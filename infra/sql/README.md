@@ -57,12 +57,12 @@ the pair applies in filename order and neither shadows the other.
 | --- | --- | --- | --- |
 | `schema_migrations` | 000 | `core/migrate.py` | never — the ledger is the record of its own work, and the runtime role cannot write it at all |
 | `calculation_results` | 001 (+019 `compute_seconds`, 024 indexes, 048 `structure_id`, 090 `epoch`) | `science/calc/postgres_store.py` | **refused**: evicting a cached result silently converts a hit into a recomputation, potentially an hours-long CREST search (D-011). Bounded by cost policy, not by a clock |
-| `molecule_fingerprints` | 002 (+004, 046 index, 084 scan-order index) | `science/fingerprints/store.py` | — |
-| `reaction_fingerprints` | 003 (+004, 046 index, 063 `source` + `(source, id)` key) | `science/fingerprints/store.py` | — |
+| `molecule_fingerprints` | 002 (+004, 046 index, 084 scan-order index, 094 `definition` in the key) | `science/fingerprints/store.py` | — |
+| `reaction_fingerprints` | 003 (+004, 046 index, 063 `source` + `(source, id)` key, 094 `definition` in the key) | `science/fingerprints/store.py` | — |
 | `reaction_labels` | 051, 086, 091 | `science/labels/store.py` | derived and rebuildable: drop it and re-run the corpus drain plus the label backfill |
 | `reaction_species` | 051 | `science/labels/store.py` | derived and rebuildable; a species the source amended away is deleted with its reaction's record phase |
 | `corpus_molecules` | 054 | `ingest/labels/corpus.py` | derived and rebuildable: refilled by re-draining the corpus |
-| `corpus_reactions` | 071 | `ingest/labels/corpus.py` | derived and rebuildable: refilled by re-draining the corpus |
+| `corpus_reactions` | 071 (+094 key) | `ingest/labels/corpus.py` | derived and rebuildable: refilled by re-draining the corpus |
 | `corpus_cursors` | 072 | `ingest/labels/cursor.py` | — (one row per append-only corpus source; deleting a row is the supported way to force a full re-walk) |
 | `audit_events` | 006 (+010, 011, 026, 044, 045, 059) | `agent/audit_store.py` | **refused**: the trail is the record of who ran what, and disposing of it is a policy decision for whoever owns that record rather than an age cutoff in a cleanup job. `prev_hash`/`row_hash`/`chain_version` are retired columns, unwritten, at their defaults |
 | `sync_cursors` | 007 | `ingest/eln/cursor.py` | — (one row per ingest source; bounded by the source count) |
@@ -190,6 +190,13 @@ ADR carrying the reading behind it.
   the new key whose `source` is not `chemist-reported` is unreachable to the old reader's
   two-column lookup. Run the migration forward again
   (D-2026-09-09-a-measurement-is-keyed-by-who-measured-it).
+- `094_fingerprint_definition_identity.sql` — the `definition` joins the primary key on
+  `molecule_fingerprints`, `reaction_fingerprints` and `corpus_reactions`, so a superseded
+  generation is *shelved* rather than deleted. Unlike 056, 063 and 093 this one stops the previous
+  image writing at all: its `ON CONFLICT (id)` / `(source, id)` no longer plans against the widened
+  key, so every fingerprint and corpus-reaction write fails with `InvalidColumnReference`. Roll
+  forward, or re-add the old key by hand
+  (D-2026-09-09-a-definition-change-shelves-a-row-it-does-not-delete).
 ### Migrations that are not re-runnable, and the recipe for each
 
 Re-running the whole set is how a restored database whose `schema_migrations` ledger is older than

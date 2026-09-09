@@ -174,6 +174,14 @@ class FingerprintSearch(BaseModel, Generic[HitT]):
     # count, deliberately: the count is a `count(*)` over the whole table and this is read on every
     # search, while the boolean is two index probes (see `has_superseded_records`). The number is
     # the operator's and goes to the connector log, which is where the re-index is run from.
+    #
+    # **Since `094` it stays True after a *finished* rebuild**, and that is the shelf rather than a
+    # regression: a definition change no longer overwrites the generation it retires, so the table
+    # holds rows this search could not compare until an operator disposes of them — which the
+    # runtime role cannot do (no DELETE) and the connector log names. The clause below therefore
+    # says the page *may* be a fraction of the corpus rather than that it is; over-cautious is the
+    # right direction for the one tool whose job is "have we seen this before", and the log is
+    # where the two states are told apart.
     index_partial: bool = False
     # The two ways a search can stop early, carried in the payload for the same reason
     # `index_empty` is: a truncation known only to the log cannot reach the model that writes the
@@ -287,10 +295,12 @@ class FingerprintSearch(BaseModel, Generic[HitT]):
         if self.index_partial:
             clauses.append(
                 f"Part of the {self.subject} index is stored under a SUPERSEDED fingerprint "
-                "definition and was not compared at all, so the query was answered over the "
-                "re-indexed fraction of the corpus rather than over the corpus. Report that the "
-                "index is mid-rebuild and that an operator must finish re-indexing it (the "
-                "connector log says how many records are waiting)."
+                "definition and was not compared at all, so the query may have been answered over "
+                "the re-indexed fraction of the corpus rather than over the corpus. Report the "
+                "search as answered over a possibly incomplete index and that an operator must "
+                "check it (the connector log says how many records are under which definition, "
+                "and whether what remains is a rebuild to finish or a superseded generation to "
+                "dispose of)."
             )
         if self.scan_truncated or self.hits_truncated:
             cap = "record cap" if self.scan_truncated else "result cap"
@@ -402,7 +412,10 @@ class FingerprintStore(Protocol):
         """How many records are stored under a definition this store cannot search.
 
         The operator's number, paid once per process beside `count`: "3 indexed, 9,997 waiting"
-        is what says a re-index is unfinished, and a boolean cannot say how far it got.
+        is what says a re-index is unfinished, and a boolean cannot say how far it got. Since `094`
+        it also stays non-zero after a *finished* rebuild, because the superseded generation is
+        shelved rather than overwritten — which is why `log_index_size` reports the two counts and
+        not a share, and names both actions an operator might owe.
         """
         ...
 
@@ -419,11 +432,16 @@ class InMemoryFingerprintStore:
 
     Computes exact Tanimoto ranking without a database — the reference the Postgres
     backend matches (same threshold and tie-break, exactly for small corpora, up to HNSW
-    recall for large ones). Keyed by `(source, id)`, so re-adding one source's record replaces
-    it and a second source using the same entry id gets its own row (D-2026-08-27) — the same
-    key the reaction table carries. An index whose records all leave `source` empty (every
-    molecule index, and every ephemeral one built in a test) behaves exactly as it did when the
-    key was the bare id, because the first half of the pair is then constant.
+    recall for large ones). Keyed by `(source, id, definition)`, so re-adding one source's record
+    under one definition replaces it, a second source using the same entry id gets its own row
+    (D-2026-08-27), and a *second definition* shelves the generation it supersedes rather than
+    evicting it (`094`). An index whose records all leave `source` empty and all carry one
+    definition — every molecule index, and every ephemeral one built in a test — behaves exactly
+    as it did when the key was the bare id, because the other two thirds are then constant.
+
+    The definition belongs in this key for the reason every part of this class exists: keyed
+    without it, this store reproduced the durable defect exactly, and a partial-index assertion
+    made here would have been evidence about a deployment that behaves differently.
     """
 
     def __init__(self, definition: str | None = None) -> None:
@@ -434,7 +452,7 @@ class InMemoryFingerprintStore:
         testable without a database. Left `None` it ranks every record, which is correct
         for an ephemeral index always populated in a single configuration (tests, demo).
         """
-        self._records: dict[tuple[str, str], FingerprintRecord] = {}
+        self._records: dict[tuple[str, str, str], FingerprintRecord] = {}
         self._definition = definition
 
     @property
@@ -446,16 +464,20 @@ class InMemoryFingerprintStore:
         return False
 
     async def add(self, record: FingerprintRecord) -> None:
-        """Insert or replace a fingerprint by `(source, id)`, superseding its unsourced twin.
+        """Insert or replace a fingerprint by `(source, id, definition)`, superseding its twin.
 
         The supersede is the in-memory half of the durable store's, and it is what keeps a
         migrated index from holding one entry twice — see `PostgresFingerprintStore.add` for the
         row it is about. Here it costs one dict lookup and keeps the two backends' contents
         identical, which is the property every ordering assertion in this module rests on.
+
+        **Scoped to one definition**, like the key it is part of: a sourced write supersedes the
+        unsourced twin *of its own generation* and leaves the shelf alone, because a row under
+        another definition is not a twin of anything — it is what the current generation replaced.
         """
-        self._records[(record.source, record.id)] = record
+        self._records[(record.source, record.id, record.definition)] = record
         if record.source:
-            self._records.pop(("", record.id), None)
+            self._records.pop(("", record.id, record.definition), None)
 
     async def add_many(self, records: Sequence[FingerprintRecord]) -> None:
         """Insert or replace a batch — `add` per record, since there is nothing here to batch.
@@ -479,11 +501,31 @@ class InMemoryFingerprintStore:
         equals byte order under UTF-8, which is order-preserving — the default database collation
         is not). On an index whose records carry no source that is the previous ordering exactly,
         because a constant leading key changes nothing.
+
+        **One row per `(source, id)`, whichever generations are shelved**, matching the durable
+        backend's `DISTINCT ON` — a molecule is one molecule to the substructure scan, and this
+        store's definition wins where both are held. On a single-generation index (every existing
+        caller) the dedupe is the identity.
         """
-        records = list(self._records.values())
+        records = self._one_per_key()
         if limit is None:
             return records
         return sorted(records, key=lambda r: (r.source, r.id))[:limit]
+
+    def _one_per_key(self) -> list[FingerprintRecord]:
+        """The generation this store shows for each `(source, id)` — the `DISTINCT ON` in Python.
+
+        This store's own definition where it is held, and the first-added generation otherwise:
+        the durable backend's `ORDER BY …, (definition = <this store's>) DESC`. A store that pins
+        no definition has no preference to express, so the first row stands. One pass over the
+        records rather than a scan per record, because the caller's cap is in the thousands.
+        """
+        chosen: dict[tuple[str, str], FingerprintRecord] = {}
+        for (source, id_, _), record in self._records.items():
+            held = chosen.get((source, id_))
+            if held is None or record.definition == self._definition != held.definition:
+                chosen[(source, id_)] = record
+        return list(chosen.values())
 
     def _searchable(self) -> list[FingerprintRecord]:
         """The records this store may rank: its own definition's, or all when it pins none.
@@ -638,10 +680,22 @@ class PostgresFingerprintStore:
         rows can never silently rank incomparable (same-width, different-radius) bits — the
         stale rows simply fall out of search until they are re-indexed.
 
-        `source_keyed` binds this store to a table whose primary key is `(source, id)`. Set it
+        **That last sentence describes rows that still exist, and until `094` they did not.**
+        The definition was an ordinary column and the upsert overwrote it, so a write under a
+        second definition *replaced* the first generation's row rather than shelving it beside it.
+        Invisible inside one deployment mid-rebuild — the re-index is walking those rows anyway —
+        and not invisible the moment two writers hold different definitions at once: measured, two
+        stores over one table left `rows=1`, each side's `count()` at 0 while the other's was 1,
+        and each side's `superseded_count()` reporting the other's population as "stale, re-index
+        me" with neither index ever converging. The definition is part of the key now
+        (`(id, definition)`, `(source, id, definition)`), the shape `041` gave `document_chunks`.
+
+        `source_keyed` binds this store to a table whose key leads with `source`. Set it
         only for a table that actually has the column: it decides the `ON CONFLICT` target, and
         naming a key the table does not have is a write that fails to plan rather than one that
-        silently mis-keys.
+        silently mis-keys. The same is true of the definition half, which is why `094` names every
+        table this class writes: bind a *fourth* table whose key is still the bare id and the first
+        write fails to plan rather than quietly evicting a generation.
         """
         if not table.isidentifier():
             raise ValueError(f"table must be a plain SQL identifier, got {table!r}")
@@ -655,7 +709,10 @@ class PostgresFingerprintStore:
         self._source_read = "source" if source_keyed else "''"
         insert_columns = "source, id" if source_keyed else "id"
         insert_values = "%(source)s, %(id)s" if source_keyed else "%(id)s"
-        conflict = "(source, id)" if source_keyed else "(id)"
+        # The definition is in the key, so a write under a *second* definition inserts beside the
+        # first instead of replacing it (`094`). A re-write under one definition still updates in
+        # place, which is what keeps a re-index from doubling the table.
+        conflict = "(source, id, definition)" if source_keyed else "(id, definition)"
         # Ties break by the whole key, so two sources holding one entry id still order
         # deterministically — and identically to the in-memory backend's `(source, id)` sort.
         self._order = 'source COLLATE "C", id COLLATE "C"' if source_keyed else 'id COLLATE "C"'
@@ -663,7 +720,7 @@ class PostgresFingerprintStore:
             f"INSERT INTO {table} ({insert_columns}, label, bits, definition) "
             f"VALUES ({insert_values}, %(label)s, %(bits)s::bit({width}), %(definition)s) "
             f"ON CONFLICT {conflict} DO UPDATE SET "
-            f"label = EXCLUDED.label, bits = EXCLUDED.bits, definition = EXCLUDED.definition"
+            f"label = EXCLUDED.label, bits = EXCLUDED.bits"
         )
         # There is deliberately no statement here that deletes the unsourced row `063` could not
         # backfill, and the reason is a privilege rather than a preference. `app_privileges.sql`
@@ -679,7 +736,25 @@ class PostgresFingerprintStore:
         # deleting it on a same-id write from another source destroys that site's only fingerprint.
         # The unsourced population is finite, shrinks only on a reindex, and is exactly the
         # pre-`063` behaviour for those rows.
-        self._all = f"SELECT {self._source_read}, id, label, bits::text, definition FROM {table}"
+
+        # **One row per key, not one row per stored generation** (`094`). This statement is the
+        # substructure scan's, and it is unfiltered by definition on purpose — a superseded row's
+        # stored SMILES is still a correct substructure hit, so a corpus mid-rebuild is searched
+        # whole by that entry point and only by it. Once a definition change *shelves* the
+        # generation it supersedes instead of overwriting it, "unfiltered" starts meaning "twice",
+        # and both halves of that are chemist-visible: the scan builds one hit per row, so a
+        # molecule held under two generations is reported twice, and `substructure_scan_max_records`
+        # bounds *rows*, so the cap arrives at half the molecules and a corpus that fits comes back
+        # `scan_truncated`.
+        #
+        # `DISTINCT ON` over the store's own key ordering, preferring this store's definition —
+        # never an arbitrary generation, so the two backends still hold the same rows and the row a
+        # chemist is shown is the structure this deployment standardized.
+        self._all = (
+            f"SELECT DISTINCT ON ({self._order}) "
+            f"{self._source_read}, id, label, bits::text, definition FROM {table} "
+            f"ORDER BY {self._order}, (definition = %(definition)s) DESC"
+        )
         # Both scoped to this store's definition, for the reason `find_similar` is: rows indexed
         # under a superseded definition are not searchable here, so counting them would report a
         # populated index to an operator whose searches all return nothing.
@@ -733,6 +808,13 @@ class PostgresFingerprintStore:
         # candidate slots, so an index mid-reindex answers from a narrower set than it looks like.
         # The outer `ORDER BY` repeats the exact tie-break so that a candidate set which *does*
         # contain a whole tie group orders it identically to the exact arm.
+        #
+        # **`094` makes that structural cost outlive the rebuild**, and it is the price of shelving
+        # rather than overwriting: a superseded generation stays in the table until an operator
+        # disposes of it, so on a deployment running this arm the effective over-fetch is divided by
+        # the number of generations held — two generations, half the candidates, permanently. The
+        # exact arm above is unaffected (its `WHERE definition` is inside the scan), and it is the
+        # shipped default. Disposal is the remedy and `log_index_size` is where it is named.
         candidate_columns = "source, id, label" if source_keyed else "id, label"
         self._similar_approximate = (
             f"SELECT {self._source_read}, id, label, 1 - distance AS similarity FROM ("
@@ -783,6 +865,21 @@ class PostgresFingerprintStore:
 
         An empty batch takes no connection at all: the drain calls this once per page, and a page
         that recorded nothing must not pay a checkout to write nothing.
+
+        **What this loop is *not* is the cost of a bulk load, and that was worth measuring before
+        anyone optimises it.** A re-index writes into a table whose HNSW index is live, and that
+        index is the whole bill: driven server-side so no round trip, no psycopg loop and no event
+        loop is inside either number, 50 000 `bit(2048)` rows on one PostgreSQL 16.15 took
+        **450.1 s (111 rows/s)** as `INSERT … SELECT` into an HNSW-indexed table, and **0.5 s
+        (94 855 rows/s)** into the same table with no index. Building the index afterwards took a
+        further 132.2 s — with parallel maintenance workers off, because this container ships
+        docker's 64 MB `/dev/shm` and a parallel build asks for more, so that half is the *slow*
+        build — for **132.7 s (377 rows/s) end to end, 3.4x**.
+
+        So the round trips this method batches are ~0.4% of a loaded re-index and `executemany`
+        would buy nothing measurable; the standard bulk path (drop the index, load, rebuild) is
+        where the 3.4x is. That path needs DDL this role does not hold, and there is no re-index
+        job to put it in — `docs/planning/BACKLOG.md` is where it belongs, not here.
         """
         if not records:
             return
@@ -815,6 +912,15 @@ class PostgresFingerprintStore:
         is `ORDER BY <key> LIMIT` — a bounded, deterministic slice so a huge corpus is never
         materialized whole into the worker heap (the caller warns when the cap truncates).
 
+        **Unfiltered, and one row per key**: since `094` a definition change shelves the generation
+        it supersedes rather than overwriting it, so "every definition" would otherwise mean "every
+        molecule twice". The constructor's `_all` says what that costs and which generation wins.
+        Under a `limit` the de-duplication rides `082`'s index and still streams (an `Incremental
+        Sort` inside each id, groups of one or two rows — `tests/test_molfp_postgres.py` pins the
+        absence of a whole-table `Sort`). **Unbounded, it does sort the table**, which it did not
+        before: that call has no caller in `src/` and already materializes every row into the heap,
+        so the ordering is the smaller half of what it costs.
+
         **Bounded in the *heap*; it was not bounded in the database, and migration `082` is what
         made the second half true.** The ordering is `COLLATE "C"` — deliberately, so this backend
         sorts identically to the in-memory one — and the primary key is a btree in the database's
@@ -829,11 +935,10 @@ class PostgresFingerprintStore:
         method cannot drop it (a `FingerprintRecord` carries its bits by definition); what removes
         it is the caller asking for only what it reads.
         """
-        if limit is None:
-            sql, params = self._all, None
-        else:
-            sql = f"{self._all} ORDER BY {self._order} LIMIT %(limit)s"
-            params = {"limit": limit}
+        params: dict[str, object] = {"definition": self._definition}
+        sql = self._all if limit is None else f"{self._all} LIMIT %(limit)s"
+        if limit is not None:
+            params["limit"] = limit
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(sql, params)
@@ -1095,14 +1200,18 @@ async def log_index_size(store: FingerprintStore, subject: Subject) -> None:
     elif superseded:
         log.warning(
             "%s fingerprint index is PARTIAL: %d record(s) indexed under the current definition "
-            "and %d still under a superseded one, so every %s search answers over %.1f%% of the "
-            "index and says so. Finish the re-index (docs/guides/runbook.md (vi)); until it "
-            "finishes the searchable corpus is the smaller number, not the total.",
+            "and %d under a superseded one, which no %s search can compare against — so every one "
+            "of them says so. Two states look like this and the operator action differs, and the "
+            "first number tells them apart because a finished rebuild counts the whole corpus. "
+            "UNFINISHED: the searchable corpus is the first number, not the total; finish it by "
+            "re-running the sync (docs/guides/runbook.md (vi)). FINISHED, superseded rows shelved: "
+            "since 094 a definition change no longer overwrites the rows it retires and the "
+            "runtime role holds no DELETE here, so disposing of them is one statement run under "
+            "the principal that owns the schema, beside `make db-migrate`.",
             subject,
             records,
             superseded,
             subject,
-            100 * records / (records + superseded),
         )
     else:
         log.info(

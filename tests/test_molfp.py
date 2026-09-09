@@ -1198,8 +1198,16 @@ def test_the_operator_log_names_the_rows_waiting_to_be_rebuilt(
 
     "1 of 50 rebuilt" is what says a re-index is unfinished and how far it got; the search surface
     carries only the boolean, because the count is a `count(*)` and that one is read on every
-    query. Three states, because the message differs in what an operator must *do*: rebuild what
-    is there, finish rebuilding it, or nothing.
+    query. Four states, because the message differs in what an operator must *do*: rebuild what is
+    there, finish rebuilding it, dispose of what the finished rebuild superseded, or nothing.
+
+    **The third is new and it is `094`'s bill.** A definition change now shelves the generation it
+    retires instead of overwriting it, so a *finished* rebuild still reports PARTIAL — the rows are
+    there, no search can compare against them, and the runtime role holds no DELETE. Two states
+    therefore render as PARTIAL and only the counts tell them apart, which is why this log line
+    reports both numbers and no longer derives a share from them: `records/(records+superseded)`
+    read as "the searchable fraction of the corpus", and after a rebuild it is 50% of a corpus that
+    is wholly searchable.
     """
 
     async def _run() -> None:
@@ -1216,16 +1224,69 @@ def test_the_operator_log_names_the_rows_waiting_to_be_rebuilt(
             await store.add(record_for("log-new", "CCS"))
             await log_index_size(store, "molecule")
             assert "is PARTIAL" in caplog.text
-            assert "1 record(s) indexed under the current definition and 3 still under a" in (
-                caplog.text
-            )
+            assert "1 record(s) indexed under the current definition and 3 under a" in caplog.text
             assert caplog.records[-1].levelname == "WARNING"
 
+            # The rebuild finishes — and since `094` the generation it superseded is *shelved*
+            # rather than overwritten, so the index still holds rows this deployment cannot
+            # compare and still says PARTIAL. What changed is what an operator must do about it,
+            # and the log is the only place that distinction is available: the searchable count is
+            # now the whole corpus, and what is left is a disposal under the owning principal
+            # rather than a rebuild to finish.
             caplog.clear()
             for i, smiles in enumerate(["CCO", "CCCO", "c1ccccc1"]):
                 await store.add(record_for(f"log-old-{i}", smiles))
             await log_index_size(store, "molecule")
+            assert "is PARTIAL" in caplog.text and "is EMPTY" not in caplog.text
+            assert "4 record(s) indexed under the current definition and 3 under a" in caplog.text
+            assert "dispos" in caplog.text and "owns the schema" in caplog.text
+            assert caplog.records[-1].levelname == "WARNING"
+
+            # And the counterfactual the whole warning rests on: an index that never held a second
+            # generation says nothing at all.
+            caplog.clear()
+            fresh = InMemoryFingerprintStore(molecule_definition())
+            await fresh.add(record_for("log-fresh", "CCS"))
+            await log_index_size(fresh, "molecule")
             assert "is PARTIAL" not in caplog.text and "is EMPTY" not in caplog.text
             assert caplog.records[-1].levelname == "INFO"
+
+    asyncio.run(_run())
+
+
+def test_the_reference_shelves_a_superseded_generation_rather_than_evicting_it() -> None:
+    """The in-memory oracle keys by definition too, because it is what the SQL is asserted against.
+
+    Every partial-index assertion in this file is made here and is only evidence about the
+    deployment while the two backends hold the same rows. Keyed by `(source, id)` alone, this store
+    reproduced the durable defect exactly: the second definition's write evicted the first, so a
+    rolling upgrade running two `ecfp_radius` values had each pod destroy the other's row and
+    neither index ever converged. `tests/test_molfp_postgres.py` measures the SQL half.
+
+    The shelf is scoped, not a second copy: a store pinned to one definition ranks only its own
+    generation, which is the guard `D-031` added and this must not weaken.
+    """
+
+    async def _run() -> None:
+        old_definition = molecule_definition() + "-previous"
+        old = InMemoryFingerprintStore(old_definition)
+        new = InMemoryFingerprintStore(molecule_definition())
+        was = record_for("shelved", "CCO").model_copy(update={"definition": old_definition})
+        now = record_for("shelved", "c1ccccc1")
+        for store in (old, new):
+            await store.add(was)
+            await store.add(now)
+
+        assert await old.count() == 1 and await new.count() == 1
+        assert [hit.label for hit in await old.find_similar(ecfp_bitstring("CCO"), 5, 0.99)] == [
+            "CCO"
+        ], "the newer definition's write evicted the generation it superseded"
+        assert [
+            hit.label for hit in await new.find_similar(ecfp_bitstring("c1ccccc1"), 5, 0.99)
+        ] == ["c1ccccc1"]
+        assert await new.find_similar(ecfp_bitstring("CCO"), 5, 0.99) == []
+        # And one molecule is one row to the substructure scan, whichever generation it came from.
+        assert [r.id for r in await new.all_records(limit=10)] == ["shelved"]
+        assert [r.definition for r in await new.all_records(limit=10)] == [molecule_definition()]
 
     asyncio.run(_run())

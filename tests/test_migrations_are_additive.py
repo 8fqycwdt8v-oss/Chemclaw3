@@ -213,6 +213,22 @@ _REVIEWED_REPLAY_BREAKS: dict[str, tuple[str, tuple[str, ...], str]] = {
 # an exempted migration still fails — an exemption is granted to statements somebody read, not to a
 # filename.
 _REVIEWED_ROLLBACK_BREAKS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "094_fingerprint_definition_identity.sql": (
+        # The definition joins the key on all three fingerprint tables, so a superseded generation
+        # is shelved instead of deleted. Unlike 056/063/093 this one genuinely stops the previous
+        # image writing at all: its `ON CONFLICT (id)` / `(source, id)` no longer plans against the
+        # widened key, so every fingerprint and corpus-reaction write fails with
+        # `InvalidColumnReference`. Roll forward, or re-add the old key by hand.
+        "D-2026-09-09-a-definition-change-shelves-a-row-it-does-not-delete",
+        (
+            "ALTER TABLE molecule_fingerprints DROP CONSTRAINT",
+            "ALTER TABLE molecule_fingerprints ADD PRIMARY KEY",
+            "ALTER TABLE reaction_fingerprints DROP CONSTRAINT",
+            "ALTER TABLE reaction_fingerprints ADD PRIMARY KEY",
+            "ALTER TABLE corpus_reactions DROP CONSTRAINT",
+            "ALTER TABLE corpus_reactions ADD PRIMARY KEY",
+        ),
+    ),
     "093_measurement_source.sql": (
         # The fourth table to be keyed by its source, after 056, 063 and 051 — and the same
         # rollback shape as 056 and 063 above. The widening adds `source` to the key rather than

@@ -90,6 +90,15 @@ unindexable, so that page keeps its sequential scan and top-N sort: 146.19 ms �
 not → 0.46 ms. Stated in the migration and the test docstring rather than papered over.
 `entra_required` deployments have no NULL owners.
 
+## Rollback
+
+`092_session_owners_updated_at.sql` is a **judged** break rather than a matched one: the column is
+nullable and additive by every pattern, and the pre-092 image derives the sort key from
+`max(session_messages.created_at)` and ignores it entirely. What that image does not do is
+*maintain* it — so a session taking its first turn during the rollback window comes back with
+`updated_at IS NULL` and is missing from `GET /sessions` until it is spoken in again. Re-run the
+migration's own backfill by hand to restore it.
+
 ## Left open
 
 `_sessions_held`'s refusal joins **every** busy session id into one string. At fleet scale that
