@@ -25,8 +25,9 @@ conventional order, because a bespoke normalization is a bespoke notion of samen
 
 Steps 2 and 3 say **"the counterion is not part of the identity"**, and that claim holds for an
 amine hydrochloride and for sodium benzoate but not for every species a chemist writes. It fails
-in four directions, each of which deletes the compound rather than normalizing it, and
-`standardize` holds them off with `_metal_is_the_compound` and a count of organic fragments:
+in five directions, each of which deletes something the compound is rather than normalizing it, and
+`standardize` holds them off with `_metal_is_the_compound`, a count of organic fragments and
+`_neutralization_is_protonation`:
 
 - **Nothing organic is left to be the compound.** A wholly inorganic reagent has no organic parent
   to keep, so the strip discards half the formula: NaOH and KOH both became water, CsF became a
@@ -49,12 +50,46 @@ in four directions, each of which deletes the compound rather than normalizing i
   bulkier solvent silently changes which substance the record is about
   (`D-2026-08-27-a-solvate-is-not-its-solvent`).
 
-Three properties separate the four from the salts that must keep collapsing, and none is "does it
+- **Neutralizing the anion would take an atom away rather than add a proton.** "The counterion
+  meets its conjugate acid" assumes the anion can *be* protonated. Sodium triacetoxyborohydride's
+  charge sits on a boron with no room for a fourth substituent, so `Uncharger` reaches neutral by
+  removing the hydride: `CC(=O)O[BH-](OC(C)=O)OC(C)=O.[Na+]` became triacetoxyborane, a Lewis acid
+  that reduces nothing, sharing one `compound_id` with the reductive-amination reagent. The first
+  three guards all pass it, because none of them is about the neutralization step
+  (`_neutralization_is_protonation`).
+
+Four properties separate the five from the salts that must keep collapsing, and none is "does it
 contain a metal": a **d- or f-block metal** is what the flask is for, while a group-1/2 counterion
 only balances a charge (`_REACTIVE_METALS`); a **metal–carbon bond** is the reagent itself, while
 the same metals in an ionic salt have none (`_is_organometallic`); and a salt has **exactly one**
-organic fragment, while a solvate has two or more. Sodium benzoate and LDA fail all three and still
-collapse. See `_is_organic` for why "organic" is a C–H/C–C test and not "contains a carbon".
+organic fragment, while a solvate has two or more; and a real conjugate acid/base pair is one whose
+neutralization **adds** hydrogens rather than removing them. Sodium benzoate and LDA fail all four
+and still collapse. See `_is_organic` for why "organic" is a C–H/C–C test and not "contains a
+carbon".
+
+**What the fourth guard deliberately does not cover, stated because it is a decision and not an
+oversight** (`D-2026-09-09-a-map-number-is-not-a-molecule`). An alkali salt of an *organic*
+conjugate acid keeps collapsing whatever the acid's strength: KOtBu, NaOtBu and LiOtBu all reach
+tert-butanol, NaOMe reaches methanol, LiHMDS reaches HMDS and LDA reaches diisopropylamine. That is
+the same rule as sodium acetate and sodium benzoate — the counterion is not part of the identity —
+and it costs what D-2026-08-01 named: a base screen over NaOMe/NaOEt/KOtBu reads as three collapses
+onto three alcohols, with the counterion the chemist is varying discarded. Separating them needs a
+pKa-shaped predicate ("an anion whose conjugate acid is weak enough that the salt is the reagent"),
+and a bespoke normalization is a bespoke notion of sameness, which is what this module opens by
+refusing. `tests/test_compound_identity.py` asserts the collapse so that whoever revisits it finds
+a decision rather than a gap.
+
+**An atom map is not part of a structure at all**, and clearing it is the one step here that is not
+about counterions. RXNMapper stamps `[CH3:1][C:2](=[O:3])[OH:4]` onto every species of every corpus
+reaction; that is acetic acid, and it used to standardize to itself. DRFP shingles atom
+environments *as SMILES strings*, so the map numbers are inside the shingles: measured, a mapped
+reaction scored **0.0000** against its own unmapped form and 0.0000 against the same reaction
+renumbered, under a default threshold of 0.3 — a silent "we have no precedent" between the
+literature corpus and the ELN, for a reaction on file in both. The numbers are cleared in
+`standardize` rather than at the DRFP boundary because the same string is what mints `compound_id`,
+so the mapped and unmapped spellings were also two notes and two ECFP rows carrying identical bits.
+`canonical_smiles` is deliberately left alone: it answers "same structure" for the calculation
+cache, where the key is what the caller submitted.
 
 **There are two questions here, and conflating them is how this goes wrong in the other
 direction.** Applying the pipeline everywhere neutralizes species a chemist meant as ions, and a
@@ -89,7 +124,7 @@ from chemclaw.core.ids import stable_hash
 # search rather than being silently compared against rows built under a newer one — the guard
 # `science/fingerprints/store.py` already applies to a changed radius or bit width, extended to the
 # other thing that decides what a row *is*.
-STANDARDIZATION_VERSION = "std6"
+STANDARDIZATION_VERSION = "std7"
 
 # The d- and f-block by atomic number — Sc→Zn, Y→Cd, La→Hg (lanthanides included) and Ac onward.
 # A block rather than a hand-picked element list, because the property being asserted is a block
@@ -135,6 +170,14 @@ _METALS = _REACTIVE_METALS | frozenset(
 # time. It is the wrong rule for an *identity* function, which is what this pipeline is — the output
 # is folded into `compound_id`, into the ECFP4 and DRFP fingerprint rows, and into the knowledge
 # graph's note ids.
+#
+# **That sentence was false of ECFP4 for as long as it stood, and the fix is not here**
+# (`D-2026-09-09-a-map-number-is-not-a-molecule`). Preserving stereo in the *string* buys nothing in
+# a fingerprint that does not read it, and RDKit's Morgan generator defaults `includeChirality` to
+# False: every pair below produced byte-identical bits and tied at Tanimoto 1.0000, so a search for
+# one enantiomer returned the other as an exact match citing a different `compound_id`. The
+# generator now sets the flag and names it in its definition string — see
+# `science/fingerprints/molfp/fingerprint.py`, which is where a claim about the bits belongs.
 #
 # Left at the default, every stereocentre alpha to a carbonyl is erased, and that is most chiral
 # drug molecules. Measured on this tree: (S)- and (R)-naproxen, L- and D-alanine, and R- and
@@ -209,7 +252,7 @@ def _is_organometallic(mol: Chem.Mol) -> bool:
 def _metal_is_the_compound(original: Chem.Mol, cleaned: Chem.Mol) -> bool:
     """Whether the species' metal is the chemistry, so neither stripping nor neutralizing applies.
 
-    Two of the four failure modes in the module docstring are this one question asked of two
+    Two of the five failure modes in the module docstring are this one question asked of two
     different molecules, and each check deliberately asks the stage that still holds its evidence:
 
     - the **cleaned** one for a reactive metal, because `Cleanup` is what disconnects the metal into
@@ -229,6 +272,38 @@ def _metal_is_the_compound(original: Chem.Mol, cleaned: Chem.Mol) -> bool:
     if _is_organometallic(original):
         return True  # the M–C bond is the reagent; the hydrocarbon left without it is not
     return any(atom.GetAtomicNum() in _REACTIVE_METALS for atom in cleaned.GetAtoms())
+
+
+def _hydrogen_count(mol: Chem.Mol) -> int:
+    """Every hydrogen in a species, implicit on a heavy atom or an atom in its own right.
+
+    Both forms are counted because the pipeline meets both: `[BH4-]` carries its hydrogens as a
+    count on boron and `[H-]` is an atom, and a test that saw only one of them would read a
+    disappearing hydride as no change at all.
+    """
+    return sum(a.GetTotalNumHs() + (1 if a.GetAtomicNum() == 1 else 0) for a in mol.GetAtoms())
+
+
+def _neutralization_is_protonation(before: Chem.Mol, after: Chem.Mol) -> bool:
+    """Whether `Uncharger` reached the neutral species by *adding* protons, as the strip assumes.
+
+    "The counterion is not part of the identity" is a claim about a conjugate acid/base pair: a
+    carboxylate meets its acid, an alkoxide its alcohol, an amide its amine, and each of those adds
+    a proton. Sodium triacetoxyborohydride is the case where that assumption is false and nothing
+    else notices. Its charge sits on boron, which has no room for a fourth substituent, so the only
+    route to neutral is to *remove* the hydride: measured, `CC(=O)O[BH-](OC(C)=O)OC(C)=O.[Na+]`
+    standardized to triacetoxyborane, a Lewis acid that reduces nothing, sharing one `compound_id`
+    and one fingerprint row with the reductive-amination reagent. All three existing guards pass it
+    — one organic fragment, a group-1 counterion, no metal–carbon bond — because none of them is
+    about the neutralization step.
+
+    The test is the hydrogen count and not an element list or a pKa table, deliberately: the
+    property being asserted is what the *transformation* did, which the two molecules already carry
+    between them, and a rule written over boron would miss whatever the next such anion is made of.
+    Where it fails the species is kept as written, charge and all, which is exactly what
+    `[BH4-].[Na+]` already gets from the organic-fragment count one branch up.
+    """
+    return _hydrogen_count(after) >= _hydrogen_count(before)
 
 
 def standardize(mol: Chem.Mol) -> Chem.Mol:
@@ -261,8 +336,21 @@ def standardize(mol: Chem.Mol) -> Chem.Mol:
     reappearing an ion at a time. A wholly inorganic ion's charge balances a counterion that may
     already have been split off it; only an organic acid/base pair can be neutralized without
     inventing a different reagent.
+
+    **And it is gated a second time on what the neutralization actually did**, because "an organic
+    acid/base pair" is a claim the fragment count cannot check. `_neutralization_is_protonation`
+    reads the two molecules and refuses the result when `Uncharger` reached neutral by *removing* a
+    hydrogen — sodium triacetoxyborohydride is the measured case, and the species is then kept with
+    its charge, which is what `[BH4-].[Na+]` already gets one branch up for the same reason.
     """
     cleaned = rdMolStandardize.Cleanup(mol)
+    # Atom maps go first and unconditionally, before any branch: they are a reaction's bookkeeping
+    # rather than a property of the compound, and every exit below returns a molecule that becomes a
+    # `compound_id` and a fingerprint row. Cleared on `cleaned` rather than on the argument because
+    # `Cleanup` hands back a copy this function owns, and a caller that passed its own molecule in
+    # must get it back unmodified.
+    for atom in cleaned.GetAtoms():
+        atom.SetAtomMapNum(0)
     if _metal_is_the_compound(mol, cleaned):
         return _TAUTOMERS.Canonicalize(cleaned)
     organic = sum(1 for f in Chem.GetMolFrags(cleaned, asMols=True) if _is_organic(f))
@@ -270,7 +358,10 @@ def standardize(mol: Chem.Mol) -> Chem.Mol:
         return _TAUTOMERS.Canonicalize(cleaned)  # no organic parent to keep, nothing to neutralize
     if organic == 1:
         cleaned = rdMolStandardize.FragmentParent(cleaned)  # the rest are counterions
-    return _TAUTOMERS.Canonicalize(rdMolStandardize.Uncharger().uncharge(cleaned))
+    uncharged = rdMolStandardize.Uncharger().uncharge(cleaned)
+    if not _neutralization_is_protonation(cleaned, uncharged):
+        return _TAUTOMERS.Canonicalize(cleaned)  # not a conjugate acid; keep the anion as written
+    return _TAUTOMERS.Canonicalize(uncharged)
 
 
 class InvalidSmilesError(ChemclawError):

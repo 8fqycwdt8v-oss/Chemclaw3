@@ -434,3 +434,55 @@ def test_a_sourced_write_supersedes_the_row_migration_063_could_not_name() -> No
         assert [(h.id, h.source) for h in hits] == [("EXP-1001", "eln-a")]
 
     asyncio.run(_run())
+
+
+# --- atom maps are reaction bookkeeping, not structure (D-2026-09-09) --------------------------
+#
+# DRFP shingles atom environments *as SMILES strings*, and an atom-map number lives inside those
+# strings — so `[CH3:1][C:2](=[O:3])[OH:4]` and `CC(=O)O` shingle to disjoint sets. `CLAUDE.md`
+# names Pistachio as the first live integration and Pistachio reaction SMILES are atom-mapped,
+# while `ingest/eln/ord.py` builds ELN rows from unmapped component SMILES. Left unfixed the two
+# tables are mutually unsearchable at any threshold, which reads as "we have no precedent".
+
+# One esterification, written four ways: unmapped, fully mapped, half mapped, and mapped with a
+# different (equally valid) numbering. RXNMapper picks the numbering, so the last pair is not
+# hypothetical — re-labelling one corpus renumbers every reaction in it.
+_UNMAPPED = "CC(=O)O.CCO>>CCOC(C)=O.O"
+_MAPPED = (
+    "[CH3:1][C:2](=[O:3])[OH:4].[CH3:5][CH2:6][OH:7]"
+    ">>[CH3:1][C:2](=[O:3])[O:7][CH2:6][CH3:5].[OH2:4]"
+)
+_HALF_MAPPED = "[CH3:1][C:2](=[O:3])[OH:4].CCO>>CCOC(C)=O.O"
+_RENUMBERED = (
+    "[CH3:11][C:12](=[O:13])[OH:14].[CH3:15][CH2:16][OH:17]"
+    ">>[CH3:11][C:12](=[O:13])[O:17][CH2:16][CH3:15].[OH2:14]"
+)
+
+
+@pytest.mark.parametrize(
+    "spelling", [_MAPPED, _HALF_MAPPED, _RENUMBERED], ids=["mapped", "half-mapped", "renumbered"]
+)
+def test_an_atom_mapped_reaction_fingerprints_as_its_own_unmapped_form(spelling: str) -> None:
+    """One reaction, four spellings, one fingerprint — bit-identical, not merely similar.
+
+    Asserted on the bits rather than on a Tanimoto floor because the property is invariance: a
+    threshold would let the map numbers move the fingerprint a little and still pass, and "a
+    little" is what a 0.3 cut-off turns into "no precedent" once the molecules are bigger than an
+    ester.
+    """
+    assert drfp_bitstring(spelling) == drfp_bitstring(_UNMAPPED)
+
+
+def test_the_mapped_and_unmapped_corpora_are_searchable_against_each_other() -> None:
+    """The consequence, stated as the search a chemist actually runs.
+
+    `ingest/labels/corpus.py` fingerprints an atom-mapped literature reaction and
+    `ingest/eln/ord.py` fingerprints an unmapped in-house one. Below the configured threshold the
+    two tables answer nothing about each other, which is indistinguishable from a corpus that
+    holds no precedent.
+    """
+    similarity = tanimoto(drfp_bitstring(_MAPPED), drfp_bitstring(_UNMAPPED))
+    assert similarity == 1.0, (
+        f"a mapped reaction scores {similarity:.4f} against its own unmapped form; the default "
+        f"threshold is {settings.fingerprint_similarity_threshold}"
+    )
