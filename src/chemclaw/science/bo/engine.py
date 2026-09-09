@@ -51,7 +51,7 @@ from bofire.data_models.strategies.api import (
 from bofire.strategies import api as strategies
 from bofire.surrogates import api as surrogate_api
 from bofire.utils.doe import get_generator
-from botorch.exceptions.errors import BotorchError, ModelFittingError
+from botorch.exceptions.errors import BotorchError, InfeasibilityError, ModelFittingError
 from linear_operator.utils.errors import NanError, NotPSDError
 
 from chemclaw.core.config import settings
@@ -96,9 +96,16 @@ class SurrogateFitError(ChemclawError):
     a raw library exception straight through the Temporal activity or the in-process campaign
     loop. `chemclaw.core.errors.ChemclawError` is what `agent.tool_authz.surface_domain_errors`
     catches for the in-process seam; for the durable one, this class's name is listed in
-    `chemclaw.durable.publish._BAD_DATA_TYPES`, because the failure is a property of the *data*
-    (the same observations will fail the same way again) rather than a transient one a retry
-    could fix.
+    `chemclaw.durable.publish._BAD_DATA_TYPES`, because the failure is a property of the *input*
+    rather than a transient one a retry could fix.
+
+    **"Input" rather than "data", and the widening is deliberate.** One case reaching this class
+    has no surrogate and no observations at all: constraints that admit no point, refused on the
+    seeding path. It is non-retryable for the same reason — the same spec fails the same way — so
+    it belongs in `_BAD_DATA_TYPES`, but calling it bad *data* is what produced a message telling a
+    chemist to vary measurements that do not exist. The name stays as it is, because
+    `_BAD_DATA_TYPES` matches it as a string; `_translating_surrogate_errors` is what separates the
+    two causes.
     """
 
 
@@ -118,15 +125,38 @@ _SURROGATE_FAILURES: tuple[type[Exception], ...] = (
 
 
 @contextmanager
-def _translating_surrogate_errors(context: str) -> Iterator[None]:
+def _translating_surrogate_errors(problem: OptimizationProblem, context: str) -> Iterator[None]:
     """Turn a known BoFire/botorch numerical failure into `SurrogateFitError`.
 
     `context` names the step in the caller's own words (e.g. "fitting the surrogate to 3
     observation(s)"), so the translated message says what was being attempted without this
     helper needing to know which of `tell`/`ask` raised.
+
+    **Two causes, and the empty polytope is matched first because the generic advice is wrong for
+    it in both halves.** Contradictory constraints — `x1+x2 <= 1` beside `x1+x2 >= 4` — reach here
+    from the *seeding* path, where a `RandomStrategy` runs and there is no surrogate, over *zero*
+    observations. So "duplicate observations collapsing the model's kernel, or an objective with no
+    spread — vary the measured values" names a model that does not exist and an action the caller
+    cannot take, and a model handed it retries with different numbers against a polytope that is
+    still empty. The constraints are what is wrong, so they are what the message names, in the
+    chemist's own relation via `describe()`.
+
+    `problem` is a parameter rather than a closure for that sentence alone: the translator is the
+    only place that sees the failure, and the constraints are the only thing that can repair this
+    one. Matched on botorch's `InfeasibilityError` **type** rather than on its message, because a
+    substring read is how the generic advice got attached to this case to begin with.
     """
     try:
         yield
+    except InfeasibilityError as error:
+        stated = "; ".join(constraint.describe() for constraint in problem.constraints)
+        raise SurrogateFitError(
+            f"no point satisfies this problem's constraints, so there is nothing to propose while "
+            f"{context}: {error} The constraints are {stated or '(none declared)'}, over the "
+            "parameter bounds as declared. This is a contradiction between the limits themselves, "
+            "not a problem with the runs — relax or remove one of them; supplying different "
+            "measurements cannot help."
+        ) from error
     except _SURROGATE_FAILURES as error:
         raise SurrogateFitError(
             f"the Bayesian surrogate failed while {context}: {error}. This is usually duplicate "
@@ -345,6 +375,7 @@ def initial_candidates(
     experiment — and `n` beyond the space size is rejected because that many
     distinct points cannot exist.
     """
+    _require_batch_fits_the_ceiling(n)
     strategy = strategies.map(RandomStrategy(domain=_to_domain(problem), seed=_resolve_seed(seed)))
     # **Two different questions, and one of them must not be answered with `None`.**
     # `discrete_space_size` is `None` only for a genuinely infinite (any-continuous) space;
@@ -357,7 +388,7 @@ def initial_candidates(
     # ordinary spaces.
     size = discrete_space_size(problem)
     feasible = discrete_candidate_count(problem)
-    with _translating_surrogate_errors("sampling initial candidates"):
+    with _translating_surrogate_errors(problem, "sampling initial candidates"):
         if size is None:
             return _frame_to_candidates(problem, strategy.ask(n))
         # Refuse against the *feasible* count when it is known, since that is the number of points
@@ -421,9 +452,10 @@ def propose_candidates(
         raise ValueError(
             f"propose_candidates needs at least {MIN_SEED_OBSERVATIONS} observations; seed first"
         )
+    _require_batch_fits_the_ceiling(n)
     _require_fresh_points_exist(problem, observations)
     strategy, _ = _fitted_strategy(problem, observations, seed)
-    with _translating_surrogate_errors(f"asking for {n} candidate(s)"):
+    with _translating_surrogate_errors(problem, f"asking for {n} candidate(s)"):
         candidates = strategy.ask(n)
     # Fewer than `n` is allowed and is not an error: a discrete space with two fresh cells left
     # should answer a request for three with two. Only *zero* is a failure, and the guard above
@@ -511,7 +543,7 @@ def _fitted_strategy(
     strategy = strategies.map(specification)
     frame = _observations_to_frame(problem, observations)
     context = f"fitting the surrogate to {len(observations)} observation(s)"
-    with _translating_surrogate_errors(context):
+    with _translating_surrogate_errors(problem, context):
         strategy.tell(frame)
     return strategy, frame
 
@@ -527,7 +559,7 @@ def _predictions_from(
     frame = pd.DataFrame(
         [{p.name: point.get(p.name) for p in problem.parameters} for point in points]
     )
-    with _translating_surrogate_errors(f"predicting at {len(points)} point(s)"):
+    with _translating_surrogate_errors(problem, f"predicting at {len(points)} point(s)"):
         predicted = strategy.predict(frame)
     return [
         Prediction(
@@ -596,14 +628,20 @@ def _fit_quality_from(
             f"{sorted(by_output)}. The fit cannot be attributed, so no score is reported."
         )
     scores = []
-    with _translating_surrogate_errors(f"cross-validating over {folds} folds"):
+    with _translating_surrogate_errors(problem, f"cross-validating over {folds} folds"):
         for objective in problem.objectives:
             surrogate = surrogate_api.map(by_output[objective.name])
             _, test, _ = surrogate.cross_validate(frame, folds=folds)
+            # R² is the fraction of the target's variance the model explains, and with no variance
+            # it has no denominator. `get_metric` answers 1.0 there — measured on eight runs all
+            # reading 42 — so a flatlined assay was published as a perfect model. The spread is
+            # taken off the same frame the folds are cut from, so it is the spread of exactly the
+            # runs the score would have been about.
+            spread = float(frame[objective.name].max() - frame[objective.name].min())
             scores.append(
                 FitQuality(
                     objective=objective.name,
-                    r2=_metric(test, RegressionMetricsEnum.R2),
+                    r2=None if spread == 0.0 else _metric(test, RegressionMetricsEnum.R2),
                     mae=_metric(test, RegressionMetricsEnum.MAE),
                     folds=folds,
                     n_observations=n,
@@ -883,6 +921,33 @@ def _randomized(design: ScreeningDesign, seed: int | None) -> ScreeningDesign:
     shuffled = list(design.runs)
     random.Random(_resolve_seed(seed)).shuffle(shuffled)
     return design.model_copy(update={"runs": shuffled, "randomized": True})
+
+
+def _require_batch_fits_the_ceiling(n: int) -> None:
+    """Refuse an ask beyond `bo_max_candidates_per_ask`, before the optimizer runs.
+
+    **In the engine and not in the MCP tool**, for the reason `_require_design_fits_the_ceiling`
+    gives in full one function below: a bound in the transport is a bound the in-process callers do
+    not get, and the durable campaign's per-round batch reaches these two functions without passing
+    through a tool schema at all.
+
+    Checked before the strategy is built rather than after the batch exists, because the cost this
+    bounds is the acquisition optimization itself — a batch that is refused once it has been
+    computed has already been paid for.
+
+    Raises:
+        ValueError: Naming the request, the ceiling and the setting that moves it.
+    """
+    if n > settings.bo_max_candidates_per_ask:
+        raise ValueError(
+            f"cannot propose {n} candidates in one ask: the ceiling is "
+            f"{settings.bo_max_candidates_per_ask}. Acquisition cost is linear in the batch — "
+            "seconds per candidate unconstrained, and several times that with constraints — so a "
+            "batch this size outlives the request that asked for it. Ask for a plate's worth at "
+            "most, run them, and come back with the results; raise "
+            "`CHEMCLAW_BO_MAX_CANDIDATES_PER_ASK` if this deployment genuinely proposes more than "
+            "that at once."
+        )
 
 
 def _require_design_fits_the_ceiling(

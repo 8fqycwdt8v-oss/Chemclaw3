@@ -65,6 +65,19 @@ class BoSettings(BaseSettings):
     # past any design a human runs (a 12-factor two-level full factorial) and far below what
     # exhausts a pod.
     bo_max_design_runs: int = Field(default=4096, ge=1)
+    # Ceiling on how many candidates one ask may propose — `suggest_next_experiment`'s `count`, and
+    # the durable campaign's per-round `batch`. It was the one model-supplied size in this bundle
+    # with nothing above it, while every sibling here is bounded. The cost is linear in the batch:
+    # measured at ~0.65 s per candidate on an unconstrained two-parameter problem, and the tool's
+    # own docstring puts a *constrained* problem at roughly nine seconds each. Behind the bundle's
+    # `request_timeout: 120` a three-digit `count` is a request the client abandons while the pod
+    # keeps computing it.
+    #
+    # 96 is a plate, which is the largest batch anybody runs at once, and it is deliberately **not**
+    # a latency guarantee: 96 constrained candidates would still outlast that timeout. The number
+    # that bounds latency is the transport's; this bounds the ask. `bo_max_evaluations` still
+    # bounds a whole campaign's spend, of which this is one round.
+    bo_max_candidates_per_ask: int = Field(default=96, ge=1)
     # How many recent evaluations `science.bo.progress` reads for its "have the last N results
     # moved at all" statement, and how many consecutive noise-sized evaluations make a plateau.
     # Five is a working default rather than a statistical claim: it is short enough that a chemist

@@ -14,7 +14,7 @@ distinct `campaign_id` per test on top so tests sharing one schema cannot see ea
 
 import asyncio
 
-from chemclaw.science.bo.campaign_record import Campaign, Suggestion
+from chemclaw.science.bo.campaign_record import Campaign, InMemoryCampaignStore, Suggestion
 from chemclaw.science.bo.campaign_record_store import PostgresCampaignStore
 from chemclaw.science.bo.problem import Candidate, Observation
 from tests.pg import migrated_db_or_skip
@@ -311,5 +311,66 @@ def test_two_turns_opening_one_campaign_at_once_agree_on_who_opened_it() -> None
         # entries. Only the *campaign* is created once.
         assert len({suggestion_id for suggestion_id, _ in results}) == 2
         assert len(await store.suggestions_for(campaign_id, 10)) == 2
+
+    asyncio.run(_run())
+
+
+# One scenario list, run against both backends. Each entry is a name, the candidates to record,
+# and whether the write must be accepted — the *disagreement* is the defect, so the expectation is
+# stated once and both stores are held to it.
+_AGREEMENT_SCENARIOS: list[tuple[str, list[Candidate], bool]] = [
+    ("an ordinary suggestion", [], True),
+    (
+        "a candidate the surrogate had a real opinion about",
+        [Candidate(params={"t": 80.0}, predicted_value=91.2, predicted_sd=1.4)],
+        True,
+    ),
+    (
+        "a degenerate GP posterior: NaN where the predicted value goes",
+        [Candidate(params={"t": 80.0}, predicted_value=float("nan"))],
+        False,
+    ),
+    (
+        "an infinite posterior sd",
+        [Candidate(params={"t": 80.0}, predicted_sd=float("inf"))],
+        False,
+    ),
+]
+
+
+def test_the_two_campaign_stores_accept_and_refuse_exactly_the_same_writes() -> None:
+    """`InMemoryCampaignStore` claims its Postgres sibling's rules "hold here" — they did not.
+
+    Measured before the fix, from one input: `record()` **succeeded** against the in-memory store
+    and **raised `ValueError: Out of range float values are not JSON compliant`** against Postgres.
+    A `session_store="memory"` dev stack recorded the campaign; the deployment lost the chemist's
+    suggestion — and lost it *after* the candidates had been computed, because `ValueError` is not
+    in `_TRANSIENT_WRITE_FAILURES` and so escapes `record_suggestion`, whose whole contract is that
+    a write failure must not turn a computed suggestion into a failed tool call.
+
+    Neither suite could see it: `test_bo_campaign_record.py` drives the in-memory backend and this
+    file drives Postgres, so one scenario list against both is the only shape that catches a
+    divergence rather than each half's own behaviour.
+    """
+
+    async def _run() -> None:
+        durable = await _store_or_skip()
+        memory = InMemoryCampaignStore()
+        for index, (name, candidates, accepted) in enumerate(_AGREEMENT_SCENARIOS):
+            campaign_id = f"pgcamp-agreement-{index}"
+            suggestion = Suggestion(campaign_id=campaign_id, candidates=candidates)
+            outcomes = {}
+            for label, store in (("postgres", durable), ("memory", memory)):
+                try:
+                    await store.record(_campaign(campaign_id), suggestion)
+                    outcomes[label] = "recorded"
+                except ValueError as error:
+                    outcomes[label] = f"refused: {error}"
+            assert outcomes["postgres"].startswith("recorded") is accepted, (
+                f"{name}: postgres {outcomes['postgres']}"
+            )
+            assert outcomes["memory"].startswith("recorded") is accepted, (
+                f"{name}: memory {outcomes['memory']}"
+            )
 
     asyncio.run(_run())

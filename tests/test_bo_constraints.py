@@ -15,7 +15,12 @@ import pytest
 from chemclaw.connectors.bo.server.tools import generate_screening_design, suggest_next_experiment
 from chemclaw.core.config import settings
 from chemclaw.science.bo.campaign_record import campaign_id_for
-from chemclaw.science.bo.engine import factorial_design, initial_candidates, propose_candidates
+from chemclaw.science.bo.engine import (
+    SurrogateFitError,
+    factorial_design,
+    initial_candidates,
+    propose_candidates,
+)
 from chemclaw.science.bo.problem import (
     Candidate,
     CategoricalParameter,
@@ -569,3 +574,57 @@ def test_a_space_too_large_to_count_still_seeds_distinctly(
 
     candidates = initial_candidates(problem, 12)
     assert len({params_key(c.params) for c in candidates}) == 12, "seeds must stay distinct"
+
+
+def _contradictory_problem() -> OptimizationProblem:
+    """`x1 + x2 <= 1` *and* `x1 + x2 >= 4`: two limits with no point between them."""
+    return OptimizationProblem(
+        parameters=[
+            ContinuousParameter(name="x1", lower=0.0, upper=5.0),
+            ContinuousParameter(name="x2", lower=0.0, upper=5.0),
+        ],
+        objectives=[Objective(name="yield", direction="maximize")],
+        constraints=[
+            LinearConstraint(
+                parameters=["x1", "x2"], coefficients=[1.0, 1.0], rhs=1.0, relation="<="
+            ),
+            LinearConstraint(
+                parameters=["x1", "x2"], coefficients=[1.0, 1.0], rhs=4.0, relation=">="
+            ),
+        ],
+    )
+
+
+def test_contradictory_constraints_are_diagnosed_as_constraints_not_as_bad_measurements() -> None:
+    """The refusal was right and the advice was wrong twice, on the path that has no data.
+
+    Measured before the fix, seeding a fresh campaign whose constraints cannot both hold:
+    `SurrogateFitError: ... No feasible point found. Constraint polytope appears empty ... This is
+    usually duplicate or near-duplicate observations collapsing the model's kernel, or an objective
+    with no spread — vary the inputs, or the measured values, before retrying`.
+
+    There is no surrogate on the seeding path (`RandomStrategy`) and there are **zero**
+    observations, so "vary the measured values" is not an action that exists — and a model handed
+    that sentence retries with different numbers against a polytope that is still empty. What is
+    wrong is the pair of constraints, so the message names them.
+    """
+    with pytest.raises(SurrogateFitError) as raised:
+        initial_candidates(_contradictory_problem(), 3)
+    message = str(raised.value)
+    assert "x1 + x2 <= 1" in message and "x1 + x2 >= 4" in message
+    assert "surrogate" not in message, "there is no model on the seeding path"
+    assert "measured values" not in message, "there are no measurements to vary"
+
+
+def test_botorch_still_raises_a_typed_error_for_an_empty_polytope() -> None:
+    """The branch above keys on a botorch *type*, not on a sentence, so the type is pinned here.
+
+    `InfeasibilityError` is what "the constraints admit no point" is, wherever it is raised from;
+    matching its message instead would break on any rewording upstream makes, and reading a
+    substring is how the generic advice came to be attached to it in the first place. If a bump
+    removes or re-parents this class, the empty-polytope branch silently stops firing and every
+    contradictory spec goes back to being called bad chemistry data — so this fails first.
+    """
+    from botorch.exceptions.errors import BotorchError, InfeasibilityError
+
+    assert issubclass(InfeasibilityError, BotorchError)

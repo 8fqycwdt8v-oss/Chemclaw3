@@ -40,6 +40,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from chemclaw.core.chem import InvalidSmilesError, require_canonical_smiles
 from chemclaw.core.config import settings
 from chemclaw.core.ids import canonical_text, stable_hash
+from chemclaw.core.jsonb import STRICT_JSON
 from chemclaw.science.bo.problem import (
     Candidate,
     CategoricalParameter,
@@ -405,13 +406,45 @@ class CampaignStore(Protocol):
         ...
 
 
+def _refuse_what_jsonb_would(campaign: Campaign, suggestion: Suggestion) -> None:
+    """Raise the `ValueError` the Postgres sibling raises, on the same four payloads it wraps.
+
+    **Serialized and discarded, because `json_column` cannot do this on its own.** `Jsonb(value,
+    dumps=...)` is lazy — psycopg calls `dumps` at execute time, at the wall — so wrapping a value
+    here would refuse nothing. `STRICT_JSON` is the function inside that wrapper, so the rule still
+    has exactly one definition (`core.jsonb`) and this store cannot drift from a rule it restates.
+
+    The column list is the one place the two backends are written out twice, and it is the shape
+    that made the divergence invisible in the first place; the differential test named in
+    `InMemoryCampaignStore`'s docstring is what holds them together.
+    """
+    for payload in (
+        campaign.problem,
+        [candidate.model_dump(mode="json") for candidate in suggestion.candidates],
+        [observation.model_dump(mode="json") for observation in suggestion.observations],
+        suggestion.problem,
+    ):
+        STRICT_JSON(payload)
+
+
 class InMemoryCampaignStore:
     """The same contract for a deployment whose durable records live in-process.
 
     Not a test double: it is the backend a `session_store="memory"` deployment gets, so the CLI and
     a dev stack accumulate a campaign's history for the life of the process rather than silently
     recording nothing. Every rule its Postgres sibling enforces holds here in the same terms — the
-    campaign upserts on id and keeps its original opener, suggestions append and never overwrite.
+    campaign upserts on id and keeps its original opener, suggestions append and never overwrite,
+    and a payload `jsonb` would refuse is refused here too.
+
+    **That last clause is new, and the sentence claiming it was false for as long as it stood.**
+    A `Candidate` carrying a NaN — the degenerate GP posterior `core.jsonb` was written about —
+    recorded cleanly here and raised `ValueError: Out of range float values are not JSON compliant`
+    against Postgres, from one input. `ValueError` is not in `_TRANSIENT_WRITE_FAILURES`, so that
+    escaped `record_suggestion` and failed the tool call *after* the candidates had been computed:
+    a dev stack kept the chemist's suggestion and the deployment lost it. Neither suite could see
+    it, because each drives one backend;
+    `tests/test_postgres_campaign_store.py::test_the_two_campaign_stores_accept_and_refuse_exactly_the_same_writes`
+    runs one scenario list against both.
     """
 
     def __init__(self) -> None:
@@ -427,7 +460,14 @@ class InMemoryCampaignStore:
         method so the two backends cannot drift into different contracts. The created flag comes
         out of the upsert for the same reason it does there: it is a property of what the write
         did, not of what a prior read saw.
+
+        The `jsonb` refusal runs **before** either write, not between them, so a refused payload
+        leaves this store exactly as Postgres's aborted transaction leaves that one: untouched.
+
+        Raises:
+            ValueError: When a payload holds a non-finite float, which `jsonb` would reject.
         """
+        _refuse_what_jsonb_would(campaign, suggestion)
         created = await self._upsert_campaign(campaign)
         return await self._add_suggestion(suggestion), created
 

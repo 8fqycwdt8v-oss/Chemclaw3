@@ -21,6 +21,7 @@ something BoFire ships (`pareto_front` is hand-written for exactly that reason).
 """
 
 from itertools import product
+from math import isfinite
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, computed_field, model_validator
@@ -428,7 +429,16 @@ class Observation(BaseModel):
     # Objective name -> value, covering **every** objective of a multi-objective problem. Empty for
     # a single-objective one, where `value` says it all. Self-describing on the wire, which is what
     # `resume_campaign` reading a JSONB row back needs.
-    values: dict[str, float] = Field(default_factory=dict)
+    #
+    # **Per-value `allow_inf_nan=False`, matching `value` one field above, and it was missing.** A
+    # failed secondary assay reported as NaN passed both this model and
+    # `require_observations_cover_objectives`, and then won: `_dominates` asks `gain < -tolerance`
+    # and `gain > tolerance`, and a NaN answers False to both, so the unmeasured axis read as "no
+    # difference" — at least as good. Measured, one run whose impurity was never measured
+    # dominated a clean 95%/0.5% run it beat on yield alone, and `pareto_front` returned the failed
+    # run as the *whole* trade-off. **A failed measurement is an absent run, not a run with a
+    # NaN**, and the boundary is where that is said.
+    values: dict[str, Annotated[float, Field(allow_inf_nan=False)]] = Field(default_factory=dict)
     provenance: str = "measured"
     # The surrogate's posterior sd at this point **when it was proposed** — carried over from the
     # `Candidate`, and deliberately not named `uncertainty`. It does not qualify `value`: `value`
@@ -527,10 +537,20 @@ class FitQuality(BaseModel):
     0.906–0.969 and MAE spanned 1.16–1.80, so **MAE varied by more than half its own value**. The
     first version printed R² to three decimals and MAE to three significant figures, which stated a
     stability neither has. Two decimals and two significant figures are what survive a repeat.
+
+    **`r2` is `None` when the held-out runs carry no variance, and that is not a missing number.**
+    R² is the fraction of the target's variance the model explains, so with SS_tot = 0 it has no
+    denominator — and the library answers 1.0, which this model then published as a perfect fit.
+    Measured on eight runs all reading 42: R² 1.0000, MAE 0, three times running. A campaign whose
+    assay has flatlined is precisely when a chemist asks whether the surrogate is worth listening
+    to, and neither caveat below fires on it, because both are about *precision*. `None` plus the
+    sentence `summary` gives is the honest answer: there is nothing here to predict, so no fit
+    quality exists. `mae` stays a number — 0 over a constant target is a true statement about the
+    predictions, and it is the R² that overclaims.
     """
 
     objective: str
-    r2: float
+    r2: float | None = Field(allow_inf_nan=False)
     mae: float = Field(ge=0.0)
     folds: int = Field(ge=2)
     n_observations: int = Field(ge=2)
@@ -545,6 +565,17 @@ class FitQuality(BaseModel):
         chemistry, and it is a statement about ten points made by a fit that would give a different
         answer if run again.
         """
+        if self.r2 is None:
+            # Returned whole rather than joined with the caveats below: both of those qualify a
+            # score, and the point of this branch is that there is no score to qualify.
+            return (
+                f"The {self.n_observations} run(s) supplied for {self.objective!r} carry **no "
+                "variance** — every one of them reports the same value — so there is nothing for "
+                "a model to predict and no fit quality exists. This is a statement about the "
+                "runs, not about the surrogate: an assay reading the same number every time is "
+                "the finding, and it is usually a dead catalyst, a saturated response or an "
+                "instrument fault rather than a flat response surface."
+            )
         stated = (
             f"Cross-validated on {self.n_observations} run(s) over {self.folds} folds, the "
             f"surrogate for {self.objective!r} predicts held-out runs with R² {self.r2:.2f} and "
@@ -862,6 +893,46 @@ def require_direction_matches_objective(spec: CampaignSpec) -> None:
         )
 
 
+def require_problem_supplies_what_the_objective_reads(spec: CampaignSpec) -> None:
+    """The decision space must declare every parameter the registered objective reads.
+
+    **The fourth rule, and the one that used to arrive as a `KeyError` hours later.** A registered
+    objective is a function over named parameters — `reizman_suzuki` reads `catalyst`, `t_res`,
+    `temperature` and `catalyst_loading`; `solubility_max` reads `molecule` — and nothing compared
+    those names against the space the spec declares. Measured: a spec naming `reizman_suzuki` over
+    a single unrelated continuous parameter was accepted at launch, ran its seed round, and failed
+    at evaluate time with a bare `KeyError: 'catalyst'`, which is neither a `SurrogateFitError` nor
+    anything `_BAD_DATA_TYPES` matches. It is the same shape as the direction mismatch one function
+    above, caught the same way and for the same reason.
+
+    **A measured objective is skipped**, as it is there: the numbers come from a bench, so there is
+    no function whose parameter names could disagree with anything.
+
+    The deferred import and its cycle are `require_direction_matches_objective`'s, which see. Note
+    what this does *not* check: that the spec's *ranges* are ones the objective is defined over. A
+    fitted emulator extrapolates flat outside its training data — measured on this benchmark, the
+    yield reads the same number at 110 °C, 300 °C and 1000 °C — and the ADR for this change records
+    why that half is left alone rather than half-guarded here.
+
+    Raises:
+        ValueError: Naming the objective, the parameters it reads, and the ones the space lacks.
+    """
+    from chemclaw.science.bo.objectives import is_measured, registered_parameters
+
+    if is_measured(spec.objective_name):
+        return
+    required = registered_parameters(spec.objective_name)
+    declared = {parameter.name for parameter in spec.problem.parameters}
+    missing = [name for name in required if name not in declared]
+    if missing:
+        raise ValueError(
+            f"the registered objective {spec.objective_name!r} reads {list(required)} from every "
+            f"candidate, but this decision space declares {sorted(declared)} — so it would fail "
+            f"at evaluate time on {missing}, after the seed round had been paid for. Declare the "
+            "missing parameter(s), or start a campaign over an objective this space fits."
+        )
+
+
 def require_problem_yields_one_best_point(problem: OptimizationProblem) -> None:
     """Every rule a loop that returns a single best observation needs of its problem.
 
@@ -935,9 +1006,11 @@ def require_campaign_startable(spec: CampaignSpec) -> None:
     manifest named the round-count rule, which takes an `int`, and every
     `start_optimization_campaign` call raised `TypeError` while CI stayed green.
 
-    Two rules today. The round ceiling is enforced here rather than on `CampaignSpec` because that
-    model's validators re-run at workflow *replay*, where a lowered ceiling must not fail an
-    in-flight campaign's own input.
+    The round ceiling is enforced here rather than on `CampaignSpec` because that model's
+    validators re-run at workflow *replay*, where a lowered ceiling must not fail an in-flight
+    campaign's own input. The rules are not counted in this sentence, for the reason this
+    repository counts nothing in prose: it said "two rules today" over four of them, and the two it
+    omitted are the two below that catch a campaign which runs to completion and answers wrongly.
 
     The second is new (W3): **the durable campaign is single-objective**, because
     `bo.objectives`'s registry maps a name to `Callable[..., Awaitable[float]]` — one number per
@@ -949,22 +1022,28 @@ def require_campaign_startable(spec: CampaignSpec) -> None:
     registry knows which way its named objective is better, and nothing compared them. BoFire
     optimizes the spec's direction while the registered function supplies the numbers, so
     `objective_name="solubility_max"` with `direction="minimize"` ran to completion, wrote a
-    PR-gated `bo-candidate`, and recommended the *least* soluble molecule as its best point — every
+    `bo-candidate` note, and recommended the *least* soluble molecule as its best point — every
     number correct and the recommendation exactly backwards, which is the shape a reviewer reading
     the note can least easily catch. Checked here rather than on `CampaignSpec` for this section's
     standing reason: these validators must not re-run at replay, where a registry edit would fail an
     in-flight campaign's own input.
 
+    The fourth is `require_problem_supplies_what_the_objective_reads`, which catches the *other*
+    half of the direction mismatch: a spec whose decision space does not declare the parameters the
+    named objective reads out of a candidate.
+
     Raises:
         ValueError: When the round count exceeds `bo_max_rounds`, the total evaluation budget
             exceeds `bo_max_evaluations`, the problem names more than one objective, a parameter
-            and an objective share a name, two categories carry the same descriptor row, or the
-            declared direction disagrees with the registered objective's.
+            and an objective share a name, two categories carry the same descriptor row, the
+            declared direction disagrees with the registered objective's, or the decision space
+            omits a parameter that objective reads.
     """
     require_rounds_within_ceiling(spec.n_rounds)
     require_evaluations_within_budget(spec)
     require_problem_yields_one_best_point(spec.problem)
     require_direction_matches_objective(spec)
+    require_problem_supplies_what_the_objective_reads(spec)
 
 
 class CampaignResult(BaseModel):
@@ -1008,16 +1087,43 @@ def observed_value(
     The single definition of "this observation's number for that objective", so the scalar/vector
     split in `Observation` is read the same way everywhere. `objective=None` means the lead one,
     which on a single-objective problem is the only one.
+
+    **It also refuses a non-finite number, which is the belt behind `Observation.values`.** That
+    field declares `allow_inf_nan=False` per value, but `values` is a plain dict on a model that is
+    neither frozen nor validated on assignment, so `observation.values[name] = nan` writes straight
+    past it. Every reader comes through here — the dominance test, the plateau read, and the frame
+    handed to BoFire — so one refusal here covers three call sites, and each of them fails
+    *differently* on a NaN: `_dominates` reads it as "no difference" and hands the failed run the
+    whole Pareto front, and BoFire drops the row mid-campaign.
+
+    Raises:
+        ValueError: When the observation reports no value for `objective`, or reports one that is
+            not a finite number.
     """
     name = problem.objective.name if objective is None else objective
     if name in observation.values:
-        return observation.values[name]
+        return _require_finite(observation.values[name], name, observation)
     if name == problem.objective.name:
-        return observation.value
+        return _require_finite(observation.value, name, observation)
     raise ValueError(
         f"observation reports no value for objective {name!r}; it carries "
         f"{sorted(observation.values) or [problem.objective.name]}"
     )
+
+
+def _require_finite(value: float, objective: str, observation: Observation) -> float:
+    """Return `value`, or raise naming the objective and the run it belongs to.
+
+    The run is named by its parameters rather than by an index, because this function is reached
+    from three callers and only one of them is enumerating a list the caller wrote.
+    """
+    if not isfinite(value):
+        raise ValueError(
+            f"the run at {observation.params!r} reports {value!r} for objective {objective!r}. A "
+            "failed or unmeasured assay is an absent run, not a run with a non-finite number: "
+            "leave the run out, or supply the measurement."
+        )
+    return value
 
 
 def require_observations_cover_objectives(
