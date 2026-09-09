@@ -21,9 +21,23 @@ ASKED_OF = "pending-tools-team"
 
 
 async def _populate(count: int) -> None:
-    """`count` open requests routed to this file's own entitlement, deadlines ascending."""
+    """`count` open requests routed to this file's own entitlement, deadlines ascending.
+
+    **Every waiting row goes first, not just this file's**, and that is a fact about the query
+    rather than housekeeping. `open_requests(asked_of=X)` matches `asked_of = ANY([X]) OR asked_of
+    = ''` on purpose — "an unrouted request is waiting on whoever is entitled, so hiding it from a
+    named query would make the common case invisible" — so a *total* over that predicate counts
+    every unrouted row in the schema too, whoever wrote it. Measured when this file first ran after
+    `test_pending_store.py` in one session: 35 rows of its own, `total_waiting` **71**, the other
+    36 unrouted rows belonging to a neighbouring file. The production behaviour is right and the
+    fixture was scoped narrower than the thing it asserted about.
+
+    Safe for the neighbours it clears: `test_pending_store.py::_clean` deletes its own rows and
+    `test_api_pending.py::_open` deletes by request id, both *before* opening what each test needs,
+    so neither depends on a row surviving from an earlier one.
+    """
     async with await connect(settings.postgres_dsn) as conn:
-        await conn.execute("DELETE FROM pending_requests WHERE asked_of = %s", (ASKED_OF,))
+        await conn.execute("DELETE FROM pending_requests WHERE state = 'waiting'")
         await conn.commit()
     for index in range(count):
         await pending_store.open_request(

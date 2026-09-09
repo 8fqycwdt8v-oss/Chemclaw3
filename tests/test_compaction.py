@@ -1139,7 +1139,13 @@ CLEAR_TRIGGER_THREAD_ALLOWANCE = 30_000
 #:
 #: Written here rather than imported, for the same reason as the constant above: this is the
 #: assertion and `core/config/agent.py` is the prose.
-BUDGET_THREAD_ALLOWANCE = 43_000
+#: **42,500 since wave 13, and the 500 is the ceiling's price rather than a re-derivation.**
+#: `CEILINGS["__default__"]` rose 65,000 → 65,500 for eight record-surface reads that can now say
+#: their answer is only a page. The trigger rose with it and kept its allowance whole, because
+#: nothing bounds it from above; this one cannot, because the budget is derived *downwards* from
+#: the 128k window. So the thread loses 500 tokens — 1.16% — and it is recorded here, at the
+#: assertion, rather than left as a claim in prose.
+BUDGET_THREAD_ALLOWANCE = 42_500
 
 #: The smallest context window this stack is designed against, in billed tokens.
 #:

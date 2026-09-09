@@ -655,7 +655,8 @@ def test_a_second_definitions_write_shelves_the_first_instead_of_deleting_it() -
         # table on every sync: a re-write under *one* definition still updates in place.
         async with await db.connect(settings.postgres_dsn) as conn, conn.cursor() as cur:
             await cur.execute("SELECT count(*) FROM molecule_fingerprints WHERE id = 'pg-shelved'")
-            assert (await cur.fetchone())[0] == 2
+            shelved = await cur.fetchone()
+            assert shelved is not None and shelved[0] == 2
         await new.add(
             FingerprintRecord(
                 id="pg-shelved", label=now, bits=ecfp_bitstring(now), definition=_NEW_DEFINITION
@@ -663,7 +664,10 @@ def test_a_second_definitions_write_shelves_the_first_instead_of_deleting_it() -
         )
         async with await db.connect(settings.postgres_dsn) as conn, conn.cursor() as cur:
             await cur.execute("SELECT count(*) FROM molecule_fingerprints WHERE id = 'pg-shelved'")
-            assert (await cur.fetchone())[0] == 2, "a repeat write under one definition inserted"
+            after = await cur.fetchone()
+            assert after is not None and after[0] == 2, (
+                "a repeat write under one definition inserted"
+            )
 
     asyncio.run(_run())
 

@@ -393,12 +393,30 @@ load_profiles()
 #: **So the ceiling is breached and raising it is not this file's decision to take alone.**
 #: `PREFIX_BOUND` below is this ceiling plus `SERVED_ELSEWHERE_ALLOWANCE`, and
 #: `tests/test_compaction.py` holds `agent_tool_result_clear_trigger` and
-#: `agent_context_token_budget` at *exactly* their claimed allowances above it — 30,000 and 43,000,
-#: zero headroom on both. Raising this number by one breaks both, and the budget cannot absorb it
-#: because `core/config/agent.py` derives it **downwards** from the 128k window. That is the
-#: designed answer to a prefix that has grown this far: narrow it. The 1,035 tokens that put it over
-#: are not this change's, and the 177 this change gives back are the direction the file asks for.
-CEILINGS: dict[str, int] = {"__default__": 65_000}
+#: `agent_context_token_budget` at their claimed allowances above it, so raising this number is
+#: never free: it moves `PREFIX_BOUND`, and every token of prefix is a token of thread the policy
+#: no longer has. `core/config/agent.py` states the same rule the other way round — *"the
+#: instrument for wanting more is a narrower prefix"*.
+#:
+#: **65,500, and what the 500 cost.** Wave 13 made eight record-surface reads able to say their
+#: answer was only a page, which is prefix a chemist gets a truthful "have we done this before?"
+#: for. Narrowing paid part of it back — the wave's prompt blocks give back 177, and a
+#: `report_measurement` paragraph that was a correction to a *previous docstring's wording* rather
+#: than anything about the tool gave back 75 more, in a schema the model pays for on every call.
+#: The remainder is bought, not found:
+#:
+#: * `agent_tool_result_clear_trigger` rises 500 with it, so the lossless edit keeps the full
+#:   `CLEAR_TRIGGER_THREAD_ALLOWANCE` it was derived to have. Nothing bounds that setting from
+#:   above, so it costs nothing to move.
+#: * `agent_context_token_budget` does **not** rise, because it is derived downwards from the 128k
+#:   window and there is nothing above it to take from. So the budget's thread allowance falls
+#:   43,000 → 42,500 — **1.16% of the thread**, and that is the price of this ceiling, paid where
+#:   the constraint actually is rather than spread until nobody can see it.
+#:
+#: Set with headroom on purpose. A ceiling 23 tokens above a measurement is a tripwire that the
+#: next unrelated merge trips; this leaves ~420 for ordinary drift, which is what makes it a
+#: ratchet rather than a trap.
+CEILINGS: dict[str, int] = {"__default__": 65_500}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.
