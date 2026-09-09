@@ -490,3 +490,84 @@ def test_the_arm_survives_a_truncated_page(monkeypatch: pytest.MonkeyPatch) -> N
     assert exact_verdict != approximate_verdict, (
         "both arms produced identical text on a truncated page — the arm is not reaching the model"
     )
+
+
+def test_the_superseded_probe_agrees_with_the_reference_and_costs_no_scan() -> None:
+    """The durable half of the partial-index probe, both of the properties it has to hold.
+
+    `D-2026-09-09-a-rebuild-nothing-counts-reports-as-finished`.
+
+    **Agreement**, because the in-memory backend is where every partial-index assertion in
+    `tests/test_molfp.py` is made and it is only evidence about the deployment if the SQL matches
+    it: a filtered Python list against `min(definition)`/`max(definition)`.
+
+    **Cost**, because `has_superseded_records` runs on *every* similarity search, and the obvious
+    spelling — `SELECT 1 … WHERE definition <> … LIMIT 1` — has to read every row before it can
+    answer "none", which is exactly the healthy case. Measured on a live PostgreSQL 16.15 at
+    200 000 rows all under the current definition: 26.32 ms for that form against 0.55 ms for the
+    extremes, and the first grows with the corpus. What makes the difference is
+    `molecule_fingerprints_definition_idx` (046), so the plan is what is asserted here rather than
+    a timing that would depend on how much this test inserted.
+    """
+
+    async def _run() -> None:
+        store = await _store_or_skip()
+        reference = InMemoryFingerprintStore(molecule_definition())
+        current = record_for("pg-superseded-current", "CCO")
+        old = record_for("pg-superseded-old", "CCCO")
+        old = old.model_copy(update={"definition": old.definition + "-superseded"})
+
+        for record in (current, old):
+            await store.add(record)
+            await reference.add(record)
+        assert await store.has_superseded_records() is await reference.has_superseded_records()
+        assert await store.has_superseded_records() is True
+        # A count, not a boolean: the durable table is shared with the rest of this schema, so the
+        # assertion is that this store's own superseded row is in it.
+        assert await store.superseded_count() >= 1
+
+        async with await db.connect(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute("SET LOCAL enable_seqscan = off")
+            await cur.execute(f"EXPLAIN (COSTS OFF) {store._definition_extremes}")
+            plan = "\n".join(str(row[0]) for row in await cur.fetchall())
+        assert "molecule_fingerprints_definition_idx" in plan, (
+            "the superseded probe no longer reaches its index; the plan was:\n" + plan
+        )
+        assert "Seq Scan" not in plan
+
+    asyncio.run(_run())
+
+
+def test_a_fully_rebuilt_durable_index_reports_no_superseded_rows() -> None:
+    """The counterfactual, on a table of this store's own rows only.
+
+    Run against a scratch table rather than the shared one, because "no superseded rows anywhere"
+    is not assertable in a schema every other test writes into — and it is the half that would
+    otherwise pass on a build whose probe always answered True.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        async with await db.connect(settings.postgres_dsn) as conn:
+            await conn.execute(
+                "CREATE TABLE IF NOT EXISTS molfp_rebuilt_probe "
+                "(id TEXT PRIMARY KEY, label TEXT NOT NULL, "
+                f"bits BIT({settings.ecfp_bits}) NOT NULL, definition TEXT NOT NULL)"
+            )
+            await conn.commit()
+        try:
+            store = PostgresFingerprintStore(
+                "molfp_rebuilt_probe", settings.ecfp_bits, molecule_definition()
+            )
+            assert await store.has_superseded_records() is False, "an empty table holds nothing"
+            for name, smiles in [("a", "CCO"), ("b", "CCCO")]:
+                await store.add(record_for(name, smiles))
+            assert await store.has_superseded_records() is False
+            assert await store.superseded_count() == 0
+            assert (await find_similar_molecules(store, "CCO")).index_partial is False
+        finally:
+            async with await db.connect(settings.postgres_dsn) as conn:
+                await conn.execute("DROP TABLE IF EXISTS molfp_rebuilt_probe")
+                await conn.commit()
+
+    asyncio.run(_run())

@@ -14,6 +14,13 @@ Two write paths, and keeping them apart is the invariant this module exists to h
 * `store_labels()` writes the derived phase and **only** the derived phase, stamping
   `labeller_version`. It never touches `record_smiles`, the conditions or the recorded roles.
 
+**A stamp says two things, and one marker separates them.** The drain has to advance past a
+reaction the labelling server cannot answer for, so such a row is stamped too — with the marker
+`underived_stamp` appends. `stale()` treats both forms as done; `coverage`, `select` and
+`current_version` treat only the plain form as labelled. Without that split a re-label pass that
+derived *nothing* left every row claiming currency under a standardization its content predates,
+and the coverage verdict read "COMPLETE: … totals rather than lower bounds".
+
 `stale()` is the query that makes the background service possible: a row whose `labeller_version`
 is NULL (never derived) or different from the current one (derived by a superseded labeller) is
 work to do. Nothing has to remember to mark anything.
@@ -40,6 +47,53 @@ log = logging.getLogger(__name__)
 
 class LabelIndexError(ChemclawError):
     """A label row could not be written or read back."""
+
+
+# The marker that splits the two things `labeller_version` has to say, and it exists because the
+# drain has to advance over a reaction the labelling server cannot answer for. Stamping such a row
+# with the plain current version is what lets `stale()` move on — and it also told every reader the
+# row's derived phase was current for that version, which it is not: `merge` keeps whatever the
+# *previous* labeller derived, so after a `std6`→`std7` re-label a degraded window left rows
+# carrying std6 content stamped std7, and `coverage` — `count(*) FILTER (WHERE labeller_version =
+# version)` — reported them COMPLETE ("counts over this facet are totals rather than lower
+# bounds"). Measured on one such row: `('Oxidation', 'RXNO:1', 'smirks', 'srv:std7:v1')` derived
+# under std6, and `stale()` would never return it again.
+#
+# A suffix on the one column rather than a second column, deliberately: staleness and currency are
+# the same question asked of the same value, and two columns is two places for that answer to
+# drift. It is a **tagged** value, not free text — nothing outside this module composes or reads
+# the tag, `store_labels` refuses a version that already carries it, and the three statements that
+# care handle it explicitly.
+_UNDERIVED_SUFFIX = "+underived"
+
+
+def underived_stamp(version: str) -> str:
+    """The stamp for a row the drain reached at `version` and could derive nothing for."""
+    return f"{version}{_UNDERIVED_SUFFIX}"
+
+
+def is_underived_stamp(labeller_version: str | None) -> bool:
+    """Whether a stored stamp says the drain passed over this row without deriving anything."""
+    return labeller_version is not None and labeller_version.endswith(_UNDERIVED_SUFFIX)
+
+
+def _stamp(version: str, derived: bool) -> str:
+    """The value `labeller_version` takes for one `store_labels` call.
+
+    One place decides it, so the two backends cannot disagree about what a row means — the same
+    reason `_searchable` exists one module over. The refusal is here rather than at each call site
+    because a `version` already carrying the marker would make a genuinely derived row
+    indistinguishable from an un-derived one, and the version string is composed from a *remote*
+    server's answer (`ingest.labels.labeller.RxnLabelServer.version`), which this repository does
+    not get to constrain at its source.
+    """
+    if _UNDERIVED_SUFFIX in version:
+        raise LabelIndexError(
+            f"labeller version {version!r} contains {_UNDERIVED_SUFFIX!r}, which this index uses "
+            "to mark a row the labeller could not derive anything for; a derived row stamped with "
+            "it would be indistinguishable from an un-derived one"
+        )
+    return version if derived else underived_stamp(version)
 
 
 class LabelIndex:
@@ -74,8 +128,18 @@ class LabelIndex:
         """
         raise NotImplementedError
 
-    async def store_labels(self, label: ReactionLabel, version: str) -> None:
-        """Write the derived phase of one reaction and stamp it `version`."""
+    async def store_labels(
+        self, label: ReactionLabel, version: str, *, derived: bool = True
+    ) -> None:
+        """Write the derived phase of one reaction and stamp it for `version`.
+
+        `derived` says whether the labeller actually answered for this row. It defaults to True
+        because that is what a caller writing a derived phase means, and because the alternative —
+        no default — puts `derived=True` on every call in the tree to say the ordinary thing. What
+        it must never default *into* is the other case: a row the server could not answer for is
+        stamped so it leaves `stale()`, and stamping it as though it had been derived is what made
+        `coverage` call a corpus of superseded content COMPLETE.
+        """
         raise NotImplementedError
 
     async def coverage(
@@ -158,18 +222,32 @@ class InMemoryLabelIndex(LabelIndex):
     async def stale(
         self, version: str, limit: int, sources: Sequence[str] | None = None
     ) -> list[ReactionLabel]:
-        """Rows whose stamp differs from `version`, in key order, capped at `limit`."""
+        """Rows whose stamp differs from `version`, in key order, capped at `limit`.
+
+        "Differs from" spans both stamps this pass can leave: a row the drain already passed over
+        at this version without deriving anything is *not* work to do again, or the batch that
+        could not be labelled would be re-read on every pass forever — which is the whole reason
+        the stamp is written at all.
+        """
         allowed = frozenset(sources) if sources is not None else None
+        current = {version, underived_stamp(version)}
         rows = [
             row
             for row in self._rows.values()
-            if row.labeller_version != version and (allowed is None or row.source in allowed)
+            if row.labeller_version not in current and (allowed is None or row.source in allowed)
         ]
         rows.sort(key=lambda r: (r.source, r.reaction_id))
         return rows[:limit]
 
-    async def store_labels(self, label: ReactionLabel, version: str) -> None:
-        """Write the derived phase over the stored record phase, stamped `version`.
+    async def store_labels(
+        self, label: ReactionLabel, version: str, *, derived: bool = True
+    ) -> None:
+        """Write the derived phase over the stored record phase, stamped for `version`.
+
+        `derived=False` says the labeller answered for neither half of this row, so the stamp
+        carries the marker and `labelled_at` is left where it was: the row leaves the stale set,
+        and every reader that asks "is this labelled at the current version" — `coverage`,
+        `select`, `current_version` — correctly says no.
 
         Species are paired by **`ordinal`**, which is the row key
         `PostgresLabelIndex._STORE_SPECIES` matches on and the identity `_carry_species` already
@@ -183,7 +261,7 @@ class InMemoryLabelIndex(LabelIndex):
         existing = self._rows.get(key)
         if existing is None:
             raise LabelIndexError(f"no record-phase row for {key!r}; label the corpus first")
-        derived = label.model_dump(include=_DERIVED_FIELDS)
+        written = label.model_dump(include=_DERIVED_FIELDS)
         by_ordinal = {new.ordinal: _derived_species(new) for new in label.species}
         species = [
             stored.model_copy(update=by_ordinal[stored.ordinal])
@@ -193,9 +271,9 @@ class InMemoryLabelIndex(LabelIndex):
         ]
         self._rows[key] = existing.model_copy(
             update={
-                **derived,
-                "labeller_version": version,
-                "labelled_at": datetime.now(UTC),
+                **written,
+                "labeller_version": _stamp(version, derived),
+                "labelled_at": datetime.now(UTC) if derived else existing.labelled_at,
                 "species": species,
             }
         )
@@ -219,8 +297,19 @@ class InMemoryLabelIndex(LabelIndex):
         return len(self._rows)
 
     async def current_version(self) -> str | None:
-        """The version of the most recently labelled row."""
-        labelled = [r for r in self._rows.values() if r.labelled_at is not None]
+        """The version of the most recently *derived* row.
+
+        An un-derived stamp is skipped, and both halves of that matter. A row derived at std6 and
+        then passed over at std7 keeps its old `labelled_at`, so it is normally outranked by any
+        genuinely derived row; but a corpus where the whole re-label found the server down has
+        nothing newer, and answering `…+underived` here would send every tool a version no row's
+        *content* was derived under.
+        """
+        labelled = [
+            r
+            for r in self._rows.values()
+            if r.labelled_at is not None and not is_underived_stamp(r.labeller_version)
+        ]
         if not labelled:
             return None
         newest = max(labelled, key=_labelled_key)
@@ -362,12 +451,17 @@ class PostgresLabelIndex(LabelIndex):
 
     # `IS DISTINCT FROM`, not `<>`: NULL means never derived and is the commonest stale row on a
     # fresh corpus, and `<>` would exclude precisely those.
+    # Two stamps leave this pass, so two of them are "not stale": the plain version, and the
+    # marked one a row gets when the labeller answered for neither half of it. Without the second
+    # predicate that row is stale again on the very next pass, which is the permanent re-read the
+    # stamp exists to stop.
     _STALE = """
         SELECT source, reaction_id, record_smiles, citation, performed_on, temperature_c,
                time_h, yield_percent, workup_text, mapped_smiles, named_reaction, reaction_class,
                rxno_id, confidence, method, labeller_version, labelled_at
         FROM reaction_labels
         WHERE labeller_version IS DISTINCT FROM %(version)s
+          AND labeller_version IS DISTINCT FROM %(underived)s
           AND (%(sources)s::text[] IS NULL OR source = ANY(%(sources)s::text[]))
         ORDER BY source, reaction_id
         LIMIT %(limit)s
@@ -389,8 +483,8 @@ class PostgresLabelIndex(LabelIndex):
             rxno_id = %(rxno_id)s,
             confidence = %(confidence)s,
             method = %(method)s,
-            labeller_version = %(version)s,
-            labelled_at = now()
+            labeller_version = %(stamp)s,
+            labelled_at = CASE WHEN %(derived)s THEN now() ELSE labelled_at END
         WHERE source = %(source)s AND reaction_id = %(reaction_id)s
     """
 
@@ -432,8 +526,17 @@ class PostgresLabelIndex(LabelIndex):
     # labelled_at IS NOT NULL`, which is this `WHERE` and this `ORDER BY` exactly — change either
     # and the plan silently falls back to the parallel sequential scan plus top-N sort that
     # migration measures at 118 ms over a million rows, once per rxnfp tool call, inside a turn.
+    #
+    # The `NOT LIKE` is the second half of the same rule `_STALE` states: an un-derived stamp names
+    # a version this row's *content* was never produced under, and handing it back here would send
+    # every rxnfp tool a version `coverage` then finds nothing labelled at. `labelled_at` is not
+    # advanced for such a row, so any genuinely derived row already outranks it — this covers the
+    # case where there is no such row, a whole corpus re-labelled against a server that was down.
+    # It filters the same index rather than defeating it: the scan stops at the first row that
+    # passes, which is the first derived one.
     _CURRENT_VERSION = (
         "SELECT labeller_version FROM reaction_labels WHERE labelled_at IS NOT NULL "
+        f"AND labeller_version NOT LIKE '%{_UNDERIVED_SUFFIX}' "
         "ORDER BY labelled_at DESC, source, reaction_id LIMIT 1"
     )
 
@@ -479,12 +582,17 @@ class PostgresLabelIndex(LabelIndex):
     async def stale(
         self, version: str, limit: int, sources: Sequence[str] | None = None
     ) -> list[ReactionLabel]:
-        """Rows never derived or derived under another version, with their species attached."""
+        """Rows never derived or derived under another version, with their species attached.
+
+        A row this drain already passed over at `version` without deriving anything is not one of
+        them — see `_STALE`.
+        """
         async with self._connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 self._STALE,
                 {
                     "version": version,
+                    "underived": underived_stamp(version),
                     "limit": limit,
                     "sources": list(sources) if sources is not None else None,
                 },
@@ -503,12 +611,25 @@ class PostgresLabelIndex(LabelIndex):
             by_key[(str(row[0]), str(row[1]))].append(_species_from_row(row))
         return [_label_from_row(r, by_key[(str(r[0]), str(r[1]))]) for r in rows]
 
-    async def store_labels(self, label: ReactionLabel, version: str) -> None:
-        """Write the derived phase of one reaction and its species, stamped `version`."""
+    async def store_labels(
+        self, label: ReactionLabel, version: str, *, derived: bool = True
+    ) -> None:
+        """Write the derived phase of one reaction and its species, stamped for `version`.
+
+        `derived=False` marks the stamp and holds `labelled_at` where it was — see the base
+        class. The species half is still written, because a row the naming and representation
+        calls both failed for can still have its roles fall back to the source's coarse map, and
+        that write is what `merge._species` calls a floor.
+        """
         async with self._connection() as conn:
             params = label.model_dump(include=_DERIVED_FIELDS)
             params.update(
-                {"source": label.source, "reaction_id": label.reaction_id, "version": version}
+                {
+                    "source": label.source,
+                    "reaction_id": label.reaction_id,
+                    "stamp": _stamp(version, derived),
+                    "derived": derived,
+                }
             )
             cur = await conn.execute(self._STORE_LABELS, params)
             if cur.rowcount == 0:
@@ -559,11 +680,13 @@ class PostgresLabelIndex(LabelIndex):
         return int(row[0]) if row else 0
 
     async def current_version(self) -> str | None:
-        """The version of the most recently labelled row.
+        """The version of the most recently *derived* row — see the in-memory twin for why.
 
         Served by `reaction_labels_current_version_idx` (086) rather than by a scan: every rxnfp
         tool calls this before it does anything else, so it is paid once per tool call on the turn
-        path, over a table sized by the corpus.
+        path, over a table sized by the corpus. Executed with **no parameters**, which is what
+        lets `_CURRENT_VERSION` carry a literal `'%…'` LIKE pattern: psycopg interpolates only when
+        params are passed, so the `%` needs no doubling here and would be wrong doubled.
         """
         async with self._connection() as conn, conn.cursor() as cur:
             await cur.execute(self._CURRENT_VERSION)

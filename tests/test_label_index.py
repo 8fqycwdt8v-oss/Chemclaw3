@@ -21,6 +21,7 @@ from chemclaw.science.labels.store import (
     LabelIndex,
     LabelIndexError,
     PostgresLabelIndex,
+    underived_stamp,
 )
 from chemclaw.science.labels.vocabulary import SpeciesRole
 from tests.pg import migrated_db_or_skip
@@ -311,18 +312,31 @@ def test_current_version_reads_the_index_and_not_the_whole_corpus() -> None:
     """`current_version()` must reach `reaction_labels_current_version_idx` (086).
 
     Two halves, because they fail for different reasons. The **shape** half runs with no database:
-    the index is `(labelled_at DESC, source, reaction_id) WHERE labelled_at IS NOT NULL`, which is
-    this statement's `WHERE` and `ORDER BY` exactly, so a rewrite of either is a silent return to
-    the parallel sequential scan the migration measures at 118 ms over a million rows — paid once
-    per rxnfp tool call, on the turn path. The **plan** half asks Postgres.
+    the index is `(labelled_at DESC, source, reaction_id) WHERE labelled_at IS NOT NULL`, so this
+    statement's partial-index predicate and its `ORDER BY` have to be that index's exactly, or the
+    plan is a silent return to the parallel sequential scan the migration measures at 118 ms over a
+    million rows — paid once per rxnfp tool call, on the turn path. The **plan** half asks Postgres.
+
+    **The two ends are pinned and the middle deliberately is not.** This was one `endswith` over
+    the whole tail, which made an added *filter* indistinguishable from a rewritten `ORDER BY`:
+    `D-2026-09-09-a-rebuild-nothing-counts-reports-as-finished` added
+    `AND labeller_version NOT LIKE '%…'`, which changes nothing about which index serves the
+    statement (it discards rows the scan already walked, in the same order) and failed this
+    assertion anyway. What the index actually requires
+    is the two ends; that a filter between them is still served by it is exactly the claim the plan
+    half is here to make, so pinning it in prose twice would be the re-derivation
+    `tests/test_context_floor.py`'s docstring warns about.
 
     `enable_seqscan = off` rather than a million seeded rows: with the sequential scan disabled, a
     statement the index can serve plans as an index scan at any row count. What is being asserted
     is that the index is reachable, not a timing that would depend on how much this test inserted.
     """
+    assert PostgresLabelIndex._CURRENT_VERSION.startswith(
+        "SELECT labeller_version FROM reaction_labels WHERE labelled_at IS NOT NULL"
+    ), "the statement no longer matches reaction_labels_current_version_idx (086)'s predicate"
     assert PostgresLabelIndex._CURRENT_VERSION.endswith(
-        "WHERE labelled_at IS NOT NULL ORDER BY labelled_at DESC, source, reaction_id LIMIT 1"
-    ), "the statement no longer matches reaction_labels_current_version_idx (086)"
+        "ORDER BY labelled_at DESC, source, reaction_id LIMIT 1"
+    ), "the statement no longer matches reaction_labels_current_version_idx (086)'s order"
 
     async def _run() -> None:
         index = await _postgres_or_skip()
@@ -371,5 +385,89 @@ def test_a_labellers_confidence_survives_the_round_trip_in_both_backends() -> No
         assert stored.confidence == reported, (
             f"{tag}: a confidence of {reported!r} came back as {stored.confidence!r}"
         )
+
+    _both_backends(_body)
+
+
+def test_an_underived_stamp_is_not_currency_in_either_backend() -> None:
+    """`store_labels(derived=False)` advances the drain without claiming the row is labelled.
+
+    The three readers that decide currency have to agree with the one that decides staleness, and
+    they had not: `stale()` moved on (correct — the drain must advance past a row the labelling
+    server cannot answer for) while `coverage` counted the row as labelled at the new version, over
+    content the *previous* labeller derived. Driven through both backends because the marker is
+    handled in a Python set on one side and in a SQL `IS DISTINCT FROM` on the other, and this
+    file's whole premise is that a rule easy to get right in Python is the one to check in SQL.
+    """
+
+    async def _body(index: LabelIndex, tag: str) -> None:
+        rid = f"{tag}-underived"
+        await index.record(_label(rid))
+        await index.store_labels(_derived(_label(rid)), _VERSION)
+        await index.store_labels(_derived(_label(rid)), "rxnlabel@2:roles1", derived=False)
+
+        keys = [(_SOURCE, rid)]
+        assert (await index.coverage("rxnlabel@2:roles1", keys)).labelled == 0, (
+            f"{tag}: an un-derived row was counted as labelled at the version it was stamped for"
+        )
+        # It still left the stale set, or the drain is wedged on it forever.
+        stale = await index.stale("rxnlabel@2:roles1", limit=500, sources=[_SOURCE])
+        assert rid not in {row.reaction_id for row in stale}, f"{tag}: the drain did not advance"
+        # And it is work again the next time the version moves.
+        later = await index.stale("rxnlabel@3:roles1", limit=500, sources=[_SOURCE])
+        assert rid in {row.reaction_id for row in later}, f"{tag}: the row can never be re-derived"
+
+    _both_backends(_body)
+
+
+def test_an_underived_stamp_does_not_become_the_current_version_in_either_backend() -> None:
+    """The stamp is not advanced past the newest *derived* row, and neither is `labelled_at`.
+
+    `current_version()` feeds every rxnfp tool, which passes it straight to `coverage`/`select`.
+    Answering with a marked stamp would count only the rows nothing was derived for — the defect
+    inverted — so the marked form is skipped, and `labelled_at` is left where it was so that an
+    ordinary degraded row is outranked by any genuinely derived one rather than relying on that
+    filter alone.
+    """
+
+    async def _body(index: LabelIndex, tag: str) -> None:
+        rid = f"{tag}-current"
+        await index.record(_label(rid))
+        await index.store_labels(_derived(_label(rid)), f"{tag}-derived-version")
+        stamped_at = await _labelled_at(index, rid)
+
+        await index.store_labels(_derived(_label(rid)), f"{tag}-degraded-version", derived=False)
+        assert await index.current_version() != f"{tag}-degraded-version", (
+            f"{tag}: a version nothing was derived under became the one every tool reads"
+        )
+        assert await _labelled_at(index, rid) == stamped_at, (
+            f"{tag}: an un-derived pass moved labelled_at, so it outranks every derived row"
+        )
+
+    _both_backends(_body)
+
+
+async def _labelled_at(index: LabelIndex, reaction_id: str) -> object:
+    """One row's `labelled_at`, read back through the stale query both backends share."""
+    rows = await index.stale("no-version-is-this", limit=500, sources=[_SOURCE])
+    [row] = [r for r in rows if r.reaction_id == reaction_id]
+    return row.labelled_at
+
+
+def test_a_version_that_already_carries_the_marker_is_refused_in_both_backends() -> None:
+    """The one way the tagged value could stop being decidable, refused where it is composed.
+
+    `labeller_version` is `f"{remote}:{STANDARDIZATION_VERSION}:{VOCABULARY_VERSION}"` and `remote`
+    is a separately versioned server's own answer, so this repository does not get to constrain the
+    string at its source. A remote version ending in the marker would make a genuinely derived row
+    indistinguishable from an un-derived one — silently, and permanently, since nothing would
+    revisit it. Loud here instead: the write does not happen.
+    """
+
+    async def _body(index: LabelIndex, tag: str) -> None:
+        rid = f"{tag}-marker"
+        await index.record(_label(rid))
+        with pytest.raises(LabelIndexError, match="indistinguishable"):
+            await index.store_labels(_derived(_label(rid)), underived_stamp(_VERSION))
 
     _both_backends(_body)

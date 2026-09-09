@@ -138,7 +138,7 @@ def _upstream_modules() -> list[Path]:
     because the DDL lives in `base` and the DELETEs and the version-ledger INSERTs live beside the
     async savers this repository imports (`agent/checkpointer.py`, `agent/scratchpad.py`).
 
-    `checkpoint/postgres/shallow.py` is deliberately absent. `ShallowPostgresSaver` writes
+    `langgraph.checkpoint.postgres.shallow` is deliberately absent. `ShallowPostgresSaver` writes
     `checkpoint_blobs` with `DO UPDATE` where the saver this repository runs writes it with
     `DO NOTHING`, so scanning it would derive — and this file would then require the grant file to
     hand out — an UPDATE no process here performs. The basis is the code that runs, which is the

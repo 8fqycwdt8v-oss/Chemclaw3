@@ -14,6 +14,7 @@ from chemclaw.science.fingerprints.store import (
     Match,
     find_matches,
     index_is_empty,
+    index_is_partial,
 )
 
 
@@ -44,7 +45,10 @@ async def find_similar_reactions(
     half of the same question — a page of `top_k` out of more that qualified is a floor, not the
     number of precedents on file. `approximate` answers the third: a deployment may search the
     index approximately (`fingerprint_search_exactness`), and then even a complete-looking page is
-    the best the index proposed rather than the best on file.
+    the best the index proposed rather than the best on file. `index_partial` answers the fourth:
+    a corpus mid-rebuild after a fingerprint-definition change holds rows this store cannot
+    compare, and one rebuilt row is enough to make `index_empty` False while the search still
+    answers over a fraction of the corpus.
     """
     matches, truncated = await find_matches(
         store, drfp_bitstring(reaction_smiles), top_k, threshold
@@ -53,6 +57,7 @@ async def find_similar_reactions(
         subject="reaction",
         hits=matches,
         index_empty=await index_is_empty(store, matches),
+        index_partial=await index_is_partial(store),
         hits_truncated=truncated,
         approximate=store.approximate,
     )

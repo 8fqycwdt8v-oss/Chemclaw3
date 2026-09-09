@@ -444,3 +444,114 @@ def test_two_sources_sharing_a_reaction_id_each_keep_their_own_labels() -> None:
             assert [s.derived_role for s in row.species][2] is SpeciesRole.LIGAND
 
     asyncio.run(_run())
+
+
+# --- a stamp is not a derivation --------------------------------------------------------
+# D-2026-09-09-a-rebuild-nothing-counts-reports-as-finished---------------
+
+
+def test_a_pass_that_derived_nothing_does_not_report_the_corpus_complete() -> None:
+    """The re-label case the `std6`→`std7` bump made real, and what it used to answer.
+
+    `D-2026-09-09-a-map-number-is-not-a-molecule` moved `STANDARDIZATION_VERSION`, which is folded
+    into `labeller_version`, so **every** labelled row went stale at once. Drain that corpus while
+    the labelling server is degraded and `merge` keeps what the previous labeller derived, so the
+    row is written back unchanged — and it used to be stamped with the plain new version, which is
+    what `coverage` counts as labelled. Measured before the fix, on one row derived under std6:
+
+        coverage: 'COMPLETE: all 1 matching reaction(s) are labelled at the current version, so
+                   counts over this facet are totals rather than lower bounds.'
+        stored:   ('Buchwald-Hartwig amination', …, 'rxnlabel@1:std6:roles1' → new version)
+
+    On a Pistachio-scale re-label that makes any window where the server is degraded permanently
+    invisible: the rows claim currency under a standardization their content predates, and
+    `stale()` never returns them again. Two docstrings in `enrich.py` said the coverage report
+    counted them as unlabelled; `store.coverage` counted `labeller_version = version`, which is
+    counting them as labelled.
+    """
+    old_version = "rxnlabel@1:std6:roles1"
+
+    async def _run() -> None:
+        index = InMemoryLabelIndex()
+        await index.record(_row("r0"))
+        # Labelled under the superseded standardization, by a server that was working then.
+        await label_stale(index, _FakeLabeller(), {}, old_version, limit=10)
+        assert (await index.coverage(old_version)).labelled == 1
+
+        # The bump: every row is stale, and the server answers for nothing.
+        report = await label_stale(index, _FakeLabeller(refuse={"r0"}), {}, _VERSION, limit=10)
+        assert (report.labelled, report.unlabelled) == (1, 1)
+
+        coverage = await index.coverage(_VERSION)
+        assert (coverage.labelled, coverage.total) == (0, 1)
+        assert coverage.verdict.startswith("NOT ANSWERABLE YET")
+        assert "COMPLETE" not in coverage.verdict
+        # And the content really is the superseded labeller's, which is what makes the count right.
+        [row] = list(index._rows.values())
+        assert row.named_reaction == "Buchwald-Hartwig amination"
+
+    asyncio.run(_run())
+
+
+def test_an_underived_row_leaves_the_stale_set_and_returns_at_the_next_version() -> None:
+    """Both halves of the stamp, because a fix to one of them breaks the other.
+
+    Stamping is what lets the drain advance past a reaction the server cannot answer for — remove
+    it and `stale()`'s deterministic first batch is re-read forever, which is the wedge
+    `reembed_stale` was changed to prevent one index over. Marking the stamp must therefore not
+    put the row back into the stale set at the *same* version, and must not keep it out at the
+    next one.
+    """
+
+    async def _run() -> None:
+        index = InMemoryLabelIndex()
+        await index.record(_row("r0"))
+        await label_stale(index, _FakeLabeller(refuse={"r0"}), {}, _VERSION, limit=10)
+
+        assert await index.stale(_VERSION, limit=10) == []
+        assert [r.reaction_id for r in await index.stale("rxnlabel@2:std7:roles1", 10)] == ["r0"]
+
+    asyncio.run(_run())
+
+
+def test_a_degraded_pass_does_not_advance_the_version_every_tool_reads() -> None:
+    """`current_version()` must never hand back a stamp no row's *content* was derived under.
+
+    Every rxnfp tool calls it first and passes the answer to `coverage`/`select`, so a marked
+    stamp there would make the facet queries count only the rows nothing was derived for — the
+    original defect inverted. A corpus whose whole re-label found the server down therefore has
+    *no* current version, which is the honest answer: the tools report the corpus as unlabelled.
+    """
+
+    async def _run() -> None:
+        index = InMemoryLabelIndex()
+        await index.record(_row("r0"))
+        await label_stale(index, _FakeLabeller(), {}, "rxnlabel@1:std6:roles1", limit=10)
+        assert await index.current_version() == "rxnlabel@1:std6:roles1"
+
+        await label_stale(index, _FakeLabeller(refuse={"r0"}), {}, _VERSION, limit=10)
+        assert await index.current_version() is None
+
+    asyncio.run(_run())
+
+
+def test_a_partly_degraded_pass_reports_the_share_it_actually_derived() -> None:
+    """The case a Pistachio re-label really produces: some rows derived, some not.
+
+    The whole point of the fix is that this reads as PARTIAL rather than COMPLETE — a chemist told
+    "counts over this facet are totals" over a corpus two thirds of which carries superseded
+    content is the failure, and it is invisible in the answer itself.
+    """
+
+    async def _run() -> None:
+        index = InMemoryLabelIndex()
+        for n in range(3):
+            await index.record(_row(f"r{n}"))
+        await label_stale(index, _FakeLabeller(refuse={"r1"}), {}, _VERSION, limit=10)
+
+        coverage = await index.coverage(_VERSION)
+        assert (coverage.labelled, coverage.total) == (2, 3)
+        assert coverage.verdict.startswith("PARTIAL")
+        assert await index.current_version() == _VERSION
+
+    asyncio.run(_run())

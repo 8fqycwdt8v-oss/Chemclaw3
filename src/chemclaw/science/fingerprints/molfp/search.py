@@ -25,6 +25,7 @@ from chemclaw.science.fingerprints.store import (
     FingerprintStore,
     find_matches,
     index_is_empty,
+    index_is_partial,
 )
 
 log = logging.getLogger(__name__)
@@ -94,13 +95,17 @@ async def find_similar_molecules(
     `top_k` could hold: the page is a floor, and it read as a total. `approximate` is the third
     member of that family and comes straight off the store: a deployment may search the index
     approximately (`fingerprint_search_exactness`), and under that trade an empty result is no
-    longer evidence that we have no analog on file.
+    longer evidence that we have no analog on file. `index_partial` is the fourth, and it is the
+    one that survives a *definition* change rather than a configuration: a corpus mid-rebuild
+    holds rows this store cannot compare, and one rebuilt row is enough to make `index_empty`
+    False while the search still answers over a fraction of the corpus.
     """
     matches, truncated = await find_matches(store, ecfp_bitstring(smiles), top_k, threshold)
     return FingerprintSearch[MoleculeHit](
         subject="molecule",
         hits=[MoleculeHit.for_molecule(match.label, match.similarity) for match in matches],
         index_empty=await index_is_empty(store, matches),
+        index_partial=await index_is_partial(store),
         hits_truncated=truncated,
         approximate=store.approximate,
     )
@@ -122,7 +127,11 @@ async def find_substructure_matches(
     The scan is bounded to `substructure_scan_max_records` (a full-table load into the
     worker heap is the failure mode) and the result to `fingerprint_max_top_k` (a broad
     fragment like "C" matches essentially every organic molecule — an unbounded hit list
-    would flood the model context). Hitting either cap is reported **in the result**
+    would flood the model context). **`index_partial` is deliberately not set here and its
+    absence is not an omission**: this scan reads `all_records`, which is unfiltered by
+    definition on purpose (a stale-definition row's stored SMILES is still a correct
+    substructure hit), so a corpus mid-rebuild is searched whole by this entry point and only
+    by this one. Hitting either cap is reported **in the result**
     (`scan_truncated`/`hits_truncated`, and the `verdict` sentence built from them), not only in
     the log: the log is read by an operator after the fact, while the payload is what the model
     holds when it writes the answer, and a scan the record cap cut short used to render as "this

@@ -163,6 +163,18 @@ class FingerprintSearch(BaseModel, Generic[HitT]):
     # True only when the index holds nothing searchable — never a hit list that merely came back
     # short. Probed (cheaply) at the one moment it can change the meaning of the result: no hits.
     index_empty: bool = False
+    # True when the index also holds records under a *superseded* fingerprint definition, which
+    # this search could not compare against. `index_empty` is the same fact at its extreme, and a
+    # definition bump walks a corpus from one to the other: at the instant of the bump every row
+    # is superseded and `index_empty` is True (honest), and the first re-indexed row flips it to
+    # False while 99% of the corpus is still invisible. Measured on the `std6`→`std7` bump of
+    # `D-2026-09-09-a-map-number-is-not-a-molecule`: 50 stale rows plus 1 rebuilt row answered
+    # "1 indexed molecule(s) matched this query" with no qualifier at all — a complete-looking
+    # answer to "have we made this before?" drawn from 2% of the corpus. A **boolean** and not the
+    # count, deliberately: the count is a `count(*)` over the whole table and this is read on every
+    # search, while the boolean is two index probes (see `has_superseded_records`). The number is
+    # the operator's and goes to the connector log, which is where the re-index is run from.
+    index_partial: bool = False
     # The two ways a search can stop early, carried in the payload for the same reason
     # `index_empty` is: a truncation known only to the log cannot reach the model that writes the
     # answer. `scan_truncated` = not every stored record was examined — the record cap cut the scan
@@ -220,57 +232,88 @@ class FingerprintSearch(BaseModel, Generic[HitT]):
                 "populate it. Do not say that nothing similar was found."
             )
         if not self.hits:
-            if self.scan_truncated:
+            caveats = self._incomplete_clauses()
+            if not caveats:
                 return (
-                    f"SEARCH INCOMPLETE: not every stored {self.subject} was examined — the scan "
-                    "stopped at its record cap, or a stored record could not be read — and "
-                    "nothing that was examined matched. This is NOT evidence that no such "
-                    f"{self.subject} exists. Report the search as inconclusive and say an operator "
-                    "must raise the scan cap or repair the index (the connector log names which)."
+                    f"No indexed {self.subject} matched this query. The {self.subject} fingerprint "
+                    "index holds records and was searched exactly — every stored record was "
+                    "compared — so this is a genuine negative result."
                 )
-            if self.approximate:
-                return (
-                    f"APPROXIMATE SEARCH, NO MATCH: nothing in the candidate set matched, but "
-                    f"this deployment searches the {self.subject} index approximately (it ranks "
-                    "candidates proposed by the similarity index rather than comparing every "
-                    "stored record), so a true neighbour can be missed. This is NOT proof that no "
-                    f"similar {self.subject} exists. Say that an approximate search found nothing "
-                    "and that an exact search would be needed to rule a precedent out."
-                )
-            return (
-                f"No indexed {self.subject} matched this query. The {self.subject} fingerprint "
-                "index holds records and was searched exactly — every stored record was compared "
-                "— so this is a genuine negative result."
+            return " ".join(
+                [
+                    "SEARCH INCOMPLETE: nothing that was compared matched this query, and not "
+                    f"every stored {self.subject} was compared. This is NOT evidence that no such "
+                    f"{self.subject} exists — report the search as inconclusive.",
+                    *caveats,
+                ]
             )
         matched = f"{len(self.hits)} indexed {self.subject}(s) matched this query."
-        # **Two independent facts, so two independent clauses — not two branches.** Truncation is
-        # about *count* ("there may be more"); approximation is about *ranking* ("these may not be
-        # the closest"). Written as exclusive `if`/`return` the first one shadowed the second, and
-        # `find_matches` asks for `k + 1` so `hits_truncated` is the *ordinary* outcome: measured
-        # over 60 queries at the shipped defaults, the truncated branch fired 60 times and the
-        # approximate branch **zero**, leaving both arms byte-identical. A chemist reading "further
-        # matches may exist" was not being told the ten in hand might not be the nearest ten, which
-        # is the whole risk the approximate arm trades for its speed.
-        truncated = self.scan_truncated or self.hits_truncated
-        labels = ["PARTIAL" if truncated else "", "APPROXIMATE" if self.approximate else ""]
+        # **Independent facts, so independent clauses — not branches.** Truncation is about
+        # *count* ("there may be more"); a superseded fraction is about *what was compared at all*;
+        # approximation is about *ranking* ("these may not be the closest"). Written as exclusive
+        # `if`/`return` the first shadowed the rest, and `find_matches` asks for `k + 1` so
+        # `hits_truncated` is the *ordinary* outcome: measured over 60 queries at the shipped
+        # defaults, the truncated branch fired 60 times and the approximate branch **zero**,
+        # leaving both arms byte-identical. A chemist reading "further matches may exist" was not
+        # being told the ten in hand might not be the nearest ten, which is the whole risk the
+        # approximate arm trades for its speed.
+        #
+        # The heading says which *kind* of qualification applies and `_incomplete_clauses` says
+        # what each one is; a partial index shares "PARTIAL" with truncation because both make the
+        # page a lower bound, and its clause is what distinguishes them.
+        lower_bound = self.scan_truncated or self.hits_truncated or self.index_partial
+        labels = ["PARTIAL" if lower_bound else "", "APPROXIMATE" if self.approximate else ""]
         heading = " AND ".join(label for label in labels if label)
         if not heading:
             return matched
-        clauses = [f"{heading} RESULT: {matched}"]
-        if truncated:
+        return " ".join([f"{heading} RESULT: {matched}", *self._incomplete_clauses()])
+
+    def _incomplete_clauses(self) -> list[str]:
+        """Every reason this search saw less than the whole index, one clause each.
+
+        **One list for both arms, because the two arms had drifted.** The hits arm was already
+        clause-composed for the reason its comment gives — truncation is about *count* and
+        approximation about *ranking*, so an `if`/`return` chain lets the first shadow the second —
+        and the no-hits arm below it was still that exact chain, three exclusive branches. Nothing
+        caught it because the two facts it could shadow cannot co-occur today (`scan_truncated` is
+        set only by the substructure scan, `approximate` only by similarity search); a third one
+        that co-occurs with both is what made the shape matter rather than merely look wrong.
+
+        Ordered by how much of the index the reader is missing: a superseded fraction is the
+        largest and the only one an operator can fix, so it is stated before the two that are
+        properties of how this query ran.
+        """
+        clauses: list[str] = []
+        if self.index_partial:
+            clauses.append(
+                f"Part of the {self.subject} index is stored under a SUPERSEDED fingerprint "
+                "definition and was not compared at all, so the query was answered over the "
+                "re-indexed fraction of the corpus rather than over the corpus. Report that the "
+                "index is mid-rebuild and that an operator must finish re-indexing it (the "
+                "connector log says how many records are waiting)."
+            )
+        if self.scan_truncated or self.hits_truncated:
             cap = "record cap" if self.scan_truncated else "result cap"
             clauses.append(
                 f"The scan stopped early ({cap}), so this is a lower bound and further matches "
                 "may exist. Do not report it as the complete set."
+                + (
+                    " An operator must raise the scan cap or repair the index (the connector log "
+                    "names which)."
+                    if self.scan_truncated
+                    else ""
+                )
             )
         if self.approximate:
             clauses.append(
-                f"This deployment searches the {self.subject} index approximately, so these are "
-                "the best neighbours the index proposed rather than provably the best on file, and "
-                "a closer one may exist. Do not present the list as the definitive set of "
-                "precedents."
+                f"This deployment searches the {self.subject} index APPROXIMATELY — it ranks "
+                "candidates proposed by the similarity index rather than comparing every stored "
+                "record — so what came back is what the index proposed rather than provably the "
+                "best on file, and a closer one may exist. This is NOT proof that no closer "
+                f"{self.subject} is on file; an exact search would be needed to rule a precedent "
+                "out."
             )
-        return " ".join(clauses)
+        return clauses
 
 
 @runtime_checkable
@@ -341,6 +384,25 @@ class FingerprintStore(Protocol):
         Separate from `is_empty` because it answers a different question for a different reader: an
         operator needs "3 of 10,000 reactions are indexed" (a half-finished backfill looks exactly
         like a healthy one to a boolean), and pays for the scan once per process start.
+        """
+        ...
+
+    async def has_superseded_records(self) -> bool:
+        """Whether the table holds a record this store's definition cannot compare — asked always.
+
+        The searchable half of the same question `superseded_count` answers for an operator, and
+        split from it for exactly the reason `is_empty` is split from `count`: this one runs on
+        **every** similarity search, because a partly re-indexed index answers a chemist over a
+        fraction of the corpus and nothing else about the result would show it, and an exact count
+        on that path is a full scan. A backend must answer it without one.
+        """
+        ...
+
+    async def superseded_count(self) -> int:
+        """How many records are stored under a definition this store cannot search.
+
+        The operator's number, paid once per process beside `count`: "3 indexed, 9,997 waiting"
+        is what says a re-index is unfinished, and a boolean cannot say how far it got.
         """
         ...
 
@@ -443,6 +505,26 @@ class InMemoryFingerprintStore:
     async def count(self) -> int:
         """How many records are searchable under this store's definition."""
         return len(self._searchable())
+
+    def _superseded(self) -> list[FingerprintRecord]:
+        """The records held here that this store's definition cannot compare against.
+
+        The complement of `_searchable`, over the same one definition of "in this index", so the
+        two cannot disagree about a record. A store pinning no definition ranks everything, so
+        nothing is superseded for it — which is the same rule `_searchable` states from the
+        other side.
+        """
+        if self._definition is None:
+            return []
+        return [r for r in self._records.values() if r.definition != self._definition]
+
+    async def has_superseded_records(self) -> bool:
+        """Whether anything here is stored under a definition this store cannot compare."""
+        return bool(self._superseded())
+
+    async def superseded_count(self) -> int:
+        """How many records here are stored under a definition this store cannot compare."""
+        return len(self._superseded())
 
     async def find_similar(self, query_bits: str, top_k: int, threshold: float) -> list[Match]:
         """Rank stored records by Tanimoto to `query_bits`, filtered and truncated.
@@ -603,6 +685,25 @@ class PostgresFingerprintStore:
         # populated index to an operator whose searches all return nothing.
         self._exists = f"SELECT 1 FROM {table} WHERE definition = %(definition)s LIMIT 1"
         self._count = f"SELECT count(*) FROM {table} WHERE definition = %(definition)s"
+        # The complement, and the two shapes are deliberately different statements rather than one
+        # with a `<>` in it, because they are read on different paths and only one of them may
+        # scan.
+        #
+        # `_superseded_count` is the operator's, run once per process beside `_count`, and a
+        # `count(*)` there is the same cost that one already pays.
+        #
+        # `_definition_extremes` is the searcher's, and it is `min`/`max` rather than the obvious
+        # `SELECT 1 … WHERE definition <> … LIMIT 1` for a reason that only shows up when the index
+        # is *healthy*: with every row under one definition, that `LIMIT 1` has to read every row
+        # before it can answer "none". `min(definition)`/`max(definition)` are two `Limit`s over
+        # `<table>_definition_idx` (`046`) instead — O(log n) index probes, and an index whose
+        # extremes are both this store's definition holds nothing else by construction. Measured on
+        # a live PostgreSQL 16.15 at 200 000 rows all under the current definition: **26.32 ms**
+        # for the `LIMIT 1` form and **0.55 ms** for this one, and the first is linear in the
+        # corpus while the second is not. `corpus_molecules`/`corpus_reactions` carry no such index
+        # and would seq-scan; neither builds a `FingerprintSearch`, so neither is on this path.
+        self._superseded_count = f"SELECT count(*) FROM {table} WHERE definition <> %(definition)s"
+        self._definition_extremes = f"SELECT min(definition), max(definition) FROM {table}"
         # `<%%>` is pgvector's Jaccard-distance operator (`%` doubled to escape psycopg).
         # Threshold-filter first (and to this store's definition), then rank by distance and
         # truncate — the in-memory backend's "threshold then top-k"; ties break by id under
@@ -759,6 +860,29 @@ class PostgresFingerprintStore:
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(self._count, {"definition": self._definition})
+                row = await cur.fetchone()
+        return int(row[0]) if row else 0
+
+    async def has_superseded_records(self) -> bool:
+        """Whether any row is under another definition — two index probes, not a scan.
+
+        Exact, and cheap for the reason the constructor's comment measures: the extremes of
+        `definition` bound every value in the column, so they are equal to this store's definition
+        if and only if nothing else is stored. A `NULL` min is an empty table.
+        """
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(self._definition_extremes)
+                row = await cur.fetchone()
+        if row is None or row[0] is None:
+            return False
+        return bool(row[0] != self._definition or row[1] != self._definition)
+
+    async def superseded_count(self) -> int:
+        """Exact number of rows this store's definition cannot compare — the operator's number."""
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(self._superseded_count, {"definition": self._definition})
                 row = await cur.fetchone()
         return int(row[0]) if row else 0
 
@@ -922,6 +1046,23 @@ async def index_is_empty(store: FingerprintStore, hits: Sequence[BaseModel]) -> 
     return not hits and await store.is_empty()
 
 
+async def index_is_partial(store: FingerprintStore) -> bool:
+    """Whether the index also holds records this search could not compare — asked every time.
+
+    The sibling of `index_is_empty`, and deliberately *not* conditioned on the hit list the way
+    that one is. Emptiness only changes the reading of an empty result, so probing for it on a
+    page of hits would buy nothing; a superseded fraction changes the reading of **both** — an
+    empty page is not evidence of absence, and a full page is a page out of the rebuilt fraction.
+    Measured on the `std6`→`std7` bump: 50 superseded rows and 1 rebuilt one answered "1 indexed
+    molecule(s) matched this query", which is the sentence a chemist acts on.
+
+    What makes that affordable is the store contract, not this function: `has_superseded_records`
+    is required to answer without a scan, and the durable backend does it in two index probes
+    (0.55 ms at 200 000 rows against 26.32 ms for the obvious `LIMIT 1` form).
+    """
+    return await store.has_superseded_records()
+
+
 async def log_index_size(store: FingerprintStore, subject: Subject) -> None:
     """Log how many records a fingerprint index holds — loudly when it holds none.
 
@@ -936,25 +1077,55 @@ async def log_index_size(store: FingerprintStore, subject: Subject) -> None:
     """
     try:
         records = await store.count()
+        superseded = await store.superseded_count()
     except (ChemclawError, ConnectionError, psycopg.Error) as exc:
         log.warning("cannot report the %s fingerprint index size: %s", subject, exc)
         return
-    if records:
-        log.info(
-            "%s fingerprint index: %d record(s) indexed under the current definition",
-            subject,
-            records,
-        )
-    else:
+    if not records:
         log.warning(
             "%s fingerprint index is EMPTY: 0 records indexed under the current definition, so "
             "every %s similarity search will report that it could not be answered. `make reindex` "
             "rebuilds the *note* index only — the fingerprint index is populated by the ELN sync "
             "(ElnSyncWorkflow), and rows predating a definition change need re-indexing too "
-            "(docs/guides/runbook.md (vi)).",
+            "(docs/guides/runbook.md (vi)).%s",
             subject,
             subject,
+            _waiting(superseded, subject),
         )
+    elif superseded:
+        log.warning(
+            "%s fingerprint index is PARTIAL: %d record(s) indexed under the current definition "
+            "and %d still under a superseded one, so every %s search answers over %.1f%% of the "
+            "index and says so. Finish the re-index (docs/guides/runbook.md (vi)); until it "
+            "finishes the searchable corpus is the smaller number, not the total.",
+            subject,
+            records,
+            superseded,
+            subject,
+            100 * records / (records + superseded),
+        )
+    else:
+        log.info(
+            "%s fingerprint index: %d record(s) indexed under the current definition",
+            subject,
+            records,
+        )
+
+
+def _waiting(superseded: int, subject: Subject) -> str:
+    """The clause the EMPTY warning gains when the table is full of superseded rows.
+
+    Appended rather than replacing that warning, because "0 searchable records" is the true and
+    already-honest reading of a corpus at the instant of a definition bump — what it could not say
+    is that the rows are *there* and need rebuilding rather than re-ingesting from the source,
+    which is a different operator action.
+    """
+    if not superseded:
+        return ""
+    return (
+        f" {superseded} record(s) are stored under a superseded definition — the whole {subject} "
+        "index is waiting to be rebuilt, not missing."
+    )
 
 
 def default_molecule_store() -> PostgresFingerprintStore:
