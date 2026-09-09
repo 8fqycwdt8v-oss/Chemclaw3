@@ -596,7 +596,7 @@ def test_record_from_ord_reaction() -> None:
     assert record.reaction_id == "rxn-1"
     assert record.source.startswith("eln:")
     assert "CCO.CC(=O)O>>CCOC(C)=O" in record.body
-    assert "temperature: 80.0 °C" in record.body
+    assert "temperature: 80 °C" in record.body
     assert cited_ids(record.body) == []
 
 
@@ -935,6 +935,42 @@ def test_a_nul_in_a_condition_the_body_never_renders_is_refused_too() -> None:
             conditions=ProcessConditions(major_impurity="des-bromo\x00 adduct"),
         )
     assert "conditions.major_impurity" in str(raised.value)
+
+
+def test_a_non_finite_condition_is_refused_where_a_nul_is() -> None:
+    """The other value `jsonb` will not take, one field away from the NUL above.
+
+    `NaN` and `±Infinity` are not JSON, and Postgres says so only at the wall — as an
+    `InvalidTextRepresentation` naming a *token*, from a driver exception that
+    `chemclaw.ingest.eln.sync` does not catch. So this has to be a `ValidationError` here.
+
+    Four of the five numeric fields were already covered *by accident*, and only three of them
+    fully: `ge`/`le` bounds reject NaN because every comparison against it is false. That left
+    `temperature_c`, which has no bounds and is the field a Kelvin setpoint arrives on, and
+    `time_h`, whose `ge=0.0` admits `+Infinity`. An accidental guard is asserted here so that
+    removing a bound cannot silently remove a guarantee nobody wrote down.
+
+    **On the model, not on the record.** `ReactionRecord`'s storable walk refuses a NUL by
+    inspecting strings, and re-validates nothing: a `ProcessConditions` handed to it has already
+    been validated at construction, which is every path that builds one. So this is where the
+    refusal has to be, and there is no legacy row to migrate — Postgres never accepted one.
+    """
+    for field in (
+        "temperature_c",
+        "time_h",
+        "yield_percent",
+        "purity_percent",
+        "impurity_area_percent",
+    ):
+        for value in (float("nan"), float("inf"), float("-inf")):
+            # `model_validate` rather than `**{...}`: the same validation, without asking a
+            # static checker to prove a dynamic field name against five different field types.
+            with pytest.raises(ValidationError):
+                ProcessConditions.model_validate({field: value})
+
+    assert ProcessConditions(temperature_c=-78.0).temperature_c == -78.0, (
+        "a finite setpoint stopped being storable"
+    )
 
 
 def test_the_next_field_added_to_a_record_cannot_forget_the_storable_check() -> None:
@@ -2065,6 +2101,52 @@ def test_the_charge_sheet_lists_every_input_with_what_was_recorded() -> None:
     )
     assert "- `CCO` (reactant): 4600 mg, 100 mmol\n" in note.body
     assert "- `Cc1ccccc1` (solvent): amount not recorded\n" in note.body
+
+
+def test_a_number_this_system_computed_is_rendered_without_its_binary_tail() -> None:
+    """A dry-ice bath is −78 °C, and a chemist reading `-77.99999999999997 °C` sees a broken system.
+
+    `195.15 - 273.15` is exact in decimal and not in binary, so every Kelvin setpoint that is not a
+    round number of degrees Celsius reached the note — and retrieval, and a human — carrying
+    seventeen digits of an artefact this system introduced. The same arithmetic is behind
+    `time_h` (minutes and seconds are scaled) and behind `mass_mg` (4.6 g becomes
+    `4600.000000000001`).
+
+    The rule is the boundary: **a number this system computed is rendered; a number the source
+    reported is echoed.** Yield, purity and impurity area are read verbatim out of the entry, so
+    there is nothing there to clean and their digits are the chemist's own.
+
+    Frontmatter is untouched by any of this — `conditions.temperature_c` still carries the full
+    double, which is what every comparison and every `WHERE` clause reads. This is the body, which
+    is prose.
+    """
+    kelvin_bath = _ester().model_copy(update={"temperature_c": 195.15 - 273.15, "time_h": 100 / 60})
+    body = record_from_ord_reaction(kelvin_bath).body
+    assert "- temperature: -78 °C\n" in body, f"the rendered conditions were:\n{body}"
+    assert "- time: 1.66666666667 h\n" in body, (
+        "a converted duration lost its magnitude or kept its noise"
+    )
+    conditions = record_from_ord_reaction(kelvin_bath).conditions
+    assert conditions is not None and conditions.temperature_c == 195.15 - 273.15, (
+        "the stored value was rounded to match the prose; the prose must not decide the record"
+    )
+
+
+def test_the_charge_sheet_keeps_the_magnitude_a_balance_actually_measured() -> None:
+    """`:g` is six significant figures, so a kilo-scale charge was published as `1.23457e+06 mg`.
+
+    That is not a rounding a reader can undo: a five-place balance reports more digits than six,
+    and the charge sheet exists so the per-species amounts behind the one-line scale are legible
+    rather than taken on trust. Twelve is past any balance and short of the binary tail, which is
+    the whole of the choice.
+    """
+    note = record_from_ord_reaction(
+        _charged(
+            Component(smiles="CCO", role=Role.REACTANT, mass_mg=1234567.8, amount_mmol=26.802345),
+        )
+    )
+    assert "- `CCO` (reactant): 1234567.8 mg, 26.802345 mmol\n" in note.body
+    assert "- scale: 1234.5678 g of reactants charged\n" in note.body
 
 
 def test_a_record_with_no_amounts_says_nothing_about_scale() -> None:

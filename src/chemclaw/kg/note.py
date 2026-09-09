@@ -549,7 +549,23 @@ class ProcessConditions(BaseModel):
 
     # `extra="forbid"` for the reason `TemporalWindow` gives: a typo'd key silently dropped is a
     # number a chemist wrote that no comparison will ever render.
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    #
+    # `allow_inf_nan=False` because this model is written straight into a `jsonb` column
+    # (`reaction_records.conditions`), and `NaN`/`±Infinity` are not JSON. Postgres refuses them at
+    # the wall, as an `InvalidTextRepresentation` naming a *token* — a `psycopg` error that is
+    # neither `ChemclawError` nor `ValidationError`, so it walked past the per-entry
+    # reject-and-continue in `ingest/eln/sync.py`, aborted the pass and advanced no cursor: one
+    # entry deterministically holding a whole corpus at a fixed date on every scheduled run after
+    # it. As a `ValidationError` it is one rejected entry with the field named in the ledger.
+    #
+    # **Four of these five fields were guarded by accident, and only three of them fully.** Every
+    # comparison
+    # against NaN is false, so `ge`/`le` already rejected it on `yield_percent`, `purity_percent`,
+    # `impurity_area_percent` and `time_h` — while `temperature_c`, the one field with no bounds to
+    # state, took it, and `time_h`'s `ge=0.0` still admitted `+Infinity`. A guarantee that is a
+    # side effect of a range nobody chose for it is a guarantee that disappears the day the range
+    # is widened, which is why it is stated here rather than left to the bounds.
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
 class Note(TemporalWindow):

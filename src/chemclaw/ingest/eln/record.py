@@ -214,15 +214,39 @@ def _hypothesis_block(reaction: OrdReaction) -> str:
     return f"Tested: {' '.join(reaction.hypothesis.split())}\n\n"
 
 
+def _measured(value: float) -> str:
+    """Render a number this system *computed*, without the binary tail of its own arithmetic.
+
+    **The boundary is who produced the digits.** A yield or a purity is echoed verbatim below,
+    because those are read straight out of the entry and their digits are the chemist's own — there
+    is nothing there to clean, and `str(float)` is already the shortest form that round-trips what
+    the source said. A temperature, a duration and a mass are *converted* (K→°C, minutes→hours,
+    g→mg), so their last digits are an artefact this system introduced: the dry-ice bath every
+    chemist writes as −78 °C reached the note — and retrieval, and a human reader — as
+    `-77.99999999999997 °C`, from `195.15 - 273.15`, which is exact in decimal and not in binary.
+
+    **Twelve significant figures, not `:g`'s six.** Six is where the neighbouring amount lines
+    started, and it is a real loss rather than a tidier one: a kilo-scale charge rendered as
+    `1.23457e+06 mg`, throwing away digits a five-place balance actually measured, on the very
+    lines whose reason for existing is that the per-species amounts are legible rather than taken
+    on trust. Twelve is past any instrument in this domain and short of the ~16 digits where the
+    noise lives.
+
+    Nothing here touches what is *stored*: `conditions` keeps the full double, which is what every
+    comparison and every future `WHERE` clause reads. This is the body, and the body is prose.
+    """
+    return f"{value:.12g}"
+
+
 def _conditions_block(reaction: OrdReaction) -> str:
     """Render the headline conditions (scale/temperature/time/yield) as a bullet list."""
     conditions = []
     if (scale := _scale(reaction)) is not None:
         conditions.append(f"scale: {scale}")
     if reaction.temperature_c is not None:
-        conditions.append(f"temperature: {reaction.temperature_c} °C")
+        conditions.append(f"temperature: {_measured(reaction.temperature_c)} °C")
     if reaction.time_h is not None:
-        conditions.append(f"time: {reaction.time_h} h")
+        conditions.append(f"time: {_measured(reaction.time_h)} h")
     if reaction.yield_percent is not None:
         conditions.append(f"yield: {reaction.yield_percent}%")
     if reaction.purity_percent is not None:
@@ -280,8 +304,8 @@ def _scale(reaction: OrdReaction) -> str | None:
     masses = [c.mass_mg for c in reactants if c.mass_mg is not None]
     # Only those with no mass, so a reactant carrying both is counted once, on the preferred form.
     amounts = [c.amount_mmol for c in reactants if c.mass_mg is None and c.amount_mmol is not None]
-    grams = f"{sum(masses) / 1000:g} g" if masses else ""
-    mmol = f"{sum(amounts):g} mmol" if amounts else ""
+    grams = f"{_measured(sum(masses) / 1000)} g" if masses else ""
+    mmol = f"{_measured(sum(amounts))} mmol" if amounts else ""
     charged = " + ".join(part for part in (grams, mmol) if part)
     if not charged:
         return None
@@ -289,12 +313,24 @@ def _scale(reaction: OrdReaction) -> str | None:
 
 
 def _charge_block(reaction: OrdReaction) -> str:
-    """Render what was actually charged, per input — the machine-legible form of the scale.
+    """Render what was actually charged, per input — the detail behind the one-line scale.
 
-    The `scale:` bullet is one number for a skim; this is the charge sheet behind it, so a reader
-    (or a downstream consumer) can see which species carried the mass and recompute stoichiometry
-    instead of taking a derived figure on trust. Empty when no input carries an amount, so a
-    record that never reported one gets no section rather than a table of blanks.
+    The `scale:` bullet is one number for a skim; this is the charge sheet behind it, so a
+    **reader** can see which species carried the mass rather than taking a derived figure on trust.
+    Empty when no input carries an amount, so a record that never reported one gets no section
+    rather than a table of blanks.
+
+    **It is prose, and calling it machine-legible was a claim about a consumer that does not
+    exist.** This docstring used to say "(or a downstream consumer) … recompute stoichiometry", and
+    `grep` finds no parser of `## Charge` anywhere in this repository — while the numbers had
+    already been through `:g`, six significant figures, which no stoichiometry survives at kilo
+    scale. `_measured` fixes the second half; the first is fixed by not claiming it.
+
+    **A column was considered and declined.** `reaction_records` holds no per-species amount, so a
+    consumer that wanted these numbers would need one — and adding a column is a design decision
+    (what shape, whose unit, keyed how, migrated when) taken on behalf of a reader nobody has yet.
+    The transcription tier stores what a query is known to ask for; the day something asks for
+    amounts, the honest answer is a column and its migration, not a parser for this text.
 
     Every input is listed once the section exists, including those with no recorded amount: that a
     species was charged is itself information, and omitting its row would read as "not charged".
@@ -309,9 +345,9 @@ def _charge_line(component: Component) -> str:
     """One charged species: its structure, its role, and whatever amount was recorded."""
     amounts = []
     if component.mass_mg is not None:
-        amounts.append(f"{component.mass_mg:g} mg")
+        amounts.append(f"{_measured(component.mass_mg)} mg")
     if component.amount_mmol is not None:
-        amounts.append(f"{component.amount_mmol:g} mmol")
+        amounts.append(f"{_measured(component.amount_mmol)} mmol")
     detail = ", ".join(amounts) if amounts else "amount not recorded"
     line = f"`{component.smiles}` ({component.role.value}): {detail}"
     # Whatever else the source recorded about this species, on the row it belongs to rather than in

@@ -28,10 +28,10 @@ from typing import Any
 
 import psycopg
 from psycopg.rows import TupleRow
-from psycopg.types.json import Jsonb
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.jsonb import json_column
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import degraded, record_metric
 from chemclaw.publish.record import CONTRACT_VERSION, Publication, ResultRecord
@@ -278,6 +278,20 @@ async def enqueue(records: list[ResultRecord]) -> int:
 
     With no sink enabled this costs one list lookup and no database round trip at all — which is
     what keeps the cost of this subsystem at zero for a deployment that has not turned it on.
+
+    **One record's failure costs one record.** The loop used to run inside a single transaction
+    with one `except Exception` around the whole of it, so a document the column refused rolled
+    back every good document beside it — and `records_for` decomposes one payload into several, so
+    those siblings are one calculation's own facts, not an unrelated grouping. All the log line
+    could then say was "could not queue 3 record(s)", which is silent about how many of the three
+    were fine.
+
+    **A savepoint per record, not a bare `try`**, because the failures are on both sides of the
+    wire and only one of them is survivable without one: psycopg refuses a NUL in its own dumper
+    and leaves the transaction healthy, while Postgres refusing a value aborts the transaction, so
+    every later `INSERT` fails with `InFailedSqlTransaction` and the final `COMMIT` takes the good
+    rows with it anyway. `conn.transaction()` nested inside the outer one is a `SAVEPOINT`, which
+    contains both.
     """
     if not records or not publishing_enabled():
         return 0
@@ -292,15 +306,12 @@ async def enqueue(records: list[ResultRecord]) -> int:
 
     written = 0
     try:
-        async with _connect("outbox_enqueue") as conn:
+        # The outer transaction is explicit so that the inner ones are savepoints rather than
+        # transactions of their own: without it the first `conn.transaction()` would open — and
+        # commit — a transaction per record, turning one batch into N commits.
+        async with _connect("outbox_enqueue") as conn, conn.transaction():
             for record in records:
-                document = Jsonb(record.model_dump(mode="json"))
-                for sink in sinks:
-                    cursor = await conn.execute(
-                        _ENQUEUE, (sink, record.calc_ref, document, record.contract_version)
-                    )
-                    written += cursor.rowcount if cursor.rowcount > 0 else 0
-            await conn.commit()
+                written += await _enqueue_one(conn, record, sinks)
     except Exception:
         logger.warning(
             "publish[enqueue:write]: could not queue %d record(s) for %s",
@@ -312,6 +323,42 @@ async def enqueue(records: list[ResultRecord]) -> int:
         return 0
     record_metric(lambda m: m.increment("chemclaw_results_queued_total", written))
     return written
+
+
+async def _enqueue_one(
+    conn: psycopg.AsyncConnection[TupleRow], record: ResultRecord, sinks: list[str]
+) -> int:
+    """Queue one record for every sink, or none of them; return the rows it wrote.
+
+    A refused document is logged and counted **by `calc_ref`**, and costs only itself: that is the
+    number an operator needs and the batch-wide line could not give.
+
+    `json_column` rather than a bare `Jsonb` for the reason `chemclaw.core.jsonb` states — a
+    non-finite float is not JSON, and letting it travel turns a value this process could have named
+    into an `InvalidTextRepresentation` naming a *token*. `publish.record`'s models refuse one at
+    projection now, where it is counted as the permanent shape problem it is; this is the boundary
+    behind that, for a document those models do not own end to end.
+    """
+    rows = 0
+    try:
+        async with conn.transaction():
+            document = json_column(record.model_dump(mode="json"))
+            for sink in sinks:
+                cursor = await conn.execute(
+                    _ENQUEUE, (sink, record.calc_ref, document, record.contract_version)
+                )
+                rows += cursor.rowcount if cursor.rowcount > 0 else 0
+    except Exception:
+        logger.warning(
+            "publish[enqueue:write]: %s could not be queued for %s; the rest of its batch is "
+            "unaffected",
+            record.calc_ref,
+            ", ".join(sinks),
+            exc_info=True,
+        )
+        record_metric(lambda m: m.increment("chemclaw_result_publish_failures_total"))
+        return 0
+    return rows
 
 
 async def enqueue_payload(

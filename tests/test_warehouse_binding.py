@@ -569,3 +569,33 @@ def test_the_server_embed_function_is_checked_like_every_other_interpolated_name
     assert load_binding(_with("main.ml.embed_text")).vector is not None, (
         "a qualified function name is still accepted"
     )
+
+
+@pytest.mark.parametrize("written_as", ["NaN", "Infinity", "-Infinity", float("nan"), float("inf")])
+def test_a_non_finite_number_is_bad_data_rather_than_a_measurement(written_as: Any) -> None:
+    """`'number'` refuses NaN and ±Infinity, whichever side of the column they arrive on.
+
+    A Spark `DOUBLE` holds NaN as a value (missingness arrives as `None`), so this is the source
+    saying something that is not a measurement — the same case as the boolean this transform
+    already refuses, and it must reach the rejection ledger with a reason rather than the row.
+
+    It reached neither before: `float("NaN")` is a float, so a NaN travelled to
+    `reaction_records.conditions` and `jsonb` refused it as `InvalidTextRepresentation` — a
+    `psycopg` error that is neither `ChemclawError` nor `ValidationError`, so it aborted the sync
+    pass instead of rejecting the entry.
+    """
+    with pytest.raises(TransformError, match="not a measurement"):
+        apply_transforms(written_as, [{"number": {}}])
+
+
+def test_clamp_refuses_the_one_number_it_cannot_hold_in_a_range() -> None:
+    """`max(nan, 0.0)` is `nan`, so the explicit guard was the thing that failed to guard.
+
+    Every comparison against NaN is false, which is why clamping silently passed it through while
+    `{min: 0, max: 100}` was written precisely to guarantee a value inside those bounds.
+    """
+    with pytest.raises(TransformError, match="not a measurement"):
+        apply_transforms(float("nan"), [{"clamp": {"min": 0.0, "max": 100.0}}])
+    assert apply_transforms(101.3, [{"clamp": {"min": 0.0, "max": 100.0}}]) == 100.0, (
+        "an out-of-range but finite number is still held, which is what clamp is for"
+    )

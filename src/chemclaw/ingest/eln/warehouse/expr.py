@@ -24,6 +24,7 @@ same call for the same reason, and this file deliberately mirrors its two substi
 bare `path` yields the *value* with its type; `${path}` inside a template interpolates its text.
 """
 
+import math
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -105,21 +106,53 @@ def as_text(value: Any) -> str:
 
 
 def _number(value: Any, options: Mapping[str, Any]) -> Any:
-    """Coerce to `float`. A blank string is silence, not a zero."""
+    """Coerce to `float`. A blank string is silence, not a zero, and NaN is neither.
+
+    **A non-finite value is refused, on the same ground as the boolean above: it is not a
+    measurement.** `float("NaN")` and `float("Infinity")` both parse, so the string form arrived
+    here as a number, and a Spark `DOUBLE` can hold a stored NaN outright — while *missingness*
+    from every driver in this seam arrives as `None`. So a NaN is the source saying something that
+    is not a value, which is bad data with a reason, not silence.
+
+    That distinction is the whole of it, and refusing here is what makes it survivable. A NaN
+    reaching `reaction_records.conditions` failed at the `jsonb` wall as
+    `psycopg.errors.InvalidTextRepresentation` — neither `ChemclawError` nor `ValidationError` — so
+    it escaped `chemclaw.ingest.eln.sync`'s per-entry reject-and-continue, aborted the pass and
+    advanced no cursor: one entry holding an entire corpus at a fixed date, deterministically, on
+    every scheduled run after it. As a `TransformError` it is one rejected entry with its reason in
+    the ledger.
+
+    **No opt-in.** A binding cannot ask for a non-finite number, because nothing in the schema this
+    engine maps onto has a field an infinity is an answer to — the same reason the boolean refusal
+    takes no option.
+    """
     del options
     if value is None:
         return None
     if isinstance(value, bool):
         raise TransformError(f"'number' refuses a boolean ({value!r}) — it is not a measurement")
     if isinstance(value, int | float):
-        return float(value)
+        return _finite(float(value), value)
     text = str(value).strip()
     if not text:
         return None
     try:
-        return float(text)
+        parsed = float(text)
     except ValueError as exc:
         raise TransformError(f"'number' cannot read {value!r} as a number") from exc
+    return _finite(parsed, value)
+
+
+def _finite(number: float, original: Any) -> float:
+    """Return `number`, or raise naming what the row actually held.
+
+    `original` rather than the parsed float, so the message quotes the column's own text: a site
+    reading `'NaN'` in a rejection ledger can search its warehouse for it, and `nan` is not what it
+    would search for.
+    """
+    if not math.isfinite(number):
+        raise TransformError(f"'number' refuses {original!r} — it is not a measurement")
+    return number
 
 
 def _scale(value: Any, options: Mapping[str, Any]) -> Any:
@@ -239,6 +272,10 @@ def _clamp(value: Any, options: Mapping[str, Any]) -> Any:
     For the columns whose site convention differs from this schema's bounds — a yield recorded as
     101.3% after rounding, which `OrdReaction` would reject outright. Clamping is a binding-author's
     explicit decision to keep such a row rather than lose it, never a default.
+
+    **The one number it cannot hold is refused before it gets here**, by `_number`. Every
+    comparison against NaN is false, so `max(nan, 0.0)` is `nan` and this — the transform whose
+    entire job is guaranteeing a value inside a range — used to return one outside every range.
     """
     number = _number(value, {})
     if number is None:
