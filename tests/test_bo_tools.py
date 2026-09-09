@@ -21,6 +21,8 @@ import yaml
 from chemclaw.connectors.bo.server import tools as bo_tools
 from chemclaw.connectors.bo.server.tools import ObjectiveScale, suggest_next_experiment
 from chemclaw.connectors.manifest import ConnectorManifest
+from chemclaw.core.config import settings
+from chemclaw.science.bo.engine import initial_candidates, propose_candidates
 from chemclaw.science.bo.problem import (
     Candidate,
     CategoricalParameter,
@@ -736,3 +738,36 @@ def test_a_problem_using_every_narrowed_model_still_round_trips_as_wire_dicts(
         <= 4.0 + 1e-6
     )
     assert suggestion.calc_refs
+
+
+def test_a_batch_beyond_the_ceiling_is_refused_before_the_optimizer_runs() -> None:
+    """`count` was the one model-supplied size in this bundle with no bound above it.
+
+    Measured on an unconstrained two-parameter problem, the acquisition cost is linear in the
+    batch: 1.3 s at 2 candidates and 2.6 s at 4, ~0.65 s each. `suggest_next_experiment`'s own
+    docstring puts a *constrained* problem at roughly nine seconds per further candidate. Behind a
+    `request_timeout: 120`, that makes a three-digit `count` a request the client abandons while
+    the pod keeps computing it — and every sibling size here (`bo_max_design_runs`,
+    `bo_max_evaluations`, `bo_max_enumerated_cells`) is bounded by config already.
+
+    Bounded in the engine rather than in the tool signature, for the reason
+    `_require_design_fits_the_ceiling` states in full: a bound in the transport is a bound the
+    in-process callers do not get. So the durable campaign's per-round batch is held to the same
+    number, and it is checked *before* the strategy runs rather than after the batch exists.
+    """
+    problem = OptimizationProblem(
+        parameters=[ContinuousParameter(name="t", lower=20.0, upper=120.0)],
+        objectives=[Objective(name="yield", direction="maximize")],
+    )
+    over = settings.bo_max_candidates_per_ask + 1
+    with pytest.raises(ValueError, match=str(settings.bo_max_candidates_per_ask)):
+        initial_candidates(problem, over)
+    with pytest.raises(ValueError, match=str(settings.bo_max_candidates_per_ask)):
+        propose_candidates(
+            problem,
+            [
+                Observation(params={"t": 40.0}, value=50.0),
+                Observation(params={"t": 80.0}, value=70.0),
+            ],
+            over,
+        )

@@ -127,8 +127,18 @@ async def _log_prediction(
     where a prediction becomes advice a chemist acts on — a cache hit deep in a workflow does not
     need re-logging, and the ledger is keyed on the input, not on how often it was read.
 
-    The subject key is the canonical SMILES, the same identity the calculation cache uses, so a
-    measurement of the same molecule meets its prediction without a second naming scheme.
+    The subject key is the canonical SMILES, so a measurement of the same molecule meets its
+    prediction without a second naming scheme.
+
+    **Its `input_hash` is not the calculation cache's, and this sentence used to say it was.**
+    Measured on `CCO`: the ledger hashes the bare string, `stable_hash("CCO")` → `f29e20f4…`; the
+    cache hashes the mapping a molecule-keyed calculator keys on,
+    `science.calc.store.molecule_hash("CCO")` → `stable_hash({"smiles": "CCO"})` → `a7d334eb…`.
+    Nothing joins the two tables on that column, so the divergence costs nothing today — what it
+    costs is the next reader who believes a `predictions` row can be reached from a
+    `calculation_results` `input_hash`, and writes the join.
+    `science/calc/calibration.py`'s module docstring carries the same false claim and is another
+    file's to correct.
     """
     canonical = canonical_smiles(smiles)
     await record_prediction(
@@ -274,6 +284,12 @@ class CalculationRecord(BaseModel):
     # as opposed to a calculation that genuinely stored nothing. Ask for that one calculation
     # directly to see it.
     result_omitted: bool = False
+    # False only for a row written before migration 090, which records nothing about which
+    # `CALCULATION_EPOCH` produced it — so it may be one a later ChemClaw-side correction
+    # invalidated, and the browse cannot tell. A row a *recorded* epoch supersedes is not returned
+    # at all (`science/calc/store.py::_matches`); this flag is the residue that cannot be
+    # classified, because `params_hash` is a digest and a store cannot re-derive its own history.
+    epoch_recorded: bool = True
     provenance: str
     computed_at: datetime | None = None
     compute_seconds: float | None = None
@@ -291,11 +307,10 @@ async def find_calculations(
 ) -> list[CalculationRecord]:
     """Look up calculations this system has already run, instead of running them again.
 
-    Every calculation ever computed is kept forever and keyed by (calculator, version, input,
-    parameters) — including the expensive DFT jobs — but until now the only way to reach one was
-    to ask for the exact same calculation and get a cache hit. This is the other question: *what
-    do we already know about this molecule*, which is what a chemist actually asks before
-    committing hours of compute.
+    Every calculation ever computed is kept forever, keyed by (calculator, version, input,
+    parameters), and the only other way to reach one is to ask for that exact calculation again.
+    This is the other question: *what do we already know about this molecule*, which is what a
+    chemist asks before committing hours of compute.
 
     Use it before submitting anything expensive, and to answer "have we looked at this before?".
     An empty result is a real answer — say the store has nothing rather than implying the
@@ -315,11 +330,12 @@ async def find_calculations(
         structure_id: Restrict to calculations that *ran on* one specific geometry, as the
             `st_...` address reported by `optimize_geometry`, `sample_conformers`,
             `scan_coordinate` or `compute_thermochemistry`. This is the question "what do we
-            already know about *this conformer*" — the relaxation started from it, its properties,
-            its Hessian — which a molecule cannot ask, because a molecule does not determine a
-            geometry. It matches the calculation's input, so a relaxation is found by the geometry
-            it started from rather than by the minimum it reached. Empty means every geometry.
-        calc_type: Restrict to one kind of calculation, e.g. "xtb", "pka", "dft". Empty means all.
+            already know about *this conformer*" — the relaxation started from it, its
+            properties, its Hessian. It matches the calculation's input, so a relaxation is found
+            by the geometry it started from rather than by the minimum it reached. Empty means
+            every geometry.
+        calc_type: Restrict to one kind of calculation, e.g. "xtb", "pka", "solubility". Empty
+            means all.
         calc_version: Restrict to one calculator version. Empty means every version — useful
             precisely when asking whether an older version's number is still what is on file.
         since: ISO-8601 date or timestamp; only results computed at or after it.
@@ -328,7 +344,9 @@ async def find_calculations(
 
     Returns:
         The matching calculations, newest first. Each carries the result payload the calculator
-        produced, so no second call is needed to read a value.
+        produced. A result a later correction invalidated is not listed; one with
+        `epoch_recorded` false predates that record and may be such a value — recompute before
+        citing it.
     """
     query = CalculationQuery(
         smiles=smiles or None,
@@ -383,6 +401,7 @@ def _record(stored: StoredResult) -> CalculationRecord:
         calc_version=stored.key.calc_version,
         result={} if omitted else projected,
         result_omitted=omitted,
+        epoch_recorded=bool(stored.epoch),
         provenance=stored.provenance,
         computed_at=stored.created_at,
         compute_seconds=stored.compute_seconds,
@@ -593,8 +612,11 @@ async def calculator_trust(property_name: str) -> Calibration:
     **Read `verdict` first**, then `n`. A disabled ledger, an empty one and too few points are all
     "the accuracy is unknown", never "the calculator is accurate" — and the figures are `None`
     rather than 0.0 in those states so a zero cannot be misread as a measurement.
-    `uncertainty_coverage` is the subtle one: a low value means the stated error bars are too
-    narrow, so the *uncertainty* is misleading even when the values look close.
+    `uncertainty_coverage` is the subtle one: it is the fraction of measurements that landed
+    inside the prediction's own **±1σ**, so a *correctly* calibrated calculator scores about
+    **0.68**, never 1.0. Well below that means the stated error bars are too narrow — the
+    *uncertainty* is misleading even when the values look close; well above means they are too
+    wide, and the calculator is being quoted as vaguer than it is.
 
     These are averages over every molecule measured. When the answer matters, follow up with
     `calculator_outliers`: a calculator can be well-behaved overall and badly wrong on one class of

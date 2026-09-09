@@ -1,14 +1,20 @@
 """Map a BO campaign's recommendation to a knowledge-graph note (plan step 1d.5).
 
-A finished campaign's best point is the experiment the optimizer recommends running next; like a QM
-result, it becomes an agent-authored note proposed through the **same** PR-gate (D-005) so a human
-validates before it enters the graph.
+A finished campaign's best point is the experiment the optimizer recommends running next, and it
+becomes an agent-authored note in the graph — readable the moment the campaign ends, carrying
+`created_by: agent` and its own `calc_refs`.
+
+**There is no reviewer between the two, and this file said there was**
+(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`, which deleted the proposal queue). What
+makes an ungated note safe is the three properties that ADR names — it arrives labelled, it arrives
+with its citations, and it can be contradicted — not a queue nobody drained. The campaign's note has
+all three: `created_by`, `calc_refs`, and a later campaign over the same space that supersedes it.
 
 This module is the *mapping only*, which is the connector split: turning a campaign result into a
-note is the BO domain's knowledge, so it lives in the bundle; pushing that note through the PR-gate
-is the review boundary, so it stays in core (`ConnectorJobWorkflow` publishes whatever note the
-result envelope carries). The activity that used to do both is gone — a connector must not be able
-to reach around the gate, and now it structurally cannot.
+note is the BO domain's knowledge, so it lives in the bundle; the single write path into the graph
+stays in core (`ConnectorJobWorkflow` publishes whatever note the result envelope carries). The
+activity that used to do both is gone — one write path is one place that stamps provenance, and now
+a bundle structurally cannot bypass it.
 
 Core also stamps the run and *why it was started* onto this note on the way through
 (`durable/job_record.py::note_with_run_provenance`, D-157). So this builder answers "what came out

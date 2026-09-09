@@ -451,6 +451,119 @@ def test_a_bare_inorganic_anion_is_not_neutralized_into_another_reagent() -> Non
     assert standard_smiles("[O-]C([O-])=O") != standard_smiles("OC(O)=O")
 
 
+def test_an_atom_map_is_not_part_of_a_compound_s_identity() -> None:
+    """A map number is a reaction's bookkeeping written into a molecule's string.
+
+    `[CH3:1][C:2](=[O:3])[OH:4]` is acetic acid. RXNMapper stamps those numbers onto every species
+    of every corpus reaction, so the same substance arrived from the literature tier and the ELN
+    tier as two `compound_id`s, two notes and two fingerprint rows carrying identical bits — the
+    identity fragmentation D-2026-07-31 exists to prevent, for the one spelling that pipeline did
+    not normalise. The numbering itself is the labeller's choice, so the third case is what a
+    re-label of one corpus does to every row in it.
+    """
+    acetic = compound_id("CC(=O)O")
+    assert compound_id("[CH3:1][C:2](=[O:3])[OH:4]") == acetic
+    assert compound_id("[CH3:7][C:8](=[O:9])[OH:10]") == acetic
+    assert standard_smiles("[CH3:1][C:2](=[O:3])[OH:4]") == standard_smiles("CC(=O)O")
+
+
+def test_a_map_number_does_not_survive_into_a_note_body_or_a_fingerprint() -> None:
+    """The two places the un-normalised string used to land, asserted separately.
+
+    `compound_id` agreeing is not enough on its own: the body renders the standardized structure
+    and the ECFP4 row is built from it, so a map number left in either would put a reaction's
+    bookkeeping into the compound record and into the bits a search ranks on.
+    """
+    assert ":" not in standard_smiles("[CH3:1][C:2](=[O:3])[OH:4]")
+    assert ecfp_bitstring("[CH3:1][C:2](=[O:3])[OH:4]") == ecfp_bitstring("CC(=O)O")
+
+
+def test_a_calculation_key_is_still_the_structure_as_it_was_submitted() -> None:
+    """The guard on the above: clearing maps belongs to "same compound", not to "same structure".
+
+    `canonical_smiles` keys the calculation cache and the QM dedup id, where the rule is that the
+    key is what the caller asked for. Nothing submits a mapped species for calculation, so this
+    pins the *scope* of the change rather than a behaviour anyone relies on.
+    """
+    assert canonical_smiles("[CH3:1][C:2](=[O:3])[OH:4]") != canonical_smiles("CC(=O)O")
+
+
+def _hydrogens(mol: Chem.Mol) -> int:
+    """Every hydrogen in a molecule, whether implicit on a heavy atom or an atom of its own."""
+    return sum(a.GetTotalNumHs() + (1 if a.GetAtomicNum() == 1 else 0) for a in mol.GetAtoms())
+
+
+def test_a_hydride_reagent_is_not_neutralized_into_a_non_reducing_ester() -> None:
+    """`Uncharger` neutralizes an anion by *adding* a proton — except when it cannot.
+
+    Sodium triacetoxyborohydride's charge sits on boron, and boron has no room for another
+    substituent, so the only way to neutralize it is to take the hydride away. Measured, the
+    hydrogen count fell 10 → 9 and `CC(=O)O[BH-](OC(C)=O)OC(C)=O.[Na+]` standardized to
+    `CC(=O)OB(OC(C)=O)OC(C)=O` — triacetoxyborane, which reduces nothing. The three existing
+    guards all pass it: one organic fragment, a group-1 counterion, no metal–carbon bond. So a
+    reductive amination and a Lewis-acid step shared a `compound_id`, a fingerprint row and a note,
+    and that is D-2026-08-01's "the discarded fragment is the reactive centre" wearing the
+    neutralization step instead of the strip.
+    """
+    borohydride = standard_smiles("CC(=O)O[BH-](OC(C)=O)OC(C)=O.[Na+]")
+    assert borohydride != standard_smiles("CC(=O)OB(OC(C)=O)OC(C)=O")
+    assert "[BH-]" in borohydride, borohydride
+    assert compound_id("CC(=O)O[BH-](OC(C)=O)OC(C)=O.[Na+]") == compound_id(
+        "CC(=O)O[BH-](OC(C)=O)OC(C)=O.[K+]"
+    )
+
+
+def test_neutralization_never_costs_the_species_a_hydrogen() -> None:
+    """The general form, since the reagent above is one instance of it rather than the rule.
+
+    "The counterion meets its conjugate acid" is a claim that neutralization *protonates*. Where it
+    instead deprotonates, the output is a different substance with a different formula, and no
+    element list or pKa table is needed to see it — the hydrogen count says so.
+
+    Every fixture is a salt of a bare metal cation, and that is what makes the count readable end
+    to end rather than a statement about one internal step: the discarded counterion carries no
+    hydrogen of its own, so any hydrogen the pipeline loses came out of the compound. Written first
+    with an amine hydrochloride in the list, it failed on `CCN.Cl` — 8 → 7, because the strip
+    discards HCl whole, which is the pipeline working. The invariant is about the neutralization,
+    and this is the fixture set over which the whole pipeline reports it faithfully.
+    """
+    for salt in (
+        "CC(=O)O[BH-](OC(C)=O)OC(C)=O.[Na+]",  # NaBH(OAc)3, the reagent above
+        "CC(=O)[O-].[Na+]",  # sodium acetate: protonation, must still collapse
+        "CC(C)(C)[O-].[K+]",  # KOtBu: protonation, see the test below
+        "C[S-].[Na+]",  # sodium thiomethoxide
+        "[O-]C(=O)c1ccccc1.[Na+]",  # sodium benzoate, D-2026-07-31's own example
+    ):
+        before = Chem.MolFromSmiles(salt)
+        after = Chem.MolFromSmiles(standard_smiles(salt))
+        assert _hydrogens(after) >= _hydrogens(before), salt
+
+
+def test_an_alkali_salt_of_an_organic_acid_still_collapses_including_the_alkoxides() -> None:
+    """The half of D-2026-09-09 that is an *accepted* consequence rather than a fixed defect.
+
+    KOtBu and tert-butanol reach one `compound_id`, and so do NaOMe/MeOH, NaOEt/EtOH, LiHMDS/HMDS
+    and LDA/diisopropylamine. That is the same rule as sodium acetate and sodium benzoate, which
+    D-2026-07-31 decided and this suite has pinned since: the counterion is not part of the
+    identity. Separating the alkoxides would take a pKa-shaped predicate — "an anion whose
+    conjugate acid is weak enough that the salt is the reagent" — and a bespoke normalization is a
+    bespoke notion of sameness, which is the thing `core/chem.py` opens by refusing.
+
+    It is asserted rather than left implicit because it has a real cost this file should name: a
+    base screen over NaOMe / NaOEt / KOtBu reads as three collapses onto three *solvents*, and the
+    counterion that a chemist is varying is exactly what is discarded. Whoever revisits that reads
+    this test first.
+    """
+    assert compound_id("CC(C)(C)[O-].[K+]") == compound_id("CC(C)(C)O")
+    assert compound_id("CC(C)(C)[O-].[Na+]") == compound_id("CC(C)(C)[O-].[K+]")
+    assert compound_id("[Na+].[O-]C") == compound_id("CO")
+    assert compound_id("C[Si](C)(C)[N-][Si](C)(C)C.[Li+]") == compound_id("C[Si](C)(C)N[Si](C)(C)C")
+    # And the guard on it: the wholly inorganic bases D-2026-08-01 rescued are still held apart,
+    # so this is a decision about organic conjugate acids and not a pipeline that collapses
+    # everything.
+    assert compound_id(_shipped("NaOH")) != compound_id(_shipped("KOH"))
+
+
 def test_standardization_is_recorded_in_the_fingerprint_definition() -> None:
     """Rows indexed under an older notion of sameness must fall out, not be ranked against new ones.
 

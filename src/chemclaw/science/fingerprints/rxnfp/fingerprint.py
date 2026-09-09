@@ -34,6 +34,16 @@ def _standardize_species(reaction_smiles: str) -> str:
     A string that does not split into exactly three `>`-delimited fields is returned
     unchanged: it is not a reaction SMILES this module's callers write, and `DrfpEncoder` is
     what should raise on it, not a guess here about how to parse it.
+
+    **Atom maps are part of what `standard_smiles` normalises, and that is load-bearing here rather
+    than incidental** (`D-2026-09-09-a-map-number-is-not-a-molecule`). DRFP shingles atom
+    environments as SMILES strings, so `[CH3:1][C:2](=[O:3])[OH:4]` and `CC(=O)O` shingle to
+    disjoint sets: measured, a mapped reaction scored **0.0000** against its own unmapped form and
+    0.0000 against the same reaction renumbered by a re-label. `ingest/labels/corpus.py` indexes
+    atom-mapped literature reactions and `ingest/eln/ord.py` indexes unmapped in-house ones, so at
+    a 0.3 threshold the two tables answered nothing about each other — a "we have no precedent" for
+    a reaction on file in both. The clearing lives in `standardize` and not here, because the same
+    string mints `compound_id`.
     """
     fields = reaction_smiles.split(">")
     if len(fields) != 3:

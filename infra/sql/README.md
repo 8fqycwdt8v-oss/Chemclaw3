@@ -47,10 +47,10 @@ the pair applies in filename order and neither shadows the other.
 | Table | Migration | Written by | Disposal |
 | --- | --- | --- | --- |
 | `schema_migrations` | 000 | `core/migrate.py` | never — the ledger is the record of its own work, and the runtime role cannot write it at all |
-| `calculation_results` | 001 (+019 `compute_seconds`, 024 indexes, 048 `structure_id`) | `science/calc/postgres_store.py` | **refused**: evicting a cached result silently converts a hit into a recomputation, potentially an hours-long CREST search (D-011). Bounded by cost policy, not by a clock |
+| `calculation_results` | 001 (+019 `compute_seconds`, 024 indexes, 048 `structure_id`, 090 `epoch`) | `science/calc/postgres_store.py` | **refused**: evicting a cached result silently converts a hit into a recomputation, potentially an hours-long CREST search (D-011). Bounded by cost policy, not by a clock |
 | `molecule_fingerprints` | 002 (+004, 046 index, 084 scan-order index) | `science/fingerprints/store.py` | — |
 | `reaction_fingerprints` | 003 (+004, 046 index, 063 `source` + `(source, id)` key) | `science/fingerprints/store.py` | — |
-| `reaction_labels` | 051, 086 | `science/labels/store.py` | derived and rebuildable: drop it and re-run the corpus drain plus the label backfill |
+| `reaction_labels` | 051, 086, 091 | `science/labels/store.py` | derived and rebuildable: drop it and re-run the corpus drain plus the label backfill |
 | `reaction_species` | 051 | `science/labels/store.py` | derived and rebuildable; a species the source amended away is deleted with its reaction's record phase |
 | `corpus_molecules` | 054 | `ingest/labels/corpus.py` | derived and rebuildable: refilled by re-draining the corpus |
 | `corpus_reactions` | 071 | `ingest/labels/corpus.py` | derived and rebuildable: refilled by re-draining the corpus |

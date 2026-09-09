@@ -11,17 +11,14 @@ author. Suggestions are a plain insert — the sequence is the campaign's histor
 would destroy the record of what was proposed before the latest data arrived.
 """
 
-import json
 from contextlib import AbstractAsyncContextManager
-from functools import partial
-from typing import Any
 
 import psycopg
 from psycopg.rows import TupleRow
-from psycopg.types.json import Jsonb
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.jsonb import json_column
 from chemclaw.science.bo.campaign_record import Campaign, Suggestion
 
 # `xmax = 0` is Postgres's own answer to "did this upsert insert, or update?" — on a freshly
@@ -69,32 +66,9 @@ _SELECT_SUGGESTIONS = """
 """
 
 
-# Non-finite floats are not JSON and `jsonb` rejects them; `partial` rather than a lambda so
-# psycopg's dumper cache keys on a stable object.
-_STRICT_JSON = partial(json.dumps, allow_nan=False)
-
-
 def _connect() -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:
     """The configured connection, with the shared statement timeout (one place, DRY)."""
     return db.connection(settings.postgres_dsn)
-
-
-def _json(value: Any) -> Jsonb:
-    """Wrap a value for a `jsonb` column, refusing non-finite floats here rather than at the wall.
-
-    `json.dumps` emits bare `NaN`/`Infinity` by default. Those are not JSON, and Postgres `jsonb`
-    rejects them — but only after the statement reaches the server, as an
-    `InvalidTextRepresentation` that `record_suggestion` used to swallow at WARNING. A campaign
-    would then read back with no observations at all, which is a silent data loss from a degenerate
-    GP posterior nobody saw.
-
-    `allow_nan=False` turns that into a `ValueError` raised at the column that holds the value, in
-    this process, with a stack that names the caller. This is the store owning its own boundary: the
-    models are permissive by necessity (tightening a persisted field would strand an in-flight
-    campaign at replay — see `require_names_do_not_clash`), so the check belongs where the bytes
-    are written.
-    """
-    return Jsonb(value, dumps=_STRICT_JSON)
 
 
 class PostgresCampaignStore:
@@ -125,7 +99,7 @@ class PostgresCampaignStore:
                     campaign.campaign_id,
                     campaign.objective,
                     campaign.direction,
-                    _json(campaign.problem),
+                    json_column(campaign.problem),
                     campaign.opened_by,
                 ),
             )
@@ -135,17 +109,17 @@ class PostgresCampaignStore:
                 _INSERT_SUGGESTION,
                 (
                     suggestion.campaign_id,
-                    _json(
+                    json_column(
                         [candidate.model_dump(mode="json") for candidate in suggestion.candidates]
                     ),
-                    _json(
+                    json_column(
                         [
                             observation.model_dump(mode="json")
                             for observation in suggestion.observations
                         ]
                     ),
                     suggestion.calc_refs,
-                    _json(suggestion.problem),
+                    json_column(suggestion.problem),
                     suggestion.job_id,
                     suggestion.actor,
                     suggestion.session_id,

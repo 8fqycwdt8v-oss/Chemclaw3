@@ -1,6 +1,7 @@
 """Tests for the BO recommendation → knowledge-graph bridge (plan step 1d.5)."""
 
 import asyncio
+import pathlib
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -9,7 +10,7 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 import chemclaw.durable.memory_jobs as memory_jobs
-from chemclaw.connectors.bo import activities as _bo_activities  # noqa: F401 — registers below
+from chemclaw.connectors.bo import activities as _bo_activities  # registers the activities below
 from chemclaw.connectors.bo.knowledge import note_from_campaign_result
 from chemclaw.connectors.bo.workflows import BoCampaignWorkflow
 from chemclaw.connectors.queues import bundle_queue
@@ -369,3 +370,36 @@ def test_the_recommended_value_survives_the_excerpt_a_reader_actually_sees() -> 
     excerpt = _excerpt(body)
     assert "98.7" in excerpt, "the excerpt quotes conditions without the value they achieved"
     assert "surrogate posterior sd" in excerpt
+
+
+#: What a model-facing description must never say about this bundle's note, one phrase per claim.
+#:
+#: Narrow on purpose. "These are proposals a human runs" is *true* and must survive — a candidate
+#: is a suggestion, and the skill says so at length. What is forbidden is the claim that a
+#: **reviewer stands between the note and the graph**, because none does.
+_GATE_CLAIMS = ("pr-gated", "pr gate", "pull request", "human review", "before it enters the graph")
+
+
+def test_no_model_facing_bo_text_claims_a_recommendation_is_reviewed_before_it_lands() -> None:
+    """`connector.yaml`'s description is the tool description the model reads on every turn.
+
+    It said `start_optimization_campaign` "opens its recommendation as a PR-gated note for human
+    review". `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed that gate and the
+    proposal queue behind it: `ConnectorJobWorkflow` now writes the note straight into the graph,
+    carrying `created_by: agent`. So the agent was telling a chemist their recommendation would be
+    checked by a person before it landed, and it landed immediately — a claim about a control that
+    does not exist, in the direction that overstates safety.
+
+    An absence test rather than a rewrite, in the shape
+    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` established: whoever
+    re-adds the claim has to add the producer too.
+    """
+    bundle = pathlib.Path(_bo_activities.__file__).resolve().parent
+    offenders = []
+    for path in [bundle / "connector.yaml", *sorted(bundle.glob("skills/**/SKILL.md"))]:
+        for number, line in enumerate(path.read_text().splitlines(), start=1):
+            if any(claim in line.lower() for claim in _GATE_CLAIMS):
+                offenders.append(f"{path.name}:{number}: {line.strip()}")
+    assert not offenders, "model-facing text claims a review gate that no longer exists:\n" + (
+        "\n".join(offenders)
+    )

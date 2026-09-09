@@ -13,11 +13,12 @@ from contextlib import asynccontextmanager
 
 import psycopg
 from psycopg.rows import TupleRow
-from psycopg.types.json import Jsonb
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.jsonb import json_column
 from chemclaw.science.calc.store import (
+    CALCULATION_EPOCH,
     CalculationKey,
     CalculationQuery,
     CorruptCacheRow,
@@ -32,8 +33,8 @@ logger = logging.getLogger(__name__)
 _UPSERT = """
     INSERT INTO calculation_results
         (key, calc_type, calc_version, input_hash, params_hash, result, provenance,
-         compute_seconds, structure_id)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+         compute_seconds, structure_id, epoch)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (key) DO UPDATE SET
         result = EXCLUDED.result,
         provenance = EXCLUDED.provenance,
@@ -46,7 +47,15 @@ _UPSERT = """
         END,
         -- Keep the recorded cost when a rewrite does not carry one, so a backfill or a
         -- re-`put` of an existing payload cannot erase what the original miss measured.
-        compute_seconds = COALESCE(EXCLUDED.compute_seconds, calculation_results.compute_seconds)
+        compute_seconds = COALESCE(EXCLUDED.compute_seconds, calculation_results.compute_seconds),
+        -- Keep a recorded epoch when a rewrite does not carry one, by the same rule as the two
+        -- above: `ArrayOffloadingStore`'s rewrite and a backfill re-`put` a row they did not
+        -- compute, and blanking the epoch would move a known-current row back into the
+        -- "unrecorded" class the browse has to hand back and mark.
+        epoch = CASE
+            WHEN EXCLUDED.epoch <> '' THEN EXCLUDED.epoch
+            ELSE calculation_results.epoch
+        END
         -- `created_at` is deliberately not in this list, by the same rule again: the key is
         -- content-addressed, so a second `put` under it is the *same* calculation being rewritten
         -- — a backfill, an `ArrayOffloadingStore` rewrite — and `created_at = now()` restamped it
@@ -57,7 +66,7 @@ _UPSERT = """
 """
 
 _SELECT = (
-    "SELECT result, provenance, compute_seconds, structure_id "
+    "SELECT result, provenance, compute_seconds, structure_id, epoch "
     "FROM calculation_results WHERE key = %s"
 )
 
@@ -67,7 +76,7 @@ _SELECT = (
 # because an unbounded scan of the one table that is never evicted (D-011) is not a query.
 _FIND = """
     SELECT key, calc_type, calc_version, input_hash, params_hash,
-           result, provenance, compute_seconds, created_at, structure_id
+           result, provenance, compute_seconds, created_at, structure_id, epoch
       FROM calculation_results
      WHERE (%(calc_type)s::text IS NULL OR calc_type = %(calc_type)s)
        AND (%(calc_version)s::text IS NULL OR calc_version = %(calc_version)s)
@@ -75,6 +84,11 @@ _FIND = """
        AND (%(structure_id)s::text IS NULL OR structure_id = %(structure_id)s)
        AND (%(since)s::timestamptz IS NULL OR created_at >= %(since)s)
        AND (%(until)s::timestamptz IS NULL OR created_at <= %(until)s)
+       -- The epoch predicate `_matches` states in Python, expressed as SQL because this store
+       -- filters before it fetches. Not a parameter of `CalculationQuery`: a row a later epoch
+       -- invalidated is wrong rather than old, and `''` is a row written before migration 090,
+       -- which is unclassifiable rather than wrong.
+       AND (epoch = '' OR epoch = %(epoch)s)
      ORDER BY created_at DESC
      LIMIT %(limit)s
 """
@@ -113,7 +127,7 @@ class PostgresStore:
                 row = await cur.fetchone()
         if row is None:
             return None
-        result, provenance, compute_seconds, structure_id = row
+        result, provenance, compute_seconds, structure_id, epoch = row
         # `checked_payload` rather than the old `result if isinstance(result, dict) else
         # json.loads(result)`: that else-branch was written for a driver that hands back a string,
         # and psycopg parses jsonb *whatever* its top level is — so an array, a string, a number or
@@ -127,10 +141,23 @@ class PostgresStore:
             provenance=provenance,
             compute_seconds=compute_seconds,
             structure_id=structure_id,
+            epoch=epoch,
         )
 
     async def put(self, stored: StoredResult) -> None:
-        """Persist `stored`, overwriting any existing result for its key."""
+        """Persist `stored`, overwriting any existing result for its key.
+
+        **The payload goes through `json_column`, which is a backstop and not the check.**
+        `checked_payload` is the check, and it runs one door earlier in `cached_compute`; this door
+        is public and has writers that never pass through that one — `ArrayOffloadingStore`'s
+        rewrite, a backfill, and whatever comes next, by the same argument
+        `publish_stored_result` makes about being paired with `put` rather than with
+        `cached_compute`. Measured, a `float("nan")` arriving here came back as
+        `InvalidTextRepresentation: invalid input syntax for type json / DETAIL: Token "NaN" is
+        invalid` — a server-side error naming a JSON token, no field and no caller. `json_column`
+        makes it a `ValueError` raised in this process at the column holding the value
+        (`chemclaw.core.jsonb`, which carries the argument and the other four paths it covers).
+        """
         key = stored.key
         async with self._connection() as conn:
             async with conn.cursor() as cur:
@@ -142,10 +169,11 @@ class PostgresStore:
                         key.calc_version,
                         key.input_hash,
                         key.params_hash,
-                        Jsonb(stored.result),
+                        json_column(stored.result),
                         stored.provenance,
                         stored.compute_seconds,
                         stored.structure_id,
+                        stored.epoch,
                     ),
                 )
             await conn.commit()
@@ -174,6 +202,12 @@ class PostgresStore:
         `stable_hash(canonical_smiles)` and is not reversible, so the query molecule is hashed the
         same way a key is built and compared. Canonicalisation happens here rather than at the
         caller so `CCO` and `OCC` find the same rows.
+
+        A row whose recorded `epoch` is neither the current one nor `''` is excluded, matching
+        `store._matches`. The two are separate code for the reason every other filter here is —
+        this one must run in SQL because it filters before it fetches — and
+        `tests/test_postgres_store.py` pins them agreeing, which is the only thing that keeps a
+        predicate stated twice from drifting.
         """
         params = {
             "calc_type": query.calc_type,
@@ -182,6 +216,7 @@ class PostgresStore:
             "structure_id": query.structure_id,
             "since": query.since,
             "until": query.until,
+            "epoch": CALCULATION_EPOCH,
             "limit": query.limit,
         }
         async with self._connection() as conn:
@@ -217,7 +252,7 @@ def _stored_from_row(row: TupleRow) -> StoredResult:
     key, not a serialization format.
     """
     _, calc_type, calc_version, input_hash, params_hash = row[:5]
-    result, provenance, compute_seconds, created_at, structure_id = row[5:]
+    result, provenance, compute_seconds, created_at, structure_id, epoch = row[5:]
     stored_key = CalculationKey(
         calc_type=calc_type,
         calc_version=calc_version,
@@ -231,6 +266,7 @@ def _stored_from_row(row: TupleRow) -> StoredResult:
         compute_seconds=compute_seconds,
         created_at=created_at,
         structure_id=structure_id,
+        epoch=epoch,
     )
 
 

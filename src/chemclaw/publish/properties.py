@@ -29,6 +29,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from chemclaw.core.units import HARTREE_TO_KCAL
+
 # What kind of value a property carries. `PropertyFact` enforces that exactly one of its three
 # value columns is filled; this says which one is correct for a given name, so a projection that
 # writes `converged` as the float 1.0 is a registry violation rather than a plausible number.
@@ -84,10 +86,15 @@ def _d(
 
 # Every conversion the registry needs, as (from, to) -> factor. Deliberately small: a unit appears
 # here only because some tool reports in it and the registry keeps another. `hartree -> kcal/mol` is
-# the one that matters, and it is the constant `science/calc/thermo.py` already uses.
+# the one that matters, and it is **imported** rather than spelled out: this file held the third
+# copy of those digits, and the copies were not all the same length — a truncated one came out
+# 1.5e-08 relative low, which is nothing until it is a chemist's number. `core.units` is the one
+# definition, `science/calc/thermo.py` already reads it, and the reciprocal below is derived rather
+# than written twice, because a second literal is a second thing that can drift. Verified
+# bit-for-bit against what stood here: no published value moves.
 UNIT_CONVERSIONS: dict[tuple[str, str], float] = {
-    ("hartree", "kcal/mol"): 627.5094740631,
-    ("kcal/mol", "hartree"): 1.0 / 627.5094740631,
+    ("hartree", "kcal/mol"): HARTREE_TO_KCAL,
+    ("kcal/mol", "hartree"): 1.0 / HARTREE_TO_KCAL,
     ("kj/mol", "kcal/mol"): 1.0 / 4.184,
     ("kcal/mol", "kj/mol"): 4.184,
     ("cal/(mol*K)", "j/(mol*K)"): 4.184,

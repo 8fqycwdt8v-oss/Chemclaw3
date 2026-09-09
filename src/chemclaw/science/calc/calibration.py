@@ -6,9 +6,17 @@ scores against a *held-out reference in a committed case file* — not against r
 so "how far should I trust this calculator?", which is the entire job of the `calculation-selection`
 skill, was answerable only in prose.
 
-This is the ledger that makes it answerable in numbers: every prediction is recorded against the
-same `(calc_type, input_hash)` identity the calculation cache already keys on, so a later
-measurement of the same thing meets it without a second naming scheme.
+This is the ledger that makes it answerable in numbers: every prediction is recorded against a
+`(calc_type, calc_version, input_hash)` identity, so a later measurement of the same thing meets it
+without a second naming scheme.
+
+**That `input_hash` is *not* the calculation cache's, and this docstring claimed it was.** The
+ledger hashes the canonical SMILES (`stable_hash(canonical)` in
+`connectors/calc/server/tools.py::_log_prediction`); the cache hashes a dict around it
+(`store.molecule_hash` is `stable_hash({"smiles": ...})`). Measured on ethanol: `f29e20f49d416e54`
+against `a7d334ebee616d78`. Nothing joins the two tables today, so the claim cost nothing — but it
+is a claim about a key, and whoever writes that join on the strength of this sentence gets zero
+rows and no error. The two schemes are independent; a join needs a translation, not a `USING`.
 
 **What calibration means here, and why it is three numbers rather than one.**
 
@@ -21,6 +29,14 @@ measurement of the same thing meets it without a second naming scheme.
   error cannot show: a calculator whose errors are small but whose error bars never contain the
   answer is miscalibrated in a way that makes its uncertainty actively misleading, which is worse
   than reporting none.
+
+  **Its target is 0.683, not 1.0, and nothing here used to say so.** The interval is ±1σ and the
+  published uncertainties it is scored against are 1σ RMSEs (`crippen_logp_uncertainty = 0.68` is
+  Wildman-Crippen's own reported RMSE), so a *correctly* calibrated calculator with Gaussian errors
+  misses roughly a third of the time by construction. Read against an unstated target of 1.0 — the
+  only one a reader supplies on their own — a perfectly calibrated calculator reads as 32%
+  miscalibrated. Materially below 0.683 means the error bars are too tight; materially above means
+  they are too loose, which is its own defect and not a better result.
 
 **Deliberately advisory.** Nothing here changes a prediction. *Recording* is best-effort and a
 calibration failure never fails a calculation — a broken ledger must degrade the *advice about*
@@ -126,6 +142,11 @@ class Calibration(BaseModel):
     # Fraction of observations that fell inside the prediction's stated ±1σ interval. `None` when
     # no prediction carried an uncertainty — deliberately not 0.0, which would read as "never
     # covered" rather than "never claimed".
+    #
+    # **The target is 0.683, not 1.0**: the interval is one standard deviation and the stated
+    # uncertainties are 1σ RMSEs, so a correctly calibrated calculator misses a third of the time.
+    # Anyone reading this field against an implied 1.0 reports a well-calibrated calculator as 32%
+    # miscalibrated.
     uncertainty_coverage: float | None = None
     unit: str = ""
 
@@ -192,7 +213,12 @@ class Residual(BaseModel):
 
     @property
     def within_uncertainty(self) -> bool | None:
-        """Whether the measurement fell inside the stated ±1σ. `None` when none was claimed."""
+        """Whether the measurement fell inside the stated ±1σ. `None` when none was claimed.
+
+        **±1σ, so `False` on about a third of well-calibrated predictions.** The stated
+        uncertainties are 1σ RMSEs, and a residual outside one of them is the ordinary case rather
+        than a miss worth explaining — see the module docstring's 0.683.
+        """
         if self.uncertainty is None or self.uncertainty <= 0:
             return None
         return abs(self.error) <= self.uncertainty

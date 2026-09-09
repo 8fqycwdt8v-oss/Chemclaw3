@@ -254,6 +254,11 @@ def test_fit_quality_is_finite_and_carries_what_it_was_computed_on() -> None:
     # Content, not a bound the model already enforces: `mae >= 0.0` is `Field(ge=0.0)` and cannot
     # fail, and `r2 <= 1.0` is arithmetic. These runs are a deliberate rising trend, so a surrogate
     # that had regressed to predicting the mean would score about 0 and be caught here.
+    #
+    # `is not None` is the *content* half of the same assertion, not a type appeasement: these runs
+    # span ~27 points, so a `None` here would mean the zero-spread branch had started firing on a
+    # trend — which would make every score in this suite unreachable.
+    assert quality.r2 is not None, "these runs vary; a fit quality must exist for them"
     assert quality.r2 > 0.5
     assert quality.mae < 5.0, "the runs span ~27 points; this is a fit, not a constant"
     assert quality.n_observations == 10
@@ -576,7 +581,9 @@ def test_the_fit_score_does_not_reproduce_and_is_reported_to_the_precision_it_do
     warn a reader off comparing two scores that differ by less than it.
     """
     scores = [_fit_quality(_problem(), _runs())[0] for _ in range(3)]
-    spread = max(s.r2 for s in scores) - min(s.r2 for s in scores)
+    values = [score.r2 for score in scores]
+    assert all(value is not None for value in values), "this fixture's runs vary; each has a score"
+    spread = max(filter(None, values)) - min(filter(None, values))
     # **Both sides.** The upper bound alone would also pass if the fit were accidentally made
     # deterministic, which would make the caveats below false — and the point of this test is that
     # the number moves. Measured spread over 8 samples on this fixture: 0.081.
@@ -695,3 +702,29 @@ def test_a_point_outside_a_continuous_bound_is_still_answered() -> None:
     )
     assert not answer.predictions[0].in_domain
     assert "extrapolating" in answer.predictions[0].summary
+
+
+def test_an_objective_with_no_spread_at_all_refuses_an_r2_instead_of_reporting_a_perfect_fit() -> (
+    None
+):
+    """R² is undefined when the target does not vary, and BoFire returns 1.0 for it.
+
+    With SS_tot = 0 a "fraction of variance explained" has no denominator; measured on eight runs
+    all reading 42, `cross_validate` scored **R² 1.0000 / MAE 0** three times running, and
+    `FitQuality.summary` called that "predicts held-out runs with R² 1.00". A campaign whose assay
+    has flatlined — dead catalyst, saturated response, mis-plumbed detector — is exactly when a
+    chemist asks whether the model is worth listening to, and both of the existing caveats are
+    about *precision*, so neither fires.
+
+    `SurrogateFitError` already names "an objective with no spread across the points seen so far"
+    as a cause of a raised failure. Measured, that input does not raise; it scores 1.00.
+    """
+    problem = _problem()
+    flat = [
+        Observation(params={"temperature": 20.0 + 10.0 * i, "solvent": "THF"}, value=42.0)
+        for i in range(8)
+    ]
+    quality = _fit_quality(problem, flat, folds=5, seed=11)[0]
+    assert quality.r2 is None, "a constant target cannot be predicted well or badly"
+    assert "no variance" in quality.summary
+    assert "R²" not in quality.summary

@@ -15,6 +15,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
+from math import isfinite
 from typing import Any, Protocol, runtime_checkable
 from weakref import WeakKeyDictionary
 
@@ -217,15 +218,66 @@ def checked_payload(key: CalculationKey, value: object) -> ResultPayload:
     a right key stays undetectable here and is stated rather than fixed: catching it needs the
     calculator's schema, which is deliberately not in this repository.
 
+    **A third half was claimed by that paragraph and was not there.** "A non-empty JSON object" was
+    checked one level deep: `isinstance(value, dict)` says nothing about what is *in* it, and three
+    classes of value inside one reach `jsonb` and fail there rather than here
+    (`D-2026-09-09-a-contract-checked-at-one-door-is-not-a-contract`, measured against a migrated
+    database):
+
+    - a **non-finite float** — `InvalidTextRepresentation: invalid input syntax for type json /
+      DETAIL: Token "NaN" is invalid`. Reachable: the fleet's `max_gradient` is
+      `float(np.max(np.abs(gradient)))`, a diverged SCF gives NaN, `float("inf")` is already a
+      sentinel there, and `json.loads` accepts the literal `NaN` by default — so a server can put
+      one into this process without anything raising on the way in;
+    - a value with **no JSON form at all** — `TypeError: Object of type Decimal is not JSON
+      serializable`, and the same for `datetime`. Asymmetric with the key: `stable_hash` uses
+      `default=str`, so such a value *keys* fine and then cannot be stored;
+    - a string carrying a **NUL** — `UntranslatableCharacter: unsupported Unicode escape sequence`,
+      whose DETAIL names the NUL escape it cannot convert to text. That one must stay refused,
+      because Postgres `text` cannot hold a NUL; what changes is that it is refused by name.
+
+    Every one of them arrived out of `store.put` *inside* `cached_compute`, after the single-flight
+    future exists — so every concurrent waiter on that key failed with a driver message naming a
+    JSON token rather than the calculation or the field, and the value recomputed on every later
+    call forever. Naming the field is the whole of the remedy available: a NaN energy is not a
+    result, so it cannot be cached, and refusing it early is the difference between an operator
+    reading "max_gradient holds the non-finite float nan" and reading a parser's DETAIL line.
+
+    **The line drawn is "refuse what fails, document what converts".** Two conversions happen inside
+    `jsonb` and are deliberately *not* refused, because the value survives them and refusing would
+    narrow what a calculator may legitimately return:
+
+    - a float of magnitude ≥ 1e16 reads back as an `int` (`1e16` → `10000000000000000`,
+      `6.02214076e23` → `602214076000000000000000`), because psycopg reads a `jsonb` number with no
+      decimal point as an integer. **`float()` of what comes back is the double that was stored**,
+      for every case measured including `5e-324` and `1.797e308` — but "the value is preserved
+      exactly" is the wrong way to say it, and the assertion that says it that way fails:
+      `6.02214076e23` is the double `602214075999999987023872`, and the integer returned is
+      `602214076000000000000000`, a different exact number and the same double. Avogadro's number
+      is a legitimate thing for a calculator to return, so this is a fact about the column rather
+      than a defect to close;
+    - a `tuple` is stored as a JSON array and read back as a `list` — the same elements in the same
+      order, nothing reinterpreted.
+
+    A **non-string mapping key** is refused rather than documented alongside them, and the
+    difference is what the change is *to*: `{1: "a"}` is written as `{"1": "a"}`, so the name a
+    reader addresses the field by is rewritten, and a key type `json.dumps` does not coerce raises
+    instead. `ResultPayload` is a `dict[str, Any]`; a key that is not a string is outside the
+    declared type, which is the same licence the emptiness check runs on.
+
+    Ordinary unicode is exact and is **not** touched: `α-pinene · Δ 25 °C — ünïcode 中文 🧪`
+    round-tripped byte-identical.
+
     Args:
         key: The address the payload is stored under, so the message names the row to act on.
         value: The candidate payload — from the database on a read, from a calculator on a write.
 
     Returns:
-        `value` unchanged, once it is a non-empty mapping.
+        `value` unchanged, once it is a non-empty mapping a `jsonb` column can hold.
 
     Raises:
-        CorruptCacheRow: `value` is not a JSON object, or is an empty one.
+        CorruptCacheRow: `value` is not a JSON object, is an empty one, or holds a value the
+            `result` column would reject — each named by the field it sits on.
     """
     if not isinstance(value, dict):
         raise CorruptCacheRow(
@@ -240,7 +292,69 @@ def checked_payload(key: CalculationKey, value: object) -> ResultPayload:
             "server degrades into — and D-011 would make it permanent, so it is refused rather "
             "than cached or handed back."
         )
+    unstorable = _unstorable(value, "result")
+    if unstorable is not None:
+        raise CorruptCacheRow(
+            f"calculation_results row {key.as_str()!r} {unstorable}. The `result` column is "
+            "`jsonb`, which cannot hold it, so persisting this would fail at the driver with a "
+            "message naming a JSON token instead of the field — and D-011 would recompute it on "
+            "every later call. Fix or drop the field named above."
+        )
     return value
+
+
+def _unstorable(value: object, path: str) -> str | None:
+    """The first reason `value` could not be written to a `jsonb` column, or None.
+
+    Depth-first over the whole payload rather than one level, because that is where every measured
+    failure sat — `{"nested": [{"converged": -inf}]}` is as fatal as a top-level one, and a check
+    that stops at the top level is the defect this closes. Iterative rather than recursive so a
+    deeply nested payload cannot trade one crash for another; the cost is one pass over a structure
+    the caller is about to serialize anyway.
+
+    Returns a clause, not a sentence, so the caller owns the address and the remedy and this owns
+    only the finding — the same split `_matches` makes with its query.
+
+    **It runs on reads as well as writes, and the read side is provably a no-op** — `jsonb` cannot
+    hold any of what this refuses, so a value that came out of the column has already passed. It is
+    not split into a write-only door anyway, because a second door is the whole subject of the ADR
+    above, and the cost was measured rather than assumed: **6.6 µs** on a typical 167-character
+    result, **4.6 ms** on a 22 kB conformer ensemble (a `json.dumps` of the same payload is 1.6 ms).
+    The first is nothing against a database round trip; the second is paid only by the shapes
+    `CalculationRecord`'s own ceiling exists for, and only per row of a browse a chemist asked for.
+
+    Args:
+        value: The payload, or any value inside it.
+        path: Dotted address of `value` within the payload, for the message.
+    """
+    pending: list[tuple[object, str]] = [(value, path)]
+    while pending:
+        item, where = pending.pop()
+        # One check for both, because `bool` is a subclass of `int` and JSON holds either.
+        if item is None or isinstance(item, bool | int):
+            continue
+        if isinstance(item, float):
+            if not isfinite(item):
+                return f"holds the non-finite float {item!r} at {where}"
+            continue
+        if isinstance(item, str):
+            if "\x00" in item:
+                return f"holds a string containing a NUL character at {where}"
+            continue
+        if isinstance(item, dict):
+            for name, nested in item.items():
+                if not isinstance(name, str):
+                    return (
+                        f"is keyed at {where} by {type(name).__name__} {name!r}, which is not the "
+                        "string a JSON object's member name has to be"
+                    )
+                pending.append((nested, f"{where}.{name}"))
+            continue
+        if isinstance(item, list | tuple):
+            pending.extend((nested, f"{where}[{index}]") for index, nested in enumerate(item))
+            continue
+        return f"holds {type(item).__name__} {item!r} at {where}, which has no JSON form"
+    return None
 
 
 class StoredResult(BaseModel):
@@ -273,6 +387,28 @@ class StoredResult(BaseModel):
     # argument payload and is not it: two calculations on one geometry in different solvents have
     # different input hashes and the same `structure_id`. Empty for a molecule-keyed calculator.
     structure_id: str = ""
+    # The `CALCULATION_EPOCH` this row was written under, so the *browse* can tell a superseded row
+    # from a current one. `get` never needs it — the epoch rides in `params_hash`, so a superseded
+    # row is simply not at the address a lookup builds — but `find` filters on the four key
+    # columns and a params digest is neither a filter nor invertible, so two rows for one molecule
+    # under one `calc_version` arrived indistinguishable and the older, invalidated one was offered
+    # to the model as evidence to cite
+    # (`D-2026-09-09-a-contract-checked-at-one-door-is-not-a-contract`).
+    #
+    # **Empty means "written before migration 090 recorded this", never "epoch 0".** Such a row is
+    # returned by the browse and *marked*, not hidden: no deployment's history can be classified
+    # retroactively — `params_hash` cannot be inverted — and hiding every pre-migration row would
+    # answer "nothing found" about a whole store the day the migration ran, which is the failure
+    # `STRUCTURE_KEYED_PREFIXES` and `remote.py`'s `structure_id` rule both exist to refuse.
+    #
+    # **It records this repository's half of the epoch and cannot record the fleet's.** The stored
+    # `params_hash` folds `CALCULATION_EPOCH` over a server digest that has already folded the
+    # calculation server's own constant of the same name, and this process never sees that one. So
+    # a row this column calls current may still have been superseded by a bump in `Chemclaw3-mcp`;
+    # what the column gives is a sound "definitely superseded", not a complete "definitely
+    # current". Stated rather than fixed, because the alternative is re-deriving somebody else's
+    # identity locally, which `connectors/calc/remote.py` refuses for exactly this reason.
+    epoch: str = ""
 
 
 # Calculators whose `input_hash` is over a 3-D structure rather than a molecule: the xTB task
@@ -300,6 +436,27 @@ def molecule_hash(smiles: str) -> str:
     One definition, used by the query filter in both backends: the hash is over the same
     `{"smiles": <canonical>}` mapping the calculators build their keys from, so getting this
     shape wrong in one place cannot make a molecule findable in one store and not the other.
+
+    **It re-derives an identity that is minted in another repository, which is the one thing this
+    module otherwise refuses to do.** `find_calculations(smiles=…)` cannot scan — `input_hash` is
+    not reversible — so the browse has to hash the query molecule the way the row was keyed, and
+    the row was keyed in `Chemclaw3-mcp`, in a different image. `connectors/calc/remote.py` states
+    the rule this sits beside: a locally-derived `calc_version` or `structure_id` "would be
+    well-formed and would match nothing". The same is true here, and the failure is quieter — an
+    empty listing reads as "nothing has been computed".
+
+    The shape is not the risk; the **canonicalizer** is. Both sides call
+    `Chem.MolToSmiles(require_molecule(...))`, and both pin RDKit with a `>=` — `rdkit>=2026.3.4`
+    here, `rdkit>=2024.3.1` there — so nothing makes the two images run one version, and RDKit's
+    canonical ranking is not contractually stable across releases.
+
+    **Measured 2026-09-09 and it agrees**, over a 14-molecule corpus chosen for the features a
+    release re-ranks (fused and bridged rings, hetero-aromatics, stereocentres, `E/Z`, a salt, an
+    isotope, a radical), driven against the fleet's *own* `descriptors.cache_key` and
+    `solubility.cache_key`: identical on all 14. `tests/test_ids.py` keeps it that way and skips
+    loudly with no sibling checkout. A matching pin floor was the alternative and does nothing that
+    matters — two `>=` floors do not equalise two images, and no floor reaches a row already
+    written by an image that has since been upgraded.
     """
     return stable_hash({"smiles": require_canonical_smiles(smiles)})
 
@@ -321,6 +478,13 @@ class CalculationQuery(BaseModel):
     to one geometry, the second to one molecule, and a geometry belongs to a molecule — but only
     the second is refused against a structure-keyed type, because only the second cannot address
     one.
+
+    **A superseded epoch is excluded and is not a filter.** `CALCULATION_EPOCH` rides inside
+    `params_hash`, so a row it invalidated is unreachable by `get` and was fully reachable by this
+    — two rows for one molecule under one `calc_version`, indistinguishable, with the wrong one
+    offered as evidence to cite. `_matches` drops a row whose recorded epoch is not the current
+    one, with no way to ask for it back, because such a row is wrong rather than merely old. A row
+    written before migration 090 records no epoch and is returned; `find_calculations` marks it.
 
     There is deliberately no filter on the result's *value*. The payload is an opaque
     calculator-owned mapping (`ResultPayload`) — the store has been calculator-agnostic since
@@ -351,7 +515,7 @@ class CalculationQuery(BaseModel):
                 f"{self.calc_type!r} is keyed by 3-D structure, not by molecule, so it cannot be "
                 "found by SMILES. Give a `structure_id` instead — the st_... address a geometry "
                 "calculation reports — or ask for a molecule-keyed calculation (pka, solubility, "
-                "descriptors, dft)."
+                "descriptors)."
             )
         return self
 
@@ -445,6 +609,13 @@ def _matches(stored: StoredResult, query: CalculationQuery) -> bool:
     if query.since is not None and (stored.created_at is None or stored.created_at < query.since):
         return False
     if query.until is not None and (stored.created_at is None or stored.created_at > query.until):
+        return False
+    # Unconditional, and it is the one filter no `CalculationQuery` field can turn off. A row whose
+    # recorded epoch is not the current one is, by the definition `CALCULATION_EPOCH` is written
+    # under, *wrong or incomplete* — not an older number a chemist might legitimately want, which
+    # is what `calc_version` is for and why that one is a filter with an "every version" default.
+    # An operator who needs such a row still has `get` and `known`, which address it by key.
+    if stored.epoch and stored.epoch != CALCULATION_EPOCH:
         return False
     return True
 
@@ -595,7 +766,17 @@ async def cached_compute(
         # reverse order looked safe.
         await publish_stored_result(key, result, compute_seconds=elapsed, structure_id=structure_id)
         await store.put(
-            StoredResult(key=key, result=result, compute_seconds=elapsed, structure_id=structure_id)
+            StoredResult(
+                key=key,
+                result=result,
+                compute_seconds=elapsed,
+                structure_id=structure_id,
+                # The epoch this process is running, which is the epoch `remote_key` (or `build`)
+                # folded into `key` a moment ago off the same module constant. Stamped here rather
+                # than defaulted on the model, because a `StoredResult` read back from a row
+                # written before migration 090 must say "unrecorded" and not claim today's.
+                epoch=CALCULATION_EPOCH,
+            )
         )
         future.set_result((result, elapsed))
         return result, False

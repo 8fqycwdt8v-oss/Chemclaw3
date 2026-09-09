@@ -8,7 +8,7 @@ by name.
 
 **This is the reference connector-owned workflow** (D-110/D-111), and what it does *not* do is
 the point. It returns a `ConnectorJobResult` and stops: core's `ConnectorJobWorkflow` supplies
-the idempotent job id, the actor attribution, the session push-back, and the PR-gate publish of
+the idempotent job id, the actor attribution, the session push-back, and the graph write of
 the note this returns. It is served by this bundle's own worker on its own task queue, so
 `bofire`/`botorch` run nowhere near the chat service — and the only thing binding it to core is
 the workflow *type name* and that queue, both strings in `connector.yaml`.
@@ -432,11 +432,14 @@ class BoCampaignWorkflow:
             retry_policy=BAD_DATA_RETRY,
         )
 
-        # The recommendation as a PR-gated note (step 1d.5) — *built* here, because the BO→note
-        # mapping is this domain's knowledge, and *published* by core, because the PR-gate is
-        # the review boundary and a connector must not be able to reach around it. Best-effort
-        # publishing (a failed git write must never fail a completed campaign) is core's
-        # discipline too, so this workflow no longer carries it.
+        # The recommendation as a note (step 1d.5) — *built* here, because the BO→note mapping is
+        # this domain's knowledge, and *published* by core, because one write path into the graph
+        # is one place that stamps provenance and a connector must not be able to reach around it.
+        # It lands with no reviewer in front of it
+        # (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`): a campaign recommendation is
+        # knowledge, and what makes it safe is its label, its citations and the campaign that can
+        # contradict it. Best-effort publishing (a failed git write must never fail a completed
+        # campaign) is core's discipline too, so this workflow no longer carries it.
         # Always built, never conditional: whether it is *published* is the manifest's
         # `publish_to_graph`, which core reads. The spec used to carry a second, model-authored
         # switch that could suppress it, which meant a campaign could finish and leave nothing

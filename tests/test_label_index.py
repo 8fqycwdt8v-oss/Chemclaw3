@@ -339,3 +339,37 @@ def test_current_version_reads_the_index_and_not_the_whole_corpus() -> None:
         )
 
     asyncio.run(_run())
+
+
+def test_a_labellers_confidence_survives_the_round_trip_in_both_backends() -> None:
+    """The column was `REAL`, so the double a labeller reported came back a different number.
+
+    `ReactionLabel.confidence` is a Python `float` — IEEE double — and `reaction_labels.confidence`
+    was the only single-precision column in the schema: a `REAL` grep over `infra/sql` and `schema`
+    matched that one line and nothing else, so it was a slip rather than a convention. Measured
+    before migration 091, a model's `1/3` came back `0.3333333432674408`, and `0.95` came back
+    `0.949999988079071` — which is the shape that bites: the day something writes
+    `WHERE confidence >= 0.95`, the row stored *as* 0.95 is not in the answer, and nothing in the
+    stored value says why.
+
+    Driven through both backends because the in-memory index is what every other test in this file
+    proves behaviour against, and it holds the double. The two must agree, or those tests are
+    evidence about a store the deployment does not have.
+    """
+
+    async def _body(index: LabelIndex, tag: str) -> None:
+        reported = 1 / 3
+        await index.record(_label(f"{tag}-confidence"))
+        await index.store_labels(
+            _derived(_label(f"{tag}-confidence")).model_copy(update={"confidence": reported}),
+            _VERSION,
+        )
+        # By id rather than by unpacking the batch: the durable index is shared with every other
+        # test in this schema, so `stale` legitimately answers with more than this row.
+        rows = await index.stale("a-later-version", limit=500, sources=[_SOURCE])
+        [stored] = [row for row in rows if row.reaction_id == f"{tag}-confidence"]
+        assert stored.confidence == reported, (
+            f"{tag}: a confidence of {reported!r} came back as {stored.confidence!r}"
+        )
+
+    _both_backends(_body)

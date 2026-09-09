@@ -99,6 +99,23 @@ SubjectKind = Literal["molecule", "geometry", "ensemble", "reaction", "complex",
 # a fact about one participant (a species' absolute Gibbs energy). One table answers both.
 FactScope = Literal["calculation", "member"]
 
+# Every model in this document, on the same three terms.
+#
+# `extra="forbid"` and `frozen=True` were already written twelve times over; `allow_inf_nan=False`
+# is the third, and writing all three once is what stops the thirteenth model from carrying two of
+# them. **A published document is JSON, and `NaN`/`±Infinity` are not JSON.** A failed
+# optimization or a division by zero inside a calculator mints them like any other float, and
+# nothing between the calculator and the `jsonb` column said no: the document reached Postgres,
+# which refused it as an `InvalidTextRepresentation` naming a *token*, counted as a transient
+# publish failure for a payload that will fail identically forever.
+#
+# Refused here instead, which is the boundary `records_for` already guards and already counts as
+# `chemclaw_result_projection_failures_total` — the series whose declared meaning is a permanent
+# gap in this release rather than a destination having a bad day. The verbatim payload is untouched
+# by this: it is `dict[str, Any]`, so the calculator's own number is still carried out whole, and
+# the refusal is of the *typed fact* built from it.
+_STORABLE = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
 
 class SubjectMember(BaseModel):
     """One participant in what a calculation was about.
@@ -109,7 +126,7 @@ class SubjectMember(BaseModel):
     source that states coefficients instead.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = _STORABLE
 
     ordinal: int = Field(ge=0)
     role: MemberRole
@@ -149,7 +166,7 @@ class Subject(BaseModel):
     hashing, so `A+B -> C` and `B+A -> C` are one subject while `2A -> B` and `A -> B` are two.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = _STORABLE
 
     kind: SubjectKind
     members: list[SubjectMember] = Field(min_length=1)
@@ -215,7 +232,7 @@ class Conditions(BaseModel):
     `solvent=None` means **gas phase**, which is a real state and not a missing value.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = _STORABLE
 
     solvent: str | None = None
     solvent_model: str = ""  # 'alpb' | 'cpcm' | ''
@@ -256,7 +273,7 @@ class TheoryLevel(BaseModel):
     a chemist runs.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = _STORABLE
 
     method: str = Field(min_length=1)  # 'GFN2-xTB' | 'B3LYP' | 'ESOL'
     family: str = ""  # semiempirical | dft | ff | ml | empirical
@@ -298,7 +315,7 @@ class PropertyFact(BaseModel):
     document must **be** to be read at all belongs here.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = _STORABLE
 
     property: str = Field(min_length=1)
     scope: FactScope = "calculation"
@@ -366,7 +383,7 @@ class SiteFact(BaseModel):
     `atom_j = -1` means a single-site value; a non-negative `atom_j` makes it a pair.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = _STORABLE
 
     atom_i: int = Field(ge=0)
     atom_j: int = -1
@@ -387,7 +404,7 @@ class PointFact(BaseModel):
     before any future result type earns a table of its own.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = _STORABLE
 
     series: str = Field(min_length=1)  # 'scan' | 'modes' | 'spectrum'
     ordinal: int = Field(ge=0)
@@ -421,7 +438,7 @@ class ConformerFact(BaseModel):
     from admitting a member with no energy at all.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = _STORABLE
 
     ordinal: int = Field(ge=0)  # 0 = lowest, as `ensemble_from_members` orders them
     structure_id: str = Field(min_length=1)
@@ -460,7 +477,7 @@ class CandidateFact(BaseModel):
     a predicate.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = _STORABLE
 
     ordinal: int = Field(ge=0)
     kind: str = Field(min_length=1)  # compound | reaction | condition | point
@@ -481,7 +498,7 @@ class FlagFact(BaseModel):
     six and nobody can enumerate them in advance.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = _STORABLE
 
     ordinal: int = Field(ge=0)
     flag: str = Field(min_length=1)
@@ -503,7 +520,7 @@ class Publication(BaseModel):
     the run was meant to answer.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = _STORABLE
 
     # **Empty means "whatever the sink calls this deployment", and empty is the normal case.** A
     # record is sink-agnostic by construction — the same projected record goes to every enabled
@@ -527,7 +544,7 @@ class ResultRecord(BaseModel):
     contract and not the other fails loudly here rather than silently downstream.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = _STORABLE
 
     # --- identity -------------------------------------------------------------------------
     # The flat cache key, `calc_type@calc_version:input_hash:params_hash` — the same string a

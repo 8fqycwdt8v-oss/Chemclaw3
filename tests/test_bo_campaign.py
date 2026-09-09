@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 from rdkit import Chem
 from rdkit.Chem import Crippen
 from temporalio import activity
@@ -545,6 +546,13 @@ def test_the_manifest_names_a_precondition_that_accepts_the_params_model() -> No
     Every `start_optimization_campaign` call then raised `TypeError` while CI stayed green, so the
     reference connector's flagship job could not be started at all. Pinned here too, because this
     wave renamed the function the manifest points at.
+
+    **The spec is the benchmark's own decision space, and it used to be a one-parameter stand-in
+    named `t`.** That was fine while the precondition only checked arities and counts; it is not
+    once `require_problem_supplies_what_the_objective_reads` compares the space against what
+    `reizman_suzuki` reads, because the stand-in is exactly the incoherent spec that rule refuses.
+    A signature smoke test must not be carried by a spec the system declines to start — it would
+    pass on the refusal instead of on the resolution.
     """
     from chemclaw.connectors.jobs import resolve_precondition
     from chemclaw.connectors.registry import discovered
@@ -554,10 +562,7 @@ def test_the_manifest_names_a_precondition_that_accepts_the_params_model() -> No
     assert job.precondition is not None
     resolve_precondition(job.precondition)(
         CampaignSpec(
-            problem=OptimizationProblem(
-                parameters=[ContinuousParameter(name="t", lower=0.0, upper=1.0)],
-                objectives=[Objective(name="yield", direction="maximize")],
-            ),
+            problem=build_problem(load_dataset()),
             objective_name="reizman_suzuki",
             n_rounds=2,
         )
@@ -948,3 +953,79 @@ def test_a_seed_batch_nobody_reports_ends_the_campaign_instead_of_failing_it(
     assert "seed batch of 4 condition(s) was never reported" in envelope.summary
     assert envelope.data == {}, "there is no best point to report, so none is invented"
     assert envelope.note is None
+
+
+def test_a_failed_secondary_assay_is_refused_rather_than_read_as_no_difference() -> None:
+    """A NaN in a non-lead objective was a wildcard that never lost, and took the whole front.
+
+    `_dominates` compares `gain < -tolerance` and `gain > tolerance`, and **both** are False for a
+    NaN — so an unmeasured axis read as "no difference", i.e. at least as good. Measured before the
+    fix: a run whose impurity was never measured but whose yield was 96% dominated a clean
+    95%/0.5% run and `pareto_front` returned it *alone*. The chemist was shown a one-point
+    trade-off consisting solely of the condition whose assay failed.
+
+    `Observation.value` has refused a non-finite number since it was written, for exactly this
+    reason; `values` is the same field for every other objective and now says so. **A failed
+    measurement is an absent run, not a run with a NaN.**
+    """
+    with pytest.raises(ValidationError, match="impurity"):
+        _point(90.0, 96.0, float("nan"))
+
+
+def test_a_non_finite_value_smuggled_past_the_model_is_refused_where_it_is_read() -> None:
+    """The belt: `values` is a plain dict, so nothing revalidates a mutation after construction.
+
+    `Observation` is not frozen and pydantic does not validate assignment, so
+    `observation.values[name] = nan` writes straight past the field above. `observed_value` is the
+    one function every reader goes through — `_dominates`, the plateau read, and the frame handed
+    to BoFire — so the refusal belongs there rather than at one of the three.
+    """
+    problem = _two_objective_problem()
+    smuggled = _point(90.0, 96.0, 0.5)
+    smuggled.values["impurity"] = float("nan")
+    with pytest.raises(ValueError, match="impurity"):
+        pareto_front(problem, [_point(10.0, 95.0, 0.5), smuggled])
+
+
+def test_a_campaign_over_a_space_its_objective_cannot_read_is_refused_at_launch() -> None:
+    """`reizman_suzuki` reads four named parameters; nothing checked the spec declares them.
+
+    Measured before the fix: `require_campaign_startable` accepted a spec naming `reizman_suzuki`
+    over a decision space of one unrelated parameter, and the failure arrived at *evaluate* time as
+    a bare `KeyError: 'catalyst'` — hours into a durable run, after the seed rounds had been paid
+    for, and as a `KeyError` rather than anything `SurrogateFitError` or `_BAD_DATA_TYPES` reads.
+
+    A registered objective is a function over named parameters, so what it reads is a property of
+    the objective and belongs in the registry beside its direction — which is the argument
+    `RegisteredObjective.direction` already makes about the other half of the same mismatch.
+    """
+    unrelated = OptimizationProblem(
+        parameters=[ContinuousParameter(name="pressure", lower=1.0, upper=10.0)],
+        objectives=[Objective(name="yld", direction="maximize")],
+    )
+    with pytest.raises(ValueError, match="catalyst"):
+        require_campaign_startable(
+            CampaignSpec(objective_name="reizman_suzuki", problem=unrelated, n_rounds=1)
+        )
+
+
+def test_the_molecule_objective_declares_the_one_parameter_it_reads() -> None:
+    """`solubility_objective` reads `params[MOLECULE_KEY]`, so a spec without it is the same bug.
+
+    Stated as a second case rather than left to the benchmark, because the check is only worth
+    having if every registered objective declares what it reads: an entry that declares nothing
+    would pass vacuously and reintroduce the `KeyError` for whatever is registered next.
+    """
+    from chemclaw.science.bo.objectives import _REGISTRY
+
+    assert _REGISTRY and all(entry.requires for entry in _REGISTRY.values()), (
+        "an objective declaring no parameters would pass the check vacuously"
+    )
+    no_molecule = OptimizationProblem(
+        parameters=[ContinuousParameter(name="temperature", lower=20.0, upper=120.0)],
+        objectives=[Objective(name="log_s", direction="maximize")],
+    )
+    with pytest.raises(ValueError, match=MOLECULE_KEY):
+        require_campaign_startable(
+            CampaignSpec(objective_name="solubility_max", problem=no_molecule, n_rounds=1)
+        )

@@ -1089,3 +1089,93 @@ def test_a_lease_its_claimer_died_holding_returns_to_the_queue_on_the_next_claim
             )
 
     asyncio.run(_run())
+
+
+def test_one_unqueueable_record_costs_one_document_and_not_the_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A poison record must not take its siblings with it, and they are genuinely its siblings.
+
+    `records_for` decomposes one payload into several — a solvent screen queues the aggregate *and*
+    its parts — so a batch here is one calculation's own facts, not an unrelated grouping. The
+    whole loop ran inside one transaction with one `except Exception` around it, so a single
+    refused row rolled back every good row beside it and returned 0, logging only "could not queue
+    3 record(s)": the counter could not say how many good documents went with the bad one.
+
+    **A savepoint per record rather than a bare `try` per record**, and the two poisons below are
+    why: they fail on opposite sides of the wire. psycopg refuses the NUL in its own text dumper,
+    which leaves the transaction healthy and would survive a bare `try`; the out-of-range
+    `schema_version` is refused by Postgres, which aborts the transaction, so every later `INSERT`
+    fails with `InFailedSqlTransaction` and the final `COMMIT` takes the good rows with it. Only a
+    savepoint contains both, and a test carrying only the first would have passed the weaker fix.
+    """
+
+    async def _run() -> list[str]:
+        await migrated_db_or_skip()
+        _with_sink(monkeypatch, "alpha")
+        async with outbox._connect("test_fixture") as conn:
+            await _reset(conn)
+        server_side = _record("poison@v1:2:x").model_copy(update={"contract_version": 2**40})
+        written = await outbox.enqueue(
+            [
+                _record("good@v1:1:x"),
+                _record("poison@v1:\x00:x"),
+                server_side,
+                _record("good@v1:2:x"),
+            ]
+        )
+        async with outbox._connect("test_fixture") as conn:
+            rows = await (
+                await conn.execute("SELECT calc_ref FROM result_publications ORDER BY calc_ref")
+            ).fetchall()
+        assert written == 2, f"the return value does not count what was actually queued: {written}"
+        return [row[0] for row in rows]
+
+    assert asyncio.run(_run()) == ["good@v1:1:x", "good@v1:2:x"], (
+        "one refused document took the good records queued beside it"
+    )
+
+
+def test_a_calculation_that_produced_a_non_finite_number_is_refused_at_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`NaN` is not JSON, so a document carrying one can never be queued — say so at projection.
+
+    A failed optimization or a division by zero inside a calculator produces `NaN` and `Infinity`
+    like any other float, and every model in `publish.record` took them. The document then reached
+    the `jsonb` column, which refused it as an `InvalidTextRepresentation` naming a *token* — a
+    write failure, counted as one, for a payload that will fail identically on every retry and
+    every re-publish.
+
+    Refusing it at projection puts it in the one series whose declared meaning is "this release
+    cannot project this shape until code changes", and leaves
+    `chemclaw_result_publish_failures_total` to mean what it says: a destination or a database
+    having a bad day.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    _with_sink(monkeypatch, "alpha")
+    projection_before = METRICS.value("chemclaw_result_projection_failures_total")
+    publish_before = METRICS.value("chemclaw_result_publish_failures_total")
+
+    written = asyncio.run(
+        outbox.enqueue_payload(
+            calc_ref="nonfinite@v1:a:b",
+            calc_type="reaction.energy",
+            payload_kind="ReactionEnergyResult",
+            payload={
+                "reactants": ["CCO"],
+                "products": ["CC=O"],
+                "method": "GFN2-xTB",
+                "delta_e_kcal": float("nan"),
+            },
+        )
+    )
+
+    assert written == 0, "a document carrying a NaN was queued, and no column will take it"
+    assert METRICS.value("chemclaw_result_projection_failures_total") == projection_before + 1, (
+        "a value this release cannot publish at all must be counted as the permanent gap it is"
+    )
+    assert METRICS.value("chemclaw_result_publish_failures_total") == publish_before, (
+        "refused before the queue, so the destination-health counter must not move"
+    )

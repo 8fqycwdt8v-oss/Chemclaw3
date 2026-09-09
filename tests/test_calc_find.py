@@ -20,6 +20,7 @@ import pytest
 from chemclaw.connectors.calc.server import tools
 from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.config import settings
+from chemclaw.science.calc import store as store_module
 from chemclaw.science.calc.store import (
     CalculationKey,
     CalculationQuery,
@@ -237,3 +238,40 @@ def test_the_tool_refuses_a_date_it_cannot_parse(monkeypatch: pytest.MonkeyPatch
             await tools.find_calculations(since="last Tuesday")
 
     asyncio.run(_run())
+
+
+def test_the_browse_marks_a_row_whose_epoch_was_never_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three standings, and only two of them can be a listing.
+
+    `CALCULATION_EPOCH` rides inside `params_hash`, which is neither a filter nor invertible, so
+    the browse used to hand a superseded row back beside its replacement with nothing to tell them
+    apart — and `find_calculations` tells the model to use a listed value instead of recomputing
+    and to cite its `calc_ref` in a knowledge note. A row whose *recorded* epoch is not the current
+    one is now excluded outright (`store._matches`), because such a row is wrong rather than old.
+
+    The third standing is the one this asserts: a row written before migration 090 records no
+    epoch, cannot be classified after the fact, and is therefore returned and **marked**. Hiding it
+    would answer "nothing found" about an entire existing store the day the migration ran; calling
+    it current would be the claim the column exists to stop being guessed at.
+    """
+
+    async def _run() -> list[tuple[str, bool]]:
+        store = InMemoryStore()
+        current = _stored("CCO", calc_type="pka", calc_version="v3", energy=-2.0)
+        await store.put(current.model_copy(update={"epoch": store_module.CALCULATION_EPOCH}))
+        unrecorded = _stored("CCN", calc_type="pka", calc_version="v3", energy=-3.0)
+        await store.put(unrecorded)
+        superseded = _stored("CCC", calc_type="pka", calc_version="v3", energy=-4.0)
+        await store.put(superseded.model_copy(update={"epoch": "0"}))
+
+        monkeypatch.setattr(tools, "default_store", lambda: store)
+        found = await tools.find_calculations(calc_type="pka")
+        return [(record.calc_ref, record.epoch_recorded) for record in found]
+
+    listed = asyncio.run(_run())
+    assert len(listed) == 2, f"a superseded epoch was listed, or a valid row was hidden: {listed}"
+    assert sorted(flag for _, flag in listed) == [False, True], (
+        f"the row with no recorded epoch was not marked as such: {listed}"
+    )

@@ -45,7 +45,7 @@ from chemclaw.ingest.eln.records import (
     UnreadableConditions,
     default_record_store,
 )
-from chemclaw.ingest.eln.sync import sync_entries
+from chemclaw.ingest.eln.sync import IngestSummary, sync_entries
 from chemclaw.kg.note import Note, note_id_for_reaction
 from chemclaw.kg.validate import external_citations, unresolved_citations, validate
 from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
@@ -747,3 +747,54 @@ def test_a_conditions_payload_that_is_not_an_object_is_refused_by_name() -> None
 
     message = asyncio.run(_run())
     assert "rxn-array-conditions" in message, "the refusal does not name the row to act on"
+
+
+def test_one_entry_reporting_a_non_finite_number_does_not_wedge_every_later_run() -> None:
+    """The wedge the reject-and-continue arm exists to prevent, driven against the real column.
+
+    `conditions` is `jsonb`, and `NaN` is not JSON. Postgres says so at the wall, as
+    `psycopg.errors.InvalidTextRepresentation` naming a *token* — an exception that is neither
+    `ChemclawError` nor `ValidationError`, so it walked past `sync_entries`' per-entry guard,
+    aborted the pass and returned no summary. Nothing advanced the cursor, the input is
+    deterministic, and the source is re-fetched from the same `since` every run: **one entry holds
+    an entire corpus at a fixed date forever**, while the ELN looks to a chemist as though it
+    stopped producing.
+
+    Driven end to end rather than at the model, because the whole defect is *which layer* the
+    refusal happens in: a `ValidationError` from `ProcessConditions` is one rejected entry with its
+    reason in the ledger, and the identical value one layer later is an outage.
+
+    In-memory stores would prove nothing here — they take a NaN happily, so this needs the column.
+    """
+
+    def _with_temperature(entry_id: str, celsius: float) -> RawEntry:
+        raw = _entry(entry_id, datetime(2026, 5, 4, tzinfo=UTC))
+        raw.payload["temperature_c"] = celsius
+        return raw
+
+    async def _run() -> IngestSummary:
+        await migrated_db_or_skip()
+        entries = [
+            _with_temperature("nan-before", 25.0),
+            _with_temperature("nan-poison", float("nan")),
+            _with_temperature("nan-after", 30.0),
+        ]
+        return await sync_entries(
+            _ListAdapter(entries),
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            PostgresReactionRecordStore(),
+            _EPOCH,
+            label_index=InMemoryLabelIndex(),
+            source="eln:nan",
+        )
+
+    summary = asyncio.run(_run())
+    assert summary.ingested == ["nan-before", "nan-after"], (
+        "the entries either side of the bad one did not survive it"
+    )
+    assert [r.entry_id for r in summary.rejected] == ["nan-poison"]
+    assert "temperature_c" in summary.rejected[0].reason, (
+        f"the rejection does not name the field to correct: {summary.rejected[0].reason!r}"
+    )
+    assert summary.next_cursor > _EPOCH, "the cursor did not advance, so the next run repeats this"
