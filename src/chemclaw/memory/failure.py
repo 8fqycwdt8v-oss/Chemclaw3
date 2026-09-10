@@ -1,4 +1,4 @@
-"""Recording that evidence was wrong, in band and through the gate (KM-12).
+"""Recording that evidence was wrong, in band, and readable the moment it lands (KM-12).
 
 The system could record what it learned and never that it learned something was *false*. Every
 memory path — campaigns, playbooks, interactions — writes positive knowledge, and the `failure-mode`
@@ -8,10 +8,13 @@ say so that the graph would remember.
 
 Two design points, both about not taking a shortcut:
 
-**It writes through the PR-gate like everything else.** A correction is machine-written text
-asserting that curated knowledge is wrong, which is *more* in need of human sign-off than the note
-it refutes, not less. There is deliberately no direct-mutation path, and no way to edit or delete
-the refuted note — it stays exactly as it was, and the disagreement is a new note plus an edge.
+**It refutes by writing a new note, never by touching the old one.** There is no direct-mutation
+path and no way to edit or delete the refuted note: it stays exactly as it was, and the
+disagreement is a new note plus an edge. That was the design under the PR-gate and it is what
+survived the gate's removal — the sentence here used to say a human signed the correction off
+first, and `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted the reviewer while this
+paragraph went on describing one. Correction is the control now, which makes the edge below the
+mechanism rather than a courtesy to a reviewer.
 
 **The edge is `contradicts`, so retrieval can see it.** Before typed edges (STO-8) a correction
 could only be prose, which meant `chemclaw.kg.conflicts` could not find it and a later query would
@@ -55,10 +58,10 @@ def failure_note(
             general rule, and this is where that distinction is recorded rather than implied.
 
     Returns:
-        An `agent`-authored note carrying a `contradicts` relation to `refutes`. It is *proposed*,
-        never written: the caller passes it to `chemclaw.kg.record.record_note` like any other
-        note, and a
-        human decides whether the graph accepts the correction.
+        An `agent`-authored note carrying a `contradicts` relation to `refutes`. Built, not
+        written: the caller passes it to `chemclaw.kg.record.record_note` like any other note,
+        which commits it straight into the graph — so it is readable, and flags the note it
+        refutes, as soon as that returns.
 
     The id is derived from the refuted note and the observation text, so re-reporting the identical
     failure is idempotent while a genuinely different observation about the same note is its own
@@ -117,18 +120,18 @@ def close_refuted_note(note: Note, failure_id: str, held_until: date) -> Note:
     arrives permanently marked as disputed, which is the truthful record.
 
     Args:
-        note: The already-merged note being retired. Its own `valid_to` must still be open — a
-            re-close would either extend a closed note's validity or append this line twice, the
-            idempotence trap `memory.supersede` guards the same way.
+        note: The note already in the graph that is being retired. Its own `valid_to` must still
+            be open — a re-close would either extend a closed note's validity or append this line
+            twice, the idempotence trap `memory.supersede` guards the same way.
         failure_id: The id of the `failure-mode` note reporting this, cited as a `[[wikilink]]`.
-            Safe to link because both files ride in **one** PR-gate submission, so the target
-            exists in the same commit that adds the citation and `kg-validate` sees a resolvable
-            link (unlike `memory.supersede`, whose replacement is a separate proposal).
+            Safe to link because both files ride in **one** write, in the order
+            `kg.record._build_write` fixes — the subject first, the retirement after it — so the
+            target exists before the citation does and no reader sees a dangling link.
         held_until: The last date on which the claim did hold — the chemist's, not today's.
 
     Returns:
-        An amended copy, ready to ride alongside the failure note in one submission so a human
-        reviews the refutation and the retirement as the single decision they actually are.
+        An amended copy, to be passed as `record_note`'s `superseded` so the refutation and the
+        retirement land as the single act they are.
 
     Raises:
         ChemclawError: When `held_until` predates the note's own `valid_from`, which is a window

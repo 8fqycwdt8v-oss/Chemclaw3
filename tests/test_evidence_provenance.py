@@ -14,11 +14,10 @@ from pathlib import Path
 
 import yaml
 
-from chemclaw.agent.research_tools import gather_evidence
-from chemclaw.agent.tool_schema import as_structured_tool
+from chemclaw.agent.research_tools import EvidenceSweepWithRefusals
 from chemclaw.core.config import settings
-from chemclaw.kg.note import Note
 from chemclaw.evals.probe import ProbeSet
+from chemclaw.kg.note import Note
 from chemclaw.retrieval.evidence import EvidenceChunk
 from chemclaw.retrieval.retrievers import GraphRetriever
 from chemclaw.retrieval.vector_index import InMemoryNoteIndex, reindex_notes
@@ -203,47 +202,59 @@ def test_an_excerpt_with_no_body_match_still_starts_at_the_beginning(tmp_path: P
     asyncio.run(_run())
 
 
-def test_the_conflict_marker_is_explained_in_the_description_the_model_is_sent() -> None:
+def test_the_conflict_marker_explains_itself_in_the_payload_the_model_reads() -> None:
     """A flag nothing explains is a flag nobody acts on.
 
     `conflicts_with`/`conflicts_total` ride on every chunk `gather_evidence` returns and were
-    described nowhere the model reads: not in the tool's own `Returns:` paragraph, not as a field
-    description (the chunk's nine fields all carried `description=None`), not in the system
-    prompt, not in a skill. The report path already renders the right sentence — see
-    `retrieval/harness.py`, which emits "these notes disagree; do not read this and a conflicting
-    note as two independent confirmations" per chunk — and the conversational path, which is every
-    turn, had neither half.
+    described nowhere the model reads: measured over the whole conversational path, "conflict",
+    "contradict" and "disput" appear **zero** times in the assembled system prompt, zero times in
+    the tool description, zero times in any `SKILL.md`, and `EvidenceChunk`'s nine fields all
+    carried `description=None`. The report path has rendered the right sentence per chunk since the
+    marker existed (`retrieval/harness.py`); the conversational path, which is every turn, had
+    neither half.
 
-    Asserted off `as_structured_tool`, because that is the object `ToolNode` binds and its
-    `description` is the string that goes out on the wire; a docstring nobody converts is not the
-    contract.
+    Asserted on the **payload** rather than on the tool description, and the reason is measured
+    rather than stylistic: `gather_evidence`'s schema is 881 tokens against
+    `tests/test_context_floor.py`'s 900-token per-tool cap, and the shortest honest version of this
+    sentence cost 73 — 954, which that ratchet refuses. A computed field costs nothing in the
+    prefix and is present only when there is something to warn about, which is the same argument
+    `NoteSearch.verdict` makes.
     """
-    description = as_structured_tool(gather_evidence).description
-    assert "conflicts_with" in description
-    assert "conflicts_total" in description
-    # The instruction, not only the field name: the failure this closes is a model handed two ids
-    # and no reason to chase them.
-    assert "two independent confirmations" in description
-
-
-def test_the_conflict_marker_survives_the_cap_that_cut_its_disputers() -> None:
-    """Why the sentence has to be on the *marked* chunk rather than left to the reader.
-
-    Measured in the review this closes: with the merged cap biting, the refuted claim survived and
-    both notes disputing it were cut, so the only trace of the disagreement in the model's context
-    was two ids on a chunk. Nothing said what they meant, and the notes they name were not there
-    to be read.
-    """
-    chunk = EvidenceChunk(
-        content="Use 5 mol% Pd.",
-        source_note_id="playbook-pd",
-        retriever="graph",
-        conflicts_with=["failure-1", "failure-2"],
-        conflicts_total=2,
+    sweep = EvidenceSweepWithRefusals(
+        chunks=[
+            EvidenceChunk(
+                content="Use 5 mol% Pd.",
+                source_note_id="playbook-pd",
+                retriever="graph",
+                conflicts_with=["failure-1", "failure-2"],
+                conflicts_total=2,
+            )
+        ]
     )
-    # The ids are all the model gets; `expand_note` is the only way to reach them, and the tool
-    # description is the only place that can say so.
-    assert chunk.conflicts_with and "expand_note" in as_structured_tool(gather_evidence).description
+    assert "two independent confirmations" in sweep.disputed
+    # The ids and the way to reach them: with the cap biting, they are the whole remaining trace.
+    assert "failure-1" in sweep.disputed and "failure-2" in sweep.disputed
+    assert "expand_note" in sweep.disputed
+    # It reaches the model: a pydantic tool return arrives as its repr, and a plain property would
+    # not be in it (`tests/test_upstream_surface.py` holds that shape).
+    assert "disputed" in repr(sweep) and "disputed" in sweep.model_dump()
+
+
+def test_the_marker_says_nothing_when_there_is_nothing_to_say() -> None:
+    """The negative control, and the reason this is a computed field rather than prose.
+
+    Most sweeps have no disagreement in them. A warning printed on all of them is a warning the
+    model learns to skip, which is the failure mode a static `Returns:` sentence would have had —
+    and would have paid 73 tokens of prefix per model call for.
+    """
+    sweep = EvidenceSweepWithRefusals(
+        chunks=[
+            EvidenceChunk(
+                content="Degas the solvent.", source_note_id="playbook-x", retriever="graph"
+            )
+        ]
+    )
+    assert sweep.disputed == ""
 
 
 def test_the_corpus_grades_whether_a_disputed_note_is_qualified_in_the_answer() -> None:
@@ -306,7 +317,10 @@ def test_the_window_follows_the_term_that_points_somewhere_not_the_first_one_it_
                 id="rxn-biaryl-run",
                 type="reaction",
                 created_by="human",
-                body=f"{head}\n\nThe low run failed by competitive protodeboronation of the boronic acid.",
+                body=(
+                    f"{head}\n\nThe low run failed by competitive "
+                    "protodeboronation of the boronic acid."
+                ),
             ),
         )
         (chunk,) = await GraphRetriever(str(tmp_path)).retrieve(

@@ -45,6 +45,18 @@ class NoteRef(BaseModel):
     Provenance is surfaced here (KM-6) so the agent can weigh a source — who authored it
     (`created_by`), where it came from (`source`), how sure it is (`confidence`), and its validity
     window — without a second lookup. Fields default so a bare reference is still constructible.
+
+    **The calculations a note rests on are part of that provenance, and were dropped here.**
+    `record_knowledge_note` tells the model to file `calc_refs` from a job's result envelope
+    (D-2026-08-21 built the envelope that carries them) "so a stale calculation can be traced to
+    the conclusions drawn from it" — and this projection is every reader there is: the model
+    through `find_notes`/`expand_note`, and the chemist through `GET /notes/{id}`, which returns
+    this same object. Neither saw one, so the citation on a computed note was write-only, and the
+    control `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` rests on — "the citations a
+    chemist checks at the point of use" — could not be exercised on the notes that most need it.
+
+    Both fields are checked by `Note`'s own validators (`_calc_ref_shape`), which is why they are
+    the only strings added here that `_ref` does not have to defang.
     """
 
     id: str
@@ -56,6 +68,10 @@ class NoteRef(BaseModel):
     confidence: float | None = None
     valid_from: date | None = None
     valid_to: date | None = None
+    # The calculation keys and stored artifacts (`<calc key>#<name>`) this note cites. Empty for
+    # every note that rests on no calculation, which is most of the corpus.
+    calc_refs: list[str] = Field(default_factory=list)
+    artifact_refs: list[str] = Field(default_factory=list)
 
 
 class NeighborRef(NoteRef):
@@ -117,6 +133,10 @@ def _ref(note: Note) -> NoteRef:
         confidence=note.confidence,
         valid_from=note.valid_from,
         valid_to=note.valid_to,
+        # Not defanged, and that is the one exception this function's rule has: both fields are
+        # shape-checked at parse time (`Note._calc_ref_shape`), so neither can carry a delimiter.
+        calc_refs=note.calc_refs,
+        artifact_refs=note.artifact_refs,
     )
 
 
@@ -517,8 +537,9 @@ async def record_knowledge_note(
             **Leave it unset when you do not** — an absent confidence means "not stated",
             which retrieval and conflict detection both read correctly; a guessed number
             is read as evidence.
-        calc_refs: Calculation keys this note rests on, so a stale calculation can be traced
-            to the conclusions drawn from it. Get them from a job's result envelope.
+        calc_refs: Calculation keys this note rests on. They ride on every reader of the note, so
+            a chemist reading a computed claim can check the run behind the number. Get them from
+            a job's result envelope.
         artifact_refs: Stored artifacts this note cites, as `<calc key>#<name>`.
         relations: Typed links to other notes — `contradicts`, `supersedes`, `follows` — each
             with its own optional confidence and validity window. Use these rather than prose
@@ -624,10 +645,13 @@ async def record_failure(
             f"be retired on {held_until.isoformat()} — file the refutation without `held_until`, "
             "or correct the existing date first"
         )
-    # Both files ride in one submission, so the reviewer signs off on the refutation and the
-    # retirement as the single decision they are. `superseded`, NOT `dependencies`: a dependency is
-    # written only where the base branch has no copy (`NoteFile.overwrite=False`), and the refuted
-    # note always exists on base — `_require_note` just found it in the merged graph — so passing
+    # Both files ride in one write, in `record._build_write`'s order, so no reader ever sees the
+    # retirement citing a successor that does not exist yet. The sentence here used to say a
+    # reviewer signed off on the pair as one decision, which stopped being true when
+    # `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the reviewer.
+    # `superseded`, NOT `dependencies`: a dependency is
+    # written only where the tree has no copy (`NoteFile.overwrite=False`), and the refuted note
+    # always exists there — `_require_note` just found it in the graph — so passing
     # the retirement as a dependency silently dropped it every time, leaving the refuted claim with
     # its validity window intact and still served as current evidence. `superseded` overwrites the
     # note in place, which is what retiring it means.

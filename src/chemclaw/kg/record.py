@@ -19,7 +19,10 @@ the durable proposal record had to hold the files a failed submission would have
 and with it the reason for the split.
 """
 
+import asyncio
+import logging
 import re
+from pathlib import Path
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -27,8 +30,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from chemclaw.core.config import settings
 from chemclaw.core.logging import redact_secrets
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.kg.graph import dangling_links, load_notes
 from chemclaw.kg.note import Note, note_relative_path
 from chemclaw.kg.render import render_note
+
+log = logging.getLogger(__name__)
 
 
 class NoteFile(BaseModel):
@@ -198,6 +204,28 @@ def _build_write(
     return NoteWrite(files=files, message=f"Add {note.type} note: {note.id}{extra}")
 
 
+def _unresolved_links(note: Note, landing: list[Note], notes_dir: Path) -> list[str]:
+    """`note`'s link targets that no note defines — neither on disk nor in this write.
+
+    Through `kg.graph.dangling_links`, which is the one definition of "a link pointing at nothing"
+    (the same question `kg-validate` fails a merge on and `analytics` reports as a gap), rather
+    than a fourth spelling of it here. The corpus is read through the parsed-note cache, so this
+    costs a stat scan on a warm process; the sort inside it is over the whole corpus's links, which
+    is nothing against the git subprocess this runs in front of.
+
+    `landing` is every note this write puts on disk, so a subject citing a dependency written
+    beside it resolves — that ordering is `_build_write`'s whole point and warning about it would
+    make the marker noise on the commonest write there is. An external id (`[[reaction-…]]`)
+    resolves in a store rather than in the tree and is not dangling; `dangling_links` already
+    knows that.
+    """
+    reported = dangling_links([*load_notes(notes_dir), *landing])
+    # Deduplicated, because a *re-record* puts the subject in the corpus and in `landing` both, and
+    # `dangling_links` walks the list rather than a set of ids — so every target would be named
+    # twice on exactly the write a reader is most likely to be reading.
+    return list(dict.fromkeys(target for source, target in reported if source == note.id))
+
+
 async def record_note(
     note: Note,
     writer: NoteWriter,
@@ -228,7 +256,8 @@ async def record_note(
             reference for what landed.
 
     Returns:
-        The writer's reference for what landed — a commit, or the unchanged tree.
+        The writer's reference for what landed — a commit, or the unchanged tree. A note whose
+        `[[wikilinks]]` name ids nothing defines still lands, and logs a WARNING naming them.
     """
     if note.created_by != "agent":
         raise ValueError(
@@ -236,6 +265,35 @@ async def record_note(
         )
 
     directory = knowledge_dir if knowledge_dir is not None else settings.knowledge_dir
+    # **A link at a note nobody wrote used to land in silence, and the write is the one moment
+    # anything can say so.** `compound_dependencies` mints the derived `compound-<hash>` id and
+    # nothing else, so a target the model typed itself is carried by no dependency: the note
+    # commits, `expand_note` on that target then raises "no note with id …" and the citation chip
+    # 404s. `kg-validate` is the check that catches it and it runs over *this* repository's corpus
+    # in CI, never over a deployment's.
+    #
+    # A **WARNING and not a refusal**, which is the same judgement `_note_file` makes about a
+    # redaction one function up: the note is the record either way, the citation is correctable by
+    # writing the note it names, and failing a turn's knowledge write over a typo'd citation would
+    # lose the observation to save the link. It is a log line and not a returned value on purpose —
+    # `record_note` hands its caller the reference for what landed, and a note *did* land — so the
+    # reader is whoever is looking at the pod, which is the same reader `git_writer`'s refusal to
+    # rewrite a person's note already writes for. Offloaded with the write it precedes, because it
+    # reads the corpus.
+    unresolved = await asyncio.to_thread(
+        _unresolved_links,
+        note,
+        [note, *(dependencies or ()), *(superseded or ())],
+        Path(settings.note_repo_dir) / directory,
+    )
+    if unresolved:
+        log.warning(
+            "note %s links to %d id(s) no note defines: %s — the note is recorded and those "
+            "citations will not resolve until the notes they name exist",
+            note.id,
+            len(unresolved),
+            ", ".join(unresolved),
+        )
     outcome = await writer.write(_build_write(note, directory, dependencies, superseded))
     if outcome.written:
         # Counted after the writer returns, so the number means "a note reached the graph" rather

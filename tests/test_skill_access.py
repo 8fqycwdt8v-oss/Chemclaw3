@@ -75,14 +75,24 @@ def test_ungated_skills_are_unaffected_by_gates() -> None:
     assert gated == all_skills - {"deep-research"}
 
 
-def test_no_shipped_skill_is_orphaned_on_the_full_surface() -> None:
-    """Every shipped skill teaches something the default agent can actually call.
+def test_no_shipped_skill_declares_only_tools_no_manifest_advertises() -> None:
+    """Every shipped skill teaches something this *tree* declares — a corpus check, not a turn's.
 
     The other side of capability scoping, and the one that would catch the real drift: a skill
     dropped here is not a filter bug, it is a skill whose whole subject has left the system — the
     stale-judgment case `make skill-validate` catches for a *renamed* tool and cannot catch for a
     capability that was simply disabled. Asserted against the default profile, which narrows
     nothing, so any drop is real.
+
+    **The basis is deliberately the manifests, and the name now says so.** `_advertised_names` is
+    what this tree *declares* — the in-process registry plus every enabled bundle's allow-list —
+    which is the right question for "is a committed `SKILL.md` about capability this repository
+    still ships". It is the wrong question for a turn, and `skills_backend` used it there until the
+    2026-09-10 review measured two skills offered with no bound tool at all: a manifest does not
+    move when a server is unreachable. That gate now reads the bound set
+    (`tests/test_langgraph_agent.py::test_a_listed_skill_always_has_at_least_one_tool_this_turn_binds`);
+    this stays as it was, because a tree-versus-manifest check that narrowed with the fleet would
+    pass by going quiet exactly when a bundle is down.
     """
     from chemclaw.agent import chemclaw_agent
     from chemclaw.agent.profiles import get_profile

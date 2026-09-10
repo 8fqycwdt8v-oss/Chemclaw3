@@ -1604,3 +1604,53 @@ def test_the_editing_middleware_hands_its_edited_request_to_its_handler() -> Non
         "handler. agent/compaction.OffLoopContextEditing takes the request from that call, so a "
         "handler that receives the unedited one means compaction has silently stopped running."
     )
+
+
+@pytest.mark.parametrize(
+    ("removal", "why"),
+    [
+        (
+            'Sources labeled "Deepagents" are specific to this agent tool; sources labeled '
+            '"Agents" are shared across all agent tools on this machine.\n\n',
+            "neither label exists here: `_labelled` derives a source's label from its directory",
+        ),
+        (
+            "**Executing Skill Scripts:**\nSkills may contain Python scripts or other executable "
+            "files. Always use absolute paths from the skill list.\n\n",
+            "`scratchpad_tools()` withholds `execute`, so nothing here can run a script",
+        ),
+        (
+            '**Example Workflow:**\n\nUser: "Can you research the latest developments in quantum '
+            'computing?"\n\n1. Check available skills -> See "web-research" skill with its '
+            "path\n2. "
+            'Read the full skill file: `read_file(file_path="...", limit=1000)`\n3. Follow the '
+            "skill's research workflow (search -> organize -> synthesize)\n4. Use any helper "
+            "scripts with absolute paths\n\n",
+            "there is no web-research skill and no egress to research with",
+        ),
+        (
+            ' (e.g., "research X" -> web-research skill)',
+            "the same absent skill, named as the example of a skill matching a request",
+        ),
+    ],
+)
+def test_the_skills_prompt_still_contains_every_sentence_this_deployment_removes(
+    removal: str, why: str
+) -> None:
+    """Each substring `_skills_prompt` cuts out of upstream's template, pinned as its exact text.
+
+    `agent/langgraph_agent._skills_prompt` derives the skills system prompt from upstream's own
+    `SKILLS_SYSTEM_PROMPT` minus the passages that are false on this deployment, by substring — so
+    the ~40 lines that are correct keep arriving from upstream and only the removals are this
+    repository's decision. That mechanism *is* the substrings: reword one upstream and the removal
+    silently stops happening, which is why `_skills_prompt` raises rather than passing the text
+    through. This asserts the same shapes from the other side, so a bump names the passage that
+    moved instead of a `RuntimeError` from inside a graph build.
+    """
+    from deepagents.middleware.skills import SKILLS_SYSTEM_PROMPT
+
+    assert removal in SKILLS_SYSTEM_PROMPT, (
+        f"deepagents' SKILLS_SYSTEM_PROMPT no longer contains a passage this deployment removes "
+        f"({why}); re-read upstream's template and update `_SKILLS_PROMPT_REMOVALS` in "
+        "agent/langgraph_agent.py"
+    )

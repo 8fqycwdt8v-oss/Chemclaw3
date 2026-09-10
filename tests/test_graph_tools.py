@@ -683,7 +683,7 @@ def test_find_notes_says_whether_there_was_a_corpus_to_miss(
 
 
 def test_no_docstring_on_the_write_path_still_promises_a_human_reviewer() -> None:
-    """The write path commits directly, and three docstrings said in the present tense that it did not.
+    """The write path commits directly, and three docstrings said in the present tense it did not.
 
     Measured: `record_failure` → `record_note` → `GitNoteWriter` commits, with nothing between the
     tool returning and the note being served as current evidence. Meanwhile

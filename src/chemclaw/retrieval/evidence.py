@@ -74,6 +74,42 @@ class EvidenceChunk(BaseModel):
     created_by: str = ""
     source: str = ""
     confidence: float | None = None
+    # Which of the query's terms (`kg.search.query_terms`) this chunk's note actually contains.
+    #
+    # **Because an absent answer was indistinguishable from a present one.** `GraphRetriever`
+    # ranks `complete or scored`: when no note matches every term it widens to *any* term, and
+    # measured over the shipped corpus complete matches in the top 8 were **0 of 8** on questions
+    # the corpus does answer — so widening is the normal path, not the fallback, and the leg
+    # always fills `retrieval_top_k`. `gather_evidence("what is the melting point of ibuprofen")`
+    # returns sixteen chunks about aspirin, DCM and route scoring, in the same shape as a
+    # successful query, while the tool's own docstring tells the model that empty means "nothing
+    # on file, never invented".
+    #
+    # **Terms rather than a count, because the counts were measured and do not discriminate.**
+    # Mean top-chunk coverage is 0.372 where the answer is present and 0.400 where it is absent;
+    # complete matches are 1/19 against 0/3. What separates the two cases is *which* terms
+    # matched: `melting` and `point` did, `ibuprofen` did not. That is a judgment the model can
+    # make against the question it asked and this system cannot make for it — so this field is
+    # evidence for the model's own qualification of an answer, not a classifier's verdict.
+    #
+    # It is a field of its own rather than the `score` it conceptually replaces because
+    # `hybrid.restated_as_position` overwrites `score` with the merged rank in both merge modes:
+    # match quality reached here once, as a number, and was spent before the model saw it.
+    #
+    # **`None` is "this source did not report it", never "nothing matched"** — the distinction
+    # `Hits.found` makes one class over. The share, warehouse, vendored-dataset and verifier legs
+    # build chunks from raw document text and never tokenise a query, so a zero there would be a
+    # claim nobody checked. An *empty list* on a note-backed chunk is a real statement: the dense
+    # leg can surface a note that shares no word with the question at all.
+    matched_terms: list[str] | None = Field(
+        default=None,
+        description=(
+            "Which of the query's search terms this note's text contains, or null where the "
+            "source does not report term matching. Compare it against the question that was "
+            "asked: a chunk that matched only the framing words of a question and none of its "
+            "subject was surfaced by a widened search and may not answer it at all."
+        ),
+    )
 
 
 class EvidenceSweep(BaseModel):

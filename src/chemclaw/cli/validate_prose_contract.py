@@ -121,6 +121,8 @@ from pathlib import Path
 
 from chemclaw.agent.chemclaw_agent import (
     _INSTRUCTION_BLOCKS,
+    _SAFETY_BLOCKS,
+    PromptBlock,
     available_tool_names,
     harness_tool_names,
     skill_tool_names,
@@ -340,15 +342,32 @@ _NON_SETTINGS_ENV = frozenset(
 )
 
 
-def _block_origin(index: int) -> str:
-    """How one instruction block is named in a problem line — the index plus its opening words.
+def _block_groups() -> tuple[tuple[str, tuple[PromptBlock, ...]], ...]:
+    """Every group of `PromptBlock`s a prompt is assembled from, by the symbol that holds it.
+
+    Two, and the second is the whole reason this is a function rather than one tuple.
+    `_SAFETY_BLOCKS` is the floor appended to a profile that replaces the default prose, and it was
+    a single un-narrowed string until 2026-09-10 — so rule 10 had never seen the text that reaches
+    every specialist, and the `record_knowledge_note` sentence in it was being sent to five shipped
+    profiles that cannot call the tool. A rule that checks one of two groups is a rule with a blind
+    spot the size of the other, which is this file's own recurring subject.
+
+    Read at call time rather than baked into a constant, so a test can substitute either group by
+    patching this module's own name for it.
+    """
+    return (("_INSTRUCTION_BLOCKS", _INSTRUCTION_BLOCKS), ("_SAFETY_BLOCKS", _SAFETY_BLOCKS))
+
+
+def _block_origin(symbol: str, index: int, blocks: tuple[PromptBlock, ...]) -> str:
+    """How one prompt block is named in a problem line — the symbol, index and opening words.
 
     The index alone is a coordinate that shifts whenever a block is inserted above; the opening
     words are what makes a failure findable by search. Both, because either alone is worse: the
-    words are not unique enough to address a block and the index is not stable enough to cite.
+    words are not unique enough to address a block and the index is not stable enough to cite. The
+    symbol joined them once there were two groups to be in.
     """
-    opening = " ".join(_INSTRUCTION_BLOCKS[index].text.split()[:6])
-    return f"src/chemclaw/agent/chemclaw_agent.py::_INSTRUCTION_BLOCKS[{index}] ({opening}…)"
+    opening = " ".join(blocks[index].text.split()[:6])
+    return f"src/chemclaw/agent/chemclaw_agent.py::{symbol}[{index}] ({opening}…)"
 
 
 def _prose_sources() -> dict[str, str]:
@@ -359,7 +378,11 @@ def _prose_sources() -> dict[str, str]:
     *maximal* one — the log-only traceability block is not in it, so checking the joined string
     would leave one of the two paragraphs a deployment can be sent outside every rule here.
     """
-    sources = {_block_origin(index): block.text for index, block in enumerate(_INSTRUCTION_BLOCKS)}
+    sources = {
+        _block_origin(symbol, index, blocks): block.text
+        for symbol, blocks in _block_groups()
+        for index, block in enumerate(blocks)
+    }
     for skills_dir in [*settings.skills_dirs, *connector_skills_dirs()]:
         for path in sorted(Path(skills_dir).glob("*/SKILL.md")):
             sources[str(path)] = path.read_text()
@@ -385,31 +408,53 @@ def check_instruction_blocks() -> list[str]:
     therefore pass rules 1-2 (those are real tools) and be silently dropped from every deployment
     that exists. That is exactly D-117's shape — a name space a checker cannot see — arriving from
     the other side, so it is named here rather than left to be discovered.
+
+    **The unconditional half of that name space may still be *named*, and the equality is what had
+    to move.** `skill_tool_names()` and `subagent_tool_names()` are attached to every agent this
+    deployment builds — `FilesystemMiddleware` unconditionally, `SubAgentMiddleware` because
+    `_apply_excluded_middleware` refuses to strip it — so a block describing `write_file` and
+    `/scratch/` is not a promise that can fail, and requiring the name would drop the block from
+    everywhere instead. Equality is therefore over `named` minus those two, and requiring one is
+    still refused. `harness_tool_names()` stays out of both halves: `write_todos` is attached only
+    when the harness is on, and the prompt is narrowed against nothing that can tell.
+
+    **And `absent_unless` is checked from the other side, because it fails the other way round.**
+    Its names must be bindable for the same reason `requires` must — a denial keyed on a name
+    nothing can bind never drops — and the two sets must be disjoint, since a block that both
+    requires a tool and is false when that tool is bound is a block no deployment ever sees. What no
+    rule here can check is *coverage*: whether a denial clause somebody writes next year declares
+    the tool that would refute it. A denial names a capability in English, not a function, so there
+    is no authoritative resolver for it and this file does not pretend otherwise
+    (`tests/test_prose_contract.py` asserts the shipped two both ways instead).
     """
-    bindable = (
-        available_tool_names()
-        - skill_tool_names()
-        - harness_tool_names()
-        - set(subagent_tool_names())
-    )
+    always_bound = skill_tool_names() | set(subagent_tool_names())
+    bindable = available_tool_names() - always_bound - harness_tool_names()
     problems: list[str] = []
-    for index, block in enumerate(_INSTRUCTION_BLOCKS):
-        named = referenced_tool_names(block.text)
-        if named != block.requires:
-            problems.append(
-                f"{_block_origin(index)}: names {sorted(named)} and requires "
-                f"{sorted(block.requires)}. A block must require exactly the tools it names — one "
-                "it names but does not require is never dropped, and one it requires but does not "
-                "name is dropped from deployments with no reason to lose it."
-            )
-        unreachable = sorted(block.requires - bindable)
-        if unreachable:
-            problems.append(
-                f"{_block_origin(index)}: requires {unreachable}, which `build_langgraph_agent` "
-                "never binds — a middleware's tool (a filesystem verb, `write_todos`, `task`) is "
-                "attached after the surface the prompt is narrowed against, so this block would be "
-                "dropped from every deployment."
-            )
+    for symbol, blocks in _block_groups():
+        for index, block in enumerate(blocks):
+            origin = _block_origin(symbol, index, blocks)
+            named = referenced_tool_names(block.text) - always_bound
+            if named != block.requires:
+                problems.append(
+                    f"{origin}: names {sorted(named)} and requires "
+                    f"{sorted(block.requires)}. A block must require exactly the tools it names — "
+                    "one it names but does not require is never dropped, and one it requires but "
+                    "does not name is dropped from deployments with no reason to lose it."
+                )
+            unreachable = sorted((block.requires | block.absent_unless) - bindable)
+            if unreachable:
+                problems.append(
+                    f"{origin}: keys on {unreachable}, which `build_langgraph_agent` never binds — "
+                    "a middleware's tool (a filesystem verb, `write_todos`, `task`) is attached "
+                    "after the surface the prompt is narrowed against, so this block would be "
+                    "dropped from every deployment (or, for `absent_unless`, from none)."
+                )
+            both = sorted(block.requires & block.absent_unless)
+            if both:
+                problems.append(
+                    f"{origin}: requires {both} and is also declared false when they are bound, so "
+                    "no deployment is ever sent it. A block is a promise or a denial, not both."
+                )
     return problems
 
 

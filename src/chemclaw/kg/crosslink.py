@@ -1,39 +1,36 @@
-"""Reading the graph from the calculation store's side (STO-7).
+"""What calculations a note rests on, counting the ones it cites only through an artifact (STO-7).
 
-`Note.calc_refs` points a note at the calculations behind it. This module is the other direction —
-given a calculation key, which notes rest on it? — and the reason it is nine lines of dict-building
-rather than an index is that the parsed notes are *already* cached in memory by `chemclaw.kg.graph`
-(behind a stat fingerprint, KM-14). A second store would be a derived index of a derived index.
+`Note.calc_refs` points a note at the calculations behind it, and `artifact_refs` points it at a
+by-product of one — so "which calculations does this note rest on" is not a field read, it is a
+field read plus the run each cited artifact came out of. `cited_calculations` is that one
+definition, and it exists because two readers would otherwise each decide for themselves whether an
+artifact counts.
 
-Why the direction matters. Before this, the calculation store and the knowledge graph were
-disjoint: "what we computed" and "what we know" could not reference each other, so a stale
-calculation could not be traced to the conclusions drawn from it, and a conclusion could not be
-traced to the run that produced it. That is a provenance gap, not only an
-ergonomic one. The forward direction makes a note auditable; this direction makes a recomputation
-actionable — when a method version changes and a cached result is invalidated, this is what says
-which notes now rest on something the system would no longer reproduce.
+**The reverse index that used to live here is deleted, and this paragraph is why.** `calc_ref_index`
+and `notes_for_calculation` answered the other direction — given a calculation key, which notes rest
+on it? — and had **no caller in `src/` from the day they were written** (D-133) until the day they
+went. D-158 gave them one in the `qm` bundle's note builder, and
+`D-2026-08-26-semiempirical-is-the-whole-tier` deleted that bundle whole, which took the producer
+with it and left nothing on either side. Two ADRs had deliberately *kept* them —
+`D-2026-08-05-three-searches-that-disagreed-about-one-note` on the grounds that each was the only
+read path for a capability a merged ADR claims, and
+`D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold` on the line "a thing no configuration can reach
+is dead, a thing a deployment selects is not". The first premise no longer holds: since
+`agent/graph_tools.NoteRef` carries `calc_refs` and `artifact_refs`, STO-7's claim — that the
+calculation store and the knowledge graph can reference each other — has a live read path in the
+direction the data actually flows, reaching the model, `GET /notes/{id}` and the chemist. The second
+was never true of these two: no setting selects them.
+
+**Re-adding the reverse lookup is a new decision, and the ADRs that designed it stand.** What was
+measured when it was tried as an agent tool, so the next attempt starts from it: the tool schema
+costs **256 tokens of static prefix on every model call** against a ratchet
+(`tests/test_context_floor.py`) that had 423 to give, and it cannot borrow `NoteSearch` without
+lying — that type's `verdict` tells a caller with no hits that "a differently-worded term may still
+find it", which is true of a substring query and nonsense about a cache key. A reverse lookup wants
+its own answer shape, and it wants a question somebody is actually asking.
 """
 
-from collections import defaultdict
-from pathlib import Path
-
-from chemclaw.kg.graph import load_notes
 from chemclaw.kg.note import Note
-
-
-def calc_ref_index(notes: list[Note]) -> dict[str, list[Note]]:
-    """Map every cited calculation key to the notes citing it.
-
-    Built over `calc_refs` *and* the calculation half of `artifact_refs`, so a note that cites only
-    a specific Hessian is still found by a query about the calculation that produced it — the
-    artifact is part of that run, and a caller asking "what rests on this calculation" means to
-    include it.
-    """
-    index: dict[str, list[Note]] = defaultdict(list)
-    for note in notes:
-        for key in cited_calculations(note):
-            index[key].append(note)
-    return dict(index)
 
 
 def cited_calculations(note: Note) -> list[str]:
@@ -48,14 +45,3 @@ def cited_calculations(note: Note) -> list[str]:
         key, _, _ = ref.rpartition("#")
         ordered.setdefault(key, None)
     return list(ordered)
-
-
-def notes_for_calculation(notes_dir: Path, calc_key: str) -> list[Note]:
-    """Every note in `notes_dir` that rests on `calc_key`, ordered by id.
-
-    Reads through `chemclaw.kg.graph.load_notes`, so it shares the parsed-note cache with every
-    other reader
-    and a warm call costs a stat scan rather than a parse of the tree.
-    """
-    matches = calc_ref_index(load_notes(notes_dir)).get(calc_key, [])
-    return sorted(matches, key=lambda note: note.id)

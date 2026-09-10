@@ -15,7 +15,10 @@ sharing — it is what keeps an unconfigured decorator from paying for itself on
 
 **Why capability scoping exists.** The tool surface is already narrowed three ways — a deployment's
 `connectors_enabled`, a profile's `tool_names`/`mcp_server_names` — and the skill surface was
-narrowed by none of them. Measured against the shipped `property-lookup` profile (5 callable
+narrowed by none of them. (A fourth narrowing arrived later and this gate could not see it either:
+a declared bundle whose server is unreachable binds nothing, while its manifest still names every
+tool — so the basis a *turn* passes is what the graph binds, not what is advertised.)
+Measured against the shipped `property-lookup` profile (5 callable
 tools), 8 of 28 advertised skills had *no* reachable tool at all: the model was handed judgment
 about `suggest_next_experiment`, `sample_conformers` and the three fingerprint tools, none of
 which that agent can call. The profile compensated in prose ("if a question needs experimental
@@ -129,8 +132,13 @@ class ToolScopedSkills(_Narrowing):
         declared: `{skill name: declared tool names}` (`chemclaw.agent.skill_manifest.
             declared_tools`) — read from disk once, because a loaded skill's own frontmatter model
             drops the `tools:` key and therefore cannot answer this question.
-        available: The tool names this agent actually advertises, both halves of the surface
-            (`chemclaw.agent.chemclaw_agent.advertised_tool_names`).
+        available: The tool names this agent can actually reach. Two callers ask two different
+            questions with it and both are right: a turn passes the surface its graph **binds**
+            (`langgraph_agent.build_langgraph_agent`), because a manifest does not move when a
+            server is unreachable and a listing narrowed by manifests offered skills whose every
+            tool was bound to nothing; a corpus check passes what this tree *declares*
+            (`chemclaw_agent.advertised_tool_names`), because a `SKILL.md` about a capability the
+            repository still ships should not stop being checked when a bundle is down.
     """
 
     def __init__(self, declared: Mapping[str, frozenset[str]], available: Iterable[str]) -> None:

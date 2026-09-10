@@ -19,8 +19,7 @@ import pytest
 from chemclaw.core.chem import compound_id
 from chemclaw.core.config import settings
 from chemclaw.ingest.eln.compound import compound_dependencies, compound_note
-from chemclaw.kg.crosslink import calc_ref_index, cited_calculations, notes_for_calculation
-from chemclaw.kg.graph import invalidate_cache
+from chemclaw.kg.crosslink import cited_calculations
 from chemclaw.kg.note import Note
 from chemclaw.kg.record import NoteWrite, WriteOutcome, record_note
 from chemclaw.kg.render import render_note
@@ -102,33 +101,24 @@ def test_an_artifact_citation_implies_a_citation_of_the_run_that_produced_it() -
     assert cited_calculations(note) == [_KEY]
 
 
-def test_the_reverse_lookup_finds_every_note_resting_on_one_calculation() -> None:
-    """The direction that makes a recomputation actionable.
+def test_the_reverse_lookup_is_gone_and_stays_gone_until_something_calls_it() -> None:
+    """The two functions that answered "which notes rest on this key" had no caller, ever.
 
-    When a method version changes and a cached result is invalidated, this is what says which
-    conclusions now rest on something the system would no longer reproduce.
+    D-133 wrote them, D-158 gave them a producer in the `qm` bundle's note builder, and
+    `D-2026-08-26-semiempirical-is-the-whole-tier` deleted that bundle — so from that day the
+    index had neither a caller nor a writer, and the only thing keeping it alive was the two
+    tests above this one, which called it directly. That is the shape CLAUDE.md names
+    (`map_to_hpc_identity`, `reject_widening`) and deletes.
+
+    An **absence** test rather than nothing, because two merged ADRs deliberately kept this module
+    and a third designed it: re-adding the lookup is a decision somebody takes on purpose with a
+    caller in hand, not a revert. `cited_calculations` stays and is asserted above — it has a real
+    caller (`tests/test_seed_corpus.py`) and it is the definition of what a note rests on.
     """
-    first = Note(id="a", type="job-result", calc_refs=[_KEY])
-    second = Note(id="b", type="report", artifact_refs=[f"{_KEY}#vibspectrum"])
-    unrelated = Note(id="c", type="report", calc_refs=[_OTHER_KEY])
+    import chemclaw.kg.crosslink as crosslink
 
-    index = calc_ref_index([first, second, unrelated])
-    assert sorted(note.id for note in index[_KEY]) == ["a", "b"]
-    assert [note.id for note in index[_OTHER_KEY]] == ["c"]
-
-
-def test_the_reverse_lookup_reads_the_note_tree(tmp_path: Path) -> None:
-    """End to end over a real directory, through the shared parsed-note cache."""
-    directory = tmp_path / "knowledge" / "job-result"
-    directory.mkdir(parents=True)
-    (directory / "a.md").write_text(
-        render_note(Note(id="a", type="job-result", calc_refs=[_KEY])), encoding="utf-8"
-    )
-    (directory / "b.md").write_text(
-        render_note(Note(id="b", type="job-result", calc_refs=[_OTHER_KEY])), encoding="utf-8"
-    )
-    invalidate_cache()
-    assert [note.id for note in notes_for_calculation(tmp_path / "knowledge", _KEY)] == ["a"]
+    assert not hasattr(crosslink, "calc_ref_index")
+    assert not hasattr(crosslink, "notes_for_calculation")
 
 
 def test_a_note_and_the_compound_it_links_land_in_one_write() -> None:
@@ -307,7 +297,9 @@ def test_a_link_whose_target_lands_in_the_same_write_is_not_reported(
         )
         with caplog.at_level(logging.WARNING, logger="chemclaw.kg.record"):
             await record_note(
-                note, _Capturing(), knowledge_dir="knowledge",
+                note,
+                _Capturing(),
+                knowledge_dir="knowledge",
                 dependencies=compound_dependencies(note),
             )
 

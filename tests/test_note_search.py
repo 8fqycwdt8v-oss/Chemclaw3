@@ -145,9 +145,7 @@ def test_a_question_s_own_grammar_is_not_a_term_the_record_must_contain() -> Non
     `dissolved` and `solvent`, `at` is inside `temperature`, `he` is inside `ether`. Measured
     over the 19 `knowledge.yaml` probes, dropping `so` alone moved two gold notes.
     """
-    terms = query_terms(
-        "Has anyone here run that before, and what conditions did they end up on?"
-    )
+    terms = query_terms("Has anyone here run that before, and what conditions did they end up on?")
 
     assert "conditions" in terms
     assert "anyone" in terms  # not a function word; the list is closed-class only

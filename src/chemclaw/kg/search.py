@@ -57,24 +57,23 @@ from chemclaw.kg.note import Note
 # listed here. That is a property of substring membership at `_MIN_TERM_CHARS`, not a loss this
 # list introduces — a chemist searching for an element wants the structure tools.
 _STOPWORDS = frozenset(
-    {
+    word
+    for category in (
         # articles, prepositions, conjunctions and particles
-        "a", "an", "and", "as", "at", "about", "again", "but", "by", "down", "for", "from",
-        "if", "in", "into", "of", "on", "or", "out", "over", "so", "than", "then", "the",
-        "to", "too", "up", "very", "with",
+        "a an and as at about again but by down for from if in into of on or out over so "
+        "than then the to too up very with",
         # interrogatives
-        "how", "what", "when", "where", "which", "who", "whom", "whose", "why",
+        "how what when where which who whom whose why",
         # pronouns and determiners
-        "he", "her", "here", "his", "it", "its", "me", "my", "our", "she", "that", "their",
-        "them", "there", "these", "they", "this", "those", "us", "we", "you", "your",
+        "he her here his it its me my our she that their them there these they this those "
+        "us we you your",
         # modals and auxiliaries
-        "am", "are", "be", "been", "being", "can", "could", "did", "do", "does", "doing",
-        "done", "had", "has", "have", "having", "is", "may", "might", "must", "shall",
-        "should", "was", "were", "will", "would",
+        "am are be been being can could did do does doing done had has have having is may "
+        "might must shall should was were will would",
         # negation, affirmation and quantifiers
-        "all", "also", "any", "both", "each", "ever", "few", "just", "many", "more", "most",
-        "much", "never", "no", "not", "only", "other", "some", "yes",
-    }
+        "all also any both each ever few just many more most much never no not only other some yes",
+    )
+    for word in category.split()
 )
 # Below this a term matches too much to be worth requiring; two characters is already `pd`.
 _MIN_TERM_CHARS = 2
@@ -166,6 +165,25 @@ def term_coverage(note: Note, terms: Sequence[str]) -> int:
     """
     haystack = search_text(note).lower()
     return sum(1 for term in terms if term in haystack)
+
+
+def matched_terms(note: Note, terms: Sequence[str]) -> list[str]:
+    """Which of `terms` appear in `note`'s searchable text, in query order, without repeats.
+
+    The per-term form of `term_coverage`, over the same haystack and the same substring rule, so
+    "matched" cannot come to mean two things in two modules — which is the drift this module was
+    written to end. `retrieval.retrievers` carries the result to the model on every note-backed
+    chunk (`EvidenceChunk.matched_terms`), because a widened search returns hits that share a
+    couple of framing words with the question and nothing said so.
+
+    **Deduplicated, where `term_coverage` is not**, and the difference is deliberate rather than an
+    oversight in one of them. Coverage is compared against `len(terms)` to decide whether a hit
+    matched the query *completely*, so a chemist who types "buchwald" twice must be able to reach
+    that ceiling; this is a list a reader compares against their own question, where the same word
+    twice says nothing the once did not.
+    """
+    haystack = search_text(note).lower()
+    return [term for term in dict.fromkeys(terms) if term in haystack]
 
 
 def term_frequencies(note: Note, terms: Sequence[str]) -> dict[str, int]:

@@ -74,7 +74,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -848,16 +848,22 @@ def _observed_prefix(profile: Any) -> tuple[SystemMessage, list[Any], list[Any]]
     return system[0], list(_BOUND), bound
 
 
-def _skills_listing(profile: Any, tools: list[Any]) -> str:
+def _skills_listing(profile: Any, tools: list[Any], available: Collection[str]) -> str:
     """The skills block exactly as `SkillsMiddleware` publishes it into the system prompt.
 
     Built through the real middleware rather than re-derived from the `SKILL.md` frontmatter,
     because a second implementation of upstream's formatting is a second thing to keep in step —
     and the number this file gates on has to be the number the model is actually sent.
     `before_agent` on an empty state is upstream's own load path: what a first turn runs.
+
+    `available` is the surface the graph binds, passed for the same reason
+    `build_langgraph_agent` passes it: the capability predicate that decides which skills are listed
+    reads it, and a listing derived from the manifests instead would split the observed total by a
+    number production does not produce.
     """
     labelled = _labelled(_skill_dirs())
-    middleware = _skills_middleware(skills_backend(profile, tools, labelled=labelled), labelled)
+    backend = skills_backend(profile, tools, labelled=labelled, available=available)
+    middleware = _skills_middleware(backend, labelled)
     loaded = middleware.before_agent({}, None, None) or {}
     return str(middleware._format_skills_list(loaded.get("skills_metadata", [])))
 
@@ -887,11 +893,14 @@ def _floor(profile_name: str) -> tuple[int, dict[str, int]]:
     contributions, measured the way `build_langgraph_agent` builds them, and the third is the
     remainder — every deepagents middleware's prompt section, named rather than uncounted.
 
-    The two derived halves stay measured from the *capability* tools deliberately.
-    `build_langgraph_agent` hands `skills_backend` the raw callables, so narrowing the skills
-    listing by the bound list would measure a backend production never builds. A negative remainder
-    would mean those two halves are no longer what production puts in the prompt — the split has
-    gone wrong, not the total, which is still what the model was sent.
+    The skills listing is derived from the *capability* tools and narrowed by the *bound* names,
+    which is exactly the pair `build_langgraph_agent` passes: it hands `skills_backend` the raw
+    callables and, since 2026-09-10, the surface the graph binds — because the capability predicate
+    that decides which skills are listed had been reading the manifests, which do not move when a
+    server is unreachable. Deriving either half differently here would split the observed total by
+    a number production does not produce. A negative remainder would mean these halves are no
+    longer what production puts in the prompt — the split has gone wrong, not the total, which is
+    still what the model was sent.
 
     **The instructions are the one part charged at more than this fixture observes, and that is
     deliberate — the alternative is the 2026-09-05 defect again.** Since the prompt became
@@ -908,7 +917,9 @@ def _floor(profile_name: str) -> tuple[int, dict[str, int]]:
     system, _sent, bound = _observed_prefix(profile)
     observed = _count(instructions_for(profile, {_tool_name(tool) for tool in bound}))
     maximal = _maximal_instructions(profile)
-    listing = _count(_skills_listing(profile, _capability_tools(profile)))
+    listing = _count(
+        _skills_listing(profile, _capability_tools(profile), {_tool_name(tool) for tool in bound})
+    )
     parts = {
         "instructions": observed,
         "instructions:blocks-only-a-served-fleet-binds": maximal - observed,

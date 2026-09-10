@@ -20,6 +20,8 @@ from chemclaw.agent.chemclaw_agent import (
     advertised_tool_names,
     available_tool_names,
     instructions_for,
+    skill_tool_names,
+    subagent_tool_names,
 )
 from chemclaw.agent.framing import ENVELOPE_TAG
 from chemclaw.agent.profiles import get_profile
@@ -560,17 +562,23 @@ def test_the_prompt_a_graph_is_sent_names_no_tool_that_graph_cannot_call() -> No
     `screen_hazards`, whose paragraph told the model to screen every proposed reagent against a
     hazard screen that was not there.
 
-    **The bound half only.** This asserts what `instructions_for` produces, not the whole system
-    message: `SkillsMiddleware` appends a skills listing carrying each skill's own declared tools,
-    and that listing is narrowed by `skill_access`'s *advertised* names (the manifests) rather than
-    by what a turn binds — so a deployment whose bundles are declared and unreachable is still
-    offered the safety-screening skill. That is a second defect with the same shape and a different
-    owner; naming it here is better than a test whose green line implies it was covered.
+    **The bound half only, plus the one name space that cannot be absent.** This asserts what
+    `instructions_for` produces, not the whole system message. The filesystem verbs and `task` come
+    from middleware attached to every agent this deployment builds, so they are never in the set the
+    prompt is narrowed against and naming them is not a promise that can fail — the same exemption
+    `validate_prose_contract.check_instruction_blocks` makes, derived from the same two functions so
+    the rule and this test cannot disagree about it.
+
+    The skills *listing* is no longer the caveat this docstring used to carry. It was narrowed by
+    `skill_access`'s advertised names — the manifests — so a deployment whose bundles were declared
+    and unreachable was still offered `safety-screening`; `skills_backend` now takes the bound set
+    (`tests/test_langgraph_agent.py::test_a_listed_skill_always_has_at_least_one_tool_this_turn_binds`).
     """
     profile = get_profile("default")
+    always_bound = skill_tool_names() | set(subagent_tool_names())
     for available in (frozenset(registered_tool_names()), advertised_tool_names(profile)):
         text = instructions_for(profile, available)
-        named = prose.referenced_tool_names(text)
+        named = prose.referenced_tool_names(text) - always_bound
         assert named <= available, sorted(named - available)
 
 
@@ -618,7 +626,7 @@ def test_the_safety_floor_survives_narrowing_to_a_surface_with_no_tools_at_all()
     while `tests/test_framing.py` stayed green because it reads the maximal text.
 
     The empty surface is the right probe: no real profile is that narrow, and a floor that survives
-    it survives every narrowing that can occur. `_SAFETY_RULES` covers the profiles that replace
+    it survives every narrowing that can occur. `_SAFETY_BLOCKS` covers the profiles that replace
     the prose entirely; this covers the ones that keep it and lose tools.
     """
     profile = get_profile("default")
@@ -627,3 +635,159 @@ def test_the_safety_floor_survives_narrowing_to_a_surface_with_no_tools_at_all()
     assert "'Refused:'" in floor
     assert "Earlier tool result dropped" in floor
     assert "What this system does not hold" in floor
+
+
+def test_the_appended_safety_floor_names_no_tool_the_profile_cannot_call() -> None:
+    """F1: the floor appended to a *replacing* profile was never narrowed, so it over-promised.
+
+    `PromptBlock` narrows the default prose against the graph's own surface. A profile that supplies
+    its own `instructions:` never reaches that code — `instructions_for` appends the safety floor as
+    one string — so the floor's `record_knowledge_note` sentence was sent verbatim to every
+    specialist, including the five that cannot call it. Measured against the shipped profiles:
+    `property-lookup` (5 advertised tools), `design` (8), `safety` (6), `evidence` (15) and
+    `computation` (41) were each told to record findings through a tool none of them holds. That is
+    the exact defect the blocks were introduced for, surviving on the one path the fix did not
+    reach.
+
+    **The floor only.** A profile's own `instructions:` are text this repository did not write and
+    cannot cut into blocks (`instructions_for`), and the shipped ones do name three identifiers
+    outside their surface — two are result fields (`structure_id`, `artifact_refs`) that rule 2
+    cannot tell from a tool, and `evidence.yaml`'s `compute_thermochemistry` is a real over-promise
+    owned by `data/profiles/`. So this asserts the half this module composes, which is the half a
+    site cannot be answerable for.
+    """
+    from chemclaw.agent.profile_discovery import load_profiles
+    from chemclaw.agent.profiles import registered_profile_names
+
+    load_profiles()
+    over_promised: dict[str, list[str]] = {}
+    for name in sorted(registered_profile_names()):
+        profile = get_profile(name)
+        if profile.instructions is None:
+            continue
+        available = advertised_tool_names(profile)
+        floor = instructions_for(profile, available).removeprefix(f"{profile.instructions}\n")
+        named = prose.referenced_tool_names(floor)
+        if named - available:
+            over_promised[name] = sorted(named - available)
+    assert not over_promised, (
+        "the safety floor names tools these profiles cannot call: "
+        f"{over_promised}. The floor is blocks now — narrow it the way `_INSTRUCTION_BLOCKS` is."
+    )
+
+
+def test_the_prompt_does_not_claim_every_launcher_takes_a_rationale() -> None:
+    """F6: nine of the nine `run_*` step-template launchers take no rationale at all.
+
+    The durable-jobs paragraph opened "every launcher takes a rationale" and went on to call it "the
+    only record of why the run happened". Measured over the shipped surface: all 14 connector-job
+    launchers take one and every one of the 9 template launchers does not — deliberately, because a
+    template run's `job` names a declared procedure whose purpose the template itself states, which
+    `find_past_jobs`' own docstring says in the same words. So the rule is about the *argument*, not
+    about launchers, and a model told otherwise is being asked to supply a field that does not
+    exist.
+    """
+    import inspect
+
+    from chemclaw.connectors.registry import job_tools
+    from chemclaw.templates.registry import template_tools
+
+    def takes_one(tool: object) -> bool:
+        return "rationale" in inspect.signature(tool).parameters  # type: ignore[arg-type]
+
+    templates = list(template_tools())
+    jobs = list(job_tools())
+    assert templates and jobs, "the fixture measured an empty surface"
+    assert not any(takes_one(tool) for tool in templates), "a template launcher grew a rationale"
+    assert all(takes_one(tool) for tool in jobs), "a connector-job launcher lost its rationale"
+    assert "every launcher takes a rationale" not in _INSTRUCTIONS, (
+        f"{len(templates)} of {len(templates)} template launchers take no rationale, so the prompt "
+        "must not promise the model that every launcher does"
+    )
+
+
+def test_the_prompt_does_not_call_every_marked_refusal_an_account_decision() -> None:
+    """F6: five refusal families carry the mark and exactly one is about the caller's account.
+
+    The `Refused:` paragraph said a marked refusal "is an access-control decision this system made
+    about the asking chemist's account" and told the model, unconditionally, to "point them at
+    whoever grants access in their organization". `DryRunRefusal`, `PlanNotApprovedError`,
+    `UndeclaredWriteRefusal` and `SkillsReadOnlyRefusal` are all `AuthorizationError` subclasses
+    reaching the model through the same `_refusal_message(marked=True)`, and none of them is about
+    entitlements: three are modes this deployment is running in and the fourth is a tool this agent
+    was not given. Sending a chemist to request access for a dry-run turn is the same category of
+    wrong answer as calling a refusal a service outage, which the very next sentence forbids.
+    """
+    from chemclaw.agent.authz import AuthorizationError
+    from chemclaw.agent.skill_backend import SkillsReadOnlyRefusal  # noqa: F401  (registers it)
+
+    def subclasses(cls: type) -> set[type]:
+        found = set(cls.__subclasses__())
+        return found | {sub for child in cls.__subclasses__() for sub in subclasses(child)}
+
+    families = subclasses(AuthorizationError)
+    assert len(families) >= 4, f"only {sorted(c.__name__ for c in families)} — re-check the claim"
+    for prompt in (_INSTRUCTIONS, instructions_for(get_profile("safety"))):
+        assert "decision this system made about the asking chemist's account" not in prompt, (
+            f"{len(families)} refusal families reach the model marked "
+            f"({sorted(c.__name__ for c in families)}) and only one is about an account"
+        )
+        assert "the reason the result states" in prompt, (
+            "the model is told to relay a refusal without being told to read its reason"
+        )
+
+
+def test_the_prompt_does_not_call_recall_preferences_the_only_memory_there_is() -> None:
+    """F6: `/memories/**` is a durable per-actor store, so it was never the only one.
+
+    `agent/scratchpad.py` routes `/memories/…` to a `StoreBackend` over Postgres, namespaced by the
+    actor, and that is the one route that outlives the session. The sentence "it is the only memory
+    of them you have" was written before it existed and survived it.
+    """
+    assert "the only memory of them you have" not in _INSTRUCTIONS
+
+
+def test_the_trail_paragraph_says_the_arguments_it_records_are_truncated() -> None:
+    """F6: `bounded_repr` truncates, and only the module docstring said so.
+
+    The traceability paragraph listed "arguments" among what the trail records. `audit.bounded_repr`
+    bounds every recorded argument to `audit_detail_max_chars`, and the module's own docstring
+    already says "truncated arguments" — so the prompt was the one reader making the stronger claim,
+    which is the claim a chemist would rely on when asking what the record proves.
+    """
+    durable = instructions_for(get_profile("default"), durable_trail=True)
+    assert "truncated arguments" in durable
+
+
+def test_a_capability_this_fleet_serves_is_not_denied_in_the_message_that_offers_it() -> None:
+    """F4: "what this system does not hold" denied two capabilities the full fleet binds.
+
+    `requires` drops a block when a tool is *absent*, which is the right shape for a promise and
+    the wrong one for a denial: a "we do not hold X" clause has to drop when X's tool is **bound**.
+    Two of them did not. At full fleet `screen_genotoxic_alerts` and `ich_impurity_limit` are bound
+    and the paragraph went on saying "no mutagenicity, genotoxicity (ICH M7) or nitrosamine rule
+    set; no elemental-impurity or residual-solvent limits" — while the *same system message* carried
+    the `safety-screening` skill's own description saying "three of those now have a table". A model
+    reading both has been told, in one prompt, that a table it can call does not exist.
+
+    So the assertion runs both ways: bound and the clause is gone, absent and the clause stands,
+    because over-stating a limit is the safe direction and dropping one on the wrong side of the
+    test would be the same defect inverted.
+    """
+    profile = get_profile("default")
+    served = {"screen_genotoxic_alerts", "ich_impurity_limit"}
+    base = advertised_tool_names(profile) - served
+
+    for tool, clause in (
+        ("screen_genotoxic_alerts", "genotoxicity (ICH M7)"),
+        ("ich_impurity_limit", "elemental-impurity or residual-solvent limits"),
+    ):
+        assert clause in instructions_for(profile, base), (
+            f"the limit on {tool} is not stated even when nothing binds it"
+        )
+        assert clause not in instructions_for(profile, base | {tool}), (
+            f"{tool} is bound and the prompt still denies the capability it provides"
+        )
+    assert "What this system does not hold" in instructions_for(profile, base | served), (
+        "the whole paragraph was dropped rather than the two clauses inside it"
+    )
