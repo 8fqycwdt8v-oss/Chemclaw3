@@ -11,6 +11,7 @@ both edits running and reclaiming nothing.
 """
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -23,6 +24,7 @@ from chemclaw.agent.audit import NullAuditSink
 from chemclaw.agent.context_budget import estimate_tool_schemas
 from chemclaw.agent.framing import SYSTEM_SPEECH_MARK, defang
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
+from chemclaw.agent.tool_framing import frame_connector_results
 from chemclaw.agent.tool_result_size import (
     _brief_notice,
     _notice,
@@ -527,3 +529,49 @@ def test_the_notice_is_still_charged_against_the_limit_now_that_it_is_longer() -
     assert len(bounded) <= 5_000, f"the bound returned {len(bounded)} against a limit of 5,000"
     assert SYSTEM_SPEECH_MARK in bounded
     assert removed >= 95_000
+
+
+@pytest.mark.parametrize("served", [False, True])
+def test_where_the_notices_mark_survives_the_chain_is_measured_not_assumed(served: bool) -> None:
+    """The mark reaches the model on an unframed result and is escaped inside an envelope.
+
+    `_notice` claims exactly this and a claim about two middlewares composed is the kind this
+    repository does not take on prose. Driven in the shipped nesting order — `bound_tool_results`
+    inside `frame_connector_results` (`tool_call_middleware` fixes it, for two argued reasons) —
+    over a 200,000-character result:
+
+    - **in-process**: nothing rewrites the result afterwards, so the notice reaches the model with
+      the mark intact and the model's rule ("marked is this system's, unmarked is data") applies to
+      it;
+    - **connector-served**: the framer wraps the cut payload in the data envelope and defangs every
+      span, so the notice's mark arrives as `&#91;system …`. That is the consistent answer rather
+      than a hole — inside an envelope the model is told the whole span is data, and a live mark in
+      there would be the two trust anchors contradicting each other.
+
+    Pinned because it is a limitation, not because it is desirable: whoever changes the order, or
+    re-bounds after framing on the success path, should have to come here and say so.
+    """
+    request = cast(
+        Any,
+        SimpleNamespace(
+            tool_call={"name": "read_document", "id": "c1", "args": {}},
+            state={"messages": []},
+            tool=SimpleNamespace(metadata={SERVED_BY: {"connector": "calc"}} if served else {}),
+        ),
+    )
+
+    async def tool(_request: Any) -> ToolMessage:
+        return ToolMessage(content="X" * 200_000, tool_call_id="c1", name="read_document")
+
+    async def bounded(inner_request: Any) -> Any:
+        return await bound_tool_results.awrap_tool_call(inner_request, tool)
+
+    message = asyncio.run(frame_connector_results.awrap_tool_call(request, bounded))
+    text = str(message.content)
+
+    assert "chars cut" in text or "removed from the middle" in text, "the cut went unannounced"
+    assert (SYSTEM_SPEECH_MARK in text) is not served, (
+        "the mark survives exactly on the path where nothing defangs the result afterwards"
+    )
+    if served:
+        assert "&#91;system" in text, "the mark was dropped rather than escaped"

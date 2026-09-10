@@ -52,11 +52,25 @@ class EvidenceChunk(BaseModel):
     # The *strongest* disagreements, declared ones first, not all of them: on a corpus shaped like
     # a real programme this list ran to ~141 ids per chunk, which is a fact about the corpus rather
     # than a signal about the note (`conflict_max_per_note`).
-    conflicts_with: list[str] = Field(default_factory=list)
+    conflicts_with: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Ids of notes the corpus records as disagreeing with this chunk's own note. These "
+            "notes disagree; do not read this and a conflicting note as two independent "
+            "confirmations. The disputing note may not be in this sweep at all."
+        ),
+    )
     # How many disagreements there are in total, which is not always `len(conflicts_with)`. Carried
     # because a truncated list with nothing saying so reads as a complete one — the same rule the
     # tool-result number cap follows. Renderers say "3 of 141" when the two differ.
-    conflicts_total: int = Field(default=0, ge=0)
+    conflicts_total: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "How many notes disagree with this one in total — larger than len(conflicts_with) "
+            "when only the strongest are listed."
+        ),
+    )
     # Who authored the source note, where it came from, and how sure it is (D-160). `NoteRef` has
     # exposed all three to `find_notes`/`expand_note` since KM-6; the sweep that gathers most of
     # the evidence an answer is built on carried none of them, so the model saw a claim and no way
