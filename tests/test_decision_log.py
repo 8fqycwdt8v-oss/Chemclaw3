@@ -423,6 +423,15 @@ def test_the_topic_cursor_is_not_ahead_of_the_record() -> None:
 # different claim — "this guarantee is enforced right now, here" — which is why it is checked here
 # and there rather than exempted with the paths.
 _RETIRED_TEST_CITATIONS: dict[str, str] = {
+    # Renamed because the old name described a property the test does not check. It calls
+    # `skill_permits` with the *manifest* basis, which is right for a tree-vs-manifest check and
+    # wrong as a claim about what a turn can reach — and wave 14 made the production basis the
+    # *bound* tools, so a name saying "on the full surface" would now name the one basis this test
+    # deliberately does not use.
+    "test_no_shipped_skill_is_orphaned_on_the_full_surface": (
+        "renamed `test_no_shipped_skill_declares_only_tools_no_manifest_advertises` "
+        "(tests/test_skill_access.py)"
+    ),
     # Renamed. The guard is live and the ADR names it by a name nothing answers to.
     "test_the_registry_has_no_duplicate_reservations": (
         "renamed `test_the_index_has_no_duplicate_reservations`, in this file"
