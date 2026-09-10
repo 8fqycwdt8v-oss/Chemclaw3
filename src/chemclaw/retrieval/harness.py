@@ -129,12 +129,33 @@ class SynthesizedSection(BaseModel):
     ordinary "retrieval ran and found nothing" — a distinction a chemist signing the report at the
     PR-gate must see, since a durable report must never let a failed section masquerade as a
     genuinely empty one (F10-D2). It stays False on every success path.
+
+    **`failed_sources` and `skipped_sources` are here because one bool could not carry two
+    remedies.** `sweep_sources` returns the two separately — a source that *raised* and a source
+    that *declined* — and `gather_section` collapsed both into `retrieval_failed`, so a vector
+    index throwing `ConnectionError` and a share leg declining because the actor is unentitled
+    rendered the identical sentence:
+
+        B. vector raised (ConnectionError)   → "_Some retrieval sources failed …re-run required._"
+        C. share declined (unentitled)       → "_Some retrieval sources failed …re-run required._"
+
+    That the section is incomplete either way is not in question and `gather_section` argues it
+    correctly. What was wrong is the *rendered remedy*: re-running C as the same actor produces
+    the same section forever, so the report told a chemist to do the one thing that cannot work.
+
+    Both default empty, which is what keeps `durable/report_workflow.py`'s constructions — a
+    section whose whole activity failed, where there is no per-source detail to have — rendering
+    exactly as they did.
     """
 
     heading: str
     memory_layer: str
     evidence: list[EvidenceChunk]
     retrieval_failed: bool = False
+    #: The sources that raised, by name. A re-run can fix these.
+    failed_sources: list[str] = Field(default_factory=list)
+    #: The sources that declined, mapped to the reason each stated. A re-run cannot fix these.
+    skipped_sources: dict[str, str] = Field(default_factory=dict)
 
     @property
     def supported(self) -> bool:
@@ -235,6 +256,11 @@ async def gather_section(
         memory_layer=section.memory_layer,
         evidence=evidence,
         retrieval_failed=bool(failed or skipped),
+        # Carried apart, because a raise and a decline need different sentences and different
+        # remedies from the reader — see `SynthesizedSection`. Collapsing them here is what made
+        # the report tell an unentitled actor to re-run.
+        failed_sources=list(failed),
+        skipped_sources=dict(skipped),
     )
 
 
@@ -277,6 +303,59 @@ def verify_claims(
         else:
             discarded.append(claim)
     return supported, discarded
+
+
+def _gap_notices(section: SynthesizedSection, *, whole: bool) -> list[str]:
+    """The sentence(s) naming what this section was swept without, and what to do about it.
+
+    **Two remedies, because there are two causes and they used to render the same line.** A source
+    that *raised* is a transient the reader can fix by re-running; a source that *declined* —
+    `RetrieverSkip`, an unentitled actor or a filter the source cannot serve — will decline again
+    forever, so telling the reader to re-run is telling them to do the one thing that cannot work.
+    Measured before this split, a vector index raising `ConnectionError` and a share leg declining
+    for want of an entitlement produced byte-identical prose.
+
+    The sources are **named**, for the reason `_invoke` names unreachable bundles in the template
+    tier: "some sources" sends nobody anywhere, and a chemist who can see it was the share leg can
+    ask for the group.
+
+    The old wording is kept verbatim for the case that carries neither list — a section whose whole
+    activity failed (`durable/report_workflow.py` constructs exactly that, and has no per-source
+    detail to give) — so nothing changes for the report path that has always produced it.
+
+    Args:
+        section: The section being rendered, carrying its own failed and skipped source names.
+        whole: Whether *nothing* was retrieved, which changes only the clause about the evidence.
+
+    Returns:
+        One markdown line per distinct cause, each ending in a newline.
+    """
+    if not section.failed_sources and not section.skipped_sources:
+        if whole:
+            return ["_Retrieval failed for this section; incomplete — re-run required._\n"]
+        return [
+            "_Some retrieval sources failed for this section; the evidence below is "
+            "incomplete — re-run required._\n"
+        ]
+    # "Retrieval failed" stays the opening of the failure family's sentence, unchanged from the two
+    # lines above: it is the substring a reader greps for and every earlier report carries it.
+    # The skip family opens with "Retrieval was declined" precisely so it is *not* that string.
+    tail = "this section is incomplete" if whole else "the evidence below is incomplete"
+    notices = []
+    if section.failed_sources:
+        named = ", ".join(sorted(section.failed_sources))
+        notices.append(
+            f"_Retrieval failed for {named} in this section; {tail} — re-run required._\n"
+        )
+    if section.skipped_sources:
+        named = "; ".join(
+            f"{name}: {reason}" for name, reason in sorted(section.skipped_sources.items())
+        )
+        notices.append(
+            f"_Retrieval was declined for this section ({named}); {tail}. Re-running as the same "
+            "actor will produce the same section — the entitlement or the filters must change._\n"
+        )
+    return notices
 
 
 def _as_evidence(content: str) -> str:
@@ -355,14 +434,11 @@ def report_note(report: Report) -> Note:
             # layer down: the rendered note the chemist signed was byte-identical to the pre-fix
             # behaviour the gather docstring said was repaired. The marker stays (the reviewer
             # must see the gap), and the evidence renders under it.
-            lines.append(
-                "_Some retrieval sources failed for this section; the evidence below is "
-                "incomplete — re-run required._\n"
-            )
+            lines.extend(_gap_notices(section, whole=False))
         elif section.retrieval_failed:
             # Nothing was retrieved at all: flagged distinctly from an empty section, so the gap
             # is visible to the reviewer (and re-runnable), never silently absent (F10-D2).
-            lines.append("_Retrieval failed for this section; incomplete — re-run required._\n")
+            lines.extend(_gap_notices(section, whole=True))
             continue
         elif not section.supported:
             lines.append("_No supporting data found; section left unsupported._\n")

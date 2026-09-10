@@ -16,7 +16,11 @@ A tool call now also names **which plan step it served** (`audit_events.plan_ste
 recorded without inventing one — including for a call a gate *refused*, where no job exists to carry
 the rationale.
 
-Read-only by construction: four `SELECT`s and no writes. Deliberately not an agent tool — the
+Read-only by construction: five `SELECT`s and no writes. The fifth is `turn_costs`, and it is
+the one that stops a degraded turn reading as a clean one: a turn stopped by its model-call cap
+left the front door with `event: error … "code":"loop_cap_reached"` on the wire and this
+reconstruction identical to a complete turn's, because the four queries above ask what was *said*
+and what *ran* and nothing asked how the turn ended. Deliberately not an agent tool — the
 audit trail is evidence *about* the agent, and a surface that let the agent read its own trail
 would invite it to summarize rather than to be examined.
 """
@@ -69,6 +73,32 @@ _JOBS = """
     ORDER BY completed_at ASC
 """
 
+# **How each turn ended, which is the fact this report was missing.** `turn_costs` is keyed on
+# exactly the id every group above is keyed on, and until this query existed the reconstruction of
+# a turn stopped by its model-call cap was byte-identical to a clean one — measured on a live
+# database, the two sessions differed only in the assistant's own sentence:
+#
+#     CLEAN       turn_costs: ('cc9738df…', 'answered',    True, None, False)
+#     LOOP-CAPPED turn_costs: ('7b62ed3a…', 'loop_capped', True, None, False)
+#
+# The columns are the ones that say something about the *answer* rather than about its price:
+# `outcome` and `completed` (migration 060), `compacted` and `context_unreducible` (069),
+# `answer_confidence` and `review_required` (082-083). Spend is deliberately not read — that is
+# `operations.activity.spend`'s question, and this report is about why a call happened and what
+# came of it.
+#
+# Ordered so the *last* row for a correlation id wins, which matters for the one writer that books
+# more than one row under a run's id: a template's `agent` steps suffix the step onto the
+# correlation id (`durable/template_activities._book_step_spend`), so a prefix is not read here at
+# all and each step's row stands on its own.
+_COSTS = """
+    SELECT correlation_id, outcome, completed, compacted, context_unreducible,
+           answer_confidence, review_required, error_code
+    FROM turn_costs
+    WHERE session_id = %s
+    ORDER BY recorded_at ASC
+"""
+
 # Whether the session was ever created here at all. One row is written per session at creation
 # (`infra/sql/013_session_owners.sql`), so its presence is the only thing in this database that can
 # tell a mistyped id from a session that ran and left nothing — and telling those apart is the whole
@@ -106,6 +136,53 @@ class Job(NamedTuple):
     job: str
     rationale: str
     summary: str
+
+
+class TurnEnd(NamedTuple):
+    """How one turn ended, from `turn_costs` — the fact this reconstruction had no query for.
+
+    Every field is a *stored* fact rather than an inference, which is the whole reason this row
+    can be printed as a record: the front door's SSE wire tells a live client a turn was capped
+    (`event: error … "code":"loop_cap_reached"`), and nothing carried that forward, so a reload and
+    this report showed a capped turn as a finished one. The row was always there.
+
+    All defaulted so a caller constructing one positionally in a test keeps working, and because
+    the columns arrived in four migrations (060, 069, 082, 083) — a row written before any of them
+    carries that column's default, and `outcome='unknown'` in particular means "written before the
+    column existed" rather than "ended in some unknown way".
+    """
+
+    outcome: str = "unknown"
+    completed: bool = True
+    compacted: bool = False
+    context_unreducible: bool = False
+    answer_confidence: float | None = None
+    review_required: bool = False
+    error_code: str = ""
+
+    def line(self) -> str:
+        """This turn's ending as one printable line.
+
+        `answered` with nothing else to say still prints, and that is deliberate: the value of a
+        marker is that its *absence* means something, and a line only rendered when something went
+        wrong would leave a reader unable to tell "this turn ended cleanly" from "this deployment
+        does not record how turns end".
+        """
+        notes = []
+        if not self.completed:
+            notes.append("no answer delivered")
+        if self.error_code:
+            notes.append(f"error {self.error_code}")
+        if self.compacted:
+            notes.append("context compacted")
+        if self.context_unreducible:
+            notes.append("context over budget and unreducible")
+        if self.answer_confidence is not None:
+            notes.append(f"confidence {self.answer_confidence:.2f}")
+        if self.review_required:
+            notes.append("flagged for review")
+        detail = f" ({'; '.join(notes)})" if notes else ""
+        return f"   ended: {self.outcome}{detail}"
 
 
 def _speaker(message: object, shape: str | None = None) -> tuple[str, str]:
@@ -181,14 +258,35 @@ def _why_nothing(known: bool) -> list[str]:
         ]
     if known:
         return [
-            "  the session exists (session_owners has its row) and nothing is recorded under it: "
-            "retention has pruned it, its turns were abandoned before the projection was written, "
-            "or it never took a turn.",
+            "  the session exists (session_owners has its row) and nothing is recorded under it — "
+            "not even a turn-cost row, which is written for a turn that was abandoned or errored: "
+            "retention has pruned it, or it never took a turn.",
         ]
     return [
         "  no session with this id was ever created against this database — check the id, the "
         "deployment and CHEMCLAW_POSTGRES_DSN. This is not an empty session; it is an unknown one.",
     ]
+
+
+def _is_database_refusal(exc: BaseException) -> bool:
+    """Whether `exc` is the driver saying no, identified without importing the driver.
+
+    `chemclaw.cli` may not import `psycopg` — `tests/test_third_party_layering.py` allows the
+    `postgres` stack to `chemclaw.core` alone, because `core/db.py` is the one connection pool —
+    so this cannot name `psycopg.Error`. What it can do is ask for the two attributes every
+    `psycopg.Error` carries and nothing else in this process does: `sqlstate`, the five-character
+    SQLSTATE the *server* returned, and `diag`, its diagnostics. A `ValueError` has neither.
+
+    Duck-typed rather than string-matched on the module name deliberately: a name check would pass
+    for any class defined in a module that happens to start with "psycopg", and would fail the day
+    the driver is wrapped. The attribute pair is the driver's own documented surface.
+
+    The right long-term home is `core/db`, which already publishes the contract this works around
+    ("an unreachable or saturated database raises `ConnectionError`") and maps only
+    `OperationalError` onto it. Widening that mapping is a change to a module every layer imports,
+    so it is a decision of its own; this keeps the promise `main`'s docstring already makes.
+    """
+    return hasattr(exc, "sqlstate") and hasattr(exc, "diag")
 
 
 def _wrap(text: str, *, limit: int = 400) -> str:
@@ -204,6 +302,7 @@ async def explain(session_id: str, dsn: str | None = None) -> list[str]:
     order: list[str] = []
     calls: dict[str, list[ToolCall]] = {}
     jobs: dict[str, list[Job]] = {}
+    ends: dict[str, TurnEnd] = {}
 
     async with connection(target) as conn:
         cursor = await conn.execute(_MESSAGES, (session_id,))
@@ -236,10 +335,17 @@ async def explain(session_id: str, dsn: str | None = None) -> list[str]:
         for correlation_id, connector, job, rationale, summary in await cursor.fetchall():
             jobs.setdefault(correlation_id, []).append(Job(connector, job, rationale, summary))
 
+        cursor = await conn.execute(_COSTS, (session_id,))
+        for correlation_id, *fields in await cursor.fetchall():
+            # Last row wins for a correlation id, which is the ordering's job — the ledger upserts
+            # on `turn_id` rather than on this key, so a re-booked turn is one row and a template's
+            # steps are several under suffixed ids.
+            ends[correlation_id] = TurnEnd(*fields)
+
         cursor = await conn.execute(_OWNED, (session_id,))
         known = await cursor.fetchone() is not None
 
-    return _render(session_id, order, turns, calls, jobs, known=known)
+    return _render(session_id, order, turns, calls, jobs, ends, known=known)
 
 
 def _render(
@@ -248,6 +354,7 @@ def _render(
     turns: dict[str, list[tuple[str, str]]],
     calls: dict[str, list[ToolCall]],
     jobs: dict[str, list[Job]],
+    ends: dict[str, TurnEnd] | None = None,
     *,
     known: bool = False,
 ) -> list[str]:
@@ -268,10 +375,17 @@ def _render(
     both a tool call and a durable job and no surviving transcript row, was rendered twice. Same
     header, same lines, one occurrence read as two.
     """
-    shown = list(dict.fromkeys([*order, *calls, *jobs]))
+    endings = ends or {}
+    # **`endings` is a fourth source of turns, not only an annotation on the other three.** A turn
+    # that was cancelled writes a cost row and nothing else — no transcript projection, no audit
+    # row — so it used to fall through to `_why_nothing`, which offered the reader three guesses
+    # ("retention has pruned it, its turns were abandoned…, or it never took a turn") while the
+    # ledger held `abandoned` on exactly the key this function groups by. A stored fact must not be
+    # rendered as a guess.
+    shown = list(dict.fromkeys([*order, *calls, *jobs, *endings]))
     lines = [f"session {session_id}", ""]
     if not shown:
-        lines.append("  no messages, tool calls or jobs recorded for this session")
+        lines.append("  no messages, tool calls, jobs or turn records for this session")
         lines.extend(_why_nothing(known))
         return lines
     for correlation_id in shown:
@@ -281,7 +395,15 @@ def _render(
         if not said:
             lines.append("   transcript: absent (compacted, pruned, or rolled back)")
         for role, text in said:
-            lines.append(f"   {role}: {_wrap(text)}")
+            # **A tool's stored result is not a speaker, and it read as one.** A `ToolMessage` is
+            # in `session_messages` like every other message, so `message_role` called it `tool`
+            # and it printed as `tool: {'flags': [...]}` — a payload rendered as transcript speech,
+            # directly above the audit trail's own `tool screen_hazards [ok, 42 ms, …]` line for
+            # the very same call. One call, two renderings, the first of which invited a reader to
+            # mistake a result for something said. It is still printed, because the audit row
+            # records that a call happened and never what it returned; it is printed as what it is.
+            label = "tool result" if role == "tool" else role
+            lines.append(f"   {label}: {_wrap(text)}")
         for job in jobs.get(correlation_id, []):
             lines.append(f"   job {job.connector}:{job.job} — because: {_wrap(job.rationale)}")
             lines.append(f"       → {_wrap(job.summary, limit=200)}")
@@ -295,6 +417,9 @@ def _render(
             via = f" via {call.agent}" if call.agent else ""
             stamp = f"{call.outcome}, {call.latency_ms:.0f} ms, {call.actor}{via}"
             lines.append(f"   tool {call.tool} [{stamp}]{step}")
+        # Last, after everything the turn did, because that is when it ended.
+        if correlation_id in endings:
+            lines.append(endings[correlation_id].line())
         lines.append("")
     return lines
 
@@ -311,6 +436,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     id is refused for the reason `erase_actor` refuses one ("actor must be a non-empty id"), and
     the database's own unreachability is one line rather than a traceback, because an operator
     reading a stack trace out of a read-only reporting command learns only that it crashed.
+
+    **That last sentence was true of one failure and read as being about all of them.** `core/db`
+    maps `psycopg.OperationalError` onto `ConnectionError` and nothing else, so a database that is
+    reachable but has no schema — the likeliest way an auditor runs this command wrong — came back
+    as 29 lines of `psycopg.errors.UndefinedTable`. Both families are now one line plus a remedy;
+    everything else still raises, because a bug in this module is not the database refusing.
     """
     parser = argparse.ArgumentParser(
         prog="python -m chemclaw.cli.explain",
@@ -332,6 +463,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         # `_DatabaseUnavailable` is that subclass, so this catches the real failure mode by its
         # documented contract rather than by a vendor exception type.
         print(f"cannot read the audit trail: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        # **The docstring's promise held for exactly one failure.** `core/db` maps only
+        # `psycopg.OperationalError` onto `ConnectionError`, and a database that is reachable but
+        # does not have this schema raises `psycopg.errors.UndefinedTable`, a `ProgrammingError` —
+        # so the branch above never saw it. Measured:
+        #
+        #     unmigrated / wrong schema:  EXIT=1, 29 stderr lines, psycopg.errors.UndefinedTable
+        #     database unreachable:       EXIT=1, 4 lines, "cannot read the audit trail: …"
+        #
+        # A wrong DSN or an unmigrated database is the likeliest way an auditor runs this command
+        # wrong, and `_why_nothing` already coaches them about the DSN on the other path.
+        if not _is_database_refusal(exc):
+            raise
+        print(f"cannot read the audit trail: {exc}", file=sys.stderr)
+        print(
+            "  the database answered but refused the query — most likely the wrong database, or "
+            "one that has not been migrated. Check CHEMCLAW_POSTGRES_DSN and run "
+            "`make db-migrate`.",
+            file=sys.stderr,
+        )
         return 1
     for line in lines:
         print(line)

@@ -17,7 +17,14 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, message_to_dict
 
 from chemclaw.agent.message_migration import LANGCHAIN_SHAPE
-from chemclaw.cli.explain import Job, ToolCall, _render, _speaker
+from chemclaw.cli.explain import (
+    Job,
+    ToolCall,
+    TurnEnd,
+    _is_database_refusal,
+    _render,
+    _speaker,
+)
 from chemclaw.core.config import settings
 from tests.legacy_rows import legacy_text
 
@@ -30,11 +37,20 @@ def _report(
     turns: dict[str, list[tuple[str, str]]] | None = None,
     calls: dict[str, list[ToolCall]] | None = None,
     jobs: dict[str, list[Job]] | None = None,
+    ends: dict[str, TurnEnd] | None = None,
     known: bool = False,
 ) -> str:
     """Render one session's reconstruction as a single string for substring assertions."""
     return "\n".join(
-        _render(_SESSION, order or [], turns or {}, calls or {}, jobs or {}, known=known)
+        _render(
+            _SESSION,
+            order or [],
+            turns or {},
+            calls or {},
+            jobs or {},
+            ends or {},
+            known=known,
+        )
     )
 
 
@@ -87,8 +103,13 @@ def test_a_turn_whose_words_were_compacted_away_is_still_shown() -> None:
 
 
 def test_an_empty_session_says_so_rather_than_printing_nothing() -> None:
-    """Silence reads as a broken tool; an explicit statement reads as an answer."""
-    assert "no messages, tool calls or jobs recorded" in _report(order=[])
+    """Silence reads as a broken tool; an explicit statement reads as an answer.
+
+    The line names `turn_costs` too, because that table is now a fourth source of turns rather
+    than only an annotation on the other three — so "nothing recorded" has to mean nothing in
+    four places, not three.
+    """
+    assert "no messages, tool calls, jobs or turn records" in _report(order=[])
 
 
 def test_a_failed_tool_call_is_not_hidden() -> None:
@@ -262,3 +283,126 @@ def test_a_session_with_rows_is_not_given_an_explanation_it_does_not_need() -> N
     report = _report(order=["c-1"], calls={"c-1": [ToolCall("find_notes", "ok", "", 3.0, "u", "")]})
     assert "CHEMCLAW_SESSION_STORE" not in report
     assert "was ever created against this database" not in report
+
+
+# --- how the turn ended, which nothing asked ------------------------------------------------------
+
+
+def test_a_capped_turn_stops_reading_as_a_clean_one() -> None:
+    """The reconstruction of a capped turn was byte-identical to a complete one.
+
+    Measured on a live database with two sessions differing only in the assistant's own sentence:
+
+        CLEAN       turn_costs: ('cc9738df…', 'answered',    True, None, False)
+        LOOP-CAPPED turn_costs: ('7b62ed3a…', 'loop_capped', True, None, False)
+
+    The fact was durable on exactly the key this report groups by, and `explain` ran four SELECTs
+    of which none was this one — while the front door's own wire had already told a live client
+    `event: error … "code":"loop_cap_reached"`.
+    """
+    clean = _report(
+        order=["c-1"],
+        turns={"c-1": [("assistant", "FINAL: yes, with a peroxide check.")]},
+        ends={"c-1": TurnEnd(outcome="answered")},
+    )
+    capped = _report(
+        order=["c-1"],
+        turns={"c-1": [("assistant", "Still checking; one more source.")]},
+        ends={"c-1": TurnEnd(outcome="loop_capped")},
+    )
+
+    assert "ended: answered" in clean
+    assert "ended: loop_capped" in capped
+    # And a clean turn still says how it ended, because a marker whose absence means nothing is
+    # not a marker.
+    assert "ended:" in clean
+
+
+def test_the_endings_line_names_every_stored_qualifier_it_has() -> None:
+    """The four columns beyond `outcome` that say something about the answer, not its price.
+
+    `compacted` and `context_unreducible` (migration 069), `answer_confidence` and
+    `review_required` (082-083), plus `completed` and `error_code` (060). Asserted together
+    because rendering only `outcome` would satisfy the test above and still hide, for instance,
+    that the answer was produced from a thread the policy could not fit in the window.
+    """
+    line = TurnEnd(
+        outcome="errored",
+        completed=False,
+        compacted=True,
+        context_unreducible=True,
+        answer_confidence=0.41,
+        review_required=True,
+        error_code="upstream_timeout",
+    ).line()
+
+    assert "ended: errored" in line
+    assert "no answer delivered" in line
+    assert "error upstream_timeout" in line
+    assert "context compacted" in line
+    assert "unreducible" in line
+    assert "confidence 0.41" in line
+    assert "flagged for review" in line
+    # A clean turn's line carries no parenthetical at all.
+    assert TurnEnd(outcome="answered").line() == "   ended: answered"
+
+
+def test_a_cancelled_turn_is_a_turn_rather_than_three_guesses() -> None:
+    """A turn that wrote only a cost row fell through to `_why_nothing`.
+
+    On a cancelled turn the report printed "retention has pruned it, its turns were abandoned…, or
+    it never took a turn" while `turn_costs` held `abandoned` on exactly the key this function
+    groups by. A stored fact must not be rendered as a guess, so the ledger is a *fourth source of
+    turns* here and not merely an annotation on the other three.
+    """
+    report = _report(known=True, ends={"c-9": TurnEnd(outcome="abandoned", completed=False)})
+
+    assert "── turn c-9" in report
+    assert "ended: abandoned (no answer delivered)" in report
+    assert "retention has pruned it" not in report
+    assert "no messages, tool calls, jobs or turn records" not in report
+
+
+def test_a_tool_result_does_not_render_as_something_somebody_said() -> None:
+    """One call was rendered twice, and the first rendering read as speech.
+
+    A `ToolMessage` is a row in `session_messages` like any other, so `message_role` called it
+    `tool` and it printed `tool: {'flags': [...]}` directly above the audit trail's own
+    `tool screen_hazards [ok, 42 ms, …]` for the same call. The body is still printed — the audit
+    row records that a call happened and never what it returned — but as a result, not a speaker.
+    """
+    report = _report(
+        order=["c-1"],
+        turns={
+            "c-1": [("tool", "{'flags': ['peroxide former']}"), ("assistant", "yes, carefully")]
+        },
+        calls={"c-1": [ToolCall("screen_hazards", "ok", "", 42.0, "u-1", "")]},
+    )
+
+    assert "   tool result: {'flags': ['peroxide former']}" in report
+    assert "   tool: {'flags'" not in report
+    # The audit line is untouched — it is the other rendering, and it is the one that is a record.
+    assert "tool screen_hazards [ok, 42 ms, u-1]" in report
+
+
+def test_a_database_that_answers_and_refuses_is_told_apart_from_one_that_does_not() -> None:
+    """The predicate behind `main`'s promise, which held for `ConnectionError` and nothing else.
+
+    Measured before the fix:
+
+        === unmigrated / wrong schema ===  EXIT=1, 29 stderr lines, psycopg.errors.UndefinedTable
+        === database unreachable       ===  EXIT=1, 4 lines, "cannot read the audit trail: …"
+
+    `core/db` maps only `psycopg.OperationalError` onto `ConnectionError`, and a schema mismatch is
+    a `ProgrammingError`. Duck-typed on the driver's own `sqlstate`/`diag` pair because
+    `chemclaw.cli` may not import `psycopg` (`tests/test_third_party_layering.py`).
+    """
+    import psycopg
+
+    assert _is_database_refusal(psycopg.errors.UndefinedTable("no such table"))
+    assert _is_database_refusal(psycopg.ProgrammingError("bad query"))
+    assert _is_database_refusal(psycopg.OperationalError("gone"))
+    # Everything else still raises, so a programming error in this file is not swallowed as "the
+    # database refused".
+    assert not _is_database_refusal(ValueError("a bug in this module"))
+    assert not _is_database_refusal(KeyError("c-1"))

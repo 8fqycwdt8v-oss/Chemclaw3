@@ -31,6 +31,7 @@ import contextlib
 import os
 import subprocess
 import sys
+import typing
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -191,6 +192,10 @@ def _drive(
         # One scheduling round is enough for a recorder that never awaits anything real; the point
         # is only that the cost task gets to run before the loop `asyncio.run` closes it.
         await asyncio.sleep(0)
+        # The activity is annotated `AgentStepResult | str` for the rollout window it documents;
+        # *this* code path is always the current one, so narrowing here is an assertion rather
+        # than a cast.
+        assert isinstance(result, AgentStepResult), result
         return result
 
     outcome = asyncio.run(_run())
@@ -1137,9 +1142,7 @@ def test_the_runs_record_states_which_step_ran_degraded(monkeypatch: pytest.Monk
     monkeypatch.setattr(settings, "harness_max_loop_iterations", 25)
     monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
 
-    step = _drive(
-        monkeypatch, _step(), ["five hazard flags; two are severe"], unreachable=["eln"]
-    )
+    step = _drive(monkeypatch, _step(), ["five hazard flags; two are severe"], unreachable=["eln"])
     degradations = {"brief": step.result.notice()}
     summary = run_summary("hazard-briefing", 2, degradations)
 
@@ -1169,9 +1172,7 @@ def _template_run() -> Any:
             {
                 "name": "hazard-briefing",
                 "summary": "Screen a molecule for hazards and write a brief.",
-                "inputs": [
-                    {"name": "smiles", "type": "string", "description": "The molecule."}
-                ],
+                "inputs": [{"name": "smiles", "type": "string", "description": "The molecule."}],
                 "steps": [
                     {
                         "id": "brief",
@@ -1185,3 +1186,32 @@ def _template_run() -> Any:
         inputs={"smiles": "CCO"},
         requested_by="chemist-1",
     )
+
+
+def test_the_step_still_admits_the_answer_an_old_worker_returns() -> None:
+    """The rollout claim `run_agent_step`'s `| str` makes, asserted rather than believed.
+
+    Both workers poll `background-jobs`, so during a deploy a new-code workflow can schedule this
+    activity onto an old-code worker that answers a bare string. Without the union the pydantic
+    data converter refuses it and the run fails — for the whole rollout, on a workflow whose own
+    ceiling (`template_run_timeout_seconds`) is 45,330 seconds. Checked on the annotation because
+    that is what the converter reads, and through the converter's own adapter because a hint that
+    *looks* permissive and decodes differently is the failure this is about.
+
+    The sequencer's other half — that a bare string still becomes the step's result — is driven end
+    to end against a real workflow environment by `tests/test_templates.py`, whose `run_agent_step`
+    stand-in returns exactly that.
+    """
+    from pydantic import TypeAdapter
+    from temporalio.contrib.pydantic import pydantic_data_converter
+
+    from chemclaw.durable import template_activities
+
+    hints = typing.get_type_hints(template_activities.run_agent_step)
+    adapter: TypeAdapter[Any] = TypeAdapter(hints["return"])
+
+    assert adapter.validate_python("briefing text") == "briefing text"
+    assert isinstance(adapter.validate_python({"answer": "x"}), AgentStepResult)
+    # And the worker's converter is the pydantic one, which is what makes the adapter above the
+    # right thing to have asked (`core/temporal_client.py`).
+    assert pydantic_data_converter is not None
