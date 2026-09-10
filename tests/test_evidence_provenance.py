@@ -12,8 +12,13 @@ second, ungated tier exists, which is why this lands before that one and on its 
 import asyncio
 from pathlib import Path
 
+import yaml
+
+from chemclaw.agent.research_tools import gather_evidence
+from chemclaw.agent.tool_schema import as_structured_tool
 from chemclaw.core.config import settings
 from chemclaw.kg.note import Note
+from chemclaw.evals.probe import ProbeSet
 from chemclaw.retrieval.evidence import EvidenceChunk
 from chemclaw.retrieval.retrievers import GraphRetriever
 from chemclaw.retrieval.vector_index import InMemoryNoteIndex, reindex_notes
@@ -194,5 +199,124 @@ def test_an_excerpt_with_no_body_match_still_starts_at_the_beginning(tmp_path: P
         (chunk,) = await GraphRetriever(str(tmp_path)).retrieve("esterification", {})
 
         assert chunk.content == body.strip()[: settings.note_excerpt_chars]
+
+    asyncio.run(_run())
+
+
+def test_the_conflict_marker_is_explained_in_the_description_the_model_is_sent() -> None:
+    """A flag nothing explains is a flag nobody acts on.
+
+    `conflicts_with`/`conflicts_total` ride on every chunk `gather_evidence` returns and were
+    described nowhere the model reads: not in the tool's own `Returns:` paragraph, not as a field
+    description (the chunk's nine fields all carried `description=None`), not in the system
+    prompt, not in a skill. The report path already renders the right sentence — see
+    `retrieval/harness.py`, which emits "these notes disagree; do not read this and a conflicting
+    note as two independent confirmations" per chunk — and the conversational path, which is every
+    turn, had neither half.
+
+    Asserted off `as_structured_tool`, because that is the object `ToolNode` binds and its
+    `description` is the string that goes out on the wire; a docstring nobody converts is not the
+    contract.
+    """
+    description = as_structured_tool(gather_evidence).description
+    assert "conflicts_with" in description
+    assert "conflicts_total" in description
+    # The instruction, not only the field name: the failure this closes is a model handed two ids
+    # and no reason to chase them.
+    assert "two independent confirmations" in description
+
+
+def test_the_conflict_marker_survives_the_cap_that_cut_its_disputers() -> None:
+    """Why the sentence has to be on the *marked* chunk rather than left to the reader.
+
+    Measured in the review this closes: with the merged cap biting, the refuted claim survived and
+    both notes disputing it were cut, so the only trace of the disagreement in the model's context
+    was two ids on a chunk. Nothing said what they meant, and the notes they name were not there
+    to be read.
+    """
+    chunk = EvidenceChunk(
+        content="Use 5 mol% Pd.",
+        source_note_id="playbook-pd",
+        retriever="graph",
+        conflicts_with=["failure-1", "failure-2"],
+        conflicts_total=2,
+    )
+    # The ids are all the model gets; `expand_note` is the only way to reach them, and the tool
+    # description is the only place that can say so.
+    assert chunk.conflicts_with and "expand_note" in as_structured_tool(gather_evidence).description
+
+
+def test_the_corpus_grades_whether_a_disputed_note_is_qualified_in_the_answer() -> None:
+    """Whether a *model* acts on the marker is a number, and nobody had it.
+
+    The two tests above assert the mechanism: the flag rides on the chunk and the description now
+    says what it means. Neither can say whether an answer built on a marked chunk actually carries
+    the caveat, because that needs a live model and a gateway this sandbox does not have. So the
+    corpus is where the question is parked — `data/evals/probes/reaction.yaml`'s `rx-33` already
+    grades the same contradiction from the *optimisation* side (does a suggestion get checked
+    against the record), and what was ungraded is the reader's side: a chunk arriving marked, with
+    the notes that dispute it possibly cut by the cap.
+
+    Asserted by the claim it forbids rather than by a probe id, so a renumbering of the corpus does
+    not read as the coverage disappearing.
+    """
+    corpus = Path(__file__).resolve().parent.parent / "data" / "evals" / "probes" / "knowledge.yaml"
+    probes = ProbeSet.model_validate(yaml.safe_load(corpus.read_text(encoding="utf-8"))).probes
+    graded = [
+        probe
+        for probe in probes
+        if any("independent confirmation" in claim for claim in probe.forbids_claims)
+    ]
+    assert graded, (
+        "no probe grades whether an answer qualifies a note the sweep marked as disputed; "
+        "`conflicts_with` is then a flag whose effect on an answer is unmeasured"
+    )
+    # The marker is what the answer has to survive on when the cap cut its disputers, so the
+    # direction has to name the field rather than only the notes.
+    assert any("conflicts_with" in probe.direction for probe in graded)
+
+
+def test_the_window_follows_the_term_that_points_somewhere_not_the_first_one_it_finds(
+    tmp_path: Path,
+) -> None:
+    """One matched term in the opening line used to pin the excerpt to the head.
+
+    `_window_start` took `first = min(offsets)` — the earliest occurrence of *any* matched term —
+    and then returned `0` whenever that offset was inside the budget. So a query whose framing
+    word sits in the note's title got the title, and the term carrying the answer was never
+    reached. Measured over the 19 independently-authored `knowledge.yaml` probes: of 30 delivered
+    gold chunks whose body exceeds the 240-char budget, **25 were the plain head** and only 13
+    showed every term that matched. The worst case is the one a chemist actually asks —
+    `rxn-suzuki-biaryl` for "what isolated yield did the Suzuki coupling of 4-bromoanisole give"
+    lost `isolated` and `yield`, which is the question *and* the 76% answer.
+
+    The rule is now the window that shows the most of the query, weighted by how much each term
+    narrows *this note*: a term appearing once points at a place, a term appearing six times
+    points nowhere. Measured the same way that moved term visibility 84/110 → 92/110 and full
+    coverage 13/30 → 17/30, with `isolated yield: 76%` inside the p01 excerpt.
+    """
+
+    async def _run() -> None:
+        # `coupling` eight times in the head, `protodeboronation` once at the end: the earliest
+        # match is in the first line, the answer is not.
+        head = "Coupling notes on the coupling of the coupling partners. " * 5
+        _write(
+            tmp_path,
+            Note(
+                id="rxn-biaryl-run",
+                type="reaction",
+                created_by="human",
+                body=f"{head}\n\nThe low run failed by competitive protodeboronation of the boronic acid.",
+            ),
+        )
+        (chunk,) = await GraphRetriever(str(tmp_path)).retrieve(
+            "did the coupling fail by protodeboronation", {}
+        )
+
+        assert "protodeboronation" in chunk.content, (
+            "the excerpt shows the framing term and not the one carrying the answer: "
+            f"{chunk.content!r}"
+        )
+        assert len(chunk.content) <= settings.note_excerpt_chars
 
     asyncio.run(_run())

@@ -48,10 +48,12 @@ from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from chemclaw.durable.template_activities import (
     AgentStepInput,
+    AgentStepResult,
     StepIdentity,
     ToolStepInput,
     step_profile,
 )
+from chemclaw.durable.template_job import run_summary, template_job_record
 from chemclaw.templates.manifest import AgentStep
 from tests.fakes_langgraph import ScriptedChatModel
 
@@ -130,12 +132,17 @@ class _Step(NamedTuple):
     events: list[Any]
     offered: list[str]
     costs: list[TurnCost]
+    # The whole `AgentStepResult`, because the answer text is now only *part* of what the step
+    # returns and the rest of it — what was unreachable, how the turn ended — is the thing the
+    # degradation group below is about.
+    result: AgentStepResult
 
 
 def _drive(
     monkeypatch: pytest.MonkeyPatch,
     step: AgentStepInput,
     script: list[Any] | ScriptedChatModel,
+    unreachable: list[str] | None = None,
 ) -> _Step:
     """Run the real `run_agent_step` against a scripted model, and report what happened.
 
@@ -172,18 +179,22 @@ def _drive(
     async def fake_open(_stack: AsyncExitStack, specs: Any) -> tuple[list[Any], list[str]]:
         names = [name for spec in specs for name in (spec.allowed_tools or [])]
         offered.extend(names)
-        return [_stand_in(name, calls) for name in names], []
+        # The second element is what a real `open_connector_specs` reports as *not* opened, and
+        # `unreachable` is how a test asks for that half — a dark bundle contributes no tools, so
+        # there is nothing else about it a caller could observe.
+        return [_stand_in(name, calls) for name in names], list(unreachable or [])
 
     monkeypatch.setattr(template_activities, "open_connector_specs", fake_open)
 
-    async def _run() -> str:
-        answer = await template_activities.run_agent_step(step)
+    async def _run() -> AgentStepResult:
+        result = await template_activities.run_agent_step(step)
         # One scheduling round is enough for a recorder that never awaits anything real; the point
         # is only that the cost task gets to run before the loop `asyncio.run` closes it.
         await asyncio.sleep(0)
-        return answer
+        return result
 
-    return _Step(asyncio.run(_run()), calls, sink.events, offered, costs)
+    outcome = asyncio.run(_run())
+    return _Step(outcome.answer, calls, sink.events, offered, costs, outcome)
 
 
 class _CostRecorder:
@@ -1031,3 +1042,146 @@ def test_a_spend_capped_step_is_booked_as_capped_rather_than_answered(
 
     assert [row.outcome for row in step.costs] == ["spend_capped"]
     assert "No files found" not in step.answer
+
+
+# --- the degradation an `agent` step used to swallow ---------------------------------------------
+#
+# The theme these four pin: a step that ran with its capability bundles dark, or that was stopped by
+# one of its two caps, returned a `str` **byte-identical in shape** to a complete one. Measured on
+# this activity against one scripted model, before the fix:
+#
+#     COMPLETE (cap=20, unreachable=[])            'FINAL: five hazard flags; two are severe.'
+#     CONNECTORS UNREACHABLE (['eln','calc'])      'FINAL: five hazard flags; two are severe.'
+#     LOOP-CAPPED (cap=2)                          'Interim: three hazard flags so far; ...'
+#
+# — and `run_summary` had no degradation to state, so the run's `job_records` row read "template
+# 'hazard-briefing' completed 1 step(s)" in all three. The fact was never missing: `unreachable`
+# came back from `open_connector_specs` and was discarded into `_`, and `loop_capped`/`spend_capped`
+# were read into `turn_costs.outcome` alone — a cost ledger neither the next step nor the artifact
+# a chemist signs can see.
+
+
+def test_a_clean_step_carries_no_notice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The control arm, first: nothing is added to an answer that is whole.
+
+    Without this the three below are satisfied by a notice on *every* step, which would make the
+    marker meaningless in exactly the way an always-on warning is.
+    """
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", 25)
+    monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
+
+    step = _drive(monkeypatch, _step(), ["five hazard flags; two are severe"])
+
+    assert step.result.degraded is False
+    assert step.result.notice() == ""
+    assert step.result.step_value() == "five hazard flags; two are severe"
+    assert run_summary("hazard-briefing", 1, {}) == "template 'hazard-briefing' completed 1 step(s)"
+
+
+def test_a_step_whose_bundles_were_dark_says_so_where_the_next_step_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dark connector reaches the value the template passes on, not just a discarded local.
+
+    `api/runner.py` yields `CapabilityDegradedEvent` off this same tuple *before* the answer, and
+    the `tool` step names the same list in its own failure — this path threw it away, so the one
+    surface with no event stream to warn on was the one producing the artifact a chemist signs.
+    """
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", 25)
+    monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
+
+    step = _drive(
+        monkeypatch, _step(), ["five hazard flags; two are severe"], unreachable=["eln", "calc"]
+    )
+
+    assert step.result.unreachable == ["eln", "calc"]
+    assert step.result.degraded is True
+    # By name, because "2 unreachable" sends nobody anywhere.
+    assert "calc" in step.result.notice() and "eln" in step.result.notice()
+    value = step.result.step_value()
+    assert value.startswith("[INCOMPLETE"), value
+    # The answer itself is still there — a degraded answer is delivered, marked, not withheld.
+    assert value.endswith("five hazard flags; two are severe")
+
+
+def test_a_capped_step_hands_on_a_marked_partial_rather_than_a_bare_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The comment above the connector call said this landed; it landed in the ledger only.
+
+    "a truncated runaway booked `outcome="answered"` and handed the next step of the template a
+    partial answer with nothing saying so" — the booking was fixed, the handing-on was not.
+    """
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", 3)
+    monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
+
+    step = _drive(monkeypatch, _step(), _looping(8))
+
+    assert step.result.outcome == "loop_capped"
+    assert step.result.degraded is True
+    assert step.result.step_value().startswith("[INCOMPLETE")
+    assert step.result.step_value().endswith("partial 2")
+
+
+def test_the_runs_record_states_which_step_ran_degraded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The durable half: a listing and a stored row that stop reading as a clean run.
+
+    `find_past_jobs` and `get_durable_job_status` render `summary` and nothing else about a
+    completed run, so the degradation has to be *in* it; `result["degraded"]` is beside it so a
+    reader that wants the fact machine-readably need not parse prose. Both, deliberately — the
+    chemist reads the text and the auditor queries the row.
+
+    `state` stays `completed` and that is argued in `run_summary`: the run did run to its end, and
+    `job_records.state` is a two-value discriminator owned by `infra/sql/061_job_record_state.sql`.
+    """
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", 25)
+    monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
+
+    step = _drive(
+        monkeypatch, _step(), ["five hazard flags; two are severe"], unreachable=["eln"]
+    )
+    degradations = {"brief": step.result.notice()}
+    summary = run_summary("hazard-briefing", 2, degradations)
+
+    assert summary == "template 'hazard-briefing' completed 2 step(s) — DEGRADED at brief"
+    record = template_job_record(
+        "wf-1",
+        _template_run(),
+        {"brief": step.result.step_value()},
+        summary,
+        degradations,
+    )
+    assert record.state == "completed"
+    assert record.summary == summary
+    assert record.result["degraded"] == degradations
+    # A clean run's row is byte-identical to what it has always been.
+    clean = template_job_record("wf-2", _template_run(), {"brief": "whole"}, "done")
+    assert clean.result == {"steps": {"brief": "whole"}}
+
+
+def _template_run() -> Any:
+    """One `TemplateRunInput` — imported here because only this group needs the workflow's input."""
+    from chemclaw.durable.template_job import TemplateRunInput
+    from chemclaw.templates.manifest import Template
+
+    return TemplateRunInput(
+        template=Template.model_validate(
+            {
+                "name": "hazard-briefing",
+                "summary": "Screen a molecule for hazards and write a brief.",
+                "inputs": [
+                    {"name": "smiles", "type": "string", "description": "The molecule."}
+                ],
+                "steps": [
+                    {
+                        "id": "brief",
+                        "kind": "agent",
+                        "purpose": "Turn the flags into something a chemist can act on.",
+                        "prompt": "Write a short brief for ${inputs.smiles}.",
+                    }
+                ],
+            }
+        ),
+        inputs={"smiles": "CCO"},
+        requested_by="chemist-1",
+    )

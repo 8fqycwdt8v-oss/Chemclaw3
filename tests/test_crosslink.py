@@ -11,11 +11,13 @@ link and its target land in one reviewable unit.
 """
 
 import asyncio
+import logging
 from pathlib import Path
 
 import pytest
 
 from chemclaw.core.chem import compound_id
+from chemclaw.core.config import settings
 from chemclaw.ingest.eln.compound import compound_dependencies, compound_note
 from chemclaw.kg.crosslink import calc_ref_index, cited_calculations, notes_for_calculation
 from chemclaw.kg.graph import invalidate_cache
@@ -250,3 +252,88 @@ def test_an_unparseable_smiles_does_not_fail_a_submission() -> None:
     """This helper reads a field opportunistically; it is not the place to reject a bad SMILES."""
     note = Note(id="n", type="reaction", compound_smiles="not-a-molecule", body="[[compound-x]]")
     assert compound_dependencies(note) == []
+
+
+def test_a_link_to_a_note_that_does_not_exist_is_reported_at_write_time(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hand-written `[[wikilink]]` at a note nobody wrote used to land in silence.
+
+    `compound_dependencies` mints the derived `compound-<hash>` id and nothing else, so a target
+    the model typed itself is carried by no dependency — the note commits, `expand_note` on the
+    target then raises "no note with id …", and the chip in the UI 404s. The write is the one
+    moment the writer can say so, and `kg-validate` — the check that does catch it — runs over
+    *this* repository's corpus in CI, never over a deployment's.
+
+    A WARNING and not a refusal: the note is the record either way, the model is told what it
+    linked to, and refusing would lose a real observation over a typo in a citation.
+    """
+
+    async def _run() -> None:
+        monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
+        note = Note(
+            id="job-1",
+            type="job-result",
+            created_by="agent",
+            body="Computed for [[compound-ethanol-w141]].",
+        )
+        with caplog.at_level(logging.WARNING, logger="chemclaw.kg.record"):
+            await record_note(note, _Capturing(), knowledge_dir="knowledge")
+
+    asyncio.run(_run())
+    assert "compound-ethanol-w141" in caplog.text
+    assert "job-1" in caplog.text
+
+
+def test_a_link_whose_target_lands_in_the_same_write_is_not_reported(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The negative control: the ordinary computed note must not warn on every write.
+
+    Its compound dependency is written first (`record._build_write`), so the link resolves the
+    moment the unit lands — warning about it would make the marker noise and train the model to
+    ignore it.
+    """
+
+    async def _run() -> None:
+        monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
+        smiles = "CCO"
+        note = Note(
+            id="job-2",
+            type="job-result",
+            compound_smiles=smiles,
+            created_by="agent",
+            body=f"Computed for [[{compound_id(smiles)}]].",
+        )
+        with caplog.at_level(logging.WARNING, logger="chemclaw.kg.record"):
+            await record_note(
+                note, _Capturing(), knowledge_dir="knowledge",
+                dependencies=compound_dependencies(note),
+            )
+
+    asyncio.run(_run())
+    assert caplog.text == ""
+
+
+def test_a_citation_of_a_transcribed_reaction_is_not_a_dangling_link(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`[[reaction-<id>]]` resolves in the record store, not in the graph (D-2026-08-25).
+
+    Every campaign and optimization note cites its runs that way, so reporting them would warn on
+    the notes the miners write most.
+    """
+
+    async def _run() -> None:
+        monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
+        note = Note(
+            id="campaign-1",
+            type="campaign",
+            created_by="agent",
+            body="Distilled from [[reaction-eln-7]].",
+        )
+        with caplog.at_level(logging.WARNING, logger="chemclaw.kg.record"):
+            await record_note(note, _Capturing(), knowledge_dir="knowledge")
+
+    asyncio.run(_run())
+    assert caplog.text == ""
