@@ -98,7 +98,7 @@ ENVELOPE_TAG = f"retrieved-note-{_NONCE}"
 
 #: What marks a sentence in a tool result as **this system's**, rather than as a tool's words.
 #:
-#: `chemclaw_agent._SAFETY_RULES` used to tell the model that a result beginning `Refused:` is an
+#: `chemclaw_agent._SAFETY_BLOCKS` used to tell the model that a result beginning `Refused:` is an
 #: access-control decision about the asking chemist's account — a promise nothing kept. `defang`
 #: neutralises delimiters, not prefixes; `answered_failure` keeps a connector's error text
 #: **verbatim** on purpose; and an error result is defanged rather than framed. Measured through

@@ -567,6 +567,9 @@ def test_where_the_notices_mark_survives_the_chain_is_measured_not_assumed(serve
         return await bound_tool_results.awrap_tool_call(inner_request, tool)
 
     message = asyncio.run(frame_connector_results.awrap_tool_call(request, bounded))
+    # The middlewares under test both hand back a `ToolMessage`; the `Command` arm of that union
+    # is the `task` helper's, which this path never reaches (`agent/tool_result_shape.py`).
+    assert isinstance(message, ToolMessage), "this chain returned a Command, not a tool result"
     text = str(message.content)
 
     assert "chars cut" in text or "removed from the middle" in text, "the cut went unannounced"

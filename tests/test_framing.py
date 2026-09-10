@@ -92,7 +92,7 @@ def test_instructions_name_the_exact_delimiter_framing_uses() -> None:
     """
     assert f"<{ENVELOPE_TAG}>" in _INSTRUCTIONS
     # And under *every* profile, not only the default: a profile's `instructions:` replace
-    # `_INSTRUCTIONS`, so the envelope rule must ride in the appended `_SAFETY_RULES` or a
+    # `_INSTRUCTIONS`, so the envelope rule must ride in the appended `_SAFETY_BLOCKS` or a
     # specialist runs with the injection defense's instruction half deleted (A2-F2).
     from chemclaw.agent.chemclaw_agent import instructions_for
     from chemclaw.agent.profile_discovery import load_profiles
