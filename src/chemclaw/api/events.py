@@ -11,6 +11,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from chemclaw.agent.verifier import AnswerCheck
 from chemclaw.core.turn_signals import RefusalReason
 
 
@@ -301,12 +302,25 @@ class AnswerEvent(BaseModel):
     confidence did not run, so the turn is routed to review with an explicit reason appended to
     `unsupported_claims` rather than a bare flag beside a high `confidence`.
 
-    With every knob off — the default — the scored fields stay `None`/`False`/empty, `verified_by`
-    stays `None`, and the event is byte-for-byte today's answer.
+    With every knob off — the default — the scored fields stay `None`/`False`/empty and
+    `verified_by` stays `None`. **What says the checks did not run is `checks_run`, and nothing
+    said it before**: those defaults are what a check *finds*, so an answer the shape gate scanned
+    and cleared serialized identically to one nothing looked at (measured: the same bytes,
+    character for character). `confidence`/`verified_by` are the verifier's own "did not run"; the
+    shape gate had no field at all.
     """
 
     type: Literal["answer"] = "answer"
     text: str
+    # Which honesty checks ran on this answer — `[]` means none did, which is the shipped default.
+    # Additive and defaulted, like `ToolFailedEvent.reason` and for the same reason: this shape is
+    # a contract two other repositories read (`Chemclaw3_ui`, `Chemclaw3_mock`), so a surface that
+    # ignores it is unchanged and one that switches on it can be exhaustive.
+    #
+    # The vocabulary is `agent.verifier`'s own, imported rather than restated: the list is written
+    # by `score_answer`, and a second spelling of the same closed set here is a contract that can
+    # drift from the code that fills it.
+    checks_run: list[AnswerCheck] = []
     confidence: float | None = None
     unsupported_claims: list[str] = []
     review_required: bool = False

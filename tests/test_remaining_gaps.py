@@ -217,7 +217,7 @@ def test_the_attachment_tools_frame_file_text_as_data() -> None:
     token = set_current_session_id("sec1-framing-session")
     try:
         STORE.add("sec1-framing-session", attachment)
-        summaries = asyncio.run(list_attachments())
+        summaries = asyncio.run(list_attachments()).attachments
         assert summaries[-1].excerpt.startswith(f'<{ENVELOPE_TAG} id="attachment:coa.md">')
         assert "</retrieved-note>" not in summaries[-1].excerpt  # breakout defanged even here
         full = asyncio.run(read_attachment("coa.md"))

@@ -1019,6 +1019,57 @@ spec:
               rule cannot fire on. Check the Temporal Schedule first; a pod that is gone entirely
               raises `ChemclawTargetDown` beside this.
 
+        {{- if .Values.retention.windows }}
+        {{- /* Disposal happened and nothing anywhere could see it. Twelve Temporal Schedules run in
+               this deployment; before this rule exactly two had a liveness alert, and neither of
+               them was one of the two *disposal* jobs. A retention sweep that silently stops
+               firing — a Schedule paused by hand, a `background-jobs` worker that never came back,
+               an activity failing every attempt — leaves every durable table growing with no
+               signal at all, and arrives as an out-of-disk incident months later.
+
+               Read off `chemclaw_table_bytes` rather than off the two retention counters, and the
+               difference is the whole point: a labelled counter emits no series until it is
+               incremented, so a sweep that runs every night and finds nothing expired would look
+               identical to one that has stopped. The gauge family is republished by *every* pass,
+               whether or not it deleted anything, so its absence means the pass itself did not
+               happen. That is the same shape as `ChemclawOutboxBacklogUnreported` above and for
+               the same reason.
+
+               Rendered only when this release states retention windows: with
+               `retention.unboundedGrowthAccepted` there is no sweep to be absent, and a rule that
+               fires for ever on a stated posture is how an alert channel is taught to be ignored.
+
+               Both durations are multiples of the sweep's own cadence, so a deployment that
+               changes the schedule moves the alert with it. Read with `dig` rather than as a
+               dotted path: `CHEMCLAW_RETENTION_SCHEDULE_MINUTES` is optional inside
+               `retention.windows`, so a dotted reference would name a key `values.yaml` does not
+               ship — which renders empty rather than failing, and is what
+               `tests/test_deploy_chart.py::test_every_values_path_exists` exists to catch. The
+               default is the same 1440 minutes `core/config/memory.py` gives
+               `retention_schedule_minutes`, so the alert and the sweep agree when neither is
+               stated. The hold keeps a fresh install from paging: `absent_over_time` is true from
+               t=0 until the first pass completes. */}}
+        - alert: ChemclawRetentionNotSweeping
+          expr: >-
+            absent_over_time(chemclaw_table_bytes[{{ mul (int (dig "CHEMCLAW_RETENTION_SCHEDULE_MINUTES" 1440 .Values.retention.windows)) (int .Values.monitoring.alerts.silenceWindowPasses) }}m])
+          for: {{ mul (int (dig "CHEMCLAW_RETENTION_SCHEDULE_MINUTES" 1440 .Values.retention.windows)) (int .Values.monitoring.alerts.silenceHoldPasses) }}m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawretentionnotsweeping
+            summary: No retention pass has reported the size of the durable store
+            description: >-
+              `chemclaw_table_bytes` is republished by every retention pass and is absent until one
+              completes, so several missed passes of `CHEMCLAW_RETENTION_SCHEDULE_MINUTES` means
+              the sweep is not running — and nothing is disposing of `session_messages`,
+              `tool_result_blobs` or the three LangGraph checkpoint tables while it is not. Check
+              the `retention` Temporal Schedule first, then the `background-jobs` worker; a pod
+              that is gone entirely raises `ChemclawTargetDown` beside this. What each pass removed
+              is in its own activity result, per table, in rows and in bytes — a sweep that runs
+              and removes nothing is a window left at 0, which this rule stays silent on because
+              the family is still being republished.
+        {{- end }}
+
     {{- /* The counters that exist *because* the system degrades quietly, and which nothing watched.
            `metrics_bridge` and `degraded()` were built so that roughly forty deliberate exception
            swallows become visible — and then no rule read the series they produce, which left the

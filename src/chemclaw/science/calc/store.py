@@ -13,7 +13,7 @@ interface with swappable backends (in-memory for tests, Postgres for real), and
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from datetime import datetime
 from math import isfinite
 from typing import Any, Protocol, runtime_checkable
@@ -520,6 +520,56 @@ class CalculationQuery(BaseModel):
         return self
 
 
+class CalculationPage(list[StoredResult]):
+    """One page of a browse: the rows, **and the two things the rows cannot say**.
+
+    `find` caps at `query.limit` and drops a row whose payload no longer parses. Both are correct
+    and both are invisible in a list: 30 stored `pka` rows for `CCO` answered a default browse with
+    20 and nothing else, and `find_calculations`' own `_timestamp` states the rule that breaks —
+    *"silently ignoring 'last Tuesday' would answer a question about a window with results from
+    outside it, which reads as an authoritative 'nothing else exists' — the failure mode this tool
+    is least able to afford."* A cut list is the same claim, made by the row count instead of by the
+    date.
+
+    **A `list` subclass and not a model wrapping one**, which is the unusual part and is deliberate.
+    Every caller of `find` — `ArrayOffloadingStore`, which forwards the page untouched, the
+    differential tests that compare two backends row for row — treats the answer as a sequence, and
+    a page that *is* a sequence leaves all of them unchanged while carrying the counts to the one
+    caller that renders an answer for a model. The cost is that slicing a page yields a plain list
+    and drops the counts, so a page is read where it is produced and never re-sliced.
+
+    `total_matched` counts every row matching the query, the unreadable ones included, because it
+    answers "what else is on file" rather than "what did this page parse".
+    """
+
+    def __init__(
+        self,
+        rows: Iterable[StoredResult],
+        *,
+        total_matched: int,
+        truncated: bool,
+        unreadable: int = 0,
+    ) -> None:
+        """Hold `rows` together with what the query found beyond them."""
+        super().__init__(rows)
+        self.total_matched = total_matched
+        self.truncated = truncated
+        self.unreadable = unreadable
+
+
+def as_page(rows: list[StoredResult], limit: int) -> CalculationPage:
+    """`rows` as a page, conservatively, when the store did not report one.
+
+    Both first-party stores return a `CalculationPage`, and `ResultStore` is a Protocol anyone may
+    implement — so a store that answers with a plain list is read at its word for what it returned
+    and *not* at its word for what it did not: a full page is reported as truncated, because "the
+    cap was reached" is the only reading that cannot claim a completeness nobody measured.
+    """
+    if isinstance(rows, CalculationPage):
+        return rows
+    return CalculationPage(rows, total_matched=len(rows), truncated=len(rows) >= limit)
+
+
 @runtime_checkable
 class ResultStore(Protocol):
     """Persistence contract for calculation results. Backends implement this."""
@@ -533,7 +583,13 @@ class ResultStore(Protocol):
         ...
 
     async def find(self, query: CalculationQuery) -> list[StoredResult]:
-        """Return results matching `query`, newest first, capped at `query.limit`."""
+        """Return results matching `query`, newest first, capped at `query.limit`.
+
+        Declared as a list rather than as `CalculationPage` because a wrapping store may forward
+        its inner store's answer under the plain annotation (`ArrayOffloadingStore` does), and a
+        narrower return type here would make that store stop satisfying this protocol for a
+        docstring's sake. `as_page` is what a caller that needs the counts goes through.
+        """
         ...
 
 
@@ -567,7 +623,7 @@ class InMemoryStore:
         """Which of `keys` the cache holds — parity with the Postgres store's existence probe."""
         return {key for key in keys if key in self._data}
 
-    async def find(self, query: CalculationQuery) -> list[StoredResult]:
+    async def find(self, query: CalculationQuery) -> CalculationPage:
         """Return results matching `query`, newest first, capped at `query.limit`.
 
         Insertion order stands in for time here: this store keeps no clock, and giving it one
@@ -588,7 +644,14 @@ class InMemoryStore:
             (stored.created_at, stored) for stored in matched if stored.created_at is not None
         ]
         dated.sort(key=lambda pair: pair[0], reverse=True)
-        return (undated + [stored for _, stored in dated])[: query.limit]
+        ordered = undated + [stored for _, stored in dated]
+        # This store holds parsed rows, so `unreadable` is structurally zero here — a payload that
+        # is not a mapping cannot be `put`. Its Postgres sibling reads jsonb and can meet one.
+        return CalculationPage(
+            ordered[: query.limit],
+            total_matched=len(ordered),
+            truncated=len(ordered) > query.limit,
+        )
 
 
 def _matches(stored: StoredResult, query: CalculationQuery) -> bool:

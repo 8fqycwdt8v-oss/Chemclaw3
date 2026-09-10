@@ -16,11 +16,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from psycopg.types.json import Jsonb
 
 from chemclaw.connectors.calc.server import tools
+from chemclaw.core import db
 from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.config import settings
 from chemclaw.science.calc import store as store_module
+from chemclaw.science.calc.postgres_store import PostgresStore
 from chemclaw.science.calc.store import (
     CalculationKey,
     CalculationQuery,
@@ -28,6 +31,7 @@ from chemclaw.science.calc.store import (
     StoredResult,
     molecule_hash,
 )
+from tests.pg import migrated_db_or_skip
 
 _NOW = datetime(2026, 7, 31, 12, 0, tzinfo=UTC)
 
@@ -197,8 +201,8 @@ def test_the_tool_returns_records_carrying_a_citable_reference(
         store = await _populated()
         monkeypatch.setattr(tools, "default_store", lambda: store)
         found = await tools.find_calculations(smiles="CCO", calc_type="dft")
-        assert len(found) == 1
-        record = found[0]
+        assert len(found.hits) == 1
+        record = found.hits[0]
         assert record.calc_ref.startswith("dft@b3lyp:")
         assert record.result == {"energy": -1.0}
         assert record.calc_type == "dft"
@@ -215,7 +219,7 @@ def test_the_tool_clamps_a_limit_past_the_configured_ceiling(
         seen: list[CalculationQuery] = []
 
         class _Recording(InMemoryStore):
-            async def find(self, query: CalculationQuery) -> list[StoredResult]:
+            async def find(self, query: CalculationQuery) -> store_module.CalculationPage:
                 seen.append(query)
                 return await super().find(query)
 
@@ -268,10 +272,183 @@ def test_the_browse_marks_a_row_whose_epoch_was_never_recorded(
 
         monkeypatch.setattr(tools, "default_store", lambda: store)
         found = await tools.find_calculations(calc_type="pka")
-        return [(record.calc_ref, record.epoch_recorded) for record in found]
+        return [(record.calc_ref, record.epoch_recorded) for record in found.hits]
 
     listed = asyncio.run(_run())
     assert len(listed) == 2, f"a superseded epoch was listed, or a valid row was hidden: {listed}"
     assert sorted(flag for _, flag in listed) == [False, True], (
         f"the row with no recorded epoch was not marked as such: {listed}"
     )
+
+
+# --- what a page does not say ------------------------------------------------------------------
+
+
+async def _many(count: int, calc_type: str = "pka") -> InMemoryStore:
+    """`count` stored results for one molecule, distinguished only by their parameters."""
+    store = InMemoryStore()
+    for index in range(count):
+        await store.put(
+            StoredResult(
+                key=CalculationKey.build(
+                    calc_type=calc_type,
+                    calc_version="v3",
+                    inputs={"smiles": require_canonical_smiles("CCO")},
+                    params={"temperature_k": 298 + index},
+                ),
+                result={"pka": 15.9},
+                created_at=_NOW - timedelta(minutes=index),
+            )
+        )
+    return store
+
+
+def test_a_capped_page_says_how_many_it_is_a_page_of(monkeypatch: pytest.MonkeyPatch) -> None:
+    """30 stored rows answered as 20 records, with nothing saying ten more existed.
+
+    The measured "before": `find_calculations(smiles="CCO", calc_type="pka")` over a store holding
+    30 returned a bare `list` of 20 `CalculationRecord`s whose fields are `calc_ref`, `calc_type`,
+    `calc_version`, `compute_seconds`, `computed_at`, `epoch_recorded`, `provenance`, `result` and
+    `result_omitted` — a per-row payload marker and nothing about the *list*.
+    """
+
+    async def _run() -> tools.CalculationSearch:
+        store = await _many(30)
+        monkeypatch.setattr(tools, "default_store", lambda: store)
+        # Annotated rather than returned straight through: the `@server.tool()` decorator erases
+        # the return type, and `mypy --strict` refuses to return `Any` from a typed function.
+        found: tools.CalculationSearch = await tools.find_calculations(
+            smiles="CCO", calc_type="pka"
+        )
+        return found
+
+    found = asyncio.run(_run())
+    assert len(found.hits) == 20
+    assert found.total_matched == 30
+    assert found.hits_truncated is True
+    assert "PARTIAL RESULT: 20 of 30" in found.verdict
+
+
+def test_a_complete_page_says_it_is_complete(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half: an unqualified answer has to be available, or the flag means nothing."""
+
+    async def _run() -> tools.CalculationSearch:
+        store = await _many(3)
+        monkeypatch.setattr(tools, "default_store", lambda: store)
+        # Annotated rather than returned straight through: the `@server.tool()` decorator erases
+        # the return type, and `mypy --strict` refuses to return `Any` from a typed function.
+        found: tools.CalculationSearch = await tools.find_calculations(
+            smiles="CCO", calc_type="pka"
+        )
+        return found
+
+    found = asyncio.run(_run())
+    assert (found.total_matched, found.hits_truncated) == (3, False)
+    assert "complete answer" in found.verdict
+
+
+def test_the_clamped_ceiling_is_visible_rather_than_silent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`limit=999` is clamped to the deployment's 50; the total is what reveals the clamp."""
+
+    async def _run() -> tools.CalculationSearch:
+        store = await _many(settings.calc_find_max_results + 10)
+        monkeypatch.setattr(tools, "default_store", lambda: store)
+        found: tools.CalculationSearch = await tools.find_calculations(
+            smiles="CCO", calc_type="pka", limit=999
+        )
+        return found
+
+    found = asyncio.run(_run())
+    assert len(found.hits) == settings.calc_find_max_results
+    assert found.total_matched == settings.calc_find_max_results + 10
+    assert found.hits_truncated is True
+
+
+def test_a_store_that_reports_no_page_is_read_as_possibly_incomplete() -> None:
+    """`ResultStore` is a Protocol: a plain-list store may not be read as claiming completeness."""
+    rows = [
+        StoredResult(
+            key=CalculationKey.build(
+                calc_type="pka", calc_version="v3", inputs={"smiles": "CCO"}, params={"i": i}
+            ),
+            result={"pka": 15.9},
+        )
+        for i in range(5)
+    ]
+    assert store_module.as_page(rows, 5).truncated is True
+    assert store_module.as_page(rows, 20).truncated is False
+    assert store_module.as_page(rows, 20).total_matched == 5
+
+
+async def _write_unreadable_row(key: CalculationKey) -> None:
+    """Put a jsonb value that is not a result object into `calculation_results`, bypassing `put`.
+
+    The column is bare `JSONB NOT NULL`, so a string, an array or a number is a value a restore, an
+    operator or a calculation server returning an unchecked shape can leave behind — and the store's
+    own `put` is exactly the path such a row did not take.
+    """
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute(
+            "INSERT INTO calculation_results (key, calc_type, calc_version, input_hash, "
+            "params_hash, result, provenance, epoch) "
+            "VALUES (%s, %s, %s, %s, %s, %s, 'computed', %s) "
+            "ON CONFLICT (key) DO UPDATE SET result = EXCLUDED.result",
+            (
+                key.as_str(),
+                key.calc_type,
+                key.calc_version,
+                key.input_hash,
+                key.params_hash,
+                Jsonb([1, 2, 3]),
+                store_module.CALCULATION_EPOCH,
+            ),
+        )
+        await conn.commit()
+
+
+def test_a_dropped_row_is_counted_rather_than_leaving_a_shorter_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_readable_row`'s own docstring measured "seven rows of which one held a jsonb string".
+
+    It fixed the crash — the browse no longer answers zero — and left the reader unable to tell six
+    of seven from seven of seven. A calculation whose row cannot be read back still exists, and a
+    model told "we have two" about three is being handed the same authoritative absence the row cap
+    hands it.
+    """
+
+    async def _run() -> tools.CalculationSearch:
+        await migrated_db_or_skip()
+        store = PostgresStore()
+        for index in range(2):
+            await store.put(
+                StoredResult(
+                    key=CalculationKey.build(
+                        calc_type="probe.unreadable",
+                        calc_version="v1",
+                        inputs={"smiles": require_canonical_smiles("CCO")},
+                        params={"i": index},
+                    ),
+                    result={"pka": 15.9},
+                    epoch=store_module.CALCULATION_EPOCH,
+                )
+            )
+        await _write_unreadable_row(
+            CalculationKey.build(
+                calc_type="probe.unreadable",
+                calc_version="v1",
+                inputs={"smiles": require_canonical_smiles("CCO")},
+                params={"i": "corrupt"},
+            )
+        )
+        monkeypatch.setattr(tools, "default_store", PostgresStore)
+        found: tools.CalculationSearch = await tools.find_calculations(calc_type="probe.unreadable")
+        return found
+
+    found = asyncio.run(_run())
+    assert len(found.hits) == 2, "the unreadable row was handed back as a result"
+    assert found.total_matched == 3, "the row that could not be read stopped being counted at all"
+    assert found.rows_unreadable == 1
+    assert "1 matching row(s) could not be read back" in found.verdict

@@ -291,7 +291,11 @@ class AgentSettings(BaseSettings):
     # moved is the size of the thing being translated. The 11,000 is a *bound* and belongs beside
     # the ceiling it extends, so it lives in `tests/test_context_floor.SERVED_ELSEWHERE_ALLOWANCE`
     # where the assertion can read it, not as a second number here that would drift away from it.
-    agent_tool_result_clear_trigger: int = Field(default=106_000, ge=1)
+    # 106,500 since wave 13: `tests/test_context_floor.py`'s ceiling rose by 500 and this is
+    # derived *upwards* from it, so it moves with it and keeps the whole thread allowance it was
+    # derived to have. The budget below cannot follow, because it is derived downwards from the
+    # window — which is why the ceiling's cost lands there and not here.
+    agent_tool_result_clear_trigger: int = Field(default=106_500, ge=1)
     # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
     # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
     # dependent in one direction. Re-measured 2026-09-06 against real BPE encodings, on the observed

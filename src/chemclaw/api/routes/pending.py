@@ -90,18 +90,30 @@ def _routing_identities(principal: Principal) -> list[str]:
     return [identity for identity in identities if identity]
 
 
-async def list_pending(principal: CurrentUser) -> PendingRequestsOut:
-    """What is waiting on you — every open request you may actually answer.
+async def list_pending(principal: CurrentUser, limit: int = 50) -> PendingRequestsOut:
+    """One page of what is waiting on you — the open requests you may actually answer.
 
     The cross-conversation read, for the reason `GET /plans/pending` exists: a question raised in a
     turn the asker has closed lives only inside that turn otherwise, and the person who has to
     answer it is usually not the person who asked.
+
+    **It has always been a page and nothing said so.** Measured against a real database, 35 waiting
+    rows rendered as 20 with no marker anywhere in the response — the same silence `GET /sessions`
+    was fixed for ("it always bounded the answer, and nothing said so"), on the surface where the
+    consequence is a raised question that ages out because it appeared in nobody's inbox.
+    `total_routed_to_you` and `truncated` say what the page is; `limit` is how a client asks for
+    the rest, bounded by the store.
+
+    A cursor rather than a limit would be the `GET /sessions` answer in full, and it is deliberately
+    not taken here: this list is ordered by *deadline*, so it does not reorder under the reader the
+    way a recency-ordered conversation list does, and the store's own bound is 200 against an inbox
+    a person is expected to empty. What was missing was the statement, not the pagination.
     """
     # The caller's whole routing surface, not just their object id: `_may_answer` accepts a upn and
     # an entitlement, so an inbox that matched only the oid hid every team-routed request from the
     # team it was routed to.
-    requests = await pending_store.open_requests(
-        asked_of=principal.oid, identities=_routing_identities(principal)
+    page = await pending_store.open_requests(
+        asked_of=principal.oid, identities=_routing_identities(principal), limit=limit
     )
     # **Through the gate, not merely through the routing.** `_routing_identities` is the mirror of
     # one branch of `_may_answer` and the store knows nothing of the other: separation of duties
@@ -109,10 +121,15 @@ async def list_pending(principal: CurrentUser) -> PendingRequestsOut:
     # raised and routed to a group Alice is in sat in Alice's inbox and answered 403 when she
     # clicked it. Filtering on the same predicate the answer route applies is what stops the two
     # drifting — an inbox whose rows are unactionable is the failure an inbox exists to prevent.
-    answerable = [request for request in requests if _may_answer(principal, request)]
+    answerable = [request for request in page.requests if _may_answer(principal, request)]
     return PendingRequestsOut(
         requests=[PendingRequestOut(**request.model_dump()) for request in answerable],
         count=len(answerable),
+        total_routed_to_you=page.total_waiting,
+        # The store's own truncation, which is the only one that hides a row: the gate below
+        # removes rows the caller cannot act on, and those are shown as a difference rather than
+        # as a cut. Conflating the two would tell a chemist to page for rows that are not theirs.
+        truncated=page.truncated,
     )
 
 

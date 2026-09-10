@@ -13,10 +13,12 @@ because the Postgres-backed tests skip in an offline sandbox and a reconstructio
 exercised in CI is one nobody has actually read the output of.
 """
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, message_to_dict
 
 from chemclaw.agent.message_migration import LANGCHAIN_SHAPE
 from chemclaw.cli.explain import Job, ToolCall, _render, _speaker
+from chemclaw.core.config import settings
 from tests.legacy_rows import legacy_text
 
 _SESSION = "s-42"
@@ -28,9 +30,12 @@ def _report(
     turns: dict[str, list[tuple[str, str]]] | None = None,
     calls: dict[str, list[ToolCall]] | None = None,
     jobs: dict[str, list[Job]] | None = None,
+    known: bool = False,
 ) -> str:
     """Render one session's reconstruction as a single string for substring assertions."""
-    return "\n".join(_render(_SESSION, order or [], turns or {}, calls or {}, jobs or {}))
+    return "\n".join(
+        _render(_SESSION, order or [], turns or {}, calls or {}, jobs or {}, known=known)
+    )
 
 
 def test_a_tool_call_is_printed_under_the_question_that_caused_it() -> None:
@@ -228,3 +233,32 @@ def test_a_helpers_call_is_marked_as_the_helpers_and_the_chemists_own_is_not() -
     )
     assert "tool find_notes [ok, 8 ms, alice@corp via default-helper]" in report
     assert "tool task [ok, 12 ms, alice@corp]" in report
+
+
+def test_an_empty_report_says_why_it_is_empty_rather_than_only_that_it_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The three reasons a reconstruction is empty, and only one of them is "nothing happened".
+
+    `explain <a session that just ran a tool>` and `explain <an id that never existed>` printed the
+    identical line. That is the *symptom* of the trail being log-only on the shipped
+    configuration — under `session_store="memory"` the two really are the same state — but the
+    report said nothing about which state it was in, so the reader could not tell a typo from a
+    deployment that records nothing from a session that was pruned.
+    """
+    monkeypatch.setattr(settings, "session_store", "memory")
+    assert "CHEMCLAW_SESSION_STORE=memory" in _report(order=[])
+
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    unknown = _report(order=[], known=False)
+    assert "was ever created against this database" in unknown
+    pruned = _report(order=[], known=True)
+    assert "session_owners has its row" in pruned
+    assert "retention has pruned it" in pruned
+
+
+def test_a_session_with_rows_is_not_given_an_explanation_it_does_not_need() -> None:
+    """The explanation belongs to the empty case only — a report with turns is its own answer."""
+    report = _report(order=["c-1"], calls={"c-1": [ToolCall("find_notes", "ok", "", 3.0, "u", "")]})
+    assert "CHEMCLAW_SESSION_STORE" not in report
+    assert "was ever created against this database" not in report

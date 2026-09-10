@@ -336,16 +336,49 @@ def safe_tool_name(name: str) -> str:
     return name if _SAFE_TOOL_NAME.match(name) else _UNRECOGNISED
 
 
+# **Two aggregations rather than one, because `count(DISTINCT actor)` cannot hash.** PostgreSQL
+# has no hashed DISTINCT aggregate, so the single-statement form is planned as
+# `GroupAggregate <- Sort` over every matching row, and the sort is the whole cost. Measured on
+# 600 000 audit rows over a one-year window (PostgreSQL 16.15, stock 4 MB `work_mem`):
+#
+#     GroupAggregate (actual time=1447..1581 rows=24)
+#       -> Sort (actual rows=600000)  Sort Method: external merge  Disk: 25456kB
+#          Execution Time: 1581.827 ms
+#
+# It is the only disk-spilling sort in this projection, it is linear in the window, and it is
+# reached by an operator asking a reporting question rather than by a turn — which is why it is a
+# cost rather than a defect.
+#
+# **`SET LOCAL work_mem` was the obvious fix and is measured worse.** At 64 MB the spill goes away
+# and the plan becomes an in-memory quicksort of 52 933 kB: **2 005.5 ms**, 27% *slower* than the
+# version that spilled, and now holding 53 MB per concurrent caller. The disk was never the
+# problem; sorting 600 000 rows to answer a 24-row question was.
+#
+# Pre-aggregating by `(tool, outcome, actor)` removes the DISTINCT, so both levels hash and both
+# parallelize: **176.0 ms**, `Batches: 1  Memory Usage: 337kB`, no temp files — **9.0x** faster on
+# the same fixture. The arithmetic is exact rather than approximate: `count(*)` over the inner
+# groups *is* the distinct actor count for that `(tool, outcome)`, and `sum(calls)`, `min(first)`
+# and `max(last)` compose the same way the single statement's aggregates did.
 _TOOL_USAGE = """
-    SELECT tool, outcome, count(*), count(DISTINCT actor), min(ts), max(ts)
-    FROM audit_events
-    WHERE ts >= %s AND ts < %s
+    SELECT tool, outcome, sum(calls), count(*), min(first_seen), max(last_seen)
+    FROM (
+        SELECT tool, outcome, actor,
+               count(*) AS calls, min(ts) AS first_seen, max(ts) AS last_seen
+        FROM audit_events
+        WHERE ts >= %s AND ts < %s
+        GROUP BY tool, outcome, actor
+    ) per_actor
     GROUP BY tool, outcome
 """
 
+# The narrowed form, built by rewriting the one predicate rather than by keeping a second copy of
+# the statement. The clause occurs exactly once — inside the inner aggregation, which is also the
+# only place it can be pushed to — so this stays a rewrite of one string and not two answers to
+# one question.
 _TOOL_USAGE_ONE = _TOOL_USAGE.replace(
     "WHERE ts >= %s AND ts < %s", "WHERE ts >= %s AND ts < %s AND tool = %s"
 )
+assert _TOOL_USAGE_ONE != _TOOL_USAGE, "the predicate this narrowing rewrites has moved"
 
 
 async def tool_usage(window: Window, *, tool: str | None = None) -> ToolUsage:

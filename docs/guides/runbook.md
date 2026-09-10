@@ -1443,6 +1443,25 @@ is permanently missing a computed result — the same loss `ChemclawKnowledgeNot
 queued-minus-published difference, which is why that difference is not a backlog and why the alert
 below reads an age.
 
+#### ChemclawRetentionNotSweeping
+`warning`, and it is the *absence* of `chemclaw_table_bytes`. Every retention pass republishes that
+family — for every table the disposal register names, whether or not the pass deleted anything — so
+several missed passes of `CHEMCLAW_RETENTION_SCHEDULE_MINUTES` means the sweep itself is not
+running, and nothing is disposing of `session_messages`, `tool_result_blobs` or the three LangGraph
+checkpoint tables while it is not. Check the `retention` Temporal Schedule first, then the
+`background-jobs` worker's logs. A pod that is gone entirely raises `ChemclawTargetDown` beside
+this; only this one fires for a worker that is up with its sweep not running.
+
+What each pass removed is in its own activity result, per table, in rows **and** in bytes — a sweep
+that runs and removes nothing is a window left at 0, which this rule stays silent on because the
+family is still being republished. `topk(5, chemclaw_table_bytes)` is the query for "what is filling
+the volume", and the answer is often a table the register **refuses** to prune.
+
+Rendered only for a release that states `retention.windows`: with `retention.unboundedGrowthAccepted`
+there is no sweep to be absent. Its window and hold are `monitoring.alerts.silenceWindowPasses` and
+`silenceHoldPasses` multiplied by the sweep cadence, so changing the cadence moves the alert with
+it; the hold is what stops a fresh install from paging before its first pass.
+
 #### ChemclawResultOutboxStuck
 `warning`. The oldest undelivered publication for this sink is older than
 `monitoring.alerts.outboxStuckSeconds`. Read `chemclaw_outbox_pending{sink}` for the depth and
@@ -1856,8 +1875,19 @@ docker image inspect "${REGISTRY}/chemclaw:${VERSION}" --format '{{ index .RepoD
 helm upgrade --install chemclaw deploy/helm/chemclaw \
   --set image.digest="sha256:<the digest from step 2>" \
   --set networkPolicy.allowAnyDestination=true \  # or list networkPolicy.egressDestinations
-  --set retention.unboundedGrowthAccepted=true   # or state retention.windows
+  --set retention.unboundedGrowthAccepted=true \  # or state retention.windows
+  --set temporal.namespace=chemclaw-prod          # no default: one Temporal namespace per release
 ```
+
+The third flag is not an escape hatch like the two above it — it is the value, and the chart ships
+no default for it. `CHEMCLAW_TEMPORAL_ADDRESS` names a broker in the cluster-shared `temporal`
+namespace, so a constant put dev, staging and prod on one Temporal namespace, one task queue and
+one schedule-id space; measured, a peer's `helm upgrade` rewrote this release's `eln-sync` to a
+different workflow type at a different interval and `_prune` deleted its `eval-drift` outright.
+**Two releases need separate databases for the same reason**, and that half is not enforceable from
+the chart: 44 tables carry no deployment discriminator, so one release's retention sweep disposes of
+another's expired threads under its own window. Passing `--set temporal.namespace=chemclaw`
+reproduces the old behaviour exactly, which is what a validation render uses.
 
 **The pipeline does exactly the three steps above.** `Jenkinsfile` builds with
 `CHEMCLAW_REVISION`, publishes, reads the digest back from the registry and passes it as

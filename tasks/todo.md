@@ -117,21 +117,21 @@ are all science-side defect classes, and no wave has swept for them.
 
 ## Wave 13 — Day one and day one thousand
 
-- [ ] W13.1 Cold start: empty database, no corpus, no connectors, no sinks, no skills, no
+- [x] W13.1 Cold start: empty database, no corpus, no connectors, no sinks, no skills, no
       `SERVED_ELSEWHERE` sibling. Every read path at zero rows — does each answer *honestly*, or
       silently emptily? (Lesson 18: the obvious implementation returns a silently empty answer.)
-- [ ] W13.2 **The silent-truncation sweep.** ~50 default `limit=` parameters and every unpaginated
+- [x] W13.2 **The silent-truncation sweep.** ~50 default `limit=` parameters and every unpaginated
       scan in `src/`: which return one page while the caller believes it holds everything? This
       generalises wave 9's `read_corpus` (5 of 12 with `complete=True`) from an accident into a
       class, per lesson 20.
-- [ ] W13.3 Aged state: synthesise a deployment with years of rows — a large corpus, thousands of
+- [x] W13.3 Aged state: synthesise a deployment with years of rows — a large corpus, thousands of
       sessions and turns, a big graph — and measure what degrades that was fine at wave-7 scale.
-- [ ] W13.4 What is implicitly single-site: ids, namespaces, caches, metric labels, the knowledge
+- [x] W13.4 What is implicitly single-site: ids, namespaces, caches, metric labels, the knowledge
       graph's git repository, the checkpointer's thread space. A second tenant is a question this
       tree has never been asked.
-- [ ] W13.5 Ceilings at rest under the aged tree: disk, WAL, index bloat, and whether the retention
+- [x] W13.5 Ceilings at rest under the aged tree: disk, WAL, index bloat, and whether the retention
       posture actually holds it bounded.
-- [ ] W13 fix stage, gate, PR, merge on green
+- [x] W13 fix stage, gate, PR, merge on green
 
 ## Wave 14 — The chemist's view: what actually reaches the human
 
@@ -168,6 +168,131 @@ the point of use, and contradiction. Wave 8 asked whether those exist. This asks
 ## Review
 
 *(the closing review is written at the end of wave 15; each wave adds its own section)*
+
+### Wave 13 — day one and day one thousand (MERGED: see PR below)
+
+Twelve waves ran on a fixture: a corpus of tens, a fresh database, a
+forty-turn thread. This one asked what the code does on **day one** and on
+**day one thousand**. Five review agents, nine fix agents.
+
+**Three of the five premises were wrong, and each disproof is worth more
+than the fix it displaced.**
+
+1. **Cold start is mostly handled.** Every path whose job is "have we seen
+   this before" is honest, sometimes conspicuously — `index_empty: true`
+   with a verdict opening `"SEARCH NOT RUN"`, `"NO ROWS IN SCOPE"`,
+   `"UNCALIBRATED: … Its accuracy is unknown, not good."` Ten of ten
+   validators report honestly, eight exit non-zero. **Zero crashes.** What
+   bites at cold is not the answers but *the machinery that asserts things
+   about them*.
+2. **The tree is already scale-hardened** where the brief predicted it
+   would not be — retention measured at 600k rows, backfill keyset-paged
+   from a 500k measurement, the outbox with `EXPLAIN` at 200k, the
+   fingerprint probe chosen from 0.55 ms against 26.32 ms. Re-measured,
+   the numbers still hold. The two real findings at scale are **not
+   database problems**, which is why eleven waves of query review missed
+   them: both are invisible to `EXPLAIN`.
+3. **The retention register is right.** Fourteen adversarial cases, every
+   prunable table reached exactly as documented. The premise "something it
+   claims to prune, it does not" is **false at row level** — and true at
+   byte level, which nobody had asked.
+
+**The two worst findings are not crashes.**
+
+- **`erase_actor` stops protecting what it claimed.** It took the turn
+  lease one session per round trip at ~56/s against a 60 s lease nothing
+  refreshed, so above ~3,500 sessions the first claims lapsed while it was
+  still taking the last. Measured: 40% expired before the erase
+  transaction opened, and a simulated second pod **took a slot while the
+  sweep was running** — the live turn the guard exists to refuse, admitted
+  by the guard. A data-subject erasure that cannot complete is a
+  compliance problem, not a latency one.
+- **A prompt asserting controls the deployment does not have.** 16 tool
+  names nothing binds, including `screen_hazards` in the paragraph telling
+  the model to call it before proposing a synthesis; and a traceability
+  claim in the present tense on a deployment where one completed turn
+  leaves `audit_events` 0 and `explain` blank. D-122's *stated* condition
+  and its *implemented* condition were different predicates, and
+  `.env.example` sits in the gap.
+
+### Where measurement overturned the brief — five times
+
+1. **The compaction quadratic was ours.** The brief blamed upstream's
+   `messages[:idx]` slice; measured, that slice is **0.3%** of the cost.
+   The dominant term is `count_tokens` inside a branch **upstream defaults
+   off and this repository turns on**. The proposed fix would have removed
+   0.3% and left 356 s at 32k messages standing.
+2. **`GREATEST` on the second cursor would lose data.** `corpus_cursors`
+   is TEXT in the source's domain, and `GREATEST('9','10')` is `'9'` — the
+   high-water spelling pins at the first single-digit id and skips
+   *forward*, where blind costs only a re-drain. That module keeps its
+   blind upsert deliberately.
+3. **De-registering unrunnable launchers breaks two shipped profiles**
+   outright, taking them from "one procedure unavailable" to every turn
+   failing at build.
+4. **The `work_mem` fix is 27% slower** at 53 MB per caller. The disk
+   spill was a symptom; sorting 600,000 rows to answer a 24-row question
+   was the cost. Splitting the DISTINCT is 9.0x.
+5. **Two of three proposed counters were written and dropped.** Reclaimed
+   bytes is structurally near-zero — retention deletes the *oldest* rows
+   and a plain `VACUUM` truncates only trailing pages — and no rule over
+   either fires solely on a fault.
+
+**Two findings were found *by* the fixing, not by the review.** Splitting
+the prompt into blocks exposed that the envelope rule shared a paragraph
+with `record_knowledge_note`, which `subagents.py` subtracts — so the
+compiled helper graph was sent **no envelope rule at all**, half the
+injection defence, while the framing test stayed green reading the maximal
+text. And batching the erase claims exposed that the obvious refresh
+**deadlocks against the erasure it protects**.
+
+**My own error, recorded because the rule is mine too.** Wiring a counter
+into `record_refusals`, I used keyword labels where `METRICS.increment`
+takes a mapping. That module swallows the exception by design, so the
+eviction rolled back with it and the cap silently stopped applying. My
+first A/B said it was not mine — and that A/B was invalid: `ruff format`
+had reflowed the call, so the `str.replace` matched nothing and I compared
+the file with itself. I made the same class of error twice more in this
+wave, once measuring a "clean checkout" that an editable install resolved
+back to the branch.
+
+### The number this repository did not have
+
+At its own sizing (200 chemists, 3,000 turns/day): **111 MB/day durable,
+none reclaimed — a 100 GB volume fills in ~2.5 years**, 69% of it one
+table stored uncompressed by an argument resting on a retention window the
+shipped configuration sets to zero. WAL is 333 MB/day, a ~29:1 ratio.
+
+### Decisions taken, with what each costs
+
+- **The context ceiling rose 500** and the cost is paid where the
+  constraint is: the trigger rises with it and keeps its allowance whole,
+  the budget cannot (it is derived downwards from the 128k window), so the
+  thread loses 500 tokens — 1.16%. Set with ~420 tokens of headroom on
+  purpose: a ceiling 23 tokens above a measurement is a tripwire, not a
+  ratchet.
+- **`temporal.namespace` has no default and the chart refuses to render.**
+  A boolean was declined — three environments would each tick it and still
+  collide. Two releases need separate databases too, and no chart guard
+  can check that half.
+- **The fingerprint definition joins the key**, and what it costs is
+  stated: with no DELETE for the runtime role a finished rebuild leaves
+  the superseded generation forever and every search says PARTIAL until an
+  operator disposes of it. Not papered over with an anti-join probe, which
+  is O(n) per search in exactly the healthy case.
+- **Measurements aggregate rather than collapse.** The default source
+  still collapses, and the reply says so instead of hiding it.
+- **The vacuum is not opt-in**, on three measured grounds — a sweep
+  without it does not bound growth at all.
+
+**Deliberately open**: ANN recall at scale (uniform random bit vectors
+give each query one true neighbour by construction, so it is neither
+confirmed nor falsified); the scratchpad store, which nothing bounds;
+`corpus_molecules`, which keeps the definition defect until its own
+upsert moves; the fingerprint re-index job that would carry the measured
+3.4x bulk path; and the skills listing, which over-promises the same way
+`_INSTRUCTIONS` did because it narrows by what manifests advertise rather
+than by what a turn binds.
 
 ### Wave 12 — lifecycle (MERGED: see PR below)
 

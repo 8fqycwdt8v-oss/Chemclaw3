@@ -63,6 +63,20 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
+- [ ] **Nothing bounds the scratchpad memory store** — [M].
+  `retention._NOT_PRUNED["store"]` read *"erasure reaches it per actor"* until wave 13, which is a
+  disposal route that fires only on a leaver request — the reasoning the `session_owners` entry
+  already rejects in its own words ("which a deployment that no one leaves never runs"). The entry
+  now says **nothing bounds it**, which is the finding; this row is the decision. `store` is
+  agent-writable (`agent/scratchpad.py`) with no size cap, no window and no clock, so a single agent
+  looping a `remember` tool is the runaway case — the same shape `ingest/rejections.py` already
+  answers with `_MAX_ROWS_PER_SOURCE` and least-recently-used eviction inside the writer's own
+  transaction. A clock is likely the wrong instrument here for the reason it is wrong there. Decide
+  between a per-actor (or per-namespace) row cap enforced by the writer and an explicit "unbounded,
+  accepted" posture; either way the register entry changes in the same commit, and
+  `tests/test_retention.py::test_no_disposal_entry_offers_actor_erasure_as_what_bounds_a_table` is
+  what stops the next rewording leaning on erasure again.
+
 - [ ] **A connector can claim a step-template launcher name, and the registry says it cannot** —
   [S], found 2026-09-05 reviewing the ambient-name guard. `_bound_by_this_process` refuses a bundle
   that claims an in-process tool, a scratchpad verb, `write_todos` or `task`. Its docstring adds

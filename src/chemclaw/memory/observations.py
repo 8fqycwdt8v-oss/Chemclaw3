@@ -365,6 +365,26 @@ async def open_observations(limit: int | None = None) -> list[Observation]:
     return [_observation(row) for row in rows]
 
 
+async def count_open_observations() -> int:
+    """How many observations are open at all — the population `open_observations` pages.
+
+    Separate from the page rather than counted beside it, and the trade is worth stating. Two
+    statements over two connections can in principle disagree; this tier is written by a nightly
+    mining pass and by nothing a person is doing at the same moment, so the window is a batch that
+    runs once a day rather than the browser-versus-timer race `pending_requests` has. What it buys
+    is that `open_observations` keeps its shape for the eighteen call sites that only want the
+    page — a `count(*) OVER ()` column would put a page-size fact inside every parsed row.
+
+    Read by `recall_observations`, which needs it because a page of ten out of fifteen and a tier
+    holding exactly ten are the same list.
+    """
+    async with _connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT count(*) FROM observations WHERE status = 'open'")
+            row = await cur.fetchone()
+    return int(row[0]) if row else 0
+
+
 async def promotable() -> list[Observation]:
     """Open observations that have crossed both promotion thresholds.
 

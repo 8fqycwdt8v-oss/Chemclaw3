@@ -213,6 +213,35 @@ _REVIEWED_REPLAY_BREAKS: dict[str, tuple[str, tuple[str, ...], str]] = {
 # an exempted migration still fails — an exemption is granted to statements somebody read, not to a
 # filename.
 _REVIEWED_ROLLBACK_BREAKS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "094_fingerprint_definition_identity.sql": (
+        # The definition joins the key on all three fingerprint tables, so a superseded generation
+        # is shelved instead of deleted. Unlike 056/063/093 this one genuinely stops the previous
+        # image writing at all: its `ON CONFLICT (id)` / `(source, id)` no longer plans against the
+        # widened key, so every fingerprint and corpus-reaction write fails with
+        # `InvalidColumnReference`. Roll forward, or re-add the old key by hand.
+        "D-2026-09-09-a-definition-change-shelves-a-row-it-does-not-delete",
+        (
+            "ALTER TABLE molecule_fingerprints DROP CONSTRAINT",
+            "ALTER TABLE molecule_fingerprints ADD PRIMARY KEY",
+            "ALTER TABLE reaction_fingerprints DROP CONSTRAINT",
+            "ALTER TABLE reaction_fingerprints ADD PRIMARY KEY",
+            "ALTER TABLE corpus_reactions DROP CONSTRAINT",
+            "ALTER TABLE corpus_reactions ADD PRIMARY KEY",
+        ),
+    ),
+    "093_measurement_source.sql": (
+        # The fourth table to be keyed by its source, after 056, 063 and 051 — and the same
+        # rollback shape as 056 and 063 above. The widening adds `source` to the key rather than
+        # removing information, so nothing is destroyed by restoring the previous image; what
+        # breaks is that a row written under the new key with a `source` other than
+        # `chemist-reported` is unreachable to the old reader's two-column lookup. The operator
+        # runs the migration forward again.
+        "D-2026-09-09-a-measurement-is-keyed-by-who-measured-it",
+        (
+            "ALTER TABLE measurements DROP CONSTRAINT",
+            "ALTER TABLE measurements ADD PRIMARY KEY",
+        ),
+    ),
     "088_turn_cost_identity.sql": (
         "D-2026-09-06-an-id-a-caller-chooses-is-not-a-key",
         (
@@ -284,6 +313,14 @@ _REVIEWED_ROLLBACK_BREAKS: dict[str, tuple[str, tuple[str, ...]]] = {
 # once made, is written down where an operator planning a rollback reads it — the same place the
 # regex-found ones are.
 _REVIEWED_SEMANTIC_BREAKS: dict[str, tuple[str, str]] = {
+    "092_session_owners_updated_at.sql": (
+        "D-2026-09-09-a-sort-key-a-page-cannot-prune-is-a-scan",
+        "`updated_at` is the sidebar's sort key. It does not break a rollback — the pre-092 image "
+        "derives the order and ignores the column — but it does not *maintain* it either, so a "
+        "session taking its first turn during the rollback window comes back with the column NULL "
+        "and is missing from the listing until it is spoken in again. The migration's backfill, "
+        "re-run by hand, restores it.",
+    ),
     "089_result_publication_lease.sql": (
         "D-2026-09-09-a-pattern-that-enumerates-covers-what-it-enumerated",
         "`claimed_at` is a delivery lease. A pre-089 pod's claim ignores it and re-claims a leased "

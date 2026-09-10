@@ -17,12 +17,14 @@ Postgres-backed and skipped where no database is reachable, like every other sto
 import asyncio
 import contextlib
 import io
+import math
 import re
 from pathlib import Path
 
 import pytest
 from psycopg.types.json import Jsonb
 
+from chemclaw.agent import leaver
 from chemclaw.agent.leaver import (
     _BEYOND_REACH,
     _ERASE,
@@ -31,6 +33,7 @@ from chemclaw.agent.leaver import (
     ErasureError,
     _residue_columns,
     _residue_for,
+    _sessions_held,
     erase_actor,
     finish_erasure,
     finish_leaves,
@@ -1202,3 +1205,162 @@ def test_the_cli_refuses_an_actor_and_a_finish_in_one_run() -> None:
     with pytest.raises(SystemExit) as empty:
         erase_actor_main([])
     assert empty.value.code == 2
+
+
+# The scale half of the guard: a person with thousands of sessions, and a lease short enough that
+# the test costs seconds rather than the three and a half minutes the full reproduction takes.
+#
+# **A shortened lease is the same defect, not a smaller one.** What lapses a claim is the ratio
+# between how long the sweep holds it and how long the lease lasts — measured at the shipped
+# 60 s lease and ~56 claims/s, the first claims expire at ~3,500 sessions and 40% of a
+# 6,000-session fleet is unprotected before the claim loop even finishes. Both tests below hold the
+# ratio and shrink the wall clock.
+_HOLGER = "oid-holger"
+
+
+async def _seed_many(actor: str, session_ids: list[str]) -> None:
+    """Give `actor` a session apiece, in two statements rather than five per session.
+
+    `tests/test_leaver.py::_seed` writes a preference, a watch and an event as well, which is what
+    a *behavioural* test of the two tiers needs. These two want a fleet, and a fleet seeded row by
+    row costs more than the thing under test.
+    """
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO session_owners (session_id, owner) "
+                "SELECT s, %s FROM unnest(%s::text[]) AS s "
+                "ON CONFLICT (session_id) DO UPDATE SET owner = EXCLUDED.owner",
+                (actor, session_ids),
+            )
+            await cur.execute(
+                "INSERT INTO session_messages (session_id, message) "
+                'SELECT s, \'{"role": "user"}\'::jsonb FROM unnest(%s::text[]) AS s',
+                (session_ids,),
+            )
+        await conn.commit()
+
+
+async def _claims_state(session_ids: list[str]) -> tuple[int, int]:
+    """`(claims this sweep still holds, claims of its own that have lapsed)`."""
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT count(*) FILTER (WHERE expires_at > now()), "
+                "       count(*) FILTER (WHERE expires_at <= now()) "
+                "FROM session_turns "
+                "WHERE session_id = ANY(%s) AND left(holder, 6) = 'erase:'",
+                (session_ids,),
+            )
+            row = await cur.fetchone()
+    return (int(row[0]), int(row[1])) if row else (0, 0)
+
+
+def test_a_sweep_that_outlasts_its_lease_still_holds_every_claim() -> None:
+    """The claim has to survive the erasure, not the first minute of it.
+
+    `_sessions_held` took every claim and **nothing refreshed it**, while the sweep it guards runs
+    for as long as the deletion takes — measured, 85 s for 400k rows, on top of a claim loop that
+    ran at ~56 sessions/s. So the guard expired under its own sweep and
+    `_TURN_CLAIM`'s `WHERE session_turns.expires_at <= now()` made every lapsed slot re-takeable
+    by anyone. Reproduced at 600 sessions against a 10 s lease: 37 claims expired before the loop
+    finished, 113 by the time the erase transaction would have run, and a second pod took
+    `sess-000001` at t+10.3 s while the sweep was still going — which is exactly the live turn
+    this whole guard exists to refuse, admitted by the guard itself.
+
+    Watched failing against the unfixed loop: `pod-2 claimed 20 of the sessions this sweep is
+    holding` and `20 of this sweep's own claims have lapsed while it holds them`.
+
+    Driven with a short lease rather than a large fleet, because what lapses a claim is the ratio
+    of hold time to lease and not the row count.
+    """
+    sessions = [f"sess-holger-{index:03d}" for index in range(20)]
+
+    async def _run() -> tuple[int, int, int]:
+        await migrated_db_or_skip()
+        await _seed_many(_HOLGER, sessions)
+        patch = pytest.MonkeyPatch()
+        patch.setattr(settings, "service_turn_claim_lease_seconds", 2.0)
+        claims = SessionTurnClaims()
+        try:
+            async with _sessions_held(sessions):
+                # Longer than the lease, and short beside the 85 s an erase transaction measured.
+                #
+                # The margin is deliberate rather than tight: the heartbeat refreshes three times
+                # per lease, so the last one before this check lands ~0.7 s before it and pushes
+                # the claims 2 s past that — a test that asserted at 1.05 leases would be asking
+                # whether the machine was busy, not whether the claims are held.
+                await asyncio.sleep(3.0)
+                stolen = [
+                    session_id
+                    for session_id in sessions
+                    if await claims.claim(session_id, "pod-2", 60.0)
+                ]
+                held, lapsed = await _claims_state(sessions)
+            for session_id in stolen:
+                await claims.release(session_id, "pod-2")
+            return len(stolen), held, lapsed
+        finally:
+            patch.undo()
+
+    stolen, held, lapsed = asyncio.run(_run())
+
+    assert stolen == 0, (
+        f"pod-2 claimed {stolen} of the sessions this sweep is holding; a turn can start on a "
+        "session the erasure is about to delete, which is the residue the guard exists to prevent"
+    )
+    assert lapsed == 0, (
+        f"{lapsed} of this sweep's own claims have lapsed while it holds them; nothing refreshes "
+        "them, so the guard covers the first lease of an erasure and not the rest of it"
+    )
+    assert held == len(sessions), f"{held} of {len(sessions)} claims are still live"
+
+
+def test_the_claim_sweep_does_not_pay_a_round_trip_per_session() -> None:
+    """One statement per session is what makes the lease lapse in the first place.
+
+    The two halves are one defect: at ~56 claims/s a fleet of 6,000 takes 104 s to claim, which is
+    longer than the 60 s lease before the sweep has deleted anything — so refreshing alone would be
+    a heartbeat racing a loop that never needed to be a loop. Counted as *connections borrowed*,
+    because that is the round trip: `SessionTurnClaims.claim` and `.release` each open one, so the
+    unfixed loop borrows 2N.
+
+    Driven with `CLAIM_BATCH` shrunk to 50 over 200 sessions, so the batching is exercised as four
+    statements rather than as the one a real fleet of this size would be — a loop that happens to
+    fit in a single batch proves the statement and not the loop around it.
+
+    Watched failing against the unfixed loop: `400 connection borrows for 200 sessions`.
+    """
+    sessions = [f"sess-hilde-{index:03d}" for index in range(200)]
+    batch = 50
+    borrows: list[str] = []
+
+    class _Counting(SessionTurnClaims):
+        """The same claims, counting how many times the sweep goes to the database."""
+
+        def _connection(self):  # type: ignore[no-untyped-def]
+            borrows.append("borrow")
+            return super()._connection()
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _seed_many("oid-hilde", sessions)
+        patch = pytest.MonkeyPatch()
+        patch.setattr(leaver, "SessionTurnClaims", _Counting)
+        patch.setattr(leaver, "CLAIM_BATCH", batch)
+        try:
+            async with _sessions_held(sessions):
+                pass
+        finally:
+            patch.undo()
+
+    asyncio.run(_run())
+
+    # Claim and release, one statement each per batch, plus headroom for a refresh tick landing
+    # inside a sweep this short.
+    ceiling = 4 * math.ceil(len(sessions) / batch) + 2
+    assert len(borrows) <= ceiling, (
+        f"{len(borrows)} connection borrows for {len(sessions)} sessions (ceiling {ceiling}): the "
+        "sweep still claims one session per round trip, so its first claims lapse before its last "
+        "one is taken"
+    )

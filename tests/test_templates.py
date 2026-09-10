@@ -31,6 +31,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.turn_signals import JobSignal
+from chemclaw.templates import registry
 from chemclaw.templates.manifest import AgentStep, Template
 from chemclaw.templates.registry import (
     TemplateError,
@@ -491,7 +492,7 @@ def test_a_shipped_template_whose_arguments_cannot_be_checked_says_so() -> None:
     """The argument check's blind spot is reported by name, not left to be inferred from silence.
 
     A bundle this release declares but does not run has no `connectors/<name>/server/tools.py`
-    here, so its signatures are unresolvable and `_step_problems` skips them — silently, by
+    here, so its signatures are unresolvable and `step_problems` skips them — silently, by
     design, because an unresolvable tool must not produce invented failures. `hazard-briefing`
     calls `screen_hazards`, which made it the first shipped template that is name-checked and
     *not* argument-checked.
@@ -554,12 +555,12 @@ def test_the_validator_accepts_a_correct_tool_step(
 def test_the_argument_check_covers_the_same_tools_whatever_the_call_order() -> None:
     """The argument check's coverage must not depend on which function ran first.
 
-    `_resolvable_signatures()` reads `registered_tools()`, which is populated only as an import
-    side effect of the agent package — and that import was supplied by `_step_problems` happening
-    to call `_available_tools()` two lines earlier. Measured in a fresh interpreter before the fix:
+    `resolvable_signatures()` reads `registered_tools()`, which is populated only as an import
+    side effect of the agent package — and that import was supplied by `step_problems` happening
+    to call `available_tools()` two lines earlier. Measured in a fresh interpreter before the fix:
 
-        _resolvable_signatures() alone    -> 30 signatures, 31 advertised tools uncovered
-        _available_tools() first, then it -> 50 signatures, 11 uncovered
+        resolvable_signatures() alone    -> 30 signatures, 31 advertised tools uncovered
+        available_tools() first, then it -> 50 signatures, 11 uncovered
 
     So reordering those two lines, or calling the function from anywhere else, silently dropped 20
     in-process tools from the check and the validator still printed "template validation passed" —
@@ -568,10 +569,10 @@ def test_the_argument_check_covers_the_same_tools_whatever_the_call_order() -> N
     test session has imported the agent for something else.
     """
     probe = (
-        "from chemclaw.cli.validate_templates import _available_tools, _resolvable_signatures\n"
-        "first = set(_resolvable_signatures())\n"
-        "_available_tools()\n"
-        "print('SAME' if first == set(_resolvable_signatures()) else 'DIFFERENT', len(first))\n"
+        "from chemclaw.agent.template_surface import available_tools, resolvable_signatures\n"
+        "first = set(resolvable_signatures())\n"
+        "available_tools()\n"
+        "print('SAME' if first == set(resolvable_signatures()) else 'DIFFERENT', len(first))\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", probe], capture_output=True, text=True, check=True
@@ -586,7 +587,7 @@ def test_a_bundle_that_cannot_be_imported_stops_the_template_gate(
 ) -> None:
     """The other way into the coverage loss the test above measures — and it was still open.
 
-    `_resolvable_signatures` caught every `ImportError`, so a bundle whose dependency stack is
+    `resolvable_signatures` caught every `ImportError`, so a bundle whose dependency stack is
     missing or renamed was indistinguishable from `qm`, which legitimately has no server module.
     Measured on this tree with one missing import injected into a connector's server tools module:
     50 signatures became 46 and `make template-validate` printed "template validation passed" and
@@ -594,7 +595,7 @@ def test_a_bundle_that_cannot_be_imported_stops_the_template_gate(
     situation, opposite answers — so the import is now one shared function that raises, and this
     pins the raising half.
     """
-    from chemclaw.cli.validate_templates import _resolvable_signatures
+    from chemclaw.agent.template_surface import resolvable_signatures
 
     missing_dep = ModuleNotFoundError("No module named 'rdkit'")
     missing_dep.name = "rdkit"
@@ -604,7 +605,7 @@ def test_a_bundle_that_cannot_be_imported_stops_the_template_gate(
 
     monkeypatch.setattr("chemclaw.connectors.registry.importlib.import_module", fail_for_bundles)
     with pytest.raises(ModuleNotFoundError, match="rdkit"):
-        _resolvable_signatures()
+        resolvable_signatures()
 
 
 # --- the run --------------------------------------------------------------------------
@@ -1094,7 +1095,7 @@ def test_an_in_process_tool_is_left_to_the_offline_gate() -> None:
     """One question, one answer. A tool whose signature is in this tree is checked there, not twice.
 
     A second lane checking the same thing differently is how two gates end up disagreeing about
-    one template — the failure `_resolvable_signatures` already records for the import path.
+    one template — the failure `resolvable_signatures` already records for the import path.
     """
     from chemclaw.cli.validate_template_args_live import check_live_arguments
 
@@ -1139,7 +1140,7 @@ def test_the_validator_reports_an_invalid_manifest_as_a_problem_not_a_traceback(
 ) -> None:
     """A manifest the registry cannot load must still be *reported*, not raised through `main`.
 
-    `main` resolves the tool surface before anything else, and `_available_tools` asks the agent for
+    `main` resolves the tool surface before anything else, and `available_tools` asks the agent for
     its tool names, which asks this registry for the `run_*` launchers — so a template whose own
     manifest is invalid (an unknown `${inputs.x}`, a forward `${steps.y.result}`) fails inside the
     registry load rather than inside the step checker, and the operator got a pydantic traceback.
@@ -1267,3 +1268,73 @@ def test_a_broker_fault_at_launch_reaches_the_model_as_a_written_refusal(
     assert "get_durable_job_status" in str(raised.value), (
         "the refusal has to name the check a chemist runs before relaunching"
     )
+
+
+# --- the runtime precondition ---------------------------------------------------------
+
+
+def test_a_template_whose_steps_do_not_resolve_is_refused_before_anything_is_queued(
+    client: _FakeClient,
+) -> None:
+    """A launcher must not start a procedure into a fleet that cannot run it.
+
+    `make template-validate` has always known this — at a deployment with no `calc` bundle it
+    reports "runs unknown job 'survey_bond_strengths'; declared jobs: []" and exits 1 — and
+    nothing at run time consulted it. So `run_bond_strength_survey` started `TemplateWorkflow`,
+    returned an id, and the system prompt told the model to report that id as work in progress and
+    poll it; `find_past_jobs` then found nothing, because a run that never reaches a step writes no
+    record.
+
+    The refusal reuses the gate's own `step_problems` rather than restating the rule — two copies
+    of "what resolves" is the defect class this repository keeps finding — and it happens **before**
+    the client is dialled, so the promise that nothing was queued is one the launcher can keep.
+    """
+    template = _template(
+        steps=[{"id": "survey", "kind": "job", "job": "no_such_job", "arguments": {}}]
+    )
+    with pytest.raises(TemplateError) as raised:
+        asyncio.run(build_template_tool(template)({}))
+    message = str(raised.value)
+    assert "no_such_job" in message
+    assert "nothing was queued" in message.lower()
+    assert client.calls == [], "the launcher dialled Temporal for a run it had already refused"
+
+
+def test_a_template_whose_steps_resolve_still_launches(client: _FakeClient) -> None:
+    """The precondition must refuse a broken template and *only* a broken one.
+
+    A gate nobody has watched pass is as unproven as one nobody has watched refuse — and this one
+    stands between every shipped procedure and its launch.
+    """
+    template = _template(
+        steps=[{"id": "one", "kind": "tool", "tool": "find_past_jobs", "arguments": {}}]
+    )
+    job_id = asyncio.run(build_template_tool(template)({}))
+    assert job_id == run_workflow_id(template, {})
+    assert len(client.calls) == 1
+
+
+def test_the_gate_and_the_launcher_share_one_definition_of_resolving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One rule, one implementation: the runtime precondition *is* the validator's own check.
+
+    Stated as an identity rather than as two agreeing outputs, because two implementations that
+    agree today are exactly what this repository keeps finding a year later.
+    """
+    from chemclaw.agent import template_surface
+    from chemclaw.cli import validate_templates
+
+    assert validate_templates.step_problems is template_surface.step_problems
+    # The launcher's identity is proven by *substitution* rather than by a name it re-exports: it
+    # imports the function lazily (the module edge would be a cycle), so only replacing the one
+    # definition and watching the refusal change shows there is not a second one.
+    calls: list[str] = []
+
+    def _fake_rule(template: Any, surface: Any = None) -> list[str]:
+        calls.append(template.name)
+        return ["the shared rule spoke"]
+
+    monkeypatch.setattr(template_surface, "step_problems", _fake_rule)
+    assert registry.unrunnable_reason(_template()) == "  - the shared rule spoke"
+    assert calls == ["probe"]

@@ -48,10 +48,13 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Literal
 
+import psycopg
+from psycopg.rows import TupleRow
 from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.metrics import METRICS
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +97,14 @@ ON CONFLICT (source, entry_id) DO UPDATE SET
 # Keep the `cap` most recently refused rows of this source; delete the rest. Ordered by
 # `entry_id` after `last_seen` so a tie — every row of one batch shares a transaction timestamp —
 # resolves deterministically instead of leaving the cap to the physical row order.
+#
+# **`RETURNING` because this bound is an assumption and nothing checked it.** The argument for the
+# cap is about the *distribution* of refusals — "a source refusing more than that has a systematic
+# defect the newest thousand rows describe as well as a million would" — which is true of a source
+# broken one way and false of a source with 1,001 distinct one-off refusals. The second kind loses
+# its oldest rows permanently, and `refusals_matching` then reports those records as never refused:
+# the strongest form of this defect, because the record is gone rather than merely unread. The
+# count makes the assumption observable instead of believed.
 _EVICT = """
 DELETE FROM ingest_rejections
 WHERE source = %(source)s
@@ -103,10 +114,13 @@ WHERE source = %(source)s
       ORDER BY last_seen DESC, entry_id
       LIMIT %(cap)s
   )
+RETURNING entry_id
 """
 
+# `count(*) OVER ()` rather than a second statement: it is the same scan, so the rows and the total
+# are one snapshot, and this runs inside a tool result on a live turn.
 _SELECT_MATCHING = """
-SELECT source, entry_id, reason, first_seen, last_seen, occurrences
+SELECT source, entry_id, reason, first_seen, last_seen, occurrences, count(*) OVER () AS matching
 FROM ingest_rejections
 WHERE lower(entry_id || ' ' || reason) LIKE ANY(%(patterns)s)
 ORDER BY last_seen DESC
@@ -136,6 +150,32 @@ class IngestRejection(BaseModel):
     first_seen: datetime
     last_seen: datetime
     occurrences: int = Field(ge=1)
+
+
+class RefusalMatches(BaseModel):
+    """The refusals one question matched, **and how many it matched**.
+
+    `_MAX_MATCHES` is 5 and the bound is argued rather than accidental — "both are prompt budget:
+    this rides inside a tool result the model reads on the turn, and a data-quality footnote that
+    outgrows the evidence it accompanies has stopped being a footnote". What was missing is that a
+    caller could not tell: "the refusals" and "the top 5 refusals" were the same list.
+
+    That is the same swallowing this module's own header refuses one category over — "swallowing it
+    here would make 'nothing was refused' and 'nothing could be asked' the same empty list, which
+    is the one thing this module must not do". A cut list with nothing saying so is that sentence
+    applied to the other end of the answer.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    rejections: list[IngestRejection] = Field(default_factory=list)
+    # How many rows matched before `_MAX_MATCHES` cut them, from the same scan as the rows.
+    total_matching: int = Field(default=0, ge=0)
+
+    @property
+    def truncated(self) -> bool:
+        """Whether refusals matched that this answer does not carry."""
+        return self.total_matching > len(self.rejections)
 
 
 async def record_refusals(source: str, refusals: Mapping[str, str]) -> None:
@@ -196,6 +236,47 @@ async def record_refusals(source: str, refusals: Mapping[str, str]) -> None:
     await _write_one_at_a_time(source, rows)
 
 
+async def _evict(cursor: psycopg.AsyncCursor[TupleRow], source: str) -> int:
+    """Apply this source's growth bound, **reporting what it deleted**, on `cursor`'s transaction.
+
+    One function rather than the same statement in both write paths, because the reporting is the
+    part that must not diverge: a fallback that evicted silently while the batch path logged would
+    leave exactly the case nobody looks at.
+
+    The bound is an argued one — `_MAX_ROWS_PER_SOURCE` says why — and the argument is an
+    assumption about the *shape* of a source's refusals rather than a fact about any source. A
+    source with more than that many *distinct* refusals loses its oldest permanently, and
+    `refusals_matching` afterwards reports those records as never refused, which is the one answer
+    this ledger exists to stop. Nothing counted it, so the assumption could never be checked
+    against a deployment.
+
+    The WARNING names the source and the consequence; `chemclaw_ingest_rejections_evicted_total`
+    is the alertable form beside it, labelled by source, so the assumption is a *checked* invariant
+    rather than one nobody can see. A flat zero here means the bound has never bitten, which is
+    what a healthy deployment looks like.
+
+    Returns:
+        How many rows the bound deleted; 0 when the source is inside it, which is the ordinary case.
+    """
+    await cursor.execute(_EVICT, {"source": source, "cap": _MAX_ROWS_PER_SOURCE})
+    evicted = await cursor.fetchall()
+    if evicted:
+        logger.warning(
+            "evicted %d ingest rejection(s) for source %r: the ledger keeps the %d most recently "
+            "refused rows per source, and these are older than all of them. Their refusals are now "
+            "unanswerable — a question about one of those records will report no refusal at all",
+            len(evicted),
+            source,
+            _MAX_ROWS_PER_SOURCE,
+        )
+        METRICS.increment(
+            "chemclaw_ingest_rejections_evicted_total",
+            len(evicted),
+            {"source": source},
+        )
+    return len(evicted)
+
+
 async def _write(source: str, rows: list[dict[str, str]]) -> None:
     """Upsert these ledger rows and re-apply the source's growth bound, in one transaction.
 
@@ -211,7 +292,7 @@ async def _write(source: str, rows: list[dict[str, str]]) -> None:
             await cur.executemany(_UPSERT, rows)
             # Once per batch rather than once per row: the bound is on what the table holds,
             # and every row of this batch is newer than everything it would evict.
-            await cur.execute(_EVICT, {"source": source, "cap": _MAX_ROWS_PER_SOURCE})
+            await _evict(cur, source)
         await conn.commit()
 
 
@@ -257,7 +338,7 @@ async def _write_one_at_a_time(source: str, rows: list[dict[str, str]]) -> None:
                         exc,
                     )
             async with conn.cursor() as cur:
-                await cur.execute(_EVICT, {"source": source, "cap": _MAX_ROWS_PER_SOURCE})
+                await _evict(cur, source)
             await conn.commit()
     except Exception as exc:
         logger.warning(
@@ -268,7 +349,7 @@ async def _write_one_at_a_time(source: str, rows: list[dict[str, str]]) -> None:
         )
 
 
-async def refusals_matching(question: str) -> list[IngestRejection]:
+async def refusals_matching(question: str) -> RefusalMatches:
     """The refused records whose id or reason matches a word of `question`, newest first.
 
     Substring matching on the question's own distinctive words, because the thing a chemist asks
@@ -293,24 +374,34 @@ async def refusals_matching(question: str) -> list[IngestRejection]:
     an observation's `statement` plain in its store and frames it in the tool: the envelope belongs
     to the one channel that feeds a model, and a row rewritten here would also be rewritten for the
     operator reading the table.
+
+    Returns:
+        The matching rows, at most `_MAX_MATCHES` of them, and `total_matching` saying how many
+        there were — because a bound applied silently makes "the refusals" and "the top five
+        refusals" the same answer.
     """
     patterns = _patterns(question)
     if not patterns:
-        return []
+        return RefusalMatches()
     async with db.connection(settings.postgres_dsn, operation="ingest_rejections.matching") as conn:
         cursor = await conn.execute(_SELECT_MATCHING, {"patterns": patterns, "limit": _MAX_MATCHES})
         rows = await cursor.fetchall()
-    return [
-        IngestRejection(
-            source=row[0],
-            entry_id=row[1],
-            reason=row[2],
-            first_seen=row[3],
-            last_seen=row[4],
-            occurrences=row[5],
-        )
-        for row in rows
-    ]
+    return RefusalMatches(
+        rejections=[
+            IngestRejection(
+                source=row[0],
+                entry_id=row[1],
+                reason=row[2],
+                first_seen=row[3],
+                last_seen=row[4],
+                occurrences=row[5],
+            )
+            for row in rows
+        ],
+        # The window function is per row and identical across them, so the first row carries it;
+        # no rows means nothing matched, which is a total of zero either way.
+        total_matching=int(rows[0][6]) if rows else 0,
+    )
 
 
 def _patterns(question: str) -> list[str]:

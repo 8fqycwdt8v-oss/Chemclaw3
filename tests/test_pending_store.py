@@ -117,13 +117,15 @@ def test_the_inbox_shows_what_is_routed_to_you_and_what_is_routed_to_nobody() ->
         await _open("pending-anyone", asked_of="", days=2)
         await _open("pending-theirs", asked_of="u-them", days=3)
 
-        mine = {row.request_id for row in await pending_store.open_requests(asked_of="u-me")}
+        mine = {
+            row.request_id for row in (await pending_store.open_requests(asked_of="u-me")).requests
+        }
         assert "pending-mine" in mine
         assert "pending-anyone" in mine
         assert "pending-theirs" not in mine
 
         # Unnarrowed, everything open is listed — the operator's view.
-        everything = {row.request_id for row in await pending_store.open_requests()}
+        everything = {row.request_id for row in (await pending_store.open_requests()).requests}
         assert {"pending-mine", "pending-anyone", "pending-theirs"} <= everything
 
     asyncio.run(_run())
@@ -140,7 +142,7 @@ def test_the_inbox_is_ordered_by_deadline_and_drops_what_is_settled() -> None:
 
         order = [
             row.request_id
-            for row in await pending_store.open_requests(asked_of="u-order")
+            for row in (await pending_store.open_requests(asked_of="u-order")).requests
             if row.requested_by == REQUESTER
         ]
         assert order == ["pending-soon", "pending-late"]
@@ -150,7 +152,7 @@ def test_the_inbox_is_ordered_by_deadline_and_drops_what_is_settled() -> None:
         )
         remaining = [
             row.request_id
-            for row in await pending_store.open_requests(asked_of="u-order")
+            for row in (await pending_store.open_requests(asked_of="u-order")).requests
             if row.requested_by == REQUESTER
         ]
         assert remaining == ["pending-late"]
@@ -215,7 +217,7 @@ def test_asking_again_after_a_deadline_lapsed_reopens_the_row() -> None:
         # Membership, not equality: these tables are shared by the whole suite and another file's
         # open request is not this test's business. Asserting the whole list is what made an
         # unrelated file fail this one in a full run and pass it alone.
-        assert request_id in [r.request_id for r in await pending_store.open_requests()]
+        assert request_id in [r.request_id for r in (await pending_store.open_requests()).requests]
 
     asyncio.run(_run())
 
@@ -369,5 +371,40 @@ def test_a_redelivered_reminder_does_not_count_one_escalation_twice() -> None:
         stored = await pending_store.get_request("pending-redelivered")
         assert stored is not None
         assert stored.reminders == 2
+
+    asyncio.run(_run())
+
+
+def test_the_inbox_query_says_how_much_it_did_not_return() -> None:
+    """A page of the inbox used to be byte-identical to the whole of it.
+
+    Measured against a real database: 35 rows waiting, `open_requests(limit=20)` returned 20, and
+    nothing in the return value, in a log line or in a counter said the other 15 existed. The cost
+    is the one an inbox exists to prevent — a question raised, never surfaced to anybody, expiring
+    unanswered — and a bare list cannot even express it.
+
+    `limit_applied` is the second half: the store clamps to 200, so a caller asking for 10,000
+    silently got 200 and had no way to tell that from a corpus of 200.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clean()
+        for index in range(35):
+            await _open(f"pending-page-{index:02d}", days=index + 1)
+
+        page = await pending_store.open_requests(limit=20)
+        assert len(page.requests) == 20
+        assert page.total_waiting >= 35
+        assert page.limit_applied == 20
+        assert page.truncated
+
+        # ...and asking for more than the store will serve is visible as the clamp it is.
+        clamped = await pending_store.open_requests(limit=10_000)
+        assert clamped.limit_applied == 200
+
+        # The ordinary case must read as complete, or the marker means nothing.
+        whole = await pending_store.open_requests(limit=200)
+        assert not whole.truncated
 
     asyncio.run(_run())

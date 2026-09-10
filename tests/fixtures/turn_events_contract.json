@@ -14,6 +14,7 @@
   "members": {
     "answer": {
       "challenged": "bool",
+      "checks_run": "list[Literal['verifier', 'answer-shape']]",
       "confidence": "float | None",
       "review_hold_id": "str | None",
       "review_required": "bool",

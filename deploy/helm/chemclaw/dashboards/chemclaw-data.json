@@ -210,7 +210,7 @@
           "refId": "B"
         }
       ],
-      "description": "Lookups by outcome, and what they were worth. `hit` answered from the store, `shared` joined another caller's in-flight computation, `miss` computed. The seconds series is the wall clock those hits and shares did not spend — a thousand avoided millisecond lookups and one avoided nineteen-minute CREST search are the same number of lookups and not the same saving, so read the rate against the count rather than instead of it."
+      "description": "Lookups by outcome, and what they were worth. `hit` answered from the store, `shared` joined another caller's in-flight computation, `miss` computed. The seconds series is the wall clock those hits and shares did not spend \u2014 a thousand avoided millisecond lookups and one avoided nineteen-minute CREST search are the same number of lookups and not the same saving, so read the rate against the count rather than instead of it."
     },
     {
       "id": 8,
@@ -930,7 +930,7 @@
       "id": 20,
       "type": "graph",
       "title": "Turns whose transcript and thread parted company",
-      "description": "The two records of one conversation: the transcript a chemist sees on reload, and the checkpoint the model is rebuilt from. A teardown between the two leaves the model holding an exchange the chemist cannot see. Counts one branch — a completed run that never answered — and deliberately not the whole class, so a flat line is not proof of agreement.",
+      "description": "The two records of one conversation: the transcript a chemist sees on reload, and the checkpoint the model is rebuilt from. A teardown between the two leaves the model holding an exchange the chemist cannot see. Counts one branch \u2014 a completed run that never answered \u2014 and deliberately not the whole class, so a flat line is not proof of agreement.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -941,6 +941,44 @@
         {
           "expr": "sum(rate(chemclaw_transcript_thread_divergence_total[15m]))",
           "legendFormat": "divergences/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "graph",
+      "title": "Refusals the ledger's growth bound deleted",
+      "description": "`ingest_rejections` keeps the newest 1,000 refusals per source, on the argument that a source refusing more than that has one systematic defect its newest thousand rows describe as well as a million would. That is an assumption about the *distribution* of a source's refusals, not a fact about any source: one with more distinct one-off refusals than the cap loses its oldest permanently, and `refusals_matching` then reports those records as never refused \u2014 the record gone rather than unread. A flat zero is the assumption holding. A source with a steady rate here is one whose refusal history is being destroyed faster than anyone reads it.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 68
+      },
+      "targets": [
+        {
+          "expr": "sum by (source) (rate(chemclaw_ingest_rejections_evicted_total[1h]))",
+          "legendFormat": "{{source}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "graph",
+      "title": "Uploads dropped from a session",
+      "description": "A chemist's file leaving the store past the per-session count or byte bound. It used to be wholly silent, and `read_attachment` then told the model the file had never been sent. A steady rate here means the per-session bound is too low for how these chemists work, not that anything is broken. Unlabelled on purpose: the only candidate label is a session id, which is unbounded cardinality.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 68
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(chemclaw_attachment_evictions_total[1h]))",
+          "legendFormat": "evictions/s",
           "refId": "A"
         }
       ]

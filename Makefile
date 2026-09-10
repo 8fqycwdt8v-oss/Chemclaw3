@@ -226,6 +226,14 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	@# neither destinations nor windows to enumerate, so it takes both escape hatches explicitly —
 	@# the same sentences an operator has to write, which is why the flags are visible here.
 	@#
+	@# `--set temporal.namespace=chemclaw` is the third, and it is not an escape hatch: it is the
+	@# value itself, because there is no safe default for it. The chart used to ship the constant
+	@# `"chemclaw"` against an address naming a *cluster-shared* broker, so two releases landed on
+	@# one namespace, one task queue and one schedule-id space — measured, a peer's `helm upgrade`
+	@# rewrote `eln-sync` to another workflow type and interval and `_prune` deleted its
+	@# `eval-drift` outright. `chemclaw` is what a validation render passes because it reproduces
+	@# the old behaviour exactly; a real release states its own.
+	@#
 	@# Twice, and the second render is the point: every switch this chart ships **off** was
 	@# validated by nobody. `mcpFace.enabled` rendered a Deployment mounting a volume the pod did
 	@# not declare and `monitoring.temporalSdkMetrics.enabled` rendered a container port name one
@@ -248,7 +256,8 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set documentShare.enabled=true --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall"; do \
 	    helm template chemclaw deploy/helm/chemclaw \
 	      --set networkPolicy.allowAnyDestination=true \
-	      --set retention.unboundedGrowthAccepted=true $$flags \
+	      --set retention.unboundedGrowthAccepted=true \
+	      --set temporal.namespace=chemclaw $$flags \
 	    | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version $(KUBE_VERSION) \
 	        -schema-location default -schema-location \
 	        'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'; \
@@ -268,6 +277,7 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	  render=$$(helm template chemclaw deploy/helm/chemclaw \
 	    --set networkPolicy.allowAnyDestination=true \
 	    --set retention.unboundedGrowthAccepted=true \
+	    --set temporal.namespace=chemclaw \
 	    --set connectors.molfp.url=https://model.invalid/mcp); \
 	  case "$$render" in *chemclaw-connector-molfp*) \
 	    echo "FAIL: an externally hosted connector still gets a Deployment/Service"; exit 1;; esac; \
@@ -282,9 +292,15 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	@# it. That failure is silent from the cluster's side: the object exists and is `Valid` by every
 	@# check this repo ran, and the alerts in it simply never evaluate.
 	@#
-	@# Both renders, because a rule behind a flag is a rule nothing else parses: the shipped
-	@# defaults, and the one with the Temporal SDK exporter on, which is the only shape that renders
-	@# `ChemclawWorkerNotPolling`. The dashboards go through the same check for the same reason at
+	@# Three renders, because a rule behind a flag is a rule nothing else parses: the shipped
+	@# defaults, the one with the Temporal SDK exporter on (the only shape that renders
+	@# `ChemclawWorkerNotPolling`), and one that *states retention windows* rather than accepting
+	@# unbounded growth — `ChemclawRetentionNotSweeping` renders only on that arm, because with the
+	@# growth accepted there is no sweep to be absent, so the two renders above parse every rule in
+	@# the file except that one. It is a separate invocation rather than a third arm of the loop,
+	@# because the chart refuses a release that states *both* postures — which is the guard
+	@# working — so the two arms cannot share a prefix with it.
+	@# The dashboards go through the same check for the same reason at
 	@# one remove — over a hundred panel queries that no other gate reads, where a mistyped one is a
 	@# blank panel rather than an error.
 	@set -e; \
@@ -293,11 +309,20 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	  for flag in "" "--set monitoring.temporalSdkMetrics.enabled=true"; do \
 	    helm template chemclaw deploy/helm/chemclaw \
 	      --set networkPolicy.allowAnyDestination=true \
-	      --set retention.unboundedGrowthAccepted=true $$flag \
+	      --set retention.unboundedGrowthAccepted=true \
+	      --set temporal.namespace=chemclaw $$flag \
 	      > "$$work/render.yaml"; \
 	    uv run python "$$work/extract.py" < "$$work/render.yaml" > "$$work/rules.yaml"; \
 	    promtool check rules "$$work/rules.yaml"; \
-	  done
+	  done; \
+	  helm template chemclaw deploy/helm/chemclaw \
+	    --set networkPolicy.allowAnyDestination=true \
+	    --set retention.windows.CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS=365 \
+	    --set retention.artifactGrowthAccepted=true \
+	    --set temporal.namespace=chemclaw \
+	    > "$$work/render.yaml"; \
+	  uv run python "$$work/extract.py" < "$$work/render.yaml" > "$$work/rules.yaml"; \
+	  promtool check rules "$$work/rules.yaml"
 
 upstream-check:  ## Re-check every upstream shape this repo borrows (run on any langchain/langgraph/deepagents bump).
 	@# The whole point of `tests/test_upstream_surface.py` is that a dependency bump becomes one

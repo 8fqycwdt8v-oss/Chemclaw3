@@ -10,6 +10,16 @@ position here, in `corpus_cursors` (`infra/sql/072_…`).
 is a datetime watermark; a keyset position is a `TEXT` key in the source's own domain, which may be
 a bigint, a ULID or a padded string.
 
+**And that is why the upsert here stays blind where `ingest/eln/cursor.py`'s became `GREATEST`.**
+The two statements read identically, which is the invitation to copy the fix across; the column
+types are what decide it. `GREATEST` on text is lexicographic — measured on this repository's own
+Postgres, `GREATEST('9'::text, '10'::text)` is `'9'` — so on a bigint feed the high-water spelling
+would pin the position at the first single-digit id it reached and *skip* every row past it.
+Blind, the worst a concurrent write can do is move the position back, which costs a re-drain of an
+append-only feed whose writes are upserts. Forwards past unread rows is the direction that loses
+data, and only the high-water spelling can go there. `tests/test_cursor.py` asserts the absence and
+measures the ordering, so the reason stays checkable rather than remembered.
+
 **No lag gauge, unlike `ingest/eln/cursor.py`, and the absence is deliberate.** That module can say
 how far behind a cursor is because a datetime subtracts from `now()`. A keyset value is opaque —
 nothing here can tell how many rows sit beyond it — so a gauge would have to invent a number.

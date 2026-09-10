@@ -1678,30 +1678,57 @@ def test_the_migration_hook_cannot_hold_a_release_open_forever() -> None:
     )
 
 
+# What an interpolated `--set` value stands in as, once it is substituted rather than dropped. A
+# string, because the one flag that needs it is a Temporal namespace; a future interpolated flag
+# whose value may not be a string (a boolean posture, a number) has to be given a representative
+# value **here**, deliberately, and until it is it will fail the render below rather than vanish
+# from the basis. That failure is the correct one: this helper's whole claim is that the pipeline
+# can state every posture, and a posture nobody has said how to state is not stated.
+_JENKINS_INTERPOLATED = "jenkins-interpolated"
+
+
 def _jenkins_render_flags() -> list[str]:
     """Every `--set` the release pipeline's render stage can emit, with all its postures stated.
 
     Read out of the `Jenkinsfile` rather than restated here: the point of the test below is that
     the *pipeline's own* flags are enough to render this chart, so a copy of them would be a second
-    answer to the question and would stay green while the pipeline broke. The interpolated pair
-    (`image.digest`/`image.repository`) is dropped — a validation render has no published digest,
-    and neither is a posture the chart refuses to render without.
+    answer to the question and would stay green while the pipeline broke.
+
+    **Two different grounds for not taking a flag at face value, which used to be one condition.**
+    `image.digest`/`image.repository` are dropped because a validation render has no published
+    digest and neither is a posture. An *interpolated* value is a different case entirely: the
+    pipeline can state it — that is what a Jenkins parameter is — it simply cannot be resolved
+    outside a Jenkins run. Dropping it silently narrows this helper's own first sentence, so it is
+    **substituted** with `_JENKINS_INTERPOLATED` instead, and the render then actually exercises
+    the posture the pipeline claims to be able to state.
+
+    **The old condition never fired, and measuring is how that surfaced.** The value pattern was
+    `[A-Za-z0-9_.:/-]+`, which does not admit `$`, `{` or `}` — so `--set
+    temporal.namespace=${params.TEMPORAL_NAMESPACE}` was not *dropped by the `$` guard*, it failed
+    to match at all, and so did both `image.*` flags. Driven over the shipped stage, the regex
+    returned two flags and the `"$" in match.group(0)` arm was reached zero times. A guard that
+    cannot fire is not the reason a thing is missing, and reading it as one is how the third
+    posture came to be invisible here with no line of this file looking wrong.
     """
     # Split on the stage declarations at their own indentation, not on the bare string: a stage
     # name quoted inside a comment in the body would otherwise truncate the block being read.
     blocks = re.split(r"\n    stage\('", (DEPLOY.parent / "Jenkinsfile").read_text())
     stage = next(block for block in blocks if block.startswith("Render the chart')"))
     flags: list[str] = []
-    for match in re.finditer(r"--set ([A-Za-z0-9_.]+)=([A-Za-z0-9_.:/-]+)", stage):
-        if "$" in match.group(0) or match.group(1).startswith("image."):
+    # The value runs to the next whitespace or Groovy string terminator, so an interpolated
+    # `${...}` — and `${a}/${b}` — is *seen* rather than skipped past. That is what makes the two
+    # decisions below decisions rather than an accident of the character class.
+    for match in re.finditer(r"--set ([A-Za-z0-9_.]+)=([^\s'\"]+)", stage):
+        key, value = match.group(1), match.group(2)
+        if key.startswith("image."):
             continue
-        flags += ["--set", f"{match.group(1)}={match.group(2)}"]
+        flags += ["--set", f"{key}={_JENKINS_INTERPOLATED if '$' in value else value}"]
     return flags
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_the_release_pipeline_can_state_every_posture_the_chart_demands() -> None:
-    """The chart refuses to render until a release states a posture, and there were two of them.
+    """The chart refuses to render until a release states a posture, and there are three of them.
 
     `templates/networkpolicy.yaml` refuses without an egress posture and `templates/config.yaml`
     refuses without a retention posture — both deliberate
@@ -1713,8 +1740,13 @@ def test_the_release_pipeline_can_state_every_posture_the_chart_demands() -> Non
 
     Rendered with the pipeline's flags rather than asserted as strings, because "a parameter named
     `ACCEPT_UNBOUNDED_GROWTH` exists" is not the claim — the claim is that what the pipeline can say
-    is enough for the chart to render, and only helm answers that. A third posture guard added to
-    the chart later fails this test with the message the operator would have got in the namespace.
+    is enough for the chart to render, and only helm answers that. The docstring here used to end
+    "a third posture guard added to the chart later fails this test with the message the operator
+    would have got in the namespace", and that is exactly what happened: `temporal.namespace` is
+    the third. It is not an escape hatch but a discriminator — the one string separating two
+    ChemClaw releases on a shared broker — so the pipeline states it from a parameter with no
+    default, and `_jenkins_render_flags` substitutes a placeholder rather than dropping it, because
+    "the pipeline can state it" is the whole of what this test asks.
     """
     flags = _jenkins_render_flags()
     result = subprocess.run(
@@ -2498,21 +2530,36 @@ def test_an_unstated_retention_posture_refuses_to_render() -> None:
     guard = "eq (empty .Values.retention.windows) (empty .Values.retention.unboundedGrowthAccepted)"
     assert guard in config, "the retention posture can be left unstated"
     assert "{{- fail " in config, "the guard warns rather than refusing"
+    # The type guard the egress twin has carried since it shipped and this half did not. `empty` is
+    # what misreads a quoted boolean, so the check has to sit *before* the emptiness test, not
+    # beside it — see `test_a_quoted_retention_escape_hatch_refuses_to_render` for the measurement.
+    assert 'kindIs "string" .Values.retention.unboundedGrowthAccepted' in config, (
+        "a quoted unboundedGrowthAccepted (--set-string) satisfies this gate while reading as off"
+    )
+    assert config.index('kindIs "string" .Values.retention.unboundedGrowthAccepted') < config.index(
+        guard
+    ), "the type guard runs after the emptiness test, which is the test that misreads the string"
     assert _values()["retention"]["windows"] == {}, (
         "the shipped default states a retention policy the release never wrote down"
     )
     assert _values()["retention"]["unboundedGrowthAccepted"] is False, (
         "the shipped default grants a permission the release never wrote down"
     )
-    # Every render of the shipped defaults must carry the escape hatch, or it cannot render at all
-    # — the same renders the egress test walks, now each paying both flags.
+    # Every render must state a retention posture, or it cannot render at all — the same renders
+    # the egress test walks. **A disjunction rather than the escape hatch by name**, because the
+    # guard above is an exclusive-or and the escape hatch is only one of its two arms: the
+    # `helm-validate` render that exists to parse `ChemclawRetentionNotSweeping` states
+    # `retention.windows` instead, since that rule renders on *that* arm and on no other. Asserting
+    # the flag by name would have failed the one render that covers the rule this half of the gate
+    # is about — and demanding both flags would fail every render, which is the guard working.
+    stated = ("--set retention.unboundedGrowthAccepted=true", "--set retention.windows")
     unflagged = [
         block[0].strip()
         for block in _makefile_renders()
-        if not any("--set retention.unboundedGrowthAccepted=true" in line for line in block)
+        if not any(flag in line for line in block for flag in stated)
     ]
     assert not unflagged, (
-        f"a shipped-defaults render is missing the flag it cannot render without: {unflagged}"
+        f"a render states no retention posture, so the chart refuses it: {unflagged}"
     )
 
 
@@ -3151,6 +3198,12 @@ def _render(*overrides: str) -> subprocess.CompletedProcess[str]:
     (`D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`'s retention half): a validation
     render states no disposal policy either, and both flags are what every other caller of this
     chart pays too — see `test_the_shipped_defaults_still_render`.
+
+    `temporal.namespace=chemclaw` is the third, and it is not a posture: it is the one string that
+    separates two ChemClaw releases sharing a broker, which the chart shipped as a constant inside
+    `config` and now refuses to default. A validation render has no site to name, so it names the
+    value the chart used to hard-code — see
+    `test_a_release_that_does_not_name_its_temporal_namespace_refuses_to_render`.
     """
     return subprocess.run(
         [
@@ -3162,6 +3215,8 @@ def _render(*overrides: str) -> subprocess.CompletedProcess[str]:
             "networkPolicy.allowAnyDestination=true",
             "--set",
             "retention.unboundedGrowthAccepted=true",
+            "--set",
+            "temporal.namespace=chemclaw",
             *overrides,
         ],
         capture_output=True,
@@ -3286,10 +3341,18 @@ def _render_windows(*keys: str) -> subprocess.CompletedProcess[str]:
     `_render` states the *other* retention posture and the gate refuses when both are set, so the
     escape hatch is overridden back to `false` rather than dropped: `--set` is last-wins, which
     leaves exactly one posture stated — the one under test.
+
+    `artifactGrowthAccepted=true` is here because stating a window is what makes the artifact-store
+    posture mandatory: the nine `CHEMCLAW_RETENTION_*` windows bound nine tables and none of them
+    is `artifact_blobs`, so a release that says "I bound my growth" is asked the second half.
+    Only on this arm — `_render`'s `unboundedGrowthAccepted` already covers that table by saying
+    everything grows.
     """
     return _render(
         "--set",
         "retention.unboundedGrowthAccepted=false",
+        "--set",
+        "retention.artifactGrowthAccepted=true",
         *(arg for key in keys for arg in ("--set", f"retention.windows.{key}=30")),
     )
 
@@ -3340,6 +3403,228 @@ def test_a_retention_window_naming_no_setting_refuses_to_render() -> None:
     by_hand = _render_windows("CHEMCLAW_RETENTION_ENABLED")
     assert by_hand.returncode != 0, by_hand.stdout[:2000]
     assert "CHEMCLAW_RETENTION_ENABLED" in by_hand.stderr, by_hand.stderr
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_a_release_that_does_not_name_its_temporal_namespace_refuses_to_render() -> None:
+    """Two releases land on one Temporal namespace, and the chart shipped that as the default.
+
+    `config.CHEMCLAW_TEMPORAL_ADDRESS` names one broker for the whole cluster — its own `temporal`
+    Kubernetes namespace, not one per release — and `CHEMCLAW_TEMPORAL_NAMESPACE` sat beside it as
+    the constant `"chemclaw"`. Inside that broker the namespace is the only boundary there is:
+    `CHEMCLAW_BACKGROUND_TASK_QUEUE` is the constant `background-jobs`, `OWNED_SCHEDULE_IDS` is a
+    set of bare constants, and a job's workflow id carries no site. The layout this repository
+    documents — `dev.yaml`/`staging.yaml`/`prod.yaml` in `deploy/jenkins/environments/`, three
+    Kubernetes namespaces, one shared Temporal — therefore put every release on one namespace, one
+    queue and one schedule-id space.
+
+    Measured against a live broker through the shipped `apply_schedules`/`_prune`, ids
+    probe-prefixed and deleted afterwards::
+
+        site A applied:  eln-sync -> workflow=SiteAWorkflow  interval=0:30:00
+        site B applied:  eln-sync -> workflow=SiteBWorkflow  interval=0:05:00   <-- overwritten
+        site A's schedules, settled:  ['eln-sync', 'eval-drift']
+        after site B's apply pruned:  ['eln-sync']                              <-- deleted
+
+    `_prune` deletes every id in `OWNED_SCHEDULE_IDS` that this release did not plan; it cannot tell
+    a peer's Schedule from a leftover of its own, and the comment above that set already anticipates
+    "a shared Temporal namespace" while protecting only *other software's* schedules.
+
+    Driven to the refusal **and** to a render, because a gate nobody has watched refuse is a claim
+    that a gate exists. The third arm is the duplicate: derived into the ConfigMap from
+    `temporal.namespace`, the key written in `config` as well would render twice and every parser
+    keeps the last, leaving this gate checking a value nothing reads.
+    """
+    # Built by hand rather than through `_render`, which states all three: `--set` is last-wins and
+    # there is no "unset", so `temporal.namespace=` would state the empty string — which is what
+    # the gate refuses — and this would then pass for the wrong reason.
+    unstated = subprocess.run(
+        [
+            "helm",
+            "template",
+            "chemclaw",
+            str(CHART),
+            "--set",
+            "networkPolicy.allowAnyDestination=true",
+            "--set",
+            "retention.unboundedGrowthAccepted=true",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert unstated.returncode != 0, (
+        "the chart still renders a Temporal namespace nobody chose, so two releases share one "
+        f"schedule-id space:\n{unstated.stdout[:2000]}"
+    )
+    assert "temporal.namespace" in unstated.stderr, unstated.stderr
+
+    stated = _render("--set", "temporal.namespace=chemclaw-staging")
+    assert stated.returncode == 0, stated.stderr
+    assert 'CHEMCLAW_TEMPORAL_NAMESPACE: "chemclaw-staging"' in stated.stdout, (
+        "the stated namespace does not reach the ConfigMap the pods read"
+    )
+
+    values = _values()
+    assert values["temporal"]["namespace"] == "", (
+        "the chart ships a default Temporal namespace again — a default is exactly the thing two "
+        "releases would share, which is why this gate has no escape hatch"
+    )
+    assert "CHEMCLAW_TEMPORAL_NAMESPACE" not in values["config"], (
+        "the namespace is back in `config`, where it is a constant rather than a release's choice"
+    )
+
+    both = _render("--set", "config.CHEMCLAW_TEMPORAL_NAMESPACE=written-by-hand")
+    assert both.returncode != 0, both.stdout[:2000]
+    assert "CHEMCLAW_TEMPORAL_NAMESPACE" in both.stderr, both.stderr
+
+    # And every shipped-defaults render in the `Makefile` must carry the flag, exactly as
+    # `test_an_unstated_egress_posture_refuses_to_render` demands of its own: this is the third
+    # thing `helm template` on these defaults cannot render without, so a render site that has not
+    # learned it does not fail *later*, it fails at once — which is what makes the omission cheap
+    # to find and worth asserting rather than remembering.
+    renders = _makefile_renders()
+    assert renders, "no `helm template` found in the Makefile — the extraction is broken"
+    unflagged = [
+        block[0].strip()
+        for block in renders
+        if not any("--set temporal.namespace=" in line for line in block)
+    ]
+    assert not unflagged, (
+        f"a shipped-defaults render is missing the flag it cannot render without: {unflagged}"
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_a_quoted_retention_escape_hatch_refuses_to_render() -> None:
+    """`unboundedGrowthAccepted: "false"` used to *satisfy* the retention gate and disable disposal.
+
+    Go templates treat every non-empty string as truthy and `empty` agrees, so a quoted boolean —
+    an operator writing down what they do *not* want, or `--set-string`, which
+    `templates/networkpolicy.yaml` calls "the single most likely way to get this wrong" — read as
+    *stated* to the gate and as *off* to everyone else. That twin has carried a `kindIs "string"`
+    guard since it shipped; this half never grew one, so the retention gate could be walked through
+    its own escape hatch. Measured with the guard removed, on otherwise shipped defaults:
+
+        helm template … --set-string retention.unboundedGrowthAccepted=false
+        -> 32 objects rendered, `CHEMCLAW_RETENTION_ENABLED` present 0 times
+
+    A release that wrote down "not unbounded growth" and installed cleanly with every durable table
+    growing forever, which is the exact end state this gate exists to make impossible.
+
+    Driven rather than read, because the sibling text assertion in
+    `test_an_unstated_retention_posture_refuses_to_render` can see the guard's *presence* and not
+    what `empty` does with a string — and it was the second of those, not the first, that made this
+    reachable.
+    """
+    quoted = subprocess.run(
+        [
+            "helm",
+            "template",
+            "chemclaw",
+            str(CHART),
+            "--set",
+            "networkPolicy.allowAnyDestination=true",
+            "--set",
+            "temporal.namespace=chemclaw",
+            "--set-string",
+            "retention.unboundedGrowthAccepted=false",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert quoted.returncode != 0, (
+        "a quoted retention escape hatch still renders; the release states a posture it does not "
+        f"have and nothing is ever pruned:\n{quoted.stdout[:2000]}"
+    )
+    assert "must be a boolean" in quoted.stderr, quoted.stderr
+
+    # And the real boolean is untouched: a guard that refused both would be a broken gate, not a
+    # strict one, and the shipped defaults plus this flag are what every render site passes.
+    stated = _render()
+    assert stated.returncode == 0, stated.stderr
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_stating_retention_windows_also_requires_an_artifact_store_posture() -> None:
+    """The retention gate bounds nine tables; `artifact_blobs` is not one of them.
+
+    `artifact_store_max_bytes` and `artifact_evict_idle_days` both default to 0 = off, they carry no
+    `CHEMCLAW_RETENTION_` prefix, and the sweep that reads them is a different workflow on a
+    different schedule. So a release that stated `retention.windows`, satisfied the posture gate and
+    believed its growth bounded still accumulated calculation by-products for the deployment's
+    lifetime — the gate's own escape hatch, one table over, which is the shape
+    `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob` exists to close.
+
+    **Asked only on the `windows` arm, and that is what keeps the shipped defaults at two `--set`
+    flags rather than three.** `unboundedGrowthAccepted: true` already says the durable tables grow
+    forever, which is true of this table too; there is nothing further for such a release to state.
+    The first arm below is what pins that, because a gate that fired on both arms would look
+    correct here and cost every render site a flag.
+    """
+    accepted = _render()  # the `unboundedGrowthAccepted` arm, unchanged
+    assert accepted.returncode == 0, (
+        "accepting unbounded growth now also demands an artifact posture, which makes a third "
+        f"`--set` mandatory at every render site for nothing:\n{accepted.stderr}"
+    )
+
+    silent = _render(
+        "--set",
+        "retention.unboundedGrowthAccepted=false",
+        "--set",
+        "retention.windows.CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS=30",
+    )
+    assert silent.returncode != 0, (
+        "a release states a retention posture and the artifact store still grows unbounded with "
+        f"nothing having asked:\n{silent.stdout[:2000]}"
+    )
+    assert "artifact_blobs" in silent.stderr, silent.stderr
+
+    bounded = _render_windows("CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS")
+    assert bounded.returncode == 0, bounded.stderr  # `_render_windows` accepts the growth
+
+    evicting = _render(
+        "--set",
+        "retention.unboundedGrowthAccepted=false",
+        "--set",
+        "retention.windows.CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS=30",
+        "--set",
+        "retention.artifactStore.CHEMCLAW_ARTIFACT_STORE_MAX_BYTES=53687091200",
+    )
+    assert evicting.returncode == 0, evicting.stderr
+    assert 'CHEMCLAW_ARTIFACT_STORE_MAX_BYTES: "53687091200"' in evicting.stdout, (
+        "the stated bound does not reach the ConfigMap, so the sweep is still off"
+    )
+
+    # And a key that names no bound refuses, for the reason `retention.windows` checks its own: an
+    # unknown prefixed variable is ignored by pydantic-settings, so it would state a posture and
+    # evict nothing. The cadence is the sharp case — it is a real setting, and it bounds nothing.
+    cadence_only = _render(
+        "--set",
+        "retention.unboundedGrowthAccepted=false",
+        "--set",
+        "retention.windows.CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS=30",
+        "--set",
+        "retention.artifactStore.CHEMCLAW_ARTIFACT_EVICTION_SCHEDULE_MINUTES=60",
+    )
+    assert cadence_only.returncode != 0, cadence_only.stdout[:2000]
+    assert "CHEMCLAW_ARTIFACT_EVICTION_SCHEDULE_MINUTES" in cadence_only.stderr, cadence_only.stderr
+
+    # And the escape hatch must be a real boolean. `networkpolicy.yaml` calls `--set-string` on one
+    # of these "the single most likely way to get this wrong": a quoted boolean is truthy in Helm
+    # and `empty` agrees, so it would satisfy the gate while reading as off — this gate reached
+    # through the misspelling of its own escape hatch.
+    quoted = _render(
+        "--set",
+        "retention.unboundedGrowthAccepted=false",
+        "--set",
+        "retention.windows.CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS=30",
+        "--set-string",
+        "retention.artifactGrowthAccepted=false",
+    )
+    assert quoted.returncode != 0, quoted.stdout[:2000]
+    assert "must be a boolean" in quoted.stderr, quoted.stderr
 
 
 # What a switch needs *besides itself* to render the branch it gates. The only literal here, and it
@@ -3593,6 +3878,8 @@ def _render_manifest_only(*overrides: str) -> str:
             "networkPolicy.allowAnyDestination=true",
             "--set",
             "retention.unboundedGrowthAccepted=true",
+            "--set",
+            "temporal.namespace=chemclaw",
             "--no-hooks",
             *overrides,
         ],

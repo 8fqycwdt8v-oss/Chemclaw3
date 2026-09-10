@@ -25,6 +25,7 @@ import pytest
 import chemclaw.agent.protocol_design_tools as tools
 from chemclaw.agent.authz import require_actor
 from chemclaw.agent.framing import ENVELOPE_TAG
+from chemclaw.agent.protocol_design_tools import ProtocolListing
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.turn_text import (
     get_current_user_texts,
@@ -44,7 +45,7 @@ from chemclaw.protocols.models import (
     Setpoints,
     design_id_for,
 )
-from chemclaw.protocols.render import DesignListing, ProtocolReadout, ProtocolReceipt
+from chemclaw.protocols.render import ProtocolReadout, ProtocolReceipt
 from chemclaw.protocols.store import InMemoryDesignStore
 
 _SOURCE = (
@@ -860,10 +861,10 @@ def test_finding_lists_what_was_stored_and_filters_by_status(
         drafted = await _open(_request(title="the draft"))
         await _draft(drafted.design_id, drafted.revision)
 
-        everything = DesignListing.model_validate_json(await tools.find_experiment_protocols())
+        everything = ProtocolListing.model_validate_json(await tools.find_experiment_protocols())
         assert {summary.title for summary in everything.designs} == {"the ask", "the draft"}
 
-        drafts = DesignListing.model_validate_json(
+        drafts = ProtocolListing.model_validate_json(
             await tools.find_experiment_protocols(status="draft")
         )
         assert [summary.title for summary in drafts.designs] == ["the draft"]
@@ -883,7 +884,7 @@ def test_finding_filters_by_project_and_returns_parseable_json(
 
         payload = await tools.find_experiment_protocols(project="prj-a")
         assert json.loads(payload)["designs"][0]["project"] == "prj-a"
-        listing = DesignListing.model_validate_json(payload)
+        listing = ProtocolListing.model_validate_json(payload)
         assert [summary.title for summary in listing.designs] == ["in prj-a"]
         assert listing.model_dump_json() == payload
 
@@ -895,7 +896,11 @@ def test_an_empty_listing_is_valid_json_rather_than_nothing(
 ) -> None:
     async def _body() -> None:
         payload = await tools.find_experiment_protocols()
-        assert json.loads(payload) == {"designs": []}
+        body = json.loads(payload)
+        assert body["designs"] == []
+        # ...and an empty listing says which kind of empty it is, rather than only being empty.
+        assert body["total"] == 0
+        assert "NONE" in body["verdict"]
 
     asyncio.run(_body())
 
@@ -926,7 +931,7 @@ def test_a_stated_slot_is_refused_when_no_chemist_spoke(store: InMemoryDesignSto
         stated = _request(scale=RequestField(value="2 g", basis="stated", quote="24 wells, no DMF"))
         with pytest.raises(ChemclawError, match="no chemist message"):
             await tools.structure_experiment_request(stated)
-        assert await store.listing() == []
+        assert (await store.listing()).designs == []
 
     asyncio.run(_body())
 

@@ -440,3 +440,62 @@ def test_the_best_supported_observation_is_read_first() -> None:
         assert [o.statement for o in await store.open_observations()] == ["solid", "thin"]
 
     asyncio.run(_run())
+
+
+def test_the_recall_page_says_how_much_of_the_tier_it_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`open_observations` clamps to `observation_max_results`, and nothing counted the rest.
+
+    The count half of this tier was weak-honest rather than silent — the tool's `limit` docstring
+    does tell the model "a full page may mean the tier holds more than you were shown" — which is
+    exactly the docstring-only pattern a verdict field exists to end: the docstring is read once
+    when the tool is defined, and the payload is what sits in the context window when the answer is
+    written. `count_open_observations` is the number that makes the sentence checkable.
+    """
+    monkeypatch.setattr(settings, "observations_enabled", True)
+
+    async def _run() -> None:
+        await _clean_db_or_skip()
+        page = settings.observation_max_results
+        await store.record(
+            [
+                _finding(statement=f"finding {index}", scope=f"transformation:{index}")
+                for index in range(page + 5)
+            ],
+            complete=True,
+        )
+
+        assert await store.count_open_observations() == page + 5
+        assert len(await store.open_observations()) == page
+
+        from chemclaw.agent import memory_tools
+
+        recall = await memory_tools.recall_observations()
+        assert recall.enabled is True
+        assert len(recall.observations) == page
+        assert recall.total_open == page + 5
+        payload = recall.model_dump()
+        assert "PARTIAL" in payload["verdict"]
+        assert str(page + 5) in payload["verdict"]
+
+    asyncio.run(_run())
+
+
+def test_an_enabled_tier_that_has_noticed_nothing_says_so_as_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Enabled-and-empty and disabled must not render alike, nor either look like the other."""
+    monkeypatch.setattr(settings, "observations_enabled", True)
+
+    async def _run() -> None:
+        await _clean_db_or_skip()
+        from chemclaw.agent import memory_tools
+
+        recall = await memory_tools.recall_observations()
+        assert recall.enabled is True
+        assert recall.observations == []
+        assert recall.total_open == 0
+        assert "NOTHING NOTICED" in recall.model_dump()["verdict"]
+
+    asyncio.run(_run())

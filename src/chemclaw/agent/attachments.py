@@ -29,7 +29,7 @@ from collections import deque
 from collections.abc import Callable
 from functools import partial
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from chemclaw.agent.framing import frame_untrusted
 from chemclaw.core.bounded import BoundedLru
@@ -51,9 +51,11 @@ __all__ = [
     "STORE",
     "Attachment",
     "AttachmentError",
+    "AttachmentListing",
     "AttachmentStore",
     "AttachmentSummary",
     "AttachmentUnavailable",
+    "SessionAttachments",
     "content_type_for",
     "list_attachments",
     "parse_attachment",
@@ -302,6 +304,43 @@ async def parse_attachment_off_loop(
         ) from exc
 
 
+#: How many dropped file names one session remembers. A module constant rather than a `Settings`
+#: field, for the reason `ingest/rejections._MAX_ROWS_PER_SOURCE` is one: `core/config/` is the
+#: operator-facing deployment surface, and how many names a refusal message may list is not a
+#: deployment decision anybody tunes. Bounded at all because the names ride in a store whose whole
+#: purpose is a memory bound, and because they go into the model's context — twenty short names is
+#: a sentence, five hundred is a page. The count is kept beyond it (`evicted_total`), so a session
+#: that has dropped more than this still says how many.
+_EVICTED_NAMES_REMEMBERED = 20
+
+
+class SessionAttachments(BaseModel):
+    """What a session holds **and what it held and lost** — the store's whole answer.
+
+    The second half is the part that did not exist. `add` evicts a session's oldest uploads past
+    either per-session bound and left no record anywhere: no log line, no counter, no field. So
+    `for_session` returned ten files after thirteen uploads and the three that were dropped were
+    indistinguishable from three that were never sent — which is not a missing detail but a false
+    statement, because `read_attachment` then said "no attachment named 'plate-00.csv' in this
+    conversation" about a file the chemist had uploaded to exactly this conversation.
+
+    `evicted` is the dropped names oldest-first, bounded by `_EVICTED_NAMES_REMEMBERED`;
+    `evicted_total` is how many were dropped whether or not their names are still remembered. Two
+    fields rather than one for the rule this repository applies to every other bounded list: a
+    truncated list with nothing saying so reads as a complete one.
+
+    **The residual is named rather than papered over.** A session evicted from the map entirely
+    (the LRU's own count and byte bounds) takes this record with it, so a conversation whose whole
+    entry was evicted looks like one that never uploaded anything. Nothing here can see that: the
+    bound it is evicted by belongs to the map, and remembering evicted sessions forever is the
+    growth the map exists to stop.
+    """
+
+    items: list[Attachment] = Field(default_factory=list)
+    evicted: list[str] = Field(default_factory=list)
+    evicted_total: int = Field(default=0, ge=0)
+
+
 def _resident_bytes(items: list[Attachment]) -> int:
     """What a session's parsed text costs the pod, in bytes rather than in characters.
 
@@ -318,6 +357,16 @@ def _resident_bytes(items: list[Attachment]) -> int:
     against a budget of tens of megabytes, and it errs the safe way.
     """
     return sum(sys.getsizeof(item.text) for item in items)
+
+
+def _entry_bytes(held: SessionAttachments) -> int:
+    """What one map entry costs, which is its files — the dropped *names* are not the payload.
+
+    Deliberately not counting `evicted`: it is bounded by `_EVICTED_NAMES_REMEMBERED` short strings
+    and charging it against a budget sized in tens of megabytes would let a session's own record of
+    what it lost evict another conversation's working material.
+    """
+    return _resident_bytes(held.items)
 
 
 class AttachmentStore:
@@ -339,9 +388,9 @@ class AttachmentStore:
         *also* given the LRU's byte budget (`attachment_store_max_bytes`): the entry count bounds
         how many conversations keep working material, the weight bounds what that costs.
         """
-        self._by_session: BoundedLru[str, list[Attachment]] = BoundedLru(
+        self._by_session: BoundedLru[str, SessionAttachments] = BoundedLru(
             lambda: settings.service_max_live_sessions,
-            weight=_resident_bytes,
+            weight=_entry_bytes,
             max_weight=lambda: settings.attachment_store_max_bytes,
         )
 
@@ -358,31 +407,78 @@ class AttachmentStore:
         entry heavier than the entire store. Nothing else can be evicted to make room for an entry
         like that, so the map simply held it (`core/bounded.py` explains why it no longer empties
         itself trying). Dropping this session's oldest attachments instead keeps the excess to at
-        most the one upload just made — the same "the newest is never the victim" rule the map
-        applies to entries, applied to one entry's contents. The residual is bounded and named: a
-        *single* attachment whose parsed text alone exceeds the budget is kept, because silently
-        discarding the file a chemist just uploaded is the worse failure and its size is bounded by
-        `document_max_expanded_bytes` — one document, not a session's worth.
+        most the one upload just made **in bytes** — the same "the newest is never the victim" rule
+        the map applies to entries, applied to one entry's contents. That qualifier is the
+        correction: this comment used to state it of the loop as a whole, and it is false of the
+        count bound one line above, which drops as many as it takes to reach
+        `attachment_max_per_session` however small the files are. The residual is bounded and
+        named: a *single* attachment whose parsed text alone exceeds the budget is kept, because
+        silently discarding the file a chemist just uploaded is the worse failure and its size is
+        bounded by `document_max_expanded_bytes` — one document, not a session's worth.
+
+        **Every drop is recorded, because the alternative was a false statement rather than a
+        missing detail.** Measured at the shipped cap: thirteen uploads left ten, and
+        `read_attachment("plate-00.csv")` answered "no attachment named 'plate-00.csv' in this
+        conversation" — about a file uploaded to that very conversation — with no log line and no
+        counter anywhere in the process. The name goes onto the entry (`SessionAttachments`) so the
+        tools can say it, and a WARNING goes to the operator, who is the only reader who can raise
+        the bound.
         """
-        items = self._by_session.get(session_id)  # an upload marks the session recently active
-        if items is None:
-            items = []
-        items.append(attachment)
+        held = self._by_session.get(session_id)  # an upload marks the session recently active
+        if held is None:
+            held = SessionAttachments()
+        held.items.append(attachment)
         # Per-session bounds: a chemist who uploads all morning must not fill the pod's memory,
         # in either unit. Oldest first, and never down past the upload just made.
-        while len(items) > settings.attachment_max_per_session or (
-            len(items) > 1 and _resident_bytes(items) > settings.attachment_store_max_bytes
+        dropped: list[str] = []
+        while len(held.items) > settings.attachment_max_per_session or (
+            len(held.items) > 1
+            and _resident_bytes(held.items) > settings.attachment_store_max_bytes
         ):
-            items.pop(0)
-        self._by_session.put(session_id, items)  # inserting evicts the LRU session past the cap
+            dropped.append(held.items.pop(0).name)
+        if dropped:
+            held.evicted_total += len(dropped)
+            # `deque(maxlen=…)` rather than a slice, so the bound is on the structure rather than
+            # on whoever remembers to re-apply it: the *oldest* names are the ones that go, which
+            # is the same recency rule everything else here follows.
+            names = deque(held.evicted, maxlen=_EVICTED_NAMES_REMEMBERED)
+            names.extend(dropped)
+            held.evicted = list(names)
+            logger.warning(
+                "dropped %d attachment(s) from session %s past the per-session bound "
+                "(%d files / %d bytes): %s",
+                len(dropped),
+                session_id,
+                settings.attachment_max_per_session,
+                settings.attachment_store_max_bytes,
+                ", ".join(dropped),
+            )
+            # Unlabelled deliberately: the only candidate label is a session id, which is
+            # unbounded cardinality. The rate is what an operator wants — a deployment dropping
+            # uploads steadily is one whose per-session bound is too low for how chemists work.
+            METRICS.increment("chemclaw_attachment_evictions_total", len(dropped))
+        self._by_session.put(session_id, held)  # inserting evicts the LRU session past the cap
 
-    def for_session(self, session_id: str) -> list[Attachment]:
-        """Everything attached to a session, oldest first.
+    def snapshot(self, session_id: str) -> SessionAttachments:
+        """Everything a session holds and everything it lost, oldest first.
 
         `peek`, not `get`: reading a session's files is not the recency signal the eviction bound
         measures (uploads are), so a read must not extend the session's slot.
+
+        A copy, because the stored object is mutated in place by `add` and a caller holding the
+        live one would see a later upload's evictions appear in an answer already written.
         """
-        return list(self._by_session.peek(session_id) or [])
+        held = self._by_session.peek(session_id)
+        return held.model_copy(deep=True) if held else SessionAttachments()
+
+    def for_session(self, session_id: str) -> list[Attachment]:
+        """Everything attached to a session, oldest first — the files alone.
+
+        Kept beside `snapshot` because most callers want exactly this and a `.items` at every call
+        site reads worse. What it must never be used for is deciding that a session has nothing:
+        that question is `snapshot`'s, and answering it from a bare list is the defect above.
+        """
+        return list(self.snapshot(session_id).items)
 
 
 # One process-wide store, mirroring the front door's live-session cache: attachments belong to the
@@ -399,31 +495,76 @@ class AttachmentSummary(BaseModel):
     excerpt: str = Field(default="")
 
 
+class AttachmentListing(BaseModel):
+    """This conversation's uploads, **and the ones it can no longer show**.
+
+    The bare `list[AttachmentSummary]` this replaced said "everything attached to a session" over a
+    list the store had already cut, and the cut was invisible in every channel: no field, no log,
+    no metric. The shape is `FingerprintSearch`'s and `EvidenceSweep`'s, applied to the one surface
+    where a short list is a statement about what the *chemist* did.
+    """
+
+    attachments: list[AttachmentSummary] = Field(default_factory=list)
+    # The names the per-session bound dropped, oldest first — bounded, with the count beside it.
+    evicted: list[str] = Field(default_factory=list)
+    evicted_total: int = Field(default=0, ge=0)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def verdict(self) -> str:
+        """The one sentence to read before telling a chemist what they sent.
+
+        `computed_field`, not a bare `property`, for the reason `FingerprintSearch.verdict` states
+        in full: a plain property is not serialized, so `model_dump()` would carry the evicted
+        names and drop the sentence explaining what they mean.
+        """
+        if not self.evicted_total:
+            return (
+                "COMPLETE: every file uploaded to this conversation is listed. An empty list means "
+                "the chemist has attached nothing yet."
+            )
+        remembered = ", ".join(self.evicted) if self.evicted else "their names are not remembered"
+        forgotten = self.evicted_total - len(self.evicted)
+        tail = f", and {forgotten} more whose names are no longer remembered" if forgotten else ""
+        return (
+            f"INCOMPLETE: {self.evicted_total} earlier upload(s) were dropped from this "
+            f"conversation by the per-session limit of {settings.attachment_max_per_session} "
+            f"files — {remembered}{tail}. They were uploaded and are gone, NOT never sent: if one "
+            "of them is what the chemist means, say it was dropped and ask them to send it again."
+        )
+
+
 @tool
-async def list_attachments() -> list[AttachmentSummary]:
+async def list_attachments() -> AttachmentListing:
     """List the files the chemist has attached to this conversation.
 
     Check this when the chemist refers to "the file", "the table I sent", or "the SOP". Read one in
     full with `read_attachment`.
 
     Returns:
-        One entry per attachment, with a short excerpt so you can tell them apart. Excerpts are
-        file content and arrive framed as data, exactly like `read_attachment` output — this
-        listing was the one path on which an upload's text reached the model unframed, and an
-        instruction planted in a file's first lines executed from here (Sec-1).
+        One entry per attachment held, with a short excerpt to tell them apart, plus
+        `evicted`/`evicted_total` — uploads dropped past the per-session limit — and a `verdict`.
+        **Read it**: a dropped file was uploaded and is gone, not "never sent". Excerpts are file
+        content and arrive framed as data, exactly like `read_attachment` output — this listing
+        was the one path on which an upload's text reached the model unframed (Sec-1).
     """
     session_id = get_current_session_id() or ""
-    return [
-        AttachmentSummary(
-            name=a.name,
-            content_type=a.content_type,
-            rows=a.rows,
-            excerpt=frame_untrusted(
-                a.text[: settings.note_excerpt_chars], note_id=f"attachment:{a.name}"
-            ),
-        )
-        for a in STORE.for_session(session_id)
-    ]
+    held = STORE.snapshot(session_id)
+    return AttachmentListing(
+        attachments=[
+            AttachmentSummary(
+                name=a.name,
+                content_type=a.content_type,
+                rows=a.rows,
+                excerpt=frame_untrusted(
+                    a.text[: settings.note_excerpt_chars], note_id=f"attachment:{a.name}"
+                ),
+            )
+            for a in held.items
+        ],
+        evicted=held.evicted,
+        evicted_total=held.evicted_total,
+    )
 
 
 @tool
@@ -439,9 +580,25 @@ async def read_attachment(name: str) -> str:
 
     Returns:
         The file's parsed text.
+
+    Raises:
+        ValueError: No such file here — and the message says whether it was dropped or never sent.
     """
     session_id = get_current_session_id() or ""
-    for attachment in STORE.for_session(session_id):
+    held = STORE.snapshot(session_id)
+    for attachment in held.items:
         if attachment.name == name:
             return frame_untrusted(attachment.text, note_id=f"attachment:{attachment.name}")
+    if name in held.evicted:
+        raise ValueError(
+            f"{name!r} was uploaded to this conversation and was then dropped: only the newest "
+            f"{settings.attachment_max_per_session} uploads are kept. Ask for it again rather "
+            "than saying it was never sent."
+        )
+    if held.evicted_total:
+        raise ValueError(
+            f"no attachment named {name!r} is held in this conversation. "
+            f"{held.evicted_total} earlier upload(s) were dropped past the per-session limit and "
+            "their names are no longer remembered, so this may have been one of them."
+        )
     raise ValueError(f"no attachment named {name!r} in this conversation")

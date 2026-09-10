@@ -13,6 +13,7 @@ audit trail would record a human's question answered by nobody.
 
 from typing import Literal
 
+from pydantic import BaseModel, Field, computed_field
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
@@ -107,8 +108,52 @@ async def request_external_input(
     return handle.id
 
 
+class PendingOverview(BaseModel):
+    """What this system is still waiting on, **and whether that is all of it**.
+
+    The bare `list[dict]` this replaced carried its incompleteness in neither channel that matters.
+    Measured against a real database: 35 waiting rows, 20 returned, no field, no log line and no
+    counter naming the fifteen. The tool's own docstring said "everything still waiting" and warned
+    about the *other* incompleteness — that this system knows only the questions it raised itself —
+    so the one caveat present was the one that was not biting.
+    """
+
+    requests: list[dict[str, object]] = Field(default_factory=list)
+    # Everything matching before the page bound, counted in the same transaction as the page.
+    total_waiting: int = Field(default=0, ge=0)
+    # The bound the store actually applied, which is not always the one asked for.
+    limit_applied: int = Field(default=0, ge=0)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def verdict(self) -> str:
+        """The one sentence to read before saying what is outstanding.
+
+        `computed_field` rather than a bare property for the reason `FingerprintSearch.verdict`
+        states: a plain property is not serialized, so the sentence that says the list is a page
+        would never reach the model that writes the answer.
+        """
+        scope = (
+            "This is what is outstanding *in this system* — only the questions this system itself "
+            "raised, never a team's whole open work."
+        )
+        shown = len(self.requests)
+        if self.total_waiting > shown:
+            return (
+                f"PARTIAL: {shown} of {self.total_waiting} open requests are shown, soonest "
+                f"deadline first (page bound {self.limit_applied}). The rest have later deadlines "
+                "and are NOT resolved — narrow with `asked_of` or raise `limit` before saying "
+                f"anything about how much is outstanding. {scope}"
+            )
+        if not shown:
+            return (
+                f"NOTHING WAITING: this system holds no open request matching that query. {scope}"
+            )
+        return f"COMPLETE: every open request matching that query is shown. {scope}"
+
+
 @tool
-async def check_pending_requests(asked_of: str = "", limit: int = 20) -> list[dict[str, object]]:
+async def check_pending_requests(asked_of: str = "", limit: int = 20) -> PendingOverview:
     """Read what this system is still waiting on — questions raised and not yet answered.
 
     Use it before raising a new one (the answer may already be on its way), when a chemist asks
@@ -118,26 +163,30 @@ async def check_pending_requests(asked_of: str = "", limit: int = 20) -> list[di
     has been chased. A request routed to nobody in particular is waiting on whoever is entitled,
     which is why it appears in every query rather than in none.
 
-    This is what is outstanding *in this system*, not what is outstanding in the programme: it
-    knows only the questions this system itself raised. Never present it as a complete list of a
-    team's open work.
+    Incomplete in two ways, both on the answer: it knows only the questions this system raised,
+    and `requests` is a page. Read `verdict` before saying how much is outstanding.
 
     Args:
         asked_of: Narrow to what is routed to one actor or entitlement, plus everything unrouted.
             Empty returns every open request.
-        limit: How many to return, soonest deadline first.
+        limit: How many to return, soonest deadline first (bounded; see `limit_applied`).
 
     Returns:
-        Open requests, soonest deadline first.
+        A page of open requests, `total_waiting`, and a verdict saying which to build on.
     """
-    requests = await pending_store.open_requests(asked_of=asked_of, limit=limit)
-    return [
-        {
-            **request.model_dump(exclude={"subject", "rationale", "answer"}),
-            # `subject` and `rationale` are free text a caller supplied — the request is readable
-            # by anyone entitled, so these arrive here exactly as a retrieved chunk does.
-            "subject": defang(request.subject),
-            "rationale": defang(request.rationale),
-        }
-        for request in requests
-    ]
+    page = await pending_store.open_requests(asked_of=asked_of, limit=limit)
+    return PendingOverview(
+        requests=[
+            {
+                **request.model_dump(exclude={"subject", "rationale", "answer"}),
+                # `subject` and `rationale` are free text a caller supplied — the request is
+                # readable by anyone entitled, so these arrive here exactly as a retrieved chunk
+                # does.
+                "subject": defang(request.subject),
+                "rationale": defang(request.rationale),
+            }
+            for request in page.requests
+        ],
+        total_waiting=page.total_waiting,
+        limit_applied=page.limit_applied,
+    )

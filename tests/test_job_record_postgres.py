@@ -73,7 +73,7 @@ def test_re_running_a_job_updates_its_row_rather_than_forking_it() -> None:
         stored = await read_job_record("pg-bo-campaign-1")
         assert stored is not None
         assert stored.summary == "re-run after the objective was fixed"
-        matches = await read_job_record_summaries("", "bo", 50)
+        matches = (await read_job_record_summaries("", "bo", 50)).hits
         assert [m.job_id for m in matches].count("pg-bo-campaign-1") == 1
 
     asyncio.run(_run())
@@ -103,7 +103,7 @@ def test_the_plan_step_survives_the_round_trip_and_reaches_the_listing() -> None
         assert stored is not None
         assert stored.plan_step == "run the optimization campaign"
         assert stored.plan_hash == "plan-rev-abc"
-        summaries = await read_job_record_summaries("", "bo", 50)
+        summaries = (await read_job_record_summaries("", "bo", 50)).hits
         by_id = {s.job_id: s for s in summaries}
         assert by_id["pg-plan-step-1"].plan_step == "run the optimization campaign"
 
@@ -128,16 +128,16 @@ def test_a_past_run_is_found_by_the_reason_it_was_run() -> None:
             )
         )
 
-        by_reason = await read_job_record_summaries("dissolves the amine", "", 50)
+        by_reason = (await read_job_record_summaries("dissolves the amine", "", 50)).hits
         assert [m.job_id for m in by_reason] == ["pg-bo-campaign-1"]
         # A listing carries the reason itself, so a hit is recognisable without a second lookup.
         assert by_reason[0].rationale.startswith("the Tuesday batch stalled")
 
-        by_connector = await read_job_record_summaries("", "calc", 50)
+        by_connector = (await read_job_record_summaries("", "calc", 50)).hits
         assert [m.job_id for m in by_connector] == ["pg-qm-barrier-1"]
 
         # Both filters empty = the recent runs, newest first, bounded by the limit.
-        recent = await read_job_record_summaries("", "", 1)
+        recent = (await read_job_record_summaries("", "", 1)).hits
         assert len(recent) == 1
 
     asyncio.run(_run())
@@ -178,13 +178,19 @@ def test_the_search_is_a_substring_search_and_the_index_serves_that_predicate() 
         found = [
             # A substring inside a word: `ILIKE '%morph%'` matches "polymorph", a stem-based
             # search does not.
-            [m.job_id for m in await read_job_record_summaries("morph", "", 50)],
+            [m.job_id for m in (await read_job_record_summaries("morph", "", 50)).hits],
             # A phrase is contiguous: these three words all appear, in this order, apart.
-            [m.job_id for m in await read_job_record_summaries("screen antisolvent", "", 50)],
+            [
+                m.job_id
+                for m in (await read_job_record_summaries("screen antisolvent", "", 50)).hits
+            ],
             # Case-insensitive, which is the `I` in ILIKE and not a property of the index.
-            [m.job_id for m in await read_job_record_summaries("POLYMORPH SCREEN", "", 50)],
+            [m.job_id for m in (await read_job_record_summaries("POLYMORPH SCREEN", "", 50)).hits],
             # A miss stays a miss — the case that used to cost a full table read.
-            [m.job_id for m in await read_job_record_summaries("no such run anywhere", "", 50)],
+            [
+                m.job_id
+                for m in (await read_job_record_summaries("no such run anywhere", "", 50)).hits
+            ],
         ]
         async with db.connection(settings.postgres_dsn) as conn:
             cursor = await conn.execute(
@@ -351,5 +357,77 @@ def test_a_failure_that_produced_nothing_still_never_erases_a_landed_result() ->
         assert stored.result == _CAMPAIGN.result, "the bookkeeping erased the science"
         assert stored.summary == _CAMPAIGN.summary
         assert stored.note_id == _CAMPAIGN.note_id
+
+    asyncio.run(_run())
+
+
+def test_a_capped_search_says_it_was_capped_and_can_be_paged_past() -> None:
+    """The retrospective view answered "have we run this before?" over the newest page, silently.
+
+    `job_record_search_limit` bounds the answer and nothing said so: measured against this table
+    with 25 matching rows and the shipped cap of 20, `search_job_records` returned 20 with no
+    total, no flag and no cursor, so the 21st-oldest matching campaign was invisible — against a
+    tool whose stated purpose is not paying twice for a run that already happened.
+
+    Two claims here, and both are the fix: a full page says the count is a **floor**, and `after`
+    reaches what the page cut off. The keyset is the last row's own `job_id`, so the page boundary
+    is a *row* rather than an offset — rows are only ever appended to this table, but a listing
+    counted in rows would still repeat and skip if two runs land in one `now()`.
+    """
+
+    async def _run() -> None:
+        sink = await _sink_or_skip()
+        for i in range(25):
+            await sink.record(
+                JobRecord(
+                    job_id=f"pg-page-{i:03d}",
+                    connector="bo",
+                    job="start_optimization_campaign",
+                    rationale=f"Suzuki coupling screen, round {i}",
+                    requested_by="oid-1",
+                    payload={"i": i},
+                    summary=f"campaign {i} finished",
+                )
+            )
+
+        first = await read_job_record_summaries("Suzuki coupling", "", 10)
+        assert len(first.hits) == 10
+        assert first.hits_truncated is True, "a page that filled must say the count is a floor"
+        assert "floor" in first.verdict
+
+        seen = [hit.job_id for hit in first.hits]
+        page = first
+        while page.hits_truncated:
+            page = await read_job_record_summaries(
+                "Suzuki coupling", "", 10, after=page.hits[-1].job_id
+            )
+            seen.extend(hit.job_id for hit in page.hits)
+        # Every row reached exactly once: no repeats across the boundary, nothing skipped.
+        assert len(seen) == len(set(seen)) == 25
+        assert page.hits_truncated is False
+
+    asyncio.run(_run())
+
+
+def test_a_search_that_fits_is_not_reported_as_truncated() -> None:
+    """The flag must be evidence, not decoration: an exact-fit page is complete, and says so."""
+
+    async def _run() -> None:
+        sink = await _sink_or_skip()
+        for i in range(3):
+            await sink.record(
+                JobRecord(
+                    job_id=f"pg-exact-{i}",
+                    connector="calc",
+                    job="sample_conformers",
+                    rationale=f"exact fit probe {i}",
+                    requested_by="oid-1",
+                    summary="done",
+                )
+            )
+        found = await read_job_record_summaries("exact fit probe", "", 3)
+        assert len(found.hits) == 3
+        assert found.hits_truncated is False
+        assert "floor" not in found.verdict
 
     asyncio.run(_run())

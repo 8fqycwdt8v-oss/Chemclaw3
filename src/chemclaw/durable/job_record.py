@@ -24,7 +24,7 @@ import logging
 from datetime import datetime
 from typing import Any, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 from temporalio import activity
 
 from chemclaw.core.config import settings
@@ -145,6 +145,67 @@ class JobRecordSummary(BaseModel):
     completed_at: datetime | None = None
 
 
+class JobRecordSearch(BaseModel):
+    """One search over the past runs: the hits, **and whether they are all of them**.
+
+    Why this is not a bare `list`, which it was: the search is capped
+    (`job_record_search_limit`), and a capped list that merely ended looks exactly like the
+    complete answer. Measured against this table with 50 matching rows and the shipped cap of 20,
+    `search_job_records("Suzuki")` returned 20 with no total, no flag and no cursor — so the
+    21st-oldest matching campaign was invisible, on the one tool whose stated purpose is not paying
+    twice for a run that already happened. "Have we optimized this coupling before?" came back
+    "no" because a page had ended.
+
+    Deliberately the same shape as `science.fingerprints.store.FingerprintSearch`, down to
+    `hits_truncated` and a `computed_field` verdict, rather than a second answer to the same
+    question: both are "have we seen this before?" tools, and both have an empty result that means
+    two different things. `records_kept` is this seam's `index_empty` — a deployment that keeps no
+    durable records answers every query with an empty list, which is not evidence that nothing was
+    ever run.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    hits: list[JobRecordSummary] = Field(default_factory=list)
+    # True when more rows matched than this page could hold, so the count is a floor rather than a
+    # total. Established exactly — the store asks for one row beyond the limit — rather than
+    # inferred from a full page, because "exactly `limit` matches exist" is a real corpus and
+    # reporting it as truncated would make the flag decoration instead of evidence.
+    hits_truncated: bool = False
+    # False when this deployment keeps no durable job records at all (`session_store != postgres`),
+    # in which case the empty list above says nothing about what has been run. The honest answer
+    # was already being *returned*; nothing on the wire distinguished it from "no match", so the
+    # model read a configuration as a finding.
+    records_kept: bool = True
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def verdict(self) -> str:
+        """The one sentence a reader must take from this result before drawing a conclusion.
+
+        A `computed_field` and not a bare `property`, which is the whole point of the method:
+        a plain property is **not serialized**, so `model_dump()` would carry the hits and the
+        flags and leave the sentence that explains them inside this process. That is the defect
+        `FingerprintSearch.verdict` was written against after a hazard screen reported "no hazards
+        detected" six times, and this model would have repeated it.
+        """
+        if not self.records_kept:
+            return (
+                "This deployment keeps no durable job records, so this is not evidence that the "
+                "run has not happened — nothing is recorded either way."
+            )
+        if not self.hits:
+            return "No past run matches this query, out of every run this system has recorded."
+        if self.hits_truncated:
+            return (
+                f"{len(self.hits)} past run(s) shown, the most recent first — more matched than "
+                "this list holds, so the count is a floor and an older matching run may not "
+                "appear. Narrow the query (or the connector) before concluding there is no "
+                "precedent."
+            )
+        return f"{len(self.hits)} past run(s) matched, and that is all of them."
+
+
 class JobRecordSink(Protocol):
     """Where a finished job's record goes. One method, so a test can be a list."""
 
@@ -229,20 +290,34 @@ async def lookup_job_record(job_id: str) -> JobRecord | None:
 
 
 async def search_job_records(
-    text: str = "", connector: str = "", limit: int | None = None
-) -> list[JobRecordSummary]:
+    text: str = "", connector: str = "", limit: int | None = None, after: str = ""
+) -> JobRecordSearch:
     """Past runs matching `text` (in the reason, the summary or the job name), newest first.
 
-    Returns an empty list rather than raising when no durable store is configured: "we have no
-    record of past runs" is the honest answer for such a deployment, and it is the same answer the
-    caller gets from an empty table.
+    Answers with an empty `hits` rather than raising when no durable store is configured — "we
+    have no record of past runs" is the honest answer for such a deployment — and says which
+    empty it is: `records_kept` is False there, and the same empty list from an empty table is not
+    the same fact.
+
+    Args:
+        text: Words to look for in the reason, the summary or the job name. Empty matches all.
+        connector: Restrict to one bundle. Empty searches all.
+        limit: Page size; `job_record_search_limit` when omitted.
+        after: The `job_id` of the last row of the previous page — a keyset anchor, not an
+            offset. Empty starts at the newest run.
+
+    Returns:
+        The page, carrying whether more matched than it holds.
     """
     if not _records_are_durable():
-        return []
+        return JobRecordSearch(records_kept=False)
     from chemclaw.durable.job_record_store import read_job_record_summaries
 
     return await read_job_record_summaries(
-        text, connector, limit if limit is not None else settings.job_record_search_limit
+        text,
+        connector,
+        limit if limit is not None else settings.job_record_search_limit,
+        after=after,
     )
 
 

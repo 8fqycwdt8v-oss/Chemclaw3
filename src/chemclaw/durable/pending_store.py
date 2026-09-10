@@ -46,6 +46,40 @@ class PendingRequest(BaseModel):
     created_at: str = ""
 
 
+#: The most rows one `open_requests` call will serve, however much a caller asks for. A module
+#: constant rather than a `Settings` field for the reason `ingest/rejections._MAX_ROWS_PER_SOURCE`
+#: is one — it is the bound that keeps an inbox read from becoming a table scan into somebody's
+#: prompt, not a deployment decision. Reported as `limit_applied` rather than applied silently:
+#: a caller asking for 10,000 used to get 200 and had no way to tell that from a corpus of 200.
+_MAX_PAGE = 200
+
+
+class OpenRequests(BaseModel):
+    """One page of the inbox, **and how much of the inbox it is**.
+
+    The bare `list[PendingRequest]` this replaced was the silence this table exists to prevent, one
+    level up. Measured against a real database: 35 rows waiting, a page of 20 returned, and nothing
+    in the value, in a log or in a counter said the other 15 were there. Both readers then said
+    something stronger than they knew — `check_pending_requests` documents itself as "everything
+    still waiting", and `GET /pending` is the inbox a raised question has to appear in or it ages
+    out unanswered.
+
+    `total_waiting` is counted over the *same* predicate in the *same* transaction as the page, so
+    "20 of 35" is one consistent statement rather than two reads of a moving table.
+    """
+
+    requests: list[PendingRequest] = Field(default_factory=list)
+    # Everything matching, before the page bound — the population this page is a page of.
+    total_waiting: int = Field(default=0, ge=0)
+    # The bound actually used, which is not the bound asked for once `_MAX_PAGE` bites.
+    limit_applied: int = Field(default=_MAX_PAGE, ge=1)
+
+    @property
+    def truncated(self) -> bool:
+        """Whether waiting requests exist that this page does not carry."""
+        return self.total_waiting > len(self.requests)
+
+
 def _connect() -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:
     """The configured connection, with the shared statement timeout (one place, DRY)."""
     return db.connection(settings.session_store_dsn or settings.postgres_dsn)
@@ -266,8 +300,8 @@ async def get_request(request_id: str) -> PendingRequest | None:
 
 async def open_requests(
     *, asked_of: str = "", identities: Sequence[str] = (), limit: int = 50
-) -> list[PendingRequest]:
-    """Everything still waiting, soonest deadline first.
+) -> OpenRequests:
+    """One page of what is still waiting, soonest deadline first, **and how many there are**.
 
     `asked_of` narrows to what is routed to one actor **or to nobody in particular**: an unrouted
     request is waiting on whoever is entitled, so hiding it from a named query would make the
@@ -280,16 +314,30 @@ async def open_requests(
     request routed to `qc-team` was answerable by the QC team and appeared in **nobody's** inbox, so
     it sat invisible until it expired. Passing only `asked_of` keeps the old behaviour for callers
     that have no role set to offer.
+
+    **The count is read in the same transaction as the page**, not because two statements would be
+    slow but because they would disagree: this table is written by expiry timers and by a browser,
+    so "20 of 35" assembled from two connections can report a total smaller than the page it
+    describes. See `OpenRequests` for why a page that cannot say it is a page is the defect.
     """
-    sql = f"SELECT {_COLUMNS} FROM pending_requests WHERE state = 'waiting'"
+    where = "WHERE state = 'waiting'"
     params: list[Any] = []
     routes = [route for route in (asked_of, *identities) if route]
     if routes:
-        sql += " AND (asked_of = ANY(%s) OR asked_of = '')"
+        where += " AND (asked_of = ANY(%s) OR asked_of = '')"
         params.append(routes)
-    sql += " ORDER BY due_at LIMIT %s"
-    params.append(max(1, min(limit, 200)))
+    page = max(1, min(limit, _MAX_PAGE))
     async with _connect() as conn:
         async with conn.cursor() as cur:
-            await cur.execute(sql, tuple(params))
-            return [_row(tuple(row)) for row in await cur.fetchall()]
+            await cur.execute(
+                f"SELECT {_COLUMNS} FROM pending_requests {where} ORDER BY due_at LIMIT %s",
+                (*params, page),
+            )
+            rows = [_row(tuple(row)) for row in await cur.fetchall()]
+            await cur.execute(f"SELECT count(*) FROM pending_requests {where}", tuple(params))
+            counted = await cur.fetchone()
+    return OpenRequests(
+        requests=rows,
+        total_waiting=int(counted[0]) if counted else len(rows),
+        limit_applied=page,
+    )

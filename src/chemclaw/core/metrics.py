@@ -470,6 +470,22 @@ _COUNTERS: dict[str, str] = {
     # channel that takes nothing while another takes everything is a broken webhook, and both
     # failing is an outage.
     "chemclaw_deliveries_total": ("Messages a delivery channel accepted, by channel."),
+    # Refused records the ledger's per-source growth bound deleted. `ingest/rejections._EVICT`
+    # keeps the newest `_MAX_ROWS_PER_SOURCE` rows per source on the argument that a source
+    # refusing more than that has one systematic defect its newest thousand rows describe as well
+    # as a million would. That is an assumption about the *distribution* of a source's refusals: a
+    # source with more distinct one-off refusals than the cap loses its oldest permanently, and
+    # `refusals_matching` then reports those records as never refused — the record is gone, not
+    # merely unread. This counter is what turns the assumption into a checked invariant.
+    "chemclaw_ingest_rejections_evicted_total": (
+        "Refused records deleted by the per-source growth bound of the ingest rejection ledger."
+    ),
+    # Uploads dropped from a live session past `attachment_max_per_session` or
+    # `attachment_store_max_bytes`. Silent until wave 13: a chemist's file left the store and
+    # `read_attachment` then said it had never been sent.
+    "chemclaw_attachment_evictions_total": (
+        "Uploads dropped from a session past its per-session count or byte bound."
+    ),
     "chemclaw_delivery_failures_total": (
         "Messages a delivery channel refused or could not be sent, by channel. A failure here is "
         "swallowed so one channel's outage is not everyone's, which is exactly why it must count."
@@ -943,6 +959,10 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # Bounded by `CHEMCLAW_DELIVERY_CHANNELS` — a deployment's own list of channel folder names,
     # never a caller's string. Same rule as every label here.
     "chemclaw_deliveries_total": ("channel",),
+    # A source name is a registry entry an operator configured, never a caller's string — the same
+    # rule the `channel` label above follows. Attachment evictions carry no label at all: the only
+    # candidate is a session id, which is unbounded cardinality.
+    "chemclaw_ingest_rejections_evicted_total": ("source",),
     "chemclaw_delivery_failures_total": ("channel",),
     # Three values, fixed in `agent/condense.py`'s own `DigestSource` literal rather than by a
     # caller: `extracted`, `degraded`, `oversized`. Bounded by the code that emits it, which is the
@@ -1191,6 +1211,35 @@ _GAUGE_FAMILIES: dict[str, str] = {
     "chemclaw_connector_tool_schema_tokens": (
         "Estimated tokens of bound tool schema advertised by each connector at handshake."
     ),
+    # **The only series that answers "is the store filling", and there was none.** Nothing in this
+    # registry matched `retention`, `disk`, `table_size` or `prune`, and `durable/retention.py`
+    # imported no metrics at all — so a sweep that deleted 1 900 rows and returned 0 bytes, and a
+    # sweep that had not run since Tuesday, were the same silence. Read from
+    # `pg_total_relation_size` once per retention pass rather than per scrape — the same "publish
+    # the last reading, never query on a scrape" shape as the outbox families above — and over
+    # every table `durable/retention.py`'s register names, not just the swept ones, because the
+    # table filling the volume is quite often one nothing prunes.
+    #
+    # **A gauge and not a pair of counters, and that is a narrowing taken on measurement.** Rows
+    # deleted and bytes reclaimed were both drafted here as counters and both removed: the row
+    # count is already in the pass's own `RetentionOutcome`, where the module's docstring has
+    # always said the deletion is auditable, and reclaimed *bytes* is structurally near-zero —
+    # retention deletes the oldest rows, which sit at the front of the relation, where a plain
+    # `VACUUM` truncates nothing. Neither had an alert that could fire on it without also firing on
+    # a healthy deployment (a table that legitimately expires nothing yet; a table that grows
+    # because the deployment grows), and a series with no reader is a cost with no benefit —
+    # `tests/test_deploy_chart.py::test_every_declared_metric_has_a_consumer` is where that rule
+    # lives. What survives is the one reading an operator actually queries: `topk(5,
+    # chemclaw_table_bytes)`.
+    #
+    # **Absent until a pass has run, which includes "for ever, on a deployment that never
+    # sweeps".** That is not seeded to zero for the reason `chemclaw_outbox_pending` is not: a
+    # fabricated 0 for a table holding gigabytes is worse than no reading. The absence is what
+    # `ChemclawRetentionNotSweeping` fires on.
+    "chemclaw_table_bytes": (
+        "Total relation size of each durable table in bytes, as of the last retention pass "
+        "(heap, indexes and TOAST — `pg_total_relation_size`)."
+    ),
     "chemclaw_connector_unhealthy": (
         "1 per enabled connector that could not be reached, by connector. The unlabelled "
         "`chemclaw_connectors_unhealthy` says how many; this says which, which is the half "
@@ -1199,6 +1248,7 @@ _GAUGE_FAMILIES: dict[str, str] = {
 }
 
 _GAUGE_FAMILY_LABELS: dict[str, str] = {
+    "chemclaw_table_bytes": "table",
     "chemclaw_outbox_pending": "sink",
     "chemclaw_outbox_oldest_pending_seconds": "sink",
     "chemclaw_outbox_dead_lettered": "sink",

@@ -9,6 +9,7 @@ substructure search works over it via the shared, backend-agnostic search functi
 import asyncio
 import random
 
+import psycopg
 import pytest
 
 from chemclaw.core import db
@@ -20,6 +21,7 @@ from chemclaw.science.fingerprints.molfp.search import (
     record_for,
 )
 from chemclaw.science.fingerprints.store import (
+    FingerprintRecord,
     InMemoryFingerprintStore,
     PostgresFingerprintStore,
     find_matches,
@@ -160,18 +162,28 @@ def test_the_capped_scan_reads_in_key_order_without_sorting_the_table() -> None:
     10.7 ms and no temp through the index. The cost grows with the corpus the cap exists to protect
     the process from, on a path the agent calls (`molfp.find_substructure_matches`).
 
-    Asserted as the **absence of a Sort node** rather than as a duration: at fixture scale sorting
-    a handful of rows is both correct and instant, so a timing assertion would see nothing. The
-    sequential scan is disabled for the same reason as in `tests/test_reaction_records.py` — on one
-    page the planner is right to scan, and the question here is what the schema offers it.
+    Asserted as the **absence of a whole-table Sort** rather than as a duration: at fixture scale
+    sorting a handful of rows is both correct and instant, so a timing assertion would see nothing.
+    The sequential scan is disabled for the same reason as in `tests/test_reaction_records.py` — on
+    one page the planner is right to scan, and the question here is what the schema offers it.
+
+    **`Incremental Sort` is permitted and a plain `Sort` is not, and the difference is the whole
+    property.** Since `094` the scan de-duplicates a shelved generation (`DISTINCT ON`, preferring
+    this store's definition), so the second sort key is `(definition = …)` *within* one id — groups
+    of one or two rows, ordered by the same `082` index and still streaming under the `LIMIT`. A
+    plain `Sort` is the node that means the server ordered the whole table first, which is the
+    defect `082` measured at 2 228 ms and 136 MB of temp.
     """
 
     async def _run() -> list[str]:
         store = await _store_or_skip()
-        statement = f"{store._all} ORDER BY {store._order} LIMIT %(limit)s"
+        statement = f"{store._all} LIMIT %(limit)s"
         async with db.connection(settings.postgres_dsn) as conn:
             await conn.execute("SET LOCAL enable_seqscan = off")
-            cursor = await conn.execute(f"EXPLAIN (FORMAT JSON) {statement}", {"limit": 5001})
+            cursor = await conn.execute(
+                f"EXPLAIN (FORMAT JSON) {statement}",
+                {"limit": 5001, "definition": molecule_definition()},
+            )
             row = await cursor.fetchone()
         nodes: list[str] = []
         pending = [row[0][0]["Plan"]] if row else []
@@ -182,8 +194,11 @@ def test_the_capped_scan_reads_in_key_order_without_sorting_the_table() -> None:
         return nodes
 
     nodes = asyncio.run(_run())
-    assert not any("Sort" in node for node in nodes), (
+    assert "Sort" not in nodes, (
         f"the capped scan sorts the whole table before taking its slice: {nodes}"
+    )
+    assert any("Index Scan" in node for node in nodes), (
+        f"the capped scan no longer reads in key order through an index: {nodes}"
     )
 
 
@@ -551,8 +566,9 @@ def test_a_fully_rebuilt_durable_index_reports_no_superseded_rows() -> None:
         async with await db.connect(settings.postgres_dsn) as conn:
             await conn.execute(
                 "CREATE TABLE IF NOT EXISTS molfp_rebuilt_probe "
-                "(id TEXT PRIMARY KEY, label TEXT NOT NULL, "
-                f"bits BIT({settings.ecfp_bits}) NOT NULL, definition TEXT NOT NULL)"
+                "(id TEXT NOT NULL, label TEXT NOT NULL, "
+                f"bits BIT({settings.ecfp_bits}) NOT NULL, definition TEXT NOT NULL, "
+                "PRIMARY KEY (id, definition))"
             )
             await conn.commit()
         try:
@@ -568,6 +584,167 @@ def test_a_fully_rebuilt_durable_index_reports_no_superseded_rows() -> None:
         finally:
             async with await db.connect(settings.postgres_dsn) as conn:
                 await conn.execute("DROP TABLE IF EXISTS molfp_rebuilt_probe")
+                await conn.commit()
+
+    asyncio.run(_run())
+
+
+# Two fingerprint definitions that are *both* plausible: a radius bump is a one-character config
+# change (`CHEMCLAW_ECFP_RADIUS`), which is what makes a rolling upgrade able to run both at once.
+_OLD_DEFINITION = "ecfp:r2:b2048"
+_NEW_DEFINITION = "ecfp:r3:b2048"
+
+
+def test_a_second_definitions_write_shelves_the_first_instead_of_deleting_it() -> None:
+    """A definition change must *shelve* the rows it supersedes, not destroy them.
+
+    `004_fingerprint_definition.sql` states the safety property as "a mismatched backfill only
+    makes stale rows fall out of similarity search (safe), never returns a wrong score", and the
+    constructor above repeats it: "the stale rows simply fall out of search until they are
+    re-indexed". Both sentences describe rows that still exist.
+
+    Measured before the fix, with the primary key on `id` alone and `definition` an ordinary column
+    the upsert overwrote:
+
+        after writer A (ecfp:r2:b2048):  rows=1   A.count=1   B.count=0
+        after writer B (ecfp:r3:b2048):  rows=1   A.count=0   B.count=1
+        table now: [('CCO', 'ethanol@B', 'ecfp:r3:b2048')]
+        A superseded_count: 1   B superseded_count: 0
+
+    Within one deployment mid-reindex that is invisible — the re-index is walking those rows
+    anyway. The moment two writers with different definitions run at once (a rolling upgrade that
+    changes `ecfp_radius`, two pods on different images, a second site) each write destroys the
+    other's row, and each side's `superseded_count` then reports the *other's* population as
+    "stale, re-index me" while neither index converges.
+
+    So the key is `(id, definition)` — the shape `document_chunks` took in `041` and `note_index`
+    in `039`, one directory over. The two generations coexist; each store answers over its own.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        old = PostgresFingerprintStore("molecule_fingerprints", settings.ecfp_bits, _OLD_DEFINITION)
+        new = PostgresFingerprintStore("molecule_fingerprints", settings.ecfp_bits, _NEW_DEFINITION)
+        # One id, two generations, deliberately different structures: which row answers is then
+        # observable rather than inferred from a count.
+        was = "Brc1ccc(cc1)C(=O)Nc1ccc(cc1)C(F)(F)F"
+        now = "O=C(Nc1ccccc1)c1ccc(cc1)N1CCOCC1"
+        await old.add(
+            FingerprintRecord(
+                id="pg-shelved", label=was, bits=ecfp_bitstring(was), definition=_OLD_DEFINITION
+            )
+        )
+        await new.add(
+            FingerprintRecord(
+                id="pg-shelved", label=now, bits=ecfp_bitstring(now), definition=_NEW_DEFINITION
+            )
+        )
+
+        after_new = await old.find_similar(ecfp_bitstring(was), 5, 0.99)
+        assert [hit.id for hit in after_new] == ["pg-shelved"], (
+            "the newer definition's write destroyed the older generation's row; there is no state "
+            "left for either side to re-index from"
+        )
+        assert [hit.label for hit in after_new] == [was]
+        # And the new generation is the one *its* store answers over — the shelf is scoped, not a
+        # second copy of the same row.
+        assert [hit.label for hit in await new.find_similar(ecfp_bitstring(now), 5, 0.99)] == [now]
+        assert await new.find_similar(ecfp_bitstring(was), 5, 0.99) == []
+
+        # And the other half of the key change, which is what keeps a re-index from doubling the
+        # table on every sync: a re-write under *one* definition still updates in place.
+        async with await db.connect(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute("SELECT count(*) FROM molecule_fingerprints WHERE id = 'pg-shelved'")
+            shelved = await cur.fetchone()
+            assert shelved is not None and shelved[0] == 2
+        await new.add(
+            FingerprintRecord(
+                id="pg-shelved", label=now, bits=ecfp_bitstring(now), definition=_NEW_DEFINITION
+            )
+        )
+        async with await db.connect(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute("SELECT count(*) FROM molecule_fingerprints WHERE id = 'pg-shelved'")
+            after = await cur.fetchone()
+            assert after is not None and after[0] == 2, (
+                "a repeat write under one definition inserted"
+            )
+
+    asyncio.run(_run())
+
+
+def test_a_shelved_generation_is_one_molecule_to_the_substructure_scan() -> None:
+    """`all_records` is unfiltered by definition, so a shelf must not double the corpus.
+
+    Two things break if it does, and both are chemist-visible. The scan's hits are built one per
+    row, so a molecule held under two generations is reported twice; and
+    `substructure_scan_max_records` bounds *rows*, so a corpus with a superseded generation on the
+    shelf reaches the cap at half the molecules — `scan_truncated` on a corpus that fits.
+
+    One row per key, then, with the searchable generation preferred: the scan re-matches the stored
+    SMILES with RDKit and never touches the bits, so either generation's label is a correct
+    substructure hit, and the current one is the structure this deployment standardized.
+
+    **This one cannot fail against the pre-`094` source and that is not a defect in it**: before the
+    key change a second definition *deleted* the first, so one molecule was one row by destroying
+    the other. It is a guard on the consequence of the fix rather than a reproduction of the bug,
+    and it does bite: driven against the widened key with the pre-`094` `_all` statement restored,
+    five molecules held under two generations came back as **10 rows**, against 5 through the
+    shipped `DISTINCT ON`.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        old = PostgresFingerprintStore("molecule_fingerprints", settings.ecfp_bits, _OLD_DEFINITION)
+        current = await _store_or_skip()
+        structure = "Ic1ccc(cc1)C(=O)N1CCN(CC1)C(=O)c1ccccc1"
+        for definition, store in ((_OLD_DEFINITION, old), (molecule_definition(), current)):
+            await store.add(
+                FingerprintRecord(
+                    id="pg-shelf-scan",
+                    label=structure,
+                    bits=ecfp_bitstring(structure),
+                    definition=definition,
+                )
+            )
+
+        rows = [r for r in await current.all_records(limit=10_000) if r.id == "pg-shelf-scan"]
+        assert len(rows) == 1, f"one molecule reached the substructure scan as {len(rows)} rows"
+        assert rows[0].definition == molecule_definition()
+
+    asyncio.run(_run())
+
+
+def test_a_table_still_keyed_without_its_definition_refuses_the_write() -> None:
+    """Binding this store to a table whose key omits `definition` fails loudly, not quietly.
+
+    The constructor says so about `source_keyed` and `094` says it about the definition half:
+    "naming a key the table does not have is a write that fails to plan rather than one that
+    silently mis-keys". Worth a test rather than a sentence, because the failure it replaces was
+    silent — the pre-`094` key accepted every write and evicted a generation per definition.
+
+    A scratch table with the *old* key, so what is asserted is the store's conflict target against
+    a schema, not a statement against itself.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        async with await db.connect(settings.postgres_dsn) as conn:
+            await conn.execute(
+                "CREATE TABLE IF NOT EXISTS molfp_old_key_probe "
+                "(id TEXT PRIMARY KEY, label TEXT NOT NULL, "
+                f"bits BIT({settings.ecfp_bits}) NOT NULL, definition TEXT NOT NULL)"
+            )
+            await conn.commit()
+        try:
+            store = PostgresFingerprintStore(
+                "molfp_old_key_probe", settings.ecfp_bits, molecule_definition()
+            )
+            with pytest.raises(psycopg.errors.InvalidColumnReference) as refusal:
+                await store.add(record_for("probe", "CCO"))
+            assert "ON CONFLICT" in str(refusal.value)
+        finally:
+            async with await db.connect(settings.postgres_dsn) as conn:
+                await conn.execute("DROP TABLE IF EXISTS molfp_old_key_probe")
                 await conn.commit()
 
     asyncio.run(_run())

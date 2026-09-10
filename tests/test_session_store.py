@@ -8,6 +8,7 @@ none, so it skips). The provider-selection test is a pure unit test with no data
 import asyncio
 import base64
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -320,9 +321,17 @@ def test_the_session_listing_uses_the_owner_index() -> None:
                 shipped = "\n".join(str(row[0]) for row in await cur.fetchall())
                 await cur.execute(f"EXPLAIN (COSTS OFF) {retired}", ("owner-plan-test",))
                 before = "\n".join(str(row[0]) for row in await cur.fetchall())
-        assert "session_owners_owner_idx" in shipped, (
-            "GET /sessions does not reach session_owners_owner_idx; the plan was:\n" + shipped
-        )
+        # **Either owner-scoped index, and the reason is migration 092.** The property is that the
+        # listing is *served from an index on `owner`* rather than scanning every session in the
+        # table; which index serves it is the planner's choice between two that both do. Before 092
+        # there was one candidate, so naming it was the same claim. 092 added
+        # `(owner, updated_at DESC, session_id DESC)` to take the sort key off a lateral the keyset
+        # cursor could not prune — 158 ms to 0.46 ms at 20,000 lifetime sessions — and the planner
+        # now prefers it, measured. Pinning the older name would fail on a *better* plan, which is
+        # a test asserting an implementation detail while claiming to assert a property.
+        assert (
+            "session_owners_owner_idx" in shipped or "session_owners_owner_updated_idx" in shipped
+        ), "GET /sessions reaches no owner-scoped index; the plan was:\n" + shipped
         assert "session_owners_owner_idx" not in before, (
             "IS NOT DISTINCT FROM now reaches the index, so the two-arm predicate in _OWNER_LIST "
             "(and the notes in migrations 039 and 046) no longer describe this Postgres:\n" + before
@@ -974,4 +983,263 @@ def test_deleting_a_session_leaves_what_belongs_to_the_person() -> None:
     assert (preferences, subscriptions) == (1, 1), (
         "deleting one conversation took data that belongs to the person, not to it: "
         f"{preferences} preference(s), {subscriptions} subscription(s) left"
+    )
+
+
+# The sort key the sidebar orders by, and what it costs to produce (092). `043_session_listing.sql`
+# derived it per page and argued a mirrored column "would be a second write per turn that can
+# silently fall out of step with the first"; the three tests below are what makes that objection
+# answerable rather than merely disagreed with — the column has one definition, the writers of the
+# table it summarises are enumerable, and the listing's membership decision does not read it.
+_OWNER_UPDATED_INDEX = "session_owners_owner_updated_idx"
+
+
+async def _newest_message(session_id: str) -> datetime | None:
+    """`max(session_messages.created_at)` for one session — what `updated_at` is defined to be."""
+    async with await db.connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT max(created_at) FROM session_messages WHERE session_id = %s", (session_id,)
+            )
+            row = await cur.fetchone()
+    return row[0] if row else None
+
+
+async def _stored_updated_at(session_id: str) -> datetime | None:
+    """The mirrored column, read raw."""
+    async with await db.connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT updated_at FROM session_owners WHERE session_id = %s", (session_id,)
+            )
+            row = await cur.fetchone()
+    return row[0] if row else None
+
+
+def test_the_sort_key_is_what_it_is_defined_to_be_after_every_writer() -> None:
+    """`session_owners.updated_at` is `max(session_messages.created_at)`, at both writers.
+
+    The whole of 043's objection to this column, asked of the code: a mirror is only as good as the
+    number of places that maintain it, and this one has two — `_OWNER_INSERT` and the touch inside
+    `save_messages` — both spelling the value as `_NEWEST_MESSAGE` rather than as a timestamp the
+    caller happens to hold.
+
+    The three cases are the three orders a session can be written in:
+
+    - **a new session, then turns** — the ordinary path, where the ownership row exists first and
+      each turn moves the column;
+    - **a transcript, then the ownership row** — `agent/session_fork.py`'s order, which imports
+      `_OWNER_INSERT` and runs it *after* copying the parent's messages onto the child id. A row
+      inserted with a NULL sort key here is a fork that never appears in `GET /sessions`;
+    - **a session with nothing said in it** — NULL, which is not a gap but the honest value, and
+      the one the listing drops.
+
+    The fourth case is the drift the mirror *can* take and the reason it cannot matter: rows
+    deleted under it (`durable/retention.py`'s message window) leave the column naming activity
+    that is gone, and the listing drops the session anyway because membership is the `EXISTS` arm
+    rather than the column.
+
+    Watched failing with the `_OWNER_TOUCH` line removed from `save_messages`: `the second turn
+    did not move the sort key, so the sidebar sorts on stale activity`.
+    """
+
+    async def _run() -> tuple[bool, bool, bool, bool, bool, bool]:
+        await migrated_db_or_skip()
+        store = SessionOwnerStore()
+        await store.record("sess-mirror-turns", "owner-mirror")
+        await _spoke_in("sess-mirror-turns")
+        after_first = await _stored_updated_at("sess-mirror-turns")
+        await _spoke_in("sess-mirror-turns", "and one more thing")
+        turns_exact = await _stored_updated_at("sess-mirror-turns") == await _newest_message(
+            "sess-mirror-turns"
+        )
+        later = await _stored_updated_at("sess-mirror-turns")
+        # Both halves explicitly, because `None < None` is not the comparison this is asking and a
+        # fallback of `now()` on each side makes an unmaintained column read as a moving one.
+        moved = after_first is not None and later is not None and after_first < later
+
+        # The fork's order: the transcript lands under an id that has no ownership row yet.
+        async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO session_messages (session_id, message, message_shape) "
+                    "VALUES (%s, %s, %s)",
+                    (
+                        "sess-mirror-fork",
+                        Jsonb({"type": "human", "content": "copied"}),
+                        "langchain",
+                    ),
+                )
+            await conn.commit()
+        await store.record("sess-mirror-fork", "owner-mirror")
+        fork_exact = await _stored_updated_at("sess-mirror-fork") == await _newest_message(
+            "sess-mirror-fork"
+        )
+
+        await store.record("sess-mirror-silent", "owner-mirror")
+        never_spoken = await _stored_updated_at("sess-mirror-silent") is None
+
+        # What `durable/retention.py` does to a session past its message window: the rows go, the
+        # ownership row stays until a later pass, and the mirror still names the activity they
+        # carried. The listing must drop it anyway — that is what the `EXISTS` arm is for.
+        async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "DELETE FROM session_messages WHERE session_id = %s", ("sess-mirror-turns",)
+                )
+            await conn.commit()
+        stale = await _stored_updated_at("sess-mirror-turns") is not None
+        listed = {row[0] for row in await store.page_for_owner("owner-mirror")}
+        return turns_exact, moved, fork_exact, never_spoken, stale, "sess-mirror-turns" in listed
+
+    turns_exact, moved, fork_exact, never_spoken, stale, pruned_listed = asyncio.run(_run())
+
+    assert moved, (
+        "the second turn did not move the sort key, so the sidebar sorts on stale activity"
+    )
+    assert turns_exact, "the mirrored sort key is not max(created_at) after a turn"
+    assert fork_exact, (
+        "an ownership row written after its transcript carries no sort key, so a fork is invisible "
+        "to GET /sessions — the failure agent/session_fork.py enumerates as its second"
+    )
+    assert never_spoken, "a session nothing was said in must carry NULL, not a timestamp"
+    assert stale, "the fixture did not reach the case: nothing was left to be stale"
+    assert not pruned_listed, (
+        "a session whose messages have been pruned is still in the listing, so the mirrored column "
+        "— not the table — is deciding which sessions exist; the `EXISTS` arm in `_OWNER_LIST` is "
+        "what keeps a stale sort key from inventing a conversation"
+    )
+
+
+def test_the_session_listing_orders_from_an_index_rather_than_sorting_every_session() -> None:
+    """The listing must be able to answer its `ORDER BY … LIMIT` from an index (092).
+
+    **This is the property, and the property is the whole finding.** While the sort key came out of
+    a `LATERAL max(created_at)`, the planner had to evaluate it for every session the owner had
+    ever created before it could discard one, and the keyset cursor could not prune the loop
+    because its predicate read the same lateral output. Measured on one corpus, both statements,
+    100-row pages, warm cache: at 6,000 lifetime sessions **33.8 ms / 18,177 buffers** derived
+    against **0.45 ms / 307 buffers** mirrored; at 20,000, **158.4 ms / 60,589 buffers** against
+    **0.46 ms / 307**. Flat rather than merely faster — the index walk stops after the page.
+
+    Asked with `enable_sort = off` rather than of a seeded corpus, for the reason
+    `test_the_session_listing_uses_the_owner_index` states beside it: a property the index can
+    serve produces an ordered plan at any row count, and one it cannot produces a sort anyway. The
+    absence of a `Sort` node is what "the LIMIT stops early" *is*.
+
+    **What this does not cover is stated rather than implied**: with the shared dev principal's NULL
+    owner the two-arm predicate is a filter rather than an index condition — `owner = NULL` is not
+    something a btree can search — so that page keeps a scan and a top-N sort. Measured at 20,000
+    sessions it still halves (146.2 ms derived, 67.7 ms mirrored), and a deployment with
+    `entra_required` on has no NULL owners at all.
+
+    Watched failing against 043's derived statement, restored verbatim: `the listing still sorts to
+    produce its order`. The index assertion beside it passed there — the planner reaches the index
+    for the *owner* predicate either way — so the `Sort` node is the half that carries this.
+    """
+
+    async def _run() -> str:
+        await migrated_db_or_skip()
+        store = SessionOwnerStore()
+        await store.record("sess-ordered-plan", "owner-ordered-plan")
+        await _spoke_in("sess-ordered-plan")
+        async with await db.connect(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SET LOCAL enable_sort = off")
+                await cur.execute(
+                    f"EXPLAIN (COSTS OFF) {_OWNER_LIST}",
+                    ("owner-ordered-plan", "owner-ordered-plan", None, None, None, 20),
+                )
+                return "\n".join(str(row[0]) for row in await cur.fetchall())
+
+    plan = asyncio.run(_run())
+
+    assert _OWNER_UPDATED_INDEX in plan, (
+        f"the session listing cannot reach {_OWNER_UPDATED_INDEX} (092), so its ORDER BY is a sort "
+        "over every session the owner has ever created; the plan was:\n" + plan
+    )
+    assert "Sort" not in plan, (
+        "the listing still sorts to produce its order, which is the cost 092 removed — the page "
+        "stops after LIMIT rows only if the index supplies the ordering:\n" + plan
+    )
+
+
+def test_only_the_two_known_statements_write_the_table_the_sort_key_mirrors() -> None:
+    """A third writer of `session_messages` fails here rather than mis-sorting the sidebar.
+
+    The residual risk 043 named and this is the answer to it: `updated_at` is maintained by the two
+    statements in `agent/session_store.py` that append to `session_messages`, and the fork's own
+    copy reaches it through `_OWNER_INSERT` a statement later. Nothing structural stops a third
+    `INSERT INTO session_messages` from appearing somewhere else in `src/` — so the scan is the
+    control, in the shape `tests/test_message_pairing.py` already uses for the stored-message shape
+    stamp: the day a writer lands that does not maintain the mirror, this says so by name.
+
+    Watched failing with the literal added to `agent/leaver.py`: `agent/leaver.py appends to
+    session_messages`.
+    """
+    package = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
+    writers = sorted(
+        path.relative_to(package).as_posix()
+        for path in package.rglob("*.py")
+        if "INSERT INTO session_messages" in path.read_text(encoding="utf-8")
+    )
+    assert writers == ["agent/session_fork.py", "agent/session_store.py"], (
+        f"{', '.join(writers)} appends to session_messages. Every writer of that table has to "
+        "leave session_owners.updated_at equal to max(created_at) for the session (092) — either "
+        "run `_OWNER_TOUCH` in the same transaction, or write the ownership row afterwards through "
+        "`_OWNER_INSERT`, which derives it"
+    )
+
+
+def test_the_batch_turn_claims_take_refresh_and_release_only_what_is_theirs() -> None:
+    """The set-shaped claim is the single-session one, per session, and must stay that way.
+
+    `agent/leaver.py` claims a departing person's whole fleet at once because one statement per
+    session ran at ~56 sessions/s and outran its own 60 s lease. What must not come with that speed
+    is a weaker guarantee: a batch that took a session somebody else is running a turn on, a
+    refresh that extended a claim already taken over, or a release that deleted another holder's
+    row. Each is asserted against a live claim held by a different holder in the same batch.
+
+    Watched failing with the holder guard neutralised in `_TURN_REFRESH_MANY`'s locking sub-select:
+    `the batch refresh extended ['sess-batch-ours', 'sess-batch-theirs'] — a claim that is not
+    ours`.
+    """
+
+    async def _run() -> tuple[set[str], set[str], set[str], str | None, str | None]:
+        await migrated_db_or_skip()
+        claims = SessionTurnClaims()
+        ours, theirs = "sess-batch-ours", "sess-batch-theirs"
+        assert await claims.claim(theirs, "another-worker", 60.0)
+        taken = await claims.claim_many([ours, theirs], "sweep-1", 60.0)
+        refreshed = await claims.refresh_many([ours, theirs], "sweep-1", 60.0)
+        other = await claims.other_holders([ours, theirs], "sweep-1")
+        await claims.release_many([ours, theirs], "sweep-1")
+        async with await db.connect(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT session_id, holder FROM session_turns WHERE session_id = ANY(%s)",
+                    ([ours, theirs],),
+                )
+                left = {str(row[0]): str(row[1]) for row in await cur.fetchall()}
+        await claims.release(theirs, "another-worker")
+        return taken, refreshed, other, left.get(ours), left.get(theirs)
+
+    taken, refreshed, other, ours_left, theirs_left = asyncio.run(_run())
+
+    assert taken == {"sess-batch-ours"}, (
+        f"the batch claim took {sorted(taken)}: a session another worker is running a turn on is "
+        "not this sweep's to take, however many are asked for at once"
+    )
+    assert refreshed == {"sess-batch-ours"}, (
+        f"the batch refresh extended {sorted(refreshed)} — a claim that is not ours, which is the "
+        "takeover `_TURN_REFRESH`'s holder guard exists to refuse"
+    )
+    assert other == {"sess-batch-theirs"}, (
+        f"the sweep was told {sorted(other)} is held elsewhere; that answer is what separates a "
+        "genuine takeover from its own erase transaction holding the rows"
+    )
+    assert ours_left is None, "the batch release left this sweep's own claim behind"
+    assert theirs_left == "another-worker", (
+        f"the batch release removed another holder's claim (left: {theirs_left}), which is a live "
+        "turn's turn slot"
     )

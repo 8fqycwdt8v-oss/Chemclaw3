@@ -596,3 +596,54 @@ def test_find_notes_truncates_in_id_order(tmp_path: Path, monkeypatch: pytest.Mo
         "compound-a",
         "compound-b",
     ]
+
+
+def test_find_notes_says_whether_there_was_a_corpus_to_miss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three different answers rendered byte-identically, and one of them is an outage.
+
+    Measured: on a zero-note corpus, `find_notes("aspirin")`, `find_notes("")` and a genuine miss
+    over a one-note corpus all returned `{'matches': [], 'total_matches': 0, 'widened': False}`.
+    "We have no note on aspirin" and "there is no knowledge graph on this deployment" are not the
+    same statement, and the honest form already existed one module away — `gather_evidence` reports
+    `sources_skipped={'graph': 'no notes found under <path>'}` and `find_knowledge_gaps()` already
+    reports `total_notes: 0`.
+
+    The tool's docstring did say "an empty result means not even one term matched — it does not
+    mean the topic is absent from the graph", which is the docstring-only pattern the verdict field
+    exists to end: read once when the tool is defined, absent from the payload that sits in the
+    context window when the answer is written.
+    """
+    # Two directories rather than one seeded halfway through: `load_notes` caches behind a stat
+    # fingerprint whose mtime resolution is coarser than this test, so writing into the directory
+    # it has just read is not a reliable way to change what it holds.
+    bare, seeded = tmp_path / "bare", tmp_path / "seeded"
+    bare.mkdir()
+    seeded.mkdir()
+    _seed(seeded)
+
+    monkeypatch.setattr(settings, "knowledge_dir", str(bare))
+    empty = asyncio.run(find_notes("aspirin"))
+    assert empty.corpus_notes == 0
+    assert "NO CORPUS" in empty.model_dump()["verdict"]
+
+    # A query with nothing searchable in it never reaches the corpus, so it may not claim one is
+    # missing: `corpus_notes is None` is "this search cannot say", the same distinction
+    # `retrieval.evidence.Hits.found is None` draws.
+    unsearchable = asyncio.run(find_notes(""))
+    assert unsearchable.corpus_notes is None
+    assert "NOT SEARCHED" in unsearchable.model_dump()["verdict"]
+
+    # ...and a real corpus that simply does not hold the answer says exactly that.
+    monkeypatch.setattr(settings, "knowledge_dir", str(seeded))
+    miss = asyncio.run(find_notes("aspirin"))
+    assert miss.matches == []
+    assert miss.corpus_notes == 2
+    verdict = miss.model_dump()["verdict"]
+    assert "NO MATCH" in verdict
+    assert "2" in verdict
+
+    hit = asyncio.run(find_notes("target"))
+    assert hit.corpus_notes == 2
+    assert "FOUND" in hit.model_dump()["verdict"]

@@ -43,12 +43,20 @@ async def build_answer_event(
         tools_called: Every tool this turn invoked, for the promised-but-uncalled scan.
 
     Returns:
-        The event, which never carries a flag the caller has to interpret: every field is either
-        what a check found or the `None`/`False` that says the check did not run.
+        The event, which never carries a flag the caller has to interpret: every *finding* field is
+        either what a check found or the `None`/`False` that says nothing was found — and
+        `checks_run` says which checks were in a position to find anything at all.
+
+        **That last clause is the correction, not decoration.** This docstring claimed the
+        `None`/`False` defaults said "the check did not run", which was true of the verifier
+        (`confidence`/`verified_by` are its own nulls) and false of the shape gate, which produces
+        no score and so had no field of its own: an answer it scanned and cleared came out
+        byte-for-byte identical to one no gate looked at, and both gates ship off.
     """
     review = await score_answer(answer, tool_outputs, tools_called)
     return AnswerEvent(
         text=answer,
+        checks_run=review.checks_run,
         confidence=review.confidence,
         verified_by=review.verified_by,
         unsupported_claims=review.unsupported,

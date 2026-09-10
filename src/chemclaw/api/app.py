@@ -26,6 +26,7 @@ route) is layered on in F4.
 """
 
 import asyncio
+import logging
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -35,6 +36,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from chemclaw.agent.audit import NullAuditSink, default_audit_sink
 from chemclaw.agent.checkpointer import close_checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs, history_provider
 from chemclaw.agent.durable_tools import cancel_job, job_status
@@ -81,6 +83,7 @@ from chemclaw.api.state import (
 )
 from chemclaw.api.tool_results import fetchable_refs, load_tool_result
 from chemclaw.connectors.health import check_connectors_at_startup, probe_connectors
+from chemclaw.connectors.registry import skills_dirs as connector_skills_dirs
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
@@ -118,6 +121,87 @@ __all__ = [
 ]
 
 _STATIC_DIR = Path(__file__).parent / "static"
+
+logger = logging.getLogger(__name__)
+
+
+def startup_inventory() -> list[str]:
+    """What this process is configured to hold, one `subsystem=state` term per subsystem.
+
+    **The gap this closes is that nothing told an operator what was unconfigured.** A cold front
+    door logged exactly one line about its own emptiness — `connectors: none enabled`, from the
+    health sweep — and nothing at all about a log-only audit trail, an unwritten session store, no
+    skills, no ingest source and no result sink. `make ci` is collectively the honest inventory and
+    it is a pre-push gate: it cannot be pointed at a running pod, and `make connector-validate`
+    *fails* on a condition this process happily serves under.
+
+    **Configuration only, and deliberately no counts.** "What it holds" — how many notes, how many
+    indexed structures — is a query per subsystem, and this runs before `db.pooling()` opens the
+    pool: a startup line that queries five subsystems is a startup line that can hang or fail a
+    boot, over facts that change every hour anyway. What is here instead is the set of facts that
+    are *static for the life of the pod* and that each turn silently degrades around. The two
+    filesystem walks are the exception and they are the ones a turn already makes per turn.
+
+    Connectors are not a term here: `check_connectors_at_startup` logs them with their
+    *reachability*, which is strictly more than this could say, and a second line naming the same
+    bundles differently is how two inventories come to disagree.
+    """
+    skills = sum(
+        1
+        for directory in [*settings.skills_dirs, *connector_skills_dirs()]
+        for _ in Path(directory).glob("*/SKILL.md")
+    )
+    notes = sum(1 for _ in settings.knowledge_path.rglob("*.md"))
+    return [
+        f"audit-trail={type(default_audit_sink()).__name__}",
+        f"sessions={settings.session_store}",
+        f"skills={skills}",
+        f"knowledge-notes={notes} in {settings.knowledge_path}",
+        f"data-sources={','.join(settings.data_source_list) or 'none'}",
+        f"result-sinks={','.join(settings.result_sink_list) or 'none (publishing off)'}",
+        f"vector-store={settings.vector_store_provider}",
+    ]
+
+
+def _report_inventory() -> None:
+    """Log the inventory, and warn separately where the trail is not the one the prompt described.
+
+    **The warning is the finding; the inventory is the context for it.** `default_audit_sink()`
+    resolves to `NullAuditSink` whenever `session_store != "postgres"`, and D-122 decided that
+    gate with a *stated* condition — "log-only is the fallback where no database is configured" —
+    that the implementation does not test. `.env.example` ships `CHEMCLAW_SESSION_STORE=memory`
+    beside a `postgres_dsn` default pointing at the `make up` database, which is the configuration
+    `CLAUDE.md` tells a developer to stand up: a database is configured, migrated and reachable,
+    `audit_events` exists, and every row a turn would write is discarded. Measured on that
+    deployment, one completed turn that called a tool left `audit_events` at 0, `session_messages`
+    at 0, `chemclaw_audit_sink_failures_total` at 0, and `explain` printing "no messages, tool
+    calls or jobs recorded".
+
+    **The DSN is deliberately not part of the condition.** "Warn when a Postgres DSN is configured"
+    reads as the narrower check and is not one: `postgres_dsn` has a default value, so it is always
+    configured and the qualifier would be a warning that always fires, dressed as a warning that
+    sometimes does. What is actually being reported is the resolution — this deployment writes no
+    durable trail — and that is worth one line at every front-door boot whether or not a DSN
+    happens to point somewhere.
+
+    The front door only, which is the process a chemist talks to and the one whose prompt makes the
+    claim. A worker's trail is the same sink by the same rule; putting the warning in `Settings`
+    would fire it in every CLI invocation and every test collection, which is how a warning stops
+    being read.
+    """
+    logger.info("inventory: %s", " ".join(startup_inventory()))
+    if isinstance(default_audit_sink(), NullAuditSink):
+        logger.warning(
+            "no durable audit trail: default_audit_sink() resolved to NullAuditSink because "
+            "CHEMCLAW_SESSION_STORE=%s, so no audit_events row and no session_messages row is "
+            "written for any turn this pod serves — `python -m chemclaw.cli.explain <session>` "
+            "will find nothing, whatever the session did. The tool-call log lines are the whole "
+            "record, and they are kept by the log stack rather than by this system. Set "
+            "CHEMCLAW_SESSION_STORE=postgres (Helm: values.yaml already does) to write the trail. "
+            "The agent is told which of the two it has, so it will not describe a trail this "
+            "deployment is not keeping.",
+            settings.session_store,
+        )
 
 
 @asynccontextmanager
@@ -177,6 +261,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # deployment configuration error, and a front door that started anyway would 400 every
     # request naming that profile with no hint as to why.
     load_profiles()
+    # After `configure_logging()` so the line is formatted the way the operator asked, and after
+    # the profiles load so a malformed one fails before anything claims the deployment is sound.
+    _report_inventory()
     # Before anything can offload. Every `asyncio.to_thread` in this process — token validation on
     # every request, the retrieval and knowledge-graph legs, embeddings, attachment parses — shares
     # one pool, and the loop's stock default is `min(32, cpu_count + 4)`: 8 on a 4-CPU pod, the

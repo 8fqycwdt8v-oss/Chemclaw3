@@ -21,6 +21,8 @@ from deepagents.backends import FilesystemBackend
 from deepagents.backends.protocol import BackendProtocol
 
 from chemclaw.agent.authz import AuthorizationError
+from chemclaw.agent.chemclaw_agent import _capability_tools
+from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.skill_backend import REFUSED, NarrowedSkillsBackend, SkillsReadOnlyRefusal
 
 _SKILLS = ("alpha", "beta", "gamma")
@@ -418,3 +420,67 @@ def test_a_skill_longer_than_the_read_default_says_so_rather_than_stopping_silen
     assert "step 100" in read and "step 101" not in read, "the tool's default no longer caps at 100"
     assert "112 lines remaining from offset 100" in read
     assert "of 212 total" in read
+
+
+def _empty_listing(tmp_path: Path) -> str:
+    """The skills section a deployment with nothing to list actually sends."""
+    from chemclaw.agent.langgraph_agent import _skills_middleware, skills_backend
+
+    profile = get_profile("default")
+    labelled = [("cold", str(tmp_path))]
+    middleware = _skills_middleware(
+        skills_backend(profile, _capability_tools(profile), labelled=labelled), labelled
+    )
+    loaded = middleware.before_agent({}, None, None) or {}
+    metadata = loaded.get("skills_metadata", [])
+    assert metadata == [], "this fixture is about the empty case; the tree was not empty"
+    return str(
+        middleware.system_prompt_template.format(
+            skills_locations=middleware._format_skills_locations(),
+            skills_load_warnings="",
+            skills_list=middleware._format_skills_list(metadata),
+        )
+    )
+
+
+def test_an_empty_skills_listing_does_not_invite_the_model_to_write_one(tmp_path: Path) -> None:
+    """Upstream's empty listing tells the model to create a skill; every write verb refuses one.
+
+    Verbatim on a cold deployment: `(No skills available yet. You can create skills in /cold)` —
+    an instruction to attempt the one thing `SkillsReadOnlyRefusal` exists to refuse, naming a
+    virtual route that is not a path on the pod. The same prompt elsewhere says "Load the
+    safety-screening skill", so the two halves of one system message contradicted each other.
+    """
+    section = _empty_listing(tmp_path)
+    assert "You can create skills" not in section
+    assert "read-only to every turn" in section
+
+
+def test_the_skills_prompt_drops_a_source_distinction_this_deployment_has_no_sources_for(
+    tmp_path: Path,
+) -> None:
+    """The Deepagents/Agents sentence describes labels `_labelled` never produces.
+
+    Sources here are labelled from their directory — `skills`, or a bundle's name — and there is no
+    machine-wide tree for the "Agents" half to refer to. A distinction the model cannot apply to
+    anything it can see, paid for on every model call.
+    """
+    section = _empty_listing(tmp_path)
+    assert 'Sources labeled "Deepagents"' not in section
+    # The rest of upstream's prompt still arrives from upstream rather than from a copy here.
+    assert "progressive disclosure" in section
+
+
+def test_the_skills_prompt_refuses_to_trim_a_sentence_upstream_no_longer_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The trim is a substring, so upstream rewording it must be loud rather than a silent no-op.
+
+    Without this the bump that changes that sentence leaves `_skills_prompt` returning upstream's
+    template unchanged — the removed sentence quietly back — and nothing anywhere says so.
+    """
+    from chemclaw.agent import langgraph_agent
+
+    monkeypatch.setattr(langgraph_agent, "SKILLS_SYSTEM_PROMPT", "{skills_locations}")
+    with pytest.raises(RuntimeError, match="source-label sentence"):
+        langgraph_agent._skills_prompt()

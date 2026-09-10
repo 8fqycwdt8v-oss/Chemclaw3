@@ -7,18 +7,34 @@ the suite patches them there (`chemclaw.agent.durable_tools.job_status` and frie
 `chemclaw/api/routes/README.md`.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 
 from chemclaw.agent.durable_tools import DurableJobStatus
 from chemclaw.api import app as front_door
 from chemclaw.api.deps import CurrentUser, _is_reviewer
 from chemclaw.durable.job_record import JobRecordSummary
 
+# Where the next page's cursor is returned, because the body cannot carry it — the same header
+# `GET /sessions` answers with, for the same reason and deliberately spelled the same way: this
+# route answers with a bare JSON array that the companion UI parses as one, so an envelope
+# (`{"jobs": [...], "next": ...}`) would break every deployed client to add a field, and a per-row
+# field would have to go on `JobRecordSummary`, which is the agent tool's shape too.
+#
+# **The value is a `job_id`, not an opaque token, and that is the difference from the session
+# listing.** A session cursor is base64 because its sort key (last activity + id) is not otherwise
+# on the row, so spelling it out invites a client to construct one. Here the anchor is a row the
+# caller already holds, the store resolves that row's position itself, and nothing about the
+# ordering is disclosed — so it survives the ordering gaining a third component, which a
+# spelled-out cursor does not.
+_NEXT_CURSOR = "X-Next-Cursor"
+
 
 async def list_jobs(
     principal: CurrentUser,
+    response: Response,
     text: str = "",
     connector: str = "",
+    after: str = "",
 ) -> list[JobRecordSummary]:
     """Durable runs this system has finished, newest first — what ran, and why.
 
@@ -43,8 +59,21 @@ async def list_jobs(
     a reason, readable by every authenticated principal — is stated in `SECURITY.md` under
     "Accepted exposures", because an accepted data-exposure decision belongs where a reviewer looks
     for one rather than only in an API-design comment.
+
+    **`job_record_search_limit` is now the page, not the end of the list.** It always bounded this
+    answer and nothing said so: a chemist with more finished runs than the cap could not reach the
+    older ones from any client, and the listing looked complete. `after` resumes strictly after the
+    run a cursor names, and `X-Next-Cursor` is present only when more matched — absent means there
+    is not. The cursor is a keyset (the last row's `job_id`) rather than an offset, because runs
+    are recorded while a listing is read and a page boundary counted in rows would repeat and skip.
     """
-    return await front_door.search_job_records(text=text, connector=connector)
+    found = await front_door.search_job_records(text=text, connector=connector, after=after)
+    if found.hits_truncated:
+        # Only when the store actually saw a further row. It asks for one beyond the page to know,
+        # so this is evidence rather than the "a full page might mean more" guess — and a client
+        # that follows a cursor into an empty page is a round trip nobody needed.
+        response.headers[_NEXT_CURSOR] = found.hits[-1].job_id
+    return found.hits
 
 
 async def get_job(

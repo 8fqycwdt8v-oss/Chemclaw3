@@ -16,7 +16,7 @@ from datetime import date
 from pathlib import Path
 
 import networkx as nx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from chemclaw.agent.authz import require_actor
 from chemclaw.agent.framing import frame_untrusted
@@ -137,6 +137,64 @@ class NoteSearch(BaseModel):
     # True when no note contained every term and the matches are partial-coverage hits instead,
     # best coverage first — the same fallback `GraphRetriever` applies to the same corpus.
     widened: bool = False
+    # How many *current* notes the search actually looked at — the question a miss cannot answer
+    # without it. Measured, a zero-note corpus and a genuine miss over a real one returned the
+    # identical `{'matches': [], 'total_matches': 0, 'widened': False}`, so "we have no note on
+    # aspirin" and "there is no knowledge graph on this deployment" were the same sentence. The
+    # honest form already existed one module away: `gather_evidence` reports
+    # `sources_skipped={'graph': 'no notes found under <path>'}`.
+    #
+    # **`None` means "this search cannot say"**, not zero — the same distinction
+    # `retrieval.evidence.Hits.found` draws for the legs that push `LIMIT k` into an index. A query
+    # with no searchable term returns before the corpus is opened, and reporting 0 for it would
+    # assert an empty graph nobody looked at.
+    corpus_notes: int | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def verdict(self) -> str:
+        """The one sentence to read before saying the graph holds nothing on a topic.
+
+        `computed_field` rather than a bare property for the reason `FingerprintSearch.verdict`
+        states in full: a plain property is not serialized, so `model_dump()` would carry the empty
+        list and drop the sentence saying what it means.
+
+        The tool docstring already said the careful thing — "an empty result means not even one
+        term matched; it does not mean the topic is absent from the graph" — and a docstring is
+        read once when the tool is defined, while the payload is what sits in the context window
+        when the answer is written.
+        """
+        if self.corpus_notes is None:
+            return (
+                "NOT SEARCHED: the query held no searchable term, so no note was examined. This "
+                "says nothing whatever about the graph — ask again with a word to search for."
+            )
+        if not self.corpus_notes:
+            return (
+                "NO CORPUS: the knowledge graph holds no current note at all, so this query was "
+                "compared against nothing. This is NOT evidence that the topic is unknown — the "
+                "question was not answered. Say the graph is empty on this deployment."
+            )
+        if not self.matches:
+            return (
+                f"NO MATCH: {self.corpus_notes} current note(s) were searched and none carried "
+                "your terms. The graph is populated, so this is a real miss — but it is a miss on "
+                "these words, and a differently-worded term may still find it."
+            )
+        cut = (
+            f" {self.total_matches} matched and the {len(self.matches)} best are shown, so the "
+            "count is a floor rather than a total."
+            if self.total_matches > len(self.matches)
+            else ""
+        )
+        widened = (
+            " No note carried every term, so these are partial-coverage hits, best coverage first."
+            if self.widened
+            else ""
+        )
+        return (
+            f"FOUND: {len(self.matches)} note(s) out of {self.corpus_notes} searched.{cut}{widened}"
+        )
 
 
 def _scan_notes(notes_dir: Path, terms: Sequence[str], today: date, cap: int) -> NoteSearch:
@@ -178,11 +236,16 @@ def _scan_notes(notes_dir: Path, terms: Sequence[str], today: date, cap: int) ->
         The search result, with `total_matches` counting the hits before the cap.
     """
     scored: list[tuple[int, NoteRef]] = []
+    searched = 0
     for note in sorted(load_notes(notes_dir), key=lambda candidate: candidate.id):
         # Discovery serves current evidence only: a not-yet-valid or expired note is not surfaced
         # as current fact (KM-7). It stays in Git and remains reachable by explicit id.
         if not note.is_current(today):
             continue
+        # Counted *after* the currency filter, because that is the corpus this search can hit: a
+        # graph of a thousand expired notes answers every query with nothing, and reporting the
+        # thousand would call that a real miss.
+        searched += 1
         coverage = term_coverage(note, terms)
         if coverage:
             scored.append((coverage, _ref(note)))
@@ -201,6 +264,7 @@ def _scan_notes(notes_dir: Path, terms: Sequence[str], today: date, cap: int) ->
         matches=[ref for _, ref in chosen[:cap]],
         total_matches=len(chosen),
         widened=widened,
+        corpus_notes=searched,
     )
 
 
@@ -217,11 +281,13 @@ async def find_notes(text: str) -> NoteSearch:
             position, not only one containing that exact run of text.
 
     Returns:
-        The matching note references (id + type + smiles + tags, body omitted) with
-        `total_matches` saying how many there were before the cap, and `widened` marking a
-        result of partial-coverage hits when no current note contained every word. An empty
-        result means not even one term matched — it does not mean the topic is absent from the
-        graph; a differently-worded term may still find it.
+        The matching note references (id + type + smiles + tags, body omitted), `total_matches`
+        before the cap, `widened` for partial-coverage hits, and `corpus_notes` — how many current
+        notes were searched at all.
+
+        **Read `verdict` before saying the graph holds nothing on a topic.** An empty result means
+        one of three things: no searchable term, an empty graph, or a real miss. Only the last is
+        evidence about the topic.
     """
     # The same tokenizer and the same haystack every other note search uses
     # (`chemclaw.kg.search`), so a note this tool finds is one `gather_evidence` can also cite.

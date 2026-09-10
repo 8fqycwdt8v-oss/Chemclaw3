@@ -4,6 +4,21 @@
        the deployment's lifetime under a comment naming retention as the bound. Evaluated here at
        the top of the file so *any* render refuses, not only one that reaches a particular
        document. */ -}}
+{{- /* And the escape hatch must be a real boolean before the emptiness test below sees it.
+
+       `networkpolicy.yaml`'s twin has carried this guard since it shipped and calls `--set-string`
+       "the single most likely way to get this wrong"; this half never grew one. Go templates treat
+       every non-empty string as truthy and `empty` agrees, so `unboundedGrowthAccepted: "false"` —
+       an operator writing down what they do *not* want, or `--set-string` — satisfied the gate
+       while reading as off, and the release ran with every durable table growing forever behind a
+       values file that says it must not. That is this gate's own failure mode reached through its
+       own escape hatch, which is exactly the shape the egress guard already refuses.
+
+       Before the emptiness check rather than beside it: `empty` is what misreads the string, so the
+       type has to be settled first or the condition below decides on a value it cannot see. */ -}}
+{{- if kindIs "string" .Values.retention.unboundedGrowthAccepted }}
+{{- fail (printf "retention.unboundedGrowthAccepted must be a boolean, not the string %q — a quoted boolean is truthy in Helm and would satisfy the retention posture gate while reading as off, leaving every durable table growing forever. Set it as `unboundedGrowthAccepted: true`/`false` (no quotes), and do not pass it via --set-string." .Values.retention.unboundedGrowthAccepted) }}
+{{- end }}
 {{- if eq (empty .Values.retention.windows) (empty .Values.retention.unboundedGrowthAccepted) }}
 {{- fail "retention: set exactly one of `retention.windows` (the CHEMCLAW_RETENTION_* day windows this release keeps history for) or `retention.unboundedGrowthAccepted: true` (the durable tables grow forever, which is not a safe end state but is now a stated one). Neither is set, or both are." }}
 {{- end }}
@@ -30,6 +45,63 @@
 {{- end }}
 {{- if not (has $key $retentionSettings) }}
 {{- fail (printf "retention.windows: %q is not a retention setting, so it would render into the ConfigMap and be read by nothing — a release that states a retention posture and prunes nothing. Use one of: %s" $key (join ", " $retentionSettings)) }}
+{{- end }}
+{{- end }}
+{{- /* And which Temporal this release owns, by the same rule and for a sharper reason: the value
+       that has to be stated here is not a posture but a *discriminator*, and it shipped as the
+       constant `"chemclaw"` inside `config`.
+
+       `CHEMCLAW_TEMPORAL_ADDRESS` names one broker for the whole cluster. Inside it the namespace
+       is the only boundary: the background queue is the constant `background-jobs`,
+       `durable/schedules.py`'s `OWNED_SCHEDULE_IDS` is a set of bare constants, and `_prune`
+       deletes every one of them this release did not plan — it cannot tell a peer's Schedule from
+       a leftover of its own. Measured against a live broker, a second release's `helm upgrade`
+       rewrote the first's `eln-sync` to a different workflow type at a different interval and
+       deleted its `eval-drift` outright. `values.yaml`'s `temporal:` block carries the whole
+       measurement.
+
+       So there is no default: a default is precisely what two releases would share. */ -}}
+{{- if not .Values.temporal.namespace }}
+{{- fail (printf "temporal.namespace is not set, and this chart ships no default for it. `CHEMCLAW_TEMPORAL_ADDRESS` names one broker for the whole cluster, and inside it the Temporal namespace is the only thing separating two ChemClaw releases: the background task queue is a constant, every Schedule id is a constant, and a second release's `helm upgrade` rewrites this one's Schedules and deletes the ones it does not itself plan. Give this release a namespace of its own — %q is unique by construction here — and register it on the broker. (A shared Postgres is the same hazard and this does not cover it: two releases need their own database too.)" .Release.Namespace) }}
+{{- end }}
+{{- if hasKey .Values.config "CHEMCLAW_TEMPORAL_NAMESPACE" }}
+{{- fail "config.CHEMCLAW_TEMPORAL_NAMESPACE is derived from `temporal.namespace` rather than written into this block — written by hand it renders the key twice, every parser keeps the last, and the gate above would be checking a value nothing reads. Remove it and set `temporal.namespace`." }}
+{{- end }}
+{{- /* And the growth the windows above do not bound.
+
+       `artifact_blobs` is swept by a *different* job (`ArtifactEvictionWorkflow`), on a different
+       schedule, under two settings that are not `CHEMCLAW_RETENTION_*` and both default to 0 = off.
+       None of the nine windows reaches it. So a release that carefully stated a retention posture
+       still had an unbounded artifact store and was never asked — the gate above satisfied, the
+       operator's belief that growth is bounded wrong, and nothing anywhere saying which half was
+       covered.
+
+       Asked only on the `windows` arm, which is what keeps this from being a third `--set` at every
+       render site. `unboundedGrowthAccepted: true` already says the durable tables grow forever;
+       that statement is true of this table too and nothing more needs stating. It is the *other*
+       arm — the release that says "I bound my growth" — whose statement was incomplete.
+
+       Two bounds and no cadence: `CHEMCLAW_ARTIFACT_EVICTION_SCHEDULE_MINUTES` is how often the
+       sweep runs rather than whether anything is bounded, so it goes in `config:` like any other
+       setting. Listing it here would let a release state a posture with a key that bounds
+       nothing, which is the defect the `$retentionSettings` allow-list above exists to stop. */ -}}
+{{- $artifactSettings := list "CHEMCLAW_ARTIFACT_EVICT_IDLE_DAYS" "CHEMCLAW_ARTIFACT_STORE_MAX_BYTES" -}}
+{{- /* And the escape hatch must be a real boolean, for the reason `networkpolicy.yaml` states at
+       length: Go templates treat every non-empty string as truthy and `empty` agrees, so
+       `artifactGrowthAccepted: "false"` — or `--set-string`, the single most likely way to get
+       this wrong — would satisfy the gate below while reading as off, and the artifact store would
+       grow unbounded behind a values file that says it must not. */ -}}
+{{- if kindIs "string" .Values.retention.artifactGrowthAccepted }}
+{{- fail (printf "retention.artifactGrowthAccepted must be a boolean, not the string %q — a quoted boolean is truthy in Helm and would satisfy this gate while reading as off, leaving the artifact store unbounded. Set it as `artifactGrowthAccepted: true`/`false` (no quotes), and do not pass it via --set-string." .Values.retention.artifactGrowthAccepted) }}
+{{- end }}
+{{- if .Values.retention.windows }}
+{{- if eq (empty .Values.retention.artifactStore) (empty .Values.retention.artifactGrowthAccepted) }}
+{{- fail "retention: this release states retention windows, which bound nine tables and not `artifact_blobs` — that store is swept by its own job under CHEMCLAW_ARTIFACT_STORE_MAX_BYTES / CHEMCLAW_ARTIFACT_EVICT_IDLE_DAYS, both of which default to 0 (off). Set exactly one of `retention.artifactStore` (either or both of those two keys) or `retention.artifactGrowthAccepted: true` (calculation by-products accumulate without bound, which is now a stated posture). Neither is set, or both are." }}
+{{- end }}
+{{- end }}
+{{- range $key, $value := .Values.retention.artifactStore }}
+{{- if not (has $key $artifactSettings) }}
+{{- fail (printf "retention.artifactStore: %q is not an artifact-eviction bound, so it would render into the ConfigMap and be read by nothing — a release that states an artifact posture and evicts nothing. Use one of: %s (the sweep's cadence is CHEMCLAW_ARTIFACT_EVICTION_SCHEDULE_MINUTES and belongs in `config`, because it is not a bound)." $key (join ", " $artifactSettings)) }}
 {{- end }}
 {{- end }}
 {{- /* **This file renders the configuration twice, and the duplication is the fix.**
@@ -90,6 +162,14 @@
   {{ $key }}: {{ $value | quote }}
   {{- end }}
   {{- end }}
+  {{- /* The artifact-eviction bounds, from `retention.artifactStore` rather than `config`, so the
+         posture the gate at the top of this file checked is the posture that reaches the pod.
+         There is no derived enable switch to go with them, unlike retention's: `planned_schedules`
+         creates the eviction Schedule when either bound is non-zero, so a stated bound *is* the
+         switch and a second one could only disagree with it. */}}
+  {{- range $key, $value := .Values.retention.artifactStore }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
   {{- /* Derived from the knowledge volume layout rather than hand-written in `config`, so the
          path the note writer writes to can never drift from the volume it is mounted on
          (gap DEP-2). Together with `CHEMCLAW_KNOWLEDGE_DIR` above it is also what every *reader*
@@ -97,6 +177,12 @@
          containers take their publish target from the same pair (`chemclaw.knowledgePublishPath`)
          instead of a `publishPath` value of their own. */}}
   CHEMCLAW_NOTE_REPO_DIR: {{ .Values.knowledge.noteRepoPath | quote }}
+  {{- /* Derived from `temporal.namespace` rather than hand-written in `config`, for the reason the
+         two above are and one more: this is the only string separating two releases on one broker,
+         so the value the gate at the top of this file refused to leave unstated has to be the same
+         value the pods read. Written in both places it renders twice and the parser keeps the
+         last — which is why writing it in `config` is refused rather than merged. */}}
+  CHEMCLAW_TEMPORAL_NAMESPACE: {{ .Values.temporal.namespace | quote }}
   {{- /* Derived from `.Values.connectors` rather than hand-written in `config`, for the same reason
          the note-repo dir is: the address the front door dials must be the Service that the same
          value block created. Only the enabled connectors appear, so a disabled bundle is simply

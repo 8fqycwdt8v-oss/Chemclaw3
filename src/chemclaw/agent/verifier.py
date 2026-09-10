@@ -544,6 +544,14 @@ async def verify_answer(
     return response.model_copy(update={"verified_by": "judge"})
 
 
+#: The honesty checks `score_answer` can run, named so a reader can tell which one spoke.
+#:
+#: A closed set rather than free text, because it crosses the SSE wire into two other repositories
+#: (`Chemclaw3_ui`, `Chemclaw3_mock`) and a consumer that switches on it should be able to be
+#: exhaustive — the same contract `core.turn_signals.RefusalReason` has for the other direction.
+AnswerCheck = Literal["verifier", "answer-shape"]
+
+
 class TurnReview(BaseModel):
     """Everything known about a finished answer's trustworthiness, computed once.
 
@@ -551,6 +559,21 @@ class TurnReview(BaseModel):
     read by `api/runner_answer.build_answer_event` to stamp the `AnswerEvent`.
     """
 
+    # Which checks actually ran, in the order they ran. **The field that makes "nothing looked at
+    # this" different from "something looked and found nothing."** Every other field here is a
+    # *finding*, so with both gates off they all sit at their `None`/`False` default — and so does
+    # a turn the shape gate scanned and cleared. Measured before this existed, the two
+    # `AnswerEvent`s were identical character for character, so a surface flagging on
+    # `review_required` showed an unflagged answer either way with no way to tell which.
+    #
+    # `verified_by` covers exactly half of the same job and cannot be widened to cover the rest:
+    # it names the check that produced `confidence`, and the shape gate produces no score (it
+    # "found something or it did not, and that is not a score"), so it has no value to put there.
+    #
+    # A check that was configured on and **crashed** is still a check that ran: it flags the answer
+    # through `unsupported_claims`, and a flag whose author is unnamed is the state this field
+    # exists to end.
+    checks_run: list[AnswerCheck] = Field(default_factory=list)
     confidence: float | None = None
     verified_by: Literal["judge", "citation-gate"] | None = None
     unsupported: list[str] = Field(default_factory=list)
@@ -606,6 +629,10 @@ async def score_answer(
     """
     review = TurnReview()
     if settings.verifier_enabled:
+        # Appended *before* the check runs, not after it: the crash branch below is a check that
+        # ran, and a name recorded only on the success path would say "unchecked" for exactly the
+        # turn that most needs to say otherwise.
+        review.checks_run = [*review.checks_run, "verifier"]
         try:
             result = await verify_turn_answer(answer, tool_outputs, evidence=evidence)
         except Exception:
@@ -627,6 +654,7 @@ async def score_answer(
                 ]
                 review.review_required = True
     if settings.answer_shape_gate_enabled:
+        review.checks_run = [*review.checks_run, "answer-shape"]
         shapes = [
             *ungrounded_parameter_shapes(answer, tool_outputs),
             *promised_uncalled_tools(answer, tools_called),

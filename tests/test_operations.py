@@ -29,7 +29,7 @@ from chemclaw.operations import (
     spend,
     tool_usage,
 )
-from chemclaw.operations.activity import KNOWLEDGE_WRITE_TOOLS
+from chemclaw.operations.activity import _TOOL_USAGE, KNOWLEDGE_WRITE_TOOLS
 from tests.pg import migrated_db_or_skip
 
 #: A string no bounded vocabulary could contain, written into every free-text column below.
@@ -445,3 +445,72 @@ def test_the_transcribed_write_tools_stay_a_subset_of_the_authorized_ones() -> N
     authorized = set(authz.KNOWLEDGE_WRITE_TOOLS)
     assert transcribed <= authorized
     assert authorized - transcribed == {"remember_preference", "forget_preference"}
+
+
+#: Enough audit rows for the planner to cost a hash aggregate against a sort, seeded and removed
+#: by the plan test below. Measured on this schema: at 5 000 rows the shipped statement plans as
+#: `HashAggregate <- HashAggregate` and the `count(DISTINCT ...)` form it replaced still plans as
+#: `GroupAggregate <- Sort`, so this is the smallest fixture that makes the difference visible.
+#: Under a hundred rows both plan as a sort and the test would pass on the unfixed statement.
+_PLAN_ROWS = 5_000
+
+_PLAN_SEED = """
+INSERT INTO audit_events (ts, correlation_id, actor, tool, arguments, outcome, detail, latency_ms)
+SELECT now() - make_interval(hours => (i %% 20)), 'c-plan-' || i, 'plan-actor-' || (i %% 50),
+       'ops_plan_probe_' || (i %% 6), '{}', (ARRAY['ok','refused','error'])[1 + (i %% 3)], '', 1.0
+FROM generate_series(1, %s) AS i
+"""
+
+
+def test_the_tool_usage_reading_does_not_sort_the_whole_window_to_answer() -> None:
+    """`count(DISTINCT actor)` cannot hash, so the single-statement form sorted every matching row.
+
+    Measured on 600 000 audit rows over a one-year window (PostgreSQL 16.15, stock 4 MB
+    `work_mem`): `GroupAggregate <- Sort`, `Sort Method: external merge  Disk: 25456kB`,
+    **1 581.8 ms** to produce twenty-four rows. It is the only disk-spilling sort in this
+    projection and it is linear in the window, so it is a reporting cost rather than a defect — but
+    it is a reporting cost that grows with the corpus for ever.
+
+    **`SET LOCAL work_mem` was the obvious fix and is measured worse**: at 64 MB the spill goes
+    away, the plan becomes an in-memory quicksort of 52 933 kB and it takes **2 005.5 ms**, 27%
+    *slower* than the version that spilled, while holding 53 MB per concurrent caller. Sorting
+    600 000 rows to answer a twenty-four-row question was the cost; the disk was a symptom.
+    Pre-aggregating by `(tool, outcome, actor)` removes the DISTINCT so both levels hash and both
+    parallelize: **176.0 ms**, `Batches: 1  Memory Usage: 337kB`, no temp files.
+
+    Asserted on the *plan* rather than on a duration, because a wall clock on a shared runner is
+    noise and the shape is the claim: no `Sort` node means nothing to spill, at any size. The
+    fixture has to be large enough for the planner to cost a hash against a sort at all — at a
+    handful of rows a sort of a handful of rows is cheapest and both forms plan identically, which
+    is why `_PLAN_ROWS` is what it is and why it is a measured number rather than a round one.
+
+    Seeded and removed under its own `correlation_id` prefix, the pattern every seeding test in
+    this file uses: the isolation schema is shared by the whole suite, so a reading is an aggregate
+    over everyone's fixtures.
+    """
+
+    async def _run() -> str:
+        await migrated_db_or_skip()
+        window = Window.trailing(1)
+        conn = await connect(settings.postgres_dsn)
+        try:
+            await conn.execute("DELETE FROM audit_events WHERE correlation_id LIKE 'c-plan-%'")
+            await conn.execute(_PLAN_SEED, (_PLAN_ROWS,))
+            await conn.commit()
+            # Without statistics the planner has no basis to cost a hash aggregate against a sort,
+            # and this fixture is written and read inside one test — nothing else would analyze it.
+            await conn.execute("ANALYZE audit_events")
+            cursor = await conn.execute("EXPLAIN " + _TOOL_USAGE, (window.since, window.until))
+            return "\n".join(str(row[0]) for row in await cursor.fetchall())
+        finally:
+            await conn.execute("DELETE FROM audit_events WHERE correlation_id LIKE 'c-plan-%'")
+            await conn.commit()
+            await conn.execute("ANALYZE audit_events")
+            await conn.close()
+
+    plan = asyncio.run(_run())
+    assert "Aggregate" in plan, f"the plan is not an aggregation any more:\n{plan}"
+    assert "Sort" not in plan, (
+        "the tool-usage reading still sorts every row in the window to answer a per-tool "
+        f"question; at 600 000 rows that is an external merge spilling 25 MB:\n{plan}"
+    )

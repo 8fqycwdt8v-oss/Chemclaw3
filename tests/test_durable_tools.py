@@ -379,24 +379,26 @@ def test_finding_past_jobs_reports_what_ran_and_why(monkeypatch: pytest.MonkeyPa
     conversation that started it — so a *new* session could not reach a single thing this system
     had ever computed.
     """
-    from chemclaw.durable.job_record import JobRecordSummary
+    from chemclaw.durable.job_record import JobRecordSearch, JobRecordSummary
 
     seen: dict[str, str] = {}
 
-    async def _search(text: str, connector: str) -> list[JobRecordSummary]:
+    async def _search(text: str, connector: str) -> JobRecordSearch:
         seen.update(text=text, connector=connector)
-        return [
-            JobRecordSummary(
-                job_id="bo-start_optimization_campaign-abc",
-                connector="bo",
-                job="start_optimization_campaign",
-                rationale="the Tuesday batch stalled at 60%",
-                summary="campaign finished after 9 evaluation(s)",
-            )
-        ]
+        return JobRecordSearch(
+            hits=[
+                JobRecordSummary(
+                    job_id="bo-start_optimization_campaign-abc",
+                    connector="bo",
+                    job="start_optimization_campaign",
+                    rationale="the Tuesday batch stalled at 60%",
+                    summary="campaign finished after 9 evaluation(s)",
+                )
+            ]
+        )
 
     monkeypatch.setattr(durable_tools, "search_job_records", _search)
-    hits = asyncio.run(durable_tools.find_past_jobs("stalled", "bo"))
+    hits = asyncio.run(durable_tools.find_past_jobs("stalled", "bo")).hits
     assert seen == {"text": "stalled", "connector": "bo"}
     # Verbatim inside the data envelope another chemist's free text arrives in (tests/test_framing).
     assert "the Tuesday batch stalled at 60%" in hits[0].rationale
@@ -656,3 +658,41 @@ def test_no_workflow_starter_here_is_reachable_from_nowhere() -> None:
         "launcher with no route, tool, CLI or manifest behind it reads as a capability and is not "
         "one; bring its caller in the same change, or delete it."
     )
+
+
+def test_find_past_jobs_says_when_its_answer_is_only_the_newest_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A "have we run this before?" answer must not be "no" because a page ended.
+
+    The tool's own docstring tells the model to use it *before launching an expensive job*, and it
+    returned a bare list capped at `job_record_search_limit` — so the 21st-oldest matching campaign
+    was invisible and indistinguishable from absent. The flag and the verdict travel with the hits
+    for the reason `FingerprintSearch` carries `index_empty`: a truncation known only to the store
+    cannot reach the model that writes the answer.
+    """
+    from chemclaw.durable.job_record import JobRecordSearch, JobRecordSummary
+
+    async def _search(text: str, connector: str) -> JobRecordSearch:
+        return JobRecordSearch(
+            hits=[
+                JobRecordSummary(
+                    job_id="bo-1",
+                    connector="bo",
+                    job="start_optimization_campaign",
+                    rationale="Suzuki screen",
+                    summary="done",
+                )
+            ],
+            hits_truncated=True,
+        )
+
+    monkeypatch.setattr(durable_tools, "search_job_records", _search)
+    found = asyncio.run(durable_tools.find_past_jobs("Suzuki"))
+    assert found.hits_truncated is True
+    assert "floor" in found.verdict
+    # The verdict is serialized, not merely readable in Python — it is the sentence the model
+    # reads, so a bare `property` would leave it in this process (the hazard-screen lesson).
+    assert "verdict" in found.model_dump()
+    # Framing still applies to the free text of each hit, unchanged by the wrapper.
+    assert found.hits[0].rationale.startswith("<")

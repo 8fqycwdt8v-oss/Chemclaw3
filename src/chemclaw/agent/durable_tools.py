@@ -62,7 +62,7 @@ from chemclaw.core.temporal_client import connect
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_signals import record_job_started
 from chemclaw.durable.connector_job import envelope_from_result
-from chemclaw.durable.job_record import JobRecordSummary, lookup_job_record, search_job_records
+from chemclaw.durable.job_record import JobRecordSearch, lookup_job_record, search_job_records
 
 # Importing the workflow *types* to launch them is deliberate and bounded
 # (D-2026-08-17-a-workflow-type-is-a-launch-contract-not-a-durability-leak): it is what makes
@@ -550,7 +550,7 @@ def _framed_free_text(text: str, job_id: str) -> str:
 
 
 @tool
-async def find_past_jobs(text: str = "", connector: str = "") -> list[JobRecordSummary]:
+async def find_past_jobs(text: str = "", connector: str = "") -> JobRecordSearch:
     """Find durable jobs this system has already run, and why each of them was run.
 
     The retrospective view over every campaign, calculation, report and template run that has
@@ -576,8 +576,11 @@ async def find_past_jobs(text: str = "", connector: str = "") -> list[JobRecordS
         connector: Restrict to one capability bundle (e.g. "bo", "calc"). Empty searches all.
 
     Returns:
-        The matching runs, newest first: what ran, why, how it ended (`state` is `completed` or
-        `failed`), what came out in one line, and the note it proposed (if any).
+        `hits` — the matching runs, newest first: what ran, why, how it ended (`state` is
+        `completed` or `failed`), what came out in one line, and the note it proposed (if any) —
+        and `verdict`, one sentence saying what the hits are evidence of. **Read it before
+        concluding a run has not happened**: the search is capped, so an empty or a full list is
+        not proof of absence.
     """
     # Two fields are framed and four are not, and both halves of that are deliberate.
     #
@@ -604,15 +607,24 @@ async def find_past_jobs(text: str = "", connector: str = "") -> list[JobRecordS
     # exists to catch. Framing is also applied *here* rather than in `search_job_records`, because
     # the front door's `GET /jobs` reads that same function for a human UI, where an envelope is
     # noise; the envelope belongs to the model's context, so it belongs to the agent layer.
-    return [
-        record.model_copy(
-            update={
-                "rationale": _framed_free_text(record.rationale, record.job_id),
-                "summary": _framed_free_text(record.summary, record.job_id),
-            }
-        )
-        for record in await search_job_records(text, connector)
-    ]
+    #
+    # The framing is applied to the *hits* and the page's own flags are carried through untouched:
+    # `hits_truncated` and `records_kept` are this system's own statements about its own store, not
+    # anybody's free text, and a `verdict` is derived from them.
+    found = await search_job_records(text, connector)
+    return found.model_copy(
+        update={
+            "hits": [
+                record.model_copy(
+                    update={
+                        "rationale": _framed_free_text(record.rationale, record.job_id),
+                        "summary": _framed_free_text(record.summary, record.job_id),
+                    }
+                )
+                for record in found.hits
+            ]
+        }
+    )
 
 
 def completed_job_status(job_id: str, raw: Any) -> DurableJobStatus:
