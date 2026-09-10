@@ -649,11 +649,11 @@ async def record_failure(
     # retirement citing a successor that does not exist yet. The sentence here used to say a
     # reviewer signed off on the pair as one decision, which stopped being true when
     # `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the reviewer.
-    # `superseded`, NOT `dependencies`: a dependency is
-    # written only where the tree has no copy (`NoteFile.overwrite=False`), and the refuted note
-    # always exists there — `_require_note` just found it in the graph — so passing
-    # the retirement as a dependency silently dropped it every time, leaving the refuted claim with
-    # its validity window intact and still served as current evidence. `superseded` overwrites the
+    # `superseded`, NOT `dependencies`: a dependency is written only where the tree has no copy
+    # (`NoteFile.overwrite=False`), and the refuted note always exists there — `_require_note`
+    # just found it in the graph — so passing the retirement as a dependency silently dropped it
+    # every time, leaving the refuted claim with its validity window intact and still served as
+    # current evidence. `superseded` overwrites the
     # note in place, which is what retiring it means.
     retirement = (
         [close_refuted_note(refuted, note.id, held_until)] if held_until is not None else []

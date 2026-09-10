@@ -649,7 +649,8 @@ def test_the_appended_safety_floor_names_no_tool_the_profile_cannot_call() -> No
     the exact defect the blocks were introduced for, surviving on the one path the fix did not
     reach.
 
-    **The floor only.** A profile's own `instructions:` are text this repository did not write and
+    **The floor only, and minus the name space that cannot be absent.** A profile's own
+    `instructions:` are text this repository did not write and
     cannot cut into blocks (`instructions_for`), and the shipped ones do name three identifiers
     outside their surface — two are result fields (`structure_id`, `artifact_refs`) that rule 2
     cannot tell from a tool, and `evidence.yaml`'s `compute_thermochemistry` is a real over-promise
@@ -660,6 +661,11 @@ def test_the_appended_safety_floor_names_no_tool_the_profile_cannot_call() -> No
     from chemclaw.agent.profiles import registered_profile_names
 
     load_profiles()
+    # The filesystem verbs are the exemption `check_instruction_blocks` derives, not an escape
+    # hatch: `FilesystemMiddleware` is composed for every agent this deployment builds, so naming
+    # them is not a promise that can fail — and the floor is where the deny-rule around them has to
+    # reach a profile that replaced the prose.
+    always_bound = skill_tool_names() | set(subagent_tool_names())
     over_promised: dict[str, list[str]] = {}
     for name in sorted(registered_profile_names()):
         profile = get_profile(name)
@@ -667,7 +673,7 @@ def test_the_appended_safety_floor_names_no_tool_the_profile_cannot_call() -> No
             continue
         available = advertised_tool_names(profile)
         floor = instructions_for(profile, available).removeprefix(f"{profile.instructions}\n")
-        named = prose.referenced_tool_names(floor)
+        named = prose.referenced_tool_names(floor) - always_bound
         if named - available:
             over_promised[name] = sorted(named - available)
     assert not over_promised, (

@@ -84,9 +84,9 @@ class EvidenceSweepWithRefusals(EvidenceSweep):
         appear **zero** times in the assembled system prompt, zero times in this tool's own
         description, zero times in any `SKILL.md`, and `EvidenceChunk`'s nine fields carried
         `description=None` for all of them — so a model was handed a list of note ids and no
-        reason to chase them. The sibling control has a block of prompt to itself: `created_by`
-        is explained in three places, and the note it labels is *less* dangerous than a claim
-        that has been refuted.
+        reason to chase them. The sibling control has a block of prompt to itself — the assembled
+        system prompt names `created_by` three times — and the note *that* labels is less
+        dangerous than a claim something in the corpus has refuted.
 
         **Said here rather than in the `Returns:` paragraph, and the reason is a measured
         constraint rather than a preference.** `gather_evidence`'s schema is 881 tokens against
