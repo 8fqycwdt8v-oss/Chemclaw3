@@ -1436,6 +1436,27 @@ the only producer on the calc job path.
 
 Found resolving the merge of #256's branch with #258.
 
+## `propose_report` proposes nothing, and its name is a registered activity name
+
+`durable/report_workflow.py::propose_report` calls `record_note`. There is nothing to propose to:
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the gate and the proposal queue
+behind it, and wave 15 corrected every *docstring* on that path — this is the one thing it did not
+touch, because the name is not prose.
+
+Renaming it is a Temporal concern rather than a refactor. The string is the registered activity
+name, so an in-flight history that has scheduled `propose_report` and not yet completed it resolves
+against a worker that no longer offers it; the safe shape is to register both names for one
+deployment cycle and drop the old one after the queue has drained, which is a release procedure and
+not a commit. Its callers also span `tests/test_report_workflow.py`,
+`tests/test_durable_observability.py` and a merged ADR (`D-2026-08-27-…`), and a merged ADR is never
+edited — so the citation outlives the rename either way and the new ADR has to say what it now
+names.
+
+Worth doing because a symbol name is read far more often than the docstring under it, and this one
+says a control exists. Not worth doing as part of a prose sweep.
+
+Found by wave 15's PR-gate claim audit.
+
 ## A truncated argument document is completed by upstream and the tool runs on the guess
 
 `D-2026-08-27-an-unparseable-tool-call-is-a-visible-failure` §3 recorded this as open and named the
