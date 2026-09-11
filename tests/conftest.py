@@ -155,6 +155,15 @@ def _fresh_derived_tool_sets() -> Iterator[None]:
     protecting against cannot happen. `discovered.cache_clear()` still exists and is still the
     seam for the narrower case a key cannot see: new manifests written into a directory the
     registry has already discovered.
+
+    **The claim that removes an order-dependence is checked by running in two orders.** Deleting a
+    fixture that ran on every test is only safe if nothing was relying on it, and the one way that
+    fails is ordering — so it was measured rather than argued: the 39 test files that touch any of
+    `connectors_dir`, `templates_dir`, `data_sources_dir`, `cache_clear` or `discovered()` were run
+    forward and reversed, **1,136 passed both ways**. That is evidence about those files and not
+    about the suite, which runs in one fixed order and has never had its order shaken out —
+    `pytest-randomly` is not installed here, and installing it is a separate decision with its own
+    cost.
     """
     _side_effecting_tools.cache_clear()
     _knowledge_read_tools.cache_clear()
