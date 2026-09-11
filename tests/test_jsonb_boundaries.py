@@ -14,7 +14,7 @@ So the enumeration is **derived**: this walks `src/` and finds every constructio
 to say which. A hand-written list of "the paths we fixed" is a list of what the tree looked like the
 afternoon somebody fixed them, which is the shape this file exists to end.
 
-**On `NOT_YET_MEASURED`.** Those nine are not endorsed and not converted. Wave 11 measured
+**On `NOT_YET_MEASURED`.** Those eight are not endorsed and not converted. Wave 11 measured
 reachability on the five paths it reviewed, not on these subsystems, and this repository's own rule
 is that a check is built after confirming the data it reads exists — converting them on the
 strength of "it compiles" would be a change with no measurement behind it. What the entry buys is

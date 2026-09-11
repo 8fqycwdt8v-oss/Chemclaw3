@@ -368,3 +368,44 @@ def test_a_session_whose_only_record_is_an_abandoned_turn_is_not_reported_as_emp
 
     asyncio.run(_run())
     asyncio.run(_clear())
+
+
+def test_the_packs_own_headline_reaches_the_model_and_not_only_its_tests() -> None:
+    """`degraded_turns` had no reader in `src/` at all — one grep hit, its own `def`.
+
+    Its docstring calls it *"the pack's own headline"* and says *"a reader who checks nothing else
+    must be able to check this"*, in the present tense. Measured before this test: `grep -rn
+    degraded_turns --include=*.py src/` returned the definition and nothing else, its only callers
+    were three assertions in this file, and because a plain `@property` is not a `computed_field`
+    it was absent from `model_dump()` too — while its two siblings, `is_empty` and `refusals`, were
+    both surfaced on the payload the model receives.
+
+    That is a member kept alive by a test that calls it directly, carrying a present-tense claim
+    about a control: the two shapes this repository deletes on sight, in one object, added by the
+    wave that introduced it. Surfaced rather than deleted because that wave's finding was "a
+    degraded answer that reads as complete", and the pack is where that is supposed to stop being
+    true. This test is the reader the docstring claimed to have.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clear()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute(
+                "INSERT INTO audit_events (correlation_id, session_id, actor, tool, arguments,"
+                " outcome, detail, latency_ms) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                ("c-head", SESSION, "u-1", "gather_evidence", "{}", "ok", "", 12.0),
+            )
+            await conn.commit()
+        await _seed_turn(SESSION, "c-head", "loop_capped", context_unreducible=True)
+
+        from chemclaw.agent.evidence_tools import assemble_evidence_pack
+
+        payload = await assemble_evidence_pack(SESSION)
+
+        assert payload["degraded_turns"] == ["c-head"], (
+            "the pack's own headline is absent from the payload the model receives, so a reader "
+            f"who checks nothing else checks nothing: {sorted(payload)}"
+        )
+
+    asyncio.run(_run())

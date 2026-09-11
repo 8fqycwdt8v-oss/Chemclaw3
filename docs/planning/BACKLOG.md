@@ -825,7 +825,7 @@ topic).
       that the receipt stays — but the copy downstream is somebody else's sweep, and the first
       deployment to point at a real store inherits the obligation. Settle it with that
       deployment, not before: the answer depends on whose database it is.
-- [ ] **Five tables still say "nothing bounds it"** — [M].
+- [ ] **Six tables still say "nothing bounds it"** — [M].
       `durable/retention.py`'s `_NOT_PRUNED` is the register that makes this visible, and it is
       doing its job: it names every table in the schema and does not invent an answer where none was
       taken. Eight entries carried that wording — five of them also saying *no decision is on
@@ -833,10 +833,14 @@ topic).
       2026-08-28 erasure pass closed three of the eight
       (`note_proposals`, `plan_approvals`, `turn_costs` — all three are kept through a data-subject
       erasure, so the decision *was* on record one module over, and a derived test now couples the
-      two registers). The remaining five are `molecule_fingerprints`, `reaction_fingerprints`,
-      `user_preferences`, `predictions` and `measurements` — and `user_preferences` is the weakest
-      of the five, because `leaver._ERASE` already deletes it per actor, so what is open there is a
-      clock rather than a policy. Plus a sixth question of a different
+      two registers). The remaining six are `molecule_fingerprints`, `reaction_fingerprints`,
+      `user_preferences`, `predictions`, `measurements` and `store` — and `user_preferences` is the
+      weakest of them, because `leaver._ERASE` already deletes it per actor, so what is open there
+      is a clock rather than a policy. `store` is the newest and is **tracked by its own row above**
+      rather than here: the 2026-09-09 sweep withdrew the erasure-as-a-bound wording for it and
+      added that row, and did not touch this count in the same file in the same commit — which is
+      `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` happening inside a register rather
+      than inside prose. Five decisions are owed here; the sixth is owed there. Plus a sixth question of a different
       kind: `tool_result_blobs` has a window and it ships at 0 "as a deliberate uniformity rather
       than a considered policy for this table", which `retention.py` itself flags as the
       highest-volume table in the set.
