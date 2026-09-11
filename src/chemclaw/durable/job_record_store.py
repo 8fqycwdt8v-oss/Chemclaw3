@@ -30,7 +30,6 @@ one. Which of the two a failure is depends on the failure — see `_says_nothing
 """
 
 from contextlib import AbstractAsyncContextManager
-from typing import Any
 
 import psycopg
 from psycopg.rows import TupleRow
@@ -205,9 +204,9 @@ class PostgresJobRecordSink:
                     record.plan_hash,
                     # psycopg adapts a mapping to `jsonb` only through its `Jsonb` wrapper — a bare
                     # dict is rejected by the adapter, not silently stringified.
-                    _json(record.payload),
+                    Jsonb(record.payload),
                     record.summary,
-                    _json(record.result),
+                    Jsonb(record.result),
                     record.note_id,
                     record.calc_refs,
                     record.runtime_seconds,
@@ -297,7 +296,3 @@ async def read_job_record_summaries(
         hits_truncated=len(rows) > limit,
     )
 
-
-def _json(value: dict[str, Any]) -> Jsonb:
-    """Wrap a mapping for a `jsonb` column (psycopg needs the explicit adapter)."""
-    return Jsonb(value)

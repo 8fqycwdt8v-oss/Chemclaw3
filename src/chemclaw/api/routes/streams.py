@@ -48,6 +48,7 @@ from chemclaw.api.events import (
     ErrorEvent,
     JobCompletedEvent,
     JobFailedEvent,
+    sse_frame,
 )
 from chemclaw.api.state import state
 from chemclaw.core.config import settings
@@ -293,7 +294,7 @@ async def session_events(
                     if failed
                     else JobCompletedEvent(job_id=job_id, summary=pushed.payload)
                 )
-                yield {"event": event.type, "data": event.model_dump_json()}
+                yield sse_frame(event)
         except Exception as exc:
             # **A stream that dies has to say so, and the registered handler cannot say it here.**
             # `create_app` turns a failed Postgres checkout into a retryable 503, but that handler
@@ -324,7 +325,7 @@ async def session_events(
                 retryable=True,
                 correlation_id=correlation_id,
             )
-            yield {"event": lost.type, "data": lost.model_dump_json()}
+            yield sse_frame(lost)
 
     handed_off = False
     try:
@@ -394,7 +395,7 @@ def _awaiting_event(payload: dict[str, Any]) -> dict[str, str]:
             else 0
         ),
     )
-    return {"event": event.type, "data": event.model_dump_json()}
+    return sse_frame(event)
 
 
 def _digest(payload: dict[str, Any]) -> Digest:

@@ -42,7 +42,10 @@ logger = logging.getLogger(__name__)
 # this module did not have it. A truncated or unparseable judge reply fell through to `unserved`,
 # so a *grading crash* was recorded as a *system failure*, indistinguishable in the output from a
 # real one. That mislabelled 65 of 190 probes in the first run and inflated the headline
-# unserved rate from at most 22 to 87. A verdict that cannot be obtained must be visibly missing.
+# unserved rate from at most 22 to 87 (`D-2026-09-04-a-gateway-is-the-only-provider`, which is the
+# frozen copy of that measurement; this is the one place in this module that restates it, and two
+# other sentences here used to restate it too). A verdict that cannot be obtained must be visibly
+# missing.
 Verdict = Literal["served", "partial", "unserved", "fabricated", "ungraded"]
 
 _SYSTEM = """You grade one answer from a chemistry R&D assistant against the direction its asker \
@@ -155,8 +158,9 @@ def _prompt(probe: Probe, outcome: ProbeOutcome) -> str:
 # **Missing it does not fabricate a verdict, and that is deliberate belt-and-braces.** A truncated
 # reply has no closing brace, so the JSON parse below fails and the probe is already `ungraded`
 # rather than `unserved`; this exists to say *why* in the reason, and to catch the case where a
-# reply is cut after a syntactically complete object. Conflating the two mislabelled 65 of 190
-# probes once, which is the whole reason `ungraded` is a verdict.
+# reply is cut after a syntactically complete object. Conflating a grading crash with a system
+# failure is the whole reason `ungraded` is a verdict — the run that measured what it cost is
+# recorded once in this file, beside `Verdict` above, and in the ADR behind it.
 _TRUNCATED = frozenset({"length", "max_tokens"})
 
 
@@ -201,7 +205,7 @@ def _judge_client() -> Any:
     `max_tokens` is bound rather than configured, because the seam's ceiling is the *agent's*
     answer allowance and this call needs its own: at 1024 the judge ran out of budget mid-JSON on
     long answers, the closing brace was never emitted, and the parse failure was recorded as a
-    verdict of `unserved` on 65 of 190 probes.
+    verdict of `unserved` on the run counted beside `Verdict` above.
     """
     from chemclaw.agent.llm_provider import build_chat_model
 

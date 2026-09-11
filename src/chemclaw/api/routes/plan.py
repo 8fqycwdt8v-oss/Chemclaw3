@@ -197,9 +197,9 @@ async def get_plan(
     what a surface renders is one fact seen twice.
     """
     read = await _read_plan(session_id, state(request).plan_approvals)
-    # One read, one question. Calling `plan_is_approved` here as well would issue a second query
-    # whose answer could differ from this one — a route reporting `approved=false` beside the
-    # name of whoever approved it is a worse surface than either fact alone.
+    # One read, one question. Calling `plan_gate.approval_stands` here as well would issue a
+    # second query whose answer could differ from this one — a route reporting `approved=false`
+    # beside the name of whoever approved it is a worse surface than either fact alone.
     approved = bool(read.decision and read.decision[0])
     return PlanStatusOut(
         session_id=session_id,

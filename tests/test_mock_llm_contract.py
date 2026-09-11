@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -36,6 +37,7 @@ from chemclaw.agent.context_budget import estimator_ratio, note_model_call, rese
 from chemclaw.agent.llm_provider import classify_model_failure
 from chemclaw.agent.turn_usage import graph_usage_tokens
 from chemclaw.cli.mock_llm import Behaviour, MockLlm, ToolCall, build_app
+from chemclaw.cli.storm_behaviours import BEHAVIOURS as STORM_BEHAVIOURS
 
 
 def _app(*behaviours: Behaviour) -> Any:
@@ -329,3 +331,148 @@ def test_the_default_request_is_unchanged_on_the_wire() -> None:
     final = frames[-1]
     assert final["usage"]["prompt_tokens_details"] is None
     assert final["choices"][0]["finish_reason"] == "stop"
+
+
+# ---------------------------------------------------------------------------------------------
+# The two routes decide the same things, and only the encoding differs.
+
+
+def _cross_wire_payload(name: str, *, chars: int = 0, tool_result: bool = False) -> dict[str, Any]:
+    """One request body both handlers accept, so their decisions are comparable byte for byte.
+
+    `messages` rather than `input` on purpose, and it is not a chat-completions bias: `select`
+    scans both keys and `already_has_tool_results` reads both shapes, so a single body reaches the
+    same behaviour and the same collapse verdict on either route. It has to be *one* body rather
+    than two equivalent ones because `_billed_input_tokens` bills `len(json.dumps(payload))` when
+    the behaviour names no constant — two spellings of the same turn would bill differently and
+    the comparison would be about the payloads instead of about the handlers.
+    """
+    messages: list[dict[str, Any]] = [{"role": "user", "content": f"[[{name}]]" + "x" * chars}]
+    if tool_result:
+        # The second pass of a turn, in the shape `already_has_tool_results` reads.
+        messages.append({"role": "tool", "tool_call_id": "call_probe", "content": "{}"})
+    return {
+        "model": "mock",
+        "stream": True,
+        # Ignored by `/v1/responses`, which always reports usage; asked for here so the chat arm
+        # reports it too and the two bills are readable off the same request.
+        "stream_options": {"include_usage": True},
+        "messages": messages,
+    }
+
+
+def _frames(app: Any, route: str, payload: dict[str, Any]) -> tuple[int, Any]:
+    """POST `payload` to `route` and return its status plus either its SSE frames or its body."""
+
+    async def _drive() -> tuple[int, Any]:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://mock"
+        ) as client:
+            async with client.stream("POST", route, json=payload) as response:
+                if response.status_code != 200:
+                    return response.status_code, json.loads(await response.aread())
+                frames = [
+                    json.loads(line[6:])
+                    async for line in response.aiter_lines()
+                    if line.startswith("data: ") and line[6:].strip() != "[DONE]"
+                ]
+                return response.status_code, frames
+
+    return asyncio.run(_drive())
+
+
+def _stats(app: Any) -> dict[str, int]:
+    """`GET /__mock/stats`'s per-behaviour counter, the only readout of what `select` chose."""
+
+    async def _drive() -> dict[str, int]:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://mock"
+        ) as client:
+            body = await client.get("/__mock/stats")
+            counts: dict[str, int] = body.json()["by_behaviour"]
+            return counts
+
+    return asyncio.run(_drive())
+
+
+def _decided(app: Any, route: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Everything the two handlers' shared prelude decides, read back off whichever wire answered.
+
+    Deliberately *not* the frame shapes: those differ by protocol and are each pinned above. What
+    is compared here is the sequence of decisions — which behaviour was selected, whether the
+    turn collapsed to an answer, what the request was billed, whether a status was injected and
+    whether the request was refused for its size.
+    """
+    before = _stats(app)
+    status, body = _frames(app, route, payload)
+    after = _stats(app)
+    chosen = [name for name, count in after.items() if count > before.get(name, 0)]
+
+    decided: dict[str, Any] = {
+        "status": status,
+        "behaviour": chosen,
+        "error": body.get("error") if status != 200 else None,
+        "billed_input": None,
+        "tool_calls": [],
+        "text": "",
+    }
+    if status != 200:
+        return decided
+
+    calls: list[str] = []
+    text = ""
+    billed: int | None = None
+    for frame in body:
+        if frame.get("type") == "response.output_item.added":  # /v1/responses
+            calls.append(frame["item"]["name"])
+        elif frame.get("type") == "response.output_text.delta":
+            text += frame["delta"]
+        elif frame.get("type") == "response.completed":
+            billed = frame["response"]["usage"]["input_tokens"]
+        elif frame.get("object") == "chat.completion.chunk":  # /v1/chat/completions
+            delta = frame["choices"][0]["delta"] if frame["choices"] else {}
+            for call in delta.get("tool_calls") or []:
+                name = (call.get("function") or {}).get("name")
+                if name is not None:
+                    calls.append(name)
+            text += delta.get("content") or ""
+            if frame.get("usage"):
+                billed = frame["usage"]["prompt_tokens"]
+    decided["tool_calls"] = calls
+    decided["text"] = text
+    decided["billed_input"] = billed
+    return decided
+
+
+@pytest.mark.parametrize("behaviour", STORM_BEHAVIOURS, ids=lambda b: b.name)
+@pytest.mark.parametrize(
+    ("chars", "tool_result"),
+    [(0, False), (20_000, False), (0, True)],
+    ids=["short", "grown", "second-pass"],
+)
+def test_both_routes_decide_one_turn_the_same_way(
+    behaviour: Behaviour, chars: int, tool_result: bool
+) -> None:
+    """The property `chat_completions`'s docstring asserts in prose, driven over both wires.
+
+    That docstring says the handler is "deliberately the *same sequence of decisions* as the
+    Responses one", and until this existed the only thing holding the two copies together was that
+    sentence — a property asserted in prose across two transcriptions of it, which is the shape
+    this repository spends `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` arguing
+    against. The whole storm catalogue is driven because the divergence that matters is the one in
+    a behaviour nobody re-read: every lane in `infra/live/` selects by name out of *this* list.
+
+    Three probes per behaviour, because three of the shared decisions are properties of the
+    request rather than of the behaviour: a short turn, one grown past `refuse_over_input_tokens`,
+    and a second pass carrying a tool result (the collapse to an answer). `think_seconds` is
+    zeroed — latency is the one thing in a behaviour that is not a decision, and `f-slow` declares
+    eight seconds of it.
+    """
+    served = replace(behaviour, think_seconds=0.0)
+    app = _app(served)
+    payload = _cross_wire_payload(served.name, chars=chars, tool_result=tool_result)
+
+    responses = _decided(app, "/v1/responses", payload)
+    chat = _decided(app, "/v1/chat/completions", payload)
+
+    assert responses == chat

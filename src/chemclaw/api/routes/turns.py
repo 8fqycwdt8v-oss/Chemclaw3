@@ -22,7 +22,7 @@ from starlette.types import Receive, Scope, Send
 from chemclaw.api.budget import BudgetExceeded
 from chemclaw.api.deps import CurrentSession, CurrentUser
 from chemclaw.api.detach import DetachableTurn
-from chemclaw.api.events import ErrorEvent, QueuedEvent
+from chemclaw.api.events import ErrorEvent, QueuedEvent, sse_frame
 from chemclaw.api.middleware import AT_CAPACITY
 from chemclaw.api.runner import failure_event, run_turn
 from chemclaw.api.schemas import MessageIn, session_title
@@ -198,7 +198,7 @@ async def post_message(
             if semaphore.locked():
                 METRICS.increment("chemclaw_turns_queued_total")
                 queued_event = QueuedEvent()
-                yield {"event": queued_event.type, "data": queued_event.model_dump_json()}
+                yield sse_frame(queued_event)
                 try:
                     await asyncio.wait_for(
                         semaphore.acquire(),
@@ -223,7 +223,7 @@ async def post_message(
                         retryable=True,
                         correlation_id=correlation_id,
                     )
-                    yield {"event": shed.type, "data": shed.model_dump_json()}
+                    yield sse_frame(shed)
                     return
             else:
                 await semaphore.acquire()
@@ -255,7 +255,7 @@ async def post_message(
                     retryable=False,
                     correlation_id=correlation_id,
                 )
-                yield {"event": refused.type, "data": refused.model_dump_json()}
+                yield sse_frame(refused)
                 return
             METRICS.increment("chemclaw_turns_started_total")
             try:
@@ -299,7 +299,7 @@ async def post_message(
                     ):
                         if event.type == "error":
                             turn_failed = True
-                        yield {"event": event.type, "data": event.model_dump_json()}
+                        yield sse_frame(event)
             except TimeoutError:
                 turn_failed = True
                 METRICS.increment("chemclaw_turn_timeouts_total")
@@ -320,7 +320,7 @@ async def post_message(
                     retryable=False,
                     correlation_id=correlation_id,
                 )
-                yield {"event": timeout_event.type, "data": timeout_event.model_dump_json()}
+                yield sse_frame(timeout_event)
         except Exception as exc:
             # **The stream's own catch-all, and it covers what `run_turn`'s cannot.** `run_turn`
             # turns any `Exception` into one user-safe `ErrorEvent`, but that guard starts inside
@@ -340,7 +340,7 @@ async def post_message(
             turn_failed = True
             logger.exception("turn stream failed for session %s", session_id)
             failed = failure_event(exc, session_id, correlation_id or uuid.uuid4().hex)
-            yield {"event": failed.type, "data": failed.model_dump_json()}
+            yield sse_frame(failed)
         finally:
             if turn_failed:
                 METRICS.increment("chemclaw_turns_failed_total")

@@ -123,7 +123,7 @@ class ProbeOutcome(BaseModel):
     could not be observed anywhere — the harness's most important number, reported as a clean zero.
 
     Nothing is lost by separating them: `degraded` and `first_degraded_index` are their own fields,
-    and `_degradation_findings` already grades the announcement on its own terms. A turn that
+    and `degradation_findings` already grades the announcement on its own terms. A turn that
     announces an outage and then dies producing nothing is exactly the silent death this looks for,
     not an exception to it.
     """

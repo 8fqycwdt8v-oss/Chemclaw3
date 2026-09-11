@@ -87,10 +87,16 @@ def default_turn_cost_sink() -> TurnCostSink:
 def record_turn_cost(cost: TurnCost) -> None:
     """Book one turn's cost, **without awaiting** — see the module docstring.
 
-    Synchronous by contract, because the only caller is a `finally` block in which an `await` would
-    re-raise a pending cancellation and skip the five context-var resets after it. The write runs as
-    its own task, swallows and logs its own failure (an escaping exception would surface only as an
-    unattributed `Task exception was never retrieved`), and is held in `_PENDING` until it finishes.
+    Synchronous by contract, because **both** callers run under a `finally` in which an `await`
+    would re-raise a pending cancellation and skip whatever follows it. There are two, not the one
+    this said, and neither is itself the `finally`: `api/runner._book_turn_spend`, called from
+    `run_turn`'s teardown, which books the turn's log record and its token counters *after* this
+    line; and `durable/template_activities._book_step_spend`, called from the step's `finally`,
+    which ends the context watch after it. The conclusion is unchanged — an `await` here would lose
+    the rest of a teardown on the cancellation path production actually reaches (D-130) — but it
+    rests on what both call sites do, not on there being only one. The write runs as its own task,
+    swallows and logs its own failure (an escaping exception would surface only as an unattributed
+    `Task exception was never retrieved`), and is held in `_PENDING` until it finishes.
 
     A cost that cannot be written is logged at warning level and lost. That is the honest trade for
     telemetry booked off the hot path: failing a turn that already answered, in order to record what

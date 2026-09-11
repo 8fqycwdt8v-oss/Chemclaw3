@@ -390,6 +390,61 @@ def _oversize_refusal(billed_input: int, limit: int) -> JSONResponse:
     )
 
 
+@dataclass(frozen=True)
+class DecidedTurn:
+    """What both chat routes have decided by the time they differ: a behaviour, a bill, a model."""
+
+    behaviour: Behaviour
+    billed_input: int
+    model: str
+
+
+def decide_turn(mock: MockLlm, payload: dict[str, Any]) -> DecidedTurn | JSONResponse:
+    """The sequence of decisions both `/v1/responses` and `/v1/chat/completions` make, once.
+
+    Either the turn to encode, or the `JSONResponse` that ends the request instead — a refusal is
+    a decision, and returning it here is what keeps the two routes from each having to remember
+    the order the refusals come in.
+
+    **One function because the property is "the same sequence of decisions", and that was asserted
+    in prose across two verbatim copies.** `chat_completions` said so in its own docstring while
+    the sequence lived twice; the copies had already begun to drift in their *commentary* (only
+    one carried the note below about the two refusals' order), which is how a copy drifts before
+    it drifts. The storm's scenarios are written against these decisions rather than against
+    either encoding, so a lane that passes on one protocol has to mean the same thing on the other.
+
+    What deliberately stays outside: `mock.remember`, because only the Responses API has a
+    `previous_response_id` to chain from, and the minting of a `resp_…`/`chatcmpl-…` id, because
+    the id space is the protocol's.
+    """
+    behaviour = mock.select(payload)
+    # Second and later passes of the same turn answer instead of calling again — see
+    # `already_has_tool_results`. `dataclasses.replace` rather than mutation: the catalogue is
+    # shared across every concurrent turn and must stay immutable.
+    #
+    # The text is carried through *unchanged*, including when it is empty. Substituting a default
+    # here quietly defeated the scenarios whose whole point is a turn that writes nothing:
+    # `f-no-text` reported `answered=True` on its first run, because this line had helpfully
+    # invented an answer for it.
+    if behaviour.calls and already_has_tool_results(payload):
+        behaviour = replace(behaviour, calls=[])
+    mock.record(behaviour)
+    if behaviour.http_status != 200:
+        # Deliberate transport failure. The SDK retries `llm_max_retries` times, so the storm
+        # counts requests here rather than inferring them from turns.
+        return JSONResponse(
+            {"error": {"message": "injected failure", "type": "server_error"}},
+            status_code=behaviour.http_status,
+        )
+    billed_input = _billed_input_tokens(behaviour, payload)
+    # After the injected status, because a behaviour that declares a failure means that one.
+    if behaviour.refuse_over_input_tokens and billed_input > behaviour.refuse_over_input_tokens:
+        return _oversize_refusal(billed_input, behaviour.refuse_over_input_tokens)
+    return DecidedTurn(
+        behaviour=behaviour, billed_input=billed_input, model=str(payload.get("model", "mock"))
+    )
+
+
 def _response_object(
     response_id: str, model: str, behaviour: Behaviour, billed_input: int
 ) -> dict[str, Any]:
@@ -646,30 +701,10 @@ def build_app(mock: MockLlm) -> FastAPI:
     async def responses(request: Request) -> Any:
         """One turn: SSE when the client asked to stream, a single body when it did not."""
         payload = await request.json()
-        behaviour = mock.select(payload)
-        # Second and later passes of the same turn answer instead of calling again — see
-        # `already_has_tool_results`. `dataclasses.replace` rather than mutation: the catalogue is
-        # shared across every concurrent turn and must stay immutable.
-        #
-        # The text is carried through *unchanged*, including when it is empty. Substituting a
-        # default here quietly defeated the scenarios whose whole point is a turn that writes
-        # nothing: `f-no-text` reported `answered=True` on its first run, because this line had
-        # helpfully invented an answer for it.
-        if behaviour.calls and already_has_tool_results(payload):
-            behaviour = replace(behaviour, calls=[])
-        mock.record(behaviour)
-        if behaviour.http_status != 200:
-            # Deliberate transport failure. The SDK retries `llm_max_retries` times, so the storm
-            # counts requests here rather than inferring them from turns.
-            return JSONResponse(
-                {"error": {"message": "injected failure", "type": "server_error"}},
-                status_code=behaviour.http_status,
-            )
-        billed_input = _billed_input_tokens(behaviour, payload)
-        # After the injected status, because a behaviour that declares a failure means that one.
-        if behaviour.refuse_over_input_tokens and billed_input > behaviour.refuse_over_input_tokens:
-            return _oversize_refusal(billed_input, behaviour.refuse_over_input_tokens)
-        model = str(payload.get("model", "mock"))
+        decided = decide_turn(mock, payload)
+        if isinstance(decided, JSONResponse):
+            return decided
+        behaviour, billed_input, model = decided.behaviour, decided.billed_input, decided.model
         # Minted here, not inside the stream, because the id has to be bound to this behaviour
         # *before* the next call in the chain can arrive asking about it.
         response_id = f"resp_{uuid.uuid4().hex}"
@@ -695,28 +730,22 @@ def build_app(mock: MockLlm) -> FastAPI:
     async def chat_completions(request: Request) -> Any:
         """The same turn as `/v1/responses`, for the protocol `ChatOpenAI` actually posts to.
 
-        The body of this handler is deliberately the *same sequence of decisions* as the Responses
-        one — select, collapse to an answer once tool results are present, record, honour an
-        injected HTTP status — because those decisions are what the storm's scenarios are written
-        against. Only the encoding differs, and it differs in `_chat_stream`.
+        The decisions are literally the same ones — `decide_turn` is the single function both
+        routes ask, because the storm's scenarios are written against those decisions rather than
+        against either encoding. Only the encoding differs, and it differs in `_chat_stream`.
+        `tests/test_mock_llm_contract.py::test_both_routes_decide_one_turn_the_same_way` drives
+        the whole behaviour catalogue through both wires and compares what they decided, so the
+        claim is checked rather than restated: this docstring used to assert the sameness in prose
+        over two verbatim copies of the sequence.
 
         No `mock.remember`: chat completions has no `previous_response_id` to chain from, and the
         client resends the conversation, so `select` finds the marker on every pass unaided.
         """
         payload = await request.json()
-        behaviour = mock.select(payload)
-        if behaviour.calls and already_has_tool_results(payload):
-            behaviour = replace(behaviour, calls=[])
-        mock.record(behaviour)
-        if behaviour.http_status != 200:
-            return JSONResponse(
-                {"error": {"message": "injected failure", "type": "server_error"}},
-                status_code=behaviour.http_status,
-            )
-        billed_input = _billed_input_tokens(behaviour, payload)
-        if behaviour.refuse_over_input_tokens and billed_input > behaviour.refuse_over_input_tokens:
-            return _oversize_refusal(billed_input, behaviour.refuse_over_input_tokens)
-        model = str(payload.get("model", "mock"))
+        decided = decide_turn(mock, payload)
+        if isinstance(decided, JSONResponse):
+            return decided
+        behaviour, billed_input, model = decided.behaviour, decided.billed_input, decided.model
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         if payload.get("stream"):
             options = payload.get("stream_options")
