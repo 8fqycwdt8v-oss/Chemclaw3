@@ -406,3 +406,28 @@ def test_a_database_that_answers_and_refuses_is_told_apart_from_one_that_does_no
     # database refused".
     assert not _is_database_refusal(ValueError("a bug in this module"))
     assert not _is_database_refusal(KeyError("c-1"))
+
+
+def test_an_errored_turn_says_why_its_transcript_is_absent_rather_than_guessing() -> None:
+    """Three named causes, all wrong, printed one line above the ledger that held the right one.
+
+    A turn that errors or is abandoned before its transcript row is written is by far the
+    commonest way to reach the absent branch — and it rendered `transcript: absent (compacted,
+    pruned, or rolled back)` directly above its own `ended: errored`. An operator following the
+    display investigates compaction, retention and a rollback, and finds all three healthy.
+
+    `endings` is already in scope on exactly the key this loop iterates, so the fact is one lookup
+    away. The same string was corrected once before for the *unreadable-row* case (this module's
+    docstring records it); the absent-row case kept the wrong leads. A stored fact must not be
+    rendered as a guess, which is the rule the `endings` source exists for.
+    """
+    errored = _report(order=["c-1"], turns={}, ends={"c-1": TurnEnd(outcome="errored")})
+
+    assert "transcript: absent (the turn ended errored before one was written)" in errored, errored
+    assert "compacted, pruned, or rolled back" not in errored, (
+        "an errored turn is still offered three causes it is not, one line above the ledger row "
+        f"that names the real one:\n{errored}"
+    )
+    # The guess is right where nothing recorded an ending, and it stays.
+    unknown = _report(order=["c-2"], turns={}, ends={})
+    assert "transcript: absent (compacted, pruned, or rolled back)" in unknown

@@ -1369,8 +1369,16 @@ ordinary reconnect into a crash loop — but since 2026-09-04 it *does* report o
 `worker_ready` is `worker.is_running and broker_seen_recently()` (see §(x)). So `/readyz` on the
 named pod **is** a second opinion: 503 says this worker has heard nothing from the broker for
 `jobs_in_flight_refresh_seconds` × 3, which points at the broker or the path to it; 200 says the
-worker is polling and the alert is about what it is polling *for* — a queue name, a task-queue
-mismatch, or a bundle whose worker was never rendered. Read the pod's own
+worker is polling and the alert is about what it is polling *for* — a queue name or a task-queue
+mismatch.
+
+**It cannot point at a bundle whose worker was never rendered, and this section used to say it
+could.** The rule is `sum by (pod) (temporal_num_pollers{…}) == 0`, so a queue no pod polls
+produces no series, `sum by (pod)` yields an *empty vector*, and `== 0` matches nothing — green
+for ever, measured against a deliberately mistyped queue name with the whole fleet healthy. That
+case is detected by nothing in this stack today: every probe was 200, `chemclaw_connectors_unhealthy`
+was 0, and the only trace of the wedged run was `chemclaw_jobs_in_flight 1` with no age beside it.
+Read the pod's own
 `chemclaw_degraded_total{subsystem="jobs_in_flight"}` either way, and check the **broker** before
 restarting anything.
 
@@ -1818,6 +1826,23 @@ The chart deploys none of these. It states what it requires of whoever does.
 | **Postgres** | the audit trail, sessions, the calculation cache, the note index, job records | the audit trail is the only part that cannot be regenerated from anything; the cache is regenerable by definition (D-011) and the note index is rebuilt by `make reindex` |
 | **Temporal** | in-flight workflow history | running jobs die; finished results survive in `job_records` (D-157) and the calculation store |
 | **Knowledge git repo** | every merged note | the corpus. It is a git repo, so any clone is a backup — including each pod's sidecar checkout |
+
+**The table above is about a store being *lost*, and corruption is the opposite case.** "The cache
+is regenerable by definition (D-011)" is true of an empty `calculation_results` and exactly false of
+a wrong one: D-011 is *why* a persisted result is never recomputed, so a value altered in place is
+served for ever. Measured — one row edited by hand moved a reaction energy from −23.2 to −42.0
+kcal/mol, an 18.8 kcal/mol error inside a stated ±3.0 uncertainty, and every signal stayed green:
+the durable smoke test passed 5/5, the poisoned row counted as a cache **hit** (raising the hit-ratio
+panel), and 0 of 13 eval metrics moved, because that baseline is 11 pinned retrieval cases and 2
+live ones and touches no computed value.
+
+Nothing in the metric plane can be made to notice this: every alert reads a counter incremented on a
+failure, refusal, absence or capacity path, and a well-formed wrong answer takes the success path.
+`artifact_blobs` is content-addressed and `schema_migrations` carries a checksum; `calculation_results`,
+the store whose contents *are* the science, has neither. **Restoring it is not a recovery step you
+can reach for, because nothing tells you to.** The controls that do apply are the ones at the point
+of use: the citations a chemist checks, and a second run of the same job — two rows for one reaction
+that disagree is, today, the entire detection surface.
 
 Only one of the three needs a *point-in-time* story rather than a recent-snapshot one, and it is the
 audit trail — because it is the only store where "we lost the last hour" means the answer to "who

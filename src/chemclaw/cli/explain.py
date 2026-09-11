@@ -393,7 +393,24 @@ def _render(
         lines.append(f"── turn {label}")
         said = turns.get(correlation_id, [])
         if not said:
-            lines.append("   transcript: absent (compacted, pruned, or rolled back)")
+            # **The ledger is read before the guess, because it is one line below.** This printed
+            # three named causes — compacted, pruned, rolled back — directly above its own
+            # `ended: errored` line, so an operator following the display investigated compaction,
+            # retention and a rollback and found all three healthy. A turn that errored or was
+            # abandoned before its transcript row was written is by far the commonest way to reach
+            # here, and `endings` already holds that on exactly the key this loop is iterating.
+            #
+            # The same string was corrected once before for the *unreadable-row* case (see this
+            # module's docstring); the *absent-row* case kept the wrong leads. A stored fact must
+            # not be rendered as a guess, which is the rule the `endings` source exists for.
+            ending = endings.get(correlation_id)
+            if ending is not None and ending.outcome != "answered":
+                lines.append(
+                    f"   transcript: absent (the turn ended {ending.outcome} "
+                    "before one was written)"
+                )
+            else:
+                lines.append("   transcript: absent (compacted, pruned, or rolled back)")
         for role, text in said:
             # **A tool's stored result is not a speaker, and it read as one.** A `ToolMessage` is
             # in `session_messages` like every other message, so `message_role` called it `tool`
