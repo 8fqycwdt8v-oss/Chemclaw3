@@ -117,4 +117,38 @@ than opening a new axis.
 
 ## Review
 
+### The ratio that three measurements disagreed about
+
+`src/` prose:code was measured three times this wave, independently, and came back **1.16**,
+**1.28** and **1.49 : 1**. A 28% spread on the number the whole of W17 was planned around.
+
+The tree did not change between them. The *method* did — specifically how each classified a
+blank line inside a docstring, and a continuation line of a multi-line statement. None of the
+three stated its method beside its number, which is why the disagreement was invisible until
+someone put them side by side.
+
+Settled with one stated rule, reproducible from `tasks/todo.md` itself: every physical line of
+every `.py` under `src/chemclaw` lands in exactly one bucket — DOCSTRING if it falls inside the
+line span of a bare string-literal expression statement, else COMMENT if its stripped form starts
+with `#`, else BLANK if empty after stripping, else CODE. The four sum to the file's line count.
+
+| | lines | code | doc | comment | blank | prose:code |
+|---|---|---|---|---|---|---|
+| `src/chemclaw` | 145,949 | 59,030 | 53,992 | 21,848 | 11,079 | **1.28 : 1** |
+| `tests` | 179,999 | 96,126 | 49,849 | 7,758 | 26,266 | **0.60 : 1** |
+
+test code : source code = **1.63 : 1**.
+
+**This is the wave's own defect, one level up from the one it went looking for.** W17 corrected
+eight present-tense counts in docstrings for not stating how they were counted. The ratio that
+justified opening W17 had the same problem, and it took three disagreeing measurements to notice.
+A number without its method is not a measurement; it is a claim that someone measured.
+
+What survives unchanged: `src/` carries more than twice the prose density of `tests/` under every
+one of the three methods. The prose burden is in the source, not in the suite — which is the
+opposite of what a review looking for bloated test prose expects to find, and the reason W19's
+recommendation is *do not trim test prose*.
+
+### Per-wave outcomes
+
 (filled in as each wave closes)
