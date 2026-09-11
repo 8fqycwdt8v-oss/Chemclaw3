@@ -93,8 +93,16 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
   `CHEMCLAW_ENTRA_TENANT_ID` and `CHEMCLAW_ENTRA_AUDIENCE`, which are validated together at
   startup), or bind loopback for local dev. `CHEMCLAW_SERVICE_ALLOW_INSECURE=true` is the conscious
   opt-out and boots with a loud warning instead.
-- **`CHEMCLAW_ENTRA_CLIENT_ID` was removed.** Settings is `extra="forbid"`, so a stale export of it
-  aborts startup with a validation error naming the field — unset it in any inherited environment.
+- **`CHEMCLAW_ENTRA_CLIENT_ID` was removed, and nothing will tell you it is still set.** Unset it
+  by hand in any inherited environment or ConfigMap. This entry used to say the opposite — that
+  `extra="forbid"` aborts startup with a validation error naming the stale field — and that is true
+  of a key in a *dotenv file* and false of the environment. Measured both ways:
+  `CHEMCLAW_ENTRA_CLIENT_ID=abc` exported into the process constructs `Settings()` cleanly, while
+  the same line in a `.env` file is refused with `Extra inputs are not permitted`. pydantic-settings'
+  environment source looks up only the names it has fields for, so a `CHEMCLAW_`-prefixed variable
+  matching no field is never seen, let alone rejected — and a ConfigMap is exactly how config
+  arrives in-cluster, which is the case this entry exists for. `deploy/README.md` carries the same
+  correction with the mechanism spelled out.
 - **`CHEMCLAW_NOTE_REPO_DIR` must be set on any host that submits notes — the default is always
   wrong in a deployment.** It ships as `.` (a dev convenience), which resolves to the process CWD.
   Every submission creates `note/<id>` in that clone and force-pushes it to the clone's origin, so

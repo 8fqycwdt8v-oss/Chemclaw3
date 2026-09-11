@@ -408,9 +408,11 @@ def decide_turn(mock: MockLlm, payload: dict[str, Any]) -> DecidedTurn | JSONRes
 
     **One function because the property is "the same sequence of decisions", and that was asserted
     in prose across two verbatim copies.** `chat_completions` said so in its own docstring while
-    the sequence lived twice; the copies had already begun to drift in their *commentary* (only
-    one carried the note below about the two refusals' order), which is how a copy drifts before
-    it drifts. The storm's scenarios are written against these decisions rather than against
+    the sequence lived twice. Driven over both wires before the copies were merged, the fourteen
+    statements did still agree — but their *commentary* had already parted: only the Responses arm
+    carried the note below explaining why the oversize refusal has to follow the injected status,
+    so the reason a reader needs in order to keep the order was present in one copy and absent
+    from the other. The storm's scenarios are written against these decisions rather than against
     either encoding, so a lane that passes on one protocol has to mean the same thing on the other.
 
     What deliberately stays outside: `mock.remember`, because only the Responses API has a

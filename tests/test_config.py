@@ -613,13 +613,28 @@ def _clear_prefixed_env() -> Iterator[None]:
 
 
 @pytest.mark.parametrize(
-    ("name", "overrides"),
+    ("name", "overrides", "fires"),
     [
         # Each of these was already forbidden in a field comment and enforced by nothing, so a
         # deployment could set it and find out in production (REV-18, D-136).
+        #
+        # **`fires` is a phrase out of the guard's own message, and it is not decoration.** These
+        # rows used to assert `pytest.raises(ValueError)` and nothing more, which every guard in
+        # `_guards_that_the_comments_already_demand` satisfies equally: a guard that started firing
+        # for the wrong reason, or an earlier one swallowing a later row, passed. Two of the eight
+        # rows *were* passing that way, and only naming the message found them — see the two
+        # comments below.
         (
-            "memory store cannot serve multiple workers",
-            {"session_store": "memory", "service_uvicorn_workers": 4},
+            # It used to read "memory store cannot serve multiple workers" over
+            # `{"session_store": "memory", "service_uvicorn_workers": 4}` — a name describing a
+            # store-specific rule that does not exist. Measured: `memory` and `postgres` are
+            # refused identically at 2 and at 4, because the guard reads
+            # `service_uvicorn_workers` alone, so the row would have passed unchanged with a
+            # store-specific rule deleted. The store is dropped rather than parametrised for the
+            # same reason: it decides nothing here.
+            "uvicorn workers above one are refused whatever else is set",
+            {"service_uvicorn_workers": 4},
+            "service_uvicorn_workers>1 silently breaks five per-process guarantees",
         ),
         (
             "a fleet cannot admit more turns than its declared ceiling",
@@ -628,17 +643,15 @@ def _clear_prefixed_env() -> Iterator[None]:
                 "service_max_concurrent_turns": 16,
                 "service_fleet_max_concurrent_turns": 48,
             },
+            r"may admit \d+ concurrent turns",
         ),
-        (
-            "uvicorn workers multiply the fleet the same way replicas do",
-            {
-                "session_store": "postgres",
-                "service_fleet_replicas": 6,
-                "service_uvicorn_workers": 2,
-                "service_max_concurrent_turns": 8,
-                "service_fleet_max_concurrent_turns": 48,
-            },
-        ),
+        # The row that stood here, "uvicorn workers multiply the fleet the same way replicas do",
+        # set `service_uvicorn_workers: 2` and was refused by the *workers* guard three statements
+        # earlier — it never reached the fleet product it was named after, and asserting only
+        # `ValueError` could not tell. It is gone rather than repaired because the axis it claimed
+        # to cover is unreachable by construction: the workers factor in
+        # `replicas × workers × cap` can only ever be 1 while that refusal stands, so the row
+        # above and the row before it are between them the whole of what can fire.
         (
             "a mid-turn resume cannot outlive its turn",
             {
@@ -646,6 +659,7 @@ def _clear_prefixed_env() -> Iterator[None]:
                 "mid_turn_resume_timeout_seconds": 900.0,
                 "service_turn_timeout_seconds": 600.0,
             },
+            "mid_turn_resume_timeout_seconds must be smaller than",
         ),
         (
             "budgets on with every cap unlimited guards nothing",
@@ -656,10 +670,12 @@ def _clear_prefixed_env() -> Iterator[None]:
                 "budget_max_turns_per_user": 0,
                 "budget_max_tokens_per_user": 0,
             },
+            "guards nothing; set at least one budget_max",
         ),
         (
             "embedding_dim must match the note_index vector column when vector search is on",
             {"embedding_dim": 768, "data_sources": "graph,vector"},
+            "disagrees with the note_index vector column",
         ),
         # DARK-8: the check asked whether the *vector* source was on, while `reindex_notes` writes
         # the embedding column for every note-index-backed source. So these two configurations
@@ -668,16 +684,30 @@ def _clear_prefixed_env() -> Iterator[None]:
         (
             "a lexical-only deployment reaches the same vector column",
             {"embedding_dim": 768, "data_sources": "graph,lexical"},
+            "disagrees with the note_index vector column",
         ),
         (
             "the scheduled reindex writes it with no retrieve source at all",
             {"embedding_dim": 768, "data_sources": "graph", "note_reindex_enabled": True},
+            "disagrees with the note_index vector column",
         ),
     ],
 )
-def test_configurations_the_comments_forbid_are_rejected(name: str, overrides: dict) -> None:  # type: ignore[type-arg]
-    """A rule worth writing in a comment is worth failing on at startup."""
-    with pytest.raises(ValueError):
+def test_configurations_the_comments_forbid_are_rejected(
+    name: str,
+    overrides: dict,  # type: ignore[type-arg]
+    fires: str,
+) -> None:
+    """A rule worth writing in a comment is worth failing on at startup — and worth naming.
+
+    `match=` is what makes this table an assertion about *which* guard ran, and the difference is
+    measured rather than argued. Driven: widening the `service_uvicorn_workers` guard by one
+    disjunct so it also fires on a mismatched `embedding_dim` — an earlier guard swallowing a
+    later row, which is the failure mode here — leaves all **7** rows green under a bare
+    `pytest.raises(ValueError)` and turns **3** of them red under `match=`, each naming the
+    embedding guard it never reached.
+    """
+    with pytest.raises(ValueError, match=fires):
         Settings(_env_file=None, **overrides)  # type: ignore[call-arg]
 
 

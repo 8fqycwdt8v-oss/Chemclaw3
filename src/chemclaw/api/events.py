@@ -606,3 +606,20 @@ Event = (
     | EvidenceSourceEvent
     | ErrorEvent
 )
+
+
+def sse_frame(event: Event) -> dict[str, str]:
+    """One turn event as the `dict` sse-starlette writes as a single SSE frame.
+
+    The wire format — `event:` from the discriminant, `data:` from `model_dump_json()` — is the
+    contract three surfaces parse, and it was spelled out at nine call sites across two route
+    modules (`api/routes/turns.py`, `api/routes/streams.py`), each an independent chance to write
+    `e.model_dump()` or to name the event something other than its own `type`. There is nothing to
+    decide here, which is exactly why it belongs in one place: a frame shape every surface
+    switches on is a contract, and a contract restated nine times is nine chances to restate it
+    wrong.
+
+    It lives beside the union rather than in either route module because both routes are callers
+    and neither is the owner — `api/routes/streams.py` already imports four members from here.
+    """
+    return {"event": event.type, "data": event.model_dump_json()}
