@@ -151,4 +151,35 @@ recommendation is *do not trim test prose*.
 
 ### Per-wave outcomes
 
-(filled in as each wave closes)
+Recorded as **premise → what measurement said**, because in five of six the premise lost. The
+full argument is `D-2026-09-11-the-debt-was-in-the-claims-not-in-the-code`.
+
+| wave | premise | measured |
+|---|---|---|
+| W16 dead code | 46 defs named nowhere | **1 dead definition in 3,133** (`DesignListing`, 6 lines) |
+| W16 settings | unread knobs among 422 | 2 declared-only, both read by `entrypoint.sh` and parity-tested |
+| W16 Rule of Three | 45% single-caller | not a defect rate; **net ~109 lines**, and 3 of the audit's own recommendations did not survive re-derivation |
+| W17 prose load | 1.28 : 1 is the liability | **98.9% DECISION, 1.1% restatement**; the ratio is not the finding |
+| W17 prose gate | 21,391 unchecked refs → build a gate | **declined at 82.9% false positives**; two narrow rules instead, 7.5% → 7.6% |
+| W18 complexity | 20 functions need splitting | **1 split of 20**; 13 had already had their extractable parts extracted |
+| W19 test tree | 179,332 lines is too many | ratio fine, 1 duplicate in 5,747, 1.6% restating prose; **runtime is 31 tests** |
+
+**What was actually wrong, in none of those categories**: three of four HTTP surfaces unbounded;
+two metric series named as alert targets that nothing emits; a settings field documented for a
+subsystem that does not exist (found 2026-08-16, never fixed); 14 dangling symbol references; nine
+parametrised tables that could not say why they passed, one proven vacuous.
+
+### What this plan got wrong about itself
+
+Three times, all in the reassuring direction:
+
+1. **The dead-code figure.** 144/46 was really 117/22 — the scan counted `tokenize` NAME tokens and
+   an f-string is one `STRING` token on 3.11, so 27 live functions read as orphans.
+2. **The prose ratio.** Measured three times independently: 1.16, 1.28, 1.49 : 1. None stated its
+   method. Settled above.
+3. **The duration profile.** Declared invalid and an agent told to skip the question; it had been
+   read while still being written. The agent re-checked rather than complying, and was right.
+
+Each was caught by something other than the session that made it — two by subagents re-deriving
+rather than accepting, one by putting three numbers side by side. That is the argument for the
+fan-out shape, and it is worth more than any line this wave deleted.
