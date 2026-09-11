@@ -1173,10 +1173,10 @@ def _empty_answer_event(
     approve.
 
     **And the first count is *attempts*, which is why it does not say "ran".** `called_tools` is a
-    view of the calls this turn *announced* — its own docstring says so, and `_turn_acted` one screen
-    below relies on it — so a refused call is in it. Printing that total as "ran" beside "3 refused
-    by a gate" reported six intents where there were three, and told a chemist three calls had run
-    that a gate had stopped before the body. The subsets are named as subsets.
+    view of the calls this turn *announced* — its own docstring says so, and `_turn_acted` one
+    screen below relies on it — so a refused call is in it. Printing that total as "ran" beside
+    "3 refused by a gate" reported six intents where there were three, and told a chemist three
+    calls had run that a gate had stopped before the body. The subsets are named as subsets.
 
     **What happened is always stated; only the advice branches, and it branches by precedence
     rather than by size.** The earlier form replaced the narrower-question line entirely, so one

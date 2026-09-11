@@ -269,8 +269,10 @@ def calc_citations(notes: list[Note]) -> list[tuple[str, str]]:
     The calculation half of what `external_citations` does for reaction ids. `_calc_ref_shape`
     checks the *form* of a key at parse time and concedes in its own comment that existence "is a
     question only a database can answer" — and until this pair of functions, nothing asked it.
-    A transposed digit in a hash merged silently and indexed (`crosslink.calc_ref_index`) a key no
-    calculation ever produced, so `find_notes_for_calculation` simply never returned the note.
+    A transposed digit in a hash merged silently, and no reader downstream could tell: the note
+    cites a key no calculation ever produced, so every reader of `calc_refs` — the model's
+    `chemclaw.agent.graph_tools.NoteRef`, `GET /notes/{id}`, a chemist following the citation by
+    hand — is handed an id that resolves to nothing.
     """
     return sorted((note.id, ref) for note in notes for ref in note.calc_refs)
 

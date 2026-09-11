@@ -225,9 +225,9 @@ def build_langgraph_agent(
     prof = profile if isinstance(profile, AgentProfile) else get_profile(profile)
     # Resolved before the skills, because the skills are narrowed by them: a skill is judgment
     # *about* tools, so which tools this profile advertises decides which judgment is worth
-    # offering (`_skills_middleware`). A helper's skills therefore narrow with its tools, at no extra
-    # cost and by the mechanism that already existed — which is D-2026-08-10's fourth invariant
-    # ("skills do not inherit") arriving as a consequence rather than as a second gate.
+    # offering (`_skills_middleware`). A helper's skills therefore narrow with its tools, at no
+    # extra cost and by the mechanism that already existed — which is D-2026-08-10's fourth
+    # invariant ("skills do not inherit") arriving as a consequence rather than as a second gate.
     tools = _capability_tools(prof)
     # **The helper's narrowing is applied here rather than in `_subagents`, and both the position
     # and the second call are the point.** `helper=True` is the one switch that says "this graph is

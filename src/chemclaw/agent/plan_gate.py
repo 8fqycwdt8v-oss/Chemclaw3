@@ -215,8 +215,9 @@ async def consume_turn_approval(session_id: str) -> None:
     generator whose `finally` also runs on the disconnect path — which production reaches through
     `CancelledError`, not `aclose()` (D-130). An `await` there re-raises the cancellation
     immediately and *everything after it in the block is skipped*: the budget booking and the
-    `turn_costs` row it writes, and the contextvar resets `chemclaw.api.runner._unstamp` performs. Leaking the ambient identity of a
-    disconnected turn into the next turn on that worker is a worse defect than the one this
+    `turn_costs` row it writes, and the contextvar resets `chemclaw.api.runner._unstamp`
+    performs. Leaking the ambient identity of a disconnected turn into the next turn on that
+    worker is a worse defect than the one this
     function exists to fix. So it is called on the two paths where awaiting is safe, and a turn torn
     down *before* it answered deliberately does not spend the approval: a turn that was undone has
     not used its authorization.
