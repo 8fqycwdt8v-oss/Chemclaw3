@@ -451,7 +451,31 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
         def _framed(message: ToolMessage) -> ToolMessage:
             if message.status == "error":
                 return _defanged(message)
-            return message.model_copy(update={"content": _framed_content(message.content, origin)})
+            # **Re-bounded for the same reason `_defanged` is, and it was missing here.** The
+            # sibling branch three lines up has carried that argument since it shipped; this one
+            # wrapped and returned. `_framed_content` defangs before it wraps, so it runs the same
+            # second pass — the one that escapes every `<` once an invisible character reveals a
+            # disguised tag — and that is a 4x expansion of the one character worth filling a
+            # payload with. Measured on the shipped ceiling: a connector *success* payload already
+            # cut to 60,000 by the nested `bound_tool_results`, carrying a delimiter disguised with
+            # one zero-width byte, left this branch at 236,129 characters, exactly 4.00x.
+            #
+            # **What that cost is not an over-long result, and the difference is why the obvious
+            # guard is vacuous.** Past upstream's evict threshold the whole result is replaced by
+            # `Tool result too large, … was saved in …` — 1,750 characters. So a
+            # `delivered <= ceiling` assertion passes against the defect (1,750 <= 60,000) while
+            # the chemist loses the entire answer. The property is that the result is still
+            # *itself*, which is what
+            # `test_a_connector_success_survives_the_ceiling_instead_of_being_evicted` asserts —
+            # written the wrong way first, and caught by driving it against unfixed source.
+            #
+            # Bounding the *framed* string rather than the content is safe and is the point:
+            # `bounded_for_batch` cuts head-and-tail, so both delimiters survive and the span stays
+            # one well-formed envelope — the property
+            # `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` records as holding for two
+            # independent reasons. Only a head-only cut in this position would lose the closing tag.
+            framed = _framed_content(message.content, origin)
+            return message.model_copy(update={"content": bounded_for_batch(request, framed)})
 
         return rewritten_tool_messages(result, _framed)
     name = request.tool_call["name"]
