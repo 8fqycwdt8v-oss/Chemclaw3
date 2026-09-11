@@ -82,7 +82,7 @@ async def _run_child(
 def _refuse_a_child_that_cannot_fail(child: Any) -> None:
     """Refuse a `fan_out` child that has not declared how it fails, at the seam that depends on it.
 
-    The contract is already written down — `fan_out`'s own `retry_policy` doc says a child raising
+    The contract is already written down — `fan_out`'s own docstring says a child raising
     a plain exception needs `@workflow.defn(failure_exception_types=[...])` "or it will hang
     instead of being dropped" — and until now nothing checked it *here*. What it costs when it is
     missed is not a failure: the SDK parks the plain exception in an internal task-failure loop
@@ -120,8 +120,6 @@ async def fan_out(
     inputs: Sequence[Any],
     *,
     id_prefix: str,
-    task_queue: str | None = None,
-    retry_policy: RetryPolicy | None = None,
     max_parallel: int | None = None,
 ) -> list[Any]:
     """Run each of `inputs` as a `child` workflow, bounded-parallel, returning successful results.
@@ -145,21 +143,6 @@ async def fan_out(
             data converter (a pydantic model or scalar).
         id_prefix: A short, caller-chosen tag for the child ids (`<parent>-<prefix>-<i>`), so a
             child in the Temporal UI reads as e.g. `...-section-2`. Required — ids must be clear.
-        task_queue: Queue the children run on; defaults to the light `background-jobs` queue.
-        retry_policy: Per-child retry policy. None defaults to `BAD_DATA_RETRY` — *not* Temporal's
-            own default, which has `maximum_attempts=0` (unlimited), so a child that fails
-            deterministically (a bad-data error, or any other exception once its own bounded
-            activity retries are exhausted) would retry forever and the fan-out could never
-            isolate-and-drop it as documented below (D-093: `_DoublerWorkflow`'s poison input hung
-            the fan-out test indefinitely against a real server — the bug this default fixes).
-            **Only the `maximum_attempts` half of that policy does anything here**: Temporal matches
-            `non_retryable_error_types` against the *outermost* failure, and a child that failed
-            through its own activity surfaces as a child/activity failure, a name deliberately
-            absent from `_BAD_DATA_TYPES`. So the effective bound on a deterministic failure is
-            `activity_max_attempts` child executions, which is only acceptable because a fan-out
-            child's work is small and independent — `connector_job.py` and `template_job.py` both
-            pass `maximum_attempts=1` for exactly this reason, their child being neither. Pass an
-            explicit policy whenever a child's re-execution is not cheap.
         max_parallel: Concurrency bound; defaults to `orchestrator_max_parallel_children`,
             resolved via a local activity so the recorded value — not a live settings read —
             shapes the batches, keeping replay deterministic across config changes.
@@ -168,14 +151,10 @@ async def fan_out(
         The results of the children that succeeded, in input order. A child that fails after its
         retries is logged and omitted (D-030: reject-and-continue), never restarting its siblings.
     """
-    queue = task_queue if task_queue is not None else settings.background_task_queue
     # Read here rather than inside `_run_child` so every child of one fan-out is bounded by the
     # same number, whatever a live settings edit does between batches — the determinism reason
     # `max_parallel` is resolved once through a local activity.
     child_timeout = timedelta(seconds=settings.fan_out_child_timeout_seconds)
-    # Bounded by default (D-093) — see the `retry_policy` arg doc for why Temporal's own
-    # unlimited-retry default would break the isolate-and-drop contract below.
-    child_retry_policy = retry_policy if retry_policy is not None else BAD_DATA_RETRY
     if max_parallel is not None:
         limit = max_parallel
     else:
@@ -193,6 +172,31 @@ async def fan_out(
     results: list[Any] = []
     # Batch rather than a semaphore: a fixed-size batch is deterministic under Temporal's replay
     # (no reliance on lock-acquisition order) and bounds concurrency just the same.
+    #
+    # **The queue and the per-child retry policy are not parameters**, though both were until
+    # every caller in this tree turned out to pass neither. Each is one line to re-add the day a
+    # second queue or a second policy exists; a `None`-defaulted argument nobody passes is a claim
+    # that callers choose, and these two paragraphs are what such a caller writes against.
+    #
+    # **The queue** is core's light `background-jobs`. A bundle owning durable work gets its own
+    # `connector-<name>` queue (D-118/D-150), and a fan-out child is core's work by construction.
+    #
+    # **Every child runs under `BAD_DATA_RETRY`**, which is bounded and is *not* Temporal's own
+    # default — that has `maximum_attempts=0` (unlimited), so a child failing deterministically (a
+    # bad-data error, or any other exception once its own activity retries are exhausted) would
+    # retry forever and this function could never isolate-and-drop it as its docstring promises
+    # (D-093: `_DoublerWorkflow`'s poison input hung the fan-out test indefinitely against a real
+    # server — the bug this default fixes).
+    #
+    # **Only the `maximum_attempts` half of that policy does anything here**: Temporal matches
+    # `non_retryable_error_types` against the *outermost* failure, and a child that failed through
+    # its own activity surfaces as a child/activity failure, a name deliberately absent from
+    # `_BAD_DATA_TYPES`. So the effective bound on a deterministic failure is
+    # `activity_max_attempts` child executions, which is only acceptable because a fan-out child's
+    # work is small and independent — and a child for which that is false is what re-adds the
+    # per-child `retry_policy` parameter this function used to take and no caller ever passed.
+    # `connector_job.py` and `template_job.py` pass `maximum_attempts=1` on their own
+    # `execute_child_workflow` calls for exactly this reason, their child being neither.
     for batch in _batches(indexed, limit):
         settled = await asyncio.gather(
             *(
@@ -202,8 +206,8 @@ async def fan_out(
                     payload,
                     id_prefix=id_prefix,
                     parent_id=parent_id,
-                    task_queue=queue,
-                    retry_policy=child_retry_policy,
+                    task_queue=settings.background_task_queue,
+                    retry_policy=BAD_DATA_RETRY,
                     execution_timeout=child_timeout,
                 )
                 for index, payload in batch

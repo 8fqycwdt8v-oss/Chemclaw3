@@ -10,7 +10,12 @@ otherwise propagate out of `record_metric` and fail the operation being counted.
 
 So this is one swallow, written once, wrapping the *update*: the metric is lost, the caller is not.
 A second copy of a bare `except Exception: pass` is exactly where a real error goes to hide, which
-is why the ~10 call sites across six packages go through here rather than each holding their own.
+is why every call site goes through here rather than each holding its own. Counted on `ff0bf6c5`,
+as `ast.Call`s to `record_metric` outside this module: **83 sites across 11 packages**, and every
+`degraded()` call below reaches the swallow through this function too. The sentence said "~10 call
+sites across six packages" until that count was taken — a present-tense number over a surface that
+grew by an order of magnitude, which is exactly the failure the measured paragraph in `degraded()`
+is written the way it is to avoid.
 
 **What this is no longer.** Until the R2 layering move the registry lived in `chemclaw.api`, so the
 import was lazy and this module read as a way around the "`core` imports no sibling" rule. Two
@@ -74,9 +79,18 @@ def degraded(
     where it happened.
 
     `level` defaults to ERROR, following `agent/audit.py`: a degradation is not a caution about
-    something that might matter later, it is a thing that definitely did not happen. The two sites
-    that pass `WARNING` are the ones where the lost function is cosmetic or is already gated in CI,
-    and each says so where it passes it.
+    something that might matter later, it is a thing that definitely did not happen. Counted the
+    same way on `ff0bf6c5`, as `ast.Call`s to `degraded` carrying a `level=`: **7 of the 41 sites
+    pass `WARNING`**, and one more (`agent/compaction.py::_degrade_once`) passes
+    `ERROR if first else DEBUG` so a repeating degradation is not re-reported as news. The lowered
+    level is for the case where the lost function is cosmetic or is already gated in CI, and four
+    of the seven argue exactly that where they pass it (`agent/skill_manifest.py::_read_manifest`,
+    `publish/drivers/sql.py::SqlResultSink._report_dropped`, `api/tool_results.py::session_sink`,
+    `core/db.py::_redact`). `publish/outbox.py::refresh_backlog` is the one that is neither
+    cosmetic nor CI-gated — it asks an operator to re-enable a sink or discard the rows, at a level
+    that says nobody need act — and `core/db.py::_merged_options` lowers it without saying why.
+    Stated as a count with a commit and a method, like the paragraph above it: "the two sites" was
+    the same claim with neither, and it was wrong by five before anyone read it again.
 
     Args:
         logger: the calling module's logger, so the record names the module that degraded.

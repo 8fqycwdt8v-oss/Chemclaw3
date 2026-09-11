@@ -625,7 +625,13 @@ def bind_pool_metrics() -> None:
     connections, and the checkpointer registers a third — and measured against a live server that
     was three pools and 48 connections reported as 16. That under-count reached the fleet
     validator too, which multiplied *processes* rather than pools: the shipped chart's floor was
-    **208** against the 136 its values file then provisioned. Both are fixed — `pg_fleet_pools`
+    **208** against the 136 its values file then provisioned. Those two are kept rather than
+    pointed at, and the distinction is worth stating because this docstring holds both kinds of
+    number: 48-as-16 is this function's own measurement and is *why* the gauge below sums over
+    pools instead of reading `settings.pg_pool_max_size`, so the derivation needs it at the call
+    site; 136 is `D-2026-08-05-the-connection-budget-is-a-fleet-number`'s figure, restated here
+    because the pair is what shows the size of the under-count, and the ADR is the frozen copy of
+    it. Neither is a current reading. Both are fixed — `pg_fleet_pools`
     counts pools, the readiness probe's pool is charged the one connection it asks for, and
     `postgres.maxConnections` provisions 256 — and the figure to trust is whichever
     `tests/test_deploy_chart.py` derives from the rendered chart, not this sentence. It has moved

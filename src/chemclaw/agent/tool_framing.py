@@ -154,12 +154,13 @@ def defanged_payload(payload: _Payload) -> _Payload:
 
     **How far that reached is worth stating exactly, because the sentence here used to state it
     over a third of the call sites.** It said none of the four was reachable "at today's three call
-    sites"; there are **eight** (five in `agent/graph_tools.py`, one each in `agent/durable_tools.py`,
-    `connectors/transport.py` and `connectors/jobs.py`), so the bound was computed over three of
-    eight and the other five were never checked. Re-measured across all eight: three of the four
-    are unreachable, and by declared type rather than by luck — seven sites pass a `str | None`, a
-    `list[str]`, or a JSON-decoded dict (a Temporal result, a `job_records` row's `result`, an MCP
-    args schema), none of which can carry an enum member, a set or a pydantic extra. The fourth,
+    sites"; there are **eight** (five in `agent/graph_tools.py`, one each in
+    `agent/durable_tools.py`, `connectors/transport.py` and `connectors/jobs.py`), so the bound was
+    computed over three of eight and the other five were never checked. Re-measured across all
+    eight: three of the four are unreachable, and by declared type rather than by luck — seven
+    sites pass a `str | None`, a `list[str]`, or a JSON-decoded dict (a Temporal result, a
+    `job_records` row's `result`, an MCP args schema), none of which can carry an enum member, a
+    set or a pydantic extra. The fourth,
     `connectors/jobs.py`, is the one site that hands over a whole model, so the `model_copy`
     widening does run there — its *consequence* needs a consumer dumping with `exclude_unset=True`,
     and there is none in `src/` — while the other three stay out of reach on that path too, because

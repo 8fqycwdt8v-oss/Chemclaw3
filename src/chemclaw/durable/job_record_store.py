@@ -295,4 +295,3 @@ async def read_job_record_summaries(
         ],
         hits_truncated=len(rows) > limit,
     )
-
