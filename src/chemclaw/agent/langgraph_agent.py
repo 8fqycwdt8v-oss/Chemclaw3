@@ -225,9 +225,9 @@ def build_langgraph_agent(
     prof = profile if isinstance(profile, AgentProfile) else get_profile(profile)
     # Resolved before the skills, because the skills are narrowed by them: a skill is judgment
     # *about* tools, so which tools this profile advertises decides which judgment is worth
-    # offering (`skills_middleware`). A helper's skills therefore narrow with its tools, at no extra
-    # cost and by the mechanism that already existed — which is D-2026-08-10's fourth invariant
-    # ("skills do not inherit") arriving as a consequence rather than as a second gate.
+    # offering (`_skills_middleware`). A helper's skills therefore narrow with its tools, at no
+    # extra cost and by the mechanism that already existed — which is D-2026-08-10's fourth
+    # invariant ("skills do not inherit") arriving as a consequence rather than as a second gate.
     tools = _capability_tools(prof)
     # **The helper's narrowing is applied here rather than in `_subagents`, and both the position
     # and the second call are the point.** `helper=True` is the one switch that says "this graph is
@@ -545,10 +545,12 @@ def _subagents(
       claimed both in turn.** Measured: upstream's `_return_command_with_state_update` copies every
       helper state key except `messages`, `todos` and `structured_response` into the caller's
       update, and `files` is not among the three — so a helper's `/scratch/evidence.md` lands in the
-      caller's `files` channel (9,937 characters of it, on the isolation fixture). The reverse holds
-      too: the helper is handed the caller's state minus those same three keys. "Returns one report"
-      is true of the *message thread* and false as a statement about state, which is a distinction
-      this comment and `HELPER_BRIEF` both used to blur — see
+      caller's `files` channel, whole. No byte count here either — the ADR cited below measured it
+      on the isolation fixture and an ADR cannot be edited, so a copy of that figure in this
+      comment is the only one of the two that can drift away from what was measured. The reverse
+      holds too: the helper is handed the caller's state minus those same three keys. "Returns one
+      report" is true of the *message thread* and false as a statement about state, which is a
+      distinction this comment and `HELPER_BRIEF` both used to blur — see
       `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`.
 
       **And `files` is a checkpointed channel, so the reach is the caller's *session*, not its

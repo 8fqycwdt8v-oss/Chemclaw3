@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -3188,8 +3189,15 @@ def test_every_supply_chain_gate_the_runbook_names_actually_runs() -> None:
 # `tests/test_helm_chart.py`'s docstring describes, with `make helm-validate` as the CI half.
 
 
+@cache
 def _render(*overrides: str) -> subprocess.CompletedProcess[str]:
     """`helm template` on the chart, with the egress and retention postures stated.
+
+    Cached on the overrides, because `helm template` is a subprocess and the chart on disk does
+    not change during a session: 18 of the 42 calls in this file pass no overrides at all and were
+    18 identical renders. Measured over the whole file, two runs each: 51.7 s / 51.1 s before,
+    43.5 s / 43.4 s after. The returned `CompletedProcess` is therefore shared between tests —
+    every reader here treats it as the immutable record of a render, which is what it is.
 
     `networkPolicy.allowAnyDestination=true` is the same flag the Makefile's two renders, the
     runbook and `deploy/README.md` all pass: the chart refuses to render until a release states

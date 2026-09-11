@@ -68,7 +68,7 @@ def _check_identifier(value: str, what: str) -> str:
     The pattern and the message live in `core.connect` beside `check_env_name`, because that module
     owns what a `connection:` block may contribute and a binding is not the only thing that
     contributes an identifier — a sink's `schema:` does too, into libpq's `options`. This stays as
-    the local name that binds the error type, so the thirteen call sites below read unchanged and
+    the local name that binds the error type, so the eighteen call sites below read unchanged and
     every failure here is still a `BindingError`.
     """
     return check_identifier(value, what, error=BindingError)

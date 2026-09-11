@@ -12,10 +12,12 @@ edge in the dependency graph.
 
 import json
 import logging
+from typing import Any
 
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import record_metric
 
 logger = logging.getLogger(__name__)
@@ -127,3 +129,43 @@ class BodySizeLimit:
             }
         )
         await send({"type": "http.response.body", "body": body})
+
+
+def transport_bounds(*, concurrency: bool = True) -> dict[str, Any]:
+    """The uvicorn keyword arguments that bound a connection before a route can refuse it.
+
+    **Three bounds `D-2026-08-01-a-cheap-request-is-still-a-request` established, applied on one of
+    the four processes that serve HTTP.** `deploy/entrypoint.sh` passes `--limit-concurrency`,
+    `--timeout-keep-alive` and `--h11-max-incomplete-event-size` in its `service)` case, and
+    `tests/test_deploy_chart.py::test_the_front_door_is_launched_with_transport_bounds` pins them —
+    to that case. Measured, the other three launch uvicorn themselves and passed none of them:
+    `api/mcp_face.py`, `connectors/server_entry.py` (which is *every* `connector-*` pod) and
+    `core/worker_http.py` ran at uvicorn's defaults — unlimited concurrency, a 5 s keep-alive and a
+    16 KiB header ceiling — while `service_max_connections`' own comment describes the number as a
+    property of "this process".
+
+    **`deploy/README.md` gave the reason, and the reason was false**: it said the three come from
+    settings "none of which the app can impose on itself". That is true of an ASGI *application*
+    and false of `uvicorn.run()` and `uvicorn.Config()`, which take all three as keyword arguments
+    at all three of those call sites. The sentence is corrected there; this function is why it can
+    be.
+
+    Here rather than beside each launcher for the reason this module already exists: `api/` and
+    `connectors/` may not import each other (`tests/test_layering.py`) and `core` is the package
+    both already depend on — the same argument `BodySizeLimit` above is built on, which is the body
+    half of the same defect.
+
+    Args:
+        concurrency: Whether to bound simultaneous connections. False for `core/worker_http.py`'s
+            probe-and-scrape surface, and the exception is deliberate: that server answers the two
+            kubelet probes, and a liveness probe *refused* because the limit is full restarts a pod
+            that is merely busy. The other two bounds still apply there, because an idle socket and
+            an oversized header are hazards whatever the surface serves.
+    """
+    bounds: dict[str, Any] = {
+        "timeout_keep_alive": settings.service_keepalive_seconds,
+        "h11_max_incomplete_event_size": settings.service_max_header_bytes,
+    }
+    if concurrency:
+        bounds["limit_concurrency"] = settings.service_max_connections
+    return bounds

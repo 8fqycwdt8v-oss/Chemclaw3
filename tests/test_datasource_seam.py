@@ -591,7 +591,7 @@ def test_the_gate_binds_every_half_as_the_registry_actually_calls_it(
         )
         monkeypatch.setattr(settings, "data_sources_dir", str(folder))
         monkeypatch.setattr(settings, "data_sources", "documented")
-        registry.discovered.cache_clear()
+        registry.forget_discovered()
 
         built: Exception | None = None
         try:

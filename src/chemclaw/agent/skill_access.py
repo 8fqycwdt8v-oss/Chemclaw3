@@ -177,7 +177,7 @@ class RoleScopedSkills(_Narrowing):
     def _permits(self, name: str) -> bool:
         """A skill is permitted if it is ungated, or the caller holds one of its gate roles.
 
-        The turn's roles are read here rather than hoisted into `get_skills` and cached on `self`.
+        The turn's roles are read here rather than hoisted into `__init__` and cached on `self`.
         One predicate object can outlive a turn, so any per-call state stored on it would be
         another turn's identity a moment later — the same lifetime rule that keeps connector MCP
         sessions per-turn. A `contextvar` read is a dict

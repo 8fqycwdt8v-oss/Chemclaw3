@@ -443,12 +443,12 @@ def test_construct_validation_catches_a_binding_that_binding_alone_cannot(
         "data_sources_dir",
         f"{source.parent}{os.pathsep}{settings.data_sources_dir}",
     )
-    registry.discovered.cache_clear()
+    registry.forget_discovered()
     try:
         assert validate_datasources() == [], "binding the kwargs alone cannot see the typo"
         problems = validate_datasources(construct=True)
     finally:
-        registry.discovered.cache_clear()
+        registry.forget_discovered()
 
     assert any("eln-broken" in problem and "exek" in problem for problem in problems), problems
 

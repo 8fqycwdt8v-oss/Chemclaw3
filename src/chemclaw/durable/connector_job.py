@@ -978,7 +978,7 @@ class ConnectorJobWorkflow:
         is itself derived deterministically from the job and its arguments.
 
         Runs through an activity rather than inline: a workflow may not touch a database, and
-        `publish_result_activity` carries the same bounded retry every other best-effort step here
+        `publish_job_result` carries the same bounded retry every other best-effort step here
         uses.
         """
         if not result.data:

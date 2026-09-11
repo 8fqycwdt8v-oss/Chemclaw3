@@ -1096,6 +1096,14 @@ async def close_checkpointer() -> None:
     stands on does. This is `close_memory_store`'s only caller, which is what makes the pair a
     lifecycle rather than two functions that happen to exist.
 
+    **It was not, and the sentence above is the reason the second caller was removed rather than
+    the count corrected.** The front door's lifespan called `close_memory_store()` itself and then
+    called this on the next line, so the store was dropped twice and the ordering invariant was
+    enforced in two places — with the argument for it written in only one of them. A rule stated
+    twice is a rule that can be half-changed: reordering the pair in `api/app.py` would have looked
+    local and correct there, against this paragraph nobody reading that file had to see. The pair
+    is one act, so it is one call site, and `api/app.py` now closes the checkpointer alone.
+
     **A pool whose loop has already closed is dropped, not awaited.** `psycopg_pool` schedules its
     workers' shutdown on the loop it was opened in, so closing it from a *different* live loop
     raises `RuntimeError: Event loop is closed` — from inside the close, after the reference would

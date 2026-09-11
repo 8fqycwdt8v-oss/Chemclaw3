@@ -151,9 +151,28 @@ def defanged_payload(payload: _Payload) -> _Payload:
     through *live*; `set`/`frozenset` members fell to the identity branch and did the same; and
     `model_copy(update=…)` widens `model_fields_set`, so a consumer dumping the copy with
     `exclude_unset=True` got a different document from the one it would have got for the original.
-    None was reachable at today's three call sites — that is why they survived — but this function's
-    whole contract is "pass it anything structured", and a claim nobody can rely on is worse here
-    than a narrower one, because the module docstring makes it a review rule.
+
+    **How far that reached is worth stating exactly, because the sentence here used to state it
+    over a third of the call sites.** It said none of the four was reachable "at today's three call
+    sites"; there are **eight** (five in `agent/graph_tools.py`, one each in
+    `agent/durable_tools.py`, `connectors/transport.py` and `connectors/jobs.py`), so the bound was
+    computed over three of eight and the other five were never checked. Re-measured across all
+    eight: three of the four are unreachable, and by declared type rather than by luck — seven
+    sites pass a `str | None`, a `list[str]`, or a JSON-decoded dict (a Temporal result, a
+    `job_records` row's `result`, an MCP args schema), none of which can carry an enum member, a
+    set or a pydantic extra. The fourth,
+    `connectors/jobs.py`, is the one site that hands over a whole model, so the `model_copy`
+    widening does run there — its *consequence* needs a consumer dumping with `exclude_unset=True`,
+    and there is none in `src/` — while the other three stay out of reach on that path too, because
+    `ConnectorJobResult` is `extra="ignore"`, `Note`/`Relation`/`ProcessConditions` are
+    `extra="forbid"`, and no field of any of them is an enum or a set. Driven rather than argued: an
+    envelope carrying a live closing delimiter in its `summary`, in a `data` key, in a `data` value
+    and in its note's `tags` comes back neutralised in all four, still a `ConnectorJobResult`, with
+    `model_fields_set` unchanged on the frozen envelope *and* on the frozen note it holds.
+
+    All four are closed regardless of reach, which is the part the count does not change: this
+    function's whole contract is "pass it anything structured", and a claim nobody can rely on is
+    worse here than a narrower one, because the module docstring makes it a review rule.
 
     A model is rebuilt with `model_copy`, which does not re-validate. That is deliberate rather
     than incidental: a `Note` reaching here has already passed the graph's validators, and

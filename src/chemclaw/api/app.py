@@ -44,7 +44,6 @@ from chemclaw.agent.graph_tools import expand_note
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.plan_approval_store import plan_approval_store
 from chemclaw.agent.profile_discovery import load_profiles
-from chemclaw.agent.scratchpad import close_memory_store
 from chemclaw.agent.session_events import stream_new_events
 from chemclaw.agent.verifier import require_verifier_capability
 from chemclaw.api.budget import BudgetTracker
@@ -237,6 +236,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     reference into the checkpointer's pool (`agent/scratchpad.py`); closing the pool first would
     leave it pointing at dead connections for whatever ran between the two calls.
 
+    **That ordering is `close_checkpointer`'s to keep, and this lifespan no longer repeats it.** It
+    called `close_memory_store()` and then `close_checkpointer()`, which closes the store itself
+    first — so the store was dropped twice and the invariant was written down in two places, only
+    one of which explained it. Two copies of an ordering rule is how the copies come to disagree:
+    whoever reorders the pair here would not be reading the argument for it, which lives beside the
+    pool that argument is about. One call now; the sequence is `agent/checkpointer.py`'s.
+
     **And drains the running turns before any of that**, which is the half that made the closes a
     hazard rather than a courtesy. Since `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop` a turn
     outlives the request that started it, on a pump task nothing outside `RunningTurns` knows
@@ -293,7 +299,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             # its checkpoint, its transcript and its cost row through all three.
             running_turns: RunningTurns = app.state.running_turns
             await running_turns.drain(settings.service_turn_timeout_seconds)
-            await close_memory_store()
+            # One call, not two. `close_checkpointer` drops the memory store itself, in the order
+            # the store's dependency on its pool requires — see the paragraph above.
             await close_checkpointer()
 
 

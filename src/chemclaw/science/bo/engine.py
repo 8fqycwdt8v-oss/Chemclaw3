@@ -522,8 +522,8 @@ def _fitted_strategy(
 
     Shared by the three things that need a fitted model — propose, predict, cross-validate — so all
     three speak about *the same* surrogate rather than three independently configured ones. That is
-    the whole reason `surrogate_fit_quality` is trustworthy: BoFire picks the surrogate class from
-    the domain, so a fit quality measured off this strategy describes the model that made the
+    the whole reason `_fit_quality_from`'s scores are trustworthy: BoFire picks the surrogate class
+    from the domain, so a fit quality measured off this strategy describes the model that made the
     recommendation, and no surrogate class is named in our code (measured, M-7).
 
     The fitted frame is returned beside the strategy because cross-validation needs the same rows,

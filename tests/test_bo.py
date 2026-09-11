@@ -96,14 +96,33 @@ def test_space_exhausted_predicate() -> None:
     assert space_exhausted(problem, 2, history, 2) is True  # 1 seen + 2 > 2
 
 
-@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
-def test_observation_rejects_non_finite_value(bad: float) -> None:
-    """A NaN/inf objective value is rejected at the boundary (G4).
+# What pydantic says when a finite-number constraint is missed, up to the value it was handed.
+# Quoted rather than derived, so the regex cannot agree with a field that has stopped checking.
+_NOT_FINITE = r"\nvalue\n  Input should be a finite number \[type=finite_number"
+
+
+@pytest.mark.parametrize(
+    ("bad", "fires"),
+    [
+        (float("nan"), _NOT_FINITE + r", input_value=nan"),
+        (float("inf"), _NOT_FINITE + r", input_value=inf"),
+        (float("-inf"), _NOT_FINITE + r", input_value=-inf"),
+    ],
+)
+def test_observation_rejects_non_finite_value(bad: float, fires: str) -> None:
+    """A NaN/inf objective value is rejected at the boundary, *by the value field* (G4).
 
     NaN compares false in both directions, so it would silently win `best_of`
     and poison the campaign result instead of failing the bad evaluation.
+
+    `match=` is what makes this an assertion about which field refused. Driven: dropping
+    `allow_inf_nan=False` from `Observation.value` while giving `params` a `min_length=3` so the
+    one-key dict every row passes in is refused instead. That leaves all **3** rows green under a
+    bare `pytest.raises(ValueError)` —
+    a construction that raises for any reason satisfies it — and turns all **3** red under
+    `match=`, each naming the constraint that no longer exists.
     """
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=fires):
         Observation(params={"x1": 0.0}, value=bad)
 
 

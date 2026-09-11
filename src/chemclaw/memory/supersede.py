@@ -92,11 +92,12 @@ def _is_synthesis_minted(note: Note) -> bool:
     members" retires notes this job could never have written, and one such note now exists by
     design: since D-161 the observations tier promotes an observation into `playbook-<obs-hash>`,
     an id anchored on the observation's *scope* rather than on the cluster's smallest member, so
-    `distill_playbooks` can never re-mint it. It was therefore always "an id this run no longer
-    mints" and was proposed for retirement on every run, carrying the body line "this cluster's
-    membership changed (merge or shrink)" — which is untrue of it, and writing one drops a
-    promoted playbook out of every current-evidence sweep via `Note.is_current`. There is no
-    review step left to catch that, which makes the lineage test the control rather than a
+    `chemclaw.memory.jobs.build_playbook_notes` can never re-mint it. It was therefore always
+    "an id this run no longer mints" and was proposed for retirement on every run, carrying the
+    body line "this cluster's membership changed (merge or shrink)" — which is untrue of it, and
+    writing one drops a promoted playbook out of every current-evidence sweep via
+    `Note.is_current`. There is no review step left to catch that, which makes the lineage test
+    the control rather than a
     convenience. The same match caught human-authored notes
     of a memory type; what stops that reaching a person's file is
     `kg/git_writer._refuse_to_clobber_a_person`, which raises rather than overwrite a note a human

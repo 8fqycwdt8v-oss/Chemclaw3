@@ -307,10 +307,31 @@ def _trade_off_runs() -> list[Observation]:
     ]
 
 
-def test_a_two_objective_ask_returns_a_front_of_the_runs_supplied() -> None:
+@pytest.fixture(scope="module")
+def trade_off_suggestion() -> bo_tools.ExperimentSuggestion:
+    """One acquisition over `_trade_off_problem()`/`_trade_off_runs()`, read by four tests.
+
+    A multi-objective acquisition — a GP fit plus a multi-start optimizer — is the expensive half
+    of this file, and the four tests below asked for it with byte-identical constant inputs, each
+    to assert a different field of the same answer: the front, the summary sentence, the
+    per-objective scales, the per-objective predictions on a candidate. None of them is about
+    repeatability or about the optimizer's run-to-run variance, so one answer serves all four.
+
+    The tests either side of this block are *not* on it and must not be: each supplies a different
+    problem or a different run list, and what they assert is a consequence of that difference.
+    """
+    # Annotated on the way out because the served tool's signature reaches mypy as `Any`.
+    suggestion: bo_tools.ExperimentSuggestion = asyncio.run(
+        suggest_next_experiment(_trade_off_problem(), _trade_off_runs())
+    )
+    return suggestion
+
+
+def test_a_two_objective_ask_returns_a_front_of_the_runs_supplied(
+    trade_off_suggestion: bo_tools.ExperimentSuggestion,
+) -> None:
     """The front is what turns "here is the trade-off" from a sentence into a computation."""
-    suggestion = asyncio.run(suggest_next_experiment(_trade_off_problem(), _trade_off_runs()))
-    on_front = {(o.values["yield"], o.values["impurity"]) for o in suggestion.front}
+    on_front = {(o.values["yield"], o.values["impurity"]) for o in trade_off_suggestion.front}
     assert on_front == {(55.0, 1.0), (78.0, 4.0), (64.0, 2.0)}
     assert (50.0, 3.0) not in on_front, "a run beaten on both axes is not on the front"
 
@@ -330,27 +351,30 @@ def test_a_single_objective_ask_draws_no_front() -> None:
     assert len(suggestion.scales) == 1
 
 
-def test_the_summary_says_there_is_no_single_best_point() -> None:
+def test_the_summary_says_there_is_no_single_best_point(
+    trade_off_suggestion: bo_tools.ExperimentSuggestion,
+) -> None:
     """The caveat has to reach the model composing the answer, not just this file."""
-    suggestion = asyncio.run(suggest_next_experiment(_trade_off_problem(), _trade_off_runs()))
-    assert "trade-off over 2 objectives" in suggestion.summary
-    assert "no single best point" in suggestion.summary
-    assert "summary" in suggestion.model_dump(mode="json")
+    assert "trade-off over 2 objectives" in trade_off_suggestion.summary
+    assert "no single best point" in trade_off_suggestion.summary
+    assert "summary" in trade_off_suggestion.model_dump(mode="json")
 
 
-def test_each_objective_gets_its_own_scale() -> None:
+def test_each_objective_gets_its_own_scale(
+    trade_off_suggestion: bo_tools.ExperimentSuggestion,
+) -> None:
     """An sd is read against its own objective's spread; yield's spread says nothing about ppm."""
-    suggestion = asyncio.run(suggest_next_experiment(_trade_off_problem(), _trade_off_runs()))
-    by_name = {scale.name: scale for scale in suggestion.scales}
+    by_name = {scale.name: scale for scale in trade_off_suggestion.scales}
     assert by_name["yield"].spread == pytest.approx(28.0)
     assert by_name["impurity"].spread == pytest.approx(3.0)
     assert by_name["impurity"].direction == "minimize"
 
 
-def test_candidates_carry_a_prediction_per_objective() -> None:
+def test_candidates_carry_a_prediction_per_objective(
+    trade_off_suggestion: bo_tools.ExperimentSuggestion,
+) -> None:
     """M-1 measured `<objective>_pred`/`_sd` per objective; this is that reaching the caller."""
-    suggestion = asyncio.run(suggest_next_experiment(_trade_off_problem(), _trade_off_runs()))
-    candidate = suggestion.candidates[0]
+    candidate = trade_off_suggestion.candidates[0]
     assert set(candidate.predicted_values) == {"yield", "impurity"}
     assert set(candidate.predicted_sds) == {"yield", "impurity"}
     # The scalars keep the lead objective, which is what every persisted row already holds.

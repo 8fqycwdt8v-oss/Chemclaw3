@@ -222,9 +222,10 @@ def turn_input(message: str) -> dict[str, Any]:
     **This is no longer where per-turn-ness comes from** — the two fields above are untracked
     channels, so they reset because the checkpoint cannot restore them, not because a caller
     remembered to zero them. What is left here is the one-line shape of a turn's input, kept as a
-    function for two reasons rather than inlined at its four call sites: it is the seam a turn's
-    invocation shape belongs to (a `recursion_limit` config sibling is the next thing to land beside
-    it), and it keeps `("user", message)` — the tuple form the graph coerces — written once.
+    function for two reasons rather than inlined at its three call sites (`api/graph_stream.py`,
+    `durable/template_activities.py`, `cli/chat.py`): it is the seam a turn's invocation shape
+    belongs to (a `recursion_limit` config sibling is the next thing to land beside it), and it
+    keeps `("user", message)` — the tuple form the graph coerces — written once.
 
     Args:
         message: The user's message for this turn.

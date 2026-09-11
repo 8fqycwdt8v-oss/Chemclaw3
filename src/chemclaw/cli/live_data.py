@@ -563,11 +563,12 @@ async def check_prose_yields_its_numbers(eln_export_dir: Path) -> Check:
 
     Which field it may be recovered *into* is decided, and the decision is the whole point.
     `D-2026-08-26-a-transcription-may-not-infer-a-setpoint` removed the headline prose fallback
-    after measuring what it produced: a reaction run at 80 °C for 12 h, stored as 0 °C for 0.5 h,
-    because a procedure begins by charging a vessel and the *addition* temperature is simply the
-    first number it states. So `OrdReaction.temperature_c`/`.time_h` are the structured field or
-    absent, and the regex result lives on `ReactionStep`, where "0 °C" belongs to the charging step
-    and says so.
+    after measuring what it produced, because a procedure begins by charging a vessel and the
+    *addition* temperature is simply the first number it states — the entry that measurement was
+    taken on is written out once, in `ingest/eln/json_adapter._number`, which is the code that
+    stopped doing it; the ADR is the frozen copy, and a third would be the one free to drift. So
+    `OrdReaction.temperature_c`/`.time_h` are the structured field or absent, and the regex result
+    lives on `ReactionStep`, where "0 °C" belongs to the charging step and says so.
 
     Both halves are asserted here, because each without the other is a check that passes for the
     wrong reason: a record carrying no step temperature would mean the prose was lost entirely, and

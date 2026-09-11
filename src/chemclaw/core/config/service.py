@@ -43,21 +43,33 @@ class ServiceSettings(BaseSettings):
     # list at all and there is no deployment that needs it — a same-origin embedded UI needs none,
     # and a browser client that does need access has an origin to name.
     service_cors_origins: str = ""
-    # How many uvicorn worker *processes* the container starts (`deploy/entrypoint.sh`). One
-    # asyncio event loop saturates one CPU, and a load test measured throughput flat at
-    # ~1.18 turns/s from 10 to 50 concurrent users on a 4-CPU box — a single-loop ceiling.
+    # **A field with one legal value, whose whole job is to refuse the other ones.** Every value
+    # above 1 is rejected unconditionally by `_guards_that_the_comments_already_demand`, and
+    # `deploy/entrypoint.sh` passes no `--workers` flag at all — so this starts no second process
+    # and cannot be made to. It exists so that an operator who sets it is told *why* at startup,
+    # by name, instead of finding out from behaviour.
     #
-    # The per-session turn guard is no longer among the reasons to keep this at 1: under
+    # The reason is unchanged and is worth keeping. One asyncio event loop saturates one CPU, and
+    # a load test measured throughput flat at ~1.18 turns/s from 10 to 50 concurrent users on a
+    # 4-CPU box, so a second process is the obvious lever — and pulling it silently breaks five
+    # per-process guarantees: the rate limiter, the budget tracker, the attachment store, the
+    # live-session LRU and the metrics registry all live in one process's memory and are invisible
+    # to a sibling worker. A chemist who uploads a file and then asks about it needs both requests
+    # on the same process, and no ingress can pin below the pod. The supported way to use more CPU
+    # is `replicas` with session affinity at the Route.
+    #
+    # The sixth guarantee is the one that *was* fixed and is therefore no longer a reason: under
     # `session_store="postgres"` a turn takes a leased row in `session_turns`, so two turns on one
-    # session cannot be admitted by two processes (D-121). What is still per-process is
-    # *capability*, not correctness — the admission semaphore (so the deployment's real cap is
-    # this many times `service_max_concurrent_turns`), the event-stream caps, uploaded attachments
-    # and harness todos, all of which live in one process's memory and are therefore invisible to
-    # a sibling worker. A chemist who uploads a file and then asks about it needs both requests on
-    # the same process, and no ingress can pin below the pod. So the supported way to use more
-    # CPU is still `replicas` with session affinity at the Route; raise this only for a
-    # deployment that does not use attachments or the harness. Under `session_store="memory"`
-    # there is no shared claim at all and this must stay 1.
+    # session cannot be admitted by two processes (D-121). That fix is why this comment used to end
+    # by advising the reader to "raise this only for a deployment that does not use attachments or
+    # the harness" — advice for a configuration the refusal has never permitted. Nor is the refusal
+    # store-specific: measured, `session_store="memory"` and `session_store="postgres"` are both
+    # refused identically at 2 and at 4, because the guard reads this field alone.
+    #
+    # Still read rather than inert: it is the middle factor in the fleet turn-ceiling product
+    # (`replicas × workers × cap`) that the same validator checks a few statements later. Pinned
+    # at 1 it contributes nothing there, so no configuration can reach that guard through this
+    # field — which is the shape a knob takes on its way out, not a second meaning.
     service_uvicorn_workers: int = Field(default=1, gt=0)
     # How long a turn's claim on its session (`session_turns`, D-121) stays valid before another
     # process may take it. A lease rather than a lock because a lock would have to be held on a

@@ -148,16 +148,6 @@ PLAN_APPROVAL_PROMPT: Final = (
 PLAN_GATE_REASON: Final[RefusalReason] = "plan_gate"
 
 
-def gated_call(tool_name: str, arguments: Mapping[str, Any]) -> bool:
-    """Whether this call is one the plan gate governs at all.
-
-    The call rather than the tool, for the reason `authz.side_effecting_call` gives: `write_file`
-    is durable under `/memories/` and turn-local under `/scratch/`, and refusing both would deny an
-    unapproved turn the scratchpad it needs in order to produce a plan worth approving.
-    """
-    return side_effecting_call(tool_name, arguments)
-
-
 # The autonomy setting that asks for the approval-first posture — the value `harness_autonomy`
 # takes when a human must approve the plan before anything executes. A constant because two
 # decisions compare against it (whether the tool gate is attached at all, and whether a finished
@@ -224,9 +214,10 @@ async def consume_turn_approval(session_id: str) -> None:
     **Not from the runner's `finally`, and that is not a style preference.** `run_turn` is an async
     generator whose `finally` also runs on the disconnect path — which production reaches through
     `CancelledError`, not `aclose()` (D-130). An `await` there re-raises the cancellation
-    immediately and *everything after it in the block is skipped*: the budget booking, the turn
-    metrics, `end_turn`, and all five context-var resets. Leaking the ambient identity of a
-    disconnected turn into the next turn on that worker is a worse defect than the one this
+    immediately and *everything after it in the block is skipped*: the budget booking and the
+    `turn_costs` row it writes, and the contextvar resets `chemclaw.api.runner._unstamp`
+    performs. Leaking the ambient identity of a disconnected turn into the next turn on that
+    worker is a worse defect than the one this
     function exists to fix. So it is called on the two paths where awaiting is safe, and a turn torn
     down *before* it answered deliberately does not spend the approval: a turn that was undone has
     not used its authorization.
@@ -465,7 +456,11 @@ async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> 
             the reason to the model.
     """
     name = request.tool_call["name"]
-    if not gated_call(name, request.tool_call.get("args") or {}):
+    # The *call* rather than the tool, for the reason `authz.side_effecting_call` gives:
+    # `write_file` is durable under `/memories/` and turn-local under `/scratch/`, and refusing
+    # both would deny an unapproved turn the scratchpad it needs in order to produce a plan worth
+    # approving. This is what "the plan gate governs this call at all" means.
+    if not side_effecting_call(name, request.tool_call.get("args") or {}):
         return await handler(request)
     session_id = get_current_session_id()
     # No session means no plan to approve and no autonomous loop to gate — a template activity's

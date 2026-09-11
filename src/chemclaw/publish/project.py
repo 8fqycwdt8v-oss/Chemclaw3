@@ -81,14 +81,20 @@ def _identify(smiles: str | None) -> tuple[str, str]:
         return "", smiles
 
 
-def _molecule(
-    smiles: str | None, structure_id: str = "", *, role: str = "subject"
-) -> SubjectMember:
-    """The single member of a one-molecule or one-geometry subject."""
+def _molecule(smiles: str | None, structure_id: str = "") -> SubjectMember:
+    """The single member of a one-molecule or one-geometry subject.
+
+    `role` is always `"subject"` — that is what "the single member" means here, and every one of
+    this module's call sites relied on the default. It was a widening `str` parameter nobody
+    passed, which cost `SubjectMember.role`'s closed `MemberRole` literal its check at the one
+    place a projection bug would show up as an unqueryable value in the column every reaction
+    query filters on. A member with any other role is built by `_species_members`, which names
+    each one.
+    """
     identifier, canonical = _identify(smiles)
     return SubjectMember(
         ordinal=0,
-        role=role,  # type: ignore[arg-type]
+        role="subject",
         compound_id=identifier,
         smiles=canonical,
         structure_id=structure_id,

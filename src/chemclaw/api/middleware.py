@@ -486,7 +486,7 @@ _MAX_VALIDATION_ERRORS = 20
 _MAX_LOGGED_CHARS = 128
 
 
-def clip_for_log(value: str, limit: int = _MAX_LOGGED_CHARS) -> str:
+def clip_for_log(value: str) -> str:
     """`value` bounded for a log record or an error body, marked when it was actually cut.
 
     One definition because three sites need it and each of them was measured unbounded: the access
@@ -494,8 +494,19 @@ def clip_for_log(value: str, limit: int = _MAX_LOGGED_CHARS) -> str:
     (8,000), and the 422's echo of what the caller sent (200,119 bytes). A truncation that said
     nothing would be worse than the raw value in one specific way — an operator reading a clipped
     id cannot tell it from a short one — so the marker is part of the contract.
+
+    **The bound is read, not passed.** It was a `limit=_MAX_LOGGED_CHARS` parameter no call site
+    ever overrode, which made the cap two spellings of one number — and the one that decides is
+    whichever a caller happened to use, which is exactly what a clip measured against
+    `SecretRedactingFilter`'s cost must not be. A site that genuinely needs its own bound is the
+    second caller that re-adds the argument; `connectors/server.py` shows the other shape, a
+    separate constant for a surface that may legitimately want a different number.
     """
-    return value if len(value) <= limit else f"{value[:limit]}…(+{len(value) - limit})"
+    return (
+        value
+        if len(value) <= _MAX_LOGGED_CHARS
+        else f"{value[:_MAX_LOGGED_CHARS]}…(+{len(value) - _MAX_LOGGED_CHARS})"
+    )
 
 
 # How deep `_json_safe` walks before it names what it stopped at rather than descending.

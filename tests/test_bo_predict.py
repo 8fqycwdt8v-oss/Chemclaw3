@@ -96,46 +96,72 @@ def _predictions(
     return interrogate_surrogate(problem, observations, points, assess_fit=False, seed=seed)[0]
 
 
-def test_a_point_among_the_runs_predicts_near_what_was_measured() -> None:
+@pytest.fixture(scope="module")
+def predicted_at() -> dict[str, Prediction]:
+    """One fit of `_problem()` over `_runs()`, read at every point the constant-input tests name.
+
+    **Measured, because the cost is the whole reason this exists.** On an idle box a
+    prediction-only interrogation of this problem is 4.4 s, of which `_fitted_strategy` is 4.3 s,
+    and reading a field off the answer is microseconds. The four tests below named four points
+    between them and each paid a whole GP fit to read one of them.
+
+    Sharing one fit is also the *stronger* arrangement, not a concession. Two of these tests
+    compare one point's posterior sd against another's, and two independently-fitted GPs of the
+    same data differ by the fit's own non-determinism — measured elsewhere in this file at R²
+    0.906-0.969 over identical inputs — so a comparison drawn across two fits carries that noise
+    inside it. `interrogate_surrogate`'s own docstring makes the same argument about the score.
+
+    Keyed by name rather than by list position: an assertion has to say which point it is about
+    without the reader counting.
+    """
+    points: dict[str, dict[str, float | str]] = {
+        "a_run_already_done": dict(_runs()[4].params),
+        "the_first_run": dict(_runs()[0].params),
+        "an_unexplored_corner": {"temperature": 119.0, "solvent": "THF"},
+        "mid_range": {"temperature": 60.0, "solvent": "THF"},
+        "far_outside_the_range": {"temperature": 400.0, "solvent": "THF"},
+    }
+    predictions = _predictions(_problem(), _runs(), list(points.values()))
+    return dict(zip(points, predictions, strict=True))
+
+
+def test_a_point_among_the_runs_predicts_near_what_was_measured(
+    predicted_at: dict[str, Prediction],
+) -> None:
     """The floor: a surrogate that cannot reproduce its own training data explains nothing."""
-    runs = _runs()
-    at = dict(runs[4].params)
-    prediction = _predictions(_problem(), runs, [at])[0]
-    assert prediction.values["yield"] == pytest.approx(runs[4].value, abs=3.0)
+    prediction = predicted_at["a_run_already_done"]
+    assert prediction.values["yield"] == pytest.approx(_runs()[4].value, abs=3.0)
     assert prediction.sds["yield"] < 5.0
     assert prediction.in_domain
 
 
-def test_an_unexplored_corner_carries_a_larger_sd_than_an_observed_point() -> None:
+def test_an_unexplored_corner_carries_a_larger_sd_than_an_observed_point(
+    predicted_at: dict[str, Prediction],
+) -> None:
     """The posterior question `op-13` asks and the run list cannot answer.
 
     "Is there an unexplored corner, or has the search been circling one region" is a statement
     about the model's uncertainty, so it needs the model. The runs alternate THF and toluene at
     every 10 °C from 20; the corner below asks about a temperature nothing sits near.
+
+    Both sds come from one fit, which is what makes the comparison a statement about the two
+    points rather than about two GPs.
     """
-    runs = _runs()
-    observed, corner = _predictions(
-        _problem(),
-        runs,
-        [dict(runs[0].params), {"temperature": 119.0, "solvent": "THF"}],
-    )
-    assert corner.sds["yield"] > observed.sds["yield"]
+    corner = predicted_at["an_unexplored_corner"]
+    assert corner.sds["yield"] > predicted_at["the_first_run"].sds["yield"]
     assert corner.in_domain
 
 
-def test_an_out_of_range_point_is_answered_and_labelled_rather_than_refused() -> None:
+def test_an_out_of_range_point_is_answered_and_labelled_rather_than_refused(
+    predicted_at: dict[str, Prediction],
+) -> None:
     """Measured (M-6): BoFire does not clamp — it extrapolates, and the sd rises sharply.
 
     Refusing would withhold a number the chemist can read correctly once told which side of the
     bound they are on, so the point is answered with `in_domain` false and a summary that says the
     mean is unconstrained there.
     """
-    runs = _runs()
-    inside, outside = _predictions(
-        _problem(),
-        runs,
-        [{"temperature": 60.0, "solvent": "THF"}, {"temperature": 400.0, "solvent": "THF"}],
-    )
+    inside, outside = predicted_at["mid_range"], predicted_at["far_outside_the_range"]
     assert inside.in_domain
     assert not outside.in_domain
     assert outside.sds["yield"] > 5 * inside.sds["yield"]
@@ -143,15 +169,16 @@ def test_an_out_of_range_point_is_answered_and_labelled_rather_than_refused() ->
     assert "extrapolating" in outside.summary
 
 
-def test_a_prediction_says_it_is_not_a_recommendation() -> None:
+def test_a_prediction_says_it_is_not_a_recommendation(
+    predicted_at: dict[str, Prediction],
+) -> None:
     """The whole reason `Prediction` is not `Candidate`.
 
     A candidate carries an implicit endorsement; an answer to a question carries none. The
     distinction lives in a `computed_field`, not a docstring, because a bare property is not
     serialized and the caveat would never reach the model composing the reply.
     """
-    prediction = _predictions(_problem(), _runs(), [{"temperature": 60.0, "solvent": "THF"}])[0]
-    assert "not a recommendation" in prediction.summary
+    assert "not a recommendation" in predicted_at["mid_range"].summary
 
 
 def test_a_featurized_categorical_is_accepted() -> None:
@@ -194,8 +221,12 @@ def test_a_featurized_categorical_is_accepted() -> None:
     assert len({round(p.values["yield"], 6) for p in at_seventy}) == 3
 
 
-def test_a_trade_off_is_predicted_on_every_axis() -> None:
-    """One fit, one prediction per objective — the W3 shape carried into the what-if."""
+def _two_objective() -> tuple[OptimizationProblem, list[Observation]]:
+    """`_problem()`'s space with an impurity axis, and runs that report both numbers.
+
+    One definition rather than two: the trade-off prediction test and the trade-off fit-quality
+    test built this identically, eighty lines apart, and each fitted it separately.
+    """
     problem = OptimizationProblem(
         parameters=_problem().parameters,
         objectives=[
@@ -211,7 +242,28 @@ def test_a_trade_off_is_predicted_on_every_axis() -> None:
         )
         for index, run in enumerate(_runs())
     ]
-    prediction = _predictions(problem, runs, [{"temperature": 60.0, "solvent": "THF"}])[0]
+    return problem, runs
+
+
+@pytest.fixture(scope="module")
+def two_objective_interrogation() -> tuple[list[Prediction], list[FitQuality]]:
+    """One interrogation of `_two_objective()` — both halves, the shape `predict_outcome` asks for.
+
+    The fit half is the expensive one (a five-fold cross-validation over two outputs), and the two
+    tests below read *different halves of the same constant question*: one that every objective is
+    predicted, one that every objective is scored. Asking once is also the arrangement
+    `interrogate_surrogate`'s docstring argues for on its own terms — the score describes the model
+    that made the prediction.
+    """
+    problem, runs = _two_objective()
+    return interrogate_surrogate(problem, runs, [{"temperature": 60.0, "solvent": "THF"}])
+
+
+def test_a_trade_off_is_predicted_on_every_axis(
+    two_objective_interrogation: tuple[list[Prediction], list[FitQuality]],
+) -> None:
+    """One fit, one prediction per objective — the W3 shape carried into the what-if."""
+    prediction = two_objective_interrogation[0][0]
     assert set(prediction.values) == {"yield", "impurity"}
     assert set(prediction.sds) == {"yield", "impurity"}
 
@@ -243,13 +295,34 @@ def test_point_in_domain_reads_both_kinds_of_parameter() -> None:
     assert not point_in_domain(problem, {"temperature": 60.0, "solvent": "DMSO"})
 
 
-def test_fit_quality_is_finite_and_carries_what_it_was_computed_on() -> None:
+@pytest.fixture(scope="module")
+def one_fit() -> list[FitQuality]:
+    """One cross-validated fit of `_problem()` over `_runs()`, for the tests that read its fields.
+
+    **Measured on an idle box**: `_fit_quality(_problem(), _runs())` is 33.3 s — a 4.3 s surrogate
+    fit plus 22.0 s of five-fold cross-validation — while reading `summary` off the result is
+    1.6 µs. Three tests asked that identical constant question and each paid the 33 s to assert a
+    different property of the same answer, which is the one case a shared fixture costs nothing.
+
+    **`test_the_fit_score_does_not_reproduce_and_is_reported_to_the_precision_it_does` must not use
+    this, and does not.** Its subject is that two identical calls give *different* scores; handed
+    one cached result it would compare a value with itself. That would fail here, because the
+    assertion is bounded on both sides for exactly this reason — but a test whose lower bound is
+    the only thing standing between it and vacuity is one to keep away from a cache rather than one
+    to rely on. It calls `_fit_quality` three times, and each of those three is a real fit.
+    """
+    return _fit_quality(_problem(), _runs())
+
+
+def test_fit_quality_is_finite_and_carries_what_it_was_computed_on(
+    one_fit: list[FitQuality],
+) -> None:
     """R² and MAE over held-out runs, with the run count and fold count beside them.
 
     The counts are not decoration: R² 0.95 over ten runs and over two hundred are different
     claims, and only one of them is about the chemistry.
     """
-    quality = _fit_quality(_problem(), _runs())[0]
+    quality = one_fit[0]
     assert quality.objective == "yield"
     # Content, not a bound the model already enforces: `mae >= 0.0` is `Field(ge=0.0)` and cannot
     # fail, and `r2 <= 1.0` is arithmetic. These runs are a deliberate rising trend, so a surrogate
@@ -265,37 +338,25 @@ def test_fit_quality_is_finite_and_carries_what_it_was_computed_on() -> None:
     assert quality.folds == 5
 
 
-def test_a_score_over_few_runs_carries_the_caveat_that_it_will_be_over_read() -> None:
+def test_a_score_over_few_runs_carries_the_caveat_that_it_will_be_over_read(
+    one_fit: list[FitQuality],
+) -> None:
     """The most over-readable number this module produces, so the caveat travels with it.
 
     A `computed_field` again, for `Prediction.summary`'s reason.
     """
-    summary = _fit_quality(_problem(), _runs())[0].summary
-    assert "sanity check, not as accuracy" in summary
+    assert "sanity check, not as accuracy" in one_fit[0].summary
 
 
-def test_the_fit_quality_names_every_objective() -> None:
+def test_the_fit_quality_names_every_objective(
+    two_objective_interrogation: tuple[list[Prediction], list[FitQuality]],
+) -> None:
     """One score per objective.
 
     A trade-off can be modelled well on one axis and badly on the other, and a single number would
     hide exactly that.
     """
-    problem = OptimizationProblem(
-        parameters=_problem().parameters,
-        objectives=[
-            Objective(name="yield", direction="maximize"),
-            Objective(name="impurity", direction="minimize"),
-        ],
-    )
-    runs = [
-        Observation(
-            params=run.params,
-            value=run.value,
-            values={"yield": run.value, "impurity": 12.0 - 0.4 * index},
-        )
-        for index, run in enumerate(_runs())
-    ]
-    assert [q.objective for q in _fit_quality(problem, runs)] == ["yield", "impurity"]
+    assert [q.objective for q in two_objective_interrogation[1]] == ["yield", "impurity"]
 
 
 def test_cross_validating_more_folds_than_runs_is_refused_with_the_reason() -> None:
@@ -324,6 +385,11 @@ def test_the_tool_can_skip_the_fit_assessment() -> None:
 
     The summary used to be empty here and now says the fit was not assessed — a blank caveat reads
     as "no caveat", which is the opposite of what it means.
+
+    **This absorbed `test_a_skipped_fit_says_so_rather_than_returning_an_empty_summary`**, which
+    sat 130 lines below with a byte-identical body and the same two assertions — one whole
+    surrogate fit, re-run to assert the sentence already asserted here. The sentence it stated in
+    its docstring is the paragraph above.
     """
     answer = asyncio.run(
         predict_outcome(_problem(), _runs(), [{"temperature": 60.0, "solvent": "THF"}], False)
@@ -452,15 +518,6 @@ def test_asking_for_neither_a_prediction_nor_a_score_is_refused() -> None:
     """An empty ask is a caller mistake, not an empty answer — the same posture as no points."""
     with pytest.raises(ValueError, match="neither a prediction nor a fit"):
         interrogate_surrogate(_problem(), _runs(), [], assess_fit=False)
-
-
-def test_a_skipped_fit_says_so_rather_than_returning_an_empty_summary() -> None:
-    """A blank summary reads as "no caveat", which is the opposite of what it means."""
-    answer = asyncio.run(
-        predict_outcome(_problem(), _runs(), [{"temperature": 60.0, "solvent": "THF"}], False)
-    )
-    assert answer.fit == []
-    assert "not assessed" in answer.summary
 
 
 # --- the front and the assay it was drawn with -------------------------------------------------
@@ -593,9 +650,19 @@ def test_the_fit_score_does_not_reproduce_and_is_reported_to_the_precision_it_do
     assert "Do not read a small difference" in summary
 
 
-def test_the_reported_score_is_not_printed_more_precisely_than_it_repeats() -> None:
-    """Two decimals on R², two significant figures on MAE — what survives a repeat."""
-    summary = _fit_quality(_problem(), _runs())[0].summary
+def test_the_reported_score_is_not_printed_more_precisely_than_it_repeats(
+    one_fit: list[FitQuality],
+) -> None:
+    """Two decimals on R², two significant figures on MAE — what survives a repeat.
+
+    **Shared fit, deliberately, and the name is why that needs saying.** What *repeats* is asserted
+    by the sibling above, which refits three times; what this one asserts is the formatting of one
+    fitted score, and it read a single sample before this fixture existed as well. The formatter is
+    a literal `:.2f`/`:.2g` over whatever the fit produced, so a second sample from the same runs
+    exercises the identical branch — the only reason to pay for one would be to hunt a rare bad
+    fit, which is not this test's job.
+    """
+    summary = one_fit[0].summary
     # `(?!\S)` anchors the MAE group: without it, a value formatted as `1e+02` matched just the
     # leading `1`, whose one significant figure passes the check below and asserts nothing.
     matched = re.search(r"R² (\d+\.\d+) and mean absolute error (\S+?)(?=\.\s|\.$)", summary)

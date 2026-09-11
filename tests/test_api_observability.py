@@ -41,20 +41,10 @@ from chemclaw.api.middleware import (
 from chemclaw.api.runner import _OUTCOMES, _deadline_passed, _settle_outcome, _TurnLedger
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
+from tests.conftest import log_field
 from tests.test_service import _app, _FakeAgent
 
 _HEADER = "X-Chemclaw-Correlation-Id"
-
-
-def _field(record: logging.LogRecord, name: str) -> Any:
-    """One `extra=` field off a captured record — `getattr`, because a `LogRecord` has no schema."""
-    return getattr(record, name)
-
-
-@pytest.fixture
-def client() -> TestClient:
-    """The front door with a fake agent — the same seam every other front-door test uses."""
-    return TestClient(_app(_FakeAgent()))
 
 
 # --------------------------------------------------------------------------------------------
@@ -144,11 +134,11 @@ def test_a_served_request_emits_one_access_record_with_the_route_template(
     records = [r for r in caplog.records if getattr(r, "event", "") == "http.request"]
     assert len(records) == 1, [r.getMessage() for r in caplog.records]
     record = records[0]
-    assert _field(record, "route") == "/healthz"
-    assert _field(record, "method") == "GET"
-    assert _field(record, "status") == 200
-    assert _field(record, "duration_ms") >= 0
-    assert _field(record, "correlation_id")
+    assert log_field(record, "route") == "/healthz"
+    assert log_field(record, "method") == "GET"
+    assert log_field(record, "status") == 200
+    assert log_field(record, "duration_ms") >= 0
+    assert log_field(record, "correlation_id")
 
 
 def test_the_access_record_names_a_session_route_by_its_template(
@@ -161,10 +151,10 @@ def test_the_access_record_names_a_session_route_by_its_template(
         caplog.clear()
         client.get(f"/sessions/{created}/messages")
     record = next(r for r in caplog.records if getattr(r, "event", "") == "http.request")
-    assert _field(record, "route") == "/sessions/{session_id}/messages"
-    assert created not in _field(record, "route")
+    assert log_field(record, "route") == "/sessions/{session_id}/messages"
+    assert created not in log_field(record, "route")
     # The routed session id rides as a *field*, which is where an unbounded value belongs.
-    assert _field(record, "session_id") == created
+    assert log_field(record, "session_id") == created
 
 
 def test_an_unmatched_path_collapses_onto_one_route_label(
@@ -176,7 +166,7 @@ def test_an_unmatched_path_collapses_onto_one_route_label(
         client.get("/no-such-route-a")
         client.get("/no-such-route-b")
     routes = {
-        _field(r, "route") for r in caplog.records if getattr(r, "event", "") == "http.request"
+        log_field(r, "route") for r in caplog.records if getattr(r, "event", "") == "http.request"
     }
     assert routes == {_UNMATCHED_ROUTE}
 
@@ -262,8 +252,8 @@ def test_a_validation_failure_is_logged_and_counted(
     assert response.status_code == 422
     assert METRICS.value("chemclaw_request_validation_failures_total") == before + 1
     record = next(r for r in caplog.records if getattr(r, "event", "") == "http.validation_failed")
-    assert _field(record, "route") == "/sessions"
-    assert _field(record, "error_count") >= 1
+    assert log_field(record, "route") == "/sessions"
+    assert log_field(record, "error_count") >= 1
     assert record.levelno == logging.WARNING
 
 
@@ -387,8 +377,8 @@ def test_an_unknown_session_records_the_refusal_it_will_not_disclose(
     assert response.json()["detail"] == "unknown session"
     assert METRICS.value("chemclaw_authz_refusals_total") == before + 1
     record = next(r for r in caplog.records if getattr(r, "event", "") == "authz.refused")
-    assert _field(record, "resource") == "session"
-    assert _field(record, "reason")
+    assert log_field(record, "resource") == "session"
+    assert log_field(record, "reason")
     assert record.levelno == logging.WARNING
 
 
@@ -730,14 +720,14 @@ def test_a_turn_writes_one_started_and_one_finished_record(
     assert events.count("turn.finished") == 1
     finished = next(r for r in caplog.records if getattr(r, "event", "") == "turn.finished")
     started = next(r for r in caplog.records if getattr(r, "event", "") == "turn.started")
-    assert _field(finished, "outcome") == "answered"
+    assert log_field(finished, "outcome") == "answered"
     # One id for the whole turn, and it is the request's — the pair is what a bug report joins on.
-    assert _field(finished, "correlation_id") == _field(started, "correlation_id")
-    assert _field(
+    assert log_field(finished, "correlation_id") == log_field(started, "correlation_id")
+    assert log_field(
         finished, "model"
     )  # the attribution `core/metrics.py` and the runbook already claimed
     assert (
-        _field(finished, "ttft_seconds") is not None
+        log_field(finished, "ttft_seconds") is not None
     )  # P9: the number a chemist actually experiences
     assert METRICS.value("chemclaw_turns_finished_total") == before + 1
     assert 'chemclaw_turns_finished_total{outcome="answered"}' in METRICS.render()

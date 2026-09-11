@@ -144,9 +144,9 @@ def _space_of(parameter: Parameter) -> dict[str, Any]:
     exactly this reason.
 
     A name is free text and folds (`core.ids.canonical_text`); a *category label* may be a molecule
-    and is reduced by `_identity_label` instead, which is the same act on a data type where case
-    carries meaning. `_identity_labels` then decides the space as a whole, so a reduction that would
-    merge two of its own labels is not applied to them.
+    and is reduced by `_identity_labels` instead, which is the same act on a data type where case
+    carries meaning. That reduction is decided for the space as a whole rather than per label, so a
+    reduction that would merge two of its own labels is not applied to them.
 
     Bounds are rounded to `_BOUND_DECIMALS` on the same argument: a model re-emitting `120.0` as
     `120.00000001` is not widening a search space, and the difference is far below any bound a
@@ -180,7 +180,7 @@ def _space_of(parameter: Parameter) -> dict[str, Any]:
         # through the one map rather than reduced a second time: a key the identity no longer
         # contains addresses nothing, and two reductions of one label set can only ever disagree.
         # The SMILES themselves are never touched — they are values, and a value that is a
-        # structure is the case `_identity_label` exists for.
+        # structure is the case `_identity_labels` exists for.
         if parameter.structures is not None:
             dumped["structures"] = {
                 labels[label]: smiles for label, smiles in parameter.structures.items()
@@ -269,7 +269,7 @@ def campaign_id_for(problem: OptimizationProblem) -> str:
     `resume_campaign` handed back and a model re-cases freely. `docs/decisions/` records the
     measurement; the short form is that `THF` and `thf` were two campaigns with two empty histories
     — while `C1CCNCC1` and `c1ccncc1`, piperidine and pyridine, were one campaign with one, which
-    is why a category label is reduced as chemistry rather than as text (`_identity_label`).
+    is why a category label is reduced as chemistry rather than as text (`_identity_labels`).
     **Existing rows are re-keyed rather than orphaned** — `chemclaw.cli.rekey_campaigns` recomputes
     the id from each row's stored `problem`, which is why this could change at all.
 

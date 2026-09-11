@@ -450,15 +450,15 @@ def test_a_shipped_bundle_that_discovery_missed_is_unresolved_not_unguarded(
     Driven by pointing `connectors_dir` at an empty directory, which is the misconfiguration
     itself rather than a stand-in for it.
     """
-    from chemclaw.connectors.registry import discovered
+    from chemclaw.connectors.registry import forget_discovered
     from chemclaw.connectors.server import _UNRESOLVED_AUTH, _declared_bearer_env
 
     monkeypatch.setattr(settings, "connectors_dir", str(tmp_path))
-    discovered.cache_clear()
+    forget_discovered()
     try:
         assert _declared_bearer_env("molfp") == _UNRESOLVED_AUTH
     finally:
-        discovered.cache_clear()
+        forget_discovered()
 
 
 def test_an_app_no_bundle_backs_is_not_refused() -> None:

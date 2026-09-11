@@ -34,26 +34,16 @@ from chemclaw.api.middleware import (
     clip_for_log,
 )
 from chemclaw.core.config import settings
+from tests.conftest import log_field
 from tests.test_service import _app, _FakeAgent
 
 # Long enough that no cap could be an accident, and the length the review measured.
 _SHOUT = "Q" * 6000
 
 
-@pytest.fixture
-def client() -> TestClient:
-    """The front door with a fake agent — the same seam every other front-door test uses."""
-    return TestClient(_app(_FakeAgent()))
-
-
 def _records(caplog: pytest.LogCaptureFixture, logger_name: str) -> list[logging.LogRecord]:
     """Every captured record from one logger — the access log and the auth gate are separate."""
     return [record for record in caplog.records if record.name == logger_name]
-
-
-def _field(record: logging.LogRecord, name: str) -> Any:
-    """One `extra=` field off a captured record — `getattr`, because a `LogRecord` has no schema."""
-    return getattr(record, name)
 
 
 # --------------------------------------------------------------------------------------------
@@ -79,7 +69,7 @@ def test_an_unauthenticated_401_books_no_session_id_from_the_path(
 
     assert response.status_code == 401
     (access,) = [r for r in _records(caplog, "chemclaw.api.middleware") if hasattr(r, "route")]
-    stamped = _field(access, "session_id")
+    stamped = log_field(access, "session_id")
     assert stamped == "", (
         f"a caller who never authenticated put {len(stamped)} characters into the access log's "
         "session_id"
@@ -165,7 +155,7 @@ def test_the_authz_refusal_clips_the_id_it_refused(caplog: pytest.LogCaptureFixt
         assert client.get(f"/sessions/{'Z' * 8000}/messages").status_code == 404
 
     (refusal,) = [r for r in _records(caplog, "chemclaw.api.deps") if hasattr(r, "target")]
-    target = _field(refusal, "target")
+    target = log_field(refusal, "target")
     assert len(refusal.getMessage()) < 400, (
         f"the refused id is still interpolated whole ({len(refusal.getMessage())} chars)"
     )
@@ -220,7 +210,7 @@ def test_a_validation_error_location_cannot_carry_the_caller_s_own_key(
         response = asyncio.run(_drive())
 
     (logged,) = [r for r in caplog.records if hasattr(r, "first_locations")]
-    (location,) = _field(logged, "first_locations")
+    (location,) = log_field(logged, "first_locations")
     assert len(location) <= _MAX_LOGGED_CHARS + 16, f"{len(location)} characters of caller key"
     assert len(response.body) < 1_000, f"the body echoed {len(response.body)} bytes"
 
@@ -250,7 +240,7 @@ def test_an_error_object_that_is_not_a_mapping_still_answers_the_caller(
     assert response.status_code == 422
     assert json.loads(response.body)["detail"] == ["a bare string"]
     (logged,) = [r for r in caplog.records if hasattr(r, "first_locations")]
-    assert _field(logged, "first_locations") == [], (
+    assert log_field(logged, "first_locations") == [], (
         "an error object with no `loc` to read must drop out of the log line, not out of the "
         "handler"
     )

@@ -129,10 +129,11 @@ def _is_really_cancelled() -> bool:
 class ConnectorSpec:
     """How to reach one connector for one turn, on the LangGraph engine.
 
-    The LangChain twin of an unconnected `ConnectorMcpTool`, and it is a *description* rather than
-    an object with a lifecycle because that is the shape the library takes: `create_session` opens
-    a connection from a `Connection` mapping, and `load_mcp_tools` needs the live session before any
-    tool exists. So the thing built per turn is this, and the thing opened per turn is the session.
+    One connector as the LangChain stack needs it *before* anything is connected, and it is a
+    *description* rather than an object with a lifecycle because that is the shape the library
+    takes: `create_session` opens a connection from a `Connection` mapping, and `load_mcp_tools`
+    needs the live session before any tool exists. So the thing built per turn is this, and the
+    thing opened per turn is the session.
 
     `allowed_tools` is carried here rather than applied at build time because it is the manifest's
     agent-facing allow-list, narrowed again by a profile, and it has to be applied to what the

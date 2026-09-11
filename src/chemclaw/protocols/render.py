@@ -29,7 +29,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.protocols.models import (
     DesignStatus,
-    DesignSummary,
     ExperimentDesign,
     Factor,
     FactorLevel,
@@ -118,14 +117,6 @@ class ProtocolReadout(BaseModel):
     receipt: ProtocolReceipt
     design: ExperimentDesign
     markdown: str
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-
-class DesignListing(BaseModel):
-    """A page of designs."""
-
-    designs: list[DesignSummary] = Field(default_factory=list)
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 

@@ -180,10 +180,15 @@ reclamation was left to an autovacuum this repository neither configures nor che
 no migration can reach the checkpoint tables, because `setup()` creates them after migrations run —
 which applies verbatim to per-table autovacuum storage parameters, so the three highest-churn
 tables in the system are exactly the three no migration can tune. `_vacuum_swept_tables` is the
-answer, `bytes_on_disk`/`bytes_reclaimed` are what the pass reports, and `chemclaw_table_bytes`,
-`chemclaw_retention_rows_deleted_total` and `chemclaw_retention_bytes_reclaimed_total` are what an
-operator can alert on — there was no such series at all before, so "the sweep removed nothing" and
-"the sweep has not run since Tuesday" were the same silence.
+answer, `bytes_on_disk`/`bytes_reclaimed` are what the pass reports, and `chemclaw_table_bytes` is
+what an operator can alert on — there was no such series at all before, so "the sweep removed
+nothing" and "the sweep has not run since Tuesday" were the same silence. That gauge family is the
+*only* series this module publishes, and the narrowing was taken on measurement rather than
+forgotten: a `rows_deleted{table}` and a `bytes_reclaimed{table}` counter were both written and
+both removed, because neither could carry an alert that fires on a sick deployment without also
+firing on a healthy one. `_publish_store_size` and the declaration in `core/metrics.py` carry that
+argument; this sentence went on naming the two deleted counters as alert targets long after
+they were gone.
 """
 
 import logging

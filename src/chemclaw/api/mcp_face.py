@@ -41,6 +41,7 @@ from mcp.server.fastmcp import FastMCP
 from chemclaw.agent import tool_modules as _tool_modules  # noqa: F401
 from chemclaw.agent.authz import READ_ONLY_TOOLS
 from chemclaw.connectors.server import connector_app
+from chemclaw.core.asgi import transport_bounds
 from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import registered_tools
 
@@ -196,6 +197,9 @@ def main() -> None:
         port=settings.service_port,
         # Ours is already applied above; letting uvicorn install its own would replace it.
         log_config=None,
+        # The three bounds D-2026-08-01 established. This face serves the same kind of traffic the
+        # front door does and ran without them until 2026-09-11 — see `core/asgi.transport_bounds`.
+        **transport_bounds(),
     )
 
 
