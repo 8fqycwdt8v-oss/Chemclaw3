@@ -105,8 +105,9 @@ class Progression(BaseModel):
 def order_chronologically(reactions: list[OrdReaction]) -> list[OrdReaction]:
     """Sort runs by the date they were performed, undated ones last, ties broken by id.
 
-    Total and deterministic, which matters because the result is rendered into a PR-gated note:
-    the same set of runs must produce the same note or every re-synthesis is a spurious diff.
+    Total and deterministic, which matters because the result is rendered into a note that
+    re-synthesis rewrites in place: the same set of runs must produce the same note or every
+    re-synthesis is a spurious diff.
     Undated runs sort last rather than first — an unknown date is not "long ago", and putting
     them at the end keeps the dated prefix a clean timeline.
     """

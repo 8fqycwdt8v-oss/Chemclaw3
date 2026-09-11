@@ -31,8 +31,9 @@ Two rules make that safe, and both are enforced rather than documented:
   An observation may direct what you look for; it may never be the evidence for a claim.
 
 Stored in Postgres rather than Git, which *preserves* "git is the source of truth" precisely
-because these are not truth: with no review, Git buys PR noise and repo churn and returns nothing,
-while a table gives cheap upsert-accumulation, TTL eviction, and no branch-per-note explosion.
+because these are not truth: with no review, Git buys a commit per candidate and repo churn and
+returns nothing, while a table gives cheap upsert-accumulation, TTL eviction, and no
+file-per-observation explosion.
 """
 
 import logging
@@ -66,8 +67,9 @@ ObservationOrigin = Literal["corpus-mining", "interaction"]
 #
 # `retired -> open` only. The column holds exactly three values (migration `025` constrains it), and
 # `promoted` must survive re-observation untouched: the miners keep re-observing a promoted finding
-# by construction, and reopening it would re-promote it on the next sweep and open the same PR every
-# night — the failure `test_a_promoted_observation_leaves_the_open_set` exists to prevent.
+# by construction, and reopening it would re-promote it on the next sweep and write the same
+# playbook note every night — the failure `test_a_promoted_observation_leaves_the_open_set`
+# exists to prevent.
 _REVIVE = """
     status = CASE WHEN observations.status = 'retired' THEN 'open' ELSE observations.status END"""
 
@@ -260,10 +262,10 @@ class Observation(BaseModel):
         anchor. That was true while one workflow did both. D-2026-08-25 split promotion out so that
         no timer opens a pull request, and the precondition went with it: mining now runs daily
         with no promotion, so a subset row can sit `open` and over-threshold while an anchor move
-        mints a superset row that is over-threshold too, and one later promotion opens two PRs for
-        one finding. `durable.observation_jobs.promote_observations_activity` now supersedes the
-        subset instead of relying on the ordering — a guarantee the code makes rather than one the
-        schedule happened to provide.
+        mints a superset row that is over-threshold too, and one later promotion writes two
+        playbook notes for one finding. `durable.observation_jobs.promote_observations_activity`
+        now supersedes the subset instead of relying on the ordering — a guarantee the code makes
+        rather than one the schedule happened to provide.
 
         **Kept rather than replaced, deliberately.** A merge-stable key would have to survive two
         clusters becoming one, and a single-linkage cluster's identity *is* its membership — the
@@ -423,7 +425,7 @@ async def promoted_observations() -> list[Observation]:
 
 
 async def set_status(observation_id: str, status: ObservationStatus) -> None:
-    """Move one observation to `status` (promoted once its PR is opened, or retired)."""
+    """Move one observation to `status` (promoted once its playbook note is written, or retired)."""
     async with _connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(_SET_STATUS, (status, observation_id))

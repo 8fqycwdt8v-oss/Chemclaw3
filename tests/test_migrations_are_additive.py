@@ -57,6 +57,7 @@ from chemclaw.core.migrate import _statements
 
 _MIGRATIONS = Path(__file__).resolve().parents[1] / "infra" / "sql"
 _DECISIONS = Path(__file__).resolve().parents[1] / "docs" / "decisions"
+_RUNBOOK = Path(__file__).resolve().parents[1] / "docs" / "guides" / "runbook.md"
 
 # How an identifier may be spelled. Both patterns below used to say `\w+`, which is the bare
 # lower-case spelling every merged migration happens to use and only that one — so a
@@ -517,6 +518,47 @@ def test_no_exemption_outlives_its_migration() -> None:
     )
     orphaned = sorted(registered - on_disk)
     assert not orphaned, f"reviewed exemption(s) naming no migration: {orphaned}"
+
+
+def test_every_reviewed_break_tells_the_operator_what_it_costs() -> None:
+    """A break somebody reviewed is one the runbook names, or the review reached nobody.
+
+    Both registers below record that a break was *examined* — the ADR, and the statements the
+    exemption covers. Neither records what the operator actually loses when the previous image
+    comes back, and neither is a thing an operator reads at 3 a.m.; the runbook's "What is still
+    broken after a successful rollback" table is. Those two were maintained side by side by hand
+    and drifted exactly as that arrangement always does: measured at this commit's parent, the
+    table covered five of `_REVIEWED_ROLLBACK_BREAKS`'s eight entries and neither of
+    `_REVIEWED_SEMANTIC_BREAKS`'s two, with the three newest breaks reviewed, exempted, and
+    invisible to the person rolling back.
+
+    So the register is the authority and the runbook is checked against it. One direction only:
+    the table also carries rows for breaks the patterns catch without review (083, 090), and
+    those are not defects — the register says a break was judged, this table says what it costs,
+    and only the second is something a register could never hold.
+    """
+    section = _runbook_rollback_section()
+    registered = set(_REVIEWED_ROLLBACK_BREAKS) | set(_REVIEWED_SEMANTIC_BREAKS)
+    missing = sorted(name for name in registered if name[:3] not in section)
+    assert not missing, (
+        f"reviewed break(s) the rollback runbook never names: {missing}. A reviewed exemption "
+        "records that somebody looked; it does not tell an operator what the restored image "
+        f"loses. Add a row to {_RUNBOOK.name}'s 'What is still broken after a successful "
+        "rollback' table, or say there why this one costs nothing."
+    )
+
+
+def _runbook_rollback_section() -> str:
+    """The runbook prose between the rollback-consequences heading and the next one.
+
+    Scoped rather than searched whole on purpose: migration numbers appear all over this runbook
+    (`046` and `058` in the replay recipe, for two), so a substring search against the whole file
+    would pass on a mention that has nothing to do with rolling back.
+    """
+    text = _RUNBOOK.read_text(encoding="utf-8")
+    start = text.index("**What is still broken after a successful rollback**")
+    end = text.index("**What no rollback undoes**", start)
+    return text[start:end]
 
 
 def test_a_judged_break_is_one_no_pattern_could_have_found() -> None:

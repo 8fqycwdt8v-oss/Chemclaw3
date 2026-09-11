@@ -35,7 +35,8 @@ from chemclaw.kg.note import Note
 def compound_note(smiles: str) -> Note:
     """Build the `compound` note for a molecule (idempotent: same compound, same note).
 
-    Authored as `agent`, so it passes the PR-gate like every other machine-written note (D-005).
+    Authored as `agent`, which is how a reader weighs it — there is no gate it passes first
+    (D-2026-09-05-the-gate-follows-behaviour-not-knowledge).
 
     Every field is derived from the **standardized** SMILES, the same key `compound_id` hashes and
     the same one `ingest.eln.ingest` indexes on. Deriving the id from one notion of sameness and
@@ -67,16 +68,17 @@ def compound_note(smiles: str) -> Note:
 def compound_dependencies(note: Note) -> list[Note]:
     """The compound notes `note` links to that a submission must carry with it (STO-7).
 
-    The rule that unblocked crosslinking, stated once and applied at the gate rather than in every
-    note-minting connector: **a note that links a compound note gets that compound note.** Because
-    `compound_id` is derived from the canonical structure, the target is fully determined by the
-    SMILES the note already carries — so the note can honestly write `[[compound-<hash>]]` and the
-    PR-gate makes the link resolve, instead of the note avoiding the link because the target might
-    not exist yet (the removed DFT bundle's note builder documented exactly that avoidance).
+    The rule that unblocked crosslinking, stated once and applied at the one write path rather
+    than in every note-minting connector: **a note that links a compound note gets that compound
+    note.** Because `compound_id` is derived from the canonical structure, the target is fully
+    determined by the SMILES the note already carries — so the note can honestly write
+    `[[compound-<hash>]]` and `kg/record.py` writes the dependency before the note that cites it,
+    instead of the note avoiding the link because the target might not exist yet (the removed DFT
+    bundle's note builder documented exactly that avoidance).
 
     Returns an empty list for a note with no `compound_smiles` or one that does not link its
-    compound. Re-proposing a compound note that is already merged is a no-op: it renders
-    byte-identically, so the submission produces no diff for it.
+    compound. Re-writing a compound note already in the graph is a no-op: it renders
+    byte-identically, so the write produces no diff for it.
     """
     if not note.compound_smiles:
         return []

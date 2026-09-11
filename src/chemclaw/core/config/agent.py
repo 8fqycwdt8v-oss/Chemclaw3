@@ -202,13 +202,20 @@ class AgentSettings(BaseSettings):
     # see its own comment below.
     #
     # **What it costs, stated because it is a behavioural change**: the thread allowance falls from
-    # the 57,000 the paragraph above held fixed to **43,000** at the prefix bound (more at today's
+    # the 57,000 the paragraph above held fixed to **42,500** at the prefix bound (more at today's
     # measured prefix, which sits below the bound — `tests/test_compaction.py` measures it, and this
     # line does not, because the figure it carried moved by 507 tokens between two measurements a
     # day apart), and the band between this and the lossless edit's trigger falls
-    # from 27,000 to 13,000. That band is squeezed by the prefix, not by this number: at a
-    # 76,000-token prefix bound and a 128k window the whole policy has 43,000 tokens of thread to
+    # from 27,000 to 12,500. That band is squeezed by the prefix, not by this number: at a
+    # 76,500-token prefix bound and a 128k window the whole policy has 42,500 tokens of thread to
     # divide between two edits. The instrument for wanting more is a narrower prefix.
+    #
+    # **Those three are arithmetic, not measurements, and they shipped stale anyway** — 43,000,
+    # 13,000 and 76,000, each falsified by wave 13 raising the ratchet ceiling 500 without touching
+    # this comment. They are `BUDGET_THREAD_ALLOWANCE`, this default minus
+    # `agent_tool_result_clear_trigger`, and `tests/test_context_floor.PREFIX_BOUND`; all three are
+    # asserted there, so read them there and treat the digits here as an illustration of the
+    # squeeze rather than as the authority on it.
     #
     # **And the second bound is now real.** `llm_context_window_tokens` stays 0 in code — this
     # repository cannot know an endpoint's window — but `deploy/helm/chemclaw/values.yaml` states

@@ -1,7 +1,7 @@
 """Scheduled rebuild of the derived note index (gap SCH-2).
 
 F10-A shipped the dense+lexical `note_index` and a `make reindex` CLI, but nothing kept it in step
-with the graph. The graph changes on every merged PR, so under `retrieval_mode="hybrid"` the vector
+with the graph. The graph changes on every note write, so under `retrieval_mode="hybrid"` the vector
 and lexical legs were serving whatever the last manual reindex captured — and because RRF fusion is
 score-agnostic, a stale entry ranks confidently *alongside* live graph hits with no staleness
 signal. That is worse than the legs being absent.

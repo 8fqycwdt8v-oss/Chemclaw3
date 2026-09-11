@@ -72,11 +72,14 @@ the fourth answer.
 
 ## Writing it into a note
 
-Any agent-proposed note describing a procedure must carry a `## Hazards` section when the screen
-returns a flag at or above the configured gate severity — `kg-validate` enforces this, so a note
-missing it fails the PR check rather than reaching a reviewer without its warnings. Write the
-section as the flags plus their standard controls, and state plainly that it is a structural
-screen, not an assessment.
+Any note you write describing a procedure must carry a `## Hazards` section when the screen
+returns a flag. **Nothing enforces this and nothing reviews it**: the `kg-validate` hazard gate was
+retired (`D-2026-08-15-safety-is-a-tool-not-a-gate`) and the PR gate over agent-written knowledge
+was deleted (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), so the note lands readable
+the moment you write it. A missing section is not caught later by anybody — it is simply missing,
+under your own `created_by: agent`, beside its citations, where a chemist meets it as evidence.
+Write the section as the flags plus their standard controls, and state plainly that it is a
+structural screen, not an assessment.
 
 ## Where this ends
 

@@ -838,3 +838,45 @@ def test_escaping_a_disguised_tag_cannot_carry_a_read_past_the_ceiling() -> None
         f"({delivered / ceiling:.2f}x): escaping a disguised tag expands the text after the "
         "cut, so the layer that expands it has to re-check the bound"
     )
+
+
+def test_a_connector_success_survives_the_ceiling_instead_of_being_evicted(probe: int) -> None:
+    """The sibling of the test above, and the consequence is *eviction*, not overflow.
+
+    The error and scratchpad results go through `_defanged`, which re-bounds after escaping and
+    says why. A connector *success* went through `_framed`, which wrapped and returned — and
+    `_framed_content` defangs before it wraps, so it runs the same blunt second pass: once an
+    invisible character reveals a disguised tag it escapes every `<`, a 4x expansion of the one
+    character worth filling a payload with.
+
+    **What that costs is not an over-long result, and asserting the obvious thing here is
+    vacuous.** Measured on the shipped ceiling: a payload cut to 60,000 by the nested
+    `bound_tool_results` left `_framed` at 236,129 characters — and upstream's evict threshold
+    then replaced the whole result with `Tool result too large, the result of this tool call …
+    was saved in …`, **1,750 characters**. So `delivered <= ceiling` passes against the defect
+    (1,750 ≤ 60,000) while the chemist loses the entire answer. The property worth asserting is
+    that the result is still *itself*.
+
+    Driven through the live connector for the reason the scratchpad twin gives: the defect is in
+    the composition of two correct pieces. `echo` is the tool because the payload has to be
+    attacker-controlled, which is the premise defanging exists for.
+    """
+    ceiling = settings.agent_max_tool_result_chars
+    opening, _ = envelope_delimiters("probe")
+    disguised = f"{opening[0]}\u200b{opening[1:]}"
+    payload = disguised + "<" * (ceiling - len(disguised))
+
+    message = _connector_turn(probe, "echo", {"text": payload})
+    spans = _text_spans(message.content)
+    delivered = sum(len(span) for span in spans)
+
+    assert "was saved in" not in spans[0], (
+        f"a connector success was evicted wholesale ({delivered} characters, beginning "
+        f"{spans[0][:60]!r}): the success branch wraps without re-checking the bound, so escaping "
+        "a disguised tag carried it past upstream's evict threshold and the model got a pointer "
+        "instead of the answer"
+    )
+    assert delivered <= ceiling, (
+        f"a connector success delivered {delivered} characters against a {ceiling} ceiling "
+        f"({delivered / ceiling:.2f}x)"
+    )

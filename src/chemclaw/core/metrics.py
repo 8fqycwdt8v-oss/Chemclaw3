@@ -1082,7 +1082,7 @@ _GAUGES: dict[str, str] = {
     # is a first-class signal rather than something to find in a log (`connectors.health`).
     "chemclaw_connectors_unhealthy": "Enabled connectors that could not be reached (0 = all up).",
     # The knowledge graph coming *in*, which had no signal at all: `chemclaw_notes_publish_failures
-    # _total` covers a note failing to reach the PR-gate and nothing covered the corpus failing to
+    # _total` covers a note failing to be written and nothing covered the corpus failing to
     # reach a pod. `deploy/knowledge-sync.sh`'s loop swallows a failed refresh on purpose, so the
     # pod serves a frozen graph and keeps citing it. Read from the volume by the process that
     # answers from it (`kg/graph.py::knowledge_sync_age_seconds`), so it needs no sidecar and no

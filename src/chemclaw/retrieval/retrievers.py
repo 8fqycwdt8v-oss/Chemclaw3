@@ -20,7 +20,12 @@ from chemclaw.core.embeddings import embed_texts
 from chemclaw.kg.conflicts import NoteConflicts, conflict_index
 from chemclaw.kg.graph import load_notes
 from chemclaw.kg.note import Note, note_id_for_reaction, strip_links
-from chemclaw.kg.search import query_terms, term_coverage, term_frequencies
+from chemclaw.kg.search import (
+    matched_terms,
+    query_terms,
+    term_coverage,
+    term_frequencies,
+)
 from chemclaw.retrieval.evidence import EvidenceChunk, Hits, RetrieverSkip
 from chemclaw.retrieval.vector_index import IndexHit, NoteIndex, default_note_index
 from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions
@@ -47,7 +52,7 @@ def _excerpt(body: str, terms: Sequence[str] = ()) -> str:
     case by construction, since their yields and outcomes are in a table at the end — the same
     failure `core/config/retrieval.py` articulates for `protocol_digest_max_chars`. In the
     conversational tools this is recoverable with `expand_note`; in `report_note` it is the final
-    artifact a chemist signs at the PR-gate, and nothing there expands.
+    artifact a chemist reads, and nothing there expands.
 
     `terms` are the query's terms (`kg.search.query_terms`) when the caller has them. With none, or
     with a match the head already covers, or with a match that is *not* in the body at all — the
@@ -68,24 +73,75 @@ def _excerpt(body: str, terms: Sequence[str] = ()) -> str:
 
 
 def _window_start(text: str, terms: Sequence[str], window: int) -> int:
-    """Where to start the excerpt so the first matched term is inside it. `0` = the head.
+    """Where to start the excerpt so it shows as much of the query as one window can. `0` = head.
 
     A third of the budget is spent on what came *before* the match, because a number with no
     sentence in front of it is a number a reader cannot place — and the sentence a chemist wants
     is the one the match is in, not the one after it. The start is pushed forward to the next word
     boundary so the excerpt does not open mid-word, which is how the pre-windowing excerpts ended
     (`in place of the cla`) and is no better at the other end.
+
+    **Which match, though — and the answer used to be "the earliest", which is no answer.** This
+    took `min(offsets)`: the first occurrence of *any* matched term, and then `return 0` whenever
+    that offset was inside the budget. So a single framing word in the note's opening line pinned
+    the excerpt to the head, and the docstring's promise that "the window follows the match"
+    guaranteed only the *first* term. Measured over the 19 independently-authored
+    `knowledge.yaml` probes: of 30 delivered gold chunks whose body exceeds the 240-char budget,
+    **25 were the plain head** and 13 showed every term that matched. `rxn-suzuki-biaryl` for
+    "what isolated yield did the Suzuki coupling of 4-bromoanisole give" lost `isolated` and
+    `yield` — the question and the 76% answer — to `suzuki` in its title.
+
+    **The rule now: the candidate window that shows the most of the query, weighted by how much
+    each term narrows *this note*.** A term occurring once in the body points at a place; a term
+    occurring six times points nowhere, so it is worth `1/6` of the one that occurs once. That
+    weighting is what separates this from counting distinct visible terms, which was measured
+    beside it: plain counting scores marginally better on term visibility (94/110 against 92/110,
+    inside the noise on 110 judgments) and leaves the p01 excerpt on the title, because it values
+    `give` and `isolated` equally. Weighted: visibility 84/110 → 92/110, full coverage 13/30 →
+    17/30, `isolated yield: 76%` inside the excerpt. Two chunks show one fewer term than before
+    and one of those two gained the playbook's actual `Order to try:` line, so the raw count is
+    not the objective either.
+
+    **Rarity is measured inside the note, not against the corpus.** An IDF would be better and is
+    reachable on the graph leg only — `_rank_by_terms` has the document frequencies, the dense and
+    lexical legs have nothing — and one excerpt rule that behaves differently per leg is the drift
+    `kg.search` exists to prevent. `str.count` over the body is available at every call site and
+    is a real signal about where in *this* note the query is answered.
+
+    Bounded by construction: one candidate per matched term plus the head, each scored by a
+    substring test over a `window`-length slice, so the cost is the query's own length and not the
+    body's.
     """
     lowered = text.casefold()
-    offsets = [found for term in terms if (found := lowered.find(term.casefold())) >= 0]
-    if not offsets:
+    # A matched term and how many times it occurs, which is both the weight and the membership
+    # test. Absent terms drop out here, so a note found by its id, type, tags or SMILES has no
+    # candidate at all and falls through to the head — the pre-windowing behaviour, unchanged.
+    folded = dict.fromkeys(term.casefold() for term in terms)
+    counts = {term: count for term in folded if (count := lowered.count(term))}
+    if not counts:
         return 0
-    first = min(offsets)
-    if first < window:  # the head already shows it
+    limit = max(0, len(text) - window)
+    candidates = {0} | {min(max(0, lowered.find(term) - window // 3), limit) for term in counts}
+
+    def shown(start: int) -> float:
+        """The weight of the query visible in the window opening at `start`."""
+        visible = lowered[start : start + window]
+        return sum(1.0 / count for term, count in counts.items() if term in visible)
+
+    # Ties go to the earliest start, so the head wins whenever it shows as much as anywhere else
+    # and an excerpt only moves when moving it buys something.
+    start = max(candidates, key=lambda candidate: (shown(candidate), -candidate))
+    if start == 0:  # the head already shows as much of the query as any window can
         return 0
-    start = min(first - window // 3, len(text) - window)
+    # Push forward to a word boundary, but never past the first term the chosen window shows —
+    # otherwise the nudge that keeps the excerpt from opening mid-word cuts off what it opened for.
+    anchor = min(
+        offset
+        for term in counts
+        if (offset := lowered.find(term, start)) >= 0 and offset + len(term) <= start + window
+    )
     space = text.find(" ", start)
-    return start if space < 0 or space >= first else space + 1
+    return start if space < 0 or space >= anchor else space + 1
 
 
 async def _eligible_notes(directory: Path, filters: dict[str, Any]) -> dict[str, Note]:
@@ -96,6 +152,11 @@ async def _eligible_notes(directory: Path, filters: dict[str, Any]) -> dict[str,
     served as current evidence (KM-7), whichever entry point found it. It stays in Git and
     reachable by explicit id; it is only dropped from current-evidence sweeps. Offloaded to a
     thread — `load_notes` is a synchronous full parse. Empty when the directory is absent.
+
+    **"Current" means as of the period the caller asked about.** A sweep that names no window is
+    asking what is true now and is judged against today, which is every unwindowed call and the
+    whole of KM-7's intent. A sweep that names one is asking what was true then, and judging it
+    against today too was a second date rule nobody requested — see `_eligible_sync`.
 
     `since`/`until` window the notes by `valid_from` — for a reaction note, the day the
     experiment was run (D-162). "What have I tried on this step in the last two weeks" was
@@ -124,7 +185,9 @@ def _eligible_sync(directory: Path, filters: dict[str, Any], today: date) -> dic
     hand-back between them on the event loop again.
 
     `today` is passed in rather than read here so that every note in one sweep is judged current
-    against the same date, and so a test can drive the currency rule without moving the clock.
+    against the same date, and so a test can drive the currency rule without moving the clock. It
+    governs the *unwindowed* sweep only — a query that names a period is asking what was true
+    then, and the comment on the currency branch below says why that is one rule and not two.
     """
     want_type = filters.get("type")
     want_tag = filters.get("tag")
@@ -135,14 +198,29 @@ def _eligible_sync(directory: Path, filters: dict[str, Any], today: date) -> dic
     # the event loop before it. It is a small syscall, but this runs per retriever per query on the
     # loop that serves every other concurrent turn, and the reason the load below is offloaded
     # applies to it unchanged.
+    windowed = since is not None or until is not None
     for note in _load_if_present(directory):
-        if not note.is_current(today):
-            continue
         if want_type is not None and note.type != want_type:
             continue
         if want_tag is not None and want_tag not in note.tags:
             continue
         if not _in_window(note, since, until):
+            continue
+        # **Currency is judged as of the period the caller asked about.** With no window that is
+        # today, unchanged (KM-7, D-055): a superseded playbook is not an answer to "what do we do
+        # now". With one, this test used to run *first* and against `date.today()` anyway, so a
+        # windowed sweep applied two date rules — the caller's, and one it did not ask for — and
+        # the second silently removed notes the first had admitted. A note valid through 2024 is
+        # exactly what "what did we recommend in 2024" is asking for, and it returned zero chunks
+        # from every leg, shape-identical to a period with nothing in it.
+        #
+        # No overlap predicate is written here, deliberately: for any note `_in_window` admits,
+        # `since <= valid_from <= until` holds and `valid_to >= valid_from` is a `Note` model
+        # invariant, so the note *was* current somewhere inside the requested period by
+        # construction. A second check asserting that would be a control with nothing to decide —
+        # the `reject_widening` shape. `tests/test_retrieval_window.py` asserts the implication
+        # instead, so loosening `_in_window` fails there rather than re-opening this quietly.
+        if not windowed and not note.is_current(today):
             continue
         notes[note.id] = note
     return notes
@@ -423,12 +501,13 @@ class FingerprintReactionRetriever:
         The sweep's `sources_failed` channel is where that belongs, and `fanout._sweep` puts it
         there the moment this stops swallowing it — the same correction the share, warehouse and
         vendored halves already took.
-        Each match cites the corresponding `reaction-<id>` note. Unlike the graph retriever, this
-        cites from the fingerprint index, whose entries are written at ingestion while the note
-        is merged separately (D-018): a reaction indexed but whose note is still pending review
-        yields a citation the report PR's kg-validate flags as dangling — surfacing the pending
-        note to the reviewer (the PR-gate working), not silently corrupting the graph. Reports
-        are therefore run over the merged corpus, as campaigns are.
+        Each match cites the corresponding `reaction-<id>` record, which resolves *outside* the
+        markdown graph (`kg.note.EXTERNAL_ID_PREFIXES`): the transcription is a row written by the
+        same `ingest_reaction` call that indexed the fingerprint, so a hit and the thing it cites
+        land together. This paragraph used to state a precondition instead — the note was "merged
+        separately" and a still-pending one reached a reviewer as a dangling citation on the
+        report's own PR — and both halves are gone: D-2026-08-25 made the transcription a row and
+        `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the PR.
 
         **`type`/`tag`/`since`/`until` narrow the result** when given (D-170). The fingerprint index
         holds bits and a label and knows nothing about note metadata, so the filter cannot go into
@@ -521,6 +600,13 @@ def _chunk_for(
     partially-provenanced evidence list, the worst of the three possible states. `terms` is what
     lets the excerpt window on the match rather than on the head of the body; a caller with no
     terms to offer gets the prefix, which is the honest fallback (see `_excerpt`).
+
+    `terms` is also what fills `matched_terms`, and it is filled *here* for the same reason
+    provenance is: every note-backed leg goes through this function, so the graph leg's widened
+    hit and the dense leg's semantic hit report match quality on the same terms. A caller with no
+    terms leaves the field `None` — "not reported" rather than "nothing matched", the distinction
+    `Hits.found` argues one class over. The membership test is `term_coverage`'s, so the field
+    cannot disagree with the number that decided the note was a hit at all.
     """
     return EvidenceChunk(
         content=_excerpt(note.body, terms) or note.id,
@@ -532,6 +618,9 @@ def _chunk_for(
         created_by=note.created_by,
         source=note.source or "",
         confidence=note.confidence,
+        # `None`, not `[]`, when the caller offered no terms: "not reported" rather than
+        # "nothing matched", the distinction `Hits.found` argues one class over.
+        matched_terms=matched_terms(note, terms) if terms else None,
     )
 
 

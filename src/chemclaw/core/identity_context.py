@@ -24,8 +24,10 @@ re-adds one — and re-adding the carrier beside `_current_actor` rather than ov
 rule asks for. An invariant is not a function.
 
 **Plain `str`/`frozenset` values and nothing but `contextvars`**, which is what makes this kernel
-material: seven packages read the turn's actor — audit, the authz gate, the PR-gate, connector
-identity headers, template activities, the CLI, and `core.logging`'s own `ContextFilter`. It sat
+material: the turn's actor is read across seven packages — audit, the authz gate, connector
+identity headers, template activities, the durable interceptor, the CLI, and `core.logging`'s own
+`ContextFilter`. (The PR-gate stood in that list until
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`; `kg` reads no contextvar.) It sat
 in `chemclaw.agent` until the R2 layering move, where it was the single import that put `kg` and
 `connectors` above the conversation layer and forced `core/logging.py` to reach for it lazily.
 """

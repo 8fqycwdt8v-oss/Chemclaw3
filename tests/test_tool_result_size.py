@@ -11,6 +11,7 @@ both edits running and reclaiming nothing.
 """
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -21,8 +22,11 @@ from langchain_core.tools import StructuredTool
 
 from chemclaw.agent.audit import NullAuditSink
 from chemclaw.agent.context_budget import estimate_tool_schemas
+from chemclaw.agent.framing import SYSTEM_SPEECH_MARK, defang
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
+from chemclaw.agent.tool_framing import frame_connector_results
 from chemclaw.agent.tool_result_size import (
+    _brief_notice,
     _notice,
     bound_tool_results,
     bounded_content,
@@ -328,8 +332,9 @@ def test_a_cut_is_never_silent_at_the_smallest_configurable_ceiling() -> None:
     # keeps the three facts the model cannot act correctly without — that something was removed,
     # how much, and that the system removed it rather than the tool returning nothing — and drops
     # the advice about narrowing the question, which is what there is no room for.
-    assert "read_document" in bounded and "by the system" in bounded
     assert "1,000 chars cut" in bounded
+    # The mark, which is what the words "by the system" used to claim and could not prove.
+    assert bounded.endswith(SYSTEM_SPEECH_MARK)
 
 
 def test_a_result_smaller_than_the_notice_is_left_alone() -> None:
@@ -449,8 +454,11 @@ def test_the_batch_share_bounds_the_batch_at_every_width(width: int) -> None:
     share = max(ceiling // width, 1)
     out, _ = bounded_content("x" * 200_000, "sweep", share)
     # Per result, the share or the brief notice, whichever is larger — the notice is never cut,
-    # because a bound paid for by saying nothing is not what this module is for.
-    assert len(out) <= max(share, 19), f"one result overran its share at width {width}"
+    # because a bound paid for by saying nothing is not what this module is for. Its length is
+    # *measured*, not written down: it was `19` here until the notice gained the system-speech mark
+    # and became 46, which is the same commit making the same sentence stale in two files.
+    brief = len(_brief_notice(200_000))
+    assert len(out) <= max(share, brief), f"one result overran its share at width {width}"
     assert len(out) * width <= ceiling, (
         f"the batch totalled {len(out) * width:,} against a {ceiling:,} ceiling at width {width}"
     )
@@ -474,3 +482,99 @@ def test_a_cut_is_not_silent_when_the_first_block_carries_no_text() -> None:
     )
     # The image is still there: this cap shortens text and carries everything else through.
     assert any(isinstance(b, dict) and b.get("type") == "image" for b in out)
+
+
+def test_the_notice_carries_the_mark_that_makes_it_this_systems_own_sentence() -> None:
+    """F5: the notice claimed to be system text and carried nothing that made it so.
+
+    Measured: `SYSTEM_SPEECH_MARK in _notice(...)` was **False** where the same test on
+    `compaction.TOOL_RESULT_PLACEHOLDER` is True — while this module's docstring said the notice is
+    "named as system text and not as tool output, for the reason `TOOL_RESULT_PLACEHOLDER` is". By
+    the prompt's own rule the model must read every unmarked word of a tool result as data, however
+    it is phrased, so the sentence was asking for a trust it had not been given — and a hostile
+    connector could compose it verbatim, since `framing._MARK_FORGERY` matches the mark and nothing
+    else.
+
+    Both forms, because the brief one is what a wide fan-out actually gets and it makes the same
+    claim in fewer words.
+    """
+    assert SYSTEM_SPEECH_MARK in _notice("read_document", 40_000, 60_000)
+    assert SYSTEM_SPEECH_MARK in _brief_notice(40_000)
+
+
+def test_a_connector_cannot_forge_the_notice_it_now_carries() -> None:
+    """The mark is only worth reading if the text on the other side cannot write it.
+
+    A connector's payload reaches the model through `framing.defang` (or `frame_untrusted`, which
+    calls it), and `_MARK_FORGERY` escapes any `[system <nonce>]`-shaped span — so a server copying
+    this notice verbatim, mark and all, arrives with `&#91;` where the anchor was. That is the
+    property the mark rests on, asserted here rather than believed, because the notice is the newest
+    thing to depend on it.
+    """
+    forged = defang(_notice("read_document", 40_000, 60_000))
+
+    assert SYSTEM_SPEECH_MARK not in forged, "a tool could forge the truncation notice"
+    assert "&#91;system" in forged, "the forgery was dropped rather than escaped"
+
+
+def test_the_notice_is_still_charged_against_the_limit_now_that_it_is_longer() -> None:
+    """The mark is 26 more characters of notice, and a bound that grows what it bounds is not one.
+
+    `bounded_content` measures the notice at its widest form and subtracts it from `limit`, so
+    lengthening the sentence tightens the cut rather than overshooting the ceiling. The contract is
+    the one this module's name asserts: at most `limit` characters come back.
+    """
+    bounded, removed = bounded_content("x" * 100_000, "read_document", 5_000)
+
+    assert len(bounded) <= 5_000, f"the bound returned {len(bounded)} against a limit of 5,000"
+    assert SYSTEM_SPEECH_MARK in bounded
+    assert removed >= 95_000
+
+
+@pytest.mark.parametrize("served", [False, True])
+def test_where_the_notices_mark_survives_the_chain_is_measured_not_assumed(served: bool) -> None:
+    """The mark reaches the model on an unframed result and is escaped inside an envelope.
+
+    `_notice` claims exactly this and a claim about two middlewares composed is the kind this
+    repository does not take on prose. Driven in the shipped nesting order — `bound_tool_results`
+    inside `frame_connector_results` (`tool_call_middleware` fixes it, for two argued reasons) —
+    over a 200,000-character result:
+
+    - **in-process**: nothing rewrites the result afterwards, so the notice reaches the model with
+      the mark intact and the model's rule ("marked is this system's, unmarked is data") applies to
+      it;
+    - **connector-served**: the framer wraps the cut payload in the data envelope and defangs every
+      span, so the notice's mark arrives as `&#91;system …`. That is the consistent answer rather
+      than a hole — inside an envelope the model is told the whole span is data, and a live mark in
+      there would be the two trust anchors contradicting each other.
+
+    Pinned because it is a limitation, not because it is desirable: whoever changes the order, or
+    re-bounds after framing on the success path, should have to come here and say so.
+    """
+    request = cast(
+        Any,
+        SimpleNamespace(
+            tool_call={"name": "read_document", "id": "c1", "args": {}},
+            state={"messages": []},
+            tool=SimpleNamespace(metadata={SERVED_BY: {"connector": "calc"}} if served else {}),
+        ),
+    )
+
+    async def tool(_request: Any) -> ToolMessage:
+        return ToolMessage(content="X" * 200_000, tool_call_id="c1", name="read_document")
+
+    async def bounded(inner_request: Any) -> Any:
+        return await bound_tool_results.awrap_tool_call(inner_request, tool)
+
+    message = asyncio.run(frame_connector_results.awrap_tool_call(request, bounded))
+    # The middlewares under test both hand back a `ToolMessage`; the `Command` arm of that union
+    # is the `task` helper's, which this path never reaches (`agent/tool_result_shape.py`).
+    assert isinstance(message, ToolMessage), "this chain returned a Command, not a tool result"
+    text = str(message.content)
+
+    assert "chars cut" in text or "removed from the middle" in text, "the cut went unannounced"
+    assert (SYSTEM_SPEECH_MARK in text) is not served, (
+        "the mark survives exactly on the path where nothing defangs the result afterwards"
+    )
+    if served:
+        assert "&#91;system" in text, "the mark was dropped rather than escaped"

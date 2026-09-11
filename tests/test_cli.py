@@ -22,6 +22,7 @@ from chemclaw.agent.plan_gate import EMPTY_PLAN_HASH, plan_identity
 from chemclaw.cli import chat as cli
 from chemclaw.core.config import settings
 from chemclaw.core.turn_text import get_current_user_texts
+from tests.fakes_langgraph import ScriptedChatModel
 
 
 def test_admin_identity_is_the_configured_actor_holding_the_configured_roles(
@@ -110,7 +111,7 @@ def test_converse_returns_the_final_assistant_text() -> None:
             assert state["messages"] == [("user", "hi")]
             return {"messages": [AIMessage(content="  55% yield  ")]}
 
-    assert asyncio.run(cli.converse(_Agent(), "hi")).strip() == "55% yield"
+    assert asyncio.run(cli.converse(_Agent(), "hi")).answer.strip() == "55% yield"
 
 
 def test_a_capped_turn_never_answers_with_a_tool_result() -> None:
@@ -135,7 +136,7 @@ def test_a_capped_turn_never_answers_with_a_tool_result() -> None:
                 ]
             }
 
-    assert asyncio.run(cli.converse(_Agent(), "hi")) == "checking the notes"
+    assert asyncio.run(cli.converse(_Agent(), "hi")).answer == "checking the notes"
 
 
 def test_successive_turns_continue_one_thread() -> None:
@@ -445,6 +446,155 @@ def test_the_console_script_returns_an_exit_code_on_the_happy_path_too(
     a caller had no way to tell a refused startup from an answered question except by reading the
     traceback. Asserted beside the failure case so the error path cannot be satisfied by returning
     1 unconditionally.
+
+    **`main` now passes `_run`'s status through rather than discarding it**, which is what makes
+    the degraded exit reachable at all: it used to run `_run` for effect and `return 0`, so a
+    one-shot run that printed an incomplete answer exited exactly as a whole one did.
     """
-    monkeypatch.setattr(cli, "_run", lambda _args: asyncio.sleep(0))
+
+    async def _clean(_args: object) -> int:
+        return 0
+
+    async def _degraded(_args: object) -> int:
+        return cli._DEGRADED_EXIT
+
+    monkeypatch.setattr(cli, "_run", _clean)
     assert cli.main(["--admin", "-m", "hello"]) == 0
+    monkeypatch.setattr(cli, "_run", _degraded)
+    assert cli.main(["--admin", "-m", "hello"]) == cli._DEGRADED_EXIT
+
+
+# --- a capped turn stops printing as a finished one ----------------------------------------------
+
+
+def _capped_script(first: str) -> Iterator[AIMessage]:
+    """A model that keeps calling `ls` and only eventually answers.
+
+    `first` is the content of the tool-calling turns, so the same script covers both shapes the
+    cap can leave behind: a partial sentence, and nothing at all.
+    """
+    usage = {"input_tokens": 50, "output_tokens": 10, "total_tokens": 60, "input_token_details": {}}
+    calls = [
+        AIMessage(
+            content=first,
+            tool_calls=[{"name": "ls", "args": {"path": "."}, "id": f"c{index}"}],
+            usage_metadata=usage,
+        )
+        for index in range(6)
+    ]
+    answer = "FINAL: pKa 3.49, confirmed against ELN batch 12."
+    done = AIMessage(content=answer, usage_metadata=usage)
+    return iter([*calls, *([done] * 41)])
+
+
+def _cli_turn(
+    monkeypatch: pytest.MonkeyPatch, cap: int, first: str = "Still checking; one more source."
+) -> cli.CliTurn:
+    """Drive `converse` on a **real compiled graph** at `cap`, and report the turn.
+
+    The graph is real for the reason `agent/loop_cap.py` gives about its own `can_jump_to`: calling
+    the hook proves the decision, and only a compiled graph proves the decision is connected to
+    anything. The cap's flag lives on an untracked channel, so nothing short of a real run leaves
+    it where `converse` reads it.
+    """
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", cap)
+    monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
+    model = ScriptedChatModel(messages=_capped_script(first))
+    monkeypatch.setattr("chemclaw.agent.langgraph_agent.build_chat_model", lambda *_a, **_k: model)
+    agent = build_langgraph_agent(actor="chemist-1")
+    return asyncio.run(cli.converse(agent, "what is the pKa of CCO?", session_id=f"cli-{cap}"))
+
+
+def test_a_capped_cli_turn_says_so_and_a_whole_one_says_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The defect and its control arm, both on a real graph with a real cap.
+
+    Measured before the fix:
+
+        === CLI, LOOP-CAPPED (cap=2) ===  stdout: 'Still checking; one more source.'
+        === CLI, COMPLETE   (cap=20) ===  stdout: 'FINAL: pKa 3.49, confirmed against ELN batch 12.'
+
+    Exit code 0 in both. The control arm is here because a notice on every turn would satisfy the
+    first assertion and mean nothing.
+    """
+    capped = _cli_turn(monkeypatch, 2)
+    assert capped.answer == "Still checking; one more source."
+    assert capped.notice == "incomplete: the turn reached its model-call cap before it finished"
+
+    whole = _cli_turn(monkeypatch, 20)
+    assert whole.answer == "FINAL: pKa 3.49, confirmed against ELN batch 12."
+    assert whole.notice == ""
+
+
+def test_a_turn_that_answered_nothing_is_not_a_blank_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At a cap of 1 over a silent first turn the CLI printed `''` and exited 0.
+
+    The cap outranks the empty answer, which is `api/runner._settle_outcome`'s ranking rather than
+    a second one: a turn stopped by its cap is a capped turn whether or not it managed prose.
+    """
+    turn = _cli_turn(monkeypatch, 1, first="")
+
+    assert turn.answer == ""
+    assert turn.notice == "incomplete: the turn reached its model-call cap before it finished"
+
+
+def test_the_notice_names_the_spend_cap_and_the_silent_turn_apart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other two endings a returned state can carry, read off the state rather than a graph.
+
+    Driven on states rather than a graph because the *readers* are what is under test here and the
+    graph arm above already proves they are wired to a real run — and because reaching the spend
+    cap through a real turn needs a billed-token budget, which is what the cap arm above sets to 0
+    precisely so the loop cap is the one that fires.
+    """
+    assert cli.turn_notice({"spend_capped": True}, "partial") == (
+        "incomplete: the turn reached its token budget before it finished"
+    )
+    assert cli.turn_notice({}, "") == "incomplete: the turn produced no answer"
+    assert cli.turn_notice({}, "a whole answer") == ""
+
+
+def test_a_one_shot_run_exits_nonzero_when_the_answer_it_printed_is_incomplete(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The exit code is the only channel a piped `-m` run has, and it said success.
+
+    stdout keeps the answer — a degraded answer is delivered, marked, not withheld — the reason
+    goes to stderr beside the connector warnings this function already writes there, and the status
+    is `_DEGRADED_EXIT` so a script can tell it from both a clean answer and a refused startup.
+    """
+    monkeypatch.setattr(cli, "resolve_identity", lambda **_k: ("admin@localhost", frozenset()))
+    monkeypatch.setattr(cli, "process_checkpointer", _none)
+    monkeypatch.setattr(cli, "open_connector_specs", _no_connectors)
+    monkeypatch.setattr(cli, "_build_cli_agent", lambda *_a, **_k: object())
+
+    async def _capped(_agent: object, _prompt: str, **_kwargs: object) -> cli.CliTurn:
+        return cli.CliTurn("  Still checking; one more source.  ", "incomplete: capped")
+
+    monkeypatch.setattr(cli, "converse", _capped)
+    code = asyncio.run(cli._run(cli._parse_args(["--admin", "-m", "pKa of CCO?"])))
+    captured = capsys.readouterr()
+
+    assert code == cli._DEGRADED_EXIT
+    assert captured.out == "Still checking; one more source.\n"
+    assert "warning: incomplete: capped" in captured.err
+
+    async def _whole(_agent: object, _prompt: str, **_kwargs: object) -> cli.CliTurn:
+        return cli.CliTurn("FINAL: pKa 3.49.", "")
+
+    monkeypatch.setattr(cli, "converse", _whole)
+    assert asyncio.run(cli._run(cli._parse_args(["--admin", "-m", "pKa of CCO?"]))) == 0
+
+
+async def _none() -> None:
+    """No checkpointer — this CLI run takes one turn against a stand-in agent."""
+    return None
+
+
+async def _no_connectors(_stack: object, _specs: object) -> tuple[list[Any], list[str]]:
+    """No MCP subprocesses, and none reported unreachable: the notice under test is the turn's."""
+    return [], []

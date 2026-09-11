@@ -523,9 +523,10 @@ def _attributes(
 def _provenance(template: str, payload: dict[str, Any], entry_id: str) -> str:
     """Render the citation, refusing one that resolved to nothing.
 
-    `OrdReaction.provenance` is required and becomes the note's `source` — the line a reviewer reads
-    to find the original record. A template whose every reference was empty would produce a citation
-    pointing nowhere, so it falls back to naming the entry rather than proposing an uncitable note.
+    `OrdReaction.provenance` is required and becomes the record's `source` — the line a reader
+    follows to find the original entry. A template whose every reference was empty would produce a
+    citation pointing nowhere, so it falls back to naming the entry rather than emitting one
+    nobody can follow.
     """
     rendered = render_template(template, payload).strip(": ").strip()
     return rendered or f"warehouse:{entry_id}"

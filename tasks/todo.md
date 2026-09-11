@@ -140,19 +140,19 @@ existing things as the control that replaced it: provenance on every chunk, cita
 the point of use, and contradiction. Wave 8 asked whether those exist. This asks whether they
 **work for the reader**, which is the only form in which they are a control at all.
 
-- [ ] W14.1 Drive an agent-written note end to end: does it land carrying `created_by: agent`,
+- [x] W14.1 Drive an agent-written note end to end: does it land carrying `created_by: agent`,
       reach a reader beside its citations, and can a chemist tell it from a reviewed one?
-- [ ] W14.2 Contradiction and supersede, driven: write a note that contradicts a held one and
+- [x] W14.2 Contradiction and supersede, driven: write a note that contradicts a held one and
       check what a later retrieval actually returns — including bi-temporal `valid_to`.
-- [ ] W14.3 Retrieval quality measured rather than asserted: a probe set, recall and precision, and
+- [x] W14.3 Retrieval quality measured rather than asserted: a probe set, recall and precision, and
       a re-check that the cap still does not starve a source (D-2026-08-01).
-- [ ] W14.4 The answer surface: SSE, CLI, report harness, evidence pack. Does an error tell the
+- [x] W14.4 The answer surface: SSE, CLI, report harness, evidence pack. Does an error tell the
       truth, and is a **degraded** answer distinguishable from a complete one?
-- [ ] W14.5 `explain` and the audit trail read back on a current session, end to end — the
+- [x] W14.5 `explain` and the audit trail read back on a current session, end to end — the
       reconstruction that was silently blank once already.
-- [ ] W14.6 What the model is told about its own controls versus what is true (the withdrawn-claim
+- [x] W14.6 What the model is told about its own controls versus what is true (the withdrawn-claim
       shape): every present-tense sentence in the system prompt and the skills listing, checked.
-- [ ] W14 fix stage, gate, PR, merge on green
+- [x] W14 fix stage, gate, PR, merge on green
 
 ## Wave 15 — Residue, and the operator's incident
 
@@ -168,6 +168,96 @@ the point of use, and contradiction. Wave 8 asked whether those exist. This asks
 ## Review
 
 *(the closing review is written at the end of wave 15; each wave adds its own section)*
+
+### Wave 14 — the chemist's view (MERGED: see PR below)
+
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted the PR gate
+over agent-written knowledge and named three existing things as the
+control that replaced it. Wave 8 asked whether those exist and are called.
+This asked whether they **work for the reader** — the only form in which
+they are a control at all. Four review agents, four fix agents.
+
+**Every one of the four premises was wrong, and three of the disproofs
+were worth more than the fix they displaced.**
+
+1. **Retrieval quality was already measured.** `evals/retrieval.py` scores
+   a gold set and *refuses to report* under a note-index configuration
+   rather than mislabel a graph-only number. What replaced the premise was
+   worse: measured against an independent gold set built from someone
+   else's probe prose, the shipped default scored **0.5682 / 0.1645**.
+2. **The SSE front door is already honest.** Caps, a dark durable tier, a
+   dark connector and three kinds of tool failure each produce a distinct,
+   truthful event *before* the answer. The premise held on every other
+   surface.
+3. **Provenance survives every hop** — file → indexer → chunk → tool JSON
+   → `NoteView` → `GET /notes` → UI. Bi-temporal retirement works
+   *including on the index legs*: a stub index whose sole top hit was the
+   retired note returned `[]`.
+4. Only W14.6's premise was upheld outright — and the largest false claim
+   was not where it pointed.
+
+### The three findings that matter
+
+- **`calc_refs` is write-only.** `record_knowledge_note` promises the
+  model that a stale calculation can be traced to the conclusions drawn
+  from it. No route resolves a key, and the reverse index had **zero
+  callers** — one of its two mentions naming a function that exists
+  nowhere in the tree. The ADR's second control, disproved for computed
+  claims.
+- **Wave 13's own fix had a hole.** `_SAFETY_RULES` was appended
+  *un-narrowed*, so it told 5 of the 6 profiles that do not bind
+  `record_knowledge_note` to record findings through it — the exact defect
+  wave 13 closed, on the one path its fix could not see.
+- **The template step a chemist signs.** Run with two bundles dark, it
+  returned the **byte-identical** string a complete one did while the job
+  record said it succeeded. The comment above that very call describes the
+  defect it fixed; that fix had landed in the cost ledger only.
+
+### Where measurement overturned the fix, not just the review
+
+- **`D-2026-08-01`'s shape, reproduced twice inside this wave.** The
+  articulate sort-key explanation contributes **exactly zero** once the
+  real cause (no interrogative stopwords) is fixed — the two-change arm is
+  byte-identical to the stopword arm alone. Then again on the excerpt
+  rule: max-distinct scored higher on the headline metric and left the
+  load-bearing case on the title.
+- **The review's own arm B is unreproducible.** Its word list is not
+  recorded; the nearest list in its own harness measures 0.6364, not the
+  0.6818 it reported. Recorded as a disagreement, not a correction.
+- **The date-window finding was half wrong.** Two sufficient causes, one
+  named: `_in_window` rejects that note independently, and the whole
+  corpus is empty under that window.
+- **A rolling-deploy hazard inside a wave-14 fix.** Annotating the
+  Temporal activity's return type alone fails **every in-flight template
+  run across every rolling deploy** — wave 12's subject reappearing inside
+  a wave-14 change.
+
+### Decisions taken, with what each costs
+
+- **The lexical leg stays off.** After the stopword fix the premise for
+  turning it on is gone — `graph` ties it on recall and beats it on
+  precision. And flipping it takes the repository's **only**
+  retrieval-quality gate dark in every CI run, trading a measured control
+  for an unmeasured 6.8pp.
+- **The reverse lookup is deleted, not given a tool**: 256 tokens of
+  permanent prefix against shared headroom, and it could not borrow
+  `NoteSearch` without lying.
+- **The contradiction marker went in the payload, not the prompt** — a
+  `computed_field` that is empty when nothing is marked. The prompt block
+  offered beside it was **declined**: ~110 tokens of permanent prefix to
+  pre-announce what the payload says exactly when relevant.
+- **The plan gate is still undescribed**, deliberately: `gate_applies` is
+  config-dependent and the shipped default is harness-off, so an
+  unconditional sentence would be this wave's own defect.
+
+**Net: retrieval 0.5682 → 0.7045 recall, 0.1645 → 0.2138 precision, at
+zero prefix cost; the prompt scope gave back 201 tokens.**
+
+**Deliberately open**: whether a real model *acts* on any of this is
+ungraded — there is no gateway here, and a probe is filed so the number
+exists the day there is one. Also `tool_framing`'s success branch never
+re-bounds after defang, which is what escapes the truncation mark inside
+an envelope.
 
 ### Wave 13 — day one and day one thousand (MERGED: see PR below)
 

@@ -20,7 +20,7 @@ from datetime import date
 from itertools import zip_longest
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, computed_field
 
 from chemclaw.agent.framing import defang, frame_untrusted
 from chemclaw.core.config import settings
@@ -73,6 +73,49 @@ class EvidenceSweepWithRefusals(EvidenceSweep):
     # Why the rejection ledger could not be asked; empty when it was. An unreachable ledger and a
     # clean corpus must not render alike — the same rule `sources_failed` exists for one field up.
     refusals_unavailable: str = ""
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def disputed(self) -> str:
+        """What a chunk's `conflicts_with` means, in the payload, when there is one to read.
+
+        **The marker shipped for a year with nothing anywhere saying what it was for.** Measured
+        across the whole conversational path: the words "conflict", "contradict" and "disput"
+        appear **zero** times in the assembled system prompt, zero times in this tool's own
+        description, zero times in any `SKILL.md`, and `EvidenceChunk`'s nine fields carried
+        `description=None` for all of them — so a model was handed a list of note ids and no
+        reason to chase them. The sibling control has a block of prompt to itself — the assembled
+        system prompt names `created_by` three times — and the note *that* labels is less
+        dangerous than a claim something in the corpus has refuted.
+
+        **Said here rather than in the `Returns:` paragraph, and the reason is a measured
+        constraint rather than a preference.** `gather_evidence`'s schema is 881 tokens against
+        `tests/test_context_floor.py`'s 900-token per-tool cap; the shortest honest version of
+        this cost 73 and put it at 954, which that ratchet refuses — correctly, because every
+        token of it is re-sent on every model call whether or not any chunk is marked. A computed
+        field costs **nothing** in the prefix and appears only when there is a disagreement to
+        report, which is also the argument `NoteSearch.verdict` and `FingerprintSearch.verdict`
+        already make: a docstring is read once when the tool is defined, and the payload is what
+        sits in the context window while the answer is being written.
+
+        The sentence is `retrieval/harness.py`'s own, verbatim, because the *report* path has
+        rendered exactly this per chunk since the marker existed and two renderings of one warning
+        would drift. What is added is the part only this path has: when the cap cuts the disputing
+        notes out of the sweep — measured, the refuted claim survived and **both** disputers were
+        cut — the ids in `conflicts_with` are the whole remaining trace, and they are reachable
+        only by `expand_note`.
+        """
+        marked = [chunk for chunk in self.chunks if chunk.conflicts_with]
+        if not marked:
+            return ""
+        ids = sorted({note for chunk in marked for note in chunk.conflicts_with})
+        return (
+            f"DISPUTED: {len(marked)} of these chunks come from a note that other notes disagree "
+            f"with ({', '.join(ids)}) — these notes disagree; do not read this and a conflicting "
+            "note as two independent confirmations. A disputing note is often not in this sweep "
+            "at all, because the cap cut it: expand_note each id in a chunk's conflicts_with "
+            "before you rest an answer on that chunk, and say the claim is disputed either way."
+        )
 
 
 def _text_retrievers() -> list[SourceRetriever]:

@@ -1369,8 +1369,16 @@ ordinary reconnect into a crash loop — but since 2026-09-04 it *does* report o
 `worker_ready` is `worker.is_running and broker_seen_recently()` (see §(x)). So `/readyz` on the
 named pod **is** a second opinion: 503 says this worker has heard nothing from the broker for
 `jobs_in_flight_refresh_seconds` × 3, which points at the broker or the path to it; 200 says the
-worker is polling and the alert is about what it is polling *for* — a queue name, a task-queue
-mismatch, or a bundle whose worker was never rendered. Read the pod's own
+worker is polling and the alert is about what it is polling *for* — a queue name or a task-queue
+mismatch.
+
+**It cannot point at a bundle whose worker was never rendered, and this section used to say it
+could.** The rule is `sum by (pod) (temporal_num_pollers{…}) == 0`, so a queue no pod polls
+produces no series, `sum by (pod)` yields an *empty vector*, and `== 0` matches nothing — green
+for ever, measured against a deliberately mistyped queue name with the whole fleet healthy. That
+case is detected by nothing in this stack today: every probe was 200, `chemclaw_connectors_unhealthy`
+was 0, and the only trace of the wedged run was `chemclaw_jobs_in_flight 1` with no age beside it.
+Read the pod's own
 `chemclaw_degraded_total{subsystem="jobs_in_flight"}` either way, and check the **broker** before
 restarting anything.
 
@@ -1702,9 +1710,13 @@ ALTER TABLE note_proposals   ADD CONSTRAINT note_proposals_state_known
     CHECK (state IN ('open', 'merged', 'rejected', 'failed', 'superseded'));
 ```
 
-Without them the run stops at file 46 of 91 (`DuplicateObject … session_messages_shape_known`) or at
-58 (`UndefinedObject … note_proposals_state_known`). The authority is `_REVIEWED_REPLAY_BREAKS` in
-`tests/test_migrations_are_additive.py`, which carries the recipe beside each one.
+Without them the run stops at `046_review_hardening_indexes.sql`
+(`DuplicateObject … session_messages_shape_known`) or at `058_note_proposal_superseded.sql`
+(`UndefinedObject … note_proposals_state_known`). The files are named rather than counted: this
+sentence shipped as "file 46 of 91", which was wrong twice over — 046 is the *48th* file, not the
+46th, and the total is whatever `infra/sql/*.sql` holds today. The authority is
+`_REVIEWED_REPLAY_BREAKS` in `tests/test_migrations_are_additive.py`, which carries the recipe
+beside each one.
 
 ## A fingerprint index or a label corpus mid-rebuild
 
@@ -1752,9 +1764,21 @@ nothing", not "the database matches this image".
 | 088 | **every turn's cost ledger row**, indefinitely | only where monitoring is deployed: `ChemclawSubsystemDegraded` fires, and `operations.activity.spend` then reports an empty ledger with no error |
 | 090 | the calculation cache stops filtering by epoch, so `find_calculations` offers superseded results to the model as evidence to cite | **no — this one is silent.** Treat browse results as unfiltered until you are forward again |
 | 089 | the publish lease is ignored, so a drain re-claims a row another is mid-delivering and the attempt budget empties twice as fast | no |
-| 083 | nothing — but note it *erased* the zeros 082 backfilled, and rolling forward cannot restore them | n/a |
+| 091 | nothing — the column widened to double precision and the restored image writes a Python float into it exactly as before | n/a |
+| 092 | a session taking its **first** turn during the rollback window comes back with `session_owners.updated_at` NULL, so it is missing from `GET /sessions` until it is spoken in again; the pre-092 image derives the order and never maintains the column | **no — this one is silent.** Re-run 092's backfill by hand to restore it |
+| 093 | `record_observation` stops writing: the restored image's `ON CONFLICT (property, input_hash)` no longer plans against a key that now carries `source`, so no observation is recorded and no calibration is scored | yes — `InvalidColumnReference` in the log |
+| 094 | every fingerprint and corpus-reaction write stops: the restored image's `ON CONFLICT (id)` / `(source, id)` no longer plans against a key that now carries `definition` | yes — `InvalidColumnReference` in the log |
 
 058 is exempted and does not actually break: its `CHECK` widens.
+
+**This table is checked against the register rather than maintained beside it.** It shipped covering
+five of `_REVIEWED_ROLLBACK_BREAKS`'s eight entries and neither of `_REVIEWED_SEMANTIC_BREAKS`'s two
+— the three newest breaks were reviewed, exempted and never written down here, which is the failure
+mode a table maintained by hand beside a register always has.
+`tests/test_migrations_are_additive.py::test_every_reviewed_break_tells_the_operator_what_it_costs`
+now fails if a registered break is missing from this section. The rows the registers do *not* hold
+(083, 090) stay: the register records that a break was reviewed, and this column records what the
+operator loses, which is not a thing the register can carry.
 
 **What no rollback undoes**: the ConfigMap history, the `post-upgrade` data conversion, and any row
 the newer generation wrote in a shape the older one cannot read.
@@ -1818,6 +1842,23 @@ The chart deploys none of these. It states what it requires of whoever does.
 | **Postgres** | the audit trail, sessions, the calculation cache, the note index, job records | the audit trail is the only part that cannot be regenerated from anything; the cache is regenerable by definition (D-011) and the note index is rebuilt by `make reindex` |
 | **Temporal** | in-flight workflow history | running jobs die; finished results survive in `job_records` (D-157) and the calculation store |
 | **Knowledge git repo** | every merged note | the corpus. It is a git repo, so any clone is a backup — including each pod's sidecar checkout |
+
+**The table above is about a store being *lost*, and corruption is the opposite case.** "The cache
+is regenerable by definition (D-011)" is true of an empty `calculation_results` and exactly false of
+a wrong one: D-011 is *why* a persisted result is never recomputed, so a value altered in place is
+served for ever. Measured — one row edited by hand moved a reaction energy from −23.2 to −42.0
+kcal/mol, an 18.8 kcal/mol error inside a stated ±3.0 uncertainty, and every signal stayed green:
+the durable smoke test passed 5/5, the poisoned row counted as a cache **hit** (raising the hit-ratio
+panel), and 0 of 13 eval metrics moved, because that baseline is 11 pinned retrieval cases and 2
+live ones and touches no computed value.
+
+Nothing in the metric plane can be made to notice this: every alert reads a counter incremented on a
+failure, refusal, absence or capacity path, and a well-formed wrong answer takes the success path.
+`artifact_blobs` is content-addressed and `schema_migrations` carries a checksum; `calculation_results`,
+the store whose contents *are* the science, has neither. **Restoring it is not a recovery step you
+can reach for, because nothing tells you to.** The controls that do apply are the ones at the point
+of use: the citations a chemist checks, and a second run of the same job — two rows for one reaction
+that disagree is, today, the entire detection surface.
 
 Only one of the three needs a *point-in-time* story rather than a recent-snapshot one, and it is the
 audit trail — because it is the only store where "we lost the last hour" means the answer to "who

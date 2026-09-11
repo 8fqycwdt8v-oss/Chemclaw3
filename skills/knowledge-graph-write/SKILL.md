@@ -31,9 +31,11 @@ graph.
   `interaction`. For anything you are proposing be *run* rather than reporting as
   done — a set of conditions for an untried substrate, the next step in a series,
   a batch from `suggest_next_experiment` — the kind is type `experiment-proposal`:
-  one type for one decision a reviewer makes, whatever produced it. It must cite
-  the evidence it rests on. Eval cases are *not* graph notes — they live under
-  `eval_case_dir`, outside the graph (D-014).
+  one type for one decision, whatever produced it. Nobody approves it; the chemist
+  meets it as evidence, and the type is what tells them they are reading something
+  to run rather than something that was run. It must cite the evidence it rests on.
+  Eval cases are *not* graph notes — they live under `eval_case_dir`, outside the
+  graph (D-014).
 - **id**: stable, human-readable, unique (e.g. `reaction-suzuki-<substrate>`);
   the id is how other notes link to this one, so it should not change.
 - **links**: connect the note to what it relates to with `[[wikilinks]]` in the

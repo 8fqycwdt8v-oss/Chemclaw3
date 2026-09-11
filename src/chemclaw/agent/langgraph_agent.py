@@ -70,7 +70,7 @@ advertising a mechanism after the mechanism is gone.
 
 import logging
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from pathlib import Path
 from typing import Annotated, Any, NotRequired, cast
 
@@ -280,11 +280,6 @@ def build_langgraph_agent(
     # own docstring says the single definition is for. It matters twice as much now: `_subagents`
     # compiles a second graph through this same function, so an un-shared walk is four.
     labelled = _labelled(_skill_dirs())
-    skills = skills_backend(prof, tools, labelled=labelled)
-    # The scratchpad wraps the skills routes rather than replacing them: the skills middleware and
-    # the filesystem tools must read the *same* backend object, or the role narrowing computed for
-    # one would not apply to the other.
-    backend = scratchpad_backend(skills, store)
     # The profile's effort, falling back to `llm_effort` inside `build_chat_model`. Resolved from
     # the profile here rather than read from settings there, because effort is a property of *this
     # agent* — a property-lookup profile and a campaign-design profile want different answers from
@@ -300,6 +295,24 @@ def build_langgraph_agent(
     # first-party tool's schema cannot vary between turns, and what it measured. The connector
     # tools are already `BaseTool`s belonging to this turn's sessions and pass through untouched.
     bound = [*(as_structured_tool(fn) for fn in tools), *(connectors or [])]
+    # **Built after `bound`, and that is what the capability gate is narrowed by.** `skill_permits`'
+    # third predicate hides a skill whose *every* declared tool is absent, and the set it measured
+    # absence against was `_advertised_names` — the in-process registry plus every enabled bundle's
+    # *manifest* allow-list. A manifest does not move when a server is unreachable, so the listing
+    # did not either: measured, a deployment with its bundles declared and `Chemclaw3-mcp` not
+    # serving offered `safety-screening` and `charge-tables-and-mass-efficiency` with **none** of
+    # their six tools bound — and `safety-screening`'s own description says "three of those now have
+    # a table", against instructions that (correctly, on that surface) deny exactly those three. One
+    # system message, both claims.
+    #
+    # The prose has been narrowed against `bound` since the blocks landed; this is the same
+    # narrowing for the other half of what the model is told, from the same set, so the two cannot
+    # disagree about what this turn can reach.
+    skills = skills_backend(prof, tools, labelled=labelled, available={t.name for t in bound})
+    # The scratchpad wraps the skills routes rather than replacing them: the skills middleware and
+    # the filesystem tools must read the *same* backend object, or the role narrowing computed for
+    # one would not apply to the other.
+    backend = scratchpad_backend(skills, store)
     shared: dict[str, Any] = {
         "model": chat_model,
         "tools": bound,
@@ -676,40 +689,81 @@ NO_SKILLS = (
     "obviously wants one.)"
 )
 
-#: The Deepagents/Agents provenance sentence, removed from the skills prompt this deployment sends.
+#: Every passage cut out of upstream's skills prompt, each named as this file refers to it.
 #:
-#: It tells the model that a source labelled "Deepagents" is specific to this agent tool and one
-#: labelled "Agents" is shared across every agent tool *on this machine*. Neither label exists
-#: here: `_labelled` derives each source's label from its directory (`skills`, or a bundle's name),
-#: there is no machine-wide skills tree, and nothing else on the pod shares one. So the sentence is
-#: a distinction the model cannot apply to anything it can see, in a prompt this file otherwise
-#: pays for by the token.
+#: **Removed by substring rather than by re-declaring upstream's template**, so the ~40 lines that
+#: are correct keep arriving from upstream on every bump and only the removals are this
+#: repository's decision. `_skills_prompt` refuses rather than silently keeping one when upstream
+#: rewords it, and `tests/test_upstream_surface.py` pins each passage from the other side so a bump
+#: names the sentence that moved instead of raising from inside a graph build.
 #:
-#: Removed by substring rather than by re-declaring upstream's template, so the ~40 lines that are
-#: correct keep arriving from upstream and only the one false sentence is this repository's
-#: decision. `_skills_prompt` refuses rather than silently keeping it when upstream rewords.
-_UPSTREAM_SOURCE_LABELS = (
-    'Sources labeled "Deepagents" are specific to this agent tool; sources labeled "Agents" are '
-    "shared across all agent tools on this machine.\n\n"
+#: The first was here alone until 2026-09-10, when the whole system message was taken off the wire
+#: at four fleet states and read rather than assumed. What the other three cost is not tokens (they
+#: are ~130 between them) but truth: this deployment **withholds `execute`**
+#: (`agent/scratchpad.py`) on stated egress and shell grounds, and the prompt was instructing the
+#: model in every configuration to run a skill's Python scripts and to "use any helper scripts". A
+#: capability declined by posture, described as available, is the same defect as prose naming a tool
+#: nothing binds — and its example was a "web-research skill" that does not exist, in a system with
+#: no egress to research with.
+#:
+#: 1. The Deepagents/Agents provenance sentence. It tells the model that a source labelled
+#:    "Deepagents" is specific to this agent tool and one labelled "Agents" is shared across every
+#:    agent tool *on this machine*. Neither label exists here: `_labelled` derives each source's
+#:    label from its directory (`skills`, or a bundle's name), there is no machine-wide skills tree,
+#:    and nothing else on the pod shares one.
+#: 2. The "Executing Skill Scripts" section — there is no verb here that runs one.
+#: 3. The example workflow, which is the second instruction to run scripts *and* the only mention
+#:    of a skill that has never existed in this tree.
+#: 4. The same absent skill again, as the parenthetical example of a request matching a skill.
+_SKILLS_PROMPT_REMOVALS: tuple[tuple[str, str], ...] = (
+    (
+        'Sources labeled "Deepagents" are specific to this agent tool; sources labeled "Agents" '
+        "are shared across all agent tools on this machine.\n\n",
+        "the Deepagents/Agents source-label sentence, which names labels no source here "
+        "carries and a machine-wide skills tree that does not exist",
+    ),
+    (
+        "**Executing Skill Scripts:**\nSkills may contain Python scripts or other executable "
+        "files. Always use absolute paths from the skill list.\n\n",
+        "the Executing Skill Scripts section, in a deployment whose `scratchpad_tools()` "
+        "withholds `execute` so that nothing here can run one",
+    ),
+    (
+        '**Example Workflow:**\n\nUser: "Can you research the latest developments in quantum '
+        'computing?"\n\n1. Check available skills -> See "web-research" skill with its '
+        "path\n2. "
+        'Read the full skill file: `read_file(file_path="...", limit=1000)`\n3. Follow the '
+        "skill's research workflow (search -> organize -> synthesize)\n4. Use any helper "
+        "scripts with absolute paths\n\n",
+        "the example workflow, which names a web-research skill this tree does not have and "
+        "tells the model to use its helper scripts",
+    ),
+    (
+        ' (e.g., "research X" -> web-research skill)',
+        "the web-research example in When to Use Skills, naming the same absent skill",
+    ),
 )
 
 
 def _skills_prompt() -> str:
-    """Upstream's skills prompt minus the one sentence that is false here.
+    """Upstream's skills prompt minus every passage that is false on this deployment.
 
     Raises:
-        RuntimeError: When the sentence is no longer in upstream's template. Loud, because the
-            alternative is that a bump quietly restores it — and because the substring is the whole
-            mechanism, so its absence means this function has stopped doing anything at all.
+        RuntimeError: When one of the passages is no longer in upstream's template. Loud, because
+            the alternative is that a bump quietly restores it — and because the substring is the
+            whole mechanism, so its absence means this function has stopped doing that removal at
+            all. Named one at a time, since the fix differs per passage.
     """
-    if _UPSTREAM_SOURCE_LABELS not in SKILLS_SYSTEM_PROMPT:
-        raise RuntimeError(
-            "deepagents' SKILLS_SYSTEM_PROMPT no longer contains the Deepagents/Agents "
-            "source-label sentence this deployment removes; re-check what upstream now says "
-            "about source labels "
-            "and update `_UPSTREAM_SOURCE_LABELS` (agent/langgraph_agent.py)"
-        )
-    return SKILLS_SYSTEM_PROMPT.replace(_UPSTREAM_SOURCE_LABELS, "", 1)
+    prompt = SKILLS_SYSTEM_PROMPT
+    for passage, description in _SKILLS_PROMPT_REMOVALS:
+        if passage not in prompt:
+            raise RuntimeError(
+                f"deepagents' SKILLS_SYSTEM_PROMPT no longer contains {description}, which this "
+                "deployment removes; re-read upstream's template and update "
+                f"`_SKILLS_PROMPT_REMOVALS` (agent/langgraph_agent.py). Missing: {passage!r}"
+            )
+        prompt = prompt.replace(passage, "", 1)
+    return prompt
 
 
 def _harness_middleware(profile: AgentProfile) -> list[Any]:
@@ -785,7 +839,11 @@ def _skills_middleware(backend: CompositeBackend, labelled: list[tuple[str, str]
 
 
 def skills_backend(
-    profile: AgentProfile, tools: list[Any], *, labelled: list[tuple[str, str]] | None = None
+    profile: AgentProfile,
+    tools: list[Any],
+    *,
+    labelled: list[tuple[str, str]] | None = None,
+    available: Collection[str] | None = None,
 ) -> CompositeBackend:
     """The skills backend for one profile — a backend that can only reach what it may.
 
@@ -812,6 +870,19 @@ def skills_backend(
 
     `labelled` is the caller's already-walked `(label, directory)` list, so one build walks the
     trees once; omitting it walks them here, which is what a test building a backend alone wants.
+
+    Args:
+        profile: The profile whose surface the capability predicate is scoped by.
+        tools: This profile's resolved in-process tools, used only to answer "what does this
+            profile advertise" when no `available` is supplied.
+        labelled: The caller's already-walked `(label, directory)` list per skills tree.
+        available: The tool names this turn actually **binds**, connectors included — what
+            `build_langgraph_agent` passes, and what the prose is narrowed against. Omitted, this
+            falls back to `_advertised_names`, the *manifest* answer: correct for a caller asking
+            what a profile advertises (`tests/test_langgraph_agent.py` checks the tree against the
+            manifests that way) and wrong for a turn, because a manifest does not move when a
+            server is unreachable. The argument exists because that difference was measured
+            offering two skills with no bound tool at all.
     """
     labelled = labelled if labelled is not None else _labelled(_skill_dirs())
     dirs = [directory for _label, directory in labelled]
@@ -819,7 +890,7 @@ def skills_backend(
     permits = skill_permits(
         enabled=settings.skills_enabled_list,
         declared=declared,
-        available=_advertised_names(profile, tools),
+        available=available if available is not None else _advertised_names(profile, tools),
         gates=settings.skill_role_gates,
     )
     _log_narrowing(profile, declared, permits)

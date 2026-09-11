@@ -307,11 +307,13 @@ async def decide_plan(
 ) -> Response:
     """Approve (or reject) a harness plan — the pre-execution gate, finally enforced.
 
-    Deliberately an HTTP route and **not** an agent tool, for the same reason
-    `POST /proposals/{id}/decision` is not (D-005): a model must never be able to authorize its
-    own plan. Under MAF that took work — the framework advertised a `mode_set` tool by default, so
-    the agent moved itself out of plan mode and the audit trail recorded it under the asking
-    chemist's identity, and `PlanApprovalModeProvider` had to subclass-and-mutate to retract it.
+    Deliberately an HTTP route and **not** an agent tool, for the reason D-005 gave for the note
+    decision this sentence used to name (`POST /proposals/{id}/decision`, deleted with the PR-gate
+    by `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`): a model must never be able to
+    authorize its own plan. Under MAF that took work — the framework advertised a `mode_set` tool
+    by default, so the agent moved itself out of plan mode and the audit trail recorded it under
+    the asking chemist's identity, and `PlanApprovalModeProvider` had to subclass-and-mutate to
+    retract it.
     Nothing advertises such a tool here; the model is not given one, which is the same guarantee
     obtained by not building the thing rather than by removing it afterwards.
 

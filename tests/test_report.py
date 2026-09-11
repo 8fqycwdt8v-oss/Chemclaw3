@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from chemclaw.ingest.eln.records import InMemoryReactionRecordStore
-from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
+from chemclaw.retrieval.evidence import EvidenceChunk, RetrieverSkip, SourceRetriever
 from chemclaw.retrieval.harness import (
     Claim,
     Report,
@@ -659,3 +659,102 @@ def test_a_partially_failed_section_renders_the_evidence_it_kept() -> None:
     assert "incomplete" in text, "the reviewer must still see the gap"
     assert "Ethyl acetate, 85%" in text, "the surviving sources' evidence must render"
     assert "No supporting data found" not in text
+
+
+# --- a declined source and a broken one are two different facts -----------------------------------
+
+
+class _RaisingRetriever:
+    """A source whose backing store is down: a transient a re-run can fix."""
+
+    name = "vector"
+
+    async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
+        """Fail the way an unreachable index does."""
+        raise ConnectionError("pgvector unreachable at 10.0.0.4:5432")
+
+
+class _DecliningRetriever:
+    """A source that refuses this actor: a re-run as the same actor gets the same refusal."""
+
+    name = "share"
+
+    async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
+        """Decline the way an unentitled share leg does."""
+        raise RetrieverSkip("the service actor holds no entitlement for this share")
+
+
+async def _one_section(retrievers: list[Any]) -> SynthesizedSection:
+    """Sweep one section over `retrievers` through the real `gather_section`."""
+    return await gather_section(
+        ReportSection(heading="Yield", query="yield", memory_layer="episodic"), retrievers
+    )
+
+
+def test_a_declined_source_and_a_failed_one_do_not_render_the_same_sentence() -> None:
+    """Two causes, two remedies — and one sentence, measured on the real sweep and renderer.
+
+        B. vector raised (ConnectionError) → "_Some retrieval sources failed …re-run required._"
+        C. share declined (unentitled)     → "_Some retrieval sources failed …re-run required._"
+
+    Byte-identical. `sweep_sources` returns `failed` and `skipped` separately and
+    `SynthesizedSection` collapsed both into one bool. That the section is incomplete either way is
+    not in question — `gather_section` argues that correctly. The rendered *remedy* was wrong for
+    the second: re-running as the same actor produces the same section forever.
+    """
+
+    async def _run() -> None:
+        broken = await _one_section([_FakeRetriever("yield", _CHUNKS), _RaisingRetriever()])
+        declined = await _one_section([_FakeRetriever("yield", _CHUNKS), _DecliningRetriever()])
+
+        assert broken.retrieval_failed and declined.retrieval_failed
+        assert broken.failed_sources == ["vector"] and broken.skipped_sources == {}
+        assert declined.failed_sources == [] and list(declined.skipped_sources) == ["share"]
+
+        broken_line = _marker(report_note(Report(title="R", sections=[broken])).body)
+        declined_line = _marker(report_note(Report(title="R", sections=[declined])).body)
+
+        assert broken_line != declined_line
+        # The failure family keeps its opening words, which is the substring every earlier report
+        # carries and a reader greps for.
+        assert broken_line.startswith("_Retrieval failed for vector")
+        assert "re-run required" in broken_line
+        # The skip family says the opposite thing, because the opposite thing is true.
+        assert "re-run required" not in declined_line
+        assert "the entitlement or the filters must change" in declined_line
+        # Both name the source. "Some retrieval sources" sends nobody anywhere.
+        assert "share: the service actor holds no entitlement" in declined_line
+
+        # And the evidence the working leg found is still rendered under either marker.
+        for section in (broken, declined):
+            assert [chunk.source_note_id for chunk in section.evidence] == ["reaction-a"]
+
+    asyncio.run(_run())
+
+
+def test_a_section_with_no_per_source_detail_renders_exactly_as_it_always_did() -> None:
+    """The control arm, and it is a compatibility claim rather than a stylistic one.
+
+    `durable/report_workflow.py` constructs `SynthesizedSection(retrieval_failed=True)` for a
+    section whose *whole activity* failed — there is no per-source detail to have there — and every
+    report already written carries that wording. Both new fields default empty so that path is
+    untouched.
+    """
+    whole = SynthesizedSection(
+        heading="Yield", memory_layer="episodic", evidence=[], retrieval_failed=True
+    )
+    assert whole.failed_sources == [] and whole.skipped_sources == {}
+    assert (
+        _marker(report_note(Report(title="R", sections=[whole])).body)
+        == "_Retrieval failed for this section; incomplete — re-run required._"
+    )
+
+
+_CHUNKS = [
+    EvidenceChunk(content="Pd/C at 40 psi gave 82%.", source_note_id="reaction-a", retriever="fake")
+]
+
+
+def _marker(body: str) -> str:
+    """The one italic marker line a rendered section carries, for substring assertions."""
+    return next(line for line in body.splitlines() if line.startswith("_"))

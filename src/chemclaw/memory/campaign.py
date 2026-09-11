@@ -1,13 +1,16 @@
 """Build a `campaign` note from a detected chain (plan steps 5.1, 5.3, deterministic core).
 
 The episodic memory note: it narrates a chain of experiments and **cites every one** via a
-`[[reaction-<id>]]` wikilink. **Precondition:** synthesis runs over reactions whose reaction
-notes are already merged into the graph (the operational order is ELN-sync → human merges the
-reaction notes → memory synthesis), so the citations resolve; a campaign PR for a reaction not
-yet merged would dangle and `kg-validate` would reject it — the gate enforces the ordering, it
-is not assumed silently. This builder produces the citable, factual skeleton (the
-transformation sequence and its evidence); the richer prose narrative is the
-`campaign-narrative-synthesis` skill's judgment (per plan 5.3), layered on top, not invented here.
+`[[reaction-<id>]]` wikilink. Those citations resolve *outside* the markdown graph
+(`kg.note.EXTERNAL_ID_PREFIXES`): a run is a row in `reaction_records`, written by ELN sync before
+synthesis ever reads the corpus, and `kg.validate` checks the ids against that store. This
+paragraph used to state a precondition instead — a human had merged each reaction's *note* first,
+and the gate enforced the ordering on the campaign's own PR — and both halves are gone:
+D-2026-08-25 made the transcription a row and
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the PR. This builder produces the
+citable, factual skeleton (the transformation sequence and its evidence); the richer prose
+narrative is the `campaign-narrative-synthesis` skill's judgment (per plan 5.3), layered on top,
+not invented here.
 """
 
 from chemclaw.ingest.eln.ord import OrdReaction

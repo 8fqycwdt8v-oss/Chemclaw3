@@ -14,7 +14,7 @@ So the enumeration is **derived**: this walks `src/` and finds every constructio
 to say which. A hand-written list of "the paths we fixed" is a list of what the tree looked like the
 afternoon somebody fixed them, which is the shape this file exists to end.
 
-**On `NOT_YET_MEASURED`.** Those nine are not endorsed and not converted. Wave 11 measured
+**On `NOT_YET_MEASURED`.** Those eight are not endorsed and not converted. Wave 11 measured
 reachability on the five paths it reviewed, not on these subsystems, and this repository's own rule
 is that a check is built after confirming the data it reads exists — converting them on the
 strength of "it compiles" would be a change with no measurement behind it. What the entry buys is
@@ -29,8 +29,13 @@ SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "chemclaw"
 
 #: Sites wave 11 measured, fixed, and routed through `chemclaw.core.jsonb.json_column`.
 #:
-#: Each of these was reproduced against a live Postgres before it was changed, and each has a test
-#: beside it that was watched failing against the unfixed source.
+#: Each of these was reproduced against a live Postgres before it was changed. This comment also
+#: said each "has a test beside it that was watched failing against the unfixed source", and
+#: mutation testing measured that as true of two of the three: reverting
+#: `science/calc/postgres_store.py` or `science/bo/campaign_record_store.py` to a bare `Jsonb` goes
+#: red, and reverting `publish/outbox.py` leaves **44 tests across its three files green**, because
+#: that module's non-finite test refuses at *projection* and never reaches the column. So the
+#: sentence is corrected and `test_no_guarded_site_has_reverted` below is what now holds all three.
 GUARDED = {
     "chemclaw/science/calc/postgres_store.py",
     "chemclaw/publish/outbox.py",
@@ -109,6 +114,29 @@ def test_every_jsonb_boundary_is_guarded_or_declared() -> None:
         f"undeclared `jsonb` write boundary: {sorted(actual - declared)}. Route it through "
         "`chemclaw.core.jsonb.json_column` and add it to GUARDED, or add it to NOT_YET_MEASURED "
         "with the reason a non-finite value cannot reach it."
+    )
+
+
+def test_no_guarded_site_has_reverted() -> None:
+    """A site in `GUARDED` constructs no `Jsonb` at all — that is what being guarded *is*.
+
+    **The partition above cannot see this, which made it the one failure it exists to prevent.**
+    `test_every_jsonb_boundary_is_guarded_or_declared` asserts `actual <= declared`, and a guarded
+    module that regresses to a bare `Jsonb` is still *declared* — so it satisfies that assertion
+    exactly as the fixed version does. Measured: reverting wave 11's own fix in
+    `publish/outbox.py` (`json_column(...)` back to `Jsonb(...)`) left 44 tests across three files
+    green, this file's included. A register whose members can quietly leave the state the register
+    asserts is a claim that a control exists, which is the shape this repository keeps finding.
+
+    So the membership is checked rather than believed: `json_column` is the only route a guarded
+    module takes, and the scan below finds no direct construction in any of them.
+    """
+    reverted = sorted(GUARDED & _jsonb_sites())
+    assert not reverted, (
+        f"these are declared GUARDED and construct `Jsonb` directly again: {reverted}. Either the "
+        "fix was reverted — route the write back through `chemclaw.core.jsonb.json_column` — or a "
+        "second, genuinely different boundary was added to the same module, in which case route "
+        "that one too rather than moving the file to NOT_YET_MEASURED: the rest of it is measured."
     )
 
 

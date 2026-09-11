@@ -11,14 +11,15 @@ link and its target land in one reviewable unit.
 """
 
 import asyncio
+import logging
 from pathlib import Path
 
 import pytest
 
 from chemclaw.core.chem import compound_id
+from chemclaw.core.config import settings
 from chemclaw.ingest.eln.compound import compound_dependencies, compound_note
-from chemclaw.kg.crosslink import calc_ref_index, cited_calculations, notes_for_calculation
-from chemclaw.kg.graph import invalidate_cache
+from chemclaw.kg.crosslink import cited_calculations
 from chemclaw.kg.note import Note
 from chemclaw.kg.record import NoteWrite, WriteOutcome, record_note
 from chemclaw.kg.render import render_note
@@ -100,33 +101,24 @@ def test_an_artifact_citation_implies_a_citation_of_the_run_that_produced_it() -
     assert cited_calculations(note) == [_KEY]
 
 
-def test_the_reverse_lookup_finds_every_note_resting_on_one_calculation() -> None:
-    """The direction that makes a recomputation actionable.
+def test_the_reverse_lookup_is_gone_and_stays_gone_until_something_calls_it() -> None:
+    """The two functions that answered "which notes rest on this key" had no caller, ever.
 
-    When a method version changes and a cached result is invalidated, this is what says which
-    conclusions now rest on something the system would no longer reproduce.
+    D-133 wrote them, D-158 gave them a producer in the `qm` bundle's note builder, and
+    `D-2026-08-26-semiempirical-is-the-whole-tier` deleted that bundle — so from that day the
+    index had neither a caller nor a writer, and the only thing keeping it alive was the two
+    tests above this one, which called it directly. That is the shape CLAUDE.md names
+    (`map_to_hpc_identity`, `reject_widening`) and deletes.
+
+    An **absence** test rather than nothing, because two merged ADRs deliberately kept this module
+    and a third designed it: re-adding the lookup is a decision somebody takes on purpose with a
+    caller in hand, not a revert. `cited_calculations` stays and is asserted above — it has a real
+    caller (`tests/test_seed_corpus.py`) and it is the definition of what a note rests on.
     """
-    first = Note(id="a", type="job-result", calc_refs=[_KEY])
-    second = Note(id="b", type="report", artifact_refs=[f"{_KEY}#vibspectrum"])
-    unrelated = Note(id="c", type="report", calc_refs=[_OTHER_KEY])
+    import chemclaw.kg.crosslink as crosslink
 
-    index = calc_ref_index([first, second, unrelated])
-    assert sorted(note.id for note in index[_KEY]) == ["a", "b"]
-    assert [note.id for note in index[_OTHER_KEY]] == ["c"]
-
-
-def test_the_reverse_lookup_reads_the_note_tree(tmp_path: Path) -> None:
-    """End to end over a real directory, through the shared parsed-note cache."""
-    directory = tmp_path / "knowledge" / "job-result"
-    directory.mkdir(parents=True)
-    (directory / "a.md").write_text(
-        render_note(Note(id="a", type="job-result", calc_refs=[_KEY])), encoding="utf-8"
-    )
-    (directory / "b.md").write_text(
-        render_note(Note(id="b", type="job-result", calc_refs=[_OTHER_KEY])), encoding="utf-8"
-    )
-    invalidate_cache()
-    assert [note.id for note in notes_for_calculation(tmp_path / "knowledge", _KEY)] == ["a"]
+    assert not hasattr(crosslink, "calc_ref_index")
+    assert not hasattr(crosslink, "notes_for_calculation")
 
 
 def test_a_note_and_the_compound_it_links_land_in_one_write() -> None:
@@ -250,3 +242,90 @@ def test_an_unparseable_smiles_does_not_fail_a_submission() -> None:
     """This helper reads a field opportunistically; it is not the place to reject a bad SMILES."""
     note = Note(id="n", type="reaction", compound_smiles="not-a-molecule", body="[[compound-x]]")
     assert compound_dependencies(note) == []
+
+
+def test_a_link_to_a_note_that_does_not_exist_is_reported_at_write_time(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hand-written `[[wikilink]]` at a note nobody wrote used to land in silence.
+
+    `compound_dependencies` mints the derived `compound-<hash>` id and nothing else, so a target
+    the model typed itself is carried by no dependency — the note commits, `expand_note` on the
+    target then raises "no note with id …", and the chip in the UI 404s. The write is the one
+    moment the writer can say so, and `kg-validate` — the check that does catch it — runs over
+    *this* repository's corpus in CI, never over a deployment's.
+
+    A WARNING and not a refusal: the note is the record either way, the model is told what it
+    linked to, and refusing would lose a real observation over a typo in a citation.
+    """
+
+    async def _run() -> None:
+        monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
+        note = Note(
+            id="job-1",
+            type="job-result",
+            created_by="agent",
+            body="Computed for [[compound-ethanol-w141]].",
+        )
+        with caplog.at_level(logging.WARNING, logger="chemclaw.kg.record"):
+            await record_note(note, _Capturing(), knowledge_dir="knowledge")
+
+    asyncio.run(_run())
+    assert "compound-ethanol-w141" in caplog.text
+    assert "job-1" in caplog.text
+
+
+def test_a_link_whose_target_lands_in_the_same_write_is_not_reported(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The negative control: the ordinary computed note must not warn on every write.
+
+    Its compound dependency is written first (`record._build_write`), so the link resolves the
+    moment the unit lands — warning about it would make the marker noise and train the model to
+    ignore it.
+    """
+
+    async def _run() -> None:
+        monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
+        smiles = "CCO"
+        note = Note(
+            id="job-2",
+            type="job-result",
+            compound_smiles=smiles,
+            created_by="agent",
+            body=f"Computed for [[{compound_id(smiles)}]].",
+        )
+        with caplog.at_level(logging.WARNING, logger="chemclaw.kg.record"):
+            await record_note(
+                note,
+                _Capturing(),
+                knowledge_dir="knowledge",
+                dependencies=compound_dependencies(note),
+            )
+
+    asyncio.run(_run())
+    assert caplog.text == ""
+
+
+def test_a_citation_of_a_transcribed_reaction_is_not_a_dangling_link(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`[[reaction-<id>]]` resolves in the record store, not in the graph (D-2026-08-25).
+
+    Every campaign and optimization note cites its runs that way, so reporting them would warn on
+    the notes the miners write most.
+    """
+
+    async def _run() -> None:
+        monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
+        note = Note(
+            id="campaign-1",
+            type="campaign",
+            created_by="agent",
+            body="Distilled from [[reaction-eln-7]].",
+        )
+        with caplog.at_level(logging.WARNING, logger="chemclaw.kg.record"):
+            await record_note(note, _Capturing(), knowledge_dir="knowledge")
+
+    asyncio.run(_run())
+    assert caplog.text == ""

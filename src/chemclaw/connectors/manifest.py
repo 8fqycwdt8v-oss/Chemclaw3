@@ -18,12 +18,14 @@ tool stay in core by rule, and each is a rule rather than a backlog item:
 
 1. **Conversation plumbing** — anything that reads or writes the *turn's* own state (attachments,
    preferences, watches, clarifying questions). Another process does not have the turn.
-2. **The PR-gate writers** (`record_knowledge_note`, `record_confirmed_answer`). The gate is the
-   review boundary; a connector reaches it only by returning a `Note` in a job envelope, which is a
-   proposal core decides to publish. That asymmetry is the point.
+2. **The graph writers** (`record_knowledge_note`, `record_confirmed_answer`). One write path is
+   one place that stamps provenance; a connector reaches the graph only by returning a `Note` in a
+   job envelope, which core publishes through `kg.record`. That asymmetry is the point, and it
+   outlived the review boundary it was first argued from
+   (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`).
 3. **Core's own data layer — the knowledge graph.** This one is worth stating because it looks like
-   a capability and is not (D-115). Thirteen core modules import `kg`: the PR-gate, all six memory
-   layers, the report retrievers, the eval verifier, the note index. Moving `find_notes`,
+   a capability and is not (D-115). Thirteen core modules import `kg`: the note write path, all
+   six memory layers, the report retrievers, the eval verifier, the note index. Moving `find_notes`,
    `expand_note` and `find_knowledge_gaps` to a bundle would leave every one of those imports in
    core — a zero dependency win — and add a second read path to one note tree. A capability earns a
    bundle by taking a dependency closure *with* it; the graph cannot, because core is its main
@@ -411,8 +413,8 @@ class JobSpec(BaseModel):
     `chemclaw.agent.authz.expensive_actions`, so it needs no matching operator entry and gains
     nothing from one. It was for a while a marker that authorized nothing, because the gate
     consulted only `entra_expensive_actions`; `tests/test_authz.py` now cross-checks every declared
-    job against the effective set. `publish_to_graph` lets core PR-gate a `Note` the job's result
-    carries — the write still goes through `chemclaw.kg.record`, never through the connector.
+    job against the effective set. `publish_to_graph` lets core record a `Note` the job's result
+    carries — the write goes through `chemclaw.kg.record`, never through the connector.
 
     **A bundle may lower its own runtime ceiling and may not raise it** (`timeout_seconds`). The
     deployment keeps the maximum — the effective ceiling is the *lower* of the declared number and
@@ -602,7 +604,7 @@ class ConnectorManifest(BaseModel):
 
     The endpoint's `tools` allow-list is **read/compute only** by contract. Mutation goes
     through a `jobs:` entry (which core authorizes, dry-run-gates and attributes) or stays a
-    core PR-gate tool. That is the existing `allowed_tools` boundary (D-029) promoted from a
+    core graph-write tool. That is the existing `allowed_tools` boundary (D-029) promoted from a
     convention to a validated contract: `make connector-validate` refuses a name matching the
     mutating-tool prefixes, so a connector cannot quietly hand the model a write path.
     """
@@ -623,14 +625,15 @@ class ConnectorManifest(BaseModel):
     #
     # **Why a bundle may extend a closed vocabulary.** Those two frozensets are closed on purpose:
     # a typo makes a note or an edge unfindable by every filter keyed on it, so the vocabulary is
-    # checked at the PR-gate rather than left open. But the vocabulary is not core's alone —
+    # checked in CI (`make kg-validate`) rather than left open. But the vocabulary is not core's
+    # alone —
     # `bo-candidate` is minted by a bundle (`connectors/bo/knowledge.py`) and was written into
     # core's frozenset by hand. That made a bundle contributing a note type the one connector
     # contribution needing a core edit, in the seam whose whole claim is that a capability is a
     # folder (D-118).
     #
     # Declaring it here keeps both properties: the set is still closed (an undeclared name still
-    # fails `make kg-validate`), a human still sees a genuinely new type at the gate that reviews
+    # fails `make kg-validate`), a human still sees a genuinely new type in the commit that adds
     # the bundle, and the deployment's effective vocabulary is exactly what its enabled bundles say
     # it is. Names are validated for shape here and for *existence* nowhere — a type nothing has
     # minted yet is a declaration, not an error.

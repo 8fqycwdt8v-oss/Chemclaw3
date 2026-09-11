@@ -34,6 +34,11 @@ from typing import Any, get_type_hints
 
 import pytest
 
+# Module-level, unlike the lazy `build_langgraph_agent` imports below, because a `parametrize`
+# decorator is evaluated at collection: the point of importing it is that this file cannot hold
+# its own copy of the tuple, and a copy is what a lazy import would force back.
+from chemclaw.agent.langgraph_agent import _SKILLS_PROMPT_REMOVALS
+
 
 def test_the_todo_middleware_still_names_the_plan_channel_todos() -> None:
     """`todos` is the plan, and three first-party readers spell it by hand.
@@ -1603,4 +1608,35 @@ def test_the_editing_middleware_hands_its_edited_request_to_its_handler() -> Non
         "ContextEditingMiddleware.wrap_model_call no longer hands the *edited* message list to its "
         "handler. agent/compaction.OffLoopContextEditing takes the request from that call, so a "
         "handler that receives the unedited one means compaction has silently stopped running."
+    )
+
+
+@pytest.mark.parametrize(("removal", "why"), _SKILLS_PROMPT_REMOVALS)
+def test_the_skills_prompt_still_contains_every_sentence_this_deployment_removes(
+    removal: str, why: str
+) -> None:
+    """Each substring `_skills_prompt` cuts out of upstream's template, pinned as its exact text.
+
+    `agent/langgraph_agent._skills_prompt` derives the skills system prompt from upstream's own
+    `SKILLS_SYSTEM_PROMPT` minus the passages that are false on this deployment, by substring — so
+    the ~40 lines that are correct keep arriving from upstream and only the removals are this
+    repository's decision. That mechanism *is* the substrings: reword one upstream and the removal
+    silently stops happening, which is why `_skills_prompt` raises rather than passing the text
+    through. This asserts the same shapes from the other side, so a bump names the passage that
+    moved instead of a `RuntimeError` from inside a graph build.
+
+    **Parametrized over the production tuple, because it used to be four hand-copied literals.**
+    Mutation testing put a fifth removal into `_SKILLS_PROMPT_REMOVALS` and reworded one of the
+    four, and this file stayed green at 4 passed both times: a copy asserts the shapes the copy
+    knows, which is "the other side" only for as long as nobody edits either. The underlying
+    invariant was never at risk — `_skills_prompt`'s own `RuntimeError` catches both mutations
+    when a graph is built — so what the copy could go wrong about was only its own claim to be
+    checking this. Importing the tuple makes the claim true and deletes forty lines of duplicate.
+    """
+    from deepagents.middleware.skills import SKILLS_SYSTEM_PROMPT
+
+    assert removal in SKILLS_SYSTEM_PROMPT, (
+        f"deepagents' SKILLS_SYSTEM_PROMPT no longer contains a passage this deployment removes "
+        f"({why}); re-read upstream's template and update `_SKILLS_PROMPT_REMOVALS` in "
+        "agent/langgraph_agent.py"
     )

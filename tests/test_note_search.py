@@ -129,3 +129,39 @@ def test_every_note_in_the_shipped_corpus_is_findable_by_its_own_type() -> None:
     invalidate_cache()
     for note in load_notes(_KNOWLEDGE):
         assert term_coverage(note, [note.type]) == 1, note.id
+
+
+def test_a_question_s_own_grammar_is_not_a_term_the_record_must_contain() -> None:
+    """A chemist asks in sentences, and every function word in one used to be a required term.
+
+    `_STOPWORDS` held fourteen entries — enough to stop `the` erasing a hit (D-138) and nothing
+    more — so `"Has anyone here run that before, and what conditions did they end up on?"` asked
+    the corpus for `has`, `anyone`, `here`, `that`, `what`, `did` and `they` alongside
+    `conditions`. Every one of them is a word no note is *about*, and each does one of two
+    damaging things: under the all-terms rule it removes a real hit, and once the search has
+    widened (`_rank_by_terms`) it *adds* every note that happens to contain it.
+
+    Substring matching is what makes the second half severe: `so` is inside `isolated`,
+    `dissolved` and `solvent`, `at` is inside `temperature`, `he` is inside `ether`. Measured
+    over the 19 `knowledge.yaml` probes, dropping `so` alone moved two gold notes.
+    """
+    terms = query_terms("Has anyone here run that before, and what conditions did they end up on?")
+
+    assert "conditions" in terms
+    assert "anyone" in terms  # not a function word; the list is closed-class only
+    for framing in ("has", "here", "that", "what", "did", "they", "up"):
+        assert framing not in terms, framing
+
+
+def test_a_stopword_list_only_grows_by_words_a_note_cannot_be_about() -> None:
+    """The cost `_STOPWORDS`' own comment names, held as an assertion rather than a promise.
+
+    Each entry is one more word a query can no longer require, so the list may hold only
+    closed-class English function words. The open-class verbs a question frames itself with
+    (`give`, `use`, `need`, `get`) were measured on the same 19 probes and moved recall by
+    **exactly zero**, so they are not here — an entry that buys nothing still costs.
+    """
+    from chemclaw.kg.search import _STOPWORDS
+
+    for open_class in ("give", "given", "use", "used", "using", "get", "got", "need", "yield"):
+        assert open_class not in _STOPWORDS, open_class

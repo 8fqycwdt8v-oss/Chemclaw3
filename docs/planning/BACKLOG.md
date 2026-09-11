@@ -825,7 +825,7 @@ topic).
       that the receipt stays — but the copy downstream is somebody else's sweep, and the first
       deployment to point at a real store inherits the obligation. Settle it with that
       deployment, not before: the answer depends on whose database it is.
-- [ ] **Five tables still say "nothing bounds it"** — [M].
+- [ ] **Six tables still say "nothing bounds it"** — [M].
       `durable/retention.py`'s `_NOT_PRUNED` is the register that makes this visible, and it is
       doing its job: it names every table in the schema and does not invent an answer where none was
       taken. Eight entries carried that wording — five of them also saying *no decision is on
@@ -833,10 +833,14 @@ topic).
       2026-08-28 erasure pass closed three of the eight
       (`note_proposals`, `plan_approvals`, `turn_costs` — all three are kept through a data-subject
       erasure, so the decision *was* on record one module over, and a derived test now couples the
-      two registers). The remaining five are `molecule_fingerprints`, `reaction_fingerprints`,
-      `user_preferences`, `predictions` and `measurements` — and `user_preferences` is the weakest
-      of the five, because `leaver._ERASE` already deletes it per actor, so what is open there is a
-      clock rather than a policy. Plus a sixth question of a different
+      two registers). The remaining six are `molecule_fingerprints`, `reaction_fingerprints`,
+      `user_preferences`, `predictions`, `measurements` and `store` — and `user_preferences` is the
+      weakest of them, because `leaver._ERASE` already deletes it per actor, so what is open there
+      is a clock rather than a policy. `store` is the newest and is **tracked by its own row above**
+      rather than here: the 2026-09-09 sweep withdrew the erasure-as-a-bound wording for it and
+      added that row, and did not touch this count in the same file in the same commit — which is
+      `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` happening inside a register rather
+      than inside prose. Five decisions are owed here; the sixth is owed there. Plus a sixth question of a different
       kind: `tool_result_blobs` has a window and it ships at 0 "as a deliberate uniformity rather
       than a considered policy for this table", which `retention.py` itself flags as the
       highest-volume table in the set.
@@ -1431,6 +1435,27 @@ interceptor skips plain string arguments by design, so it binds nothing there an
 the only producer on the calc job path.
 
 Found resolving the merge of #256's branch with #258.
+
+## `propose_report` proposes nothing, and its name is a registered activity name
+
+`durable/report_workflow.py::propose_report` calls `record_note`. There is nothing to propose to:
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the gate and the proposal queue
+behind it, and wave 15 corrected every *docstring* on that path — this is the one thing it did not
+touch, because the name is not prose.
+
+Renaming it is a Temporal concern rather than a refactor. The string is the registered activity
+name, so an in-flight history that has scheduled `propose_report` and not yet completed it resolves
+against a worker that no longer offers it; the safe shape is to register both names for one
+deployment cycle and drop the old one after the queue has drained, which is a release procedure and
+not a commit. Its callers also span `tests/test_report_workflow.py`,
+`tests/test_durable_observability.py` and a merged ADR (`D-2026-08-27-…`), and a merged ADR is never
+edited — so the citation outlives the rename either way and the new ADR has to say what it now
+names.
+
+Worth doing because a symbol name is read far more often than the docstring under it, and this one
+says a control exists. Not worth doing as part of a prose sweep.
+
+Found by wave 15's PR-gate claim audit.
 
 ## A truncated argument document is completed by upstream and the tool runs on the guess
 

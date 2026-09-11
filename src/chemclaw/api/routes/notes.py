@@ -38,11 +38,14 @@ async def get_note(
 ) -> NoteView | Response:
     """One note's body and the notes within `hops` stated relations of it.
 
-    404 rather than 400 for an unknown id, and the distinction is worth stating: the commonest
-    real cause is a citation to a note still awaiting its PR-gate review (D-018), which is a note
-    that does not exist *yet* rather than a malformed request. `expand_note` raises `ChemclawError`
-    for it — chemclaw's always-safe bad-input contract — so the message is safe to pass through,
-    and a chip that cannot resolve gets told why.
+    404 rather than 400 for an unknown id, and the distinction is worth stating: a citation is a
+    string in somebody's prose, so an id that resolves to nothing is a missing note rather than a
+    malformed request. It used to name a different cause — "a note still awaiting its PR-gate
+    review (D-018)" — and that cause cannot happen any more: a note is in the graph the moment it
+    is written (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), so what is left is a
+    typo'd `[[wikilink]]`, which `kg.record` now warns about at write time.
+    `expand_note` raises `ChemclawError` for it — chemclaw's always-safe bad-input contract — so
+    the message is safe to pass through, and a chip that cannot resolve gets told why.
 
     `hops` is clamped inside `expand_note` against `graph_max_hops`, so this route needs no bound
     of its own; adding one would be a second ceiling to keep in step with the first.
@@ -51,7 +54,7 @@ async def get_note(
     patch seam is `chemclaw.api.app` (see `routes/README.md`).
 
     **Revalidated with an `ETag`, never `immutable`, and `private` despite having no owner.** A note
-    id is stable *across edits* — the graph is Markdown in Git and a PR-gate merge rewrites a body
+    id is stable *across edits* — the graph is Markdown in Git and a later write rewrites a body
     under the same id — the neighbourhood is other notes' business, and `Note.is_current` is
     evaluated against `date.today()`, so a neighbour leaves this view on the day its `valid_to`
     passes with nothing written at all. None of that is content-addressed, which is why the

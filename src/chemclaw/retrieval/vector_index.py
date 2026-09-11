@@ -688,7 +688,8 @@ async def reindex_notes(
     `full=True` re-embeds every note unconditionally (the CLI's `--full`), for recovery from a
     corrupted index.
 
-    Idempotent either way (upsert by id), so it is safe to run on a schedule or after a merge.
+    Idempotent either way (upsert by id), so it is safe to run on a schedule or after a note
+    write.
 
     **Notes deleted from disk are retired here** (D-2026-08-25). They used to be left behind as
     stale rows, on the argument that the retrievers drop a hit whose note no longer loads — true,
@@ -698,11 +699,12 @@ async def reindex_notes(
     The prune runs before the "nothing changed" exit below, because a run whose only news is a
     deletion has nothing to embed and must still remove it.
 
-    **Reads past the graph cache deliberately.** This is the one in-process moment that correlates
-    with a merge — the PR-gate's merge webhook triggers it — and the note list below is compared
-    against a freshly scanned `note_file_fingerprints`. Without the bust the two halves could come
-    from different moments: a graph cached before the merge landed, diffed against fingerprints
-    read after it, which computes `changed` from a stale set of notes. The cost is one rescan on a
+    **Reads past the graph cache deliberately.** This runs while notes are landing in the tree
+    underneath it — on a Schedule, `durable/note_index.py` being Schedule-only since its webhook
+    starter was deleted — and the note list below is compared against a freshly scanned
+    `note_file_fingerprints`. Without the bust the two halves could come from different moments: a
+    graph cached before a write landed, diffed against fingerprints read after it, which computes
+    `changed` from a stale set of notes. The cost is one rescan on a
     job that is about to re-embed anyway.
     """
     directory = Path(notes_dir) if notes_dir is not None else settings.knowledge_path

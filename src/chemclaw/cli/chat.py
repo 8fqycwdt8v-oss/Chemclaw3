@@ -33,14 +33,16 @@ import argparse
 import asyncio
 import contextlib
 import sys
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Mapping, Sequence
+from typing import Any, NamedTuple
 
 from chemclaw.agent.audit import AuditSink
 from chemclaw.agent.audit_store import PostgresAuditSink
 from chemclaw.agent.checkpointer import process_checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
+from chemclaw.agent.loop_cap import loop_capped
+from chemclaw.agent.spend_cap import spend_capped
 from chemclaw.agent.state import answer_text, turn_config, turn_input
 from chemclaw.connectors.registry import open_connector_specs
 from chemclaw.core.config import settings
@@ -62,6 +64,63 @@ _PLAN_COMMANDS = {"/plan", "/approve"}
 # `checkpointer.process_checkpointer`'s to deliver; until that function existed this comment
 # described a property nothing provided.
 _CLI_SESSION_ID = "cli"
+
+# What a one-shot `-m` run exits with when the answer it printed is incomplete. Distinct from `1`,
+# which `main` already means "this never started" by — a script has to be able to tell "no answer"
+# from "an answer you must not treat as the whole one", and exit 0 said neither.
+_DEGRADED_EXIT = 2
+
+
+class CliTurn(NamedTuple):
+    """One CLI turn: the answer, and the sentence saying what is missing from it.
+
+    **This used to be a bare `str`, which is the whole defect.** Driven on a real compiled graph
+    with a real cap, `converse` returned — and the CLI printed on stdout, with exit code 0 — the
+    interim sentence of a turn that had been stopped mid-work:
+
+        === CLI, LOOP-CAPPED (cap=2) ===  stdout: 'Still checking; one more source.'
+        === CLI, COMPLETE   (cap=20) ===  stdout: 'FINAL: pKa 3.49, confirmed against ELN batch 12.'
+
+    and at a cap of 1 whose first turn said nothing, a bare newline and exit 0. Nothing in the
+    shape of either told a reader, or a script, which they had.
+
+    The signal was already in hand: `converse` calls `ainvoke`, so it holds the final state, and
+    `durable/template_activities.py` reads `loop_capped(result)` off exactly that.
+    `agent/loop_cap.py`'s own docstring reasons about this file — "a surface marks it partial
+    (`chemclaw.api.runner` does this off `loop_hit_cap`)" — and gave it no reader.
+
+    **What was not missing is a log line**, and saying so is the point: `enforce_loop_cap` logs
+    `WARNING the model loop hit its N-iteration cap`, so stderr was never empty. It arrived among
+    fifteen connector warnings, said nothing about the answer printed after it, and left a piped
+    run's only machine-readable channel — the exit code — saying success. A log line about the loop
+    is not a notice about the answer.
+
+    `notice` is empty for a whole turn, which is what keeps a clean run's output byte-identical.
+    """
+
+    answer: str
+    notice: str = ""
+
+
+def turn_notice(state: Mapping[str, Any], answer: str) -> str:
+    """One line naming what is missing from `answer`, or `""` when nothing is.
+
+    The three endings a *returned* state can carry, in the order `api/runner._settle_outcome`
+    ranks them — both caps before the empty answer, because a capped turn does deliver the partial
+    answer it managed and ranking the empty case first would make either cap unreachable on a turn
+    that produced nothing.
+
+    Deliberately not shared with `durable.template_activities.AgentStepResult.notice`: that one is
+    spliced into prose a later template step reads, this one is a terminal line for a person, and
+    `cli` importing `durable` would pull Temporal into the terminal front door to save a sentence.
+    """
+    if loop_capped(state):
+        return "incomplete: the turn reached its model-call cap before it finished"
+    if spend_capped(state):
+        return "incomplete: the turn reached its token budget before it finished"
+    if not answer:
+        return "incomplete: the turn produced no answer"
+    return ""
 
 
 def resolve_identity(*, admin: bool, actor: str | None) -> tuple[str, frozenset[str]]:
@@ -130,8 +189,8 @@ async def converse(
     prompt: str,
     session_id: str = _CLI_SESSION_ID,
     earlier: Sequence[str] = (),
-) -> str:
-    """Run one turn on the graph under `session_id` and return its text answer.
+) -> CliTurn:
+    """Run one turn on the graph under `session_id` and return its answer **and its notice**.
 
     Reusing one `session_id` across successive calls is what makes the CLI a multi-turn
     conversation: it is the checkpointer's `thread_id`, so each turn continues the thread the last
@@ -168,11 +227,19 @@ async def converse(
         )
     finally:
         reset_current_user_texts(token)
-    return answer_text(result)
+    # Read off the state this call *returned*, which is the only place either cap's flag lives —
+    # both channels are untracked, so `get_state()` answers `False` for a turn that was capped
+    # (`agent/spend_cap.spend_capped` says so in its own `Args`).
+    answer = answer_text(result)
+    return CliTurn(answer, turn_notice(result, answer))
 
 
-async def _run(args: argparse.Namespace) -> None:
+async def _run(args: argparse.Namespace) -> int:
     """Resolve identity, build the agent, open its MCP subprocesses, and dispatch.
+
+    Returns the process's exit status, which is `_DEGRADED_EXIT` when a one-shot `-m` run printed
+    an answer it had to mark incomplete. The exit code is the only channel a piped run has, and it
+    said success for a turn stopped halfway through its work.
 
     Identity is stamped ambient (`chemclaw.core.identity_context`) for the whole session — a CLI
     run is
@@ -203,11 +270,19 @@ async def _run(args: argparse.Namespace) -> None:
             saver = await process_checkpointer()
             agent = _build_cli_agent(args, actor, connectors, saver)
             if args.message is not None:
-                print((await converse(agent, args.message)).strip())
+                turn = await converse(agent, args.message)
+                # The answer on stdout and the notice on stderr, so a piped run stays parseable
+                # while a person still learns what it is — the same split this function already
+                # makes for an unreachable connector, two lines up.
+                print(turn.answer.strip())
+                if turn.notice:
+                    print(f"warning: {turn.notice}", file=sys.stderr)
+                    return _DEGRADED_EXIT
             else:
                 await _repl(agent, actor, saver)
     finally:
         reset_current_identity(identity_token)
+    return 0
 
 
 async def _repl(agent: Any, actor: str, saver: Any) -> None:
@@ -259,12 +334,17 @@ async def _repl(agent: Any, actor: str, saver: Any) -> None:
             if prompt.lower() in _PLAN_COMMANDS:
                 print(await _plan_command(prompt, actor, saver), file=sys.stderr)
                 continue
-            answer = (await converse(agent, prompt, earlier=said)).strip()
+            turn = await converse(agent, prompt, earlier=said)
             # Recorded only once the turn answered, which is the front door's rule rather than a
             # convenience: `api.runner._record_transcript` writes nothing for a turn that produced
             # no answer, so a failed turn leaves no quotable words there either.
             said.append(prompt)
-            print(answer)
+            # Before the answer, for the reason `api/runner` yields `CapabilityDegradedEvent`
+            # before it: a reader who stops at the answer must already have read the notice. No
+            # exit code here — a REPL's status is the session's, not the turn's.
+            if turn.notice:
+                print(f"warning: {turn.notice}", file=sys.stderr)
+            print(turn.answer.strip())
         except Exception as exc:  # keep the session alive across a single failed turn
             print(f"error: {exc}", file=sys.stderr)
 
@@ -346,7 +426,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "-m",
         "--message",
         default=None,
-        help="Ask one question and exit (scriptable), instead of the interactive REPL.",
+        help="Ask one question and exit (scriptable), instead of the interactive REPL. "
+        f"Exits {_DEGRADED_EXIT} when the answer it printed is incomplete — a cap was reached, or "
+        "the turn produced nothing — with the reason on stderr.",
     )
     parser.add_argument(
         "--audit-postgres",
@@ -378,11 +460,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     configure_logging()
     try:
-        asyncio.run(_run(_parse_args(argv)))
+        return asyncio.run(_run(_parse_args(argv)))
     except (ChemclawError, ConnectionError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    return 0
 
 
 if __name__ == "__main__":

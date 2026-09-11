@@ -169,7 +169,7 @@ class GitWriteError(ChemclawError):
 
     **This name is registered non-retryable** (`durable.publish._BAD_DATA_TYPES`), so it is
     raised only for the failures where that is true: a mis-pointed checkout, a path escaping the
-    tree, a proposal branch carrying commits this gate did not author. A dead remote, a timed-out
+    tree, a checkout sitting on some branch other than the base. A dead remote, a timed-out
     command or a contended lock is `GitRemoteError` below — the split this class used to not
     have, which made `note_write_max_attempts` dead for exactly the failures it was configured
     for: a 30-second network blip dropped a note from a synthesis batch on the first attempt

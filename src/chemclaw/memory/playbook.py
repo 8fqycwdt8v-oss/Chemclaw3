@@ -8,9 +8,10 @@ repetition is episodic, not a transferable rule). `find_playbook_candidates` is 
 playbook with no citations is inadmissible (plan 5.4: Belegverweise verpflichtend). The
 distilled rule's prose is the `playbook-distillation` skill's judgment, layered on this base.
 
-`playbook_note` is also what the observations tier calls when a human promotes an observation
-(`durable.observation_jobs`), so a `playbook` note has two provenances. It states which, on the
-note, derived from the id rather than asserted by the caller — see the function's docstring.
+`playbook_note` is also what the observations tier calls when an observation crosses both
+promotion thresholds (`durable.observation_jobs`), so a `playbook` note has two provenances. It
+states which, on the note, derived from the id rather than asserted by the caller — see the
+function's docstring.
 """
 
 import logging
@@ -26,10 +27,10 @@ from chemclaw.memory.similarity import cluster_by_similarity, reaction_fingerpri
 
 logger = logging.getLogger(__name__)
 
-# The two things that mint a `playbook` note, told apart on the note itself. A reader of the merged
-# file — and every retrieval path that surfaces `source` — deserves to know which one wrote it: a
-# cluster distilled from reactions that recur across projects is a different kind of claim from a
-# reading the observations tier accumulated support for and a human then chose to promote (D-161).
+# The two things that mint a `playbook` note, told apart on the note itself. A reader of the file —
+# and every retrieval path that surfaces `source` — deserves to know which one wrote it: a cluster
+# distilled from reactions that recur across projects is a different kind of claim from a reading
+# the observations tier accumulated support for until a threshold promoted it (D-161).
 SOURCE_DISTILLATION = "memory:cross-project-distillation"
 SOURCE_PROMOTED_OBSERVATION = "memory:promoted-observation"
 
@@ -108,15 +109,18 @@ def playbook_note(note_id: str, summary: str, evidence_note_ids: list[str]) -> N
 
     `note_id` is the full note id (e.g. from `chemclaw.memory.ids.stable_id("playbook", ...)`).
     `summary` is the distilled rule (from the `playbook-distillation` skill); every playbook
-    must cite the notes that evidence it via `[[wikilinks]]`, so a reviewer (a process chemist)
-    can trace the rule to real experiments before approving the merge.
+    must cite the notes that evidence it via `[[wikilinks]]`, so a process chemist meeting the
+    rule as evidence can trace it back to real experiments. Nothing gates the write
+    (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), which is what makes the citation the
+    control rather than a courtesy: this line used to say the citations were what let a reviewer
+    check the rule *before approving the merge*, and there is no merge to approve.
 
     `evidence_note_ids` are **full note ids**, cited verbatim. They used to be bare reaction ids
     that this function prefixed with `reaction-`, which quietly required every caller's evidence to
     be a reaction: the observations tier promotes findings whose evidence includes an `interaction`
     note, and stripping-then-re-adding the prefix turned `interaction-42` into a link to
-    `reaction-interaction-42` — a dangling citation that fails `kg-validate` on the very PR the
-    promotion opens. A function that cites what it is given cannot make that mistake.
+    `reaction-interaction-42` — a dangling citation `kg-validate` fails the moment the promotion
+    lands. A function that cites what it is given cannot make that mistake.
 
     **`source` is derived, not passed.** Both producers already say which one they are, in the id
     they mint: cluster distillation anchors it on the cluster's smallest member, and promotion

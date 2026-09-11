@@ -27,14 +27,53 @@ from collections.abc import Sequence
 
 from chemclaw.kg.note import Note
 
-# Words that carry no retrieval signal but do carry the difference between "biaryl" (three hits)
-# and "the biaryl" (none) under a whole-phrase match. Deliberately tiny and English-only: this is
-# not stemming or a language model, it is the handful of words a chemist puts around the term they
-# actually mean. Terms are matched independently, so dropping `in` costs "in situ" nothing — the
-# note is still found by `situ` — and a longer list is resisted because each entry is one more
-# word a query can no longer *require*.
+# The words a question is *framed* in, as opposed to the words it is *about*. English-only and
+# closed-class by construction: articles, prepositions, conjunctions, pronouns, determiners,
+# interrogatives, modals, auxiliaries and quantifiers — the categories a language does not coin new
+# members of, and therefore the categories no note can have as its subject. Not stemming and not a
+# language model.
+#
+# **The cost of an entry, and why it is paid here.** Each word here is one word a query can no
+# longer *require*, and that argument kept this list at fourteen from D-138 until it was measured
+# end to end. What the measurement showed is that the cost lands on the other side: a chemist asks
+# "Has anyone here run that before, and what conditions did they end up on?", `_rank_by_terms`
+# requires all twenty-two terms, nothing in any corpus satisfies `has AND here AND that AND
+# they AND …`, and the leg widens to *any* term — where every one of those words now **adds**
+# notes rather than removing them. Substring matching (`term_coverage`) makes that severe: `so` is
+# inside `isolated`, `dissolved` and `solvent`; `at` is inside `temperature`; `he` is inside
+# `ether`. Measured over the 19 independently-authored `knowledge.yaml` probes (44 gold pairs),
+# adding the closed classes moved micro recall 0.5682 → 0.7045 and micro precision 0.1645 →
+# 0.2138, and leave-one-out found no entry that costs a single gold note.
+#
+# **What is deliberately not here.** The open-class verbs a question frames itself with — `give`,
+# `use`, `get`, `need` and their inflections — were measured on the same probes and moved recall
+# by **exactly zero**, so they are not added: an entry that buys nothing still costs. Terms are
+# matched independently, so dropping `in` costs "in situ" nothing (the note is still found by
+# `situ`).
+#
+# **What this does not reach.** The two-letter element symbols that collide with function words
+# (`Be`, `At`, `Am`, `He`, `In`, `No`) are unusable as query terms either way: `term_coverage` is a
+# case-insensitive substring test, so `be` already matched `because` and `carbene` before it was
+# listed here. That is a property of substring membership at `_MIN_TERM_CHARS`, not a loss this
+# list introduces — a chemist searching for an element wants the structure tools.
 _STOPWORDS = frozenset(
-    {"a", "an", "and", "for", "from", "in", "is", "of", "on", "or", "our", "the", "to", "with"}
+    word
+    for category in (
+        # articles, prepositions, conjunctions and particles
+        "a an and as at about again but by down for from if in into of on or out over so "
+        "than then the to too up very with",
+        # interrogatives
+        "how what when where which who whom whose why",
+        # pronouns and determiners
+        "he her here his it its me my our she that their them there these they this those "
+        "us we you your",
+        # modals and auxiliaries
+        "am are be been being can could did do does doing done had has have having is may "
+        "might must shall should was were will would",
+        # negation, affirmation and quantifiers
+        "all also any both each ever few just many more most much never no not only other some yes",
+    )
+    for word in category.split()
 )
 # Below this a term matches too much to be worth requiring; two characters is already `pd`.
 _MIN_TERM_CHARS = 2
@@ -126,6 +165,25 @@ def term_coverage(note: Note, terms: Sequence[str]) -> int:
     """
     haystack = search_text(note).lower()
     return sum(1 for term in terms if term in haystack)
+
+
+def matched_terms(note: Note, terms: Sequence[str]) -> list[str]:
+    """Which of `terms` appear in `note`'s searchable text, in query order, without repeats.
+
+    The per-term form of `term_coverage`, over the same haystack and the same substring rule, so
+    "matched" cannot come to mean two things in two modules — which is the drift this module was
+    written to end. `retrieval.retrievers` carries the result to the model on every note-backed
+    chunk (`EvidenceChunk.matched_terms`), because a widened search returns hits that share a
+    couple of framing words with the question and nothing said so.
+
+    **Deduplicated, where `term_coverage` is not**, and the difference is deliberate rather than an
+    oversight in one of them. Coverage is compared against `len(terms)` to decide whether a hit
+    matched the query *completely*, so a chemist who types "buchwald" twice must be able to reach
+    that ceiling; this is a list a reader compares against their own question, where the same word
+    twice says nothing the once did not.
+    """
+    haystack = search_text(note).lower()
+    return [term for term in dict.fromkeys(terms) if term in haystack]
 
 
 def term_frequencies(note: Note, terms: Sequence[str]) -> dict[str, int]:

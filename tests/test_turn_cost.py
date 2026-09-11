@@ -272,8 +272,8 @@ def test_the_runtime_counter_is_declared_on_the_process_registry() -> None:
     assert "chemclaw_job_runtime_seconds_total" in METRICS.render()
 
 
-def test_the_turn_cost_ledger_has_exactly_one_reader_and_it_has_a_surface() -> None:
-    """The ledger's reader is `operations/activity.py`, and `review_activity` is what asks it.
+def test_every_turn_cost_reader_has_the_surface_that_asks_it() -> None:
+    """Each reader of the ledger ships with the route, command or report that asks it.
 
     This began as an *absence* pin. `turn_costs` had two readers and neither had a caller:
     `turn_cost_store.read_spend_by_actor` described itself as "the whole point of the table" and was
@@ -285,10 +285,25 @@ def test_the_turn_cost_ledger_has_exactly_one_reader_and_it_has_a_surface() -> N
 
     The rule that absence enforced was never "no reader" — it was *a query function needs the route,
     command or report that asks it, in the same change*
-    (`D-2026-08-29-a-trail-nobody-can-read-answers-no-question`). So the pin now states the rule
-    directly: exactly one module reads the table, and a registered agent tool reaches it. Both
-    halves matter. Drop the tool and this is the 2026-08-27 shape again; add a second reader and the
-    single-reader property this package was built to have is gone.
+    (`D-2026-08-29-a-trail-nobody-can-read-answers-no-question`). This pin used to state it as
+    "exactly one module reads the table", which is a **proxy** for the rule rather than the rule,
+    and the proxy failed the first time the rule was satisfied by somebody else: a wave-14 review
+    found that a turn stopped by its model-call cap reconstructed identically to a clean one in
+    `cli/explain.py` and assembled an identical evidence pack in `operations/evidence_pack.py` —
+    because `outcome` lives in this table and neither surface read it. Both fixes ship *with* their
+    surface, which is what the rule asks; refusing them for the count would have been the proxy
+    outranking the thing it stands for.
+
+    The list is exhaustive and each entry is named with what asks it, so a reader added with no
+    surface still fails here — which is the half that matters:
+
+    - `operations/activity.py` — the aggregate read model, reached by the `review_activity` tool.
+    - `operations/evidence_pack.py` — `assemble`, the context-of-use record for one session.
+    - `cli/explain.py` — `python -m chemclaw.cli.explain`, the audit reconstruction.
+
+    Note what the count never protected: `evidence_pack.py` has always read `audit_events`,
+    `job_records`, `effects` and `plan_approvals` with its own SQL, so "operations/activity.py is
+    the only reader" was never true of this system's tables generally — only of this one.
 
     `tests/test_postgres_turn_cost_store.py` reads the table with its own SQL, which is where a
     test's read-back belongs.
@@ -299,9 +314,14 @@ def test_the_turn_cost_ledger_has_exactly_one_reader_and_it_has_a_surface() -> N
         for path in src.rglob("*.py")
         if "FROM turn_costs" in path.read_text(encoding="utf-8")
     )
-    assert readers == ["operations/activity.py"], (
-        f"{readers} reads `turn_costs`. Exactly one module may: `chemclaw.operations.activity`, "
-        "which `review_activity` reaches. A reader with no surface is the 2026-08-27 defect."
+    assert readers == [
+        "cli/explain.py",
+        "operations/activity.py",
+        "operations/evidence_pack.py",
+    ], (
+        f"{readers} reads `turn_costs`. Each reader must ship with the route, command or report "
+        "that asks it, and be listed here with it. A reader with no surface is the 2026-08-27 "
+        "defect."
     )
     import chemclaw.agent.operations_tools  # noqa: F401  (registers the tool)
     from chemclaw.core.tool_registry import registered_tool_names

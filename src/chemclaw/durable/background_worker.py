@@ -19,7 +19,9 @@ could not also do. And the periodic jobs are each one Temporal Schedule under
 pod cannot produce a second concurrent run of one of them however many workers poll.
 
 What a single replica does buy is exclusion over state that lives **in the pod**, and after the
-PR-gate's cluster advisory lock closed the git half there is exactly one such dependency left:
+note writer's cluster advisory lock (`kg/git_writer.py::GitNoteWriter._cluster_lock`, which
+outlived the PR-gate it was built under) closed the git half there is exactly one such dependency
+left:
 `NoteReindexWorkflow`. `retrieval/vector_index.py::reindex_notes` retires index rows for every
 note absent from *this pod's* knowledge checkout, which is an `emptyDir` refreshed by the pod's
 own sidecar — so two pods are two views of the corpus, and a note one has fetched and the other

@@ -5,8 +5,9 @@ anyone who can reach the broker can send one — so `AwaitAnswerWorkflow` treats
 attribution and never as authorization
 (`D-2026-08-28-roles-do-not-cross-the-durable-boundary-unsigned`). Deciding *who may answer*
 therefore has to happen on this side of the wire, before the signal is sent, exactly as
-`POST /sessions/{id}/plan/decision` and `POST /proposals/{id}/decision` are routes for the reason
-that a model must never authorize its own work.
+`POST /sessions/{id}/plan/decision` is a route for the reason that a model must never authorize its
+own work. `POST /proposals/{id}/decision` stood beside it in this sentence until the PR-gate was
+deleted (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`).
 
 **`asked_of` is routing and `_may_answer` is the gate, and they are deliberately not the same
 thing.** A request routed to nobody in particular is answerable by any authenticated caller; one

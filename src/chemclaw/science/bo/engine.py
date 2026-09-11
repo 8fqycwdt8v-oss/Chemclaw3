@@ -318,7 +318,7 @@ def _frame_to_candidates(problem: OptimizationProblem, frame: pd.DataFrame) -> l
     columns whenever a model backs the proposal; a `RandomStrategy` returns the parameters alone.
     Reading them conditionally is what lets one adapter serve both, and recovering the sd is the
     point: it is computed on every model-guided ask and was dropped here, one function before it
-    could reach the `bo-candidate` note a human signs off on (F8-T1 follow-up).
+    could reach the `bo-candidate` note a chemist reads before booking lab time (F8-T1 follow-up).
 
     `_des` is deliberately left behind. It is the acquisition/desirability score — a ranking
     quantity in the strategy's own units, not a statement about the chemistry — and carrying it

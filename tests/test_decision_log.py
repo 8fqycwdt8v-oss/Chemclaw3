@@ -423,6 +423,15 @@ def test_the_topic_cursor_is_not_ahead_of_the_record() -> None:
 # different claim — "this guarantee is enforced right now, here" — which is why it is checked here
 # and there rather than exempted with the paths.
 _RETIRED_TEST_CITATIONS: dict[str, str] = {
+    # Renamed because the old name described a property the test does not check. It calls
+    # `skill_permits` with the *manifest* basis, which is right for a tree-vs-manifest check and
+    # wrong as a claim about what a turn can reach — and wave 14 made the production basis the
+    # *bound* tools, so a name saying "on the full surface" would now name the one basis this test
+    # deliberately does not use.
+    "test_no_shipped_skill_is_orphaned_on_the_full_surface": (
+        "renamed `test_no_shipped_skill_declares_only_tools_no_manifest_advertises` "
+        "(tests/test_skill_access.py)"
+    ),
     # Renamed. The guard is live and the ADR names it by a name nothing answers to.
     "test_the_registry_has_no_duplicate_reservations": (
         "renamed `test_the_index_has_no_duplicate_reservations`, in this file"
@@ -571,6 +580,33 @@ def test_every_test_an_adr_names_still_exists() -> None:
         f"{len(dangling)} test name(s) cited in docs/decisions/ resolve to nothing: {dangling}. "
         "A merged ADR is never edited, so the fix is one of two things: rename the test back, or "
         "add the name to _RETIRED_TEST_CITATIONS with the line saying what replaced it."
+    )
+
+
+def test_no_retired_test_citation_is_unspent() -> None:
+    """A row here is a permission *granted to a citation*, so a citation has to be asking for it.
+
+    `test_every_test_an_adr_names_still_exists` consults this register only for names it found in
+    `docs/decisions/`, so a row naming a test no ADR cites is never read — it is an exemption
+    nobody spent, which is exactly the shape `test_no_exemption_outlives_its_migration` exists to
+    refuse one register over. Measured by mutation: adding
+    `"test_zzz_nothing_ever_cited_this"` to the register left this file green at 16 passed, and
+    this register was the only one in this review missing its unspent-entry half — `KNOWN_OVERSIZED`
+    has one, `NOT_YET_MEASURED` has one, `_REVIEWED_ROLLBACK_BREAKS` has one.
+
+    The consequence of leaving it out is not cosmetic: a row is also a *silencer*, and one that
+    outlives the citation it was granted for goes on silencing the name if a later test claims it
+    — which the resurrection check below catches only while the name stays exactly as spelled.
+    """
+    cited = {
+        name for path in _adr_files() for name in _TEST_CITATION.findall(path.read_text("utf-8"))
+    }
+    unspent = sorted(set(_RETIRED_TEST_CITATIONS) - cited)
+    assert not unspent, (
+        f"declared retired but cited by no ADR: {unspent}. The row exempts a citation that does "
+        "not exist, so nothing ever reads it — delete it. (If you added the row in the same "
+        "commit as the ADR that cites the name, check the citation's spelling against "
+        "`_TEST_CITATION`: a citation the regex cannot see is the other way to reach this.)"
     )
 
 

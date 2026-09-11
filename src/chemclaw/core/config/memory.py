@@ -28,16 +28,20 @@ class MemorySettings(BaseSettings):
     # chemistry, so the grouping must be tight to avoid merging distinct transformations.
     optimization_similarity_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     memory_job_timeout_seconds: float = Field(default=300.0, gt=0)
-    # Most notes one synthesis run may propose (0 = unbounded). The three jobs rescan the whole
-    # corpus daily with no cursor, so a large import would open a PR per cluster on the first
-    # night. The window rotates by run date rather than truncating, so the cap bounds the flood
-    # without the tail of the corpus being proposed *never* — see `_slice_for_this_run`.
+    # Most notes one synthesis run may write (0 = unbounded). The three jobs rescan the whole
+    # corpus with no cursor, so a large import would write a note per cluster in one run. The
+    # window rotates by run date rather than truncating, so the cap bounds the flood without the
+    # tail of the corpus being written *never* — see `_slice_for_this_run`.
     memory_max_notes_per_run: int = Field(default=25, ge=0)
-    # The ungated observations tier (D-161). Off by default and deliberately: it is the first
-    # knowledge surface no human signs off before the agent can read it, and a deployment must
-    # choose that rather than inherit it. `promote_min_*` are the two thresholds at which an
-    # observation earns a human's review as a playbook PR — evidence count says the finding is not
-    # a coincidence, project count says it is not one team's local habit, and neither alone does.
+    # The observations tier (D-161). Off by default and deliberately, though not for the reason
+    # this comment gave: "the first knowledge surface no human signs off before the agent can read
+    # it" stopped being a distinction when
+    # `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` made that true of every agent-written
+    # note. What the tier still is, is a pattern across projects that no single run supports, so a
+    # deployment chooses to have one rather than inheriting it (see `memory/observations.py`).
+    # `promote_min_*` are the two thresholds at which an observation is promoted into an ordinary
+    # playbook note — evidence count says the finding is not a coincidence, project count says it
+    # is not one team's local habit, and neither alone does.
     # `retire_after_days` is how long an observation nothing re-observes stays open; without it the
     # tier only ever grows and becomes a write-only log.
     observations_enabled: bool = False

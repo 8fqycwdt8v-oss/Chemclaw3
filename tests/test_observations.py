@@ -156,8 +156,14 @@ class TestTheCorpusMiner:
         runs — and the statement used to read "…has failure outcomes on every recorded attempt (2
         runs)" for a transformation the corpus records five successes for. That is the opposite of
         what happened, and `observation_jobs._promotion_summary` copies the sentence verbatim into a
-        promoted playbook's PR body cited only by the non-success runs, so the human at the gate
-        cannot see what falsifies it. It must scope itself to the runs it actually counted.
+        promoted playbook's **note body**, cited only by the non-success runs — so nobody meeting it
+        can see what falsifies it. It must scope itself to the runs it actually counted.
+
+        **This paragraph said "PR body" and "the human at the gate", and there is neither**
+        (D-2026-09-05-the-gate-follows-behaviour-not-knowledge). That makes the defect
+        *worse* rather than smaller: a false statement used to be one a reviewer might catch before
+        it landed, and now it lands — which is the whole reason the gate's removal rests on a note
+        being readable beside its own citations.
         """
         corpus = [
             _reaction(f"s{n}", "alpha" if n % 2 else "beta", OutcomeClass.SUCCESS) for n in range(5)
@@ -205,9 +211,11 @@ class TestTheCorpusMiner:
         `INCONCLUSIVE` members too — so one project's failure beside a second project's aborted or
         never-assayed runs read as "failed in 1 run across 2 projects (alpha, beta)", cleared both
         shipped promotion thresholds, and `durable.observation_jobs._promotion_summary` copied that
-        sentence verbatim into a playbook PR. The human at that gate then reads a recurrence claim
+        sentence verbatim into a playbook note. Whoever retrieves it then reads a recurrence claim
         about a transformation that has failed in exactly one project, cited by runs that
-        `OutcomeClass` says carry no evidence about the chemistry either way.
+        `OutcomeClass` says carry no evidence about the chemistry either way — and reads it as
+        current knowledge, because there is no gate between the miner and the graph
+        (D-2026-09-05-the-gate-follows-behaviour-not-knowledge).
         """
         assert (
             mine_corpus(

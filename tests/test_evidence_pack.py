@@ -33,7 +33,7 @@ async def _clear() -> None:
     leaves rows for every later test to trip over.
     """
     async with await connect(settings.postgres_dsn) as conn:
-        for table in ("audit_events", "job_records", "effects", "plan_approvals"):
+        for table in ("audit_events", "job_records", "effects", "plan_approvals", "turn_costs"):
             await conn.execute(f"DELETE FROM {table} WHERE session_id = %s", (SESSION,))
         await conn.commit()
 
@@ -261,3 +261,151 @@ def test_the_pack_carries_the_three_things_a_reader_must_not_supply_themselves()
 
     asyncio.run(_run())
     asyncio.run(_clear())
+
+
+# --- how the turns ended, which the pack could not see --------------------------------------------
+
+
+async def _seed_turn(session_id: str, correlation_id: str, outcome: str, **columns: object) -> None:
+    """One `turn_costs` row — the ledger the pack now reads as its fifth store."""
+    row: dict[str, object] = {
+        "turn_id": f"tid-{session_id}-{correlation_id}",
+        "correlation_id": correlation_id,
+        "session_id": session_id,
+        "actor": "u-1",
+        "profile": "default",
+        "outcome": outcome,
+        "completed": outcome == "answered",
+        **columns,
+    }
+    async with await connect(settings.postgres_dsn) as conn:
+        await conn.execute(
+            f"INSERT INTO turn_costs ({', '.join(row)}) VALUES ({', '.join('%s' for _ in row)})",
+            tuple(row.values()),
+        )
+        await conn.commit()
+
+
+def test_a_degraded_session_no_longer_assembles_the_pack_a_clean_one_does() -> None:
+    """The finding, driven against the real stores.
+
+    Measured before the fifth read, with one session loop-capped and the durable tier dark: the
+    two packs were **byte-identical** once the timestamp and the latency were scrubbed. `assemble`
+    read `audit_events`, `job_records`, `effects` and `plan_approvals` — and `turn_costs`, which
+    holds `outcome`, was not among them. This is the module whose stated purpose is a
+    context-of-use record, and whose `LIMITS` names four other gaps and did not name this one.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clear()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute(
+                "INSERT INTO audit_events (correlation_id, session_id, actor, tool, arguments,"
+                " outcome, detail, latency_ms) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                ("c-1", SESSION, "u-1", "gather_evidence", "{}", "ok", "", 12.0),
+            )
+            await conn.commit()
+        await _seed_turn(SESSION, "c-1", "loop_capped", context_unreducible=True)
+
+        pack = await assemble(SESSION)
+
+        assert [(t.correlation_id, t.outcome) for t in pack.turns] == [("c-1", "loop_capped")]
+        assert pack.turns[0].completed is False
+        assert pack.turns[0].context_unreducible is True
+        assert [t.correlation_id for t in pack.degraded_turns] == ["c-1"]
+        # The tool call is unchanged: what ran is still what ran. The pack simply no longer
+        # presents it as a completed turn's evidence.
+        assert [call.tool for call in pack.tool_calls] == ["gather_evidence"]
+
+    asyncio.run(_run())
+    asyncio.run(_clear())
+
+
+def test_a_clean_turn_is_recorded_and_is_not_called_degraded() -> None:
+    """The control arm: `degraded_turns` empty on a turn that answered.
+
+    Without it the assertion above is satisfied by calling every turn degraded, which would make
+    the pack's headline mean nothing — the same reason `refusals` is asserted beside a successful
+    call rather than alone.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clear()
+        await _seed_turn(SESSION, "c-9", "answered", answer_confidence=0.92, compacted=True)
+
+        pack = await assemble(SESSION)
+
+        assert [(t.correlation_id, t.outcome) for t in pack.turns] == [("c-9", "answered")]
+        assert pack.turns[0].answer_confidence == 0.92
+        # Compaction is the policy working on a long thread, not a statement about the answer.
+        assert pack.turns[0].compacted is True
+        assert pack.degraded_turns == []
+
+    asyncio.run(_run())
+    asyncio.run(_clear())
+
+
+def test_a_session_whose_only_record_is_an_abandoned_turn_is_not_reported_as_empty() -> None:
+    """A turn that spent tokens and was then abandoned writes a cost row and nothing else.
+
+    No audit row, no job, no approval — so before the fifth read the pack said "nothing recorded"
+    for a session that demonstrably ran and demonstrably cost money. `is_empty` is documented as
+    "the one thing a caller must check before presenting a pack", which is exactly the check that
+    was wrong here.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clear()
+        await _seed_turn(SESSION, "c-x", "abandoned")
+
+        pack = await assemble(SESSION)
+
+        assert not pack.is_empty
+        assert [t.outcome for t in pack.degraded_turns] == ["abandoned"]
+
+    asyncio.run(_run())
+    asyncio.run(_clear())
+
+
+def test_the_packs_own_headline_reaches_the_model_and_not_only_its_tests() -> None:
+    """`degraded_turns` had no reader in `src/` at all — one grep hit, its own `def`.
+
+    Its docstring calls it *"the pack's own headline"* and says *"a reader who checks nothing else
+    must be able to check this"*, in the present tense. Measured before this test: `grep -rn
+    degraded_turns --include=*.py src/` returned the definition and nothing else, its only callers
+    were three assertions in this file, and because a plain `@property` is not a `computed_field`
+    it was absent from `model_dump()` too — while its two siblings, `is_empty` and `refusals`, were
+    both surfaced on the payload the model receives.
+
+    That is a member kept alive by a test that calls it directly, carrying a present-tense claim
+    about a control: the two shapes this repository deletes on sight, in one object, added by the
+    wave that introduced it. Surfaced rather than deleted because that wave's finding was "a
+    degraded answer that reads as complete", and the pack is where that is supposed to stop being
+    true. This test is the reader the docstring claimed to have.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clear()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute(
+                "INSERT INTO audit_events (correlation_id, session_id, actor, tool, arguments,"
+                " outcome, detail, latency_ms) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                ("c-head", SESSION, "u-1", "gather_evidence", "{}", "ok", "", 12.0),
+            )
+            await conn.commit()
+        await _seed_turn(SESSION, "c-head", "loop_capped", context_unreducible=True)
+
+        from chemclaw.agent.evidence_tools import assemble_evidence_pack
+
+        payload = await assemble_evidence_pack(SESSION)
+
+        assert payload["degraded_turns"] == ["c-head"], (
+            "the pack's own headline is absent from the payload the model receives, so a reader "
+            f"who checks nothing else checks nothing: {sorted(payload)}"
+        )
+
+    asyncio.run(_run())

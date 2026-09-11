@@ -6,18 +6,18 @@ the impurity profile, and the full **step-by-step procedure** in prose, so a det
 recipe survives ingestion intact and a chemist who reaches this record from a structure search gets
 the recipe rather than an id.
 
-**Nothing here infers anything**, which is why the result is data rather than a PR-gated note
+**Nothing here infers anything**, which is why the result is data rather than a knowledge claim
 (`chemclaw.ingest.eln.records`): every field is read from the entry or rendered from fields that
-were, so there is no claim for a reviewer to accept or reject. What a human *asserts* about these
-runs is a playbook or a campaign in `knowledge/`, gated as it always was, citing this record as
-`reaction-<id>`.
+were, so there is nothing here for anyone to decide. What a human *asserts* about these runs is a
+playbook or a campaign in `knowledge/`, written as knowledge and corrected rather than
+pre-approved, citing this record as `reaction-<id>`.
 
 That was true of this module and false of what it was handed, which is a distinction the argument
 does not survive: `eln-json` recovered `temperature_c` and `time_h` from procedure prose by taking
 the first regex match, and those landed in `conditions` as recorded fact. **The premise is a
 constraint on the whole path, not a property of this file**, and it is now enforced where it was
 broken — `D-2026-08-26-a-transcription-may-not-infer-a-setpoint`. Anything that would put a derived
-number into a field an entry did not state belongs on the other side of the gate, in a note.
+number into a field an entry did not state belongs on the other side of that line, in a note.
 
 The record carries no `[[wikilink]]`, and that is enforced by `_without_wikilinks` rather than
 merely asserted — the source's free text reaches this body verbatim, and a record that could spell
@@ -50,10 +50,12 @@ def _without_wikilinks(body: str) -> str:
     This module's docstring promises the note "carries no `[[wikilink]]`", and that promise was
     false: `kg.note` parses the rendered body for links, so a chemist typing
     `[[contradicts:reaction-1234]]` into a hypothesis, a failure reason, a procedure step or an
-    unmapped attribute forged a real relation into a PR-gated note. The gate cannot catch it — a
+    unmapped attribute forged a real relation into the note. No review could have caught it — a
     forged link is indistinguishable from an authored one, `contradicts` and `supersedes` are in
     the allowed vocabulary, and `kg.validate` only objects when the target does not exist, so
-    naming a *real* note passes review as a well-formed note. Which it is.
+    naming a *real* note yields a well-formed note. Which it is. There is no review now
+    (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), which makes this function the
+    control rather than a second line of one.
 
     Applied once to the assembled body rather than at each of the five free-text sites, so the next
     field added to this mapping cannot forget it — and so that the values which are not obviously
@@ -61,9 +63,9 @@ def _without_wikilinks(body: str) -> str:
     A cross-block spelling was considered and is not the reason: the blocks are joined by newlines
     and label prefixes, so two `[` from adjacent fields never actually meet.
 
-    The substitution is visible and lossless rather than a strip. The note is prose a human signs
-    off on, so the reviewer should see what the source actually wrote — and deleting a chemist's
-    characters to make them safe is the same mistake as trusting them.
+    The substitution is visible and lossless rather than a strip. The record is prose a chemist
+    reads, so they must see what the source actually wrote — and deleting a chemist's characters to
+    make them safe is the same mistake as trusting them.
 
     **A lookahead, not `str.replace("[[", "[ [")`, and that distinction is the whole control.**
     `str.replace` scans left to right and never re-reads what it has just emitted, so it consumes

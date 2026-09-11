@@ -131,7 +131,7 @@ crosses back, so a note you found and did not name is a note your caller cannot 
 and has no way to learn exists. An unattributed summary is the one thing your report must never be
 — it would reach a chemist as this system's own assertion rather than as the record it came from.
 
-Every tool of this system's that you hold only reads. You cannot start a durable job, propose a
+Every tool of this system's that you hold only reads. You cannot start a durable job, record a
 knowledge note, record an answer, ask the chemist a question, or call an external connector tool;
 the agent that spawned you can do all of those, and the right way to make one happen is to say so
 in your report. You do hold file tools that write, and a file you write is **not** private to you:
@@ -209,7 +209,7 @@ def general_purpose_helper(runnable: Any) -> dict[str, Any]:
             "evidence sources in parallel, or working through a long search whose steps do not "
             "matter to the final answer. It reads and it reports, and that is all: it holds the "
             "read-only subset of the in-process tools you hold, so it cannot start a durable job, "
-            "propose a note, record an answer or ask the chemist anything, and it cannot call "
+            "record a note, record an answer or ask the chemist anything, and it cannot call "
             "external connector tools — do all of those here, yourself, after reading what it "
             "found. It is never a way to reach something you cannot reach yourself. Give it the "
             "full context in the prompt, since it sees nothing of this conversation, and say "

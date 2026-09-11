@@ -18,7 +18,10 @@ front door runs one uvicorn worker — the bounded worker-thread wrapper the rou
 
 Attachments are **session-scoped and in-memory**: they are working material for a conversation, not
 knowledge. Anything worth keeping goes through `record_knowledge_note` like every
-other machine-written note — routing uploads straight into the graph would bypass the review line.
+other machine-written note — routing uploads straight into the graph would bypass the one write
+path that stamps `created_by`, renders the note and checks its links (`kg/record.py`). That clause
+read "would bypass the review line" until `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`
+deleted the line.
 """
 
 import asyncio

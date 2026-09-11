@@ -136,6 +136,82 @@ class AgentStepInput(BaseModel):
     step_id: str = ""
 
 
+class AgentStepResult(BaseModel):
+    """One `agent` step's answer **and what was missing while it was produced**.
+
+    The step used to return a bare `str`, and that is the whole defect this model exists to close:
+    a step whose connectors never came up, or whose model loop was stopped by its iteration cap,
+    returned a string byte-identical in *shape* to a complete one — so the next step of the
+    template read a partial answer as the finished article, `template_job_record` wrote a row with
+    nothing on it saying so, and the brief a chemist signs carried no notice. Measured on the real
+    activity against one scripted model: complete and connectors-unreachable both returned
+    `'FINAL: five hazard flags; two are severe.'`, and the capped run returned its interim sentence
+    with `state` unset on the run's record either way.
+
+    The fact was not missing, it was *discarded*. `open_connector_specs` already reports which
+    bundles did not open (`api/runner.py` yields `CapabilityDegradedEvent` off exactly that, and
+    the `tool` step already names them in its own failure), and `loop_capped`/`spend_capped` were
+    already read here — but only into `turn_costs.outcome`, a cost ledger the next step and the
+    final artifact cannot see. The comment above the call in `run_agent_step` had said as much
+    since the day that fix landed: "a truncated runaway booked `outcome="answered"` and handed the
+    next step of the template a partial answer with nothing saying so." It landed in the ledger
+    only. This is the other half.
+
+    `outcome` is `turn_costs.outcome`'s vocabulary rather than a second one, for the reason
+    `_book_step_spend` gives for spelling that vocabulary out: one word must mean one thing on
+    every writer, and this model is fed from the same variable the ledger row is.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    answer: str = ""
+    # How the turn ended, in `turn_costs.outcome`'s words. Only the *endings a value can carry*
+    # reach here: a step that raised has no result at all, so `errored` and `abandoned` are booked
+    # by the ledger and never constructed here.
+    outcome: str = "answered"
+    # The connector bundles that did not come up for this step. Names, not counts, because
+    # "2 unreachable" sends nobody anywhere — the same reason `_invoke` renders them by name.
+    unreachable: list[str] = Field(default_factory=list)
+
+    @property
+    def degraded(self) -> bool:
+        """Whether this answer was produced with something missing."""
+        return bool(self.unreachable) or self.outcome != "answered"
+
+    def notice(self) -> str:
+        """One sentence naming what was missing, or `""` for a clean step.
+
+        Written as system text in the first person of the *system*, not of the model, because it is
+        prepended to a model's prose and a reader must be able to tell the two apart — the same
+        stance `agent/tool_result_size.py` takes for the notice it splices into a cut result.
+        """
+        if not self.degraded:
+            return ""
+        missing = []
+        if self.outcome == "loop_capped":
+            missing.append("the step reached its model-call cap before it finished")
+        if self.outcome == "spend_capped":
+            missing.append("the step reached its token budget before it finished")
+        if self.outcome == "empty_answer":
+            missing.append("the step produced no answer")
+        if self.unreachable:
+            missing.append(
+                f"{len(self.unreachable)} capability bundle(s) were unreachable: "
+                f"{', '.join(sorted(self.unreachable))}"
+            )
+        return f"[INCOMPLETE — {'; '.join(missing)}]"
+
+    def step_value(self) -> str:
+        """What the next step and the run's record see: the notice, then the answer.
+
+        Prepended rather than appended for the reason `api/runner` emits `CapabilityDegradedEvent`
+        *before* the answer: a reader who stops early must still have read the notice, and a
+        result that is cut is cut from the end.
+        """
+        notice = self.notice()
+        return f"{notice}\n\n{self.answer}" if notice else self.answer
+
+
 class JobStepInput(BaseModel):
     """One resolved `job` step: which declared job, with which already-substituted arguments."""
 
@@ -545,8 +621,20 @@ class _StepMeter(AsyncCallbackHandler):
 
 @durable_activity("background")
 @activity.defn
-async def run_agent_step(step: AgentStepInput) -> str:
-    """Run one agent turn as the run's actor and return its answer text.
+async def run_agent_step(step: AgentStepInput) -> AgentStepResult | str:
+    """Run one agent turn as the run's actor and return its answer **with its degradation**.
+
+    **The `| str` is the rollout, not indecision.** This activity used to return a bare answer
+    string, and both workers poll `background-jobs`: during a rolling deploy a new-code *workflow*
+    worker can schedule this step onto an old-code *activity* worker, which answers `"…"` where the
+    caller's type hint now says `AgentStepResult`. The pydantic data converter refuses that
+    (`ValidationError: 1 validation error for AgentStepResult`), `agent_step_retry()` allows one
+    attempt, and `failure_exception_types=[Exception]` fails the run — so annotating this
+    `AgentStepResult` alone would fail every template run in flight across every deploy, for the
+    length of the rollout. `template_run_timeout_seconds` is 45,330, so "in flight across a deploy"
+    is the ordinary case rather than a race. The sequencer's `isinstance` reads both shapes and the
+    old one degrades to what it always meant: an answer with nothing said about it. Same reasoning
+    as `AgentStepInput.step_id`'s default, one boundary further out.
 
     The step that keeps a template agentic: the sequence around it is fixed, the reasoning inside it
     is not. `profile` narrows which agent runs it, so a summarizing step need not hold the
@@ -623,7 +711,12 @@ async def run_agent_step(step: AgentStepInput) -> str:
     with _acting_as(step.identity):
         try:
             async with AsyncExitStack() as stack:
-                connectors, _unreachable = await open_connector_specs(
+                # `unreachable` is kept, and discarding it was the defect `AgentStepResult`
+                # documents: this step's whole surface can be dark and the answer it returns is
+                # shaped exactly like a complete one. `api/runner.py` yields
+                # `CapabilityDegradedEvent` off this same tuple, and the `tool` step below names
+                # the same list in its own failure — this path threw it away.
+                connectors, unreachable = await open_connector_specs(
                     stack, connector_specs(profile)
                 )
                 # Compiled here, with this step's connectors, for the reason
@@ -685,7 +778,10 @@ async def run_agent_step(step: AgentStepInput) -> str:
                     outcome = "spend_capped"
                 else:
                     outcome = "answered" if answered else "empty_answer"
-                return answer
+                # The same three facts the ledger books, returned to the caller as well — because
+                # the ledger is not a thing the next step of the template, `template_job_record` or
+                # the chemist reading the brief can see.
+                return AgentStepResult(answer=answer, outcome=outcome, unreachable=unreachable)
         except asyncio.CancelledError:
             # A Temporal activity cancellation — the workflow was cancelled, the worker is
             # draining, or an activity timeout fired. The chat path calls this ending `abandoned`

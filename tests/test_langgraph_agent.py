@@ -39,13 +39,14 @@ from chemclaw.agent.chemclaw_agent import (
     harness_tool_names,
     subagent_tool_names,
 )
-from chemclaw.agent.framing import SYSTEM_SPEECH_MARK
+from chemclaw.agent.framing import ENVELOPE_TAG, SYSTEM_SPEECH_MARK
 from chemclaw.agent.langgraph_agent import _labelled, build_langgraph_agent, skills_backend
 from chemclaw.agent.loop_cap import loop_capped
 from chemclaw.agent.plan_gate import PLAN_GATE_REASON, plan_approval_refusal, plan_identity
+from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
-from chemclaw.agent.scratchpad import scratchpad_tools
+from chemclaw.agent.scratchpad import MEMORY_ROOT, SCRATCH_ROOT, scratchpad_tools
 from chemclaw.agent.skill_access import skill_permits
 from chemclaw.agent.skill_backend import REFUSED
 from chemclaw.agent.skill_manifest import declared_tools
@@ -55,6 +56,7 @@ from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.api.events import ToolFailedEvent
 from chemclaw.api.graph_stream import _signal_event, graph_events
 from chemclaw.api.runner_trace import ToolCallTrace
+from chemclaw.connectors.registry import skills_dirs as _bundle_skills_dirs
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
@@ -469,14 +471,21 @@ def test_the_backend_narrows_skills_by_the_shared_predicate(
     is the half that was never about engines: the backend narrows by `skill_permits`, the same
     predicate every other caller asks, against the shipped corpus and the shipped gates rather
     than a written list.
+
+    **The basis is passed to both sides rather than defaulted on one, and that is not tidiness.**
+    `skills_backend` grew an `available=` argument so a turn's gate reads the tools it *binds*
+    instead of the tools its manifests advertise, and it keeps the manifest answer as the fallback
+    for callers with no graph. Omitting it here would have left this test asserting parity on the
+    path production no longer takes — a green line about the default branch, in the file whose job
+    is the production one.
     """
     gated = sorted(declared_tools([*settings.skills_dirs]))[0]
     monkeypatch.setattr(settings, "skill_role_gates", {gated: ["process-chemist"]})
     profile, tools = get_profile(None), _capability_tools()
+    bound = {fn.__name__ for fn in tools}
 
     token = set_current_identity("u-1", frozenset({"reader"}))
     try:
-        from chemclaw.agent import chemclaw_agent
         from chemclaw.connectors.registry import skills_dirs
 
         every_dir = [*settings.skills_dirs, *skills_dirs()]
@@ -486,11 +495,11 @@ def test_the_backend_narrows_skills_by_the_shared_predicate(
             if skill_permits(
                 enabled=settings.skills_enabled_list,
                 declared=declared_tools(every_dir),
-                available=chemclaw_agent._advertised_names(profile, tools),
+                available=bound,
                 gates=settings.skill_role_gates,
             )(name)
         }
-        graph = _skill_names(skills_backend(profile, tools))
+        graph = _skill_names(skills_backend(profile, tools, available=bound))
     finally:
         reset_current_identity(token)
 
@@ -991,3 +1000,156 @@ def test_a_turn_runs_under_a_chosen_step_ceiling_not_the_frameworks_9999() -> No
     # attached and this is its only bound.
     assert "configurable" not in turn_config()
     assert turn_config()["recursion_limit"] == settings.agent_recursion_limit
+
+
+def _observed_prompt(**kwargs: Any) -> tuple[str, set[str]]:
+    """The whole system message one built graph sends, and the tools it bound, off the wire.
+
+    Every middleware writes into the same system message — this repository's instructions, the
+    skills listing, upstream's wrapper around it — so a claim about "the prompt" assembled from the
+    pieces this repository happens to write is a claim about part of it
+    (`tests/test_context_floor.py::_observed_prefix` records what that cost). One real model call,
+    the message the model received, and the surface the graph runs, which is what every narrowing
+    here has to agree with.
+    """
+    model = _Recording(messages=iter([AIMessage(content="done")]))
+    graph = build_langgraph_agent(model=model, audit_sink=NullAuditSink(), **kwargs)
+    asyncio.run(graph.ainvoke({"messages": [("user", "hi")]}))
+    assert model.prompts, "the model was never called, so no prompt was observed"
+    return model.prompts[0], _advertised(graph)
+
+
+def _system_prompt(**kwargs: Any) -> str:
+    """Just the system message, for a caller with nothing to ask about the surface."""
+    prompt, _bound = _observed_prompt(**kwargs)
+    return prompt
+
+
+@pytest.mark.parametrize(
+    ("claim", "why"),
+    [
+        ("Executing Skill Scripts", "`scratchpad_tools()` withholds `execute`"),
+        ("Skills may contain Python scripts", "there is no verb here that runs one"),
+        ("web-research", "no such skill exists and the posture declines the capability"),
+        ("Use any helper scripts", "the same instruction in the example workflow"),
+        ("shared across all agent tools on this machine", "no machine-wide skills tree exists"),
+    ],
+)
+def test_the_prompt_does_not_tell_the_model_to_run_a_skills_script(claim: str, why: str) -> None:
+    """F2: upstream's skills prompt instructed the model to execute scripts it cannot execute.
+
+    Measured off the wire at four fleet states, the shipped system message told the model — verbatim
+    and in every one — that "Skills may contain Python scripts or other executable files" and to
+    "Use any helper scripts with absolute paths", in a deployment whose `scratchpad_tools()`
+    withholds `execute` on stated egress and shell grounds. Its example workflow named a
+    "web-research" skill that does not exist and whose capability the no-egress posture declines.
+
+    Both close through the seam that was already there for the source-label sentence: upstream's own
+    template minus the passages that are false here, by substring, raising if upstream rewords one
+    (`_skills_prompt`). The passages are pinned in `tests/test_upstream_surface.py`; this asserts
+    what the model is actually handed.
+    """
+    assert claim not in _system_prompt(), (
+        f"the system message still tells the model {claim!r}, and {why}"
+    )
+
+
+def test_a_listed_skill_always_has_at_least_one_tool_this_turn_binds() -> None:
+    """F3: the listing was narrowed by what manifests advertise, not by what the turn binds.
+
+    `ToolScopedSkills` hides a skill whose *every* declared tool is absent, and the set it measured
+    absence against was `_advertised_names` — the in-process registry plus every enabled bundle's
+    manifest allow-list. A manifest does not move when a server is unreachable, so on the state
+    this suite runs in (bundles declared, `Chemclaw3-mcp` not serving) two skills were listed whose
+    declared tools were bound to nothing at all: `safety-screening` and
+    `charge-tables-and-mass-efficiency`. The model was handed judgment about `screen_hazards`,
+    `screen_genotoxic_alerts` and `ich_impurity_limit` — and, in `safety-screening`'s own
+    description, the sentence "three of those now have a table", which contradicts the instructions'
+    denial of exactly those three in the same message.
+
+    The basis is now the tools the graph binds, which is the same set the prose is narrowed against.
+    """
+    prompt, bound = _observed_prompt()
+    listed = _listed_skills(prompt)
+    declared = declared_tools([*settings.skills_dirs, *_bundle_skills_dirs()])
+    orphaned = {
+        name: sorted(declared[name])
+        for name in listed
+        if declared.get(name) and not (declared[name] & bound)
+    }
+    assert not orphaned, (
+        f"skills listed with no bound tool at all: {orphaned}. The listing must be narrowed by "
+        "what this turn binds, not by what a manifest advertises."
+    )
+
+
+def test_the_prompt_says_where_a_turn_may_write_and_where_it_may_not() -> None:
+    """F7: the filesystem verbs were bound on every turn and named nowhere in the prompt.
+
+    Measured off the wire: **zero** occurrences of `write_file`, `/scratch` or `/memories` in the
+    whole system message, while `write_file`, `edit_file`, `ls`, `glob` and `grep` were bound and
+    `filesystem_permissions()` refuses a write to any path outside those two roots. A refused write
+    the model was never told the rule for is an unpredictable refusal, and a scratchpad it does not
+    know it has is a working surface nobody uses — which is the gap `agent/scratchpad.py` was built
+    to close and then did not tell anyone about.
+    """
+    load_profiles()
+    # The default prose and a profile that replaces it: the verbs and the deny-rule are the same on
+    # both, because `FilesystemMiddleware` is composed for every agent this deployment builds — so
+    # the block is one object in both `_INSTRUCTION_BLOCKS` and `_SAFETY_BLOCKS` rather than a
+    # sentence the specialists were left out of.
+    for profile in (None, "safety"):
+        prompt = _system_prompt() if profile is None else _system_prompt(profile=profile)
+        for token in ("write_file", SCRATCH_ROOT, MEMORY_ROOT):
+            assert token in prompt, (
+                f"the {profile or 'default'} prompt never mentions {token!r}, which every "
+                "turn binds"
+            )
+
+
+def test_a_narrow_profiles_system_message_drops_the_floor_sentence_it_cannot_act_on() -> None:
+    """F1, proven by capture on a narrow profile rather than by reading the text that composes it.
+
+    The floor appended to a profile that replaces the prose is `PromptBlock`s now, so the
+    `record_knowledge_note` sentence goes only to an agent that binds the tool. Both directions off
+    the wire, because a fix that deleted the sentence everywhere would pass the first half alone:
+    `property-lookup` binds nothing that writes and must not be told to record findings;
+    `reporting` is built around `record_knowledge_note` and must still be.
+
+    The security floor is asserted in the same capture, because that is what the appended text is
+    *for* — a narrowing over capability must never take the envelope rule with it.
+    """
+    load_profiles()
+    sentence = "goes through record_knowledge_note"
+
+    narrow = _system_prompt(profile="property-lookup")
+    assert sentence not in narrow, "a profile with no write tool is still told to record findings"
+    assert ENVELOPE_TAG in narrow, "the narrowing took the envelope rule with it"
+    assert "'Refused:'" in narrow, "the narrowing took the refusal semantics with it"
+
+    assert sentence in _system_prompt(profile="reporting"), (
+        "the profile built around record_knowledge_note lost the sentence about it"
+    )
+
+
+def test_a_denial_drops_off_the_wire_when_the_fleet_binds_the_tool_that_refutes_it() -> None:
+    """F4 on a compiled graph: `absent_unless` has to act on what the graph *binds*.
+
+    `tests/test_prose_contract.py` asserts the two clauses both ways through `instructions_for`;
+    this is the same claim taken off the wire, because the argument that matters is about the tool
+    list `build_langgraph_agent` assembles and hands to the prompt. The bundle that serves
+    `screen_genotoxic_alerts` lives in `Chemclaw3-mcp` and cannot be reached from this interpreter,
+    so it is stood in for by a tool of that name passed as a connector — which is exactly the shape
+    `open_connector_specs` returns and the only thing the narrowing reads.
+    """
+    denial = "genotoxicity (ICH M7)"
+    served = StructuredTool.from_function(
+        func=lambda smiles: "no alert",
+        name="screen_genotoxic_alerts",
+        description="Screen a structure for DNA-reactive structural alerts.",
+    )
+
+    assert denial in _system_prompt(), "the limit is not stated on a deployment without the tool"
+    assert denial not in _system_prompt(connectors=[served]), (
+        "the tool is bound and the prompt still denies the capability it provides"
+    )

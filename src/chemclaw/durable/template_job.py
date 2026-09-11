@@ -40,6 +40,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.notify import notify_session_best_effort
     from chemclaw.durable.template_activities import (
         AgentStepInput,
+        AgentStepResult,
         JobStepInput,
         StepIdentity,
         ToolStepInput,
@@ -109,8 +110,34 @@ class TemplateRunResult(BaseModel):
 TEMPLATE_JOB_FAMILY = "template"
 
 
+def run_summary(template: str, steps: int, degradations: dict[str, str]) -> str:
+    """The one sentence a listing shows for a finished run — **including what it ran without**.
+
+    `find_past_jobs` and `get_durable_job_status` render `summary` and nothing else about a
+    completed run, so a run whose `agent` step answered with two capability bundles dark showed
+    "template 'hazard-briefing' completed 3 step(s)" — the same sentence, to the byte, as a clean
+    one. The step ids rather than a count, for the reason `failed_template_record` gives about
+    naming the failing step: "the run was degraded" is unactionable when a procedure has five
+    steps.
+
+    `state` deliberately stays `completed`, and that is a boundary rather than an omission: the run
+    *did* run to its end, and `job_records.state` is documented by its own migration
+    (`infra/sql/061_job_record_state.sql`) as the two-value discriminator `completed`/`failed` that
+    `agent/durable_tools.py` passes through to the model verbatim. A third value there is that
+    column's decision to make, not this caller's.
+    """
+    line = f"template {template!r} completed {steps} step(s)"
+    if not degradations:
+        return line
+    return f"{line} — DEGRADED at {', '.join(sorted(degradations))}"
+
+
 def template_job_record(
-    job_id: str, run: "TemplateRunInput", results: dict[str, Any], summary: str
+    job_id: str,
+    run: "TemplateRunInput",
+    results: dict[str, Any],
+    summary: str,
+    degradations: dict[str, str] | None = None,
 ) -> JobRecord:
     """The durable record of one finished template run.
 
@@ -130,6 +157,14 @@ def template_job_record(
     reviewed `data/templates/<name>.yaml` whose own `summary` states what the procedure is for, so
     copying that here would restate another store's fact in a field documented as the requester's
     own words.
+
+    Args:
+        job_id: The run's workflow id, which is also its correlation id.
+        run: The pinned template, its inputs, and whose run it is.
+        results: Every step's result, keyed by step id.
+        summary: The run's one-line account — build it with `run_summary`.
+        degradations: Which steps ran with something missing, and what, keyed by step id. `None`
+            or empty for a clean run, which is what keeps such a run's row unchanged.
     """
     return JobRecord(
         job_id=job_id,
@@ -145,7 +180,15 @@ def template_job_record(
         # Every step, not only the last. A fixed procedure's value is being able to show what each
         # stage produced, which is why `TemplateRunResult` keeps them; reconstructing them from
         # Temporal history afterwards is not something a chemist can do.
-        result={"steps": results},
+        #
+        # `degraded` is beside them rather than folded into them, and only when there is one: a
+        # clean run's `result` is byte-identical to what it has always been, and a reader that
+        # wants the fact machine-readably has it keyed by step id rather than having to parse the
+        # notice out of the prose. That prose carries it too (`AgentStepResult.step_value`) —
+        # deliberately both, because the chemist reads the text and the auditor queries the row.
+        result=(
+            {"steps": results, "degraded": degradations} if degradations else {"steps": results}
+        ),
         payload_kind="template",
     )
 
@@ -217,6 +260,11 @@ class TemplateWorkflow:
         scope: dict[str, Any] = {f"inputs.{item.name}": None for item in run.template.inputs}
         scope.update({f"inputs.{key}": value for key, value in run.inputs.items()})
         results: dict[str, Any] = {}
+        # Which steps ran degraded, and in what way — keyed by step id, because "the run was
+        # degraded" is as unactionable as "the template failed" was when a procedure has five
+        # steps. Empty for a clean run, which is what keeps the record and the push-back of an
+        # undegraded run byte-identical to what they were.
+        degradations: dict[str, str] = {}
 
         for step in run.template.steps:
             try:
@@ -244,16 +292,27 @@ class TemplateWorkflow:
                 )
                 await self._notify_failure(run, step, exc)
                 raise
+            # **An `agent` step reports what was missing, and the run has to carry it.** The step
+            # returns an `AgentStepResult` rather than a bare string precisely so this loop can
+            # tell a degraded answer from a whole one; unwrapping it here — rather than inside
+            # `_run_step` — is what keeps `scope` and `results` holding the *text* every other
+            # step kind holds, so a `${steps.x.result}` reference still substitutes prose and a
+            # `tool` step's result is untouched. `step_value()` carries the notice into the text
+            # itself, because the next step reads nothing else.
+            if isinstance(result, AgentStepResult):
+                if result.degraded:
+                    degradations[step.id] = result.notice()
+                result = result.step_value()
             results[step.id] = result
             scope[f"steps.{step.id}.result"] = result
 
-        summary = f"template {run.template.name!r} completed {len(run.template.steps)} step(s)"
+        summary = run_summary(run.template.name, len(run.template.steps), degradations)
         # Recorded before the push-back, so the id a chemist is handed is one `find_past_jobs` and
         # `get_durable_job_status` can already answer for. Best-effort in the same sense the
         # connector wrapper means it: a finished run is finished, and losing its row must not undo
         # the work or fail the workflow.
         await self._record_run(
-            template_job_record(workflow.info().workflow_id, run, results, summary)
+            template_job_record(workflow.info().workflow_id, run, results, summary, degradations)
         )
         if run.session_id:
             await notify_session_best_effort(
@@ -263,6 +322,9 @@ class TemplateWorkflow:
                     "job_id": workflow.info().workflow_id,
                     "template": run.template.name,
                     "summary": summary,
+                    # Only when there is one, so a clean run's push-back is the payload it has
+                    # always been and the UI's `normalizeEvent` has nothing new to drop.
+                    **({"degraded": degradations} if degradations else {}),
                 },
             )
         # The last step's result is the run's answer: a procedure ends with the thing it was for,
@@ -410,7 +472,7 @@ class TemplateWorkflow:
         A `tool` step naming a job launcher would return an id and move on, which is right in a chat
         turn (the agent must not block) and useless here: a template exists to sequence work, so it
         waits. Reusing `ConnectorJobWorkflow` rather than starting the connector's workflow directly
-        keeps the job's cross-cutting concerns — the PR-gate publish, the actor attribution — in the
+        keeps the job's cross-cutting concerns — the note write, the actor attribution — in the
         one place that owns them.
         """
         # Through an activity, not by calling `find_job` here: the lookup reads the connector

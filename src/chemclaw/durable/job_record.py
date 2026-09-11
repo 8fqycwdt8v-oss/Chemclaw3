@@ -10,7 +10,7 @@ history aged out: *what did that campaign actually try*, *how do I find it from 
 and — for every job this system runs, not just BO — *why was it run at all*.
 
 So the record is written by core's `ConnectorJobWorkflow` for **every** connector job, not by each
-connector. That placement is the same rule the PR-gate and the actor stamp follow: an obligation
+connector. That placement is the same rule the note write and the actor stamp follow: an obligation
 that must hold for every capability belongs to the one wrapper they all run inside, because "each
 connector remembers" is precisely the discipline that fails silently.
 
@@ -82,7 +82,8 @@ class JobRecord(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     summary: str = ""
     result: dict[str, Any] = Field(default_factory=dict)
-    # The note this run proposed, or "" — a join to the graph, not proof of a merge.
+    # The note this run produced, or "" — a join to the graph, and not proof the write landed:
+    # it is copied off the result envelope, and the graph write that follows is best-effort.
     note_id: str = ""
     # The calculation keys the run rested on, from its envelope (D-2026-08-21). Kept beside the
     # note rather than inside `result` for the same reason `note_id` is: `result` is the
@@ -392,13 +393,15 @@ def note_with_run_provenance(note: Note, record: JobRecord) -> Note:
     """Return `note` with a footer naming the run that produced it and the reason it was started.
 
     **Applied by core to every connector note**, which is the whole point: the reason a job ran is
-    the one thing a merged markdown note could never say, and asking each connector to append it
+    the one thing a markdown note could never say by itself, and asking each connector to append it
     would guarantee that some connector does not. A reader months later gets *why this was done*
-    from the same file that says what came out, with no second store to consult — and a reviewer
-    sees the reason on the PR they are being asked to sign.
+    from the same file that says what came out, with no second store to consult. This paragraph
+    ended "and a reviewer sees the reason on the PR they are being asked to sign", which
+    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` falsified — and the footer matters
+    *more* without that reader, because nobody now meets the note before it is in the graph.
 
-    The footer carries **no `[[wikilink]]`**, deliberately. A link to a note that does not exist
-    fails `chemclaw.kg.validate` on the very PR this note opens, and the job id names a database
+    The footer carries **no `[[wikilink]]`**, deliberately. A link to a note that does not exist is
+    what `kg-validate` fails the corpus on, and the job id names a database
     row rather than a graph node; it is rendered as code so it stays a literal.
 
     `Note` is frozen, so this builds a copy — which also leaves the connector's own object intact

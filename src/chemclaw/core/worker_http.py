@@ -8,7 +8,7 @@ that recording a metric elsewhere "is a no-op — there is no registry and no HT
 processes". Half of that was never true: the registry (`core/metrics.py`) is a stdlib-only module
 singleton, so it exists in every process that imports it. So the background worker and every
 connector worker have been incrementing counters into a live registry that nothing could read.
-Every durable job launched, every note proposed from a workflow, every audit-sink failure inside a
+Every durable job launched, every note recorded from a workflow, every audit-sink failure inside a
 background activity: recorded, and invisible.
 
 **"Liveness is the Temporal poll itself"** was asserted in three chart templates and enforced

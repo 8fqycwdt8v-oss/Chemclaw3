@@ -144,18 +144,18 @@ class RetrievalSettings(BaseSettings):
     # warm query O(1); the cost is that a note changed by something *outside* this process
     # (another pod, an out-of-band `git pull`) can stay invisible for up to this long.
     #
-    # Changes made *through* this process do not wait: the PR-gate submitter calls
-    # `kg.graph.invalidate_cache()` after it writes a note, so the authoring loop stays instant.
+    # Changes made *through* this process do not wait: `kg.git_writer` calls
+    # `kg.graph.invalidate_cache()` after it commits a note, so the authoring loop stays instant.
     # `0` disables the window — every query re-scans, which is the exact pre-DA-5 behavior and
     # the setting to choose where any staleness is unacceptable.
     #
     # Raised from 5 s to 60 s. At 5 s a busy pod re-ran the O(notes) `rglob` almost continuously —
     # a load test with 50 concurrent sessions kept it permanently expired, so the "cache" paid its
     # full scan on essentially every `gather_evidence`/`find_notes`. Nothing was gained for that:
-    # the only *in-process* writer (the PR-gate submitter) calls `invalidate_cache()` explicitly,
+    # the only *in-process* writer (`kg.git_writer`) calls `invalidate_cache()` explicitly,
     # so this window governs out-of-process changes only — and those arrive via the knowledge-sync
-    # sidecar, whose own refresh cadence is 300 s. A 5-second window could not make a merged note
-    # visible any sooner than the sync that delivers it; it only bought scans.
+    # sidecar, whose own refresh cadence is 300 s. A 5-second window could not make a note written
+    # elsewhere visible any sooner than the sync that delivers it; it only bought scans.
     graph_cache_ttl_seconds: float = Field(default=60.0, ge=0.0)
 
     # ── pgvector HNSW recall knobs ────────────────────────────────────────────────────────────

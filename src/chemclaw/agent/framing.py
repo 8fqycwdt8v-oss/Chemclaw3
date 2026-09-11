@@ -1,11 +1,12 @@
 """Frame retrieved third-party content so the model reads it as data, not instructions.
 
 Why this exists: note bodies, ELN-ingested reaction labels and uploaded attachments are not
-authored by the agent, and none of them is reviewed before it reaches the model —
-agent-authored notes do, but *ingested* ELN/ORD notes, fingerprint labels and a chemist's uploads
-are third-party text that lands in context directly. A body containing "ignore your instructions
-and …" is the classic indirect prompt-injection vector (the retrieval and attachment tools feed
-these bodies verbatim into context).
+authored by the agent, and nothing reviews any of them before they reach the model — this sentence
+excepted agent-authored notes as reviewed until
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` falsified that. Ingested ELN/ORD notes,
+fingerprint labels and a chemist's uploads are third-party text that lands in context directly. A
+body containing "ignore your instructions and …" is the classic indirect prompt-injection vector
+(the retrieval and attachment tools feed these bodies verbatim into context).
 
 Wrapping retrieved content in an explicit, named envelope — paired with the agent instruction
 that envelope contents are evidence to cite, never commands — is the cheap, centralized
@@ -98,7 +99,7 @@ ENVELOPE_TAG = f"retrieved-note-{_NONCE}"
 
 #: What marks a sentence in a tool result as **this system's**, rather than as a tool's words.
 #:
-#: `chemclaw_agent._SAFETY_RULES` used to tell the model that a result beginning `Refused:` is an
+#: `chemclaw_agent._SAFETY_BLOCKS` used to tell the model that a result beginning `Refused:` is an
 #: access-control decision about the asking chemist's account — a promise nothing kept. `defang`
 #: neutralises delimiters, not prefixes; `answered_failure` keeps a connector's error text
 #: **verbatim** on purpose; and an error result is defanged rather than framed. Measured through
@@ -200,10 +201,42 @@ def _defang(content: str) -> str:
     body = _FORGERY.sub("&lt;", content)
     if _FORGERY.search(revealed):
         body = body.replace("<", "&lt;")
-    body = _MARK_FORGERY.sub("&#91;", body)
+    return _marks_escaped(body, revealed)
+
+
+def _marks_escaped(body: str, revealed: str) -> str:
+    """The mark half of `_defang`, split out because one caller needs it without the other half.
+
+    `neutralise_marks` below runs this pass alone over text that *already carries* this system's
+    envelope delimiters — so the tag pass, which escapes exactly those, would destroy the thing it
+    is protecting. Splitting rather than copying, because the disguise arm (`revealed`) is the half
+    a second implementation would forget: measured, four invisible-character variants of the mark
+    passed an escape written without it.
+    """
+    escaped = _MARK_FORGERY.sub("&#91;", body)
     if _MARK_FORGERY.search(revealed):
-        body = body.replace("[", "&#91;")
-    return body
+        escaped = escaped.replace("[", "&#91;")
+    return escaped
+
+
+def neutralise_marks(content: str) -> str:
+    """Escape every `SYSTEM_SPEECH_MARK`-shaped span in `content`, leaving envelope tags alone.
+
+    **For system text that ends up *inside* an envelope, which is not a contradiction — it is the
+    rule.** The envelope says "this span is retrieved data"; the mark says "this sentence is the
+    system's own". A span carrying both tells the model two incompatible things about the same
+    characters, and the one it is told to trust is the one an attacker most wants to write. So
+    nothing inside an envelope carries a live mark, whoever wrote it.
+
+    The caller is `agent/tool_framing.py`'s connector-success branch, which bounds the *framed*
+    string: `bounded_for_batch` announces its cut with a marked notice, and after framing that
+    notice lands between the two delimiters. Until 2026-09-11 that branch did not re-bound at all
+    and the question could not arise; the fix that closed a 4.00x expansion opened this, and
+    `tests/test_tool_result_size.py::test_where_the_notices_mark_survives_the_chain_is_measured_not_assumed`
+    caught it on CI rather than here. The model still reads the cut — the notice text survives; what
+    it does not read is an attribution the envelope has already contradicted.
+    """
+    return _marks_escaped(content, content.translate(_INVISIBLE))
 
 
 # Everything an id may carry. Excludes `"`, `<` and `>` (so an id cannot terminate the attribute
