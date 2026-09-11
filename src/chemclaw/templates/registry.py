@@ -77,8 +77,13 @@ def _load(path: Path) -> Template:
 
 
 @cache
-def discovered() -> dict[str, Template]:
-    """Every discovered template by name, validated. Cached for the process, like connectors.
+def _discovered_in(dirs: tuple[str, ...]) -> dict[str, Template]:
+    """Every template found under `dirs`, by name, validated. Cached on `dirs`, like connectors.
+
+    **Keyed on the directories because they are the input.** This was `@cache` on a zero-argument
+    `discovered()` reading `settings.templates_dirs` itself, so the key omitted the only thing the
+    answer depends on and a test repointing `templates_dir` poisoned every later test in the
+    process. See `chemclaw.connectors.registry._discovered_in`, which carries the whole argument.
 
     Two distinctness rules, because the file name and the *tool* name are different namespaces and
     only the second is the one a turn uses. `tool_name` folds a hyphen to an underscore, so
@@ -90,7 +95,7 @@ def discovered() -> dict[str, Template]:
     """
     found: dict[str, Template] = {}
     claimed: dict[str, str] = {}
-    for directory in settings.templates_dirs:
+    for directory in dirs:
         root = Path(directory)
         if not root.is_dir():
             continue
@@ -109,6 +114,21 @@ def discovered() -> dict[str, Template]:
             claimed[generated] = template.name
             found[template.name] = template
     return found
+
+
+def discovered() -> dict[str, Template]:
+    """Every discovered template by name, validated.
+
+    The settings read is here rather than inside the cache, so a `templates_dir` changed
+    mid-process is seen on the next call instead of being answered from the old directory's entry.
+    """
+    return _discovered_in(tuple(settings.templates_dirs))
+
+
+# The seam a test uses when it writes new templates into a directory already discovered — the one
+# case a directory-keyed cache cannot see, the key being unchanged. mypy does not model attributes
+# on function objects, hence the ignore.
+discovered.cache_clear = _discovered_in.cache_clear  # type: ignore[attr-defined]
 
 
 def enabled() -> list[Template]:

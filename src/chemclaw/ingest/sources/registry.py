@@ -53,8 +53,11 @@ class DataSourceError(ChemclawError):
     """
 
 
-def _source_dirs() -> list[Path]:
-    """Every data-source folder found across the configured dirs, sorted by name.
+def _source_dirs(dirs: tuple[str, ...]) -> list[Path]:
+    """Every data-source folder found across `dirs`, sorted by name.
+
+    The directories are an argument rather than a read of `settings.data_sources_dirs`, because
+    they are the input `_discovered_in` is cached on (see there).
 
     Sorted rather than filesystem order so retrieval fan-out order is identical on every machine.
     Earlier dirs win on a name collision, so a deployment can mount a folder that overrides a
@@ -63,7 +66,7 @@ def _source_dirs() -> list[Path]:
     variant plus a new branch in core.
     """
     found: dict[str, Path] = {}
-    for directory in settings.data_sources_dirs:
+    for directory in dirs:
         root = Path(directory)
         if not root.is_dir():
             continue
@@ -90,15 +93,35 @@ def _read_manifest(path: Path) -> DataSourceManifest:
 
 
 @cache
-def discovered() -> dict[str, DataSourceManifest]:
-    """Every data source found on disk, by name — manifests only, nothing imported.
+def _discovered_in(dirs: tuple[str, ...]) -> dict[str, DataSourceManifest]:
+    """Every data source found under `dirs`, by name — manifests only, nothing imported.
 
     Cached because discovery is filesystem I/O over a fixed layout and both consumers call it per
     operation. The cache holds *manifests*, never built halves: a built half may close over
     per-call config (a monkeypatched `knowledge_dir` in tests, a rotated export dir), so sources
     are constructed fresh on every call exactly as the old factories did.
+
+    **Keyed on the directories because they are the input.** This was `@cache` on a zero-argument
+    `discovered()` reading `settings.data_sources_dirs` itself, so the key omitted the only thing
+    the answer depends on and a single test pointing the registry at its own `tmp_path` manifests
+    poisoned the rest of the session. See `chemclaw.connectors.registry._discovered_in`.
     """
-    return {path.name: _read_manifest(path) for path in _source_dirs()}
+    return {path.name: _read_manifest(path) for path in _source_dirs(dirs)}
+
+
+def discovered() -> dict[str, DataSourceManifest]:
+    """Every data source found on disk, by name — manifests only, nothing imported.
+
+    The settings read is here rather than inside the cache, so a `data_sources_dir` changed
+    mid-process is seen on the next call instead of being answered from the old directory's entry.
+    """
+    return _discovered_in(tuple(settings.data_sources_dirs))
+
+
+# The seam a test uses when it writes new manifests into a directory already discovered — the one
+# case a directory-keyed cache cannot see, the key being unchanged. mypy does not model attributes
+# on function objects, hence the ignore.
+discovered.cache_clear = _discovered_in.cache_clear  # type: ignore[attr-defined]
 
 
 def resolve_half(reference: str) -> Callable[..., Any]:

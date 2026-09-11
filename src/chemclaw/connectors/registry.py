@@ -98,15 +98,19 @@ class ConnectorError(ChemclawError):
     """
 
 
-def _bundle_dirs() -> list[Path]:
-    """Every connector bundle directory found across the configured connector dirs, sorted by name.
+def _bundle_dirs(dirs: tuple[str, ...]) -> list[Path]:
+    """Every connector bundle directory found across `dirs`, sorted by name.
 
     Sorted rather than filesystem order so the advertised tool order is identical on every
     machine — tool order is part of the prompt the model sees, and a surface that reshuffles per
     pod is a reproducibility problem.
+
+    The directories are an argument rather than a read of `settings.connectors_dirs`, because this
+    is the input `_discovered_in` is cached on and a cached function that reaches past its own
+    parameters for its real input is the defect that made the cache unkeyable (see there).
     """
     found: dict[str, Path] = {}
-    for directory in settings.connectors_dirs:
+    for directory in dirs:
         root = Path(directory)
         if not root.is_dir():
             continue
@@ -140,15 +144,38 @@ def _load_manifest(bundle: Path) -> ConnectorManifest:
 
 
 @cache
+def _discovered_in(dirs: tuple[str, ...]) -> dict[str, tuple[Path, ConnectorManifest]]:
+    """Every bundle found under `dirs`, by name, with its directory — validated, cached on `dirs`.
+
+    Cached because discovery reads and parses every manifest on disk (measured: ~48 ms), while the
+    result is fixed for as long as the directories are — which in a deployment is the process's
+    whole life, config being read once at import.
+
+    **Keyed on the directories because they are the input.** This was `@cache` on a zero-argument
+    `discovered()` that read `settings.connectors_dirs` itself, so the cache key omitted the only
+    thing the answer depends on: a test repointing `connectors_dir` at a `tmp_path` bundle poisoned
+    the result for every later test in the process, and the only available defence was clearing the
+    cache around *every* test in the suite — 5,747 forced re-discoveries to protect against ~21
+    files. With the directories in the key a repointed directory is simply a different entry, so the
+    poisoning cannot happen and the clearing is not needed.
+    """
+    return {bundle.name: (bundle, _load_manifest(bundle)) for bundle in _bundle_dirs(dirs)}
+
+
 def discovered() -> dict[str, tuple[Path, ConnectorManifest]]:
     """Every discovered bundle by name, with its directory — validated, regardless of enablement.
 
-    Cached because discovery reads and parses every manifest on disk, while the result is fixed
-    for the process's lifetime (config is read once at import, and bundles do not appear at run
-    time). `discovered.cache_clear()` is the seam a test uses after pointing `connectors_dir`
-    elsewhere.
+    The settings read is here rather than inside the cache, so that changing `connectors_dir`
+    mid-process is seen on the next call instead of being answered from the previous directory's
+    entry.
     """
-    return {bundle.name: (bundle, _load_manifest(bundle)) for bundle in _bundle_dirs()}
+    return _discovered_in(tuple(settings.connectors_dirs))
+
+
+# The seam a test uses when it writes new manifests into a directory this registry has *already*
+# discovered — the one case a directory-keyed cache cannot see on its own, since the key is
+# unchanged. mypy does not model attributes on function objects, hence the ignore.
+discovered.cache_clear = _discovered_in.cache_clear  # type: ignore[attr-defined]
 
 
 def bearer_token_env_names() -> tuple[str, ...]:
