@@ -4,8 +4,9 @@
 "record a note" path imports it (`from tests.conftest import FakeWriter`)
 instead of redefining an identical fake per file (DRY).
 
-`_fresh_discovery_caches` clears the connector and template `@cache`d discovery seams around
-every test; see its docstring for why that has to be autouse rather than a per-file convention.
+`_fresh_derived_tool_sets` clears the two `@cache`d authorization sets derived from the connector
+and template registries around every test; see its docstring for why that has to be autouse rather
+than a per-file convention, and for why the registries themselves are no longer cleared here.
 
 `_free_port` is the one "ask the OS for an unused loopback port" helper, shared by every test
 that starts a real server instead of being redefined per file (Rule of Three).
@@ -32,13 +33,10 @@ from _pytest.terminal import TerminalReporter
 from chemclaw.agent.authz import knowledge_read_tools as _knowledge_read_tools
 from chemclaw.agent.authz import side_effecting_tools as _side_effecting_tools
 from chemclaw.connectors.reachability import forget_reachability as _forget_reachability
-from chemclaw.connectors.registry import discovered as _connectors_discovered
 from chemclaw.core.config import settings
 from chemclaw.ingest.eln.warehouse.connect import forget_open_warehouses as _forget_warehouses
-from chemclaw.ingest.sources.registry import discovered as _sources_discovered
 from chemclaw.kg.record import NoteWrite, WriteOutcome
 from chemclaw.retrieval.vectors.registry import forget_vector_store as _forget_vector_store
-from chemclaw.templates.registry import discovered as _templates_discovered
 from tests.pg import create_test_schema, drop_test_schema, schema_dsn
 
 # `pytester` runs a throwaway pytest session inside a tmp dir, which is the only way to observe
@@ -134,41 +132,33 @@ def isolated_postgres_schema() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def _fresh_discovery_caches() -> Iterator[None]:
-    """Clear the connector, template and data-source `@cache`d discovery registries per test.
+def _fresh_derived_tool_sets() -> Iterator[None]:
+    """Clear the two `@cache`d authorization sets derived from the discovery registries, per test.
 
-    `chemclaw.connectors.registry.discovered`, `chemclaw.templates.registry.discovered` and
-    `chemclaw.ingest.sources.registry.discovered` are `@cache`d for production, where the
-    bundle/template/source layout is fixed for the process's life.
-    Most of the suite calls them expecting the real, on-disk default; a handful of tests repoint
-    `connectors_dir` / `templates_dir` at a `tmp_path` fixture bundle instead. `monkeypatch`
-    restores the setting afterwards, but it has no idea a `functools.cache` sits downstream, so a
-    test that forgot to clear it left the *next* test reading a stale or `tmp_path`-only result —
-    order-dependent failures in `test_agent.py` and `test_prose_contract.py` traced to exactly
-    this (`docs/planning/BACKLOG.md`). Clearing both directions, autouse, turns "remember to clear
-    the cache" from a per-file convention every new test has to rediscover into an invariant nothing
-    can forget — and it is cheap: clearing an empty `functools.cache` is O(1).
+    `chemclaw.agent.authz.side_effecting_tools` and `knowledge_read_tools` are `@cache`d on *no
+    arguments* while their real input is the enabled connector and template manifests, so a test
+    that repoints `connectors_dir` at a `tmp_path` bundle leaves the next test's write gates
+    reading the old deployment's classification and its turn record counting the old one's
+    searches. Autouse for the reason every cache-clearing fixture here is: "remember to clear the
+    cache" as a per-file convention is something each new test file has to rediscover, and the
+    failure it produces lands in a *different* file, order-dependent. It is cheap — measured at
+    0.018 ms and 0.005 ms to re-derive against warm registries, because both are a pass over
+    manifests already parsed.
 
-    **The data-source registry is the third of the same kind and was the one not here**, cleared
-    instead by a per-file autouse fixture in `tests/test_datasource_seam.py`. That worked for as
-    long as every test repointing `data_sources_dir` lived in that file, and stopped the moment one
-    did not: a single test elsewhere pointing the registry at its own `tmp_path` manifests poisoned
-    the cache for the rest of the session, and 50 tests in four unrelated files failed reading a
-    corpus of one fixture source. Which is precisely the failure the docstring above already
-    describes, in the one registry it did not cover.
+    **The three discovery registries themselves are deliberately no longer cleared here.**
+    `connectors.registry.discovered`, `templates.registry.discovered` and
+    `ingest.sources.registry.discovered` were `@cache`d on nothing for the same reason, and this
+    fixture was the defence: clear them around all 5,747 tests so the ~21 files that repoint a
+    directory cannot poison the rest. Clearing is O(1); the *re-discovery* it forced is not —
+    measured at 48 ms, 32 ms and 32 ms a time. They are now keyed on the directory tuple they
+    actually read, so a repointed `tmp_path` is a different cache entry and the poisoning it was
+    protecting against cannot happen. `discovered.cache_clear()` still exists and is still the
+    seam for the narrower case a key cannot see: new manifests written into a directory the
+    registry has already discovered.
     """
-    _connectors_discovered.cache_clear()
-    _templates_discovered.cache_clear()
-    _sources_discovered.cache_clear()
-    # Derived from the first two, so it goes stale exactly when they do — a repointed
-    # `connectors_dir` with this cache still warm would leave the write gates reading the old
-    # deployment's classification, and the turn record counting the old one's searches.
     _side_effecting_tools.cache_clear()
     _knowledge_read_tools.cache_clear()
     yield
-    _connectors_discovered.cache_clear()
-    _templates_discovered.cache_clear()
-    _sources_discovered.cache_clear()
     _side_effecting_tools.cache_clear()
     _knowledge_read_tools.cache_clear()
 
@@ -199,7 +189,7 @@ def _fresh_attached_connections() -> Iterator[None]:
     wrong in a test session, though — `warehouse_fake.prime()` installs a new fake per test, and a
     cached connection would serve every later test the *first* test's rows.
 
-    Autouse for `_fresh_discovery_caches`'s reason: "clear the cache" as a per-file convention is
+    Autouse for `_fresh_derived_tool_sets`'s reason: "clear the cache" as a per-file convention is
     something each new test file has to rediscover, and the failure it produces is order-dependent.
     """
     _forget_warehouses()
