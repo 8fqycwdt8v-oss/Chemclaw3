@@ -335,8 +335,15 @@ half-written.
   unfetchable metric blocks scale-*down* only, never a scale-up driven by one that reads).
   `service.autoscaling.occupancy.enabled: false` renders the CPU-only HPA exactly as before.
 - **Request bounds** (D-2026-08-01-a-cheap-request-is-still-a-request): uvicorn is launched with
-  `--limit-concurrency`, `--timeout-keep-alive` and `--h11-max-incomplete-event-size` (all from
-  `CHEMCLAW_SERVICE_*` settings, none of which the app can impose on itself); an ASGI middleware
+  `--limit-concurrency`, `--timeout-keep-alive` and `--h11-max-incomplete-event-size`, all from
+  `CHEMCLAW_SERVICE_*` settings. This line used to add "none of which the app can impose on
+  itself", and that was true of an ASGI *application* and false of `uvicorn.run()` — which takes
+  all three as keyword arguments. Measured on 2026-09-11, the sentence had cost something: the
+  front door was the only one of four HTTP surfaces that had them, and the MCP face, every
+  `connector-*` pod and the worker probe server ran at uvicorn's defaults — unlimited concurrency,
+  a 5 s keep-alive, a 16 KiB header ceiling. `chemclaw.core.asgi.transport_bounds` is the one
+  place they are now decided, applied at every launcher, and
+  `tests/test_transport_bounds.py` fails a launcher added without them. An ASGI middleware
   (`chemclaw.core.asgi.BodySizeLimit`) refuses a body over `CHEMCLAW_SERVICE_MAX_REQUEST_BYTES`
   with 413 before it is read; and a per-principal token bucket refuses with 429, on in the chart
   and off in code. Every connector server installs the same middleware over its own, smaller

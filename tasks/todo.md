@@ -13,7 +13,7 @@ a later commit could falsify without failing a test (`D-2026-09-03`).
 | Structural duplication | 33 duplicated 8-statement shapes in 8,643 windows, nearly all pydantic field blocks and SQL row mapping | **no wave — the tree is DRY** |
 | Function body length | median **9**, p90 36, but 20 functions 130–315 lines | W18 |
 | Worst branch count | `protocols/render.py::render_markdown` — **41 branches, 257 lines** | W18 |
-| Top-level defs named exactly once in `src/` (the definition itself) | **144** — 46 named nowhere at all (1,009 lines), 98 named only by tests (6,321 lines) | W16 |
+| Top-level defs named exactly once in `src/` | **117**, of which **22** are named nowhere and 25 only by tests. *This row first said 144/46 and was wrong*: the scan behind it counted `tokenize` NAME tokens, and on Python 3.11 an f-string is a single `STRING` token, so every identifier interpolated into one is invisible. 27 live functions read as orphans — nine of them consecutive helpers in `ingest/eln/record.py`, which looks exactly like a dead cluster. Re-derived with `ast`. | W16 |
 | `Settings` fields | **422** | W16 |
 | Test tree | **179,332 lines, 384 files, 1.23× `src`**, full run 23:42 | W19 |
 | `__init__.py` re-exports | 49 | fine |
@@ -28,6 +28,12 @@ after the maintenance *surface*, not the line count.
 proven otherwise, and this tree has already been burned by both directions: it deleted 1,442 lines
 of unreachable specialist code correctly (`D-2026-08-15`), and it kept `reject_widening` alive for
 months as "a claim that a control exists". Nothing gets deleted on a name-count alone.
+
+**That constraint earned itself inside this plan's first hour.** The dead-code row above was wrong
+in the direction that would have deleted live code, and the audit's own near-miss was reporting the
+egress guard's arming function as dead because it is imported under an alias
+(`from chemclaw.core.netguard import arm_from_settings as arm_egress_guard`). Two independent
+blind spots, both in the reassuring direction, before a line was removed.
 
 ---
 
