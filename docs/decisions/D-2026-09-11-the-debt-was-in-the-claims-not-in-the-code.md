@@ -85,12 +85,25 @@ sites. `forget_discovered()` is the idiom this tree already had (`forget_reachab
 
 ## Consequences
 
-**The suite's runtime is 31 tests, not 179,332 lines.** A profiled run measured 60 tests — 0.8% of
-the suite — at 58.4% of wall clock, of which 31 BoFire surrogate-fit tests are 43.5% alone; the
-other ~7,654 average 106 ms. **Not one `setup` or `teardown` entry reaches the top 60**, which is
-direct evidence against the per-test-database story the wave was planned around. The mechanism is
-one missing fixture: `tests/test_bo_predict.py` has 41 tests and none, so each refits the same
-surrogate from the same constant inputs to assert a different property of the result.
+**The suite's runtime is concentrated in a handful of tests, not spread across 179,332 lines.**
+On a quiet machine: the slowest 25 tests are **512 s of a 1,552 s suite (33%)**, and the seven
+BoFire/BO files together are **389 s (25%)**. **Not one `setup` or `teardown` entry reaches the top
+25**, which is direct evidence against the per-test-database story this wave was planned around —
+the cost is in `call`, not in scaffolding.
+
+**The first figure this paragraph carried was 43.5%, and it was wrong in the way this ADR is about.**
+It came from a profile taken while four other pytest processes were running against the same
+Postgres on a four-core box. GP fitting is CPU-bound, so contention inflated it roughly threefold
+while inflating the I/O-bound majority far less — which is exactly the shape that makes one subject
+look dominant. Re-measured quiet, `tests/test_bo_predict.py` is **110 s before the wave's fixture
+and 97 s after**, not the 337.9 s → 17.1 s the two profiles implied. So the fixture is worth about
+**12% of one file and under 1% of the suite**, and the honest summary of the runtime work is that
+it found where the time is and barely moved it.
+
+The mechanism is still real and still worth recording: `tests/test_bo_predict.py` had 41 tests and
+no fixtures, so each refit the same surrogate from the same constant inputs to assert a different
+property of the result. Five of them must keep refitting, because what they assert is
+reproducibility; a shared fit would leave them green while testing nothing.
 
 **Three of this wave's own measurements were wrong, all in the reassuring direction, and that is
 the finding that generalises.**
@@ -106,6 +119,11 @@ the finding that generalises.**
 3. A duration profile was declared invalid and an agent told to skip the question. It had been read
    while still being written; the data was there all along. The agent re-checked rather than
    complying, and was right to.
+4. **And then the profile that replaced it was believed uncritically.** Its 43.5% was measured under
+   contention and carried into this ADR's first draft, a `tasks/todo.md` section and a PR body
+   before a clean re-measurement halved it. The rule below would have caught it at the point of
+   writing: the method — *taken while four other pytest processes shared the database* — was the
+   whole story, and stating it was the cheap thing nobody did.
 
 So the rule this ADR adds to `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`: **state the
 method beside the number.** A count whose method is unstated cannot be reproduced, and three

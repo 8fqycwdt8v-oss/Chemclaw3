@@ -162,7 +162,7 @@ full argument is `D-2026-09-11-the-debt-was-in-the-claims-not-in-the-code`.
 | W17 prose load | 1.28 : 1 is the liability | **98.9% DECISION, 1.1% restatement**; the ratio is not the finding |
 | W17 prose gate | 21,391 unchecked refs → build a gate | **declined at 82.9% false positives**; two narrow rules instead, 7.5% → 7.6% |
 | W18 complexity | 20 functions need splitting | **1 split of 20**; 13 had already had their extractable parts extracted |
-| W19 test tree | 179,332 lines is too many | ratio fine, 1 duplicate in 5,747, 1.6% restating prose; **runtime is 31 tests** |
+| W19 test tree | 179,332 lines is too many | ratio fine, 1 duplicate in 5,747, 1.6% restating prose; runtime concentrated — slowest 25 are 512 s of 1,552 s, BO files 389 s (25%) |
 
 **What was actually wrong, in none of those categories**: three of four HTTP surfaces unbounded;
 two metric series named as alert targets that nothing emits; a settings field documented for a
@@ -179,6 +179,10 @@ Three times, all in the reassuring direction:
    method. Settled above.
 3. **The duration profile.** Declared invalid and an agent told to skip the question; it had been
    read while still being written. The agent re-checked rather than complying, and was right.
+4. **The profile that replaced it.** Its "31 BO tests are 43.5% of the run" was measured while four
+   other pytest processes shared the database; GP fitting is CPU-bound, so contention inflated it
+   about threefold. Clean: BO files are 25%, and the fixture the figure motivated is worth 12% of
+   one file and under 1% of the suite. It reached an ADR draft, this file and a PR body first.
 
 Each was caught by something other than the session that made it — two by subagents re-deriving
 rather than accepting, one by putting three numbers side by side. That is the argument for the
