@@ -10,11 +10,10 @@ methods), CHEMINF (chemical information) and OntoRXN already name these relation
 knowledge graphs, and a bespoke set would be one more thing to map to a standard later.
 
 Enforced by `chemclaw.kg.validate`, not by the `Note` schema — exactly as `KNOWN_NOTE_TYPES` is,
-and for the
-same reason: a hard schema rejection would fail the agent's write at the tool, so `kg-validate`
-names an unknown relation over the whole corpus instead, once, while an intended one costs one line
-here. (This paragraph used to say the agent *proposes* a relation and that "the PR-gate is where a
-human decides whether it joins the vocabulary". There is no gate
+and for the same reason: a hard schema rejection would fail the agent's write at the tool, so
+`kg-validate` names an unknown relation over the whole corpus instead, once, while an intended one
+costs one line here. (This paragraph used to say the agent *proposes* a relation and that "the
+PR-gate is where a human decides whether it joins the vocabulary". There is no gate
 (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), so what buys the placement is what it
 costs a *write*, not what a reviewer sees.)
 """

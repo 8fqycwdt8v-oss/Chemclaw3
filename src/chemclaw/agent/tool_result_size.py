@@ -81,7 +81,7 @@ logger = logging.getLogger(__name__)
 _HEAD_SHARE = 3 / 5
 
 
-def _notice(tool: str, removed: int, total: int) -> str:
+def _notice(tool: str, removed: int, total: int, mark: str = SYSTEM_SPEECH_MARK) -> str:
     """The sentence that replaces the middle, addressed to the model rather than to a log.
 
     Named as system text and not as tool output, for the reason `TOOL_RESULT_PLACEHOLDER` is: a
@@ -117,11 +117,11 @@ def _notice(tool: str, removed: int, total: int) -> str:
         f"{tool} result to stay inside this session's context budget. This is written by the "
         "system, not by the tool. The result was not empty and was not an error — narrow the "
         f"question (a filter, a smaller limit, one identifier) to see the part you need.] "
-        f"{SYSTEM_SPEECH_MARK}\n\n"
+        f"{mark}\n\n"
     )
 
 
-def _brief_notice(removed: int) -> str:
+def _brief_notice(removed: int, mark: str = SYSTEM_SPEECH_MARK) -> str:
     """The shortest honest form of the sentence above, for a share too small to hold it.
 
     A batch's share is `agent_max_tool_result_chars // width`, so a wide enough fan-out drives it
@@ -150,10 +150,15 @@ def _brief_notice(removed: int) -> str:
     number that a reworded sentence makes stale.
 
     Args:
-        removed: How many characters were removed. The only variable left: the tool name went with
-            the words above, so there is nothing else this form can say.
+        removed: How many characters were removed. The only variable left of the *facts*: the tool
+            name went with the words above, so there is nothing else this form can say.
+        mark: The provenance anchor to end on. Defaults to the live `SYSTEM_SPEECH_MARK`, which is
+            the rule. The one caller that overrides it is `agent/tool_framing.py`'s connector
+            success branch, whose notice lands *inside* an envelope — see `_notice` above for why
+            a live mark in there is two trust anchors contradicting each other, and why escaping
+            it at source rather than after the cut is what keeps the bound exact.
     """
-    return f"[{removed:,} chars cut] {SYSTEM_SPEECH_MARK}"
+    return f"[{removed:,} chars cut] {mark}"
 
 
 def _spans(content: Any) -> list[str]:
@@ -278,7 +283,9 @@ def _rebuilt(content: Any, kept: list[str]) -> Any:
     return rebuilt
 
 
-def bounded_content(content: Any, tool: str, limit: int) -> tuple[Any, int]:
+def bounded_content(
+    content: Any, tool: str, limit: int, *, mark: str = SYSTEM_SPEECH_MARK
+) -> tuple[Any, int]:
     """`content` cut to `limit` characters of text, and how many characters that removed.
 
     Separated from the middleware so the arithmetic can be exercised on a value rather than through
@@ -307,7 +314,7 @@ def bounded_content(content: Any, tool: str, limit: int) -> tuple[Any, int]:
     total = sum(len(span) for span in spans)
     if limit <= 0 or total <= limit:
         return content, 0
-    widest = len(_notice(tool, total, total))
+    widest = len(_notice(tool, total, total, mark))
     carrier = _carrier(content, spans)
     if limit < widest:
         # The share is smaller than the sentence explaining the cut, so the sentence is the thing
@@ -325,7 +332,7 @@ def bounded_content(content: Any, tool: str, limit: int) -> tuple[Any, int]:
         # The figure is not written here: it used to say 19 characters and 3,158 calls, and the
         # mark `_notice` gained made both stale in the same commit
         # (`tests/test_tool_result_size.py` measures the crossover instead).
-        brief = _brief_notice(total)
+        brief = _brief_notice(total, mark)
         if total <= len(brief):
             return content, 0
         return _rebuilt(content, _kept(spans, 0, brief, carrier)), total
@@ -337,10 +344,13 @@ def bounded_content(content: Any, tool: str, limit: int) -> tuple[Any, int]:
     # `total`.
     kept = max(limit - widest, 0)
     removed = total - kept
-    return _rebuilt(content, _kept(spans, kept, _notice(tool, removed, total), carrier)), removed
+    return (
+        _rebuilt(content, _kept(spans, kept, _notice(tool, removed, total, mark), carrier)),
+        removed,
+    )
 
 
-def bounded_for_batch(request: Any, content: Any) -> Any:
+def bounded_for_batch(request: Any, content: Any, *, mark: str = SYSTEM_SPEECH_MARK) -> Any:
     """`content` cut to this call's share of the ceiling, counted, logged, and said so in the text.
 
     The share arithmetic and both of its side effects in one function, because there are now two
@@ -360,7 +370,7 @@ def bounded_for_batch(request: Any, content: Any) -> Any:
     # The batch's share, never below 1: 0 is the deployment's own "no cap" and a share that rounded
     # to it would restore the unbounded behaviour exactly where the batch is widest.
     limit = max(ceiling // batch_width(request), 1) if ceiling else 0
-    bounded, removed = bounded_content(content, tool, limit)
+    bounded, removed = bounded_content(content, tool, limit, mark=mark)
     if not removed:
         return content
     # **The metric label is the served name, never the model's string**, and `core/metrics.py`

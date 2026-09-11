@@ -112,7 +112,13 @@ from langchain.agents.middleware import wrap_tool_call
 from langchain_core.messages import ToolMessage
 from pydantic import BaseModel
 
-from chemclaw.agent.framing import defang, envelope_delimiters, frame_untrusted
+from chemclaw.agent.framing import (
+    SYSTEM_SPEECH_MARK,
+    defang,
+    envelope_delimiters,
+    frame_untrusted,
+    neutralise_marks,
+)
 from chemclaw.agent.tool_result_shape import rewritten_tool_messages
 from chemclaw.agent.tool_result_size import bounded_for_batch
 from chemclaw.connectors.transport import SERVED_BY
@@ -474,8 +480,27 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
             # one well-formed envelope — the property
             # `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` records as holding for two
             # independent reasons. Only a head-only cut in this position would lose the closing tag.
+            #
+            # **And the cut's own notice then lands inside the envelope, so it carries the escaped
+            # mark rather than the live one.** `bounded_for_batch` ends its notice in
+            # `SYSTEM_SPEECH_MARK` — genuine system speech, and right everywhere else it is used.
+            # Between these two delimiters it would not be: the envelope says "this span is
+            # retrieved data" and the mark says "this sentence is mine", which is a pair no reader
+            # can hold at once and the one an attacker most wants to write.
+            # `tool_result_size._notice`'s own docstring already settled the question for the
+            # *inner* bound — that notice reaches the model as `&#91;system …]` because
+            # `_framed_content` defangs the span it is in — and calls it "the consistent answer
+            # rather than a hole". This is the same answer for the outer one.
+            #
+            # **Escaped at source rather than after the cut, because after is 8 characters too
+            # late.** Neutralising the bounded string was tried first and measured 60,008 against
+            # the 60,000 ceiling: two `[` in the notice, four characters each. The bound is exact
+            # by contract (`bounded_content`: "the notice is charged against `limit`"), so
+            # anything appended afterwards breaks it — the mark has to be the escaped one *while*
+            # the notice is being sized.
             framed = _framed_content(message.content, origin)
-            return message.model_copy(update={"content": bounded_for_batch(request, framed)})
+            bounded = bounded_for_batch(request, framed, mark=neutralise_marks(SYSTEM_SPEECH_MARK))
+            return message.model_copy(update={"content": bounded})
 
         return rewritten_tool_messages(result, _framed)
     name = request.tool_call["name"]
