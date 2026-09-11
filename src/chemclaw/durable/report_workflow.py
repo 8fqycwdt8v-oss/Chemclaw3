@@ -3,7 +3,7 @@
 The report is a graph of sections; here each section is a Temporal activity, so a
 long report (hundreds of retrievals over years of data) is resumable and survives worker
 restarts — the same fire-and-forget durability as the QM spine (Phase 1). The workflow
-retrieves section by section, then a final activity renders the draft and proposes it through
+retrieves section by section, then a final activity renders the draft and records it through
 the note-write path (5b.7). Retriever construction (the production sources) lives in the activities;
 the factory is module-level so tests swap it.
 """
@@ -135,8 +135,8 @@ class ReportSectionWorkflow:
     Each section is its own child workflow so a long report resumes section by section after a
     worker restart. A section whose retrieval exhausts its retries does not fail (and so is not
     silently dropped) the report: the child degrades to a placeholder section marked
-    `retrieval_failed`, so the assembled draft shows the gap explicitly for the chemist at the
-    PR-gate. The activity carries the single retry boundary (`BAD_DATA_RETRY`); the fan-out does not
+    `retrieval_failed`, so the assembled draft shows the gap explicitly for the chemist who reads
+    it. The activity carries the single retry boundary (`BAD_DATA_RETRY`); the fan-out does not
     layer a second child-level retry on top.
     """
 
@@ -218,11 +218,11 @@ def _reconcile(
 # D-2026-08-27.
 @workflow.defn(failure_exception_types=[Exception])
 class DevelopmentReportWorkflow:
-    """Draft a report durably, fanning sections out to child workflows, then PR-gate the draft."""
+    """Draft a report durably, fanning sections out to child workflows, then record the draft."""
 
     @workflow.run
     async def run(self, request: ReportRequest) -> ConnectorJobResult:
-        """Fan each section out to a child workflow, then propose the assembled draft note.
+        """Fan each section out to a child workflow, then record the assembled draft note.
 
         Sections are retrieved as independent child workflows (bounded parallelism). Each child owns
         its own retry (the activity's `BAD_DATA_RETRY`) and degrades a failed section to a visible
@@ -237,7 +237,7 @@ class DevelopmentReportWorkflow:
         closure (the graph, the retrievers, the fingerprint store) is what core keeps for
         `gather_evidence` regardless.
 
-        It still publishes its own note rather than returning one for core to gate, and that is
+        It still writes its own note rather than returning one for core to write, and that is
         correct here for the reason it would be wrong in a bundle: the note *reference* is this
         workflow's result, so publishing is the work, not a side effect — and this is core's own
         workflow, on the side of the boundary the note-write path lives on.

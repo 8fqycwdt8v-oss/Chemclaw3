@@ -18,13 +18,16 @@ Shaped as `ingest.eln.records` is, and for the same reason: a Protocol with an i
 Postgres implementation, so the drafting path is testable with no database while the store that
 actually serves the front door is exercised against a real one.
 
-**A design is data, not a knowledge claim, so it is a row rather than a PR-gated note.** The gate
-answers "is this true"; a draft is a proposal to act and nothing about it is true yet. That is
+**A design is data, not a knowledge claim, so it is a row rather than a note.** `knowledge/`
+answers "what do we know"; a draft is a proposal to act and nothing about it is true yet. That is
 `D-2026-08-25-an-eln-transcription-is-data-not-a-claim` arriving from the opposite side — the
-transcription is ungated because there is nothing to decide, and a draft is ungated because the
-decision is *running it*, which happens in a laboratory and not in a review queue. A chemist who
-wants a rule out of an approved design still proposes a `playbook` or an `experiment-proposal` note
-citing it, through the gate that has always been there.
+transcription is a row because there is nothing to decide, and a draft is a row because the
+decision it carries is *running it*, which happens in a laboratory. A chemist who wants a rule out
+of an approved design still writes a `playbook` or an `experiment-proposal` note citing it, on the
+one write path every agent note takes (`kg/record.py`). This paragraph used to end "through the
+gate that has always been there", which
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` falsified; the row/note line it was drawn
+beside is unchanged.
 """
 
 from __future__ import annotations

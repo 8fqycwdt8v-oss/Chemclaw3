@@ -19,7 +19,10 @@ test asserts it.
 **What this does and does not claim to be.** It is a retriever over a local corpus, so a vendored
 reagent table can be *cited* like any other evidence. It is not an ingest half: vendored data is
 reference material, not experiments, and giving it a write path into the knowledge graph would put
-unreviewed third-party records behind the PR-gate's back.
+third-party records into `knowledge/` wearing this system's own provenance. That used to read
+"behind the PR-gate's back"; `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the
+gate, which makes the argument stronger rather than weaker — nothing now stands between a written
+note and the chemist who reads it as evidence.
 """
 
 import csv

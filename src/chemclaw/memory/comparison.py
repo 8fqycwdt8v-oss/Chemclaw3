@@ -3,7 +3,7 @@
 A process chemist comparing runs of one transformation wants one thing on the page: the runs side
 by side, a column per condition and outcome, and — the column that carries the actual development
 argument — *what each run changed relative to the one before it*. `chemclaw.memory.optimization`
-has built exactly that since Phase 5, for a DRFP-similar campaign, offline, into a PR-gated note.
+has built exactly that since Phase 5, for a DRFP-similar campaign, offline, into a campaign note.
 
 This module is that renderer with the campaign taken out of it, because a second caller now needs
 the same table over a *retrieved* set of protocols at turn time — the same artifact at a different
@@ -136,13 +136,13 @@ def render_table(headers: list[str], rows: list[list[str]]) -> str:
     Cell contents are the caller's, and this places them **as cells**: what a caller supplies can
     fill a cell but never add one (`_placeable` says what that cost before it was true). The
     guarantee is here rather than at each field, because this is the one renderer the turn-time
-    comparison and the PR-gated campaign note share — and because the widest column of both is
+    comparison and the campaign note share — and because the widest column of both is
     composed from two fields joined *after* either could have carried a delimiter, so a per-field
     rule would not have covered it.
 
     No width padding: the table is read by a Markdown renderer and by a model, neither of which
     needs it, and padding would make every re-synthesis of a campaign a spurious whitespace diff
-    against the merged note.
+    against the note already committed.
     """
     header_row = f"| {' | '.join(_placeable(h) for h in headers)} |"
     rule = f"|{'|'.join('---' for _ in headers)}|"

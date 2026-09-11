@@ -95,9 +95,9 @@ class EvidenceChunk(BaseModel):
     # measured over the shipped corpus complete matches in the top 8 were **0 of 8** on questions
     # the corpus does answer — so widening is the normal path, not the fallback, and the leg
     # always fills `retrieval_top_k`. `gather_evidence("what is the melting point of ibuprofen")`
-    # returns sixteen chunks about aspirin, DCM and route scoring, in the same shape as a
-    # successful query, while the tool's own docstring tells the model that empty means "nothing
-    # on file, never invented".
+    # returns `retrieval_top_k` chunks about aspirin, DCM and route scoring — eight at the
+    # shipped default, in the same shape as a successful query, while the tool's own docstring
+    # tells the model that empty means "nothing on file, never invented".
     #
     # **Terms rather than a count, because the counts were measured and do not discriminate.**
     # Mean top-chunk coverage is 0.372 where the answer is present and 0.400 where it is absent;

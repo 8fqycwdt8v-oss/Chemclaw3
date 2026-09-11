@@ -12,7 +12,7 @@ not free:
   budget. A deploy therefore stalls a job by up to that timeout for no reason other than how it
   was killed.
 - The pod's own cleanup never runs: `db.pooling()`'s connections are dropped rather than closed, and
-  a git checkout the PR-gate submitter was mid-way through is abandoned in place.
+  a git checkout the note writer was mid-way through is abandoned in place.
 
 `Worker.shutdown()` is the supported alternative — stop polling for new tasks, let in-flight ones
 finish, then cancel what remains after `graceful_shutdown_timeout`. It just needs something to call

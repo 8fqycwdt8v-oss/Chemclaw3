@@ -138,7 +138,7 @@ def _brief_notice(removed: int) -> str:
     **The mark replaced the words that claimed what it proves, and the form got shorter for it.**
     This used to read "cut from this <tool> result by the system", and four of those words were an
     assertion of provenance that anything could type (`_notice` records what that was worth). The
-    mark is that assertion, unforgeably, in 26 characters — so it goes in and the claim comes out,
+    mark is that assertion, unforgeably, in 25 characters — so it goes in and the claim comes out,
     along with the tool name, which `ToolMessage.name` already carries on every result and which at
     these widths is a per-result constant the share exists to bound. What is left is exactly the
     two facts the mark cannot carry: that something was removed, and how much.

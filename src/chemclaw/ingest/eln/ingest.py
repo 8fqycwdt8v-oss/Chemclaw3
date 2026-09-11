@@ -11,7 +11,9 @@ used to be true of the first two only, while the third was proposed as a `create
 for a human to merge — a reviewer asked to approve a rendering of data the source system had
 already signed off on. The argument the fingerprint half always made now covers the whole function:
 nothing here infers anything, so there is nothing to decide. A knowledge *claim* about these runs
-is still a playbook or a campaign, still gated, citing these records.
+is still a playbook or a campaign citing these records — and since
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` that is not gated either, which this line
+used to say it was.
 
 Stores are injected, so the flow is testable with in-memory ones. Every write is an id-keyed
 upsert, so re-ingesting is safe and an amended entry simply overwrites its record.

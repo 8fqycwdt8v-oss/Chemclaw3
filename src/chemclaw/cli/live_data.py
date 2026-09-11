@@ -666,15 +666,17 @@ async def check_the_corpus_is_findable(mapped: dict[str, list[OrdReaction]]) -> 
     question". `find_similar_reactions` is the real entry point behind the agent's
     `similar_reactions`, so this measures what a chemist gets rather than what a store contains.
 
-    **It is deliberately checked while the notes are still unmerged**, because that is the state a
-    freshly-ingested corpus is in and the state the PR-gate keeps it in until a human acts. The
-    fingerprint row is written at ingestion and the note is not, so the two halves disagree by
-    design, and which retrieval path you take decides what you see. Measured on this corpus with
-    every note pending: an unfiltered search returns 10 real wells for a 4-bromoanisole coupling,
-    and the same search narrowed by `{"type": "reaction"}` through `FingerprintReactionRetriever`
-    returns **0**, loudly ("filtered reaction search returned 0 of 10 wanted hits"). Both are
-    correct — a note nobody can read cannot be shown to satisfy a filter — and the gap is worth a
-    check precisely because nothing else states it.
+    **It is deliberately checked while the corpus has no notes at all**, which is what an ingested
+    corpus is: `ingest_reaction` writes the record and the fingerprint row and mints no note
+    (`D-2026-08-25-an-eln-transcription-is-data-not-a-claim`), so the two halves disagree by design
+    and which retrieval path you take decides what you see. Measured: an unfiltered search returns
+    10 real wells for a 4-bromoanisole coupling, and the same search narrowed by
+    `{"type": "reaction"}` through `FingerprintReactionRetriever` returns **0**, loudly ("filtered
+    reaction search returned 0 of 10 wanted hits"). Both are correct — a note that was never
+    written cannot satisfy a filter — and the gap is worth a check precisely because nothing else
+    states it. This paragraph read "while the notes are still unmerged … the state the PR-gate keeps
+    it in until a human acts", which `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`
+    falsified twice over: there is no gate, and there was never a pending note here to hold.
 
     `index_empty` is asserted as well as the hit count: an empty index answering "no precedents" is
     the exact defect `find_similar_reactions`' own docstring was written around.

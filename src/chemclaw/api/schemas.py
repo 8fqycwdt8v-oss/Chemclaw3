@@ -3,9 +3,11 @@
 These models are the wire contract a browser (or the companion UI repo) programs against, kept
 apart from the routes that serve them (R3.2) because a shape change is an API-compatibility
 decision while a route change is a behavior one — a reviewer should see each kind of diff on its
-own. Nothing here touches `app.state`, the database or Temporal: the two functions beside the
-models (`_transcript`, `_proposal_summary`) are pure projections from stored records onto these
-shapes, which is what lets `tests/test_jobs_api.py` drive them without an app.
+own. Nothing here touches `app.state`, the database or Temporal: the functions beside the models
+(`_transcript` and its helpers) are pure projections from stored records onto these shapes, which is
+what lets `tests/test_jobs_api.py` drive them without an app. That list named a second projection,
+`_proposal_summary`, until the PR-gate it summarised was deleted
+(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`).
 
 `content_address` is imported for the same reason and is no exception to it: it is `hashlib` over a
 string, and the *decision* it feeds — whether a past tool call's full result is still fetchable —

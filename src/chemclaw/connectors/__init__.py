@@ -19,6 +19,6 @@ Layout:
 - `server.py` — the connector *side*: a FastMCP capability as the FastAPI app a bundle serves.
 
 The durable half lives in `durable/connector_job.py`: core's `ConnectorJobWorkflow` keeps
-idempotency, actor attribution, the PR-gate and session push-back, while the connector owns the
-workflow it wraps. Design and staging: `docs/archive/plans/connector-plan.md`.
+idempotency, actor attribution, the knowledge-graph write and session push-back, while the
+connector owns the workflow it wraps. Design and staging: `docs/archive/plans/connector-plan.md`.
 """

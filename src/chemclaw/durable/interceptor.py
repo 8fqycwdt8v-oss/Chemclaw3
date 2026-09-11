@@ -23,7 +23,7 @@ Two other absences met in the same place, which is why this is one object rather
 
 **Why an interceptor and not 43 edits.** An obligation that must hold for every activity belongs to
 the one place they all run through — the same rule `ConnectorJobWorkflow` follows for the durable
-record, the PR-gate and the push-back, and for the same reason: "each activity remembers" is the
+record, the note write and the push-back, and for the same reason: "each activity remembers" is the
 discipline that fails silently. It also means a *new* activity is instrumented the day it is
 written, with nothing to forget.
 

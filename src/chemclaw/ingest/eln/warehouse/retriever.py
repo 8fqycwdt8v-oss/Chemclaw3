@@ -291,8 +291,8 @@ class WarehouseVectorRetriever:
                 EvidenceChunk(
                     content=content,
                     # Not a knowledge-graph note id, and not pretending to be one: the citation has
-                    # to resolve to something a reader can check, and for a row that was never
-                    # proposed as a note that is the row itself. `vendored:<dataset>:<row>` is the
+                    # to resolve to something a reader can check, and for a row that never
+                    # became a note that is the row itself. `vendored:<dataset>:<row>` is the
                     # same call made for the same reason.
                     source_note_id=f"{self.name}:{key}",
                     retriever=self.name,

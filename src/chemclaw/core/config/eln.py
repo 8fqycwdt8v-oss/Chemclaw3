@@ -19,7 +19,7 @@ class ElnSettings(BaseSettings):
     """
 
     # The one concrete adapter reads a JSON-export ELN from this directory; the sync activity's
-    # timeout bounds one batch of fetch+validate+index+PR-gate work.
+    # timeout bounds one batch of fetch+validate+index work.
     eln_export_dir: str = "data/eln-exports"
     eln_sync_timeout_seconds: float = Field(default=300.0, gt=0)
     # The sync fetches from this far *behind* its high-water cursor, so an export file that
@@ -38,7 +38,9 @@ class ElnSettings(BaseSettings):
     # advanced cursor after each one — so an arbitrarily large backlog makes bounded forward
     # progress instead of timing out one giant attempt forever. Entries inside the overlap
     # window re-ingest idempotently and do not count against the bound. Sized so a full chunk of
-    # per-entry PR-gate pushes fits comfortably inside `eln_sync_timeout_seconds`.
+    # per-entry writes fits comfortably inside `eln_sync_timeout_seconds` — it was sized against
+    # per-entry PR-gate pushes, a cost `D-2026-08-25-an-eln-transcription-is-data-not-a-claim`
+    # removed from this hop and nobody has re-measured without.
     eln_sync_batch_size: int = Field(default=100, ge=1)
     # How many chunks one *run* of the drain may take before it hands the rest to a fresh run with
     # `continue_as_new`. Nothing bounded this, and the ELN sync was the only drain in the package

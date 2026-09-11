@@ -4,7 +4,8 @@
 undeclared counter name, an undeclared histogram, or a label set that does not match what the
 counter declared. That strictness is right — the failure mode of a metric typo is not a crash but a
 second, silent time series nobody queries — and it is exactly what must not reach a caller's
-request path. A mistyped counter name in the PR-gate, the connector registry or an audit sink would
+request path. A mistyped counter name in the note write path, the connector registry or an audit
+sink would
 otherwise propagate out of `record_metric` and fail the operation being counted.
 
 So this is one swallow, written once, wrapping the *update*: the metric is lost, the caller is not.

@@ -52,7 +52,7 @@ def _excerpt(body: str, terms: Sequence[str] = ()) -> str:
     case by construction, since their yields and outcomes are in a table at the end — the same
     failure `core/config/retrieval.py` articulates for `protocol_digest_max_chars`. In the
     conversational tools this is recoverable with `expand_note`; in `report_note` it is the final
-    artifact a chemist signs at the PR-gate, and nothing there expands.
+    artifact a chemist reads, and nothing there expands.
 
     `terms` are the query's terms (`kg.search.query_terms`) when the caller has them. With none, or
     with a match the head already covers, or with a match that is *not* in the body at all — the
@@ -501,12 +501,13 @@ class FingerprintReactionRetriever:
         The sweep's `sources_failed` channel is where that belongs, and `fanout._sweep` puts it
         there the moment this stops swallowing it — the same correction the share, warehouse and
         vendored halves already took.
-        Each match cites the corresponding `reaction-<id>` note. Unlike the graph retriever, this
-        cites from the fingerprint index, whose entries are written at ingestion while the note
-        is merged separately (D-018): a reaction indexed but whose note is still pending review
-        yields a citation the report PR's kg-validate flags as dangling — surfacing the pending
-        note to the reviewer (the PR-gate working), not silently corrupting the graph. Reports
-        are therefore run over the merged corpus, as campaigns are.
+        Each match cites the corresponding `reaction-<id>` record, which resolves *outside* the
+        markdown graph (`kg.note.EXTERNAL_ID_PREFIXES`): the transcription is a row written by the
+        same `ingest_reaction` call that indexed the fingerprint, so a hit and the thing it cites
+        land together. This paragraph used to state a precondition instead — the note was "merged
+        separately" and a still-pending one reached a reviewer as a dangling citation on the
+        report's own PR — and both halves are gone: D-2026-08-25 made the transcription a row and
+        `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the PR.
 
         **`type`/`tag`/`since`/`until` narrow the result** when given (D-170). The fingerprint index
         holds bits and a label and knows nothing about note metadata, so the filter cannot go into

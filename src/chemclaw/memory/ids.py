@@ -1,9 +1,9 @@
 """Deterministic note ids for synthesized memory notes.
 
 Why this exists: a campaign or playbook id must stay stable while its evidence grows,
-so periodic re-synthesis over a *grown* corpus updates the existing note in place
-through the idempotent PR-gate branch (`note/<id>`) instead of minting a fresh note
-beside the stale one. Both jobs derive their ids identically, so the derivation lives
+so periodic re-synthesis over a *grown* corpus updates the existing note in place —
+same id, same file in `knowledge/` — instead of minting a fresh note beside the
+stale one. Both jobs derive their ids identically, so the derivation lives
 once (DRY).
 
 The module also owns the *inverse*: `is_cluster_anchored` asks whether a note's id is the one
@@ -24,9 +24,9 @@ def stable_id(prefix: str, member_ids: list[str]) -> str:
 
     The anchor is the *smallest* member id, not the full member set: hashing the exact
     set would mint a brand-new id whenever a cluster gains a member (routine under
-    periodic ELN sync), leaving the already-merged subset note in the graph as stale
+    periodic ELN sync), leaving the subset note already in the graph as stale
     "current" knowledge with no supersede link. Anchoring on the smallest member keeps
-    the id — and therefore the PR-gate branch and the merged file path — stable as the
+    the id — and therefore the file the note occupies in `knowledge/` — stable as the
     cluster grows, so the grown note supersedes the old one in place. Clusters within
     one synthesis run are disjoint (connected components / similarity partitions), so
     anchors never collide. Uses the shared `chemclaw.core.ids.stable_hash`, so memory ids

@@ -2,7 +2,7 @@
 
 A patent corpus is not an ELN, and the difference is not size. An ELN entry is this organisation's
 own record of an experiment it ran: it is transcribed into `reaction_records`, and what anyone
-asserts *about* those runs is still a playbook or a campaign a human signs off. A patent reaction is
+asserts *about* those runs is still a playbook or a campaign note citing them. A patent reaction is
 *literature*: it is evidence, it cites a document anyone can read, and it belongs to nobody here.
 `D-2026-08-06-a-share-is-mounted-not-called` drew that line for documents; this applies it to
 reactions.

@@ -1064,11 +1064,13 @@ def redact_secrets(text: str, extra_secrets: tuple[str, ...] = ()) -> str:
     """Return `text` with every credential this process can recognize replaced by `***`.
 
     The redaction `SecretRedactingFilter` applies to a log line, exposed so anything that
-    *persists* an error message can apply the same one. The PR-gate is the case that forced it:
-    a failed submission stores git's stderr in `note_proposals.reason`, a compliance table nobody
+    *persists* an error message can apply the same one. The PR-gate was the case that forced it:
+    a failed submission stored git's stderr in `note_proposals.reason`, a compliance table nobody
     prunes, and it bounded that text by truncating it — but truncation is not redaction, and a
     realistic token-bearing push failure measures well under any length worth keeping, so the
-    credential was stored verbatim and in full.
+    credential was stored verbatim and in full. The gate is gone
+    (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`); what persists model-adjacent text now
+    is `kg.record`, which redacts a note's own rendered body through this function.
 
     `extra_secrets` is for values a caller resolved itself (the filter's per-connector bearer-token
     variable names), keeping the lazy `connectors` import out of this module.

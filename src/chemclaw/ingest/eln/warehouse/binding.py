@@ -586,7 +586,7 @@ class VectorBinding(BaseModel):
         default=True,
         description=(
             "Drop a hit whose reaction already became a note. Without it a curated reaction would "
-            "reach the agent twice — once as reviewed, merged knowledge and once as a raw row — "
+            "reach the agent twice — once as a curated note and once as a raw row — "
             "and the duplicate would look like corroboration."
         ),
     )

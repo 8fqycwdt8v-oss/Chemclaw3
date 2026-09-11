@@ -5,8 +5,9 @@ workflow** and so is state-changing: it authorizes, it requires an actor, and it
 plan gate like every other launcher. `check_pending_requests` reads the projection and is a read.
 
 **Neither of them can answer a question, and that omission is the design.** Answering is
-`POST /pending/{id}/answer`, a route, for the same reason a plan decision and a proposal decision
-are routes (D-005): a model must never be able to authorize its own work. A tool that could settle
+`POST /pending/{id}/answer`, a route, for the same reason a plan decision is one (D-005): a model
+must never be able to authorize its own work. The note decision this named beside it went with the
+PR-gate (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). A tool that could settle
 a wait would let the agent ask itself for approval and grant it in the next tool call, and the
 audit trail would record a human's question answered by nobody.
 """

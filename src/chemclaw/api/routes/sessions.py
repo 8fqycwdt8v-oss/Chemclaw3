@@ -419,9 +419,10 @@ async def upload_attachment(
     assistant.
 
     Session-scoped and in-memory by design: an attachment is working material for a
-    conversation, not knowledge. Anything in it worth keeping goes through the PR-gate like
-    every other machine-touched write; routing uploads into the graph would bypass the review
-    line.
+    conversation, not knowledge. Anything in it worth keeping is written to the graph the way
+    every other machine-touched note is — through `kg/record.py`, carrying `created_by: agent` and
+    its citations — and routing uploads straight in would skip the step that gives them either
+    (D-2026-09-05-the-gate-follows-behaviour-not-knowledge).
 
     Unsupported formats are refused with a message naming what *is* supported (422), never
     silently half-parsed — a PDF "read" by scraping whatever bytes look like text would

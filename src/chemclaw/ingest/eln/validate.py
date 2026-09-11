@@ -14,8 +14,10 @@ fingerprint index (G4):
    **What this therefore does not catch, stated plainly** because it reads stronger than it
    is: any fabrication whose product is built from elements the inputs already supply.
    `aniline + methanol >> paracetamol` validates. So does `methane >> eicosane`, and
-   `glucose >> cholesterol`. Only a product introducing a *new element* is rejected — which
-   is why the reviewer, not this function, is the gate on whether a reaction is real.
+   `glucose >> cholesterol`. Only a product introducing a *new element* is rejected, so this is a
+   soundness filter and never a check that a reaction is real. That check used to be the reviewer's
+   at the PR-gate; `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the reviewer and
+   nothing replaced them here — a transcription is trusted because a source system recorded it.
 
    Two stronger checks were considered and neither is available on this data. Comparing
    heavy-atom counts needs a ceiling on how many times an input may repeat in a product, and

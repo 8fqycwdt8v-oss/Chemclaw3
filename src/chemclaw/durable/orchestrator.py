@@ -218,7 +218,7 @@ async def fan_out(
             if isinstance(outcome, BaseException):
                 # Counted as well as logged, because the parent is about to complete
                 # *successfully* with a short list and a log line is not a signal anyone watches.
-                # The failure this makes visible: the PR-gate's git credential expires, every
+                # The failure this makes visible: the note writer's git credential expires, every
                 # child fails, and the memory-synthesis jobs return `[]` every night while
                 # `/schedules` shows runs climbing and no failures. `metrics_bridge` is already
                 # proven callable from workflow code (`durable/publish.py`).

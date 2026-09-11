@@ -8,9 +8,11 @@ afterwards. These routes make the design a document with an address.
 **A human edit is a REST write, not a tool call composed by a click.** That distinction is the one
 `Chemclaw3_ui`'s own rule states (`docs/chemistry-aware-frontend.md` §9): everything the *agent*
 does reaches it as a chat turn, and a button that composed a tool call would be a surface deciding
-what the agent does. Editing a document is not that — it is the chemist authoring a revision, which
-is exactly what `POST /proposals/{id}/decision` already is for a note. So the write lands here,
-`author_kind` records that a person made it, and the agent is not involved.
+what the agent does. Editing a document is not that — it is the chemist authoring a revision, the
+standing `POST /sessions/{id}/plan/decision` already has for a plan. So the write lands here,
+`author_kind` records that a person made it, and the agent is not involved. (This named
+`POST /proposals/{id}/decision`, which went with the PR-gate,
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`.)
 
 **The conflict is a 409 and it is bound to a revision**, the same shape `POST
 /sessions/{id}/plan/decision` uses for `plan_hash`: a caller says which revision they edited, and a
@@ -258,9 +260,11 @@ async def _require_writable(design_id: str, principal: Principal) -> None:
     design opened by somebody else, then landed a revision on it as its author. A lab record saying
     an experiment was run is the most consequential thing this table holds.
 
-    Owner **or** reviewer, rather than the reviewer-only rule `POST /proposals/{id}/decision` uses.
-    That route's subject is machine-written knowledge entering a shared graph, where the whole point
-    is that the author does not decide. A design is a chemist's own experiment: they approve their
+    Owner **or** reviewer, rather than the reviewer-only rule the note decision route had: its
+    subject was machine-written knowledge entering a shared graph, where the whole point was that
+    the author does not decide, and it went with the PR-gate
+    (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). A design is a chemist's own
+    experiment: they approve their
     own plate, and a reviewer reaches other people's for the same reason `_is_reviewer` exists.
 
     Reads stay open on purpose. A design is a shared scientific artifact — the schema says so where

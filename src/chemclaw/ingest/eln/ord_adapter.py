@@ -466,8 +466,8 @@ def _smiles(compound: dict[str, Any]) -> str:
        than guessing, which is what keeps this a lookup and not an inference.
 
     Still raises when nothing resolves. Refusing to invent a structure is the point (a fabricated
-    one propagates silently into a fingerprint index, a similarity hit and eventually a proposed
-    note); what changes is that refusal now follows an actual attempt.
+    one propagates silently into a fingerprint index, a similarity hit and eventually a note
+    citing it); what changes is that refusal now follows an actual attempt.
     """
     identifiers = _identifiers(compound)
     for wanted in ("SMILES",):

@@ -434,7 +434,7 @@ def _env_reading_destinations(settings: Any) -> list[tuple[str, str, tuple[str, 
       anchor every bearer token is validated against.
 
     **`git` is the third and is filed rather than charged** (`docs/planning/BACKLOG.md`). The KG
-    PR-gate shells out to `git push`, which inherits the environment and is measurably proxied —
+    note writer shells out to `git push`, which inherits the environment and is measurably proxied —
     but its URL is not on this object: `git_remote` is the string `"origin"`, and resolving it means
     `git remote get-url` in a subprocess at *config import*, a cost every entrypoint would pay at
     every start for a destination only one subsystem uses.

@@ -231,8 +231,8 @@ class ConnectorJobResult(BaseModel):
     `summary` is the one line the chat shows and the model reads; `data` is the job's own structured
     result, opaque to core (a connector's domain types stay the connector's business); `note` is the
     optional knowledge contribution. Typing `note` as the existing frozen `Note` means a connector's
-    proposal passes the graph's own slug and schema validators on the way in, so a malformed note is
-    rejected at the boundary instead of failing later at branch creation in the PR-gate.
+    contribution passes the graph's own slug and schema validators on the way in, so a malformed
+    note is rejected at the boundary instead of failing later inside the note write.
 
     **`extra="ignore"`, and the asymmetry with `ConnectorJobInput` above is the decision.** Five
     fields on this wire say in as many words that they are "additive and defaulted because it
@@ -363,7 +363,7 @@ def job_record_for(
 
     A module-level function rather than a block inside the workflow because it is pure, and
     because everything around it needs a live Temporal server to exercise — this way "the record
-    carries the arguments, the *whole* result and the note it proposed" is a property the offline
+    carries the arguments, the *whole* result and the note it wrote" is a property the offline
     suite can hold, instead of one that is only ever checked in CI.
     """
     return JobRecord(
@@ -439,7 +439,7 @@ def finish_headroom() -> timedelta:
 
     Five things happen after `_run_child`, and they are why this wrapper is not a pass-through:
     settle the effect ledger, write the durable record (D-157), offer the composite to the results
-    store, PR-gate the note, push back to the launching session. Anyone giving the wrapper an
+    store, write the note, push back to the launching session. Anyone giving the wrapper an
     execution timeout has to leave room for all of them.
 
     **The room used to be counted rather than measured, and one activity is not what any of these
@@ -486,7 +486,7 @@ def finish_headroom() -> timedelta:
         # `_publish_result`.
         + queue
         + timedelta(seconds=settings.result_publish_timeout_seconds)
-        # The note's PR-gate.
+        # The note write.
         + queue
         + timedelta(seconds=settings.note_write_timeout_seconds)
         # The session push-back, on either ending.
@@ -669,7 +669,7 @@ class ConnectorJobWorkflow:
 
     @workflow.run
     async def run(self, job: ConnectorJobInput) -> ConnectorJobResult:
-        """Execute the connector's workflow, PR-gate any note it produced, and wake its session.
+        """Execute the connector's workflow, write any note it produced, and wake its session.
 
         The child runs on the connector's own task queue, so its dependencies and its failure domain
         stay outside this worker. A child failure propagates: the job genuinely failed, and the tool
@@ -1027,16 +1027,19 @@ class ConnectorJobWorkflow:
     async def _finish(
         self, job: ConnectorJobInput, result: ConnectorJobResult, started_at: datetime
     ) -> ConnectorJobResult:
-        """Record the run, offer its note to the PR-gate, and push the completion back."""
+        """Record the run, write its note into the graph, and push the completion back."""
         record = job_record_for(
             workflow.info().workflow_id,
             job,
             result,
             runtime_seconds=(workflow.now() - started_at).total_seconds(),
         )
-        # Written *before* the note publish, because this is the durable copy: the graph write is a
-        # proposal a human may never merge, while this row is what makes the result survive
-        # Temporal's own history retention. Best-effort for the same reason the publish is — the
+        # Written *before* the note publish, because this is the durable copy: the graph write is
+        # best-effort and may be dropped after its retries, while this row is what makes the result
+        # survive Temporal's own history retention. (This line read "a proposal a human may never
+        # merge" until `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`; the ordering it
+        # argues for is unchanged, because a write that can fail is still not the durable copy.)
+        # Best-effort for the same reason the publish is — the
         # science is finished, so a database that is down must not fail a completed job and send an
         # expensive campaign round the retry loop — but logged at error level, because unlike a
         # failed note this loses data nothing else holds.
@@ -1056,7 +1059,7 @@ class ConnectorJobWorkflow:
         # composite the job assembled from them, which has no cache row of its own by design.
         await self._publish_result(job, result)
         if job.publish_to_graph and result.note is not None:
-            # The same PR-gate activity the memory-synthesis jobs use — one write path into the
+            # The same note-write activity the memory-synthesis jobs use — one write path into the
             # graph, on the light background queue, bounded retries, never failing the job. The
             # note is stamped with the run and its reason on the way through, here rather than in
             # each connector, so no bundle can forget and every recorded note answers "why was this

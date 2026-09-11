@@ -1,12 +1,14 @@
-"""Memory synthesis jobs (plan steps 5.3, 5.4, core) — chains/candidates → PR-gated notes.
+"""Memory synthesis jobs (plan steps 5.3, 5.4, core) — chains/candidates → agent notes.
 
 The deterministic core of the periodic background jobs: `build_campaign_notes` turns detected
 chains into `campaign` notes, `build_playbook_notes` turns cross-project candidates into `playbook`
-notes, and `build_optimization_notes` groups same-transformation runs — each then proposed through
-the **same** PR-gate as every other agent note (D-005), no new write path.
+notes, and `build_optimization_notes` groups same-transformation runs — each then written through
+the **same** path as every other agent note (`kg/record.py`), no new write path. D-005's PR-gate is
+gone (D-2026-09-05-the-gate-follows-behaviour-not-knowledge): knowledge lands when it is
+learned, carrying `created_by: agent`, and is corrected rather than pre-approved.
 
 **Building and publishing are separate, and only building lives here.** `durable/memory_jobs.py`
-runs each builder as one activity and fans each note out to its own PR-gate child (F10-D2), so a
+runs each builder as one activity and fans each note out to its own write child (F10-D2), so a
 note that cannot be published does not take its siblings with it. The reaction set is injected, so
 every builder runs in-memory in tests. The factual note bodies are built here; the richer narrative
 / distilled rule is the corresponding skill's judgment, layered on top.
@@ -32,15 +34,15 @@ logger = logging.getLogger(__name__)
 
 
 class SynthesisUnit(BaseModel):
-    """One reviewable unit of a synthesis run: a note, plus the retirements it carries.
+    """One indivisible unit of a synthesis run: a note, plus the retirements it carries.
 
     The pairing is the point. A retirement and its replacement used to be independent notes in
     one flat list, and the per-run cap's rotating window could put them in different days' runs —
     so a reviewer could merge "retire `campaign-aaa`" while its replacement had not even been
     proposed yet, and the retired note's successor line named a note that did not exist. A unit
-    travels through the fan-out whole: the retirement rides the replacement's submission
-    (`propose_note`'s `superseded`), lands in the same PR, and the pair merges as the single
-    decision it is.
+    travels through the fan-out whole: the retirement rides the replacement's write
+    (`record_note`'s `superseded`) and is written *after* the successor it names, so the pair
+    reaches a reader as the single decision it is.
     """
 
     note: Note
@@ -53,7 +55,7 @@ def build_campaign_notes(
     """Detect chains and build (not publish) one `campaign` unit per chain, retirements paired.
 
     The deterministic half of campaign synthesis: it produces the notes but writes nothing, so the
-    durable workflow that fans each unit out to its own PR-gate child (plan F10-D2) decides *how*
+    durable workflow that fans each unit out to its own write child (plan F10-D2) decides *how*
     they are written while this decides *what* they are. "What" includes retiring the notes this
     run's clusters replaced (`_units`), the one thing here that reads the corpus.
     """
@@ -109,23 +111,24 @@ def _units(notes: list[Note], *, corpus_complete: bool) -> list[SynthesisUnit]:
 
     **A partial corpus read builds notes but retires nothing.** A read that skipped entries can
     legitimately stop minting a cluster's id — the cluster's members were in the skipped part —
-    and retiring merged knowledge on the strength of a read that saw less than the record would
-    propose retracting notes that are still true, gated only by a reviewer with no way to know
-    the read was partial. Said out loud, because a run that quietly skips its retirement half
-    looks identical to one with nothing to retire.
+    and retiring knowledge on the strength of a read that saw less than the record would retract
+    notes that are still true. That used to be caught, if at all, by a reviewer with no way to know
+    the read was partial; `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the
+    reviewer, so this guard is the whole control. Said out loud, because a run that quietly skips
+    its retirement half looks identical to one with nothing to retire.
 
     A run producing zero notes retires nothing by construction — `supersede_updates` only retires
     a note some new note *replaced*, and a vanished cluster has no successor to point at. That is
     a stated limit, not an oversight: a retirement with no successor would have nothing to write
-    in its "superseded by" line, and "the corpus stopped supporting this" is `failure-mode` /
-    reviewer territory, not a mechanical retraction.
+    in its "superseded by" line, and "the corpus stopped supporting this" is a `failure-mode`
+    note somebody writes, not a mechanical retraction.
     """
     if not notes:
         return []
     if not corpus_complete:
         logger.warning(
             "memory synthesis skipped its retirement pass: the corpus read was incomplete, and "
-            "retiring merged notes on a partial view proposes retracting knowledge that may "
+            "retiring notes on a partial view retracts knowledge that may "
             "still be true"
         )
         return [SynthesisUnit(note=note) for note in notes]
@@ -139,7 +142,7 @@ def _units(notes: list[Note], *, corpus_complete: bool) -> list[SynthesisUnit]:
 # Three `synthesize_*`/`distill_*` coroutines and their shared `_propose_all` stood here: build the
 # notes, then publish them all in one pass. Nothing ran them. F10-D2 split each job into a builder
 # and a durable fan-out — `durable/memory_jobs.py` imports only `build_campaign_notes`,
-# `build_playbook_notes` and `build_optimization_notes` and gives each note its own PR-gate child,
+# `build_playbook_notes` and `build_optimization_notes` and gives each note its own write child,
 # so a note that fails to publish no longer takes its siblings with it — and the old whole-batch
 # publishers were left behind with the tests that exercised them.
 #

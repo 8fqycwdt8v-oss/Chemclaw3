@@ -10,7 +10,7 @@ the request path (tests, the classic non-service caller) where there simply is n
 notify.
 
 **Kernel material, not conversation material.** The id is a bare `str`, this module imports nothing
-but `contextvars`, and it is read from six packages — audit, the PR-gate, connector identity
+but `contextvars`, and it is read from six packages — audit, the plan gate, connector identity
 headers, template steps, and `core.logging`'s own `ContextFilter`. It lived in `chemclaw.agent`
 until the R2 layering move, which is exactly why `core/logging.py` had to reach for it through a
 lazy import to stay off the agent layer; that is now an ordinary intra-`core` import.

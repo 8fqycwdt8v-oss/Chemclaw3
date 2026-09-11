@@ -72,7 +72,7 @@ def optimization_campaign_note(
     unreadable. When the runs carry no dates the note says so rather than implying a sequence.
 
     The note stays output-neutral: it surfaces the recorded conditions, outcomes and changes and
-    leaves *what mattered* to the skill's analysis and the human reviewer (D-005).
+    leaves *what mattered* to the skill's analysis and to the chemist who reads the note.
     """
     # The series *is* the ordering: every row is read off a step, and the run behind it is looked
     # up by id. Zipping two independently-sorted lists would have paired them positionally, which
@@ -130,11 +130,12 @@ def _run_detail(reaction: OrdReaction) -> str:
     """The per-run block: the hypothesis it tested, then its procedure excerpt (each if any).
 
     Both are ELN free text — what a technician typed, or a warehouse column a binding mapped — and
-    this block lands in a PR-gated note that a chemist merges and that the graph reads citations
-    out of. So a `[[wikilink]]` in either is stripped to its target: unstripped it was a real
-    outgoing edge to a note the campaign never referenced, forged by whoever wrote the procedure
-    and indistinguishable in review from one this system derived. Same rule and same reason as
-    `retrieval.harness.report_note`, which carried the identical defect over retrieved chunks.
+    this block lands in a note that is readable the moment it is written and that the graph reads
+    citations out of. So a `[[wikilink]]` in either is stripped to its target: unstripped it was a
+    real outgoing edge to a note the campaign never referenced, forged by whoever wrote the
+    procedure and indistinguishable to a reader from one this system derived. Same rule and same
+    reason as `retrieval.harness.report_note`, which carried the identical defect over retrieved
+    chunks.
     """
     lines = []
     if reaction.hypothesis:

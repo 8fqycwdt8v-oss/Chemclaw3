@@ -24,7 +24,9 @@ was never true of these two: no setting selects them.
 **Re-adding the reverse lookup is a new decision, and the ADRs that designed it stand.** What was
 measured when it was tried as an agent tool, so the next attempt starts from it: the tool schema
 costs **256 tokens of static prefix on every model call** against a ratchet
-(`tests/test_context_floor.py`) that had 423 to give, and it cannot borrow `NoteSearch` without
+(`tests/test_context_floor.py`) that had 423 tokens of headroom to give when that was measured
+— read the live figure off the ratchet rather than this sentence, which is three waves old and
+whose subject read 610 at the last measurement. It cannot borrow `NoteSearch` without
 lying — that type's `verdict` tells a caller with no hits that "a differently-worded term may still
 find it", which is true of a substring query and nonsense about a cache key. A reverse lookup wants
 its own answer shape, and it wants a question somebody is actually asking.

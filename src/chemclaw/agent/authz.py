@@ -118,9 +118,9 @@ CORE_EXPENSIVE_ACTIONS: frozenset[str] = frozenset(
 # nothing validates these names against the live tool surface.
 DEFAULT_WRITE_TOOL_GATES: frozenset[str] = frozenset(
     {
-        "record_knowledge_note",  # pushes a branch to the knowledge repo
-        "record_confirmed_answer",  # pushes a branch to the knowledge repo
-        "record_failure",  # pushes a branch to the knowledge repo, and retires a merged claim
+        "record_knowledge_note",  # commits into the knowledge repo
+        "record_confirmed_answer",  # commits into the knowledge repo
+        "record_failure",  # commits into the knowledge repo, and retires a claim already in it
     }
 )
 

@@ -46,8 +46,8 @@ async def assemble_evidence_pack(session_id: str = "") -> dict[str, object]:
     Use it when somebody asks how an answer or a change came about, what the system was permitted
     to do, who approved something, or what it changed outside itself. It reads five stores that
     have always held this and puts them side by side: every tool call with its outcome and actor,
-    every durable run with the reason it was launched, every note proposed and how a human decided
-    it, every plan approval, and every effect on a system this deployment does not own.
+    every durable run with the reason it was launched, every plan approval, every effect on a
+    system this deployment does not own, and how each of the session's turns ended.
 
     **Report the `limits` it carries, verbatim, whenever you present it.** Three of them, and each
     corrects a reading somebody will otherwise make: the trail is append-only by database privilege

@@ -1,11 +1,12 @@
 """Frame retrieved third-party content so the model reads it as data, not instructions.
 
 Why this exists: note bodies, ELN-ingested reaction labels and uploaded attachments are not
-authored by the agent, and none of them is reviewed before it reaches the model —
-agent-authored notes do, but *ingested* ELN/ORD notes, fingerprint labels and a chemist's uploads
-are third-party text that lands in context directly. A body containing "ignore your instructions
-and …" is the classic indirect prompt-injection vector (the retrieval and attachment tools feed
-these bodies verbatim into context).
+authored by the agent, and nothing reviews any of them before they reach the model — this sentence
+excepted agent-authored notes as reviewed until
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` falsified that. Ingested ELN/ORD notes,
+fingerprint labels and a chemist's uploads are third-party text that lands in context directly. A
+body containing "ignore your instructions and …" is the classic indirect prompt-injection vector
+(the retrieval and attachment tools feed these bodies verbatim into context).
 
 Wrapping retrieved content in an explicit, named envelope — paired with the agent instruction
 that envelope contents are evidence to cite, never commands — is the cheap, centralized

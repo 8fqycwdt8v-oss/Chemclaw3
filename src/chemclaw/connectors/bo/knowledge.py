@@ -48,15 +48,15 @@ def note_from_campaign_result(
 
     It also records the **space that was searched**, which the earlier version left out (D-157). A
     recommendation of "1.2 mol% Pd" means one thing when the campaign could have gone to 5 mol% and
-    something else entirely when 1.2 was the ceiling, and the reader of a merged note has no other
-    copy of the decision space: the spec lives in the durable job record and in Temporal's history,
-    neither of which is in front of someone reviewing a markdown file.
+    something else entirely when 1.2 was the ceiling, and the reader of a recorded note has no
+    other copy of the decision space: the spec lives in the durable job record and in Temporal's
+    history, neither of which is in front of someone reading the note.
 
-    The id is the objective plus a hash of the recommended parameters, so re-proposing the same
-    recommendation is idempotent. The *body* is not quite: core appends the run and its reason
-    (D-157), so a second, differently-motivated campaign that lands on the same point proposes the
+    The id is the objective plus a hash of the recommended parameters, so recording the same
+    recommendation twice is idempotent. The *body* is not quite: core appends the run and its reason
+    (D-157), so a second, differently-motivated campaign that lands on the same point writes the
     same note id with a different footer — which is a real difference (two runs agreeing, for two
-    reasons) and one a reviewer should see. The identical campaign never gets that far: it rejoins
+    reasons) and one a chemist should see. The identical campaign never gets that far: it rejoins
     the first run's id and never re-executes.
 
     **The value comes before the conditions, and carries the surrogate's opinion of it** (F8-T1).
@@ -69,13 +69,14 @@ def note_from_campaign_result(
 
     **The molecules it recommends are written as structures, not as prose** — see `_condition` and
     `_recommended_molecule`. That is what makes a `bo-candidate`'s structures legible to every
-    by-compound path at all — `kg.conflicts`, `find_notes`, and a reviewer reading the PR. (It also
+    by-compound path at all — `kg.conflicts`, `find_notes`, and a chemist reading the note. (It also
     put them in front of the `kg-validate` hazard gate, which is why they were written this way;
     that gate was retired by `D-2026-08-15-safety-is-a-tool-not-a-gate` and the structures are
     worth writing without it.)
 
-    The note carries no `[[wikilink]]` (a dangling link would fail `chemclaw.kg.validate` on the
-    very PR this opens).
+    The note carries no `[[wikilink]]` (a dangling link is what `kg.record` warns about at write
+    time and what `make kg-validate` fails the corpus for; this said "on the very PR this opens"
+    until `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted the PR).
     """
     best = result.best
     by_name = {parameter.name: parameter for parameter in problem.parameters}

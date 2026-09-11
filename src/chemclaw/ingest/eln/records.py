@@ -1,16 +1,18 @@
 """The ELN transcription tier: reaction records as queryable data (D-2026-08-25).
 
 An ELN entry used to become a `created_by: agent` markdown note that a human merged through the
-PR-gate. D-005's gate exists to put a human in front of *machine-generated knowledge*, and a
+PR-gate. D-005's gate existed to put a human in front of *machine-generated knowledge*, and a
 transcription is not that — `record_from_ord_reaction` is a pure deterministic mapping with no
 model in it, so the reviewer was approving a rendering of data a chemist had already signed off on
 upstream. Measured, that cost 202 ms of serialized git per entry and a corpus scan that outgrows
 `eln_sync_timeout_seconds` at ~700k notes, and it bought nothing anyone could decide.
 
 So a record lands here instead, in Postgres, exactly as migration `025` argues for observations:
-with no review, Git buys a branch per entry and returns nothing. What a human *asserts* about these
-runs is still a playbook or a campaign in `knowledge/`, gated as it always was, citing these
-records by the same `reaction-<id>` name it always used.
+with no review, Git buys a commit per entry and returns nothing. What a human *asserts* about
+these runs is still a playbook or a campaign in `knowledge/` — written straight into the graph and
+corrected rather than pre-approved since
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`, where this line used to read "gated as it
+always was" — citing these records by the same `reaction-<id>` name it always used.
 
 **Upsert-by-id is the idempotency**, which is why nothing here asks "have I seen this?" as a
 separate question of the corpus. The sync loop used to answer it by parsing every merged note on

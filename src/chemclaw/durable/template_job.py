@@ -472,7 +472,7 @@ class TemplateWorkflow:
         A `tool` step naming a job launcher would return an id and move on, which is right in a chat
         turn (the agent must not block) and useless here: a template exists to sequence work, so it
         waits. Reusing `ConnectorJobWorkflow` rather than starting the connector's workflow directly
-        keeps the job's cross-cutting concerns — the PR-gate publish, the actor attribution — in the
+        keeps the job's cross-cutting concerns — the note write, the actor attribution — in the
         one place that owns them.
         """
         # Through an activity, not by calling `find_job` here: the lookup reads the connector

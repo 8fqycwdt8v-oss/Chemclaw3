@@ -9,7 +9,8 @@ tool uniformly — the audit trail is a single reusable piece (DRY), like `kg/re
 It is observe-only: it never alters the arguments or the result. Each call records the
 correlation id (which conversation), the actor (who — a Phase-6 seam, the configured
 `service_actor_id` until Entra identity lands), the tool name, its truncated arguments, the
-outcome and a short effect summary (e.g. the PR ref a `propose_*` tool returned), and the latency.
+outcome and a short effect summary (e.g. the commit ref a `record_*` tool returned), and the
+latency.
 Records go to the stdlib log always, and additionally to a durable `AuditSink` when one is
 supplied (the Postgres append-only trail) — the log is the floor, the sink is the durable record.
 
