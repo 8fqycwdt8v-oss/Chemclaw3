@@ -414,8 +414,12 @@ load_profiles()
 #:   the constraint actually is rather than spread until nobody can see it.
 #:
 #: Set with headroom on purpose. A ceiling 23 tokens above a measurement is a tripwire that the
-#: next unrelated merge trips; this leaves ~420 for ordinary drift, which is what makes it a
-#: ratchet rather than a trap.
+#: next unrelated merge trips; this left ~420 for ordinary drift when it was set, which is what
+#: makes it a ratchet rather than a trap. **The live headroom is this ceiling minus what the test
+#: below measures, and it moves in both directions** — it read 610 three waves later, because a
+#: bound tool's schema *shrank*. That is why the figure is dated here rather than stated: a
+#: headroom transcribed as current is a claim about a commit, which is the defect the paragraph
+#: above spends fifteen lines on.
 CEILINGS: dict[str, int] = {"__default__": 65_500}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly

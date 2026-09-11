@@ -270,8 +270,11 @@ later it was 42,549 — drifted by a merge that touched a tool-schema module, wi
 paragraph's subject rewritten. Twice now a session has re-transcribed these numbers to correct them
 and been stale again within a merge, which is the same argument this file already makes about
 counting `make` targets and skipped tests: **the live number is whatever `tests/test_context_floor.py`
-measures, and the ceiling it ratchets against is the only figure worth reading here — 65,000.**
-The deferral itself stands.
+measures, and the ceiling it ratchets against is the only figure worth reading here — which is
+`CEILINGS["__default__"]` in that same file, and not a digit transcribed here.** This sentence
+shipped naming one, 65,000, and a later commit raised the ceiling without touching this line — the
+paragraph that opens "this file no longer claims a current one" claiming a stale one, which is the
+argument it is making happening to itself. The deferral itself stands.
 
 **That ceiling then moved again, by 20,500 in one commit, and nothing was added**
 (`D-2026-09-05-a-ratchet-that-binds-no-connectors-measures-a-smaller-system`). The ratchet called

@@ -1710,9 +1710,13 @@ ALTER TABLE note_proposals   ADD CONSTRAINT note_proposals_state_known
     CHECK (state IN ('open', 'merged', 'rejected', 'failed', 'superseded'));
 ```
 
-Without them the run stops at file 46 of 91 (`DuplicateObject … session_messages_shape_known`) or at
-58 (`UndefinedObject … note_proposals_state_known`). The authority is `_REVIEWED_REPLAY_BREAKS` in
-`tests/test_migrations_are_additive.py`, which carries the recipe beside each one.
+Without them the run stops at `046_review_hardening_indexes.sql`
+(`DuplicateObject … session_messages_shape_known`) or at `058_note_proposal_superseded.sql`
+(`UndefinedObject … note_proposals_state_known`). The files are named rather than counted: this
+sentence shipped as "file 46 of 91", which was wrong twice over — 046 is the *48th* file, not the
+46th, and the total is whatever `infra/sql/*.sql` holds today. The authority is
+`_REVIEWED_REPLAY_BREAKS` in `tests/test_migrations_are_additive.py`, which carries the recipe
+beside each one.
 
 ## A fingerprint index or a label corpus mid-rebuild
 
@@ -1760,9 +1764,21 @@ nothing", not "the database matches this image".
 | 088 | **every turn's cost ledger row**, indefinitely | only where monitoring is deployed: `ChemclawSubsystemDegraded` fires, and `operations.activity.spend` then reports an empty ledger with no error |
 | 090 | the calculation cache stops filtering by epoch, so `find_calculations` offers superseded results to the model as evidence to cite | **no — this one is silent.** Treat browse results as unfiltered until you are forward again |
 | 089 | the publish lease is ignored, so a drain re-claims a row another is mid-delivering and the attempt budget empties twice as fast | no |
-| 083 | nothing — but note it *erased* the zeros 082 backfilled, and rolling forward cannot restore them | n/a |
+| 091 | nothing — the column widened to double precision and the restored image writes a Python float into it exactly as before | n/a |
+| 092 | a session taking its **first** turn during the rollback window comes back with `session_owners.updated_at` NULL, so it is missing from `GET /sessions` until it is spoken in again; the pre-092 image derives the order and never maintains the column | **no — this one is silent.** Re-run 092's backfill by hand to restore it |
+| 093 | `record_observation` stops writing: the restored image's `ON CONFLICT (property, input_hash)` no longer plans against a key that now carries `source`, so no observation is recorded and no calibration is scored | yes — `InvalidColumnReference` in the log |
+| 094 | every fingerprint and corpus-reaction write stops: the restored image's `ON CONFLICT (id)` / `(source, id)` no longer plans against a key that now carries `definition` | yes — `InvalidColumnReference` in the log |
 
 058 is exempted and does not actually break: its `CHECK` widens.
+
+**This table is checked against the register rather than maintained beside it.** It shipped covering
+five of `_REVIEWED_ROLLBACK_BREAKS`'s eight entries and neither of `_REVIEWED_SEMANTIC_BREAKS`'s two
+— the three newest breaks were reviewed, exempted and never written down here, which is the failure
+mode a table maintained by hand beside a register always has.
+`tests/test_migrations_are_additive.py::test_every_reviewed_break_tells_the_operator_what_it_costs`
+now fails if a registered break is missing from this section. The rows the registers do *not* hold
+(083, 090) stay: the register records that a break was reviewed, and this column records what the
+operator loses, which is not a thing the register can carry.
 
 **What no rollback undoes**: the ConfigMap history, the `post-upgrade` data conversion, and any row
 the newer generation wrote in a shape the older one cannot read.

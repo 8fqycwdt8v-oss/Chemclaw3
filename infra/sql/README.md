@@ -202,7 +202,9 @@ ADR carrying the reading behind it.
 Re-running the whole set is how a restored database whose `schema_migrations` ledger is older than
 its tables is recovered. Two files abort that run — the runner sends everything in one transaction,
 so nothing after the failure applies either. Apply the recipe first; both were verified end to end,
-after which all 90 tracked files replay clean against a fully populated database.
+after which every tracked file replays clean against a fully populated database. A count is
+not written here: it was verified at 90 files and read 94 four waves later, and the sentence
+is about the two recipes, not about how many files there happen to be.
 
 - `046_review_hardening_indexes.sql` — `ADD CONSTRAINT session_messages_shape_known` with no drop
   above it, so a replay aborts with `DuplicateObject: constraint "session_messages_shape_known" for

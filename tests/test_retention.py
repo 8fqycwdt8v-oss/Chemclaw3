@@ -2550,7 +2550,10 @@ def test_a_pass_reports_bytes_beside_rows_and_stops_the_table_growing() -> None:
     # Convergence rather than an absolute ceiling, because the shape is what separates the two
     # cases and a ceiling would be a number about this fixture. Measured over the four cycles:
     # 147 456 / 245 760 / 270 336 / 294 912 with the vacuum pass — increments 98 304 then 24 576
-    # then 24 576, decelerating as the freed pages come back into use — against 253 952 -> 737 280
+    # then 24 576: one step down as the freed pages come back into use, and flat at the reuse floor
+    # after it. (Not "decelerating", which is what this line said over three increments two of which
+    # are equal; the assertion below compares the first against the last and never needed the
+    # stronger shape.) Against 253 952 -> 737 280
     # without it, where every cycle adds a fresh cycle's worth and nothing is ever reused.
     early, late = sizes[1] - sizes[0], sizes[3] - sizes[2]
     assert late * 2 <= early, (
@@ -2653,12 +2656,28 @@ def test_no_disposal_entry_offers_actor_erasure_as_what_bounds_a_table() -> None
     table erasure *deletes from*, mentioning that erasure is not stating a bound, and the entry has
     to also say what does bound it — including saying that nothing does, which is this register's
     own recognised way of recording a finding rather than inventing an answer.
+
+    **The trigger is a keyword family and it shipped as two literals, which a synonym walked past.**
+    Mutation testing put `"a leaver sweep removes it per actor"` — the identical defect, no
+    "erasure" and no "erases" in it — into an entry and this test stayed green. The family below is
+    the concepts `agent/leaver.py` actually uses, and it is a *gate* rather than the assertion: all
+    it decides is whether the stricter arm runs, so a miss costs a check and never a false failure.
+    The same run found this loop could pass having examined nothing at all, which the intersection
+    assertion now refuses: `erasable` being non-empty says the erasure register still has a shape,
+    and it said nothing about whether any of those tables reaches `_NOT_PRUNED`.
     """
     erasable = {table for table, *_ in leaver_erase}
     assert erasable, "the erasure register's shape moved; this rule now derives from nothing"
-    for table in sorted(erasable & set(_NOT_PRUNED)):
+    examined = sorted(erasable & set(_NOT_PRUNED))
+    assert examined, (
+        "no table that erasure deletes from is in `_NOT_PRUNED`, so this rule examined nothing and "
+        "passed. Either every erasable table gained a clock — delete this test and say so — or one "
+        "of the two registers moved out from under it"
+    )
+    rests_on_erasure = re.compile(r"erasure|erase[sd]|per[- ]actor|actor[- ]scoped|leaver", re.I)
+    for table in examined:
         stated = _NOT_PRUNED[table]
-        if "erasure" not in stated and "erases" not in stated:
+        if not rests_on_erasure.search(stated):
             continue
         assert "nothing bounds it" in stated or stated.startswith(("refused:", "cascades from")), (
             f"{table} is erased per actor and its disposal entry leans on that erasure without "

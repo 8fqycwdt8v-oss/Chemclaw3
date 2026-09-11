@@ -10,7 +10,7 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 import chemclaw.durable.memory_jobs as memory_jobs
-from chemclaw.connectors.bo import activities as _bo_activities  # registers the activities below
+from chemclaw.connectors.bo import activities as _bo_activities  # noqa: F401 (registers them)
 from chemclaw.connectors.bo.knowledge import note_from_campaign_result
 from chemclaw.connectors.bo.workflows import BoCampaignWorkflow
 from chemclaw.connectors.queues import bundle_queue
@@ -377,7 +377,25 @@ def test_the_recommended_value_survives_the_excerpt_a_reader_actually_sees() -> 
 #: Narrow on purpose. "These are proposals a human runs" is *true* and must survive — a candidate
 #: is a suggestion, and the skill says so at length. What is forbidden is the claim that a
 #: **reviewer stands between the note and the graph**, because none does.
+_REPO = pathlib.Path(__file__).resolve().parents[1]
+
 _GATE_CLAIMS = ("pr-gated", "pr gate", "pull request", "human review", "before it enters the graph")
+
+#: Lines in the corpus below that name the gate in order to say it is **gone**.
+#:
+#: Keyed by `path:line-text` rather than by path, so a file cannot pick up a *second*, live claim
+#: under an exemption granted for a historical one. The phrase list above cannot tell the two
+#: apart — "the PR gate … was deleted" contains "pr gate" exactly as a live claim would — and a
+#: negation-aware scan over model-facing prose is a worse trade than one named row: this repository
+#: keeps the reasoning that led to a decision on purpose, so these lines are the point rather than
+#: residue.
+#:
+#: The phrase is a fragment of the *matching line*, not of the sentence's point — this one's
+#: "was deleted (`D-2026-09-05-…`)" is on the line after the one the scan flags, and an exemption
+#: that has to hold a sentence across a wrap would break on a reflow rather than on a claim.
+_GATE_CLAIM_HISTORICAL = {
+    "safety-screening/SKILL.md": "and the PR gate over agent-written knowledge",
+}
 
 
 def test_no_model_facing_bo_text_claims_a_recommendation_is_reviewed_before_it_lands() -> None:
@@ -394,12 +412,56 @@ def test_no_model_facing_bo_text_claims_a_recommendation_is_reviewed_before_it_l
     `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` established: whoever
     re-adds the claim has to add the producer too.
     """
-    bundle = pathlib.Path(_bo_activities.__file__).resolve().parent
+    corpus = _model_facing_text()
+    assert len(corpus) > 1, (
+        f"this scan found {len(corpus)} model-facing file(s); the globs below have stopped "
+        "resolving, and an absence test over an empty corpus passes by saying nothing"
+    )
     offenders = []
-    for path in [bundle / "connector.yaml", *sorted(bundle.glob("skills/**/SKILL.md"))]:
+    for path in corpus:
         for number, line in enumerate(path.read_text().splitlines(), start=1):
-            if any(claim in line.lower() for claim in _GATE_CLAIMS):
-                offenders.append(f"{path.name}:{number}: {line.strip()}")
+            if not any(claim in line.lower() for claim in _GATE_CLAIMS):
+                continue
+            if _GATE_CLAIM_HISTORICAL.get(f"{path.parent.name}/{path.name}", "\0") in line:
+                continue
+            offenders.append(f"{path.relative_to(_REPO)}:{number}: {line.strip()}")
     assert not offenders, "model-facing text claims a review gate that no longer exists:\n" + (
         "\n".join(offenders)
     )
+
+
+def test_no_historical_gate_exemption_is_unspent() -> None:
+    """An exemption whose line has gone is a permission nobody spends — the register's other half.
+
+    `_GATE_CLAIM_HISTORICAL` silences a line; a row whose line has been reworded or deleted goes on
+    silencing whatever lands at that path next. This is the same second half
+    `test_no_exemption_outlives_its_migration` gives the migration registers and
+    `test_no_retired_test_citation_is_unspent` gives the ADR one.
+    """
+    corpus = {f"{path.parent.name}/{path.name}": path.read_text() for path in _model_facing_text()}
+    unspent = sorted(
+        key for key, phrase in _GATE_CLAIM_HISTORICAL.items() if phrase not in corpus.get(key, "")
+    )
+    assert not unspent, (
+        f"exemption(s) naming a line that is no longer there: {unspent}. Delete the row — the file "
+        "either stopped mentioning the gate or now mentions it differently, and in the second case "
+        "the new wording has to be read before it is exempted."
+    )
+
+
+def _model_facing_text() -> list[pathlib.Path]:
+    """Every file whose words reach the model: a tool description, or an injected skill.
+
+    **Scoped to the BO bundle until 2026-09-11, which made it a rule about one directory.** The
+    claim it refuses — that a recommendation is reviewed before it lands — is not a BO-specific
+    thing to say, and mutation testing put the identical sentence into a root `skills/*/SKILL.md`
+    and watched this pass. There are 28 skills under that root, every one of them injected into the
+    prompt by `SkillsMiddleware`, and every `connector.yaml` description is read on every turn.
+    So the corpus is the whole model-facing surface, and this test's name says "model-facing"
+    rather than "BO" because that is what it now means.
+    """
+    return [
+        *sorted(_REPO.glob("src/chemclaw/connectors/*/connector.yaml")),
+        *sorted(_REPO.glob("src/chemclaw/connectors/*/skills/**/SKILL.md")),
+        *sorted(_REPO.glob("skills/**/SKILL.md")),
+    ]
