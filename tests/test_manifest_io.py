@@ -18,6 +18,7 @@ import pytest
 from chemclaw.connectors.jobs import ConnectorJobError, resolve_params_model
 from chemclaw.connectors.registry import ConnectorError
 from chemclaw.connectors.registry import discovered as connectors_discovered
+from chemclaw.connectors.registry import forget_discovered as forget_connectors_discovered
 from chemclaw.core.config import settings
 from chemclaw.core.manifest_io import (
     MAX_MANIFEST_NODES,
@@ -29,10 +30,12 @@ from chemclaw.deliver.registry import DeliveryChannelError
 from chemclaw.deliver.registry import build as build_channel
 from chemclaw.ingest.sources.registry import DataSourceError
 from chemclaw.ingest.sources.registry import discovered as sources_discovered
+from chemclaw.ingest.sources.registry import forget_discovered as forget_sources_discovered
 from chemclaw.publish.registry import ResultSinkError
 from chemclaw.publish.registry import discovered as sinks_discovered
 from chemclaw.templates.registry import TemplateError
 from chemclaw.templates.registry import discovered as templates_discovered
+from chemclaw.templates.registry import forget_discovered as forget_templates_discovered
 
 _HTTP_ENDPOINT = "endpoint:\n  transport: http\n  url: http://127.0.0.1:9/mcp\n  tools: [a, b]\n"
 
@@ -71,10 +74,10 @@ def test_an_alias_bomb_is_refused_by_arithmetic_rather_than_by_running_out_of_me
     assert len(text) < 400, "the fixture's whole point is that it is tiny on disk"
     root = _bundle(tmp_path, "fix", text)
     monkeypatch.setattr(settings, "connectors_dir", str(root))
-    connectors_discovered.cache_clear()
+    forget_connectors_discovered()
     with pytest.raises(ConnectorError, match=f"over the {MAX_MANIFEST_NODES}-node ceiling"):
         connectors_discovered()
-    connectors_discovered.cache_clear()
+    forget_connectors_discovered()
 
 
 def test_deep_nesting_is_the_seams_own_error_and_not_a_bare_recursion_error(
@@ -88,10 +91,10 @@ def test_deep_nesting_is_the_seams_own_error_and_not_a_bare_recursion_error(
     """
     root = _bundle(tmp_path, "deep", "a: " + "[" * 2000 + "]" * 2000 + "\n")
     monkeypatch.setattr(settings, "connectors_dir", str(root))
-    connectors_discovered.cache_clear()
+    forget_connectors_discovered()
     with pytest.raises(ConnectorError):
         connectors_discovered()
-    connectors_discovered.cache_clear()
+    forget_connectors_discovered()
 
 
 def test_a_duplicated_classification_key_is_refused_rather_than_silently_last_wins(
@@ -113,10 +116,10 @@ def test_a_duplicated_classification_key_is_refused_rather_than_silently_last_wi
         + "  state_changing: []\n  read_only: [a, b]\n",
     )
     monkeypatch.setattr(settings, "connectors_dir", str(root))
-    connectors_discovered.cache_clear()
+    forget_connectors_discovered()
     with pytest.raises(ConnectorError, match="appears more than once"):
         connectors_discovered()
-    connectors_discovered.cache_clear()
+    forget_connectors_discovered()
 
 
 def test_an_oversized_prose_field_cannot_become_the_prompt(
@@ -137,10 +140,10 @@ def test_an_oversized_prose_field_cannot_become_the_prompt(
         + "\n",
     )
     monkeypatch.setattr(settings, "connectors_dir", str(root))
-    connectors_discovered.cache_clear()
+    forget_connectors_discovered()
     with pytest.raises(ConnectorError, match="summary"):
         connectors_discovered()
-    connectors_discovered.cache_clear()
+    forget_connectors_discovered()
 
 
 def test_a_templates_summary_is_bounded_by_the_same_number(
@@ -155,10 +158,10 @@ def test_a_templates_summary_is_bounded_by_the_same_number(
         encoding="utf-8",
     )
     monkeypatch.setattr(settings, "templates_dir", str(tmp_path))
-    templates_discovered.cache_clear()
+    forget_templates_discovered()
     with pytest.raises(TemplateError, match="summary"):
         templates_discovered()
-    templates_discovered.cache_clear()
+    forget_templates_discovered()
 
 
 @pytest.mark.parametrize("folder", ["UPPER", "with space", "dot.dot", "-leading"])
@@ -181,10 +184,10 @@ def test_a_data_source_name_is_held_to_the_shape_its_three_siblings_require(
         encoding="utf-8",
     )
     monkeypatch.setattr(settings, "data_sources_dir", str(tmp_path))
-    sources_discovered.cache_clear()
+    forget_sources_discovered()
     with pytest.raises(DataSourceError):
         sources_discovered()
-    sources_discovered.cache_clear()
+    forget_sources_discovered()
 
 
 def test_a_sink_manifest_failure_is_a_result_sink_error_naming_the_file(
@@ -277,9 +280,9 @@ def test_a_bundle_symlinked_out_of_its_discovery_root_is_not_discovered(
     root.mkdir()
     (root / "linked").symlink_to(outside, target_is_directory=True)
     monkeypatch.setattr(settings, "connectors_dir", str(root))
-    connectors_discovered.cache_clear()
+    forget_connectors_discovered()
     assert connectors_discovered() == {}
-    connectors_discovered.cache_clear()
+    forget_connectors_discovered()
 
 
 def test_the_reader_still_refuses_python_tags_and_still_takes_a_mapping(tmp_path: Path) -> None:
@@ -307,10 +310,10 @@ def test_every_shipped_manifest_still_loads_through_the_bounded_reader() -> None
     files, and a ceiling derived from a corpus that then fails it is the failure mode CLAUDE.md
     keeps naming — a number in prose that is a claim about a commit.
     """
-    connectors_discovered.cache_clear()
-    sources_discovered.cache_clear()
+    forget_connectors_discovered()
+    forget_sources_discovered()
     sinks_discovered.cache_clear()
-    templates_discovered.cache_clear()
+    forget_templates_discovered()
     assert connectors_discovered()
     assert sources_discovered()
     assert sinks_discovered()

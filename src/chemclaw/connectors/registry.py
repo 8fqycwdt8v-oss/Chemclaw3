@@ -172,10 +172,22 @@ def discovered() -> dict[str, tuple[Path, ConnectorManifest]]:
     return _discovered_in(tuple(settings.connectors_dirs))
 
 
-# The seam a test uses when it writes new manifests into a directory this registry has *already*
-# discovered — the one case a directory-keyed cache cannot see on its own, since the key is
-# unchanged. mypy does not model attributes on function objects, hence the ignore.
-discovered.cache_clear = _discovered_in.cache_clear  # type: ignore[attr-defined]
+def forget_discovered() -> None:
+    """Drop the cache so the next `discovered()` re-reads bundle manifests from disk.
+
+    **The one case a directory-keyed cache cannot see on its own**: new manifests written into a
+    directory this registry has *already* discovered. The key is the directory tuple, so it is
+    unchanged and the entry still answers. Repointing `connectors_dir` needs no clearing at all,
+    because that is a different key.
+
+    A named function rather than `discovered.cache_clear`, which is what this was for a few hours.
+    An attribute assigned onto a function object is invisible to `mypy`: the definition needed a
+    `# type: ignore[attr-defined]` and **every one of the 35 call sites became an error**, so the
+    suppression at the definition bought silence in one place and noise in thirty-five. The tree
+    already had the right idiom for a test-isolation reset — `forget_reachability`,
+    `forget_vector_store`, `forget_open_warehouses` — and this is it.
+    """
+    _discovered_in.cache_clear()
 
 
 def bearer_token_env_names() -> tuple[str, ...]:

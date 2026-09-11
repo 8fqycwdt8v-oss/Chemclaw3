@@ -30,6 +30,7 @@ from chemclaw.connectors.registry import (
     declared_relations,
     discovered,
     enabled,
+    forget_discovered,
     health_url,
     job_tools,
     server_tools_module,
@@ -458,7 +459,7 @@ def test_every_ambient_name_space_is_refused_to_a_connector(
         root.mkdir(parents=True)
         _bundle(root, "alpha", _http_manifest("alpha", tools=name))
         _use(monkeypatch, root)
-        discovered.cache_clear()
+        forget_discovered()
         try:
             job_tools()
         except ConnectorError as refusal:

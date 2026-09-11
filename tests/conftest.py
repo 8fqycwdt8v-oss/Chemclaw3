@@ -11,6 +11,10 @@ than a per-file convention, and for why the registries themselves are no longer 
 `_free_port` is the one "ask the OS for an unused loopback port" helper, shared by every test
 that starts a real server instead of being redefined per file (Rule of Three).
 
+`client` and `log_field` are the same rule applied to the front-door suites: the fixture that
+builds the app with a fake agent, and the one-line reader for an `extra=` field on a captured
+record, were byte-identical in `test_api_observability.py` and `test_api_review_logging.py`.
+
 `pytest_collection_modifyitems` owns both wall-clock-cap adjustments: the `thread` timeout method
 for Temporal-backed modules, and `PYTEST_TIMEOUT_SCALE`, which is the one knob that relaxes *every*
 cap — including the per-test markers, which no command-line flag can reach.
@@ -21,14 +25,17 @@ server, or an absent `helm` binary took away.
 """
 
 import asyncio
+import logging
 import os
 import socket
 from collections.abc import Iterator
+from typing import Any
 
 import psycopg
 import pytest
 from _pytest.config import UsageError
 from _pytest.terminal import TerminalReporter
+from fastapi.testclient import TestClient
 
 from chemclaw.agent.authz import knowledge_read_tools as _knowledge_read_tools
 from chemclaw.agent.authz import side_effecting_tools as _side_effecting_tools
@@ -50,6 +57,34 @@ def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def log_field(record: logging.LogRecord, name: str) -> Any:
+    """One `extra=` field off a captured record — `getattr`, because a `LogRecord` has no schema.
+
+    Named for what it reads rather than `_field`, because a shared helper is called from files
+    that have their own `_`-private names and a leading underscore here would claim the opposite
+    of what a conftest is.
+    """
+    return getattr(record, name)
+
+
+@pytest.fixture
+def client() -> TestClient:
+    """The front door with a fake agent — the same seam every other front-door test uses.
+
+    Here rather than per file because two suites held a byte-identical copy. A file that wants a
+    differently-built client still defines its own `client` fixture and pytest's nearest-wins
+    resolution gives it that one, which is how `test_api_shedding.py`, `test_jobs_api.py`,
+    `test_protocol_routes.py` and `test_tool_results.py` keep theirs.
+
+    `tests.test_service` is imported inside the body on purpose: pytest imports this conftest
+    before collecting anything, so a module-scope import here would make every run — `pytest
+    tests/test_bo.py` included — pay for the front-door module and its whole dependency tree.
+    """
+    from tests.test_service import _app, _FakeAgent
+
+    return TestClient(_app(_FakeAgent()))
 
 
 class FakeWriter:
@@ -152,9 +187,12 @@ def _fresh_derived_tool_sets() -> Iterator[None]:
     directory cannot poison the rest. Clearing is O(1); the *re-discovery* it forced is not —
     measured at 48 ms, 32 ms and 32 ms a time. They are now keyed on the directory tuple they
     actually read, so a repointed `tmp_path` is a different cache entry and the poisoning it was
-    protecting against cannot happen. `discovered.cache_clear()` still exists and is still the
-    seam for the narrower case a key cannot see: new manifests written into a directory the
-    registry has already discovered.
+    protecting against cannot happen. `forget_discovered()` is the seam for the narrower case a
+    key cannot see: new manifests written into a directory the registry has already discovered.
+    It is a named function rather than `discovered.cache_clear`, which is what it was for a few
+    hours — an attribute assigned onto a function object is invisible to `mypy`, so that spelling
+    needed one suppression at the definition and produced an error at every one of its 35 call
+    sites.
 
     **The claim that removes an order-dependence is checked by running in two orders.** Deleting a
     fixture that ran on every test is only safe if nothing was relying on it, and the one way that

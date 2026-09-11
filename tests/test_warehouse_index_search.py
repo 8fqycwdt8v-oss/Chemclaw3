@@ -166,7 +166,15 @@ async def test_a_key_the_relation_no_longer_holds_is_dropped_not_guessed_at() ->
 
 @_sync
 async def test_an_unfiltered_search_costs_no_scope_query() -> None:
-    """`None` means the whole index and must cost nothing extra — one statement, not two."""
+    """`None` means the whole index and must cost nothing extra — one statement, not two.
+
+    **This is also the optimisation the `where:` fix must not lose**: a binding with no `where:`
+    and nothing to filter on is still one round trip. That sentence had a test of its own further
+    down this file, byte-identical to this one in setup, call and assertion. Driven — forcing the
+    scope branch by replacing the "no truthy filter" early return with `if False:` — reddened each
+    of them alone, so the second proved nothing this one does not. The reasoning was worth keeping;
+    the second call was not.
+    """
     retriever = _retriever(await _store_ranked("ester formation", "RX-1"))
     await retriever.retrieve("ester formation", {})
 
@@ -286,15 +294,6 @@ async def test_a_broad_where_does_not_starve_an_unfiltered_query() -> None:
         object.__setattr__(settings, "vector_store_max_scope_keys", cap)
 
     assert len(chunks) == 2, "a `where:` bigger than the cap must not zero an unfiltered query"
-
-
-@_sync
-async def test_a_binding_with_no_where_and_no_filter_still_costs_no_scope_query() -> None:
-    """The optimisation the fix must not lose: nothing to filter on is still one round trip."""
-    retriever = _retriever(await _store_ranked("ester formation", "RX-1"))
-    await retriever.retrieve("ester formation", {})
-
-    assert len(warehouse_fake.NEXT.executed) == 1  # type: ignore[union-attr]
 
 
 @_sync

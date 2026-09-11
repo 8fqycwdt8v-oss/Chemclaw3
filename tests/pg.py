@@ -43,7 +43,7 @@ import pytest
 
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
-from chemclaw.core.migrate import migrate
+from chemclaw.core.migrate import migrate, migration_dsn
 
 # Not a `Settings` field on purpose: `core/config/` is the operator-facing deployment
 # surface, and its parity tests (DA-1) require every field to be documented in `.env.example`.
@@ -104,6 +104,12 @@ async def drop_test_schema(base_dsn: str, schema: str = TEST_SCHEMA) -> None:
         await conn.commit()
 
 
+# Which (migration DSN, migrations directory) pairs this process has already migrated. The
+# session fixture in `conftest.py` fixes both before any test runs, so in a normal run this holds
+# exactly one entry and every test after the first pays only the reachability probe.
+_MIGRATED: set[tuple[str, str]] = set()
+
+
 async def migrated_db_or_skip() -> None:
     """Ensure a reachable, migrated Postgres database, or skip if none is available.
 
@@ -115,13 +121,29 @@ async def migrated_db_or_skip() -> None:
     The reachability probe is against `postgres_dsn` deliberately: it is the connection the tests
     themselves use, so a migrator that answers while the runtime credential does not is a failure
     worth seeing rather than a skip.
+
+    **The probe runs every time and the migration does not**, and the asymmetry is the point.
+    Migrations are ledger-idempotent, so the second run applies nothing — but it is a *72 ms*
+    nothing (connect, advisory lock, read the ledger, checksum every shipped file), and 642 test
+    functions across 81 files reach this. Measured on `tests/test_retention.py`, two runs each:
+    30.1 s / 36.0 s before, 24.4 s / 24.3 s after. The probe stays
+    per-test because it is what produces the skip: memoising it too would turn a database that
+    went away mid-session into an error, where this marker's whole job is to report it as a skip
+    and let `tests/conftest.py`'s epilogue count what the run is therefore not evidence about.
     """
     try:
         conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
         await conn.close()
     except psycopg.OperationalError as exc:  # pragma: no cover - env-dependent
         pytest.skip(f"Postgres unavailable (start it: sudo dockerd; make up): {exc}")
-    await migrate()
+    # Keyed on what `migrate()` actually reads, rather than on a bare `True`: a test that
+    # repoints `sql_migrations_dir` or the migration DSN is asking for a *different* migration,
+    # and a memo that cannot see its own input is the defect
+    # `chemclaw.connectors.registry._discovered_in` carries the argument for.
+    applied_to = (migration_dsn(), settings.sql_migrations_dir)
+    if applied_to not in _MIGRATED:
+        await migrate()
+        _MIGRATED.add(applied_to)
 
 
 async def create_checkpoint_tables() -> None:
