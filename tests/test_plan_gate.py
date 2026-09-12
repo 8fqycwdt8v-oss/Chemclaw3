@@ -72,6 +72,12 @@ class _Session:
     def __init__(self, session_id: str, titles: list[str] | None = None) -> None:
         self.session_id = session_id
         self.titles: list[str] = list(titles or [])
+        # What this session's plan steps declare they will call, and so what an approval of it
+        # authorizes (`agent/plan_scope.py`). Every case in *this* file is about **when** an
+        # approval stands — a rewrite, a spend, an eviction — so the declaration is fixed at the
+        # one gated tool they all drive and stays out of the way. What an approval *covers* is
+        # `tests/test_plan_scope.py`, which varies it.
+        self.declares: list[str] = ["record_knowledge_note"]
 
 
 async def _set_plan(session: _Session, titles: list[str]) -> None:
@@ -81,7 +87,7 @@ async def _set_plan(session: _Session, titles: list[str]) -> None:
 
 async def _approve(store: InMemoryPlanApprovalStore, session: _Session) -> None:
     """Record a human approval for the plan the session is proposing right now."""
-    await store.record(session.session_id, _hash(session), "chemist-1", True)
+    await store.record(session.session_id, _hash(session), "chemist-1", True, session.declares)
 
 
 async def _titles(session: _Session) -> list[str]:
@@ -94,6 +100,15 @@ def _hash(session: _Session) -> str:
     return plan_identity(session.titles) or EMPTY_PLAN_HASH
 
 
+def _todos(session: _Session | None) -> list[dict[str, Any]]:
+    """The session's plan as `write_todos` would have written it — steps and their declarations."""
+    if session is None:
+        return []
+    return [
+        {"content": t, "status": "pending", "tools": list(session.declares)} for t in session.titles
+    ]
+
+
 async def _call(tool: str, session: _Session | None) -> bool:
     """Drive one tool call through the gate; return whether the tool body ran."""
     ran = False
@@ -104,9 +119,7 @@ async def _call(tool: str, session: _Session | None) -> bool:
         return None
 
     request = tool_request(tool)
-    object.__setattr__(
-        request, "state", {"todos": [{"content": t} for t in (session.titles if session else [])]}
-    )
+    object.__setattr__(request, "state", {"todos": _todos(session)})
     token = set_current_session_id(session.session_id) if session is not None else None
     try:
         await run_middleware(enforce_plan_approval, request, _handler)
@@ -123,7 +136,7 @@ async def _record(store: InMemoryPlanApprovalStore, session: _Session) -> None:
     refuses to write, because the gate must hold against a row that exists however it got there —
     written before the route was fixed, or by a path that never went through it.
     """
-    await store.record(session.session_id, _hash(session), "chemist", True)
+    await store.record(session.session_id, _hash(session), "chemist", True, session.declares)
 
 
 async def _try_call(tool: str, session: _Session) -> bool:
@@ -221,7 +234,9 @@ def test_a_rejection_after_an_approval_revokes_it(approvals: InMemoryPlanApprova
         await _set_plan(session, ["do the thing"])
         await _approve(approvals, session)
         assert await _call("record_knowledge_note", session)
-        await approvals.record(session.session_id, _hash(session), "chemist-1", False)
+        await approvals.record(
+            session.session_id, _hash(session), "chemist-1", False, session.declares
+        )
         with pytest.raises(PlanNotApprovedError):
             await _call("record_knowledge_note", session)
 
@@ -522,11 +537,7 @@ async def _call_with_messages(tool: str, session: _Session, messages: list[Any])
         return None
 
     request = tool_request(tool, call_id="c-write")
-    object.__setattr__(
-        request,
-        "state",
-        {"todos": [{"content": t} for t in session.titles], "messages": messages},
-    )
+    object.__setattr__(request, "state", {"todos": _todos(session), "messages": messages})
     token = set_current_session_id(session.session_id)
     try:
         await run_middleware(enforce_plan_approval, request, _handler)

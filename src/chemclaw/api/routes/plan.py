@@ -18,9 +18,10 @@ from datetime import datetime
 from fastapi import FastAPI, HTTPException, Request
 from starlette.responses import Response
 
-from chemclaw.agent.plan_approval_store import ApprovalStore
+from chemclaw.agent.plan_approval_store import ApprovalStore, Decision
 from chemclaw.agent.plan_gate import EMPTY_PLAN_HASH, gate_applies, plan_identity
-from chemclaw.agent.plan_state import session_todos
+from chemclaw.agent.plan_scope import declared_scope
+from chemclaw.agent.plan_state import session_plan
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.session_store import SessionOwnerStore, encode_session_cursor
 from chemclaw.api.deps import CurrentSession, CurrentUser
@@ -51,10 +52,14 @@ class _PlanRead:
     """
 
     todos: list[str] | None
+    # Every tool the plan's steps declare — what approving it would authorize, and what a surface
+    # has to show beside the steps for the decision to be an informed one
+    # (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`).
+    scope: list[str]
     # The identity a decision is recorded against, or `None` when there is nothing to decide on.
     approvable: str | None
-    # The latest *effective* `(approved, actor)`; `None` when nobody has decided at all.
-    decision: tuple[bool, str] | None
+    # The latest *effective* decision; `None` when nobody has decided at all.
+    decision: Decision | None
 
     @property
     def plan_hash(self) -> str:
@@ -72,10 +77,16 @@ async def _read_plan(session_id: str, approvals: ApprovalStore) -> _PlanRead:
     for an empty one and a row recorded against the empty-plan constant would say "someone approved
     the empty plan" — an identity every session in every deployment shares.
     """
-    todos = await session_todos(session_id)
+    plan = await session_plan(session_id)
+    todos = None if plan is None else [str(step["content"]) for step in plan]
     approvable = plan_identity(todos or [])
     decision = await approvals.decision(session_id, approvable) if approvable else None
-    return _PlanRead(todos=todos, approvable=approvable, decision=decision)
+    return _PlanRead(
+        todos=todos,
+        scope=sorted(declared_scope(plan or [])),
+        approvable=approvable,
+        decision=decision,
+    )
 
 
 def _plan_gated(profile_name: str | None) -> bool:
@@ -183,7 +194,7 @@ async def get_plan(
     written before the decision route refused to — must not come back as `approved=true` here
     either. The hash is still reported, because a client needs *an* identity to display.
 
-    **The plan is read from the checkpointer** (`agent/plan_state.session_todos`), not from an
+    **The plan is read from the checkpointer** (`agent/plan_state.session_plan`), not from an
     in-process session object. It used to come off `live.session`, the handle the front door held
     per live session, because MAF's harness kept its todo list inside it — and that handle is
     exactly what an LRU eviction or a pod roll dropped, which is half of why a rehydrated session
@@ -206,9 +217,15 @@ async def get_plan(
         session_id=session_id,
         plan_hash=read.plan_hash,
         plan=read.todos or [],
+        # What approving this plan would authorize. Shown beside the steps because the decision is
+        # only informed if the person can see it: the gate refuses a state-changing tool no step
+        # declared, so a surface that rendered the steps alone would be asking for a yes to
+        # something it had not displayed
+        # (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`).
+        scope=read.scope,
         mode="execute" if approved else "plan",
         approved=approved,
-        decided_by=read.decision[1] if read.decision else None,
+        decided_by=read.decision.actor if read.decision else None,
     )
 
 
@@ -288,6 +305,7 @@ async def pending_plans(request: Request, principal: CurrentUser) -> PendingPlan
                     updated_at=updated_at,
                     plan_hash=read.approvable,
                     plan=read.todos,
+                    scope=read.scope,
                 )
             )
     return PendingPlansOut(
@@ -329,7 +347,8 @@ async def decide_plan(
     it is the same function the gate asks, so the route and the enforcement cannot disagree about
     what counts as a plan.
     """
-    plan_hash = plan_identity(await session_todos(session_id) or [])
+    plan = await session_plan(session_id) or []
+    plan_hash = plan_identity([str(step["content"]) for step in plan])
     if plan_hash is None:
         raise HTTPException(
             status_code=409,
@@ -348,7 +367,15 @@ async def decide_plan(
     # used to need a separate `rearm_plan` call against session state, which is one more thing a
     # future route could forget to do.
     await state(request).plan_approvals.record(
-        session_id, plan_hash, principal.oid or "", body.approved
+        session_id,
+        plan_hash,
+        principal.oid or "",
+        body.approved,
+        # The scope is taken from the plan being decided on, here, once — not read back from the
+        # todo list when a call is gated. That is what stops the model widening what it was
+        # granted: `plan_identity` hashes `content` only, so a rewrite that keeps the text and adds
+        # a tool to a step hashes to this same approved plan, and the gate still reads this row.
+        declared_scope(plan),
     )
     # Nothing else to flip. This used to call `grant_execute` as well, moving the session's MAF
     # mode — a second piece of state saying the same thing, on a different lifetime, which is what

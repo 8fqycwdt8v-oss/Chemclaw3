@@ -377,12 +377,26 @@ def _recorded_provenance() -> tuple[str, str, str]:
     **The actor reaching this tool is a claim, not an identity, and the record has to say so.**
     `caller_provenance` reads `X-Chemclaw-Actor` off the serving HTTP request, and
     `chemclaw.connectors.caller` says in its own module docstring that these values "arrive on an
-    unauthenticated header from outside this process's trust boundary". This bundle's manifest
-    declares `auth: mode: none`, so the pod does not even authenticate *core*: anything that can
-    open a socket to it can name any chemist it likes. Measured before this existed — a call
-    carrying `X-Chemclaw-Actor: victim-oid` wrote `victim-oid` verbatim into `bo_campaigns.
-    opened_by` and `bo_suggestions.actor`, the two columns `agent/leaver.py` retains as the
-    answer to "who framed this campaign's decision space", indistinguishable from a real one.
+    unauthenticated header from outside this process's trust boundary". Measured before this
+    existed — a call carrying `X-Chemclaw-Actor: victim-oid` wrote `victim-oid` verbatim into
+    `bo_campaigns.opened_by` and `bo_suggestions.actor`, the two columns `agent/leaver.py` retains
+    as the answer to "who framed this campaign's decision space", indistinguishable from a real one.
+
+    **Who can make that claim is narrower than this paragraph used to say, and the marker survives
+    the narrowing.** It read "this bundle's manifest declares `auth: mode: none`, so the pod does
+    not even authenticate *core*: anything that can open a socket to it can name any chemist it
+    likes". The manifest declares `mode: bearer` with `token_env: CHEMCLAW_BO_MCP_TOKEN`
+    (`D-2026-08-20-a-networkpolicy-selects-peers-not-paths` closed that, and
+    `tests/test_connector_identity.py::test_every_bundle_this_repository_hosts_authenticates_its_own_mcp`
+    holds it for every bundle); driven against the real app, `/mcp` answers **401** with no token
+    and 401 with a wrong one. So the forgery is a *token-holder's*, not anyone's.
+
+    That is a smaller threat and not a closed one, which is exactly why the marking stays. A bearer
+    proves this request came from something holding this bundle's credential — in the shipped
+    deployment, core — and says nothing about *which chemist* core was serving. The header is still
+    the only thing carrying that, and it is still unauthenticated, so a column that recorded it bare
+    would be indistinguishable from one filled by a validated principal. Dropping the prefix on the
+    strength of the bearer would be trusting a credential to answer a question it does not answer.
 
     **Why marking rather than sourcing the real principal.** The durable sibling
     (`connectors/bo/workflows.py`) reads `requested_by` off the run's Temporal memo, which core sets

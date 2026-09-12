@@ -70,7 +70,7 @@ advertising a mechanism after the mechanism is gone.
 
 import logging
 import uuid
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Mapping, Sequence
 from pathlib import Path
 from typing import Annotated, Any, NotRequired, cast
 
@@ -83,7 +83,6 @@ from deepagents.middleware.skills import (
     SkillsMiddleware,
     SkillsState,
 )
-from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.middleware.types import PrivateStateAttr
 from langgraph.channels.untracked_value import UntrackedValue
 
@@ -111,6 +110,7 @@ from chemclaw.agent.loop_cap import enforce_loop_cap
 from chemclaw.agent.model_calls import model_call_middleware, refuse_unparsed_arguments
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
 from chemclaw.agent.plan_link import stamp_plan_link
+from chemclaw.agent.plan_scope import ScopedTodoListMiddleware
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import refuse_repeated_calls
 from chemclaw.agent.scratchpad import (
@@ -140,7 +140,7 @@ from chemclaw.agent.tool_authz import (
 from chemclaw.agent.tool_framing import frame_connector_results
 from chemclaw.agent.tool_result_size import bound_tool_results
 from chemclaw.agent.tool_schema import as_structured_tool
-from chemclaw.connectors.registry import skills_dirs
+from chemclaw.connectors.registry import ConnectorError, skills_dirs
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
 
@@ -294,7 +294,7 @@ def build_langgraph_agent(
     # that conversion is per-*process* work happening per turn: `agent/tool_schema.py` says why a
     # first-party tool's schema cannot vary between turns, and what it measured. The connector
     # tools are already `BaseTool`s belonging to this turn's sessions and pass through untouched.
-    bound = [*(as_structured_tool(fn) for fn in tools), *(connectors or [])]
+    bound = _bound_surface(tools, connectors)
     # **Built after `bound`, and that is what the capability gate is narrowed by.** `skill_permits`'
     # third predicate hides a skill whose *every* declared tool is absent, and the set it measured
     # absence against was `_advertised_names` — the in-process registry plus every enabled bundle's
@@ -768,6 +768,43 @@ def _skills_prompt() -> str:
     return prompt
 
 
+def _bound_surface(tools: list[Any], connectors: Sequence[Any] | None) -> list[Any]:
+    """The turn's whole tool surface, refusing a connector tool that claims a first-party name.
+
+    The in-process half is converted here rather than left for `ToolNode` to convert, because that
+    conversion is per-*process* work happening per turn: `agent/tool_schema.py` says why a
+    first-party tool's schema cannot vary between turns, and what it measured. The connector tools
+    are already `BaseTool`s belonging to this turn's sessions and pass through untouched.
+
+    **The name check is the reason this is a function**
+    (`D-2026-09-12-a-tool-list-is-a-name-space-whichever-argument-it-arrives-on`). `ToolNode` keys
+    `tools_by_name` by name and the connector half is appended second, so a connector tool called
+    `record_knowledge_note` simply *wins*: measured, 61 tools bound, the first-party writer gone,
+    no error and no warning. What makes that a security shape rather than a typing gap is that
+    `authz` still classifies the **name** — every gate fires exactly as it did while the
+    connector's body runs behind them, and `agent/audit.py` records the refusal or the call against
+    the first-party capability's identity.
+
+    `connectors/registry._declared_tool_names` already refuses a *manifest* claiming the name, and
+    that is the path a deployment takes. The `connectors` keyword is the one that bypasses it — it
+    is how `api/runner.py` hands the turn its opened sessions, and how a test builds a graph — so
+    the check belongs beside the concatenation, over the names the first list declares. The
+    refusal is a `ConnectorError` worded like the registry's, because an operator reading one of
+    the two should not have to work out that they are the same rule.
+    """
+    first_party = [as_structured_tool(fn) for fn in tools]
+    claimed = {tool.name for tool in first_party}
+    for tool in connectors or []:
+        if tool.name in claimed:
+            raise ConnectorError(
+                f"a connector tool named {tool.name!r} was bound alongside the first-party "
+                "capability of that name; a connector cannot take a first-party capability's "
+                "name, because the name is the authorization key and the model has only one of "
+                "them to call"
+            )
+    return [*first_party, *(connectors or [])]
+
+
 def _harness_middleware(profile: AgentProfile) -> list[Any]:
     """The plan/execute harness's todo list, and the runaway cap every profile gets.
 
@@ -784,6 +821,13 @@ def _harness_middleware(profile: AgentProfile) -> list[Any]:
 
     The todo list stays harness-only: a classic turn has no plan for the gate to read, and
     advertising `write_todos` there would be a capability the mode does not use.
+
+    **It is `ScopedTodoListMiddleware`, not upstream's**, because a plan step has to say what it
+    will call for the approval to bound anything
+    (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`). Everything else about
+    upstream's middleware is kept — its prompt, its parallel-rewrite guard, the `todos` channel and
+    the `write_todos` name — so the gate, the plan link and the two decision surfaces read exactly
+    what they read before, one field wider.
 
     `enforce_loop_cap` both enforces the cap and records it, and `loop_cap.loop_capped` reads that
     record. One counter for one number — and it counts in `before_model` deliberately: see
@@ -803,7 +847,7 @@ def _harness_middleware(profile: AgentProfile) -> list[Any]:
     caps = [enforce_loop_cap, enforce_spend_cap, MeterTurnSpend()]
     if not harness_enabled_for(profile):
         return caps
-    return [TodoListMiddleware(), *caps]
+    return [ScopedTodoListMiddleware(), *caps]
 
 
 def _skills_middleware(backend: CompositeBackend, labelled: list[tuple[str, str]]) -> Any:

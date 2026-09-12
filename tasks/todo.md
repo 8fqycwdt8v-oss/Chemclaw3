@@ -211,19 +211,44 @@ plainly that they cannot.
 Four rows where a control's *scope* is wider than its name, plus the two name spaces a connector can
 quietly capture.
 
-- [ ] W22.1 `Chemclaw3` — a standing plan approval authorizes any state-changing tool, not the
-      plan's steps [L]. The largest authorization gap on the queue. ADR; `HumanInTheLoopMiddleware`
-      stays declined for the plan gate itself (`docs/planning/BACKLOG.md`).
-- [ ] W22.2 `Chemclaw3` — the unauthenticated `X-Chemclaw-Actor` header becomes durable attribution.
-- [ ] W22.3 `Chemclaw3` — a connector can claim a `run_<name>` step-template launcher and the
-      registry's docstring says it cannot (measured: **accepted**). Decide which registry owns the
-      name space; either a new `tests/test_layering.py` edge or moving the collision check after both
-      registrations.
-- [ ] W22.4 `Chemclaw3` — `build_langgraph_agent(connectors=...)` accepts a tool that shadows a
-      first-party name.
-- [ ] W22.5 `Chemclaw3` — two producers bind a template step's ambient identity and one suffices;
-      collapsing them moves a security control's proof onto a worker harness. Decide deliberately,
-      not by deletion (`tests/test_template_job_step.py`).
+- [x] W22.1 `Chemclaw3` — a standing plan approval authorizes any state-changing tool, not the
+      plan's steps [L]. **Built**, closed by
+      `D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`: a plan step declares the
+      tools it will call (`agent/plan_scope.ScopedTodoListMiddleware`, a required schema field so
+      an omission is a retryable tool error rather than a fall-through), the decision stamps the
+      union onto `plan_approvals.scope` (migration 095), and the gate reads the **row** rather than
+      the live plan, so a rewrite that widens a step's declaration under an unchanged `content`
+      hash gains nothing. Before/after is `tests/test_plan_scope.py`'s ratchet over the whole of
+      `side_effecting_tools()`. `HumanInTheLoopMiddleware` stays declined for the plan gate itself.
+- [x] W22.2 `Chemclaw3` — the unauthenticated `X-Chemclaw-Actor` header becomes durable attribution.
+      **Row corrected, not closed** — the caller still chooses the string. What was wrong was a
+      docstring: `_recorded_provenance` said the bundle declares `auth: mode: none` so "anything
+      that can open a socket to it can name any chemist it likes", over a manifest declaring
+      `mode: bearer`; driven, `/mcp` answers 401 with no token and 401 with a wrong one. The
+      forgery is a *token-holder's*. The `unverified:` prefix stays on its own argument (a bearer
+      proves core called, never which chemist), and
+      `tests/test_bo_provenance.py::test_the_threat_model_this_module_states_is_the_one_its_manifest_declares`
+      fails whenever docstring and manifest disagree, in either direction.
+- [x] W22.3 `Chemclaw3` — a connector can claim a `run_<name>` step-template launcher.
+      Reproduced **cold** (`make connector-validate`, a fresh pod) and refused only warm, as "an
+      in-process tool" — the wrong operator-facing reason. Closed by
+      `D-2026-09-12-a-tool-list-is-a-name-space-whichever-argument-it-arrives-on` with neither of
+      the two fixes the row named: `_bound_by_this_process` asks
+      `chemclaw_agent.template_tool_names()` over the `connectors -> agent` edge its own import
+      already uses, so no new edge and no change to when a misconfiguration is reported.
+      `chemclaw.templates.registry` owns the name space.
+- [x] W22.4 `Chemclaw3` — `build_langgraph_agent(connectors=...)` accepts a tool that shadows a
+      first-party name. Reproduced: 61 tools bound, the first-party writer gone from
+      `tools_by_name`, **and the name still classified state-changing** — so every gate fires on the
+      first-party identity while the connector's body runs. Refused at the concatenation, same ADR.
+- [x] W22.5 `Chemclaw3` — **row deleted, premise false.** The two producers disagree about `roles`
+      on purpose: the interceptor binds `frozenset()` (a relayed argument is data, `D-2026-08-28`),
+      `_acting_as` binds the real set because `authorize_job_step` is a template step's *first*
+      authorization. Measured, neutering only the role bind leaves the unentitled refusal standing
+      and fails the entitled arm — the collapse would refuse every legitimately entitled template
+      job step. Replaced by the residual row "template step roles cross the durable boundary on an
+      unsigned payload", with its trigger;
+      `D-2026-09-12-two-producers-of-one-identity-are-not-redundant-when-they-disagree`.
 - [ ] W22.6 `Chemclaw3-mcp` — verify bearer-on-`/mcp` against a **running** server for all seven,
       not off the source: a mounted MCP surface bypasses the enclosing app's dependencies. The
       fleet's own `CLAUDE.md` says verify this way and no test does it per-server.

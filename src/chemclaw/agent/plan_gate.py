@@ -93,18 +93,37 @@ def plan_identity(items: Sequence[str]) -> str | None:
     return stable_hash(list(items)) if items else None
 
 
-async def approval_stands(session_id: str, plan_hash: str | None) -> bool:
-    """Whether a live, unspent human approval exists for this plan — the shared lookup.
+async def approved_scope(session_id: str, plan_hash: str | None) -> frozenset[str] | None:
+    """The tools a live, unspent approval for this plan authorizes, or `None` when none stands.
 
     Folds "and it has not already been spent" in, because consumption is recorded on the decision
     itself (`plan_approvals.consumed_at`) rather than in session state. That fold is D-167's last
     fix: the spent-ness of an approval used to live where a pod roll could drop it while the
     approval survived.
+
+    **`None` and an empty set are different answers, and collapsing them would lose the control**
+    (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`). `None` means nobody has
+    approved this plan, or the approval has had its turn. `frozenset()` means somebody approved a
+    plan that declared no state-changing tool — a real and common decision, and one that refuses
+    every gated call while still being an approval. A caller that only needs the first question
+    asks `approval_stands`.
     """
     if plan_hash is None:
-        return False
+        return None
     decision = await plan_approval_store().decision(session_id, plan_hash)
-    return bool(decision and decision[0])
+    if decision is None or not decision.approved:
+        return None
+    return decision.scope
+
+
+async def approval_stands(session_id: str, plan_hash: str | None) -> bool:
+    """Whether a live, unspent human approval exists for this plan — the shared lookup.
+
+    The question `api/runner._pending_plan_approval` asks to decide whether to show the decision
+    card: it is about *whether the chemist has been asked*, not about what any one call may do, so
+    it must not read an approval that authorizes nothing as no approval at all.
+    """
+    return await approved_scope(session_id, plan_hash) is not None
 
 
 def plan_approval_refusal(tool_name: str) -> PlanNotApprovedError:
@@ -112,6 +131,27 @@ def plan_approval_refusal(tool_name: str) -> PlanNotApprovedError:
     return PlanNotApprovedError(
         f"{tool_name} changes stored data or starts work, and the plan it is part of "
         "has not been approved yet; review the plan and approve it, then ask again"
+    )
+
+
+def out_of_scope_refusal(tool_name: str, scope: frozenset[str]) -> PlanNotApprovedError:
+    """The refusal a call outside the approved plan's declared tools earns.
+
+    A *different sentence* from `plan_approval_refusal`, and deliberately so: "nobody has approved
+    this" and "this was approved and does not cover that tool" are different problems with
+    different remedies, and a chemist reading the second while the plan is visibly approved would
+    reasonably conclude the gate was broken. It names what the approval does cover, because the
+    remedy — rewrite the plan so a step declares this tool, and have it approved — is only obvious
+    once the reader can see the declaration they are outside of.
+
+    Same exception class, so the audit outcome, the `plan_gate` refusal reason and the relay to the
+    model are unchanged: the class answers "which gate refused", and the sentence answers "why".
+    """
+    declared = ", ".join(sorted(scope)) or "no tools at all"
+    return PlanNotApprovedError(
+        f"{tool_name} changes stored data or starts work, and the approved plan does not list it: "
+        f"its steps declared {declared}. Rewrite the plan so a step declares {tool_name}, and ask "
+        "for the new plan to be approved."
     )
 
 
@@ -450,10 +490,24 @@ async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> 
     — a launched job is a `job_records` row and a `session_events` push-back — so the list this
     hashes is the plan and only the plan, and there is nothing to filter.
 
+    **An approval authorizes the tools its plan declared, and nothing else**
+    (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`). Until that decision this
+    function asked one question — does an approval stand for this plan — so an approval recorded
+    against a one-line, read-only plan authorized every name in `authz.side_effecting_tools()`.
+    Each step now declares the tools it will call (`agent/plan_scope.py`), the decision stamps the
+    union of those declarations onto the row (`plan_approvals.scope`), and the scope is read back
+    from **there** rather than from the live plan. That direction is the whole of it:
+    `plan_identity`
+    hashes `content` only, so a rewrite that keeps every step's text and widens its declaration
+    hashes to the same approved plan — and gains nothing, because the model's declaration is never
+    what is consulted.
+
     Raises:
-        PlanNotApprovedError: The plan behind this call has no live approval. The body never runs;
-            the audit middleware records the refusal and `surface_authorization_denials` relays
-            the reason to the model.
+        PlanNotApprovedError: The plan behind this call has no live approval, or has one that does
+            not name this tool. The body never runs; the audit middleware records the refusal and
+            `surface_authorization_denials` relays the reason to the model. The two cases carry
+            different sentences (`plan_approval_refusal`, `out_of_scope_refusal`) because they have
+            different remedies.
     """
     name = request.tool_call["name"]
     # The *call* rather than the tool, for the reason `authz.side_effecting_call` gives:
@@ -472,6 +526,9 @@ async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> 
     if rewritten is _UNANSWERABLE:
         raise plan_approval_refusal(name)
     lines = rewritten if rewritten is not None else await _plan_behind(request, session_id)
-    if lines is not None and await approval_stands(session_id, plan_identity(lines)):
-        return await handler(request)
-    raise plan_approval_refusal(name)
+    scope = None if lines is None else await approved_scope(session_id, plan_identity(lines))
+    if scope is None:
+        raise plan_approval_refusal(name)
+    if name not in scope:
+        raise out_of_scope_refusal(name, scope)
+    return await handler(request)

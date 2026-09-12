@@ -77,30 +77,6 @@ topic).
   `tests/test_retention.py::test_no_disposal_entry_offers_actor_erasure_as_what_bounds_a_table` is
   what stops the next rewording leaning on erasure again.
 
-- [ ] **A connector can claim a step-template launcher name, and the registry says it cannot** —
-  [S], found 2026-09-05 reviewing the ambient-name guard. `_bound_by_this_process` refuses a bundle
-  that claims an in-process tool, a scratchpad verb, `write_todos` or `task`. Its docstring adds
-  that `run_<name>` template launchers are "a different name space that a bundle has no business
-  claiming either" — and measured, a bundle declaring `run_bond_strength_survey` is **accepted**:
-
-  ```
-  NOT REFUSED: a connector may claim the template launcher 'run_bond_strength_survey'
-  ```
-
-  The cause is ordering rather than an oversight in the union. `chemclaw_agent
-  ._register_generated_tools` is `[*job_tools(), *template_tools()]`, so `job_tools()` runs the
-  collision check while `registered_tools()` still holds no launcher — measured empty at that
-  moment. The consequence is the one the whole check exists to prevent, one name space out: the
-  bundle's tool wins `tools_by_name` and a chemist asking for a template gets the connector's tool
-  under the launcher's name, with no error.
-  **Not a one-liner, which is why it is a row.** Closing it means either reading
-  `chemclaw.templates.registry` from `connectors/registry` — a new import edge
-  `tests/test_layering.py` would have to be told about, in the direction that module has so far
-  avoided — or moving the collision check to after both registrations, which changes when a
-  misconfiguration is reported. Which registry owns that name space is the decision.
-  The false sentence is corrected in this commit; the gap is not. Anchors:
-  `connectors/registry.py::_bound_by_this_process`, `agent/chemclaw_agent.py::_register_generated_tools`.
-
 - [ ] **The `git` remote is now a destination a deployment must declare, and nothing derives it** —
   [S], what is left of "the egress guard is blind to gRPC and to Temporal" after
   `D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py`. The blindness
@@ -142,50 +118,35 @@ topic).
   `cli/chat.main`, the two connector components are shown unable to reach the gateway, and
   `tests/test_llm_gateway_guard.py` drives the processes. Do not read that as covering this one.
 
-- [ ] **A standing plan approval authorizes any state-changing tool, not the plan's steps** — [L],
-  from the 2026-08 security review (proven live). `plan_gate.enforce_plan_approval` refuses a
-  state-changing call unless an approval exists for the current plan's identity — `plan_identity`,
-  a hash of the todo *contents* — but it never compares the *tool being called* to anything in the
-  plan. So once a human approves a one-line read-only plan ("look up the melting point of aspirin"),
-  every tool in `authz.side_effecting_tools()` executes for the rest of that turn:
-  `record_knowledge_note` (a knowledge-graph write / git push), `synthesize_memory`, every durable
-  calc/BO launch. Combined with the unframed injection surfaces (connector output, `find_past_jobs`
-  `plan_step`, ELN notes) this is the injection amplifier — untrusted text that reaches the model
-  during an approved turn reaches the full write surface while the chemist believes they approved a
-  lookup. The clean fix is **not** a patch: the plan is prose todos with no per-step tool
-  declaration, so binding an approval to "its tools" requires the harness to enumerate the
-  side-effecting tools each step will use (a `write_todos`/prompt schema change), capture that set
-  on the `plan_approvals` row at approval, and refuse a call whose tool is outside it. Scanning the
-  todo prose for tool names was rejected as fragile in both directions (a legitimate plan that does
-  not spell the exact registered name would fail to authorize its own tool, making `plan_only`
-  unusable — the worst outcome the gate's own docstring names). Until the declaration exists, the
-  gate binds plan *content* only. Deliberately left as a feature rather than shipped as a heuristic.
-
 - [ ] **The unauthenticated `X-Chemclaw-Actor` header becomes durable attribution** — [M], and
       **narrower than this row used to claim**. It does not reach `job_records` or the audit trail:
       the durable path takes the actor as an argument sourced from core's validated front-door
-      principal (`ConnectorJobInput.requested_by`, `durable/connector_job.py:160` — the row named a
-      field called `actor`, which does not exist), and never reads the header. The real reach is two
-      columns on the synchronous MCP path — `bo_campaigns.opened_by` and `bo_suggestions.actor`, via
-      `connectors/bo/server/tools.py::_recorded_provenance` (:374). The `unverified:<id>` marking is in place (D-2026-08-13),
-      so what is open is that a caller still chooses the string. A bearer on the row above proves
-      *core called*, not *which chemist*, so full closure needs an actor assertion bound to the call
-      (OBO or a signed memo) — which is the `DEFERRED.md` warehouse row's blocker too.
+      principal (`ConnectorJobInput.requested_by`, `durable/connector_job.py:164` — the row named a
+      field called `actor`, which does not exist, and an anchor that has since drifted four lines),
+      and never reads the header. Re-driven 2026-09-12: a forged `X-Chemclaw-Actor` reaches the tool
+      body verbatim and lands as `unverified:<id>` in exactly two columns on the synchronous MCP
+      path — `bo_campaigns.opened_by` and `bo_suggestions.actor`, via
+      `connectors/bo/server/tools.py::_recorded_provenance` — and in neither `audit_events` (which
+      reads `agent/audit.py::get_current_actor`) nor `job_records` (`require_actor()`).
+      The `unverified:<id>` marking is in place (D-2026-08-13), so what is open is that a caller
+      still chooses the string.
+      **Narrower again 2026-09-12, and one docstring asserted the opposite.**
+      `_recorded_provenance` said this bundle "declares `auth: mode: none`, so the pod does not even
+      authenticate *core*: anything that can open a socket to it can name any chemist it likes" —
+      over a manifest that has declared `mode: bearer` with `token_env: CHEMCLAW_BO_MCP_TOKEN` since
+      `D-2026-08-20-a-networkpolicy-selects-peers-not-paths`. Driven against the real app, `/mcp`
+      answers 401 with no token and 401 with a wrong one. So the forgery is a **token-holder's**.
+      The docstring is corrected and
+      `tests/test_bo_provenance.py::test_the_threat_model_this_module_states_is_the_one_its_manifest_declares`
+      fails whenever the two disagree, in either direction. The prefix stays on its own argument: a
+      bearer proves *core called*, not *which chemist*, so full closure still needs an actor
+      assertion bound to the call (OBO or a signed memo) — which is the `DEFERRED.md` warehouse
+      row's blocker too.
       **Narrowed 2026-08-27** (`D-2026-08-27-a-bound-that-multiplies-…`): the claim no longer
       travels back out as provenance — `CampaignThread` dropped `opened_by`, because a reader of a
       resumed campaign cannot tell a marked actor from a verified one. Both columns keep the value
       for the audit trail, where that question can be answered. What stays open is unchanged: the
       string is still the caller's to choose.
-
-- [ ] **`build_langgraph_agent(connectors=...)` accepts a tool that shadows a first-party name** —
-      [S], the residual `D-2026-09-04-a-name-is-one-capability-across-every-namespace` names and
-      leaves open, and whose `BACKLOG.md` row was never written. `connectors/registry.py`'s
-      `_declared_tool_names` refuses a *manifest* claiming `record_knowledge_note`, and that is
-      the path a deployment takes; the `connectors` keyword is the one that bypasses it, because
-      `agent/langgraph_agent.py`'s `bound = [*(as_structured_tool(fn) for fn in tools),
-      *(connectors or [])]` concatenates the two lists with no name check at all. Closed in
-      practice and open in the type: the check belongs beside that concatenation, over the names
-      the first list already declares.
 
 ## 2 — Answers that are wrong without saying so
 
@@ -1354,29 +1315,40 @@ core-level `trace_and_identity_headers()` that `connectors/identity.py` composes
 which is a small change once the question is answered and a layering exception if it is not.
 Found by the 2026-08-27 logging and monitoring review.
 
-## Two producers bind a template step's ambient identity, and only one of them is needed
+## Template step roles cross the durable boundary on an unsigned payload
 
-`durable/interceptor.py` binds the actor, the roles, the session and the correlation id around
-*every* activity on every worker, reading them one level into a nested `identity` field — which is
-exactly the shape `durable/template_activities.py`'s `ToolStepInput`, `AgentStepInput` and
-`JobStepInput` use. Measured against those real models, `activity_context` returns the same four
-values `template_activities._acting_as:161` binds, over a scope that strictly contains the
-bracket's. So on a worker the bracket is redundant in full.
+`durable/template_activities.py::_acting_as` binds `StepIdentity.roles` — the requester's real role
+set, lifted out of a workflow argument. Every other reader of that payload binds
+`frozenset()` on purpose (`durable/interceptor.py::activity_context`, `D-2026-08-28`): a relayed
+argument is data, not a verified claim, so a role taken from it is a role anyone who can enqueue an
+activity could forge.
 
-It is still there, and deleting it is not a tidy-up: with the bracket neutered, four tests fail, and
-two of them — `test_an_expensive_job_step_is_refused_for_an_unentitled_requester` and
-`test_an_entitled_requester_passes_the_same_gate` in `tests/test_template_job_step.py` — are the
-proof that a template step cannot run a tool its requester could not run. They invoke
-`authorize_job_step` directly, where no interceptor runs, so collapsing the two producers means
-moving a security control's proof onto a worker harness. That is the whole of the work and the whole
-of the risk; decide it deliberately rather than by deletion. The two cannot drift while both stand,
-because both read `StepIdentity`'s own fields.
+The template path is the exception and the exception is argued, not an oversight.
+`authorize_job_step` is the **first** authorization a template step gets — a step launched by
+another step has no front-door pre-check behind it — so binding empty there would refuse every
+entitled template job rather than fail closed on a forgery. Measured: neutering only the role bind
+leaves `test_an_expensive_job_step_is_refused_for_an_unentitled_requester` still refusing and fails
+`test_an_entitled_requester_passes_the_same_gate` outright.
 
-The same question does **not** apply to `connectors/calc/activities.py::_acting_for`: the
-interceptor skips plain string arguments by design, so it binds nothing there and that bracket is
-the only producer on the calc job path.
+**What it rests on today is broker write access being restricted** — Temporal mTLS, enforced under
+`entra_required` — which is a deployment property rather than a check this code makes. Closing it
+properly means a **signed payload**: a Temporal codec (or payload converter) that signs
+`StepIdentity` on the way out and verifies on the way in, after which `_acting_as` binds a verified
+claim and the exception disappears. That is a new piece of work with its own release story (a codec
+is cluster-wide and both sides must be deployed before either relies on it), not an edit.
 
-Found resolving the merge of #256's branch with #258.
+**Trigger.** A deployment that runs `TemplateWorkflow` on a broker whose write access is not
+restricted to this system's own workers — a shared cluster without mTLS, or a namespace other
+teams can enqueue into.
+
+Anchors: `durable/template_activities.py::_acting_as` (the bind and its eleven-line comment),
+`durable/interceptor.py::activity_context` (the fail-closed reader beside it),
+`tests/test_template_job_step.py` (the pair that fails in opposite directions).
+
+Replaces "two producers bind a template step's ambient identity, and only one of them is needed",
+whose title was its premise: the two producers disagree about `roles`, on purpose, and collapsing
+them would refuse entitled work rather than weaken a refusal
+(`D-2026-09-12-two-producers-of-one-identity-are-not-redundant-when-they-disagree`).
 
 ## `propose_report` proposes nothing, and its name is a registered activity name
 

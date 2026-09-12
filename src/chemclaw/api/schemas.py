@@ -243,11 +243,19 @@ class PendingAnswerIn(BaseModel):
 
 
 class PlanStatusOut(BaseModel):
-    """The plan a session is currently proposing, its hash, and who (if anyone) approved it."""
+    """The plan a session is currently proposing, its hash, and who (if anyone) approved it.
+
+    `scope` is what approving it would authorize: every tool the plan's steps declare
+    (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`). It belongs in the same
+    payload as the steps because the gate enforces it — a state-changing tool no step declared is
+    refused even under a live approval — so a surface that showed the steps alone would be asking
+    a person to approve a thing it had not shown them.
+    """
 
     session_id: str
     plan_hash: str
     plan: list[str]
+    scope: list[str] = []
     mode: str
     approved: bool
     decided_by: str | None = None
@@ -273,6 +281,10 @@ class PendingPlan(BaseModel):
     updated_at: datetime
     plan_hash: str
     plan: list[str]
+    # What approving this plan would authorize — see `PlanStatusOut.scope`. The inbox carries it
+    # for the same reason the card does: it is the half of the plan a person is deciding about
+    # that the steps do not say.
+    scope: list[str] = []
 
 
 class PendingPlansOut(BaseModel):

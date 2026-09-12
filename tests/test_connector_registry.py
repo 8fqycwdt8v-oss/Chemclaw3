@@ -21,6 +21,7 @@ from chemclaw.agent.chemclaw_agent import (
     harness_tool_names,
     skill_tool_names,
     subagent_tool_names,
+    template_tool_names,
 )
 from chemclaw.connectors.manifest import HttpEndpoint, StdioEndpoint
 from chemclaw.connectors.registry import (
@@ -412,10 +413,17 @@ def test_a_connector_cannot_claim_an_ambient_tool_name(
 # contract makes about header spellings: it is what an operator reads in the refusal, so a test
 # that imported it would agree with a typo. Two of the three appeared nowhere but their own
 # definition before this.
+#
+# **The fourth was accepted outright and is the reason this table is not three.** A bundle
+# declaring `run_bond_strength_survey` passed on every path that loads manifests cold —
+# `make connector-validate`, a fresh pod — because the launchers are registered *after* the
+# collision check runs, and it was refused only in a warm process, where it came back as "an
+# in-process tool": the wrong name space, and so the wrong remedy for whoever read it.
 _AMBIENT_NAME_SPACES = (
     (skill_tool_names, "a scratchpad file verb"),
     (harness_tool_names, "a plan-harness tool"),
     (subagent_tool_names, "the subagent spawner"),
+    (template_tool_names, "a step-template launcher"),
 )
 
 

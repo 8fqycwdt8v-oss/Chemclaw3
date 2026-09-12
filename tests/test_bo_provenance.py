@@ -9,10 +9,15 @@ them with equal confidence from unequal evidence:
   the validated front-door principal (`connectors/bo/workflows.py`, `connectors/bo/activities.py`).
   Nothing attacker-writable is between that value and an authenticated login.
 - The **synchronous** MCP tool reads `X-Chemclaw-Actor` off the serving HTTP request. That header
-  is unauthenticated by design (`connectors/caller.py`), and this bundle's manifest declares
-  `auth: mode: none`, so the pod authenticates nobody at all — anything that can open a socket to
-  it could name any chemist it liked, and the row it produced was byte-indistinguishable from the
-  durable path's.
+  is unauthenticated by design (`connectors/caller.py`), so the caller chooses the name, and the
+  row it produced was byte-indistinguishable from the durable path's.
+
+This paragraph used to add that the manifest declares `auth: mode: none`, "so the pod
+authenticates nobody at all — anything that can open a socket to it could name any chemist it
+liked". That stopped being true when the bundle gained a bearer, and the sentence outlived it in
+two places. `test_the_threat_model_this_module_states_is_the_one_its_manifest_declares` is what
+fails the next time the two disagree — in *either* direction, so a manifest that loses its
+credential fails it too.
 
 So these tests pin the asymmetry rather than a string: the synchronous path marks the name it could
 not verify, the durable path does not, and an absent caller is recorded as absent rather than as an
@@ -195,4 +200,39 @@ def test_the_durable_path_records_its_validated_actor_unmarked(
     assert (campaign.opened_by, suggestion.actor) == ("alice@example.com", "alice@example.com")
     assert not suggestion.actor.startswith("unverified:"), (
         "the memo-derived actor crossed no attacker-writable surface and must not be marked"
+    )
+
+
+def test_the_threat_model_this_module_states_is_the_one_its_manifest_declares() -> None:
+    """The marker's docstring describes who can forge the header; the manifest decides.
+
+    `_recorded_provenance`'s docstring is where a reader learns what the `unverified:` prefix is
+    defending against, and for a while it said the pod "does not even authenticate *core*: anything
+    that can open a socket to it can name any chemist it likes" — over a manifest that had declared
+    `mode: bearer` since `D-2026-08-20-a-networkpolicy-selects-peers-not-paths`. Driven against the
+    real app, `/mcp` answers 401 with no token and 401 with a wrong one, so the paragraph overstated
+    the exposure by the width of a credential.
+
+    Asserted in both directions rather than as "the phrase is absent", because the failure that
+    matters is *disagreement*: a bundle that loses its bearer and keeps a docstring saying it has
+    one is the same defect with the signs swapped, and it is the direction that understates the
+    exposure.
+
+    It does not assert the marking itself stays — that is the tests above. The prefix survives the
+    narrowing on its own argument: a bearer proves *core called*, never *which chemist*, so the
+    header is still an unverifiable claim.
+    """
+    from chemclaw.connectors.bo.server.tools import _recorded_provenance
+    from chemclaw.connectors.manifest import BearerAuth, HttpEndpoint
+    from chemclaw.connectors.registry import discovered
+
+    _path, manifest = discovered()["bo"]
+    assert isinstance(manifest.endpoint, HttpEndpoint)
+    authenticated = isinstance(manifest.endpoint.auth, BearerAuth)
+    doc = _recorded_provenance.__doc__ or ""
+    claims_open = "does not even authenticate" in doc
+    assert claims_open != authenticated, (
+        "connectors/bo/server/tools.py::_recorded_provenance describes a pod that authenticates "
+        f"{'nobody' if claims_open else 'its caller'} while connectors/bo/connector.yaml declares "
+        f"auth {manifest.endpoint.auth!r}"
     )

@@ -283,16 +283,19 @@ def _acting_as(identity: StepIdentity) -> Iterator[None]:
     be three chances to forget a reset, which leaks one run's identity into whatever the worker
     picks up next.
 
-    **This is no longer the only thing that binds them, and saying so is the point.**
-    `durable/interceptor.py` wraps *every* activity on every worker and reads the same three ids
-    off the same `identity` field — measured against the real `ToolStepInput`, `AgentStepInput` and
-    `JobStepInput`, it binds exactly what this bracket binds, over a scope that strictly contains
-    it. So on a worker this is redundant, and it cannot drift, because both read
-    `StepIdentity`'s own fields rather than restating them. What it still covers is an activity
-    invoked *directly* — which is how the two authorization tests over `authorize_job_step` prove
-    that a step cannot run a tool its requester could not run. Collapsing the two into one producer
-    means moving those tests onto a worker harness, and that is a decision with a security control
-    in its blast radius rather than a tidy-up (`docs/planning/BACKLOG.md`).
+    **This is no longer the only thing that binds them, and the difference between the two is not
+    the scope — it is the roles**
+    (`D-2026-09-12-two-producers-of-one-identity-are-not-redundant-when-they-disagree`).
+    `durable/interceptor.py` wraps *every* activity on every worker and reads the same `identity`
+    field, over a scope that strictly contains this bracket's. Three of the four values agree.
+    `roles` does not: the interceptor binds `frozenset()` **deliberately**, because a relayed
+    workflow argument is data rather than a verified claim (security review, `D-2026-08-28`), and
+    this bracket binds the real set for the reason the comment below gives. So the two are not two
+    producers of one value and collapsing them is not a tidy-up — measured, neutering only the role
+    bind leaves `test_an_expensive_job_step_is_refused_for_an_unentitled_requester` **still
+    refusing** and fails `test_an_entitled_requester_passes_the_same_gate` outright, i.e. it would
+    refuse every legitimately entitled template job step. This paragraph said "it binds exactly
+    what this bracket binds" for as long as that was false.
     """
     # The template path DOES bind `identity.roles`, unlike the interceptor and the report retriever
     # which bind empty (security review: roles do not cross the durable boundary from an unsigned

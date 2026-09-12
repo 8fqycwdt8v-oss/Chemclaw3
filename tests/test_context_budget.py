@@ -841,13 +841,37 @@ def test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable() -> No
     is held between switch intervals — so what it buys is the loop being *scheduled* during the
     work, which `api/runner.py` measured at 3.1x for the graph build. Anything at or near 1.0 is
     the block this test exists to keep out.
+
+    **The control is run rather than assumed, and that is a correction.** This assertion used to
+    divide a *nominal* constant — `turns * len(tools) * per_tool`, the work if every conversion ran
+    end to end — and compare the worst gap against a third of it. But the twelve bursts overlap, so
+    that denominator is a duration the burst never takes: measured over ten runs here, the real wall
+    was 54–166 ms against a nominal 384 ms, and `worst` tracked `wall` to within a few ms *every
+    time*. So what the old form actually measured was how much the twelve busy-waits happened to
+    overlap — thread-pool scheduling luck against core count and machine load — and it failed about
+    one run in five, on CI at 129 ms against a 128 ms line, a 0.8% miss.
+
+    The docstring above already named the right basis and never ran it. It does now: the same burst
+    goes through the **synchronous** `wrap_model_call`, which does the identical work on the loop,
+    and the async path must leave the loop schedulable by a clear factor against *that* measurement.
+    Both numbers then come from this process, this core count and this load, so the comparison is
+    immune to all three.
     """
     _SCHEMA_TOKENS.clear()
     converted: list[str] = []
     per_tool = 0.004
-    tools = [_NamedTool(f"tool_{i}") for i in range(8)]
     turns = 12
-    work = turns * len(tools) * per_tool
+    # **Distinct tools per turn, so the memo cannot confound the comparison.** With twelve turns
+    # sharing eight tools, how many conversions actually run depends on how the turns interleave:
+    # started together they all miss, run serially the first warms `_SCHEMA_TOKENS` for the rest.
+    # That made two earlier drafts of this test wrong in opposite directions — a control that did
+    # 8 conversions against the burst's 96 and read as faster than the thing it bounds, and then a
+    # version that passed with the offload deleted, because the mutated path serialised and went
+    # warm while the control stayed cold. Giving every turn its own tool names makes both arms do
+    # the same 96 conversions whatever the scheduling, which is the only way the ratio means
+    # anything.
+    tools_per_turn = [[_NamedTool(f"turn{n}_tool{i}") for i in range(8)] for n in range(turns)]
+    work = turns * len(tools_per_turn[0]) * per_tool
 
     async def handler(_request: Any) -> str:
         return "done"
@@ -860,19 +884,30 @@ def test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable() -> No
             gaps.append(now - last)
             last = now
 
-    async def burst() -> tuple[float, float]:
+    async def burst(*, on_loop: bool) -> tuple[float, float]:
+        """The same twelve measurements, offloaded or on the loop, under the same heartbeat."""
         gaps: list[float] = []
         stop = asyncio.Event()
         beat = asyncio.create_task(heartbeat(stop, gaps))
         await asyncio.sleep(0.05)
         gaps.clear()
         started = time.perf_counter()
-        await asyncio.gather(
-            *(
-                MeasureRequestPrefix().awrap_model_call(_tool_request(tools), handler)
-                for _ in range(turns)
+        if on_loop:
+            # The control: `wrap_model_call` is the synchronous path and does the conversions
+            # inline, so the loop is held for the whole of it. Driven in a task so the heartbeat
+            # is a genuine co-runner rather than something the gather happens to interleave.
+            def sync_handler(_request: Any) -> str:
+                return "done"
+
+            for turn_tools in tools_per_turn:
+                MeasureRequestPrefix().wrap_model_call(_tool_request(turn_tools), sync_handler)
+        else:
+            await asyncio.gather(
+                *(
+                    MeasureRequestPrefix().awrap_model_call(_tool_request(turn_tools), handler)
+                    for turn_tools in tools_per_turn
+                )
             )
-        )
         wall = time.perf_counter() - started
         stop.set()
         await beat
@@ -883,11 +918,27 @@ def test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable() -> No
             "langchain_core.utils.function_calling.convert_to_openai_tool",
             _costly_conversion(per_tool, converted),
         )
-        worst, wall = asyncio.run(burst())
+        worst, wall = asyncio.run(burst(on_loop=False))
+        _SCHEMA_TOKENS.clear()
+        on_loop_worst, on_loop_wall = asyncio.run(burst(on_loop=True))
 
     assert converted, "nothing was measured, so this run says nothing about the loop"
-    assert worst < work / 3, (
-        f"one uninterrupted {worst * 1000:.0f} ms gap on the event loop against {work * 1000:.0f} "
-        f"ms of prefix measurement (wall {wall * 1000:.0f} ms): the sweep is running on the loop "
-        "that serves every other turn's stream and both kubelet probes"
+    assert on_loop_worst > work / 3, (
+        f"the on-loop control only blocked the loop for {on_loop_worst * 1000:.0f} ms against "
+        f"{work * 1000:.0f} ms of nominal work, so it is not holding the loop and cannot serve as "
+        "the basis this assertion divides by — the control has stopped being a control"
+    )
+    # **1.3x, and the figure is measured rather than chosen.** The old form divided a nominal
+    # constant by 3 and passed only because the shared-tool memo let the burst do a fraction of the
+    # work. With every turn cold the offload's real benefit on this workload is 1.64x-2.48x over
+    # eight runs (on-loop control 390-392 ms, stable to three digits; async worst gap 158-239 ms) —
+    # not the 3.1x `api/runner.py` measures for the graph build, which is a different workload. The
+    # defect this exists for reads as ~1.0x, so 1.3 sits clear of both: below the slowest honest
+    # run and well above the block. Widen it only against a fresh measurement.
+    assert worst < on_loop_worst / 1.3, (
+        f"one uninterrupted {worst * 1000:.0f} ms gap on the event loop "
+        f"(wall {wall * 1000:.0f} ms) "
+        f"against {on_loop_worst * 1000:.0f} ms when the same measurement runs on the loop "
+        f"(wall {on_loop_wall * 1000:.0f} ms): the sweep is running on the loop that serves every "
+        "other turn's stream and both kubelet probes"
     )

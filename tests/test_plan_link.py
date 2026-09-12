@@ -289,10 +289,13 @@ def test_the_link_is_bound_inside_a_real_compiled_graph() -> None:
         seen.append(get_current_plan_link())
         return "recorded"
 
+    # `tools` is required by the plan tool's schema (`agent/plan_scope.py`), so a `write_todos`
+    # call omitting it never reaches state at all — the model gets a validation error instead.
+    # The link itself reads only `content` and `status`.
     plan = [
-        {"content": "gather the evidence", "status": "completed"},
-        {"content": "run the conformer search", "status": "in_progress"},
-        {"content": "propose a note", "status": "pending"},
+        {"content": "gather the evidence", "status": "completed", "tools": []},
+        {"content": "run the conformer search", "status": "in_progress", "tools": []},
+        {"content": "propose a note", "status": "pending", "tools": ["record_knowledge_note"]},
     ]
     register_tool(plan_link_probe)
     try:

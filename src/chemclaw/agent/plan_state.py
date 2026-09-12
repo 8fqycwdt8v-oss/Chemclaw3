@@ -65,6 +65,34 @@ async def session_todos(session_id: str, *, saver: Any | None = None) -> list[st
         The todo `content` strings in order; `[]` for a readable session proposing nothing; `None`
         when the plan could not be read at all.
     """
+    todos = await session_plan(session_id, saver=saver)
+    if todos is None:
+        return None
+    return [str(todo["content"]) for todo in todos]
+
+
+async def session_plan(session_id: str, *, saver: Any | None = None) -> list[dict[str, Any]] | None:
+    """The session's plan steps whole, or `None` when the plan is unreadable.
+
+    The same read `session_todos` answers from, one field wider — and it is the wider one that is
+    the primitive, because the narrow one loses what an approval has to record. A step declares the
+    tools it will call (`agent/plan_scope.py`), the decision stamps that declaration onto
+    `plan_approvals.scope`, and a route that could only see `content` would be recording an
+    approval for a plan it had not fully read
+    (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`).
+
+    Steps with no readable `content` are dropped here rather than at each caller, so the hash, the
+    scope and the display are all taken over the same list — a plan identity that included a step
+    the scope did not would be two readings of one plan.
+
+    Args:
+        session_id: The session, which is the checkpointer's `thread_id`.
+        saver: The checkpointer to read; `None` resolves the configured one.
+
+    Returns:
+        The plan's steps in order; `[]` for a readable session proposing nothing; `None` when the
+        plan could not be read at all.
+    """
     checkpoint = await _latest_checkpoint(session_id, saver)
     if checkpoint is None:
         return None
@@ -77,7 +105,7 @@ async def session_todos(session_id: str, *, saver: Any | None = None) -> list[st
         )
         return None
     todos = values.get("todos") or []
-    return [str(todo["content"]) for todo in todos if isinstance(todo, dict) and "content" in todo]
+    return [todo for todo in todos if isinstance(todo, dict) and "content" in todo]
 
 
 async def _latest_checkpoint(session_id: str, saver: Any | None) -> dict[str, Any] | None:
