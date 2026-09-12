@@ -145,13 +145,27 @@ topic).
 - [ ] **The unauthenticated `X-Chemclaw-Actor` header becomes durable attribution** — [M], and
       **narrower than this row used to claim**. It does not reach `job_records` or the audit trail:
       the durable path takes the actor as an argument sourced from core's validated front-door
-      principal (`ConnectorJobInput.requested_by`, `durable/connector_job.py:160` — the row named a
-      field called `actor`, which does not exist), and never reads the header. The real reach is two
-      columns on the synchronous MCP path — `bo_campaigns.opened_by` and `bo_suggestions.actor`, via
-      `connectors/bo/server/tools.py::_recorded_provenance` (:374). The `unverified:<id>` marking is in place (D-2026-08-13),
-      so what is open is that a caller still chooses the string. A bearer on the row above proves
-      *core called*, not *which chemist*, so full closure needs an actor assertion bound to the call
-      (OBO or a signed memo) — which is the `DEFERRED.md` warehouse row's blocker too.
+      principal (`ConnectorJobInput.requested_by`, `durable/connector_job.py:164` — the row named a
+      field called `actor`, which does not exist, and an anchor that has since drifted four lines),
+      and never reads the header. Re-driven 2026-09-12: a forged `X-Chemclaw-Actor` reaches the tool
+      body verbatim and lands as `unverified:<id>` in exactly two columns on the synchronous MCP
+      path — `bo_campaigns.opened_by` and `bo_suggestions.actor`, via
+      `connectors/bo/server/tools.py::_recorded_provenance` — and in neither `audit_events` (which
+      reads `agent/audit.py::get_current_actor`) nor `job_records` (`require_actor()`).
+      The `unverified:<id>` marking is in place (D-2026-08-13), so what is open is that a caller
+      still chooses the string.
+      **Narrower again 2026-09-12, and one docstring asserted the opposite.**
+      `_recorded_provenance` said this bundle "declares `auth: mode: none`, so the pod does not even
+      authenticate *core*: anything that can open a socket to it can name any chemist it likes" —
+      over a manifest that has declared `mode: bearer` with `token_env: CHEMCLAW_BO_MCP_TOKEN` since
+      `D-2026-08-20-a-networkpolicy-selects-peers-not-paths`. Driven against the real app, `/mcp`
+      answers 401 with no token and 401 with a wrong one. So the forgery is a **token-holder's**.
+      The docstring is corrected and
+      `tests/test_bo_provenance.py::test_the_threat_model_this_module_states_is_the_one_its_manifest_declares`
+      fails whenever the two disagree, in either direction. The prefix stays on its own argument: a
+      bearer proves *core called*, not *which chemist*, so full closure still needs an actor
+      assertion bound to the call (OBO or a signed memo) — which is the `DEFERRED.md` warehouse
+      row's blocker too.
       **Narrowed 2026-08-27** (`D-2026-08-27-a-bound-that-multiplies-…`): the claim no longer
       travels back out as provenance — `CampaignThread` dropped `opened_by`, because a reader of a
       resumed campaign cannot tell a marked actor from a verified one. Both columns keep the value
