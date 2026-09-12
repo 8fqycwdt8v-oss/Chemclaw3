@@ -326,6 +326,39 @@ rows: a per-call bound with nothing bounding N of them.
 **Acceptance** — a driven saturation probe per ceiling: N+1 concurrent sessions/calls refused
 promptly (not queued), the refusal counted, and the pod's RSS bounded across the probe.
 
+### W23 review (Chemclaw3 half: W23.4–W23.8)
+
+Five items, five decisions, four ADRs. **Four of the five plan rows were wrong about their own
+subject, in the same direction each time — they described the resource that was easy to see rather
+than the one that was actually unbounded.**
+
+- **W23.7** said "a timed-out parse still runs to completion on the worker thread", which reads as a
+  CPU leak. The pod *was* bounded. What was unbounded was the pod's *lifetime*: a slot is released
+  by its thread's completion, so a parse that never returns holds it for ever. Driven,
+  `in_flight` stayed at 2 five seconds after both callers were freed and every later upload was
+  shed. The fix is a killable child process, and the reason it is affordable is measured rather
+  than assumed: 10 ms warm against 0.97 s for a fresh interpreter.
+- **W23.8** said "four sequential activities under a ceiling that funds one". Six, and it funds two.
+  And the obvious remedy (`continue_as_new` per round) does not work, because the ceiling is an
+  *execution* timeout. The one that does — sharing the remaining budget between the dispatches
+  still to come — was itself chosen against a measurement: bounding each dispatch by the *whole*
+  remainder also fits the ceiling and funds only three of the six.
+- **W23.4** named "a looping `remember`" as the runaway; a turn is already capped at ~200 writes.
+  The runaway is accumulation across turns.
+- **W23.5** grouped six tables as one finding; they are five decisions, and two of the "obviously
+  fine" ones were not what they looked like — the fingerprint tables are bounded by the corpus
+  *times every definition ever written*, and `user_preferences` was the second agent-writable table
+  with no bound at all.
+- **W23.6** was right about the channel and wrong about the size of the prize. Bounding what
+  crosses into the caller's state is 8.8% of what a 2 MB helper write costs the checkpoint tables;
+  the other 91% is the helper's own subgraph, which this seam cannot reach. That is now a
+  `BACKLOG.md` row carrying the measurement rather than a gap the ADR implies is closed.
+
+Two findings came out of *driving* a fix rather than out of the plan: `netguard._host_of` refused
+`AF_UNIX` while its own docstring said it exempted local IPC (and the C half of the same control had
+it right all along), and a 2 MB payload of `"x"` measures TOAST compression rather than storage —
+the first checkpoint measurement here said 552 kB and was evidence about nothing.
+
 ## W24 — The durable layer: races, lock order, loop teardown
 
 Defects that only appear under concurrency, on the layer a production deployment runs continuously.
