@@ -22,6 +22,7 @@ local IPC. Nothing asserted it in either direction, and the C half of the same c
 import asyncio
 import socket
 import time
+from multiprocessing.connection import Connection
 from pathlib import Path
 
 import pytest
@@ -36,7 +37,11 @@ from chemclaw.core import netguard
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from chemclaw.ingest.documents import isolate
-from chemclaw.ingest.documents.isolate import ParseWorkerLost, parse_document_isolated
+from chemclaw.ingest.documents.isolate import (
+    ParseWorkerLost,
+    parse_context,
+    parse_document_isolated,
+)
 from chemclaw.ingest.documents.parse import ScannedDocumentError
 from tests.test_document_formats import _blank_pdf_bytes  # type: ignore[attr-defined]
 
@@ -44,6 +49,65 @@ from tests.test_document_formats import _blank_pdf_bytes  # type: ignore[attr-de
 # and small enough that building it costs nothing. Measured on this tree: 6 MB parses in 0.694 s,
 # so 20 MB is ~2.3 s against a 0.2 s deadline — a factor of ten, not a race.
 _SLOW_CSV = b"aaaa,bbbb,cccc,dddd\n" * 1_000_000
+
+
+def _egress_posture(connection: "Connection[object]", *_ignored: object) -> None:
+    """Child entry point: report what the egress guard does to a non-loopback connect.
+
+    Module level because `forkserver` pickles a target by reference, which is the same constraint
+    `isolate._parse_into` is written under — and it is why this probe lives in the test module
+    rather than in a script.
+
+    Args:
+        connection: The write end of the pipe the parent reads.
+    """
+    import socket
+
+    from chemclaw.core import netguard
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(1.0)
+            probe.connect(("198.51.100.1", 80))  # TEST-NET-2, routed nowhere
+        connection.send(("reached", netguard._armed))
+    except netguard.EgressForbidden:
+        connection.send(("refused", netguard._armed))
+    except OSError as exc:
+        connection.send((f"other:{type(exc).__name__}", netguard._armed))
+    finally:
+        connection.close()
+
+
+def test_a_parse_child_is_still_inside_the_no_egress_posture() -> None:
+    """A parse now runs in a process this repository did not previously have, so say what it may do.
+
+    The whole deployment posture is that nothing dials out. Moving untrusted bytes into a *new*
+    process is exactly the move that could carry them outside a guard armed in the parent, and
+    "the child inherits it" is an assumption rather than an observation — `forkserver` starts its
+    server by fork **and exec**, so the child's guard is whatever that fresh interpreter armed, not
+    a copy of the parent's memory.
+
+    It is armed, and the mechanism is worth naming because it is not obvious: `_PRELOAD` imports
+    `chemclaw.ingest.documents.parse`, which imports `chemclaw.core.config`, whose module body ends
+    in `arm_egress_guard(settings)`. So the guard is armed in the forkserver before it forks
+    anything, and every parse child inherits an armed one.
+    """
+    context = parse_context()
+    reader, writer = context.Pipe(duplex=False)
+    child = context.Process(target=_egress_posture, args=(writer,))
+    child.start()
+    writer.close()
+    try:
+        outcome, armed = reader.recv()
+    finally:
+        reader.close()
+        child.join()
+
+    assert armed is True, "the egress guard is not armed inside a parse child"
+    assert outcome == "refused", (
+        f"a parse child's outbound connect was {outcome!r} rather than refused by the egress "
+        "guard, so untrusted bytes are parsed in a process outside the no-egress posture"
+    )
 
 
 def _warm_the_forkserver() -> None:

@@ -33,6 +33,16 @@ server by fork **and exec** (`multiprocessing.util.spawnv_passfds`), so the serv
 single-threaded interpreter, and every parse is then forked from *it* rather than from the front
 door. The preload list is what makes those forks cost 10 ms instead of 970.
 
+**A parse child is still inside the no-egress posture, and that is observed rather than inherited.**
+Moving untrusted bytes into a process this deployment did not previously have is exactly the move
+that could carry them outside a guard armed in the parent — and `forkserver` starts its server by
+fork *and exec*, so the child's guard is whatever that fresh interpreter armed, not a copy of the
+parent's memory. It is armed, by a chain worth naming because it is not obvious: `_PRELOAD` imports
+`parse`, which imports `chemclaw.core.config`, whose module body ends in
+`arm_egress_guard(settings)`. So the guard is armed in the forkserver before it forks anything.
+`tests/test_parse_isolation.py::test_a_parse_child_is_still_inside_the_no_egress_posture` drives a
+non-loopback connect from inside a child and reads both the refusal and `netguard._armed` back.
+
 **What a child reads from `Settings` is the forkserver's, not the caller's.** The server is exec'd
 once with the process's environment and imports `parse` at that moment, so a child's
 `document_max_expanded_bytes` is whatever the environment said when the first upload arrived. That

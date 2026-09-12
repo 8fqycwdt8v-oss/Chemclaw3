@@ -105,6 +105,16 @@ narrows the guard and loses nothing: a path under `/tmp` leaves the host by no r
 is about, so refusing it protected nothing and broke local process IPC. Both spellings of an
 internet host — `str` and `bytes` inside the tuple — are still read.
 
+## The child is still inside the no-egress posture
+
+Moving untrusted bytes into a new process is the move that could carry them outside a guard armed in
+the parent, so it is observed rather than assumed. Driven from inside a parse child: a connect to
+`198.51.100.1:80` is refused with `EgressForbidden` and `netguard._armed` reads True. The chain is
+`_PRELOAD` → `chemclaw.ingest.documents.parse` → `chemclaw.core.config`, whose module body ends in
+`arm_egress_guard(settings)`, so the guard is armed in the forkserver before it forks anything.
+Mutated by allowlisting that address (`CHEMCLAW_EGRESS_ALLOW=198.51.100.1`), the probe reports
+`reached` and the test fails.
+
 ## Consequences
 
 - Every upload costs one forked child: ~10 ms warm, ~0.9 s on the first upload a process serves.
@@ -133,3 +143,4 @@ internet host — `str` and `bytes` inside the tuple — are still read.
 - `tests/test_parse_isolation.py::test_a_parse_past_its_deadline_is_killed_and_counted`
 - `tests/test_parse_isolation.py::test_local_ipc_is_not_refused_as_egress` — both the address reader
   and a real `AF_UNIX` connect through the armed guard.
+- `tests/test_parse_isolation.py::test_a_parse_child_is_still_inside_the_no_egress_posture`
