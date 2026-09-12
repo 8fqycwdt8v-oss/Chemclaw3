@@ -18,6 +18,40 @@ set -euo pipefail
 export LANGSMITH_TRACING="${LANGSMITH_TRACING:-false}"
 export LANGCHAIN_TRACING_V2="${LANGCHAIN_TRACING_V2:-false}"
 
+# Arm the compiled half of the egress guard, for every component below.
+#
+# `netguard.py` patches `socket.socket` and the `socket` module's resolvers at
+# `chemclaw.core.config` import, which covers the whole pure-Python surface and nothing else:
+# measured, a `grpc.insecure_channel`, the OTLP gRPC span exporter and `temporalio.Client.connect`
+# each reached an off-allowlist listener with its refusal counter flat, because all three open
+# sockets below the interpreter. `src/chemclaw/core/netguard_preload.c` interposes libc's `connect`,
+# `getaddrinfo`, `sendto` and `sendmsg` and refuses them there; see
+# `D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py`.
+#
+# **It has to be here and cannot be in Python.** `LD_PRELOAD` is read by the dynamic loader before
+# the interpreter exists, so nothing a process imports can arm it for itself. One interpreter start
+# at container boot is what the layer costs.
+#
+# **And here rather than in the Helm chart, which is the shape this repository has twice recorded as
+# a mistake** (the Helm-only LangSmith pin; the Helm-only LLM provider). In the image, every
+# component gets it — including a plain `docker run` — and the chart cannot hold a value that
+# silently disagrees. It also keeps the knowledge-sync containers out of it on purpose: they set
+# their own `command` and so never pass through here, and what they dial is `git`'s remote, which is
+# not on the settings object the allowlist is derived from.
+#
+# `chemclaw.cli.egress_preload` prints `enabled|disabled` and the allowlist
+# `netguard.derive_allowed` returns — the *same* derivation the in-process guard arms with, so there
+# is one list rather than a second one written in shell. Under `set -e` a failure here stops the
+# container rather than starting it unguarded, which is the direction that matters: a pod missing the
+# library or the variable runs with the compiled path open.
+chemclaw_egress_posture="$(python -m chemclaw.cli.egress_preload)"
+if [ "${chemclaw_egress_posture%% *}" = "enabled" ]; then
+  export CHEMCLAW_NETGUARD_PRELOAD_ALLOW="${chemclaw_egress_posture#* }"
+  # Prepended rather than assigned, so an operator's own preload (a profiler, a memory checker) is
+  # not silently dropped by the security layer.
+  export LD_PRELOAD="/app/lib/libchemclaw_netguard.so${LD_PRELOAD:+:${LD_PRELOAD}}"
+fi
+
 component="${CHEMCLAW_COMPONENT:-service}"
 
 case "${component}" in

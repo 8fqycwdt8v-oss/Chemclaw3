@@ -1059,6 +1059,30 @@ _MAX_SERIES_PER_COUNTER = 128
 _GAUGES: dict[str, str] = {
     "chemclaw_turns_in_flight": "Turns currently streaming.",
     "chemclaw_egress_guard_armed": "1 when the in-process egress guard is installed, else 0.",
+    # **The compiled layer has its own arming state, and folding it into the gauge above would
+    # rebuild the blindness that licensed it.** `chemclaw_egress_guard_armed` says the *Python*
+    # guard is patched in; measured, it read 1 while a `grpc.insecure_channel`, the OTLP gRPC span
+    # exporter and `temporalio.Client.connect` each reached an off-allowlist listener, because all
+    # three open sockets below the interpreter. `netguard_preload.c` is the `LD_PRELOAD`
+    # interposition that refuses them, and whether it is loaded is a different question from
+    # whether `netguard.arm` ran — so it is a different series. 1 is measured from the dynamic
+    # linker, never from `LD_PRELOAD`: a preload naming a path that does not exist is ignored in
+    # silence, which is precisely where a gauge lies.
+    "chemclaw_egress_preload_armed": (
+        "1 when the LD_PRELOAD egress interposer is loaded into this process, else 0."
+    ),
+    # Two series rather than one, because a blocked **lookup** and a blocked **dial** are different
+    # events with different causes: the first is a name nothing declared, the second an address
+    # nothing resolved to. An operator reading one number cannot tell which happened, and the two
+    # want different next steps. Gauges rather than counters because the counting happens in C
+    # atomics — binding the reading means a scrape reflects what the interposer actually counted,
+    # with no polling loop to drift or die.
+    "chemclaw_egress_preload_refused_connect": (
+        "Dials (connect/sendto/sendmsg) the LD_PRELOAD egress interposer refused in this process."
+    ),
+    "chemclaw_egress_preload_refused_resolve": (
+        "Name lookups the LD_PRELOAD egress interposer refused in this process."
+    ),
     "chemclaw_turn_capacity": "Configured maximum concurrent turns (the admission cap).",
     # The right-hand side of the only question the per-process cap cannot answer. `sum()` of the
     # gauge above across pods is what the fleet is *admitting* right now; this is what it was

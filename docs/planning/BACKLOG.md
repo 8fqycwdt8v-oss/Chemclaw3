@@ -154,41 +154,25 @@ topic).
   one measurement of whether the SDK accepts a caller-supplied client. Anchors:
   `retrieval/vectors/qdrant.py`, `core/http.py::gateway_client_kwargs`.
 
-- [ ] **The egress guard is blind to gRPC and to Temporal, and those are its two highest-value
-  destinations** — [M], opened 2026-09-06 by the wave-5 egress review, argued in
-  `D-2026-09-06-a-redaction-that-only-covers-logrecords-covers-one-sink.md`. `arm()` patches
-  `socket.socket`'s methods and the `socket` module resolvers; grpc's C-core and Temporal's Rust
-  sdk-core open sockets through neither. Measured with the allowlist deliberately **empty** and no
-  proxy variables set: `grpc.insecure_channel`, the OTLP gRPC span exporter and
-  `temporalio.Client.connect` all reached an external listener with `chemclaw_egress_refused_total`
-  at 0 — re-driven 2026-09-12, seven TCP connections reached a non-loopback listener while the
-  counter moved only for the pure-Python control, and the Temporal leg additionally connected to the
-  **real** broker with `_refused` at 0. `derive_allowed` adds `temporal_address` unconditionally and
-  `otel_endpoint` **only under `otel_enabled`** (`netguard.py:269`) — this row said both
-  unconditionally, which is not false in substance, since the host is listed whenever the exporter
-  runs, but it is the sentence a reader checks. Either way it reads as a bound and is not; the
-  docstrings at `core/netguard.py` now say so in both places, which is the part that was cheap. **Why it matters beyond the general concession**: with
-  `otel_include_sensitive_data` on, that exporter carries prompts and completions, so a wrong or
-  hostile `CHEMCLAW_OTEL_ENDPOINT` exports them anywhere while both signals an operator would check
-  (`chemclaw_egress_refused_total`, `chemclaw_egress_guard_armed`) report health. **And the two
-  blindnesses compound**: measured with an ambient proxy left in place, grpc followed `https_proxy`
-  to a *loopback* proxy — invisible to the socket guard because it is a compiled extension, and
-  invisible to the NetworkPolicy because a sidecar shares the pod's netns. The module's fallback
-  ("those are the NetworkPolicy's job") does not hold for that combination.
-  **Not a one-liner, which is why it is a row** — but one of the two candidate mechanisms is no
-  longer hypothetical. Measured 2026-09-12 against a **real** gRPC server reached over a non-loopback
-  route, an `LD_PRELOAD` interposition on libc `connect` refused the plain socket, `grpc` and
-  `temporalio` alike, with grpc's own C-core reporting `connect failed: ... Operation not permitted`,
-  while loopback continued to work for all three. So Temporal's Rust sdk-core does go through glibc
-  `connect` here — measured, not assumed. What that does **not** cover has to be stated rather than
-  implied: a statically linked binary or a direct syscall, and `getaddrinfo`/UDP unless those are
-  interposed too. Per-library interception stays the dead end the row describes (grpc exposes no
-  socket factory hook; `temporalio` dials in Rust). The remaining decision is whether this
-  deployment wants a `.so` in the image plus a pod env var — which is the `MCP_EGRESS_GUARD=off`
-  shape and needs the same "no shipped deployment disables it" assertion. The cheaper half that
-  remains open is the chart: `networkPolicy.egressDestinations` does not say it is the only layer
-  bounding these two, nor what a loopback sidecar does to that. Anchors:
-  `core/netguard.py::arm`, `::derive_allowed`, `deploy/helm/chemclaw/values.yaml` (`networkPolicy`).
+- [ ] **The `git` remote is now a destination a deployment must declare, and nothing derives it** —
+  [S], what is left of "the egress guard is blind to gRPC and to Temporal" after
+  `D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py`. The blindness
+  itself is closed: `core/netguard_preload.c` interposes libc's `connect`, `getaddrinfo`, `sendto`
+  and `sendmsg` through `LD_PRELOAD`, armed by `deploy/entrypoint.sh` from the allowlist
+  `netguard.derive_allowed` returns, and driven against a real gRPC server over a non-loopback route
+  it refuses the plain socket, `grpc` and `temporalio` alike — grpc's own C-core reporting
+  `connect failed: ... Operation not permitted` — while loopback and an allowlisted address continue
+  to work. Three things remain:
+  - **`git` is now bounded and nothing derives its host.** A child inherits `LD_PRELOAD`, so
+    `kg/git_writer.py`'s `git push` is refused unless the remote is named in
+    `CHEMCLAW_EGRESS_ALLOW` — the first time that destination has been bounded at all, and a
+    behaviour change for any deployment pushing notes off-box. `git_remote` is the string `"origin"`,
+    so resolving it means `git remote get-url` in a subprocess; the entrypoint already runs one
+    interpreter to derive the allowlist and is the one place that could afford it.
+  - **The IPv4-mapped arm is unmeasured on hosts without `AF_INET6`**, which includes this sandbox:
+    `test_an_ipv4_mapped_address_is_not_a_way_around_the_check` skips with the reason in the message.
+  Anchors: `core/netguard_preload.c`, `core/netguard_preload.py`, `deploy/entrypoint.sh`,
+  `kg/git_writer.py`.
 
 - [ ] **Seven live-lane httpx clients read the ambient proxy, one of them carrying a bearer — plus a
   Phoenix SDK client that builds its own** — [S], opened 2026-09-06 by the same review. **The count

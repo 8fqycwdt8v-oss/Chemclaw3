@@ -1219,4 +1219,40 @@ spec:
               A process is running with `CHEMCLAW_EGRESS_GUARD_ENABLED=false`, so outbound calls are
               bounded only by the NetworkPolicy, not by this process — the defence-in-depth layer for
               "only LLM traffic leaves the estate" is off.
+        {{- /* The compiled layer's own pair, and the reason they are not folded into the two
+               above: `chemclaw_egress_guard_armed` reported 1 while grpc's C-core, the OTLP gRPC
+               exporter and Temporal's Rust sdk-core each reached an off-allowlist listener — a
+               signal an operator checks, reading health over the open path. One gauge per layer,
+               one refusal series per *kind* of refusal, because a blocked lookup and a blocked dial
+               want different next steps. */}}
+        - alert: ChemclawEgressPreloadDisarmed
+          expr: max(chemclaw_egress_preload_armed) < 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawegresspreloaddisarmed
+            summary: The compiled egress interposer is not loaded
+            description: >-
+              A process is running without `LD_PRELOAD` naming the egress interposer, so gRPC,
+              Temporal and any other compiled client in it are bounded only by the NetworkPolicy.
+              The in-process guard cannot see those calls at all, and `chemclaw_egress_guard_armed`
+              will still read 1.
+        - alert: ChemclawEgressPreloadRefused
+          expr: >-
+            increase(chemclaw_egress_preload_refused_connect[15m]) > 0
+            or increase(chemclaw_egress_preload_refused_resolve[15m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawegresspreloadrefused
+            summary: A compiled client tried to reach a host outside the egress allowlist
+            description: >-
+              The LD_PRELOAD interposer refused an outbound dial or a name lookup. The pod's stderr
+              carries a `chemclaw-netguard-preload:` line naming the destination and which of the
+              two it was. This should be zero; a non-zero rate is either an attempted exfiltration
+              path or a destination the deployment legitimately needs and must add to
+              `CHEMCLAW_EGRESS_ALLOW` — including a **remote git note repository**, which is
+              reached by a child process and so is bounded by this layer and by nothing else.
 {{- end }}

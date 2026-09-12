@@ -80,6 +80,7 @@ from chemclaw.core.config.store import StoreSettings
 from chemclaw.core.config.temporal import TemporalSettings
 from chemclaw.core.egress import pin_langsmith_egress
 from chemclaw.core.netguard import arm_from_settings as arm_egress_guard
+from chemclaw.core.netguard_preload import publish_state as publish_preload_state
 
 # The package's public surface, exactly what the single-file module exported: the composed class,
 # its singleton, every section mixin (a few are imported directly, e.g. `EvalSettings`), and the
@@ -1276,6 +1277,16 @@ pin_langsmith_egress(allowed=settings.langsmith_tracing_allowed)
 # rather than of a launcher. The allowlist is derived from the destinations this deployment dials
 # (the LLM gateway, Postgres, Temporal, the connector endpoints, the IdP), so a host outside it —
 # a dependency fetching model weights, a usage ping, a DNS licence check — is refused. It is defence
-# in depth behind the NetworkPolicy for the "only LLM traffic leaves" invariant and cannot cover a
-# child process or a compiled extension's own syscalls; `chemclaw.core.netguard` documents both.
+# in depth behind the NetworkPolicy for the "only LLM traffic leaves" invariant. What *this* layer
+# cannot reach — a child process, a compiled extension's own syscalls — is `netguard_preload.c`'s
+# job, the `LD_PRELOAD` interposition `deploy/entrypoint.sh` arms; `chemclaw.core.netguard` and
+# `chemclaw.core.netguard_preload` document the split and what is left over after both.
 arm_egress_guard(settings)
+
+# And publish whether that second layer is actually loaded here, **unconditionally** — including
+# when `egress_guard_enabled` is false. Which layers a process has is a fact about the process, not
+# a consequence of a setting, and the finding that licensed the compiled layer is exactly that one
+# gauge reporting health while another path was open. `is_armed()` asks the dynamic linker rather
+# than reading `LD_PRELOAD`, because a preload naming a path that does not exist is ignored in
+# silence.
+publish_preload_state()

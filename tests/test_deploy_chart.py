@@ -2444,6 +2444,37 @@ def test_egress_destinations_are_declarable() -> None:
     assert _values()["networkPolicy"]["egressDestinations"] == []
 
 
+def test_the_destination_list_says_which_layer_it_is_the_only_one_of() -> None:
+    """An operator sizing this list has to know which shapes it is the whole control for.
+
+    The comment block above `egressDestinations` explained `to: []` and stopped there. What it did
+    not say is that the in-process guard patches `socket.socket` and therefore bounds **no**
+    gRPC or Temporal traffic at all — measured, three such clients reached an off-allowlist listener
+    with the refusal counter flat — and that a **loopback sidecar shares the pod's network
+    namespace**, so no entry here can see a service mesh or egress gateway's traffic. An operator
+    who read the old block came away believing a destination list was defence in depth where it was
+    the only layer, and believing it covered a shape it structurally cannot.
+
+    Pinned as prose because that is what the file carries and what a deployer reads; this repository
+    already pins chart prose this way (`test_the_connection_arithmetic_is_not_restated_in_prose`).
+    The phrases are the *claims*, not the wording around them, so a rewrite that keeps the meaning
+    keeps this green.
+    """
+    prose = (CHART / "values.yaml").read_text()
+    _, _, after = prose.partition("egressPorts:")
+    block, _, _ = after.partition("egressDestinations:")
+    for claim in (
+        "netguard_preload",
+        "statically linked",
+        "shares the pod's network namespace",
+        "refuse_proxied_egress",
+    ):
+        assert claim in block, (
+            f"the egressDestinations comment block does not say {claim!r} — a deployer cannot size "
+            "this list without knowing which layer it is the only one of"
+        )
+
+
 def _makefile_renders() -> list[list[str]]:
     """Every `helm template` of this chart in the Makefile, as its whole (continued) command.
 

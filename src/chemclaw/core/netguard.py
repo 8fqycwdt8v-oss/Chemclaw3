@@ -16,24 +16,37 @@ the host, and counted; the log and the counter are load-bearing rather than deco
 only surfaced as a connection error would be swallowed by the first `except OSError` in the stack
 (the LLM failover, `publish/drivers/http`, `connectors/health` all have one).
 
-**What it cannot cover, stated rather than implied.** A patched `socket` in this interpreter says
-nothing about a **child process** (`kg/git_writer.py` shells out to `git`), a **`ctypes` call into
-libc**, a syscall from a **compiled extension** (this closure carries `grpcio`, `rdkit`, torch,
-`psycopg_binary`), or **`_socket.socket`** — the C base class `socket.socket` subclasses, whose
-`connect` is not assignable and is two lines of ordinary Python away. Those are the NetworkPolicy's
-job — the layer that takes the network away rather than asking Python nicely — and the chart's
-`git_remote` / egress rules are where they land. This guard catches the large class a static
-import scan cannot: a dependency reaching out at runtime.
+**What *this* layer cannot cover, stated rather than implied.** A patched `socket` in this
+interpreter says nothing about a **child process** (`kg/git_writer.py` shells out to `git`), a
+**`ctypes` call into libc**, a syscall from a **compiled extension** (this closure carries `grpcio`,
+`rdkit`, torch, `psycopg_binary`), or **`_socket.socket`** — the C base class `socket.socket`
+subclasses, whose `connect` is not assignable and is two lines of ordinary Python away. This guard
+catches the large class a static import scan cannot: a dependency reaching out at runtime.
 
-**Two of this deployment's own destinations are in the compiled-extension class, and naming them is
-the point.** gRPC's C-core and Temporal's Rust sdk-core open sockets without touching
+**Two of this deployment's own destinations were in the compiled-extension class, and they are why
+there is a second layer.** gRPC's C-core and Temporal's Rust sdk-core open sockets without touching
 `socket.socket` or the module resolvers, so `otel_endpoint` and `temporal_address` — both of which
-`derive_allowed` adds — are **allowlist entries, not enforcement**. Measured with the allowlist
-deliberately empty and no proxy set: a `grpc.insecure_channel`, the OTLP gRPC span exporter and
-`temporalio.Client.connect` all reached an external listener with `_refused` at 0. That is a real
-limit rather than a defect this module can close, and `docs/planning/BACKLOG.md` carries the row;
-it is written here because an entry in an allowlist reads as a bound, and for these two it is not
-one.
+`derive_allowed` adds — used to be allowlist entries rather than enforcement. Measured with the
+allowlist deliberately empty and no proxy set: a `grpc.insecure_channel`, the OTLP gRPC span
+exporter and `temporalio.Client.connect` all reached an external listener with `_refused` at 0,
+seven connections against one refusal for the pure-Python control. With
+`otel_include_sensitive_data` on, that exporter carries prompts and completions, so the blind path
+was also the highest-value one.
+
+`core/netguard_preload.c` closes it
+(`D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py`): an `LD_PRELOAD` interposition on
+libc's `connect`, `getaddrinfo`, `sendto` and `sendmsg`, armed by `deploy/entrypoint.sh` from the
+allowlist **this** module derives, so there is one derivation and two enforcement points. Driven
+against a real gRPC server over a non-loopback route, all three of the clients above are refused —
+grpc reporting `connect failed: ... error: Operation not permitted` from its own C-core — while the
+same dials succeed with no interposer and succeed on loopback with it. It reaches the child process
+and the `ctypes` call in the paragraph above as well, because a child inherits `LD_PRELOAD`: a
+deployment that pushes notes to a **remote** git host must now name that host in `egress_allow`,
+which is the first time that destination has been bounded at all. `chemclaw_egress_preload_armed`
+is its own series and deliberately not this layer's gauge — `chemclaw_egress_guard_armed` reporting
+1 over an open compiled path is what made the finding serious. What neither layer covers is a
+**statically linked** binary or one issuing the syscall directly; that is the NetworkPolicy's job,
+the layer that takes the network away rather than asking libc nicely.
 
 **One shape has no such backstop, and it is why `refuse_proxied_egress` exists.** A proxy moves the
 destination out of the address, so the allowlist cannot see it; and where the proxy is a sidecar on
@@ -222,12 +235,27 @@ def derive_allowed(settings: Any) -> frozenset[str]:
     one arrives here or is named there as somebody else's socket, so the next such field fails on
     the day it is declared rather than in a deployment that split its session store.
 
-    **Two entries here are bookkeeping rather than bounds**, and the module docstring says why:
+    **Two entries here used to be bookkeeping rather than bounds, and now they are bounds.**
     `temporal_address` and `otel_endpoint` are dialled by Temporal's Rust sdk-core and grpc's
-    C-core, neither of which goes through the patched `socket.socket` or the patched resolvers.
-    They are added so the set describes what this deployment reaches — which is what the derivation
-    is for — but nothing in this file enforces them. Measured: both reach an off-allowlist host
-    with `_refused` at 0.
+    C-core, neither of which goes through the patched `socket.socket` or the patched resolvers —
+    measured, both reached an off-allowlist host with `_refused` at 0. `core/netguard_preload.c`
+    enforces them at libc and reads *this* set, so what this function returns is now the
+    allowlist of both layers rather than a description one of them ignores.
+
+    **Which is why the asymmetry below is deliberate rather than an oversight.**
+    `temporal_address` is added unconditionally because every component dials it; `otel_endpoint`
+    only under `otel_enabled`, because with tracing off nothing dials it and an entry would be a
+    permission for a destination no client opens. Under enforcement a conditional entry is the
+    *correct* shape — it tracks whether the dial exists — and the unconditional one would be the
+    defect if Temporal were optional.
+
+    **What the same reasoning then exposed: `otel_endpoint` is not the only spelling of that
+    destination.** `core/logging.py` bridges it into `OTEL_EXPORTER_OTLP_ENDPOINT` with
+    `setdefault`, so a deployment that sets the standard variable (or the per-signal
+    `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) directly keeps winning — and the exporter then dials a
+    host this function never saw. Harmless while nothing enforced it; with the compiled layer armed
+    it is an exporter refused by its own deployment, reported as an `UNAVAILABLE` the exporter
+    swallows. So the standard variables are read here too, in the exporter's own precedence order.
 
     A *manifest*-supplied host — a warehouse ELN's `connection:`, a result sink's, a delivery
     channel's, an external vector store reached through `module:callable` — is still not derived
@@ -268,7 +296,13 @@ def derive_allowed(settings: Any) -> frozenset[str]:
     if getattr(settings, "entra_required", False):
         add(getattr(settings, "entra_jwks_endpoint", "") or settings.entra_jwks_url)
     if getattr(settings, "otel_enabled", False):
+        # Every spelling the exporter would resolve, most specific first, because `core/logging.py`
+        # only `setdefault`s the bridge and OTel's own precedence prefers the per-signal variable.
+        # A deployment that configures the collector the standard way is configuring a destination
+        # this object does not carry, and the compiled layer refuses what is not here.
         add(settings.otel_endpoint)
+        add(os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"))
+        add(os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"))
     if getattr(settings, "vector_store_provider", "pgvector") != "pgvector":
         add(settings.vector_store_url)
     for extra in (settings.egress_allow or "").split(","):

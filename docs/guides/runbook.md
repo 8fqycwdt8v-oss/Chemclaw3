@@ -1557,6 +1557,32 @@ estate" is off in that process. Either it was disabled deliberately (and this al
 silenced for that deployment, with the reason recorded) or a values file turned it off by accident;
 set it back to `true` and roll the affected pods.
 
+#### ChemclawEgressPreloadDisarmed
+`critical`. A process is running without the compiled egress interposer
+(`src/chemclaw/core/netguard_preload.c`) loaded, so every client that opens sockets below the
+interpreter — grpc's C-core, Temporal's Rust sdk-core, the OTLP gRPC exporter — is bounded only by
+the NetworkPolicy. **`ChemclawEgressGuardDisarmed` will be silent**, because the in-process guard is
+a different layer and reports separately; that pair reading 1 and 0 is exactly the condition this
+alert exists for. Causes, in the order to check them: the pod was started with an explicit `command`
+that bypasses `chemclaw-entrypoint` (the knowledge-sync containers do this deliberately and are not
+in the alert's scope, since they run `git` rather than a component); `CHEMCLAW_EGRESS_GUARD_ENABLED`
+is `false`, which turns off both layers by design; or the image was built without the interposer, in
+which case `ls /app/lib` in the pod is empty and the fix is a rebuild. `LD_PRELOAD` naming a path
+that does not exist is ignored by the loader without a word, so believe the gauge rather than the
+environment variable.
+
+#### ChemclawEgressPreloadRefused
+`critical`. The interposer refused an outbound dial or a name lookup. `kubectl logs` the pod and grep
+`chemclaw-netguard-preload:` — the line names the destination, the port and which of `connect`,
+`sendto` and `resolve` it was; the two counters split the same way, so a lookup refusal and a dial
+refusal can be told apart on the dashboard. Decide whether the destination is legitimate. If it is,
+add its host to `CHEMCLAW_EGRESS_ALLOW` (bare host, no scheme, no port) and roll the pods. **Two
+destinations are commonly legitimate and are not derived from any setting**: a *remote* git note
+repository, because `kg/git_writer.py` shells out to `git`, which inherits `LD_PRELOAD` and so is
+bounded by this layer alone; and a collector named only in `OTEL_EXPORTER_OTLP_ENDPOINT` when
+`CHEMCLAW_OTEL_ENDPOINT` is unset. If it is not legitimate, the refusal is the control working —
+record what it was before silencing anything.
+
 ## (xi) A migration that will not apply, and a release stuck in `pending-upgrade`
 
 Migrations run as a Helm `pre-install,pre-upgrade` hook Job that completes before any app container
