@@ -5362,3 +5362,42 @@ def test_the_shipped_connector_path_is_the_path_the_image_has() -> None:
         f"extraConnectors.shippedPath is {_values()['extraConnectors']['shippedPath']!r}; the "
         f"image puts the shipped bundles at {expected!r}"
     )
+
+
+def test_the_image_workflow_derives_component_modules_that_actually_import() -> None:
+    """`image.yml` derives the smoke list by grepping `entrypoint.sh`, and a grep reads prose.
+
+    Deriving the list from the script rather than restating it is right — a second list drifts from
+    the script in either direction, which is the defect that derivation exists to prevent. But the
+    derivation has to read the script the way the shell does, and it did not: a **comment** saying
+    that every ``exec python -m chemclaw<...>`` line resolved to the wrong interpreter was matched
+    by ``grep -oE 'python -m [a-z_][a-z0-9_.]*'``, so the workflow smoke-tested a component named
+    ``chemclaw<...>`` and died on ``SyntaxError: invalid syntax``. The fix strips whole-line
+    comments first; this holds it, offline, without building an image.
+
+    Asserting *importability* rather than "no ellipsis" on purpose. A rule naming the one shape that
+    broke would pass the next comment that happens to contain a plausible dotted path, and the
+    property the workflow actually needs is that every name it derives can be imported.
+    """
+    import importlib.util
+    import re
+
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "image.yml").read_text(encoding="utf-8")
+    assert "sed -E 's/^[[:space:]]*#.*$//' deploy/entrypoint.sh" in workflow, (
+        "image.yml no longer strips comments before deriving the component list, so a sentence in "
+        "entrypoint.sh can be smoke-tested as a module again"
+    )
+
+    # Reproduce the workflow's own derivation rather than restating its answer.
+    script = (DEPLOY / "entrypoint.sh").read_text(encoding="utf-8")
+    commands = re.sub(r"(?m)^[ \t]*#.*$", "", script)
+    modules = re.findall(r"python -m ([a-z_][a-z0-9_.]*)", commands)
+    modules += [t.split(":")[0] for t in re.findall(r"uvicorn ([a-z_][a-z0-9_.]*:[a-zA-Z_]+)", commands)]
+    assert len(modules) >= 2, "the derivation found nothing; it has drifted from the script"
+
+    for module in modules:
+        assert importlib.util.find_spec(module) is not None, (
+            f"image.yml would smoke-test {module!r}, which is not an importable module — the "
+            "derivation has picked up prose rather than a command"
+        )
