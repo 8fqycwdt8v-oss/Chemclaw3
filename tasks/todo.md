@@ -292,8 +292,15 @@ rows: a per-call bound with nothing bounding N of them.
       Driving it found `netguard._host_of` refusing the forkserver's own `AF_UNIX` socket as egress
       while its docstring claimed local IPC was exempt.
       `D-2026-09-12-a-parse-that-cannot-be-killed-wedges-its-replica`.
-- [ ] W23.8 `Chemclaw3` — `BoCampaignWorkflow` runs four sequential activities under a ceiling that
-      funds one.
+- [x] W23.8 `Chemclaw3` — `BoCampaignWorkflow` runs four sequential activities under a ceiling that
+      funds one. **Done** — and the row was wrong twice over: it is **six** activities for a
+      one-round campaign, and the ceiling funds **two** (20,940 <= 25,200), breaking at the third.
+      Measured, 6 x 10,470 = 62,820 s against 25,200. `continue_as_new` cannot fix it because
+      `connector_job.py` applies the ceiling as `execution_timeout`, which spans the chain. A run
+      now spends its budget down and shares what is left between the dispatches still to come: all
+      six fit at ~3,880 s each, totalling 25,170. Bounding each by the *whole* remainder was tried
+      and funds only three — measured, not argued.
+      `D-2026-09-12-a-ceiling-that-funds-one-attempt-does-not-fund-a-sequence`.
 
 **Acceptance** — a driven saturation probe per ceiling: N+1 concurrent sessions/calls refused
 promptly (not queued), the refusal counted, and the pod's RSS bounded across the probe.

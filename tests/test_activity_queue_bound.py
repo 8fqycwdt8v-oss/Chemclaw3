@@ -32,7 +32,9 @@ carrying an argument nobody checked.
 import ast
 import asyncio
 import re
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from temporalio import workflow
@@ -47,9 +49,18 @@ with workflow.unsafe.imports_passed_through():
     from temporalio.client import Client
     from temporalio.worker import Worker
 
+    from chemclaw.connectors.bo.workflows import (
+        BoCampaignWorkflow,
+        CampaignBudgetSpent,
+        dispatches_left,
+    )
     from chemclaw.core.config import settings
     from chemclaw.durable.note_index import NoteReindexWorkflow
-    from chemclaw.durable.publish import connector_queue_wait_timeout, fan_out_queue_wait_timeout
+    from chemclaw.durable.publish import (
+        connector_queue_wait_timeout,
+        fan_out_queue_wait_timeout,
+        remaining_queue_wait_timeout,
+    )
     from tests.temporal_env import pydantic_client, start_env_or_skip
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
@@ -346,3 +357,164 @@ def test_every_fan_out_child_waits_on_the_fan_out_bound_not_on_cores_hour() -> N
             "core's hour equals the fan-out ceiling, so its degradation path is unreachable"
         )
         assert "schedule_to_start_timeout=queue_wait_timeout()" not in body
+
+
+# --- a sequence of dispatches under one ceiling --------------------------------------------------
+
+
+class _StubbedRun:
+    """Just enough of a workflow context to drive `BoCampaignWorkflow._queue_wait` and a clock.
+
+    The method under test reads exactly two things from the SDK — `workflow.info()` for the run's
+    execution budget and start, and `workflow.now()` for where it is inside that budget — so a
+    stub of those two drives the real arithmetic without a broker. Driving it on the real method
+    rather than re-deriving the recurrence in the test is the point: a test that recomputed
+    `min(queue_bound, remaining)` here would agree with itself forever.
+    """
+
+    def __init__(
+        self, monkeypatch: pytest.MonkeyPatch, ceiling: float | None, n_rounds: int = 1
+    ) -> None:
+        """Start a campaign at t=0 under `ceiling`, or under no execution ceiling when None."""
+        self.started = datetime(2026, 9, 12, tzinfo=UTC)
+        self.now = self.started
+        info = SimpleNamespace(
+            execution_timeout=None if ceiling is None else timedelta(seconds=ceiling),
+            workflow_start_time=self.started,
+        )
+        monkeypatch.setattr(workflow, "info", lambda: info)
+        monkeypatch.setattr(workflow, "now", lambda: self.now)
+        self.campaign = BoCampaignWorkflow()
+        self.campaign._dispatches_left = dispatches_left(n_rounds, seeding=True)
+
+    def dispatch(self) -> float:
+        """Take the next activity's queue bound, spend the whole of it, then run the activity.
+
+        The worst case, which is what a ceiling has to fund: every dispatch waits its full
+        allowance and then takes its full start-to-close budget. A real campaign spends less on
+        both, which is why the assertions below are inequalities.
+        """
+        wait = self.campaign._queue_wait().total_seconds()
+        self.now += timedelta(seconds=wait + settings.bo_activity_timeout_seconds)
+        return wait
+
+    @property
+    def spent(self) -> float:
+        """Wall clock consumed since the campaign started, in seconds."""
+        return (self.now - self.started).total_seconds()
+
+
+@pytest.mark.parametrize("ceiling", [25200.0, 50400.0, 86400.0])
+def test_a_campaigns_sequence_of_dispatches_fits_the_ceiling_they_share(
+    monkeypatch: pytest.MonkeyPatch, ceiling: float
+) -> None:
+    """Six dispatches under one execution ceiling, and the sum has to fit inside it.
+
+    **`connector_queue_wait_timeout` is derived so that `q + w` fits, singular.** Every bundle
+    child passed it unchanged, and `BoCampaignWorkflow` runs six activities for a one-round
+    campaign: propose the seed, evaluate it, propose the round, evaluate it, record the round,
+    record the campaign. Measured at the shipped settings before this: `q` = 10,170 s and a `bo`
+    activity's `w` = 300 s, so 6 x 10,470 = 62,820 s against a 25,200 s ceiling — 2.5x. Two fit,
+    the third breaks it, and the overrun is a `WorkflowExecutionTimedOut`, which reaches no
+    workflow code and names neither the queue nor the reason.
+
+    Parametrised over three ceilings rather than asserting the shipped numbers, for the reason its
+    two siblings above give: the property is structural, and a re-derivation that reintroduced a
+    per-dispatch constant would pass at one ceiling by luck. The lowest is the shipped value; going
+    below `longest_bundle_activity` would test a ceiling `Settings` refuses.
+
+    **All six must fit, not merely "the sum is bounded".** Bounding each dispatch by the whole
+    remaining budget is enough for the sum — but measured that way the first two take 10,170 s each
+    of 25,200 and the campaign stops after three, having proposed a seed and evaluated it. Sharing
+    what is left between the dispatches still to come is what makes the bound usable, and it is
+    what the count in `dispatches_left` is for.
+    """
+    monkeypatch.setattr(settings, "connector_job_timeout_seconds", ceiling)
+    run = _StubbedRun(monkeypatch, ceiling, n_rounds=1)
+
+    waits = [run.dispatch() for _ in range(6)]
+
+    assert run.spent <= ceiling - settings.activity_timeout_seconds, run.spent
+    assert all(wait > 0 for wait in waits), waits
+    # And the counterfactual, so a bound that had quietly gone flat could not pass: the same six
+    # dispatches on the queue-wide constant alone overrun the ceiling they share.
+    flat = connector_queue_wait_timeout().total_seconds() + settings.bo_activity_timeout_seconds
+    assert 6 * flat > ceiling, (
+        "the flat bound now fits six dispatches, so this test no longer discriminates"
+    )
+
+
+def test_a_campaign_never_waits_longer_than_the_queue_wide_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sharing the budget must not *lengthen* a wait, which on a short campaign it would.
+
+    The queue-wide bound is `C - 15,000 - 30` (the fleet's longest bundle activity), and a share is
+    `C/n - 300 - 30`, so which one binds depends on the ceiling: at the shipped 25,200 s over six
+    dispatches the share is the tighter, and at a *low* ceiling over few dispatches the queue bound
+    is. 20,000 s with three dispatches is the second case — share 6,337 s against a queue bound of
+    4,970 s — and without the `min` a campaign whose worker is simply absent would sit 1,367 s
+    longer than any other job on the same queue before saying so.
+    """
+    ceiling = 20000.0
+    monkeypatch.setattr(settings, "connector_job_timeout_seconds", ceiling)
+    run = _StubbedRun(monkeypatch, ceiling, n_rounds=0)
+    queue_bound = connector_queue_wait_timeout()
+    share = remaining_queue_wait_timeout(
+        timedelta(seconds=ceiling / dispatches_left(0, seeding=True)),
+        settings.bo_activity_timeout_seconds,
+    )
+    assert share is not None and share > queue_bound, (
+        "this ceiling no longer produces a share above the queue bound, so the `min` is untested"
+    )
+    assert run.campaign._queue_wait() == queue_bound
+
+
+def test_a_campaign_that_has_spent_its_ceiling_refuses_to_dispatch_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The end of the recurrence is a stop, not a silent overrun.
+
+    `run` catches this and ends the campaign with the history and the best point it has. The
+    alternative — dispatch anyway — is the failure the whole bound exists to remove: the execution
+    timeout fires mid-activity, is delivered to no workflow code, and the chemist is told nothing
+    about a run that had real evaluations in it.
+    """
+    ceiling = settings.connector_job_timeout_seconds
+    run = _StubbedRun(monkeypatch, ceiling)
+    run.now = run.started + timedelta(seconds=ceiling - settings.bo_activity_timeout_seconds)
+    assert run.campaign._cannot_afford_another_dispatch()
+    with pytest.raises(CampaignBudgetSpent):
+        run.campaign._queue_wait()
+
+
+def test_a_campaign_with_no_execution_ceiling_keeps_the_queue_wide_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A measured campaign gets no execution timeout, so there is no budget to spend down.
+
+    `child_execution_timeout` returns None for a job that suspends on a person —
+    `bo_measurement_deadline_days` is a fortnight and no wall-clock ceiling can contain it. There
+    is then nothing to divide, and the queue-wide bound is the whole of the answer. Driven a year
+    into the run so a stray elapsed-time subtraction could not pass this.
+    """
+    run = _StubbedRun(monkeypatch, None)
+    run.now = run.started + timedelta(days=365)
+    assert not run.campaign._cannot_afford_another_dispatch()
+    assert run.campaign._queue_wait() == connector_queue_wait_timeout()
+
+
+def test_a_remaining_budget_that_cannot_fund_an_attempt_answers_none() -> None:
+    """`None` rather than a zero or negative timedelta, because those are not bounds.
+
+    Temporal takes a `schedule_to_start_timeout` at face value: a non-positive one either fails
+    validation or expires the activity the instant it is scheduled, and both read as "the queue is
+    unserved" about a queue that is fine. The caller has to make a different decision, so the
+    function has to be able to say something different.
+    """
+    overhead = settings.activity_timeout_seconds
+    assert remaining_queue_wait_timeout(timedelta(seconds=300 + overhead + 1), 300.0) == timedelta(
+        seconds=1
+    )
+    assert remaining_queue_wait_timeout(timedelta(seconds=300 + overhead), 300.0) is None
+    assert remaining_queue_wait_timeout(timedelta(seconds=0), 300.0) is None

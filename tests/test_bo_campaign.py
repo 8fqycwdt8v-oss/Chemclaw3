@@ -790,9 +790,20 @@ def test_a_measured_campaign_outlives_the_ceiling_that_would_have_killed_it(
     the reason `tests/test_awaiting.py` is — the deadline and the queue are read off `settings`
     inside workflow code, and this drives them from the test.
     """
-    ceiling = timedelta(seconds=4)
+    # **The whole arithmetic is scaled, not just the ceiling**, and that became necessary when
+    # `D-2026-09-12-a-ceiling-that-funds-one-attempt-does-not-fund-a-sequence` made a campaign share
+    # its execution budget between the dispatches still to come. Arm one's ceiling used to be 4 s
+    # against the shipped 300 s activity budget, so under that bound the campaign now refuses its
+    # *first* dispatch — correctly, since four seconds cannot fund a five-minute activity — and dies
+    # before opening the wait this arm exists to strand. Scaling the activity budget and the
+    # activity overhead with the ceiling restores the shape being reproduced: three dispatches at
+    # 2.9 s of queue wait plus 3 s of work is 17.7 s, inside the 18 s ceiling, so the campaign
+    # reaches its wait and is then killed by the ceiling exactly as before.
+    ceiling = timedelta(seconds=18)
     queue = "test-bo-measured"
     monkeypatch.setattr(settings, "background_task_queue", queue)
+    monkeypatch.setattr(settings, "bo_activity_timeout_seconds", 3.0)
+    monkeypatch.setattr(settings, "activity_timeout_seconds", 0.1)
     # Long enough that neither arm expires on its own inside the test, so the only thing that can
     # end arm one is the ceiling under test.
     monkeypatch.setattr(settings, "bo_measurement_deadline_days", 300 / 86_400)

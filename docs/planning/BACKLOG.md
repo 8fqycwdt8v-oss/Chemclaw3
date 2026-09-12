@@ -63,6 +63,15 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
+- [ ] **`max_concurrent_workflow_tasks` is set nowhere, so nothing this repository chose bounds
+  workflow-task concurrency** — [M]. `durable/background_worker.py` sets `max_concurrent_activities`
+  and stops there, so the workflow-task ceiling is whatever the SDK defaults to. A **child workflow
+  is not an activity**, so the activity ceiling does not bound the bundle children core starts at
+  all — which is the population `D-2026-09-12-a-ceiling-that-funds-one-attempt-does-not-fund-a-sequence`
+  has just finished reasoning about from the *inside* of one child. Measure what a saturated worker
+  actually holds before choosing a number: a ceiling set from the SDK's default is the same
+  unexamined posture this row is about, one value further on.
+
 - [ ] **Nothing bounds the scratchpad memory store** — [M].
   `retention._NOT_PRUNED["store"]` read *"erasure reaches it per actor"* until wave 13, which is a
   disposal route that fires only on a leaver request — the reasoning the `session_owners` entry
