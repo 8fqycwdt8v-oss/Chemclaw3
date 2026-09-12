@@ -63,6 +63,19 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
+- [ ] **A helper's own subgraph checkpoints are 91% of what a spawn costs, and nothing bounds
+  them** — [M]. `D-2026-09-12-a-helpers-scratch-file-crosses-into-its-callers-state` bounded what
+  crosses into the *caller's* `files` channel, which is what W23.6 named. Measured on a real
+  `AsyncPostgresSaver` with incompressible text, one helper writing 2 MB costs **20,712 kB** of
+  checkpoint rows above a 296 kB baseline — 10.4x — and that cap reclaims **1,824 kB**, 8.8%. The
+  rest is the helper's own `files` and `messages` channels in `checkpoint_blobs`, re-serialised per
+  version, which a `wrap_tool_call` middleware cannot reach: it runs when `task` returns, after
+  those checkpoints are written. Two levers exist and both are decisions rather than edits — a
+  bound on `write_file`'s *content argument*, which would also silently truncate a chemist's own
+  scratchpad, or compiling a helper with no checkpointer at all, which changes what a mid-turn
+  interrupt can resume. Measure which before choosing; the probe is
+  `/tmp`-free and is the one in that ADR's table.
+
 - [ ] **`max_concurrent_workflow_tasks` is set nowhere, so nothing this repository chose bounds
   workflow-task concurrency** — [M]. `durable/background_worker.py` sets `max_concurrent_activities`
   and stops there, so the workflow-task ceiling is whatever the SDK defaults to. A **child workflow

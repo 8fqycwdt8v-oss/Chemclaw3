@@ -82,3 +82,54 @@ def rewritten_tool_messages(result: Any, rewrite: Callable[[ToolMessage], ToolMe
     if all(new is old for new, old in zip(rewritten, messages, strict=True)):
         return result
     return dataclasses.replace(result, update={**result.update, "messages": rewritten})
+
+
+def rewritten_command_files(result: Any, rewrite: Callable[[str, int], str]) -> Any:
+    """Apply `rewrite` to every file a `Command` writes into its caller's state.
+
+    **The other half of what `task` hands back, and nothing bounded it.**
+    `rewritten_tool_messages` above covers the report — the part a model reads — and
+    `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread` established that the
+    caller's *thread* stays tiny: driven, a helper reading 2 MB leaves its caller 57 characters.
+    That measurement is right and it is about one of the two things a helper returns. Upstream's
+    `_return_command_with_state_update` copies **every** non-excluded key of the helper's final
+    state into the caller's update, and `files` is one of them — so the same probe puts
+    **2,000,137 characters** of the helper's scratch filesystem into the caller's checkpointed
+    state, where the thread shows 57.
+
+    It is a *storage* blow-out rather than a context one, and the two need different arithmetic.
+    The report is bounded against `agent_max_tool_result_chars` because it is sent to a model; a
+    file is bounded against what a checkpoint costs, because LangGraph writes the whole channel
+    per superstep and per version.
+
+    Args:
+        result: Whatever the tool handler returned.
+        rewrite: Takes one file's text and how many files share the budget, and returns the text to
+            store. Returning the same string is how a rewrite declines to change anything.
+
+    Returns:
+        The same shape, with its files rewritten.
+    """
+    if not isinstance(result, Command) or not isinstance(result.update, dict):
+        return result
+    files = result.update.get("files")
+    if not isinstance(files, dict) or not files:
+        return result
+    # `FileData` is a mapping carrying `content` beside its timestamps, and treating it as one
+    # rather than importing upstream's constructor is what keeps `created_at` intact — rebuilding
+    # a file would restamp it. `tests/test_upstream_surface.py` asserts the shape, which is this
+    # repository's discipline for every assumption about a library's data that the library does
+    # not promise.
+    rewritten: dict[str, Any] = {}
+    changed = False
+    for path, data in files.items():
+        content = data.get("content") if isinstance(data, dict) else None
+        if not isinstance(content, str):
+            rewritten[path] = data
+            continue
+        bounded = rewrite(content, len(files))
+        rewritten[path] = data if bounded is content else {**data, "content": bounded}
+        changed = changed or bounded is not content
+    if not changed:
+        return result
+    return dataclasses.replace(result, update={**result.update, "files": rewritten})

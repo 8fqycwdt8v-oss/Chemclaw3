@@ -409,6 +409,22 @@ class AgentSettings(BaseSettings):
     # It is also inert without an actor: no ambient identity means no namespace, and a memory
     # written under a shared prefix would be one nobody can erase and everybody can read
     # (`agent/scratchpad.memory_namespace`).
+    # **What a helper may write into its caller's checkpointed state**, which nothing bounded.
+    # `task` returns a `Command` whose update carries every non-excluded key of the helper's final
+    # state, `files` included — so a helper's scratch filesystem crosses into the caller's `files`
+    # channel whole. Driven, a helper reading 2 MB left its caller a *thread* of 57 characters and
+    # **2,000,137 characters** of `files`: the isolation
+    # `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread` measured is real and it
+    # is about the thread only.
+    #
+    # A separate number from `agent_max_tool_result_chars`, because it bounds a different resource.
+    # That one is context — what a model is sent. This is storage: LangGraph writes the whole
+    # channel per superstep and again per version, so one 2 MB write measured 7,818 kB of
+    # `checkpoint_blobs` plus 7,815 kB of `checkpoint_writes` — **~15.6 MB, 7.8x** — and a turn has
+    # many supersteps. 200,000 characters is ~1.6 MB of checkpoint rows per superstep at that
+    # amplification, and it is a *total*: several files share it, the way a batch of tool calls
+    # shares `agent_max_tool_result_chars`, because the resource is the channel and not the file.
+    agent_subagent_files_max_chars: int = Field(default=200_000, ge=0)
     agent_memory_enabled: bool = False
     # **What bounds the `store` table, which nothing did.** `durable/retention.py`'s register said
     # of it "**nothing bounds it**", and it was right: `store` is agent-writable with no size cap,

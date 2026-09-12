@@ -22,6 +22,7 @@ local IPC. Nothing asserted it in either direction, and the C half of the same c
 import asyncio
 import socket
 import time
+from pathlib import Path
 
 import pytest
 
@@ -37,7 +38,7 @@ from chemclaw.core.metrics import METRICS
 from chemclaw.ingest.documents import isolate
 from chemclaw.ingest.documents.isolate import ParseWorkerLost, parse_document_isolated
 from chemclaw.ingest.documents.parse import ScannedDocumentError
-from tests.test_document_formats import _blank_pdf_bytes
+from tests.test_document_formats import _blank_pdf_bytes  # type: ignore[attr-defined]
 
 # A CSV big enough that parsing it is unmistakably longer than the deadline the wedge test sets,
 # and small enough that building it costs nothing. Measured on this tree: 6 MB parses in 0.694 s,
@@ -56,7 +57,7 @@ def _warm_the_forkserver() -> None:
     parse_document_isolated("warm.csv", b"a,b\n1,2\n", None, 60.0)
 
 
-def test_the_parse_does_not_run_in_this_process() -> None:
+def test_the_parse_does_not_run_in_this_process(monkeypatch: pytest.MonkeyPatch) -> None:
     """The work crosses a process boundary, proven by breaking this process's copy of it.
 
     `isolate.parse_document` is the name `_parse_into` calls. Replacing it here would stop any
@@ -67,16 +68,12 @@ def test_the_parse_does_not_run_in_this_process() -> None:
     through the result — a test seam in production code to prove a property the code already has.
     """
     _warm_the_forkserver()
-    original = isolate.parse_document
 
     def refuse(*args: object, **kwargs: object) -> None:
         raise AssertionError("the parse ran in the calling process")
 
-    isolate.parse_document = refuse  # type: ignore[assignment]
-    try:
-        parsed = parse_document_isolated("runs.csv", b"id,yield\nR-1,88\n", None, 60.0)
-    finally:
-        isolate.parse_document = original  # type: ignore[assignment]
+    monkeypatch.setattr(isolate, "parse_document", refuse)
+    parsed = parse_document_isolated("runs.csv", b"id,yield\nR-1,88\n", None, 60.0)
     assert parsed.rows == 1
     assert "R-1" in parsed.text
 
@@ -180,7 +177,7 @@ def test_the_cap_still_sheds_when_the_slots_are_genuinely_busy(
     asyncio.run(_drive())
 
 
-def test_local_ipc_is_not_refused_as_egress(tmp_path: object) -> None:
+def test_local_ipc_is_not_refused_as_egress(tmp_path: Path) -> None:
     """An `AF_UNIX` address names a path, and a path leaves this host by no route.
 
     `netguard._host_of` fell through to `host = address` for a non-tuple address, so a unix-socket
@@ -200,7 +197,7 @@ def test_local_ipc_is_not_refused_as_egress(tmp_path: object) -> None:
     assert netguard._host_of(("example.invalid", 443)) == "example.invalid"
     assert netguard._host_of((b"example.invalid", 443)) == "example.invalid"
 
-    path = str(tmp_path) + "/probe.sock"  # type: ignore[operator]
+    path = str(tmp_path / "probe.sock")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
         server.bind(path)
         server.listen(1)

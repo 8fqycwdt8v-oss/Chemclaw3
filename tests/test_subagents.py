@@ -940,3 +940,84 @@ def test_a_helpers_file_outlives_the_turn_that_spawned_it() -> None:
         "an earlier turn — the defanging must hold for the whole session, not for the spawning turn"
     )
     assert f"&lt;/{ENVELOPE_TAG}>" in read_back
+
+
+def test_a_helpers_scratch_file_is_bounded_on_its_way_into_its_callers_state() -> None:
+    """The isolation above is real and it is about the *thread*; this is the other channel.
+
+    `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread` measured the caller's whole
+    thread at 57 characters for a helper that read ~9.8 kB, and that measurement is right. What it
+    does not cover is upstream's `_return_command_with_state_update`, which copies **every**
+    non-excluded key of the helper's final state into the caller's update — `files` among them. So
+    the same probe with a 2 MB scratch write leaves the caller a 57-character thread and
+    **2,000,137 characters** of `files`, in the channel the checkpointer persists.
+
+    Driven with the thread asserted alongside, because the two numbers are the finding: a test that
+    only checked `files` could pass while a regression quietly put the helper's reading into the
+    caller's messages as well.
+    """
+    written = "z" * (settings.agent_subagent_files_max_chars * 4)
+    state = _spawn_state(read=True, written=written)
+
+    files = state.get("files") or {}
+    assert files, "the helper's scratch file did not cross at all, so this test measures nothing"
+    stored = sum(len(str(data.get("content", ""))) for data in files.values())
+    assert stored <= settings.agent_subagent_files_max_chars, (
+        f"{stored} characters of a helper's scratch filesystem reached its caller's checkpointed "
+        f"state against a {settings.agent_subagent_files_max_chars}-character budget"
+    )
+
+    thread = sum(len(str(getattr(m, "content", "") or "")) for m in state["messages"])
+    assert thread * 20 < len(written), (
+        f"the caller's thread is {thread} characters against the {len(written)} the helper wrote; "
+        "bounding the file must not have been achieved by routing it through the thread"
+    )
+
+
+def test_a_cut_file_says_it_was_cut() -> None:
+    """A silent truncation hands a chemist a document that simply stops.
+
+    The caller can read a helper's file back — that crossing is what `parent_reads` exercises — so
+    the cut has to carry the same system-marked notice a truncated tool result does. Reused rather
+    than reimplemented: `bounded_content` is the one place this repository cuts text, which is why
+    this asserts the mark rather than a wording.
+    """
+    from chemclaw.agent.framing import SYSTEM_SPEECH_MARK
+
+    written = "z" * (settings.agent_subagent_files_max_chars * 4)
+    files = _spawn_state(read=True, written=written).get("files") or {}
+    content = "".join(str(data.get("content", "")) for data in files.values())
+
+    assert SYSTEM_SPEECH_MARK in content, (
+        "a helper's file was cut with nothing in it saying so, so a caller reading it back gets a "
+        "document that stops mid-sentence and no way to tell that from the end of the file"
+    )
+    assert content.startswith("z") and content.rstrip().endswith("z"), (
+        "the cut kept only one end; `bounded_content` keeps both so a reader can see what the "
+        "document was going towards"
+    )
+
+
+def test_several_files_share_one_budget() -> None:
+    """The budget is the channel's, so a per-file cap times unbounded files is not a bound.
+
+    Driven on a constructed command rather than through a spawn, because the property is
+    arithmetic: what a fixture would add is a second way to write two files, not evidence. The
+    share is the same division `bounded_for_batch` applies across a batch of tool calls, and for
+    the same reason.
+    """
+    from deepagents.backends.utils import create_file_data
+    from langgraph.types import Command
+
+    from chemclaw.agent.tool_result_shape import rewritten_command_files
+    from chemclaw.agent.tool_result_size import _bounded_file
+
+    budget = settings.agent_subagent_files_max_chars
+    files = {f"/scratch/n{index}.md": create_file_data("z" * budget) for index in range(4)}
+    bounded = rewritten_command_files(Command(update={"files": files}), _bounded_file)
+
+    stored = sum(len(str(d.get("content", ""))) for d in bounded.update["files"].values())
+    assert stored <= budget, (
+        f"four files of {budget} characters each stored {stored} against a {budget} budget, so the "
+        "cap is per file and four helpers' worth of files is four times the bound"
+    )

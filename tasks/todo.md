@@ -292,7 +292,17 @@ rows: a per-call bound with nothing bounding N of them.
       `STANDARDIZATION_VERSION` bump forks the table permanently and the runtime role holds no
       DELETE. `predictions` needs a `calc_version` retirement policy, not a row cap; `measurements`
       is unbounded and accepted. `D-2026-09-12-a-bound-on-an-agent-writable-table-is-a-row-count`.
-- [ ] W23.6 `Chemclaw3` — nothing bounds what a helper writes into its caller's checkpointed state.
+- [x] W23.6 `Chemclaw3` — nothing bounds what a helper writes into its caller's checkpointed state.
+      **Done for the channel the row names, and the residual is measured rather than implied.**
+      Driven: 2,000,137 chars of `files` against a 57-character thread, now capped at
+      `agent_subagent_files_max_chars` (a total several files share). On a real saver with
+      **incompressible** text — the first measurement padded with `"x"` and measured TOAST
+      compression instead — one 2 MB helper write costs 20,712 kB of checkpoint rows above a 296 kB
+      baseline (10.4x, not 7.8x), and this cap reclaims 1,824 kB, **8.8%**. The other 91% is the
+      helper's *own* subgraph checkpoints, which a `wrap_tool_call` middleware cannot reach; that is
+      a `BACKLOG.md` row with the measurement. It is a one-off per spawn, not recurring: two later
+      turns on the same thread added 56 kB in both arms.
+      `D-2026-09-12-a-helpers-scratch-file-crosses-into-its-callers-state`.
 - [x] W23.7 `Chemclaw3` — a timed-out parse still runs to completion on the worker thread [L]:
       the wall clock frees the caller, not the CPU. **Done** — and the row understated it. The pod
       *was* bounded (`_ParseSlots` shed the third upload in 2.00 s); the defect is that a slot is

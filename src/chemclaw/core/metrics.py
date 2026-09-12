@@ -382,6 +382,14 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_preference_evictions_total": (
         "Preferences dropped because one owner was over `preferences_max_per_owner`."
     ),
+    # A helper's scratch file cut on its way into the caller's checkpointed state. Its own series
+    # rather than the tool-result truncation counter because it bounds a different resource — that
+    # one is context, this is what a checkpoint costs — and an operator reading a rising rate here
+    # is being told a helper is writing more than the channel budget allows, which is a prompt
+    # problem rather than a storage one.
+    "chemclaw_subagent_file_truncations_total": (
+        "Files a helper wrote that were cut on their way into its caller's state."
+    ),
     "chemclaw_document_parse_kills_total": (
         "Document parses whose reader process was killed for outrunning its deadline."
     ),
