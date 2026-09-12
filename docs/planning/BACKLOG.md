@@ -101,9 +101,11 @@ topic).
   The false sentence is corrected in this commit; the gap is not. Anchors:
   `connectors/registry.py::_bound_by_this_process`, `agent/chemclaw_agent.py::_register_generated_tools`.
 
-- [ ] **The JWKS fetch follows an ambient proxy and has no seam to stop it** — [M], opened
-  2026-09-05 by the review of `D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`.
-  `api/auth.py:85` builds a `PyJWKClient`, whose `fetch_data` calls `urllib.request.urlopen` —
+- [ ] **The JWKS fetch follows an ambient proxy and has no seam to stop it** — **[S], re-sized from
+  [M] on 2026-09-12 because the decision this row said it needed turned out not to be needed.**
+  Opened 2026-09-05 by the review of `D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`.
+  `api/auth.py:92` (inside `_client_for`, `:88`) builds a `PyJWKClient`, whose `fetch_data` calls
+  `urllib.request.urlopen` —
   which resolves proxies from the process-global default opener and has no `trust_env`. Measured
   with a recorder standing in as the proxy: it received
   `GET http://login.microsoftonline.com/tenant/discovery/v2.0/keys`. **This is the anchor every
@@ -120,19 +122,25 @@ topic).
   half is moot — the JWKS fetch only happens when `entra_required` is on — but the sentence was
   being read as a statement about the boot refusal in general, and as that it is false. The
   asymmetry with the LLM seam stands.
-  **Not a one-liner, which is why it is a row.** `PyJWKClient` takes `ssl_context` and no opener,
-  so the only in-process fix is
-  `urllib.request.install_opener(build_opener(ProxyHandler({})))` at import — a process-wide side
-  effect on every library that reaches for `urlopen`, which wants its own decision rather than
-  riding along. The alternative is vendoring `fetch_data`, which couples this module to a surface
-  it does not otherwise use (`_match_kid` is already written the long way for that reason).
+  **The sentence that made this a row was measured false on 2026-09-12.** It said the only
+  in-process fix is `urllib.request.install_opener(build_opener(ProxyHandler({})))` — a process-wide
+  side effect on every library that reaches for `urlopen` — with vendoring `fetch_data` as the only
+  alternative. There is a second route and it is **host-scoped**: `ProxyHandler.proxy_open` consults
+  `proxy_bypass` per request, so adding the JWKS host to `no_proxy` before the client is built works
+  even after the default opener is cached, and touches no other `urlopen` caller. Driven three ways
+  against a loopback recorder — baseline proxied, `no_proxy` not proxied, `install_opener` not
+  proxied. It is also already this module's own vocabulary: `core/netguard.py:529` tells operators to
+  add these destinations to `NO_PROXY`. So no decision is outstanding; what is left is the edit plus a
+  regression test shaped like the probe. Confirmed against PyJWT 2.13.0, whose
+  `PyJWKClient.__init__` takes `ssl_context` and no opener, session or `trust_env`.
   Anchors: `api/auth.py::_client_for`, `core/netguard.py::refuse_proxied_egress`.
 
 - [ ] **An external vector store's client builds its own httpx and is outside the proxy fix** —
   [S], opened 2026-09-05 by `D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`.
-  `retrieval/vectors/qdrant.py:118` constructs `AsyncQdrantClient`, which builds its own httpx
-  client internally and takes only `verify` from this repository — so `trust_env` stays at its
-  default and a configured proxy would carry that traffic. It is **not** the LLM seam, so no prompt
+  `retrieval/vectors/qdrant.py:131` (inside `open_qdrant_client`, `:99`) constructs
+  `AsyncQdrantClient`, which builds its own httpx client internally and was passed only `verify` from
+  this repository — so `trust_env` stayed at its default and a configured proxy would carry that
+  traffic. It is **not** the LLM seam, so no prompt
   or bearer is on it; what is on it is embedded note text and the query vectors. Recorded rather
   than blind-patched for one reason: `qdrant_client` is not in this closure (`pgvector` is the
   shipped provider), so the claim "passing a client works" would be untested prose, which is the
@@ -153,9 +161,13 @@ topic).
   sdk-core open sockets through neither. Measured with the allowlist deliberately **empty** and no
   proxy variables set: `grpc.insecure_channel`, the OTLP gRPC span exporter and
   `temporalio.Client.connect` all reached an external listener with `chemclaw_egress_refused_total`
-  at 0. `derive_allowed` adds `otel_endpoint` and `temporal_address` all the same, which reads as a
-  bound and is not — the docstrings at `core/netguard.py` now say so in both places, which is the
-  part that was cheap. **Why it matters beyond the general concession**: with
+  at 0 — re-driven 2026-09-12, seven TCP connections reached a non-loopback listener while the
+  counter moved only for the pure-Python control, and the Temporal leg additionally connected to the
+  **real** broker with `_refused` at 0. `derive_allowed` adds `temporal_address` unconditionally and
+  `otel_endpoint` **only under `otel_enabled`** (`netguard.py:269`) — this row said both
+  unconditionally, which is not false in substance, since the host is listed whenever the exporter
+  runs, but it is the sentence a reader checks. Either way it reads as a bound and is not; the
+  docstrings at `core/netguard.py` now say so in both places, which is the part that was cheap. **Why it matters beyond the general concession**: with
   `otel_include_sensitive_data` on, that exporter carries prompts and completions, so a wrong or
   hostile `CHEMCLAW_OTEL_ENDPOINT` exports them anywhere while both signals an operator would check
   (`chemclaw_egress_refused_total`, `chemclaw_egress_guard_armed`) report health. **And the two
@@ -163,24 +175,39 @@ topic).
   to a *loopback* proxy — invisible to the socket guard because it is a compiled extension, and
   invisible to the NetworkPolicy because a sidecar shares the pod's netns. The module's fallback
   ("those are the NetworkPolicy's job") does not hold for that combination.
-  **Not a one-liner, which is why it is a row.** Closing it means an `LD_PRELOAD`/seccomp layer or
-  a per-library interception (grpc exposes no socket factory hook; `temporalio` dials in Rust), i.e.
-  a decision about what enforces egress rather than an edit to this module. The cheaper half that
+  **Not a one-liner, which is why it is a row** — but one of the two candidate mechanisms is no
+  longer hypothetical. Measured 2026-09-12 against a **real** gRPC server reached over a non-loopback
+  route, an `LD_PRELOAD` interposition on libc `connect` refused the plain socket, `grpc` and
+  `temporalio` alike, with grpc's own C-core reporting `connect failed: ... Operation not permitted`,
+  while loopback continued to work for all three. So Temporal's Rust sdk-core does go through glibc
+  `connect` here — measured, not assumed. What that does **not** cover has to be stated rather than
+  implied: a statically linked binary or a direct syscall, and `getaddrinfo`/UDP unless those are
+  interposed too. Per-library interception stays the dead end the row describes (grpc exposes no
+  socket factory hook; `temporalio` dials in Rust). The remaining decision is whether this
+  deployment wants a `.so` in the image plus a pod env var — which is the `MCP_EGRESS_GUARD=off`
+  shape and needs the same "no shipped deployment disables it" assertion. The cheaper half that
   remains open is the chart: `networkPolicy.egressDestinations` does not say it is the only layer
   bounding these two, nor what a loopback sidecar does to that. Anchors:
   `core/netguard.py::arm`, `::derive_allowed`, `deploy/helm/chemclaw/values.yaml` (`networkPolicy`).
 
-- [ ] **Six live-lane httpx clients read the ambient proxy, one of them carrying a bearer** — [S],
-  opened 2026-09-06 by the same review. `cli/live_probes.py:340` builds an `Authorization: Bearer`
-  client carrying `live_probe_token`, and `cli/live_storm.py` (five sites), `cli/phoenix_publish.py`
-  and `evals/live.py` build clients, all at httpx's default `trust_env=True`. None is on a path a
-  chemist reaches, which is why it is [S] rather than the finding itself — but
+- [ ] **Seven live-lane httpx clients read the ambient proxy, one of them carrying a bearer — plus a
+  Phoenix SDK client that builds its own** — [S], opened 2026-09-06 by the same review. **The count
+  said six and one of the four modules was misattributed; both corrected 2026-09-12 by re-running the
+  test's own AST walker.** `cli/live_probes.py:340` builds an `Authorization: Bearer` client carrying
+  `live_probe_token`; `cli/live_storm.py:216,259,533,650,1293` and `evals/live.py:581` build httpx
+  clients, all at httpx's default `trust_env=True`. `cli/phoenix_publish.py:30` builds **no httpx
+  client at all** — it is `phoenix.client.Client`, matched by the detector only because it keys on the
+  bare name `Client`; the installed SDK takes `http_client`, so that site closes by passing
+  `httpx.Client(trust_env=False)`. None is on a path a chemist reaches, which is why it is [S] rather
+  than the finding itself — but
   `core/netguard.py`'s docstring asserted "every first-party HTTP client here passes
   `trust_env=False`" as the correctness argument for charging two destinations instead of twelve,
-  and that sentence was false for these six.
+  and that sentence was false for these seven.
   `tests/test_netguard.py::test_every_served_http_client_refuses_the_ambient_proxy` now enforces the
   property with these four modules in a named exemption list, so a *new* client anywhere else fails
-  on the day it is written; closing this row is deleting the list, one keyword per site. It is a row
+  on the day it is written — and the list's granularity is a **module path**, so a new client added
+  inside one of those four files is exempt too, which is worth closing in the same commit. Closing
+  this row is deleting the list, one keyword per site (eight sites, seven of them httpx). It is a row
   rather than a patch only because those files belong to another surface than the one that found it.
   Anchors: `cli/live_probes.py`, `cli/live_storm.py`, `cli/phoenix_publish.py`, `evals/live.py`,
   `tests/test_netguard.py::_TRUST_ENV_LANE_EXEMPTIONS`.
@@ -189,13 +216,25 @@ topic).
   opened by `D-2026-09-04-a-gateway-is-the-only-provider`. `_refuse_unconfigured_llm_gateway` and
   `_refuse_unauthenticated_exposure` are called only from `api/app.py`, so a background worker
   never runs either — and `durable/template_activities.py` builds a graph inside an activity, so a
-  worker pod *does* make model calls to `llm_base_url`. The chart is not affected (verified:
-  `helm template` renders `CHEMCLAW_LLM_BASE_URL` into `chemclaw-config`, and 9 Deployments plus 3
-  Jobs `envFrom` it), so this bites a non-Helm or partially-overridden deployment, which gets a
-  silent loopback dial in the worker where the front door would have refused to boot.
-  **Not a one-liner, which is why it is a row.** The guard's signal is `service_host` being
-  non-loopback — a property of a *bind*, and a worker does not bind. Extending it means deciding
-  what "exposed" means for a process that only makes outbound calls, which is a design question.
+  worker pod *does* make model calls to `llm_base_url` — driven end to end 2026-09-12: importing
+  `durable/background_worker.py` exposes neither guard, `template_activities.run_agent_step` is a
+  real `@activity.defn`, and in that guard-free process a model call reached a loopback recorder at
+  `/v1/chat/completions`. The shipped default that makes it silent is
+  `llm_base_url = "http://127.0.0.1:8820/v1"` (`core/config/llm.py:47`). The chart is not affected,
+  **and this row's own verification of that was wrong**: re-rendered with helm 3.16.3,
+  `CHEMCLAW_LLM_BASE_URL` lands in **two** ConfigMaps — 9 Deployments plus 2 Jobs `envFrom`
+  `chemclaw-config`, while `chemclaw-migrate` `envFrom`s `chemclaw-config-hook`, which carries the
+  same key. "9 Deployments plus 3 Jobs `envFrom` it" is false of any one ConfigMap; the conclusion
+  stands. So this bites a non-Helm or partially-overridden deployment, which gets a silent loopback
+  dial in the worker where the front door would have refused to boot.
+  **This is two rows, and only one of them carries the design question** (split 2026-09-12).
+  `_refuse_unconfigured_llm_gateway`'s signal is *configuration* — a loopback or empty `llm_base_url`
+  in a process that makes model calls — so it is closable now by hoisting it out of
+  `api/middleware.py` into a process-kind-agnostic home and calling it from `background_worker.main()`
+  and the connector-worker entrypoints. `_refuse_unauthenticated_exposure` is the half that cannot
+  follow: its signal is `service_host` being non-loopback, a property of a *bind*, and a worker does
+  not bind. Extending **that** one means deciding what "exposed" means for a process that only makes
+  outbound calls, which is a design question and stays open.
   The front-door-only scope is pre-existing (`_refuse_unauthenticated_exposure` has always been
   that way); what is new is that the ADR's argument — "loudly at boot rather than loudly on the
   first turn" — only holds for one of the two process kinds.

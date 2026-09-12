@@ -159,9 +159,28 @@ whose own text says the stated guarantee is narrower than the sentence asserting
 - [ ] W21.6 `Chemclaw3-mcp` — **create `docs/decisions/` and a `BACKLOG.md`.** The fleet has no
       decision record, so every argument in its `CLAUDE.md` is unanchored prose. This wave's own
       findings are its first rows. (Prerequisite for R7 in every later fleet wave.)
-- [ ] W21.7 `Chemclaw3-mcp` — generalise `tests/test_fleet.py:666`'s pattern (no shipped deployment
-      widens `MCP_EGRESS_ALLOW`) to `MCP_EGRESS_GUARD=off` and to every resource bound. Today a
-      deployment can disable the guard and nothing refuses.
+- [ ] W21.7 `Chemclaw3-mcp` — **this row was wrong and the Scout pass corrected it.** It said
+      `tests/test_fleet.py:666` covers `MCP_EGRESS_ALLOW` and not `MCP_EGRESS_GUARD`. Measured: it
+      covers **both**. What is actually open is four things, three of them found by looking:
+      (a) `_egress_offences` (`tests/test_fleet.py:641`) matches `^ENV\s+(MCP_EGRESS_[A-Z_]+)=` under
+      `re.MULTILINE`, and `servers/rxnlabel/Containerfile:78` and `servers/rxnpredict/Containerfile:56`
+      both set `MCP_EGRESS_GUARD=on` as a backslash-continuation — so for **two of seven** servers,
+      flipping it to `off` or adding an allowlist beside it passes the ratchet. Worse,
+      `test_the_allowlist_check_bites` (`:700`) drives only the own-line form, i.e. the one shape
+      those two files do not use: the bites-test certifies the arm the tree does not exercise. This is
+      `Chemclaw3`'s own "a basis that is re-derived rather than observed will agree with itself
+      forever", one repository over.
+      (b) **No ratchet protects any resource bound.** `_egress_offences` discards every env pair not
+      named `MCP_EGRESS_*`; twelve bounds are `os.environ`-readable and widenable with nothing red,
+      two of them the concurrency ceilings that repository's own `CLAUDE.md` calls non-negotiable.
+      `calc` is the one server whose bounds are constants.
+      (c) `grpc` is absent from `no_egress.FORBIDDEN_MODULES`, and measured it opens real connections
+      with the guard armed and the counter flat — `grpcio` is lockfile-reachable through `tensorboard`
+      under `rxnpredict`'s ML extras, so the static scan is the only in-repo layer that could see it.
+      (d) `egress.py`'s docstring concedes **four** channels outside the guard; that repository's
+      `CLAUDE.md` names three, omitting `_socket.socket` — the one the runtime guard provably cannot
+      reach. And `no_egress.py`'s docstring concedes neither `ctypes` nor `grpc`, so a reader of a
+      clean scan cannot learn the case is outside both layers.
 
 **Acceptance** — R6 in both repos; an LD_PRELOAD/seccomp decision recorded either way; the counter
 and `chemclaw_egress_guard_armed` shown to move under a driven gRPC attempt, or the ADR stating
@@ -381,6 +400,18 @@ of three repositories ship through a Jenkins pipeline that can skip its own gate
       both pipelines calling it.
 - [ ] W29.9 `Chemclaw3` — snapshot refresh has no named owner or cadence in any fleet server README
       (`MODULES.md` open question (c)). Assign or record the posture.
+- [ ] W29.10 `Chemclaw3` — **the dependency gate and GitHub disagree, and the gate's own config file
+      says otherwise.** Measured 2026-09-12: `make deps-audit` reports no known vulnerabilities over
+      both the production closure and the full one (212 and 246 packages), while a push to this
+      repository returns `GitHub found 7 vulnerabilities on ... default branch (1 high, 6 moderate)`.
+      `--no-dev` is *not* the gap — both arms were run. `.github/dependabot.yml` declares two
+      ecosystems, `uv` **and `github-actions`**, and the actions are SHA-pinned while nothing in
+      `make ci` audits them; that same file's header asserts "the pipeline already *detects* a
+      vulnerable closure — `make deps-audit` runs `pip-audit` against `uv.lock`, blocking, in both
+      workflows", which is true of Python and silent about the ecosystem the file adds an updater for
+      twelve lines later. Determine which ecosystem holds the seven, then either widen the gate or
+      correct the claim. Anchors: `Makefile::deps-audit`, `.github/dependabot.yml`,
+      `.github/workflows/image.yml`.
 
 **Acceptance** — build one fleet image and diff its resolved packages against `uv.lock` (expect
 zero); flip a suppressed advisory's pinned version and show the gate go red; run the UI's new `npm
