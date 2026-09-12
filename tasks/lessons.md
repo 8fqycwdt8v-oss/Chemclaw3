@@ -2276,3 +2276,54 @@ corrected for promising a retry that only one of its two callers performs — an
 immediately above it went on saying "the job will be retried" through that whole commit and its
 review. **Rule: when a claim is wrong in one place, grep the claim rather than fixing the line;
 the same sentence usually exists two or three times within the same function.**
+
+## A survey's exemption is the claim to re-measure (2026-09-12)
+
+**What happened.** Briefing an implementer to put a ratchet over the MCP fleet's resource bounds, I
+handed it a table of twelve env-overridable bounds and a sentence I had taken from a survey without
+checking: *"`calc`'s bounds are not env-readable — constants only — so `calc` is the one server where
+the ceiling cannot be widened by a deployment."* The implementer derived the set from the code
+instead and found **42**, `calc`'s among them. Verified independently:
+
+```
+defaults : 4 500
+with env : 99 99999     # CHEMCLAW_CALC_MAX_CONCURRENT_REQUESTS, CHEMCLAW_XTB_MAX_ATOMS
+```
+
+`calc` is the server whose calls take minutes to hours. Had the implementer worked to my table, the
+ratchet would have shipped blind to the heaviest server in the fleet, and the gap would have read as
+covered.
+
+**Why the survey was wrong, in a form worth reusing.** It read `engine/admission.py` and
+`engine/xtb_cli.py`, saw module-level `int` constants, and concluded "constants only". The values
+flow from a `pydantic-settings` class two files away whose `env_prefix="CHEMCLAW_"` makes every field
+an environment variable. **An `os.environ`/`getenv` grep cannot see a pydantic-settings field** — so
+any inventory of "what a deployment can change" built by grepping for env reads is short by exactly
+the settings-class mechanism, which is the mechanism a well-structured repository uses.
+
+**Rule: a survey sentence of the form "X is the one case where this cannot happen" is the sentence
+to re-measure first.** It is the claim that scopes work *away* from X, so believing it costs exactly
+the case it exempts, and it is never the claim anyone checks — an exemption reads as diligence.
+
+**Rule: brief an implementer with the measurement and the anchors, never with the conclusion.** Three
+further framing claims in the same brief were wrong and the implementer caught each only because it
+had been given room to re-derive: the widening form I preferred (`value > default`) mis-scores
+`CHEMCLAW_CREST_THREADS=4` against a default of `0` meaning "size from `/proc/cpuinfo`", which is a
+*narrowing* reading as a widening; `ctypes` must not go on the forbidden-import list because
+`pyexec`'s sandbox needs it for `prctl(PR_SET_DUMPABLE, 0)`; and the egress ratchet saw the guard in
+5 of 7 Containerfiles, not 7.
+
+## Ask what fanned-out implementers share, not just which files they own (2026-09-12)
+
+**What happened.** I launched three implementers into the same working tree on the same branch,
+having carefully given each a disjoint set of source files. Disjoint files are not the unit of
+sharing. They would have shared **one git index** — the failure already in this log, where a plain
+`git commit` swept unrelated staged files into a note's commit — and each would have run `make type`
+over 840 files while the others were mid-edit, so any of them could have chased, or "fixed", another
+agent's half-written module. I stopped all three before any had written a byte, verified the tree
+clean, and ran them serially instead while work in a *different repository* continued in parallel.
+
+**Rule: before fanning out, enumerate what the agents share — the index, the virtualenv, the
+database, the full-tree gate — not only the files.** Parallelism is free across repositories and
+expensive inside one checkout. If it must be inside one, give each agent its own worktree, and
+remember a worktree needs its own environment before `uv run` means anything in it.

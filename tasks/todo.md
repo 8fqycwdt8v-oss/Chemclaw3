@@ -171,9 +171,16 @@ whose own text says the stated guarantee is narrower than the sentence asserting
       `Chemclaw3`'s own "a basis that is re-derived rather than observed will agree with itself
       forever", one repository over.
       (b) **No ratchet protects any resource bound.** `_egress_offences` discards every env pair not
-      named `MCP_EGRESS_*`; twelve bounds are `os.environ`-readable and widenable with nothing red,
-      two of them the concurrency ceilings that repository's own `CLAUDE.md` calls non-negotiable.
-      `calc` is the one server whose bounds are constants.
+      named `MCP_EGRESS_*`. **This row said twelve bounds and named `calc` as the one server whose
+      bounds are constants and therefore safe; both were measured false on 2026-09-12.** The shipped
+      ratchet derives **42** by AST over `packages/*/src` and `servers/*/src`, covering both
+      mechanisms — an env read converted by `int`/`float`, and a numeric `pydantic-settings` field
+      under an `env_prefix`. `calc` is not the exception but the **worst case**: `CalcSettings`
+      (`servers/calc/.../engine/config.py:64`) carries `env_prefix="CHEMCLAW_"`, so
+      `CHEMCLAW_CALC_MAX_CONCURRENT_REQUESTS=99 CHEMCLAW_XTB_MAX_ATOMS=99999` moves that pod 4 → 99
+      and 500 → 99999 — on the server whose calls take minutes to hours. The survey missed it because
+      an `os.environ`/`getenv` grep cannot see a pydantic-settings field, which is why the set had to
+      be derived rather than listed.
       (c) `grpc` is absent from `no_egress.FORBIDDEN_MODULES`, and measured it opens real connections
       with the guard armed and the counter flat — `grpcio` is lockfile-reachable through `tensorboard`
       under `rxnpredict`'s ML extras, so the static scan is the only in-repo layer that could see it.
