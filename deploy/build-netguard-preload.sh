@@ -21,4 +21,14 @@ if [ "$#" -ne 2 ]; then
     exit 64
 fi
 
+# The output directory is created here rather than by either caller, because the two callers
+# disagree about whether it exists and only one of them said so. The image builds into `/app/lib`,
+# which nothing in `deploy/Containerfile` had created -- `ld` answers that with
+# "cannot open output file ... No such file or directory" and the whole build fails. The suite
+# builds into a temp root that always exists, so it could not have caught it, and `docker build`
+# does not run in the sandbox this was written in (a pre-existing TLS failure against the Red Hat
+# CDN, in the `dnf -y update` line above it). CI caught it. Putting the `mkdir` in the shared
+# script means neither caller has to remember, which is the same argument that put the flags here.
+mkdir -p "$(dirname "$2")"
+
 exec "${CC:-gcc}" -shared -fPIC -O2 -Wall -Wextra -Werror -o "$2" "$1" -ldl

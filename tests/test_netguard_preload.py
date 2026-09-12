@@ -73,7 +73,16 @@ def interposer() -> Path:
     """
     if shutil.which(os.environ.get("CC", "gcc")) is None:  # pragma: no cover - toolchain-dependent
         pytest.skip("no C compiler: the interposer cannot be built, so nothing here is measured")
-    target = Path(os.environ.get("PYTEST_DEBUG_TEMPROOT", "/tmp")) / netguard_preload.LIBRARY_NAME
+    # Into a directory that does **not** exist yet, deliberately. This fixture used to build into a
+    # temp root that always does, so it could not observe whether the script creates its own output
+    # directory -- and the image builds into `/app/lib`, which nothing creates. The result was a
+    # green suite and a failed `docker build`, found by CI rather than here. Mirroring the image's
+    # shape is what makes this fixture evidence about the thing the image runs.
+    target = (
+        Path(os.environ.get("PYTEST_DEBUG_TEMPROOT", "/tmp"))
+        / "netguard-preload-build"
+        / netguard_preload.LIBRARY_NAME
+    )
     subprocess.run(
         ["sh", str(_BUILD_SCRIPT), str(netguard_preload.SOURCE), str(target)],
         check=True,
