@@ -982,6 +982,61 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "type": "graph",
+      "title": "Evictions from what an agent writes",
+      "datasource": "prometheus",
+      "span": 12,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(chemclaw_memory_evictions_total[1h]))",
+          "legendFormat": "memory files past agent_memory_max_files",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(chemclaw_preference_evictions_total[1h]))",
+          "legendFormat": "preferences past preferences_max_per_owner",
+          "refId": "B"
+        }
+      ],
+      "id": 23,
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 76
+      }
     }
   ],
   "refresh": "30s",
