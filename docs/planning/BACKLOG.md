@@ -1315,29 +1315,40 @@ core-level `trace_and_identity_headers()` that `connectors/identity.py` composes
 which is a small change once the question is answered and a layering exception if it is not.
 Found by the 2026-08-27 logging and monitoring review.
 
-## Two producers bind a template step's ambient identity, and only one of them is needed
+## Template step roles cross the durable boundary on an unsigned payload
 
-`durable/interceptor.py` binds the actor, the roles, the session and the correlation id around
-*every* activity on every worker, reading them one level into a nested `identity` field — which is
-exactly the shape `durable/template_activities.py`'s `ToolStepInput`, `AgentStepInput` and
-`JobStepInput` use. Measured against those real models, `activity_context` returns the same four
-values `template_activities._acting_as:161` binds, over a scope that strictly contains the
-bracket's. So on a worker the bracket is redundant in full.
+`durable/template_activities.py::_acting_as` binds `StepIdentity.roles` — the requester's real role
+set, lifted out of a workflow argument. Every other reader of that payload binds
+`frozenset()` on purpose (`durable/interceptor.py::activity_context`, `D-2026-08-28`): a relayed
+argument is data, not a verified claim, so a role taken from it is a role anyone who can enqueue an
+activity could forge.
 
-It is still there, and deleting it is not a tidy-up: with the bracket neutered, four tests fail, and
-two of them — `test_an_expensive_job_step_is_refused_for_an_unentitled_requester` and
-`test_an_entitled_requester_passes_the_same_gate` in `tests/test_template_job_step.py` — are the
-proof that a template step cannot run a tool its requester could not run. They invoke
-`authorize_job_step` directly, where no interceptor runs, so collapsing the two producers means
-moving a security control's proof onto a worker harness. That is the whole of the work and the whole
-of the risk; decide it deliberately rather than by deletion. The two cannot drift while both stand,
-because both read `StepIdentity`'s own fields.
+The template path is the exception and the exception is argued, not an oversight.
+`authorize_job_step` is the **first** authorization a template step gets — a step launched by
+another step has no front-door pre-check behind it — so binding empty there would refuse every
+entitled template job rather than fail closed on a forgery. Measured: neutering only the role bind
+leaves `test_an_expensive_job_step_is_refused_for_an_unentitled_requester` still refusing and fails
+`test_an_entitled_requester_passes_the_same_gate` outright.
 
-The same question does **not** apply to `connectors/calc/activities.py::_acting_for`: the
-interceptor skips plain string arguments by design, so it binds nothing there and that bracket is
-the only producer on the calc job path.
+**What it rests on today is broker write access being restricted** — Temporal mTLS, enforced under
+`entra_required` — which is a deployment property rather than a check this code makes. Closing it
+properly means a **signed payload**: a Temporal codec (or payload converter) that signs
+`StepIdentity` on the way out and verifies on the way in, after which `_acting_as` binds a verified
+claim and the exception disappears. That is a new piece of work with its own release story (a codec
+is cluster-wide and both sides must be deployed before either relies on it), not an edit.
 
-Found resolving the merge of #256's branch with #258.
+**Trigger.** A deployment that runs `TemplateWorkflow` on a broker whose write access is not
+restricted to this system's own workers — a shared cluster without mTLS, or a namespace other
+teams can enqueue into.
+
+Anchors: `durable/template_activities.py::_acting_as` (the bind and its eleven-line comment),
+`durable/interceptor.py::activity_context` (the fail-closed reader beside it),
+`tests/test_template_job_step.py` (the pair that fails in opposite directions).
+
+Replaces "two producers bind a template step's ambient identity, and only one of them is needed",
+whose title was its premise: the two producers disagree about `roles`, on purpose, and collapsing
+them would refuse entitled work rather than weaken a refusal
+(`D-2026-09-12-two-producers-of-one-identity-are-not-redundant-when-they-disagree`).
 
 ## `propose_report` proposes nothing, and its name is a registered activity name
 
