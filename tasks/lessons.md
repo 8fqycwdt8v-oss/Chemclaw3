@@ -2356,3 +2356,22 @@ indistinguishable from outside.
 **Rule: a mutation step asserts that the file changed before it runs the test.** `git diff --quiet
 <file> && echo "MUTATION DID NOT APPLY"` is the whole fix, and it belongs in the harness rather than
 in the reading of its output, because the reading is where the optimistic interpretation lives.
+
+## 2026-09-12 — never `git checkout` a file whose only copy of your work is uncommitted
+
+Mutation testing (R3) means editing a shipped file, running a test, and reverting. I reverted with
+`git checkout <file>` on three files whose changes were **uncommitted**, and destroyed about forty
+minutes of work in `plan_gate.py`, `routes/plan.py` and `cli/chat.py` — silently, because the
+mutation's own test run had already printed its red line and the loss only showed up when an
+unrelated test went red afterwards.
+
+`git checkout` restores from the index. During a mutation the index holds the *pre-change* file, so
+the revert throws away the fix and the mutation together.
+
+**Rule: back the file up before mutating it and restore from the backup, never from git** —
+`cp f $SCRATCH/b.f; <mutate>; pytest ...; cp $SCRATCH/b.f f`. Committing the fix first also works
+and is better when the fix is finished; the backup is what covers mutating work in progress.
+
+The tell that something was wrong was a mutation reddening a test it had no business touching
+(`test_a_refusal_outside_the_scope_names_what_was_approved` failing on a change to the HTTP route).
+**A mutation that reddens the wrong test is a signal about the tree, not about the test.**
