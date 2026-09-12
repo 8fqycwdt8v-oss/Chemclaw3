@@ -148,16 +148,6 @@ topic).
       for the audit trail, where that question can be answered. What stays open is unchanged: the
       string is still the caller's to choose.
 
-- [ ] **`build_langgraph_agent(connectors=...)` accepts a tool that shadows a first-party name** —
-      [S], the residual `D-2026-09-04-a-name-is-one-capability-across-every-namespace` names and
-      leaves open, and whose `BACKLOG.md` row was never written. `connectors/registry.py`'s
-      `_declared_tool_names` refuses a *manifest* claiming `record_knowledge_note`, and that is
-      the path a deployment takes; the `connectors` keyword is the one that bypasses it, because
-      `agent/langgraph_agent.py`'s `bound = [*(as_structured_tool(fn) for fn in tools),
-      *(connectors or [])]` concatenates the two lists with no name check at all. Closed in
-      practice and open in the type: the check belongs beside that concatenation, over the names
-      the first list already declares.
-
 ## 2 — Answers that are wrong without saying so
 
 - [ ] **RRF's premise is independent rankers and this system has correlated ones;
