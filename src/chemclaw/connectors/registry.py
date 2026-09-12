@@ -689,15 +689,20 @@ def _bound_by_this_process() -> dict[str, str]:
     into the very registry read here — so reading them back would make every deployment with jobs
     fail on its second build, on a name it declared itself. The launchers are recognised by the
     module that generated them rather than by a marker, so there is nothing to remember to set.
-    **Template launchers are a fourth name space and this sentence used to claim they were
-    covered.** It read "template launchers are deliberately *not* excluded", which is true of the
-    exclusion above and false about the outcome: measured, a bundle declaring
-    `run_bond_strength_survey` is accepted. The launchers are not in `registered_tools()` when this
-    runs — `chemclaw_agent._register_generated_tools` is `[*job_tools(), *template_tools()]`, so
-    the collision check has already returned before the first launcher is registered. The gap is
-    the ordering, not the exclusion. Filed in `docs/planning/BACKLOG.md` rather than closed here,
-    because reading the template registry from this module is a new import edge
-    (`tests/test_layering.py`) and a decision about which registry owns that name space.
+    **Template launchers are a fourth name space, and they are named here rather than left to the
+    registry walk.** `registered_tools()` cannot answer for them at the moment this runs:
+    `chemclaw_agent._register_generated_tools` is `[*job_tools(), *template_tools()]`, so this
+    check has already returned before the first launcher is registered — measured, a bundle
+    declaring `run_bond_strength_survey` was accepted on exactly the paths that ship cold
+    (`make connector-validate`, a fresh pod loading its manifests), and refused only in a process
+    that had already built an agent, where it came back as *"an in-process tool"* — the wrong
+    reason for an operator to be handed.
+
+    So the launcher names are asked for directly, the way the three name spaces above are, rather
+    than being hoped for in the registry. That also settles which registry owns the name space:
+    `chemclaw.templates.registry` does, and this module reads it through `chemclaw_agent` — the
+    same already-declared `connectors -> agent` edge the import above uses, so no new one is
+    introduced and *when* a misconfiguration is reported does not move.
     """
     from chemclaw.agent import chemclaw_agent
 
@@ -709,6 +714,9 @@ def _bound_by_this_process() -> dict[str, str]:
     bound.update(dict.fromkeys(chemclaw_agent.skill_tool_names(), "a scratchpad file verb"))
     bound.update(dict.fromkeys(chemclaw_agent.harness_tool_names(), "a plan-harness tool"))
     bound.update(dict.fromkeys(chemclaw_agent.subagent_tool_names(), "the subagent spawner"))
+    # Asked for rather than read off `registered_tools()`, because the launchers are registered
+    # *after* this check runs — see the paragraph above for the measurement.
+    bound.update(dict.fromkeys(chemclaw_agent.template_tool_names(), "a step-template launcher"))
     return bound
 
 

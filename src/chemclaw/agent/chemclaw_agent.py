@@ -55,7 +55,16 @@ from chemclaw.core.tool_registry import (
     registered_tool_names,
     registered_tools,
 )
-from chemclaw.templates.registry import template_tool_names, template_tools
+
+# `template_tool_names` is re-exported deliberately, alongside the three sibling name-space readers
+# defined below: this module is where the six of them are assembled (`available_tool_names`), and
+# `connectors/registry._bound_by_this_process` reads all four from here over the already-declared
+# `connectors -> agent` edge rather than opening a `connectors -> templates` one for a single name
+# list. The `as` is what makes the re-export explicit to `mypy --strict`.
+from chemclaw.templates.registry import (
+    template_tool_names as template_tool_names,
+)
+from chemclaw.templates.registry import template_tools
 
 
 @dataclass(frozen=True)

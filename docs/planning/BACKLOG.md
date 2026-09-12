@@ -77,30 +77,6 @@ topic).
   `tests/test_retention.py::test_no_disposal_entry_offers_actor_erasure_as_what_bounds_a_table` is
   what stops the next rewording leaning on erasure again.
 
-- [ ] **A connector can claim a step-template launcher name, and the registry says it cannot** —
-  [S], found 2026-09-05 reviewing the ambient-name guard. `_bound_by_this_process` refuses a bundle
-  that claims an in-process tool, a scratchpad verb, `write_todos` or `task`. Its docstring adds
-  that `run_<name>` template launchers are "a different name space that a bundle has no business
-  claiming either" — and measured, a bundle declaring `run_bond_strength_survey` is **accepted**:
-
-  ```
-  NOT REFUSED: a connector may claim the template launcher 'run_bond_strength_survey'
-  ```
-
-  The cause is ordering rather than an oversight in the union. `chemclaw_agent
-  ._register_generated_tools` is `[*job_tools(), *template_tools()]`, so `job_tools()` runs the
-  collision check while `registered_tools()` still holds no launcher — measured empty at that
-  moment. The consequence is the one the whole check exists to prevent, one name space out: the
-  bundle's tool wins `tools_by_name` and a chemist asking for a template gets the connector's tool
-  under the launcher's name, with no error.
-  **Not a one-liner, which is why it is a row.** Closing it means either reading
-  `chemclaw.templates.registry` from `connectors/registry` — a new import edge
-  `tests/test_layering.py` would have to be told about, in the direction that module has so far
-  avoided — or moving the collision check to after both registrations, which changes when a
-  misconfiguration is reported. Which registry owns that name space is the decision.
-  The false sentence is corrected in this commit; the gap is not. Anchors:
-  `connectors/registry.py::_bound_by_this_process`, `agent/chemclaw_agent.py::_register_generated_tools`.
-
 - [ ] **The `git` remote is now a destination a deployment must declare, and nothing derives it** —
   [S], what is left of "the egress guard is blind to gRPC and to Temporal" after
   `D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py`. The blindness
