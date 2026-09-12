@@ -1,4 +1,15 @@
-"""The boot guard on the model gateway's address, for every process that makes a model call.
+"""The boot guard on the model gateway's address, for every process this deployment starts.
+
+**"Every process" is the five `deploy/entrypoint.sh` dispatches plus the terminal CLI, and the
+partition is checked rather than claimed** (`tests/test_llm_gateway_guard.py`): `service`,
+`background-worker` and `mcp-face` call this in their entrypoints, `connector-*` and
+`connector-worker-*` reach no model at all, and the three hook Jobs are DDL, GRANTs, a stored-row
+rewrite and Temporal Schedules. Two *operator* CLIs also build a model outside that set and are
+named there rather than left implied — `cli/verifier_margin` now calls this (its own docstring
+already refused to "measure a mock"), and `retrieval/vector_index` deliberately does not, because
+`make reindex` is a documented local target against the local embedding endpoint and the index it
+writes is regenerable by definition. This sentence used to read "for every process that makes a
+model call", which was wider than anything asserted it.
 
 **Why it is here and not in `api/middleware.py`, where it was written.** The guard's subject is
 *configuration* — where this deployment's one OpenAI-compatible gateway lives
@@ -21,11 +32,38 @@ module exists to end, which is why nothing below reads it.
 """
 
 import logging
+from urllib.parse import urlsplit
 
 from chemclaw.core.config import settings
-from chemclaw.core.http import is_loopback_url
+from chemclaw.core.http import is_loopback_url, parse_host
 
 logger = logging.getLogger(__name__)
+
+
+def _gateway_cannot_leave_this_pod() -> bool:
+    """Whether `llm_base_url` names an address whose traffic never reaches the network.
+
+    `is_loopback_url` answers most of it. The one address it deliberately does **not** answer is the
+    unspecified one, and that is right for the two callers that read a *bind* — as a bind it is
+    every interface, which is the whole subject of SEC-2 — and wrong here, because `llm_base_url` is
+    a
+    **destination**. Measured against a real listener on loopback: a gateway URL whose host is the
+    unspecified address booted past this guard and its socket's peer came back as the loopback
+    address, so every prompt went to whatever answered inside the pod. The normalisation is here
+    rather than in `core.http` for exactly that reason: widening the shared predicate would waive
+    the front door's unauthenticated-bind refusal for the address it exists to catch. (The address
+    is described rather than written as a URL: `tests/test_no_egress.py` scans this file's *text*
+    for host literals and cannot tell a measurement in a docstring from a default in code, which is
+    that guard working — `core/http.py` carries the same note for the same reason.)
+    """
+    if is_loopback_url(settings.llm_base_url):
+        return True
+    try:
+        host = urlsplit(settings.llm_base_url).hostname
+    except ValueError:
+        return False
+    address = parse_host(host)
+    return address is not None and address.is_unspecified
 
 
 def refuse_unconfigured_llm_gateway() -> None:
@@ -58,10 +96,13 @@ def refuse_unconfigured_llm_gateway() -> None:
     `_gateway_is_addressed` validator already refuses it unconditionally, in every process, before
     this function could run. A second check would be dead code claiming a control.
 
+    **What counts as "loopback" is `_gateway_cannot_leave_this_pod`, not `is_loopback_url` alone**,
+    because a destination and a bind disagree about exactly one address. See that function.
+
     Raises:
         RuntimeError: naming the address, why it cannot be right, and the two edits that proceed.
     """
-    if not is_loopback_url(settings.llm_base_url):
+    if not _gateway_cannot_leave_this_pod():
         return
     if not settings.llm_allow_loopback_gateway:
         raise RuntimeError(

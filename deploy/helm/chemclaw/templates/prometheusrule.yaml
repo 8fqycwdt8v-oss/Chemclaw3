@@ -1207,8 +1207,14 @@ spec:
               at runtime, or a misconfiguration. The pod's ERROR log names the host. This should be
               zero; a non-zero rate is either an attempted exfiltration path or a destination the
               deployment legitimately needs and must add to `CHEMCLAW_EGRESS_ALLOW`.
+        {{- /* `min`, not `max`, and the difference is the whole alert: `max` over the fleet is 1
+               as soon as **any one** pod is armed, so a single disarmed process — which is exactly
+               the condition this fires for — never alerts. Pinned by
+               `tests/test_deploy_chart.py::test_a_single_disarmed_pod_is_what_these_alerts_are_for`
+               over a two-pod series, because the shipped `max` shape produced no alert there and
+               `min` produced one. */}}
         - alert: ChemclawEgressGuardDisarmed
-          expr: max(chemclaw_egress_guard_armed) < 1
+          expr: min(chemclaw_egress_guard_armed) < 1
           for: 5m
           labels:
             severity: critical
@@ -1226,7 +1232,7 @@ spec:
                one refusal series per *kind* of refusal, because a blocked lookup and a blocked dial
                want different next steps. */}}
         - alert: ChemclawEgressPreloadDisarmed
-          expr: max(chemclaw_egress_preload_armed) < 1
+          expr: min(chemclaw_egress_preload_armed) < 1
           for: 5m
           labels:
             severity: critical

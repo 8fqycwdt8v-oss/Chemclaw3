@@ -3,7 +3,7 @@
 # `LD_PRELOAD` names.
 #
 # **One declaration of the flags, because there are two callers.** `deploy/Containerfile` builds it
-# into the image, and `tests/test_netguard_preload.py` builds it to drive the three-arm measurement.
+# into the image, and `tests/test_netguard_preload.py` builds it to drive the four-arm measurement.
 # Writing `gcc …` twice is the shape this repository keeps finding: the test would then prove a
 # binary the image does not ship. This script is the shared half, and the test invokes *it* rather
 # than reproducing it.

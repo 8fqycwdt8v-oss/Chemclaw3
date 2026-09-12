@@ -760,6 +760,13 @@ config:
   # There is no `CHEMCLAW_LLM_PROVIDER` — this address is the whole knob
   # (`D-2026-09-04-a-gateway-is-the-only-provider`).
   CHEMCLAW_LLM_BASE_URL: "http://internal-llm.llm.svc:8000/v1"
+  # The one legitimate production case for a *loopback* gateway, stated here because a deployer who
+  # needs it will look for it here and nowhere else. A gateway **sidecar** in this pod is an
+  # ordinary topology, and the guard above refuses it by default — a loopback address is the dev
+  # mock's shipped default, and the guard cannot tell the two apart. Set this to `"true"` only
+  # beside a `CHEMCLAW_LLM_BASE_URL` that names a sidecar, never to make a refusal go away: with it
+  # on, every model call this pod makes goes to something on this host, and the boot log says so.
+  CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY: "false"
   CHEMCLAW_LLM_MODEL: "gpt-oss"
   # The window of the model on the line above, so the context policy's *second* bound is real.
   # `llm_context_window_tokens` defaults to 0 in code — "undeclared", the honest default for an

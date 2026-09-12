@@ -120,6 +120,29 @@ case "${component}" in
     # standing in for two very different authorities.
     exec python -m chemclaw.api.mcp_face
     ;;
+  schedules)
+    # The Temporal Schedules reconciler, run as a post-install/post-upgrade hook Job
+    # (`templates/schedules-job.yaml`). A component rather than a chart `command:`, and that is the
+    # security fix rather than a tidy-up: a Kubernetes `command:` **replaces** the image
+    # `ENTRYPOINT`, so this Job started with no `LD_PRELOAD` at all — while its only outbound
+    # traffic is gRPC to Temporal through the Rust sdk-core, which is exactly the class `netguard.py`
+    # measurably cannot see and this arming block exists for. It also runs on every `helm upgrade`.
+    exec python -m chemclaw.cli.schedules
+    ;;
+  migrate)
+    # The pre-upgrade DDL hook Job: the migrations, then the runtime role's grants, in that order,
+    # because a grant names tables the migrations create and one applied before its table exists
+    # fails. The order was the chart's `sh -c "… && …"` and is this script's now, for the same
+    # reason as `schedules` above; under `set -e` the sequence means exactly what the `&&` meant.
+    python -m chemclaw.core.migrate
+    exec python -m chemclaw.core.grants
+    ;;
+  convert)
+    # The post-upgrade stored-message conversion
+    # (D-2026-08-27-a-conversion-that-cannot-be-rolled-back-is-not-a-pre-upgrade-step). It runs as
+    # the *runtime* role, which is why the chart gives it `chemclaw.env` and not the DDL credential.
+    exec python -m chemclaw.agent.message_migration
+    ;;
   connector-worker-*)
     # A connector bundle's own Temporal worker, for a bundle that owns durable work
     # (`src/chemclaw/connectors/<name>/worker.py`). Matched before `connector-*` so the more specific prefix wins.

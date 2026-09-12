@@ -108,6 +108,19 @@ _ADDRESSES: list[tuple[str, bool]] = [
     ("0.0.0.0", False),
     ("::", False),
     ("", False),
+    # The short, decimal, octal and hexadecimal spellings `inet_aton(3)` accepts and
+    # `ipaddress.ip_address` does not. Every one was driven against a real listener and reached
+    # `('127.0.0.1', <port>)`, while this predicate called all four network-reachable — so a
+    # gateway named any of these booted past `core.llm_gateway` and sent every prompt to whatever
+    # answered inside the pod. `0177.1` is the fifth and was found by taking the measurement
+    # rather than by reading the four in the report.
+    ("127.1", True),
+    ("2130706433", True),
+    ("0x7f.1", True),
+    ("0177.1", True),
+    # And the other direction, so the fallback cannot be read as "any number is loopback":
+    # `inet_aton` accepts this one too, as 0.0.48.57.
+    ("12345", False),
     ("exfil.localhost", False),  # a suffix is never resolved, never trusted
     ("127.0.0.1.nip.io", False),
     # An IPv4-mapped literal follows its mapped address, both ways. This row was written the

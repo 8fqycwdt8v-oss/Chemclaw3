@@ -39,8 +39,12 @@ logger = logging.getLogger(__name__)
 #: image picks it up through the `COPY src ./src` that is already there.
 SOURCE = Path(__file__).with_name("netguard_preload.c")
 
-#: The shared object the build produces and `LD_PRELOAD` names. One spelling, read by the build
-#: script, the entrypoint and the tests.
+#: The shared object the build produces and `LD_PRELOAD` names. **Read by the tests, not by the
+#: build script or the entrypoint** — both of those hold their own literal, because one is `sh` and
+#: the other is a `Containerfile` argument, and neither can import Python. This comment claimed all
+#: three, which would have made a rename here look safe; what actually keeps the spellings together
+#: is `tests/test_netguard_preload.py::test_the_entrypoint_preloads_the_path_the_image_installs`,
+#: which pins the other two against this one.
 LIBRARY_NAME = "libchemclaw_netguard.so"
 
 #: Where `deploy/Containerfile` installs it. The entrypoint preloads this path; a test pins that the

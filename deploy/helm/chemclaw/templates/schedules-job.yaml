@@ -46,8 +46,15 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- include "chemclaw.containerSecurityContext" . | nindent 12 }}
-          command: ["python", "-m", "chemclaw.cli.schedules"]
+          {{- /* No `command:`, deliberately. A Kubernetes `command:` replaces the image
+                 `ENTRYPOINT`, and `deploy/entrypoint.sh` is where `LD_PRELOAD` is armed — so
+                 `["python", "-m", "chemclaw.cli.schedules"]` here ran the one workload in this
+                 chart whose entire outbound traffic is gRPC to Temporal with the compiled egress
+                 layer absent, on every `helm upgrade`. The component is named in the environment
+                 and the image dispatches it. */}}
           env:
+            - name: CHEMCLAW_COMPONENT
+              value: "schedules"
             {{- include "chemclaw.env" . | nindent 12 }}
           envFrom:
             {{- include "chemclaw.envFrom" . | nindent 12 }}

@@ -17,6 +17,7 @@ apply here — this is a user-scoped resource access, so it is fully Entra-scope
 import asyncio
 import logging
 import os
+import threading
 import time
 from typing import Any
 from urllib.parse import urlsplit
@@ -80,6 +81,17 @@ class IdentityProviderUnavailable(Exception):
 # finding). Keyed by endpoint so a config change is still picked up.
 _jwks_clients: dict[str, PyJWKClient] = {}
 
+# `_client_for` runs on concurrent worker threads — `validate_token` is dispatched through
+# `asyncio.to_thread`, so two requests bearing tokens from two tenants genuinely build their clients
+# at the same moment. Its body is a read-modify-write of `os.environ` followed by a
+# check-then-insert into the dict above, and the first of those is the one that loses data rather
+# than merely duplicating work: measured with the window widened, five concurrent writers of five
+# distinct hosts left **one** of the five in `no_proxy`, and the loser's key set is then fetched
+# through the ambient proxy — exactly what `_bypass_ambient_proxy` exists to prevent. A dict
+# insertion racing itself only builds a second client, which is why this lock is stated as being
+# about the environment.
+_client_lock = threading.Lock()
+
 # When an unknown `kid` was last allowed to force a JWKS re-fetch, per endpoint. Caching the client
 # — the earlier fix above — bounds the *warm* path but not this one: `PyJWKClient.get_signing_key`
 # retries with `refresh=True` whenever the `kid` is absent from the cached set, and the `kid` comes
@@ -135,13 +147,20 @@ def _client_for(endpoint: str) -> PyJWKClient:
 
     The endpoint's host is taken out of the ambient proxy's reach first — see
     `_bypass_ambient_proxy` for why that is the whole seam PyJWT leaves us.
+
+    **Serialised**, because this runs on the validation thread pool and its body writes a process
+    global that is read back in the same breath. See `_client_lock`. The lock covers the whole body
+    rather than the environment write alone: the cheapest correct scope, and holding it across a
+    `PyJWKClient` construction costs nothing, since that constructor performs no I/O — the key set
+    is fetched lazily on the first `get_signing_key`.
     """
-    client = _jwks_clients.get(endpoint)
-    if client is None:
-        _bypass_ambient_proxy(urlsplit(endpoint).hostname or "")
-        client = PyJWKClient(endpoint, timeout=settings.entra_http_timeout_seconds)
-        _jwks_clients[endpoint] = client
-    return client
+    with _client_lock:
+        client = _jwks_clients.get(endpoint)
+        if client is None:
+            _bypass_ambient_proxy(urlsplit(endpoint).hostname or "")
+            client = PyJWKClient(endpoint, timeout=settings.entra_http_timeout_seconds)
+            _jwks_clients[endpoint] = client
+        return client
 
 
 def _match_kid(signing_keys: list[Any], kid: str) -> Any | None:

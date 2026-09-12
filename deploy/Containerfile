@@ -112,7 +112,7 @@ COPY deploy/knowledge-sync.sh /usr/local/bin/chemclaw-knowledge-sync
 # behaviour a missing build dependency should have.
 #
 # The flags are in `deploy/build-netguard-preload.sh` rather than on this line, because
-# `tests/test_netguard_preload.py` compiles the same source to drive its three-arm measurement: two
+# `tests/test_netguard_preload.py` compiles the same source to drive its four-arm measurement: two
 # `gcc` invocations would let that suite prove a binary this image does not ship.
 #
 # The destination is `chemclaw.core.netguard_preload.LIBRARY_PATH`, the path the entrypoint

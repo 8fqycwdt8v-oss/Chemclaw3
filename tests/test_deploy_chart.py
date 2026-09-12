@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -1771,6 +1772,125 @@ def test_the_release_pipeline_can_state_every_posture_the_chart_demands() -> Non
             f"the render stage states {key} and `openshift.sh` cannot, so `helm upgrade` applies a "
             "release the pipeline never validated"
         )
+
+
+#: The two "a process is running unguarded" alerts. Both read a per-pod gauge, so both have the
+#: same aggregation question and both got the same answer wrong.
+_DISARMED_ALERTS = ("ChemclawEgressGuardDisarmed", "ChemclawEgressPreloadDisarmed")
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None or shutil.which("promtool") is None,
+    reason="helm and promtool are what render and evaluate the rule",
+)
+def test_a_single_disarmed_pod_is_what_these_alerts_are_for() -> None:
+    """`max(...) < 1` over a per-pod gauge cannot fire while any one pod is armed.
+
+    Which is the condition. This wave exists because one process kind out of four was unguarded
+    while three were fine, and the alerts written to catch the compiled layer's version of that
+    failure shipped reading `max` — 1 as soon as a single pod reports armed, so a fleet with one
+    disarmed pod never alerts and the runbook entry's first listed cause is a **per-pod** one.
+
+    Evaluated rather than read: `make helm-validate` runs `promtool check rules`, which parses an
+    expression and says nothing about what it evaluates to. The two-pod series below is the whole
+    difference — driven against the shipped `max` shape it produced **no alert**, and against `min`
+    it produced one.
+
+    The rule bodies are rebuilt from the render with only `alert` and `expr` kept, deliberately: a
+    `promtool` unit test matches annotations exactly, so carrying them here would put a second copy
+    of the alert's prose in this file, which is the duplication every other gate in this repository
+    is arranged to avoid.
+    """
+    render = subprocess.run(
+        [
+            "helm",
+            "template",
+            "chemclaw",
+            str(CHART),
+            "--set",
+            "networkPolicy.allowAnyDestination=true",
+            "--set",
+            "retention.unboundedGrowthAccepted=true",
+            "--set",
+            "temporal.namespace=chemclaw",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    rules = [
+        rule
+        for document in yaml.safe_load_all(render)
+        if document and document.get("kind") == "PrometheusRule"
+        for group in document["spec"]["groups"]
+        for rule in group["rules"]
+        if rule.get("alert") in _DISARMED_ALERTS
+    ]
+    assert {rule["alert"] for rule in rules} == set(_DISARMED_ALERTS), (
+        f"the render no longer carries both disarmed alerts: {[r.get('alert') for r in rules]}"
+    )
+    with tempfile.TemporaryDirectory() as scratch:
+        work = Path(scratch)
+        (work / "rules.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "groups": [
+                        {
+                            "name": "disarmed",
+                            "rules": [
+                                {"alert": rule["alert"], "expr": rule["expr"]} for rule in rules
+                            ],
+                        }
+                    ]
+                }
+            )
+        )
+        series = [
+            {
+                "series": f'{metric}{{pod="armed"}}',
+                "values": "1x10",
+            }
+            for metric in ("chemclaw_egress_guard_armed", "chemclaw_egress_preload_armed")
+        ] + [
+            {
+                "series": f'{metric}{{pod="disarmed"}}',
+                "values": "0x10",
+            }
+            for metric in ("chemclaw_egress_guard_armed", "chemclaw_egress_preload_armed")
+        ]
+        (work / "test.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "rule_files": ["rules.yaml"],
+                    "evaluation_interval": "1m",
+                    "tests": [
+                        {
+                            "interval": "1m",
+                            "input_series": series,
+                            "alert_rule_test": [
+                                {
+                                    "eval_time": "9m",
+                                    "alertname": name,
+                                    "exp_alerts": [{"exp_labels": {}}],
+                                }
+                                for name in _DISARMED_ALERTS
+                            ],
+                        }
+                    ],
+                }
+            )
+        )
+        evaluated = subprocess.run(
+            ["promtool", "test", "rules", "test.yaml"],
+            cwd=work,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    assert evaluated.returncode == 0, (
+        "one of the disarmed alerts does not fire for a fleet with a single disarmed pod — which "
+        f"is the only shape it exists for:\n{evaluated.stdout}{evaluated.stderr}"
+    )
 
 
 def test_no_delivery_script_deploys_this_chart_atomically() -> None:

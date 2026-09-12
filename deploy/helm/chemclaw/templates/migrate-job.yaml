@@ -91,11 +91,9 @@ spec:
                  release, unlike the migrations, which are applied once per file and tracked: a
                  grant is a reconciliation against a schema that keeps growing and a role that may
                  be created at any time (D-2026-08-05-append-only-by-grant-not-by-contract). */}}
-          command:
-            - sh
-            - -c
-            - python -m chemclaw.core.migrate && python -m chemclaw.core.grants
           env:
+            - name: CHEMCLAW_COMPONENT
+              value: "migrate"
             {{- include "chemclaw.env" . | nindent 12 }}
             {{- include "chemclaw.migrationEnv" . | nindent 12 }}
           envFrom:
@@ -162,13 +160,14 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- include "chemclaw.containerSecurityContext" . | nindent 12 }}
-          command: ["python", "-m", "chemclaw.agent.message_migration"]
           {{- /* `chemclaw.env` only, deliberately: the converter resolves its DSN through
                  `session_store._session_dsn`, so it runs as the *runtime* role, which already holds
                  UPDATE on `session_messages`. `chemclaw.migrationEnv` mounts the credential that
                  owns the schema and can rewrite the audit trail; a Job that does not issue DDL has
                  no business holding it, and the Job above is still the only place it appears. */}}
           env:
+            - name: CHEMCLAW_COMPONENT
+              value: "convert"
             {{- include "chemclaw.env" . | nindent 12 }}
           envFrom:
             {{- include "chemclaw.envFrom" . | nindent 12 }}

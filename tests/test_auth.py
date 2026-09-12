@@ -13,6 +13,7 @@ import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from types import SimpleNamespace
 from typing import Any
 
 import jwt
@@ -391,6 +392,77 @@ def test_the_jwks_fetch_does_not_follow_an_ambient_proxy(
     assert os.environ["no_proxy"] == "keep.example,jwks.invalid"
     assert os.environ["NO_PROXY"] == "keep.example,jwks.invalid"
     assert urllib.request.proxy_bypass("keep.example"), "the operator's own bypass was clobbered"
+
+
+def test_two_tenants_validating_at_once_both_reach_no_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_client_for` is called on concurrent worker threads and writes a process global.
+
+    `validate_token` runs under `asyncio.to_thread`, so two requests bearing tokens from two tenants
+    genuinely build their JWKS clients at the same moment, and the body of `_client_for` was an
+    unsynchronised read-modify-write of `os.environ`. Measured with the window widened, five
+    concurrent writers of five distinct hosts left **one** of the five in `no_proxy` — and the
+    loser's key set is then fetched through the ambient proxy, which is the precise failure
+    `_bypass_ambient_proxy` exists to prevent.
+
+    The widener is a slow *read* of the environment, injected where the window actually is —
+    between the `get` and the assignment. The real window is microseconds wide, so a test that
+    merely started five threads passes against the unlocked code most runs, which is worse than no
+    test: it reports a fixed race that is still there. The first version of this test widened
+    `proxy_bypass` instead, which sleeps *before* the window rather than inside it, and the unlocked
+    mutation survived it. Driven with the widener in the right place: unlocked retains 1 of 5,
+    locked retains 5 of 5.
+
+    The environment is a stand-in rather than the process's own, which also keeps the test from
+    leaving `no_proxy` behind for whatever runs next.
+    """
+    hosts = [f"tenant{index}.login.example" for index in range(5)]
+
+    class SlowEnviron:
+        """A mapping whose read is slow, so the read-modify-write below has a window to lose in.
+
+        The three operations `_bypass_ambient_proxy` performs and nothing else. Not a `dict`
+        subclass, because widening `get`'s signature to insert the sleep is exactly the override
+        `Mapping` forbids.
+        """
+
+        def __init__(self) -> None:
+            self.values: dict[str, str] = {}
+
+        def __contains__(self, key: object) -> bool:
+            return key in self.values
+
+        def get(self, key: str, default: str = "") -> str:
+            # Read *then* sleep, and return what was read. Sleeping and re-reading would close the
+            # window this exists to open, which is how the first version of this widener came out
+            # vacuous — every thread saw the value its predecessor had just written.
+            value = self.values.get(key, default)
+            time.sleep(0.05)
+            return value
+
+        def __setitem__(self, key: str, value: str) -> None:
+            self.values[key] = value
+
+    environment = SlowEnviron()
+    monkeypatch.setattr(auth, "os", SimpleNamespace(environ=environment))
+    monkeypatch.setattr(auth, "_jwks_clients", {})
+    monkeypatch.setattr(auth, "PyJWKClient", lambda endpoint, timeout: object())
+    monkeypatch.setattr(auth, "proxy_bypass", lambda host: False)
+    threads = [
+        threading.Thread(target=auth._client_for, args=(f"https://{host}/keys",)) for host in hosts
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    exempted = environment.values.get("no_proxy", "")
+    missing = [host for host in hosts if host not in exempted]
+    assert not missing, (
+        f"{len(missing)} of {len(hosts)} JWKS hosts were lost from no_proxy ({exempted!r}); their "
+        "key sets would be fetched through the ambient proxy"
+    )
 
 
 def test_an_unknown_kid_is_an_auth_error_not_an_unhandled_crash(

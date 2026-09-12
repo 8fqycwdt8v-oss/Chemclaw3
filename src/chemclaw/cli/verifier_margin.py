@@ -36,6 +36,7 @@ from typing import Any
 from chemclaw.agent.llm_provider import build_chat_model
 from chemclaw.agent.verifier import judge_once
 from chemclaw.core.config import settings
+from chemclaw.core.llm_gateway import refuse_unconfigured_llm_gateway
 from chemclaw.retrieval.evidence import EvidenceChunk
 
 # The three answer classes, named after what the 2026-08-16 live run actually flagged. Each prompt
@@ -187,7 +188,14 @@ def _summary(results: list[dict[str, Any]], threshold: float) -> dict[str, Any]:
 
 
 def main() -> None:
-    """Generate (or load) the pair corpus, roll the raw judge, and print the measurement."""
+    """Generate (or load) the pair corpus, roll the raw judge, and print the measurement.
+
+    The gateway guard runs first, because this module's own contract is that it "needs a model
+    credential; refuses without one rather than measuring a mock" — and the shipped
+    `CHEMCLAW_LLM_BASE_URL` *is* the mock. Without this the promise was prose: the measurement a
+    band width is fitted from would have been the mock's spread, reported as the judge's.
+    """
+    refuse_unconfigured_llm_gateway()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rolls", type=int, default=4, help="judge rolls per pair (default 4)")
     parser.add_argument(

@@ -247,6 +247,61 @@ def test_the_whole_of_127_is_loopback_here(monkeypatch: pytest.MonkeyPatch) -> N
         refuse_unconfigured_llm_gateway()
 
 
+#: Connect to `argv[1]:argv[2]` and print the peer the kernel gave. Deliberately imports nothing
+#: from this repository, so the answer is the operating system's rather than the guard's.
+_PEER_PROBE = """
+import socket, sys
+with socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=5) as reached:
+    print(reached.getpeername()[0])
+"""
+
+#: Spellings of "inside this pod" that `ipaddress.ip_address` rejects and `connect(2)` accepts.
+#: `0.0.0.0` is here for a different reason from the other four — see the test.
+_SPELLINGS_THAT_REACH_THIS_HOST = ("127.1", "2130706433", "0x7f.1", "0177.1", "0.0.0.0")
+
+
+@pytest.mark.parametrize("spelling", _SPELLINGS_THAT_REACH_THIS_HOST)
+def test_a_gateway_spelled_to_evade_the_parser_is_still_refused(
+    spelling: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal and the reason for it, measured in the same test.
+
+    `is_loopback_host` parsed with `ipaddress.ip_address`, which accepts only the dotted-quad form,
+    while what a socket is ultimately handed is `inet_aton(3)` — so the short, decimal, octal and
+    hexadecimal spellings of `127.0.0.1` were *not* loopback to the guard and booted clean. The
+    fifth, `0.0.0.0`, is a different failure with the same effect: it is genuinely not loopback as a
+    **bind** (which is why `core.http` still answers False for it and two callers depend on that),
+    and as a **destination** it never leaves the host, so `core.llm_gateway` normalises it itself.
+
+    Neither egress layer catches the follow-on: `derive_allowed` puts the same literal on the
+    allowlist, and the compiled interposer sees `inet_ntop`'s canonical `127.0.0.1`, which is
+    loopback-exempt. So the boot guard is the only layer that can refuse this, and the second arm
+    here is what makes the first mean something — it connects and reports the peer the kernel
+    actually gave, rather than asserting from a table that the spelling is equivalent.
+    """
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        # In a child, because this process has `core.netguard` armed and it refuses `0.0.0.0` as a
+        # destination by design — which is the guard being consistent, not the fact under test. The
+        # child imports no first-party module, so what it reports is the kernel's answer.
+        reached = subprocess.run(
+            [sys.executable, "-c", _PEER_PROBE, spelling, str(port)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    assert reached.stdout.strip() == "127.0.0.1", (
+        f"{spelling} does not reach this host here, so it is not the address class this test is "
+        f"about: {reached.stdout}{reached.stderr}"
+    )
+    monkeypatch.setattr(settings, "llm_allow_loopback_gateway", False)
+    monkeypatch.setattr(settings, "llm_base_url", f"http://{spelling}:{port}/v1")
+    with pytest.raises(RuntimeError, match="loopback address"):
+        refuse_unconfigured_llm_gateway()
+
+
 def test_a_real_gateway_passes_in_every_posture(monkeypatch: pytest.MonkeyPatch) -> None:
     """The other direction, so the test above cannot pass by refusing everything."""
     monkeypatch.setattr(settings, "llm_allow_loopback_gateway", False)
@@ -300,6 +355,17 @@ _COMPONENT_MAKES_MODEL_CALLS: dict[str, bool] = {
     # A bundle's own Temporal worker, serving only that bundle's registered activities. Core's
     # `template_activities` is not imported here — that is the whole point of the seam.
     "connector-worker-*": False,
+    # The hook Jobs, which became components in
+    # `D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py` because a chart `command:`
+    # replaces the image ENTRYPOINT and so skipped the arming block. None of the three reaches a
+    # model: `cli.schedules` creates and prunes Temporal Schedules, `core.migrate`/`core.grants`
+    # issue DDL and GRANTs, and `agent.message_migration` rewrites stored rows. `cli.schedules`
+    # *imports* `core.embeddings` transitively through `durable.schedules` (measured) and calls
+    # nothing in it, which is why the verdict is about the call and not about the import — the
+    # import-closure proxy below is applied to connector bundles, where the seam is the point.
+    "schedules": False,
+    "migrate": False,
+    "convert": False,
 }
 
 #: The entrypoint module for each component that must call the guard.
@@ -358,6 +424,76 @@ def test_each_model_calling_component_calls_the_guard_in_its_entrypoint(
     assert _COMPONENT_MAKES_MODEL_CALLS[component] is True
     assert _calls_the_guard(*where), (
         f"{component}: {where[0]}::{where[1]} no longer calls the guard"
+    )
+
+
+#: Modules under `src/` that are a process in their own right (a `main` plus a `__main__` block)
+#: **and** import a model seam at module scope, mapped to whether they must call the guard. Derived
+#: against, not transcribed: the module docstring of `core/llm_gateway` used to promise "every
+#: process that makes a model call" while one of these two was unguarded and nothing looked.
+_MODEL_TOUCHING_CLIS: dict[str, bool] = {
+    # Its own docstring: "needs a model credential; refuses without one rather than measuring a
+    # mock" — and the shipped gateway *is* the mock, so the promise needed the guard to be true.
+    "cli/verifier_margin.py": True,
+    # `make reindex` / `make reindex-full`, a documented local target against the local embedding
+    # endpoint. The note index is regenerable by definition (D-011's sibling argument), so a local
+    # rebuild against the mock costs a re-run rather than a wrong answer to a chemist — and the
+    # deployment's own reindex is the `background-worker`'s scheduled job, which is guarded.
+    "retrieval/vector_index.py": False,
+}
+
+#: Module-scope imports that mean "this process can reach the model gateway".
+_MODEL_SEAMS = frozenset({"chemclaw.agent.llm_provider", "chemclaw.core.embeddings"})
+
+
+def _entrypoint_modules_that_reach_a_model() -> dict[str, bool]:
+    """Every `src/` module that is its own process and imports a model seam at module scope."""
+    found: dict[str, bool] = {}
+    for path in sorted(_SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        imported = {
+            node.module
+            for node in tree.body
+            if isinstance(node, ast.ImportFrom) and node.module in _MODEL_SEAMS
+        } | {
+            alias.name
+            for node in tree.body
+            if isinstance(node, ast.Import)
+            for alias in node.names
+            if alias.name in _MODEL_SEAMS
+        }
+        if not imported:
+            continue
+        has_main = any(
+            isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == "main"
+            for node in tree.body
+        )
+        is_entrypoint = any(
+            isinstance(node, ast.If) and ast.unparse(node.test).startswith("__name__")
+            for node in tree.body
+        )
+        if has_main and is_entrypoint:
+            found[path.relative_to(_SRC).as_posix()] = _calls_the_guard(
+                path.relative_to(_SRC).as_posix(), "main"
+            )
+    return found
+
+
+def test_every_model_touching_cli_has_a_verdict_and_matches_it() -> None:
+    """The promise in `core/llm_gateway`'s docstring, made checkable in both directions.
+
+    A partition rather than a list of the guarded ones: a new `python -m` module that builds a chat
+    model or an embedding client fails here until somebody writes down whether it must refuse a
+    loopback gateway. The three deployment components have their own arms above; this covers the
+    processes an operator starts by hand, which is where the promise was wider than the test.
+    """
+    actual = _entrypoint_modules_that_reach_a_model()
+    assert set(actual) == set(_MODEL_TOUCHING_CLIS), (
+        "a module that is its own process and reaches a model seam has no verdict here: "
+        f"{sorted(set(actual) ^ set(_MODEL_TOUCHING_CLIS))}"
+    )
+    assert actual == _MODEL_TOUCHING_CLIS, (
+        f"a model-touching CLI disagrees with its verdict: {actual} vs {_MODEL_TOUCHING_CLIS}"
     )
 
 
