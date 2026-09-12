@@ -6,6 +6,26 @@
 # component is PID 1 and receives SIGTERM directly for graceful shutdown on pod termination.
 set -euo pipefail
 
+# **The base image puts its own interpreter in front of ours, and bash is what does it.**
+# `deploy/Containerfile` sets `ENV PATH="/app/.venv/bin:${PATH}"`, which is correct and is not what
+# a component sees. The UBI python-311 base also sets `BASH_ENV=/opt/app-root/bin/activate`, and
+# bash sources `$BASH_ENV` on *non-interactive* startup -- before the first line of this script --
+# whereupon `activate` prepends `/opt/app-root/bin` ahead of everything. Measured in the base image:
+#
+#   $ docker run -e PATH="/app/.venv/bin:..." ubi9/python-311 bash -c 'command -v python'
+#   /opt/app-root/bin/python
+#
+# That interpreter has no `chemclaw` installed, so every `exec python -m chemclaw...` below -- the
+# background worker, the mcp face, and both connector forms -- resolved to it. `service` escaped
+# only by accident: `uvicorn` is not in `/opt/app-root/bin`, so its lookup fell through to the venv.
+#
+# It stayed invisible because nothing ran a real component through this script. `image.yml`'s smoke
+# step uses `docker run --entrypoint python`, which Docker resolves from the image's own `ENV PATH`
+# without a shell, so `BASH_ENV` never fires; and the one step that does execute this ENTRYPOINT
+# passes an *unknown* component, which exits 64 above every `exec`. That header already records the
+# same class of miss for an earlier defect. The smoke step now drives a real component too.
+export PATH="/app/.venv/bin:${PATH}"
+
 # Defence in depth for the LangSmith egress decision, not the control itself. The real control is
 # in-process — `chemclaw.core.egress.pin_langsmith_egress`, called from `chemclaw.core.config`,
 # which every component below imports — because langsmith's env read is `lru_cache`d and an

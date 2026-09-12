@@ -516,7 +516,9 @@ def test_a_rolled_back_release_re_applies_its_own_grant_file() -> None:
     # actually carried — that grants run after the migrations, in that order — is asserted below
     # against the script that now owns it. Selecting by `command:` again would pass while the
     # sequence had moved somewhere unexecuted, which is the shape this whole wave is about.
-    assert re.search(r'value:\s*"?migrate"?', migrate), "wrong document: this one is not the migrate Job"
+    assert re.search(r'value:\s*"?migrate"?', migrate), (
+        "wrong document: this one is not the migrate Job"
+    )
     entrypoint = (_ROOT / "deploy" / "entrypoint.sh").read_text(encoding="utf-8")
     case = entrypoint.split("migrate)", 1)[-1].split(";;", 1)[0]
     assert "python -m chemclaw.core.migrate" in case and "python -m chemclaw.core.grants" in case, (

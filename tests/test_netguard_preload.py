@@ -62,6 +62,65 @@ _SIOCGIFADDR = 0x8915
 _PRELOAD_VARIABLE = "LD_PRELOAD"
 
 
+def test_the_entrypoint_puts_the_project_venv_back_in_front_of_the_base_images() -> None:
+    """The image's `ENV PATH` is not the PATH a component gets, and bash is why.
+
+    `deploy/Containerfile` sets `ENV PATH="/app/.venv/bin:${PATH}"`. The UBI python-311 base also
+    sets `BASH_ENV=/opt/app-root/bin/activate`, which bash sources on **non-interactive** startup —
+    before the first line of `entrypoint.sh` — and `activate` prepends `/opt/app-root/bin` ahead of
+    everything. Measured in the base image with the image's own PATH supplied::
+
+        $ docker run -e PATH="/app/.venv/bin:..." ubi9/python-311 bash -c 'command -v python'
+        /opt/app-root/bin/python
+
+    That interpreter has no `chemclaw`, so every `exec python -m chemclaw...` this script dispatches
+    — the background worker, the mcp face and both connector forms — resolved to it. `service`
+    escaped only because `uvicorn` is absent from `/opt/app-root/bin` and its lookup fell through.
+
+    Asserted here rather than in CI alone because CI could not see it: `image.yml`'s smoke loop runs
+    `docker run --entrypoint python`, which Docker resolves from `ENV PATH` with no shell, so
+    `BASH_ENV` never fires; and the step that does run this ENTRYPOINT passes an unknown component
+    and exits above every `exec`. A text assertion is weaker than driving the image, and it is what
+    a suite with no image build can hold — the driven half is the new arm in that workflow.
+    """
+    entrypoint = _ENTRYPOINT.read_text(encoding="utf-8")
+    restore = 'export PATH="/app/.venv/bin:${PATH}"'
+    assert restore in entrypoint, (
+        "entrypoint.sh does not put the project venv back in front of the base image's; every "
+        "`exec python -m chemclaw...` it dispatches will resolve to an interpreter without chemclaw"
+    )
+    # The offset of the first line that runs an interpreter *at all* — `exec`ed or not — found by
+    # line rather than by substring, and deliberately not "the first dispatch".
+    #
+    # Two drafts of this were wrong in opposite directions and both are worth keeping visible. The
+    # first took `entrypoint.index("exec python -m")`, which matched the sentence in the comment
+    # above rather than the command, and so failed on correct code: a locator that cannot tell
+    # prose from the thing it describes is the defect this file is about, inside the test written
+    # to catch it. The second compared against the first `exec`, and a mutation that moved the
+    # restore to the line immediately *above* that `exec` passed — because by then the arming
+    # block has already run `python -m chemclaw.cli.egress_preload` with the wrong interpreter,
+    # and under `set -e` that is where every component dies. "Before the first interpreter" is the
+    # property; "before dispatch" was a weaker one that happened to read the same.
+    lines = entrypoint.split("\n")
+    offsets: list[int] = []
+    at = 0
+    for line in lines:
+        stripped = line.lstrip()
+        # Comment lines are prose about interpreters, not uses of one. Excluding them is the whole
+        # reason this is a line scan rather than a substring search.
+        if stripped and not stripped.startswith("#") and re.search(r"\b(python|uvicorn)\b", line):
+            offsets.append(at)
+        at += len(line) + 1
+    first_interpreter = min(offsets, default=-1)
+    assert first_interpreter > 0, (
+        "entrypoint.sh runs no interpreter; this test is watching the wrong file"
+    )
+    assert entrypoint.index(restore) < first_interpreter, (
+        "the PATH is restored after something has already run an interpreter, which is after it "
+        "could matter — under `set -e` the first such line is where every component dies"
+    )
+
+
 @pytest.fixture(scope="module")
 def interposer() -> Path:
     """The built `.so`, compiled by the **same script the image build runs**.
