@@ -674,6 +674,40 @@ def test_the_api_key_is_registered_for_redaction(monkeypatch: pytest.MonkeyPatch
     assert "CHEMCLAW_VECTOR_STORE_API_KEY" in registered
 
 
+def test_the_qdrant_client_refuses_the_ambient_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`trust_env=False` reaches the httpx client `AsyncQdrantClient` builds for itself.
+
+    This store is not the LLM seam, so no prompt and no bearer is on it; what is on it is embedded
+    note text and the query vectors. A proxy variable on the pod would carry both off-address, past
+    `core/netguard.py`, which sees only the dial to the proxy, and past a NetworkPolicy when the
+    proxy is a loopback sidecar.
+
+    **This assertion is a shape and the effect behind it was measured elsewhere, deliberately.**
+    `qdrant_client` is not in this closure — `pgvector` is the shipped provider — so nothing here
+    can construct a real client. Observed 2026-09-12 in a scratch venv on qdrant-client 1.19.0,
+    construction only, no server and no I/O: the client's internal `httpx.AsyncClient` carries
+    `trust_env=True` by default and `False` when this keyword is passed, because
+    `AsyncQdrantClient` forwards its extra keywords through `AsyncApiClient` into `AsyncClient(**
+    kwargs)`. The same forwarding is why a caller-supplied `http_client` is a `TypeError` and is
+    therefore not the fix. What this test holds is the half that can go stale by edit here: that
+    the keyword is still sent, and sent unconditionally rather than only where a private CA is
+    configured — the mistake the `verify` keyword below exists to avoid making twice.
+    """
+    stub = _StubModule()
+    monkeypatch.setattr(qdrant_module, "register_secret_env", lambda name: None)
+    monkeypatch.setattr(qdrant_module, "_client_module", lambda: stub)
+    monkeypatch.setattr(settings, "llm_tls_ca_bundle", "")
+    qdrant_module.open_qdrant_client()
+    assert stub.kwargs.get("trust_env") is False, (
+        "the Qdrant client would read a proxy variable and carry note text and query vectors to a "
+        "host of the setter's choosing"
+    )
+
+    monkeypatch.setattr(settings, "llm_tls_ca_bundle", "/etc/ssl/internal.pem")
+    qdrant_module.open_qdrant_client()
+    assert stub.kwargs.get("trust_env") is False, "a private CA is not what decides this"
+
+
 def test_no_private_ca_means_no_verify_keyword(monkeypatch: pytest.MonkeyPatch) -> None:
     """The default path uses only keywords the client certainly accepts.
 

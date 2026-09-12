@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -1773,6 +1774,125 @@ def test_the_release_pipeline_can_state_every_posture_the_chart_demands() -> Non
         )
 
 
+#: The two "a process is running unguarded" alerts. Both read a per-pod gauge, so both have the
+#: same aggregation question and both got the same answer wrong.
+_DISARMED_ALERTS = ("ChemclawEgressGuardDisarmed", "ChemclawEgressPreloadDisarmed")
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None or shutil.which("promtool") is None,
+    reason="helm and promtool are what render and evaluate the rule",
+)
+def test_a_single_disarmed_pod_is_what_these_alerts_are_for() -> None:
+    """`max(...) < 1` over a per-pod gauge cannot fire while any one pod is armed.
+
+    Which is the condition. This wave exists because one process kind out of four was unguarded
+    while three were fine, and the alerts written to catch the compiled layer's version of that
+    failure shipped reading `max` — 1 as soon as a single pod reports armed, so a fleet with one
+    disarmed pod never alerts and the runbook entry's first listed cause is a **per-pod** one.
+
+    Evaluated rather than read: `make helm-validate` runs `promtool check rules`, which parses an
+    expression and says nothing about what it evaluates to. The two-pod series below is the whole
+    difference — driven against the shipped `max` shape it produced **no alert**, and against `min`
+    it produced one.
+
+    The rule bodies are rebuilt from the render with only `alert` and `expr` kept, deliberately: a
+    `promtool` unit test matches annotations exactly, so carrying them here would put a second copy
+    of the alert's prose in this file, which is the duplication every other gate in this repository
+    is arranged to avoid.
+    """
+    render = subprocess.run(
+        [
+            "helm",
+            "template",
+            "chemclaw",
+            str(CHART),
+            "--set",
+            "networkPolicy.allowAnyDestination=true",
+            "--set",
+            "retention.unboundedGrowthAccepted=true",
+            "--set",
+            "temporal.namespace=chemclaw",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    rules = [
+        rule
+        for document in yaml.safe_load_all(render)
+        if document and document.get("kind") == "PrometheusRule"
+        for group in document["spec"]["groups"]
+        for rule in group["rules"]
+        if rule.get("alert") in _DISARMED_ALERTS
+    ]
+    assert {rule["alert"] for rule in rules} == set(_DISARMED_ALERTS), (
+        f"the render no longer carries both disarmed alerts: {[r.get('alert') for r in rules]}"
+    )
+    with tempfile.TemporaryDirectory() as scratch:
+        work = Path(scratch)
+        (work / "rules.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "groups": [
+                        {
+                            "name": "disarmed",
+                            "rules": [
+                                {"alert": rule["alert"], "expr": rule["expr"]} for rule in rules
+                            ],
+                        }
+                    ]
+                }
+            )
+        )
+        series = [
+            {
+                "series": f'{metric}{{pod="armed"}}',
+                "values": "1x10",
+            }
+            for metric in ("chemclaw_egress_guard_armed", "chemclaw_egress_preload_armed")
+        ] + [
+            {
+                "series": f'{metric}{{pod="disarmed"}}',
+                "values": "0x10",
+            }
+            for metric in ("chemclaw_egress_guard_armed", "chemclaw_egress_preload_armed")
+        ]
+        (work / "test.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "rule_files": ["rules.yaml"],
+                    "evaluation_interval": "1m",
+                    "tests": [
+                        {
+                            "interval": "1m",
+                            "input_series": series,
+                            "alert_rule_test": [
+                                {
+                                    "eval_time": "9m",
+                                    "alertname": name,
+                                    "exp_alerts": [{"exp_labels": {}}],
+                                }
+                                for name in _DISARMED_ALERTS
+                            ],
+                        }
+                    ],
+                }
+            )
+        )
+        evaluated = subprocess.run(
+            ["promtool", "test", "rules", "test.yaml"],
+            cwd=work,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    assert evaluated.returncode == 0, (
+        "one of the disarmed alerts does not fire for a fleet with a single disarmed pod — which "
+        f"is the only shape it exists for:\n{evaluated.stdout}{evaluated.stderr}"
+    )
+
+
 def test_no_delivery_script_deploys_this_chart_atomically() -> None:
     """`--atomic` turns the `post-upgrade` convert Job back into a release gate it was moved out of.
 
@@ -2442,6 +2562,37 @@ def test_egress_destinations_are_declarable() -> None:
     policy = (CHART / "templates" / "networkpolicy.yaml").read_text()
     assert ".Values.networkPolicy.egressDestinations" in policy
     assert _values()["networkPolicy"]["egressDestinations"] == []
+
+
+def test_the_destination_list_says_which_layer_it_is_the_only_one_of() -> None:
+    """An operator sizing this list has to know which shapes it is the whole control for.
+
+    The comment block above `egressDestinations` explained `to: []` and stopped there. What it did
+    not say is that the in-process guard patches `socket.socket` and therefore bounds **no**
+    gRPC or Temporal traffic at all — measured, three such clients reached an off-allowlist listener
+    with the refusal counter flat — and that a **loopback sidecar shares the pod's network
+    namespace**, so no entry here can see a service mesh or egress gateway's traffic. An operator
+    who read the old block came away believing a destination list was defence in depth where it was
+    the only layer, and believing it covered a shape it structurally cannot.
+
+    Pinned as prose because that is what the file carries and what a deployer reads; this repository
+    already pins chart prose this way (`test_the_connection_arithmetic_is_not_restated_in_prose`).
+    The phrases are the *claims*, not the wording around them, so a rewrite that keeps the meaning
+    keeps this green.
+    """
+    prose = (CHART / "values.yaml").read_text()
+    _, _, after = prose.partition("egressPorts:")
+    block, _, _ = after.partition("egressDestinations:")
+    for claim in (
+        "netguard_preload",
+        "statically linked",
+        "shares the pod's network namespace",
+        "refuse_proxied_egress",
+    ):
+        assert claim in block, (
+            f"the egressDestinations comment block does not say {claim!r} — a deployer cannot size "
+            "this list without knowing which layer it is the only one of"
+        )
 
 
 def _makefile_renders() -> list[list[str]]:
@@ -5211,3 +5362,43 @@ def test_the_shipped_connector_path_is_the_path_the_image_has() -> None:
         f"extraConnectors.shippedPath is {_values()['extraConnectors']['shippedPath']!r}; the "
         f"image puts the shipped bundles at {expected!r}"
     )
+
+
+def test_the_image_workflow_derives_component_modules_that_actually_import() -> None:
+    """`image.yml` derives the smoke list by grepping `entrypoint.sh`, and a grep reads prose.
+
+    Deriving the list from the script rather than restating it is right — a second list drifts from
+    the script in either direction, which is the defect that derivation exists to prevent. But the
+    derivation has to read the script the way the shell does, and it did not: a **comment** saying
+    that every ``exec python -m chemclaw<...>`` line resolved to the wrong interpreter was matched
+    by ``grep -oE 'python -m [a-z_][a-z0-9_.]*'``, so the workflow smoke-tested a component named
+    ``chemclaw<...>`` and died on ``SyntaxError: invalid syntax``. The fix strips whole-line
+    comments first; this holds it, offline, without building an image.
+
+    Asserting *importability* rather than "no ellipsis" on purpose. A rule naming the one shape that
+    broke would pass the next comment that happens to contain a plausible dotted path, and the
+    property the workflow actually needs is that every name it derives can be imported.
+    """
+    import importlib.util
+    import re
+
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "image.yml").read_text(encoding="utf-8")
+    assert "sed -E 's/^[[:space:]]*#.*$//' deploy/entrypoint.sh" in workflow, (
+        "image.yml no longer strips comments before deriving the component list, so a sentence in "
+        "entrypoint.sh can be smoke-tested as a module again"
+    )
+
+    # Reproduce the workflow's own derivation rather than restating its answer.
+    script = (DEPLOY / "entrypoint.sh").read_text(encoding="utf-8")
+    commands = re.sub(r"(?m)^[ \t]*#.*$", "", script)
+    modules = re.findall(r"python -m ([a-z_][a-z0-9_.]*)", commands)
+    targets = re.findall(r"uvicorn ([a-z_][a-z0-9_.]*:[a-zA-Z_]+)", commands)
+    modules += [target.split(":")[0] for target in targets]
+    assert len(modules) >= 2, "the derivation found nothing; it has drifted from the script"
+
+    for module in modules:
+        assert importlib.util.find_spec(module) is not None, (
+            f"image.yml would smoke-test {module!r}, which is not an importable module — the "
+            "derivation has picked up prose rather than a command"
+        )

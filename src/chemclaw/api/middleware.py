@@ -1,4 +1,10 @@
-"""The front door's cross-cutting HTTP armor: headers, body caps, CORS, and the fail-closed boots.
+"""The front door's cross-cutting HTTP armor: headers, body caps, CORS, and the fail-closed boot.
+
+One boot guard, not two. `_refuse_unconfigured_llm_gateway` moved to `chemclaw.core.llm_gateway`
+(`D-2026-09-12-a-gateway-guard-in-the-front-door-is-not-a-deployment-guard`): its subject is where
+this deployment's model gateway is, which every process that takes a turn has to be right about, and
+a background worker takes turns. What is left here is the one whose subject really is *this* app —
+a bind, which is why it could not follow.
 
 Everything here applies to *every* request or to the process as a whole — nothing is specific to a
 route, which is the line that separates this module from `chemclaw/api/routes/` (R3.2). `create_app`
@@ -27,7 +33,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from chemclaw.connectors.identity import HEADER_CORRELATION
 from chemclaw.core.asgi import BodySizeLimit
 from chemclaw.core.config import settings
-from chemclaw.core.http import is_loopback_host, is_loopback_url
+from chemclaw.core.http import is_loopback_host
 from chemclaw.core.identity_context import (
     reset_current_correlation_id,
     reset_current_identity,
@@ -228,47 +234,6 @@ def _refuse_unauthenticated_exposure() -> None:
         "deployment.",
         settings.service_host,
     )
-
-
-def _refuse_unconfigured_llm_gateway() -> None:
-    """Fail closed when a network-exposed process still points at the *dev* model gateway.
-
-    **This replaces a guard that was false, and the replacement is the smaller claim.** What stood
-    here refused `llm_provider="anthropic"` with no `llm_base_url`, and returned early whenever
-    `llm_base_url` was truthy — its docstring said an `llm_base_url` naming a compatible gateway
-    "satisfies it". It did not: on that provider the base URL was never passed to the client at all,
-    so the one combination this was written to catch (a gateway configured, the provider left at its
-    shipped default) is precisely the one it waved through, while `core/netguard.derive_allowed`
-    added the public vendor host to the egress allowlist for the same reason. Measured before the
-    change, with `llm_base_url` set to an internal gateway and the provider left at its default:
-    the constructed client's `anthropic_api_url` was the vendor's public host, and this function
-    returned cleanly. (Both addresses are described rather than quoted, because
-    `tests/test_no_egress.py` scans this file's *text* for `http(s)://` host literals and cannot
-    tell a measurement in a docstring from a default in code — which is the guard working.)
-
-    With one client and one destination (`D-2026-09-04-a-gateway-is-the-only-provider`) there is no
-    public vendor default left to refuse — `llm_base_url` is where every prompt goes, always. What
-    *is* new is that the field ships with a value: `http://127.0.0.1:8820/v1`, the local mock
-    (`cli/mock_llm.MOCK_PORT`), so a fresh checkout needs no credential. That default is safe by
-    construction — a loopback address cannot leave the pod — but it is a default, and a deployment
-    that forgot to set the real one would discover it as a connection refusal on a chemist's first
-    question rather than at boot.
-
-    So this says it at boot instead, on the same non-loopback-bind signal as
-    `_refuse_unauthenticated_exposure`, and it is a *configuration* check rather than a destination
-    policy: where a real gateway points is the operator's decision and not this repository's.
-    Loopback dev against the mock is untouched.
-    """
-    if is_loopback_host(settings.service_host):
-        return
-    if is_loopback_url(settings.llm_base_url):
-        raise RuntimeError(
-            "SECURITY: this process binds a non-loopback interface "
-            f"({settings.service_host!r}) while CHEMCLAW_LLM_BASE_URL still names a loopback "
-            f"address ({settings.llm_base_url!r}) — the local dev mock. Every turn would fail on a "
-            "refused connection. Set CHEMCLAW_LLM_BASE_URL to the model gateway this deployment "
-            "should use."
-        )
 
 
 class _SecurityHeaders:

@@ -489,20 +489,50 @@ def _hook_documents() -> dict[str, str]:
     return documents
 
 
+def _entrypoint_case(component: str) -> str:
+    """The body of `deploy/entrypoint.sh`'s `case` branch for `component`.
+
+    The hook Jobs stopped carrying their own `command:` when a chart `command:` turned out to
+    replace the image `ENTRYPOINT` and so skip the block that arms the compiled egress layer. What
+    each Job runs is therefore a property of the script, and these tests read it there.
+    """
+    script = (_CHART.parents[1] / "entrypoint.sh").read_text(encoding="utf-8")
+    body = script.split(f"\n  {component})\n", 1)
+    assert len(body) == 2, f"entrypoint.sh has no `{component})` case"
+    return body[1].split("\n    ;;", 1)[0]
+
+
 def test_the_pre_upgrade_hook_migrates_then_reconciles_grants() -> None:
-    """Two steps whose order is not optional, in one container so the shell enforces it.
+    """Two steps whose order is not optional, in one process so the shell enforces it.
 
-    The grants name tables the migrations create. One container rather than two hook Jobs, so the
-    ordering is the shell's `&&` rather than two weights — and so a failed migration is never
-    followed by a grant run at all.
+    The grants name tables the migrations create, so a grant applied before its table exists fails.
+    One container rather than two hook Jobs, so the ordering is a shell sequence rather than two
+    hook weights two documents apart — and so a failed migration is never followed by a grant run
+    at all.
 
-    The stored-message conversion used to be the middle term of this `&&` and is deliberately no
-    longer here; the test below is what says where it went and why.
+    **The sequence moved from the chart to `deploy/entrypoint.sh` and this test moved with it**
+    (`D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py`). A Kubernetes `command:`
+    *replaces* the image `ENTRYPOINT`, so the `sh -c "… && …"` that used to be here ran with the
+    compiled egress layer unarmed. Under `set -e` the two-line sequence in the `migrate)` case means
+    exactly what the `&&` meant, and the Job now names its component instead of its command.
+
+    The stored-message conversion used to be the middle term and is deliberately not in either; the
+    test below is what says where it went and why.
     """
     documents = _hook_documents()
     migrate = " ".join(documents["migrate"].split())
-    assert "python -m chemclaw.core.migrate && python -m chemclaw.core.grants" in migrate
-    assert "chemclaw.agent.message_migration" not in migrate, (
+    assert 'name: CHEMCLAW_COMPONENT value: "migrate"' in migrate, migrate
+    assert "command:" not in migrate, (
+        "the DDL Job declares its own `command:` again, which replaces the image ENTRYPOINT and so "
+        "starts it with the compiled egress layer unarmed"
+    )
+    case = _entrypoint_case("migrate")
+    steps = [line for line in case.splitlines() if "python -m" in line]
+    assert [step.split("python -m ")[1].strip() for step in steps] == [
+        "chemclaw.core.migrate",
+        "chemclaw.core.grants",
+    ], case
+    assert "chemclaw.agent.message_migration" not in case, (
         "the data conversion is back in the pre-upgrade hook, where it rewrites rows the previous "
         "release is still serving"
     )
@@ -531,7 +561,8 @@ def test_the_ddl_runs_before_the_rollout_and_the_data_conversion_after_it() -> N
     convert = documents["convert"]
     assert '"helm.sh/hook": post-install,post-upgrade' in convert
     assert '"helm.sh/hook-weight": "5"' in convert
-    assert '"python", "-m", "chemclaw.agent.message_migration"' in convert
+    assert 'value: "convert"' in convert, convert
+    assert "chemclaw.agent.message_migration" in _entrypoint_case("convert")
     assert 'include "chemclaw.migrationEnv"' not in convert, (
         "the conversion Job mounts the credential that owns the schema and can rewrite the audit "
         "trail; it issues no DDL and does not need it"

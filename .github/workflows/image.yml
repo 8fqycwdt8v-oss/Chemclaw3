@@ -95,12 +95,22 @@ jobs:
           # D-118 deleted when the HPC job became a connector job, so CI asserted a component
           # that no longer exists. A second list can disagree with the script in either
           # direction; a grep of the script cannot.
+          # **Comments are stripped first, because these greps cannot tell prose from a command.**
+          # A comment in `entrypoint.sh` explaining that every `exec python -m chemclaw<...>` line
+          # resolved to the wrong interpreter was read by the first grep as a component named
+          # `chemclaw<...>`, and the smoke loop then ran `python -c "import chemclaw<...>"` and died
+          # on a SyntaxError. Deriving the list from the script rather than restating it is still
+          # right -- a second list drifts -- but the derivation has to read the script the way the
+          # shell does. `sed` drops whole-line comments; a trailing comment cannot contain a command.
+          commands="$(sed -E 's/^[[:space:]]*#.*$//' deploy/entrypoint.sh)"
           modules=()
           while read -r module; do modules+=("${module}"); done < <(
-            grep -oE 'python -m [a-z_][a-z0-9_.]*' deploy/entrypoint.sh | cut -d' ' -f3
+            printf '%s' "${commands}" \
+              | grep -oE 'python -m [a-z_][a-z0-9_.]*' | cut -d' ' -f3
           )
           while read -r target; do modules+=("${target%%:*}"); done < <(
-            grep -oE 'uvicorn [a-z_][a-z0-9_.]*:[a-zA-Z_]+' deploy/entrypoint.sh | cut -d' ' -f2
+            printf '%s' "${commands}" \
+              | grep -oE 'uvicorn [a-z_][a-z0-9_.]*:[a-zA-Z_]+' | cut -d' ' -f2
           )
           # The `connector-*` cases build their target from `${name}`, so they are quoted and the
           # greps above deliberately skip them; they expand from the bundles actually present.
@@ -118,6 +128,32 @@ jobs:
             docker run --rm --user 1001 --entrypoint python chemclaw:ci -c "import ${module}"
             echo "::endgroup::"
           done
+
+          # **And once through the real ENTRYPOINT, because the loop above cannot see the defect
+          # that matters.** `docker run --entrypoint python` is resolved by Docker from the image's
+          # own `ENV PATH`, with no shell involved -- so it never observes what bash does to PATH on
+          # startup. The UBI base sets `BASH_ENV=/opt/app-root/bin/activate`, which prepends the
+          # base venv ahead of ours, and every `exec python -m chemclaw...` in `entrypoint.sh`
+          # therefore resolved to an interpreter with no `chemclaw` installed. Four of the five
+          # component kinds could not start, and this step was green throughout, because the only
+          # other step that runs this ENTRYPOINT passes an *unknown* component and exits above
+          # every `exec`.
+          #
+          # `background-worker` is the arm to drive: it is a `python -m` component (so it exercises
+          # the lookup that broke) and it fails fast with no broker rather than serving. Its refusal
+          # to reach the broker is success here -- what is being asserted is that the interpreter
+          # resolved and `chemclaw` imported, so a `ModuleNotFoundError` is the failure.
+          echo "::group::the entrypoint resolves an interpreter that has chemclaw"
+          out=$(docker run --rm --user 1001 \
+                  -e CHEMCLAW_COMPONENT=background-worker \
+                  -e CHEMCLAW_TEMPORAL_ADDRESS=127.0.0.1:1 \
+                  chemclaw:ci 2>&1 || true)
+          printf '%s\n' "${out}"
+          if printf '%s' "${out}" | grep -q "No module named 'chemclaw'"; then
+            echo "the entrypoint ran an interpreter with no chemclaw: PATH is wrong in the image" >&2
+            exit 1
+          fi
+          echo "::endgroup::"
 
       - name: Record what this build actually contains (SBOM + digest)
         # `main` only. The SBOM's stated job, two paragraphs down, is answering "what was in the

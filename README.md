@@ -43,15 +43,24 @@ there is no second config source.
 
 ```sh
 # The front-door chat service (FastAPI + SSE). Browse to the served page, start a
-# session, watch a plan + tool use, get a cited answer. Both hosts, deliberately:
-# `--host` is the socket, `CHEMCLAW_SERVICE_HOST` is what the app is told about it,
-# and with no identity provider configured the app refuses to serve a request that
-# arrives on anything but loopback (see `src/chemclaw/api/middleware.py`).
-CHEMCLAW_SERVICE_HOST=127.0.0.1 \
+# session, watch a plan + tool use, get a cited answer. Three variables, each a
+# different fact: `--host` is the socket, `CHEMCLAW_SERVICE_HOST` is what the app is
+# told about it (with no identity provider configured the app refuses a request that
+# arrives on anything but loopback — `src/chemclaw/api/middleware.py`), and
+# `CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY` is the *gateway* posture stated out loud.
+# The third is not extra ceremony: the shipped `CHEMCLAW_LLM_BASE_URL` is the local
+# mock on loopback, and since D-2026-09-12 every process that makes a model call
+# refuses to boot pointed at it **in every posture** — the loopback bind used to skip
+# the check, which made a deployment's exposed-gateway typo invisible. Saying "yes, I
+# mean the dev mock" is what replaced it (`src/chemclaw/core/llm_gateway.py`).
+CHEMCLAW_SERVICE_HOST=127.0.0.1 CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY=true \
   uvicorn chemclaw.api.app:create_app --factory --host 127.0.0.1 --port 8000
 
-# Durable workers (separate processes; need Temporal + Postgres from `make up`).
-python -m chemclaw.durable.background_worker    # background-jobs (ELN sync, reports, memory)
+# Durable workers (separate processes; need Temporal + Postgres from `make up`). The
+# background worker takes agent turns inside an activity, so it asks the same gateway
+# question; the two connector workers reach no model and do not.
+CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY=true \
+  python -m chemclaw.durable.background_worker  # background-jobs (ELN sync, reports, memory)
 python -m chemclaw.connectors.calc.worker       # connector-calc (the expensive xTB calculations)
 python -m chemclaw.connectors.bo.worker         # connector-bo (optimization campaigns)
 ```

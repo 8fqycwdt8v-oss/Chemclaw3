@@ -163,9 +163,15 @@ class ObservabilitySettings(BaseSettings):
     # NetworkPolicy for the invariant that only LLM traffic (and declared infrastructure) leaves the
     # estate: a library fetching model weights, a usage ping, a DNS licence check is caught here,
     # though a static scan cannot see it. On by default; `false` is the loud, stated opt-out for
-    # a deployment that has an equivalent network control and wants the process out of the way. It
-    # cannot cover a child process, a `ctypes` call into libc, or a compiled extension's own
-    # syscalls — the NetworkPolicy is the layer that does.
+    # a deployment that has an equivalent network control and wants the process out of the way.
+    #
+    # **It governs two layers, not one.** The socket patching cannot see a child process, a `ctypes`
+    # call into libc, or a compiled extension's own syscalls — and grpc's C-core and Temporal's Rust
+    # sdk-core are in that last class, measurably. `chemclaw.core.netguard_preload` is the
+    # `LD_PRELOAD` interposition that refuses them at libc, armed by `deploy/entrypoint.sh` from the
+    # same derived allowlist, and this setting turns it off too: `false` gives a deployment neither
+    # guard rather than a compiled layer refusing what the patched one was told to allow. What is
+    # left over after both — a statically linked binary, a direct syscall — is the NetworkPolicy's.
     egress_guard_enabled: bool = True
     # Extra hosts the guard permits, comma-separated, on top of the destinations derived from the
     # other settings. Empty by default and empty in the shipped chart; each entry is a deliberate,
@@ -178,6 +184,12 @@ class ObservabilitySettings(BaseSettings):
     # attaches one must name its host here, or the guard refuses its own configured database. That
     # is a real limit of "derived from the settings the process dials", written down because
     # `netguard`'s docstring reads as though nothing needs naming by hand.
+    #
+    # **And one destination that only became a destination when enforcement did: a *remote* git
+    # note repository.** `kg/git_writer.py` shells out to `git`, a child process inherits
+    # `LD_PRELOAD`, and `git_remote` is the string `"origin"` — so the host is not on this object
+    # and cannot be derived without a subprocess at every process start. A deployment that pushes
+    # notes off-box names it here or the push is refused.
     egress_allow: str = ""
     # The OTLP collector endpoint (plan F6-T5). Bridged into `OTEL_EXPORTER_OTLP_ENDPOINT` when
     # set, so the exporter's own precedence still applies; empty in dev (no collector). Config, so

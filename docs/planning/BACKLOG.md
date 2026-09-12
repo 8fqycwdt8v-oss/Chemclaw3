@@ -101,104 +101,46 @@ topic).
   The false sentence is corrected in this commit; the gap is not. Anchors:
   `connectors/registry.py::_bound_by_this_process`, `agent/chemclaw_agent.py::_register_generated_tools`.
 
-- [ ] **The JWKS fetch follows an ambient proxy and has no seam to stop it** — [M], opened
-  2026-09-05 by the review of `D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`.
-  `api/auth.py:85` builds a `PyJWKClient`, whose `fetch_data` calls `urllib.request.urlopen` —
-  which resolves proxies from the process-global default opener and has no `trust_env`. Measured
-  with a recorder standing in as the proxy: it received
-  `GET http://login.microsoftonline.com/tenant/discovery/v2.0/keys`. **This is the anchor every
-  bearer token is validated against**, so a proxy that could answer it could serve a key set of its
-  own choosing. Two things bound the severity and neither closes it: a real tenant endpoint is
-  `https`, where a proxy sees a CONNECT tunnel it can only open with a CA the pod already trusts
-  (which is exactly what a TLS-terminating corporate proxy arranges); and the boot refusal added by
-  that ADR stops a deployment that has *not* declared a proxy **and has `entra_required` on** —
-  which is the Helm chart (`values.yaml` sets `CHEMCLAW_ENTRA_REQUIRED: "true"` on every
-  component) and is **not** this repository's own defaults. This sentence said "every shipped one"
-  and that was measured false on 2026-09-06: on `Settings()` defaults `proxied_destinations`
-  charges nothing, so `make chat`, `make connectors`, CI, a hand-started worker and any site behind
-  `CHEMCLAW_SERVICE_ALLOW_INSECURE=true` boot with the hole open. For *this* row the identity-off
-  half is moot — the JWKS fetch only happens when `entra_required` is on — but the sentence was
-  being read as a statement about the boot refusal in general, and as that it is false. The
-  asymmetry with the LLM seam stands.
-  **Not a one-liner, which is why it is a row.** `PyJWKClient` takes `ssl_context` and no opener,
-  so the only in-process fix is
-  `urllib.request.install_opener(build_opener(ProxyHandler({})))` at import — a process-wide side
-  effect on every library that reaches for `urlopen`, which wants its own decision rather than
-  riding along. The alternative is vendoring `fetch_data`, which couples this module to a surface
-  it does not otherwise use (`_match_kid` is already written the long way for that reason).
-  Anchors: `api/auth.py::_client_for`, `core/netguard.py::refuse_proxied_egress`.
+- [ ] **The `git` remote is now a destination a deployment must declare, and nothing derives it** —
+  [S], what is left of "the egress guard is blind to gRPC and to Temporal" after
+  `D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py`. The blindness
+  itself is closed: `core/netguard_preload.c` interposes libc's `connect`, `getaddrinfo`, `sendto`
+  and `sendmsg` through `LD_PRELOAD`, armed by `deploy/entrypoint.sh` from the allowlist
+  `netguard.derive_allowed` returns, and driven against a real gRPC server over a non-loopback route
+  it refuses the plain socket, `grpc` and `temporalio` alike — grpc's own C-core reporting
+  `connect failed: ... Operation not permitted` — while loopback and an allowlisted address continue
+  to work. Two things remain:
+  - **`git` is now bounded and nothing derives its host.** A child inherits `LD_PRELOAD`, so
+    `kg/git_writer.py`'s `git push` is refused unless the remote is named in
+    `CHEMCLAW_EGRESS_ALLOW` — the first time that destination has been bounded at all, and a
+    behaviour change for any deployment pushing notes off-box. `git_remote` is the string `"origin"`,
+    so resolving it means `git remote get-url` in a subprocess; the entrypoint already runs one
+    interpreter to derive the allowlist and is the one place that could afford it.
+  - **The IPv4-mapped arm is unmeasured on hosts without `AF_INET6`**, which includes this sandbox:
+    `test_an_ipv4_mapped_address_is_not_a_way_around_the_check` skips with the reason in the message.
+  Anchors: `core/netguard_preload.c`, `core/netguard_preload.py`, `deploy/entrypoint.sh`,
+  `kg/git_writer.py`.
 
-- [ ] **An external vector store's client builds its own httpx and is outside the proxy fix** —
-  [S], opened 2026-09-05 by `D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`.
-  `retrieval/vectors/qdrant.py:118` constructs `AsyncQdrantClient`, which builds its own httpx
-  client internally and takes only `verify` from this repository — so `trust_env` stays at its
-  default and a configured proxy would carry that traffic. It is **not** the LLM seam, so no prompt
-  or bearer is on it; what is on it is embedded note text and the query vectors. Recorded rather
-  than blind-patched for one reason: `qdrant_client` is not in this closure (`pgvector` is the
-  shipped provider), so the claim "passing a client works" would be untested prose, which is the
-  shape this repository keeps deleting. **The boot refusal covers less than this row said.** It
-  fires only where `_env_reading_destinations` charges a destination — the OTLP endpoint and the
-  Entra JWKS — so a deployment with `entra_required=false` and `otel_enabled=false`, which is what
-  `.env.example` ships, boots with a proxy variable set and nothing charged (measured 2026-09-06:
-  HTTP 200 through a real loopback proxy to an external listener, `netguard._refused` 0 before and
-  after, the proxy's log showing the absolute-URI request line). The residual is a site that has
-  declared a proxy **or** runs identity and tracing off, *and* runs the non-default vector store. Closing it needs the extra installed, then
-  one measurement of whether the SDK accepts a caller-supplied client. Anchors:
-  `retrieval/vectors/qdrant.py`, `core/http.py::gateway_client_kwargs`.
-
-- [ ] **The egress guard is blind to gRPC and to Temporal, and those are its two highest-value
-  destinations** — [M], opened 2026-09-06 by the wave-5 egress review, argued in
-  `D-2026-09-06-a-redaction-that-only-covers-logrecords-covers-one-sink.md`. `arm()` patches
-  `socket.socket`'s methods and the `socket` module resolvers; grpc's C-core and Temporal's Rust
-  sdk-core open sockets through neither. Measured with the allowlist deliberately **empty** and no
-  proxy variables set: `grpc.insecure_channel`, the OTLP gRPC span exporter and
-  `temporalio.Client.connect` all reached an external listener with `chemclaw_egress_refused_total`
-  at 0. `derive_allowed` adds `otel_endpoint` and `temporal_address` all the same, which reads as a
-  bound and is not — the docstrings at `core/netguard.py` now say so in both places, which is the
-  part that was cheap. **Why it matters beyond the general concession**: with
-  `otel_include_sensitive_data` on, that exporter carries prompts and completions, so a wrong or
-  hostile `CHEMCLAW_OTEL_ENDPOINT` exports them anywhere while both signals an operator would check
-  (`chemclaw_egress_refused_total`, `chemclaw_egress_guard_armed`) report health. **And the two
-  blindnesses compound**: measured with an ambient proxy left in place, grpc followed `https_proxy`
-  to a *loopback* proxy — invisible to the socket guard because it is a compiled extension, and
-  invisible to the NetworkPolicy because a sidecar shares the pod's netns. The module's fallback
-  ("those are the NetworkPolicy's job") does not hold for that combination.
-  **Not a one-liner, which is why it is a row.** Closing it means an `LD_PRELOAD`/seccomp layer or
-  a per-library interception (grpc exposes no socket factory hook; `temporalio` dials in Rust), i.e.
-  a decision about what enforces egress rather than an edit to this module. The cheaper half that
-  remains open is the chart: `networkPolicy.egressDestinations` does not say it is the only layer
-  bounding these two, nor what a loopback sidecar does to that. Anchors:
-  `core/netguard.py::arm`, `::derive_allowed`, `deploy/helm/chemclaw/values.yaml` (`networkPolicy`).
-
-- [ ] **Six live-lane httpx clients read the ambient proxy, one of them carrying a bearer** — [S],
-  opened 2026-09-06 by the same review. `cli/live_probes.py:340` builds an `Authorization: Bearer`
-  client carrying `live_probe_token`, and `cli/live_storm.py` (five sites), `cli/phoenix_publish.py`
-  and `evals/live.py` build clients, all at httpx's default `trust_env=True`. None is on a path a
-  chemist reaches, which is why it is [S] rather than the finding itself — but
-  `core/netguard.py`'s docstring asserted "every first-party HTTP client here passes
-  `trust_env=False`" as the correctness argument for charging two destinations instead of twelve,
-  and that sentence was false for these six.
-  `tests/test_netguard.py::test_every_served_http_client_refuses_the_ambient_proxy` now enforces the
-  property with these four modules in a named exemption list, so a *new* client anywhere else fails
-  on the day it is written; closing this row is deleting the list, one keyword per site. It is a row
-  rather than a patch only because those files belong to another surface than the one that found it.
-  Anchors: `cli/live_probes.py`, `cli/live_storm.py`, `cli/phoenix_publish.py`, `evals/live.py`,
-  `tests/test_netguard.py::_TRUST_ENV_LANE_EXEMPTIONS`.
-
-- [ ] **The gateway boot guard reaches one process, and the worker is the other one** — [M],
-  opened by `D-2026-09-04-a-gateway-is-the-only-provider`. `_refuse_unconfigured_llm_gateway` and
-  `_refuse_unauthenticated_exposure` are called only from `api/app.py`, so a background worker
-  never runs either — and `durable/template_activities.py` builds a graph inside an activity, so a
-  worker pod *does* make model calls to `llm_base_url`. The chart is not affected (verified:
-  `helm template` renders `CHEMCLAW_LLM_BASE_URL` into `chemclaw-config`, and 9 Deployments plus 3
-  Jobs `envFrom` it), so this bites a non-Helm or partially-overridden deployment, which gets a
-  silent loopback dial in the worker where the front door would have refused to boot.
-  **Not a one-liner, which is why it is a row.** The guard's signal is `service_host` being
-  non-loopback — a property of a *bind*, and a worker does not bind. Extending it means deciding
-  what "exposed" means for a process that only makes outbound calls, which is a design question.
-  The front-door-only scope is pre-existing (`_refuse_unauthenticated_exposure` has always been
-  that way); what is new is that the ADR's argument — "loudly at boot rather than loudly on the
-  first turn" — only holds for one of the two process kinds.
+- [ ] **What "network-exposed" means for a process that only makes outbound calls** — [M],
+  opened by `D-2026-09-04-a-gateway-is-the-only-provider`, narrowed to this half by
+  `D-2026-09-12-a-gateway-guard-in-the-front-door-is-not-a-deployment-guard`.
+  `_refuse_unauthenticated_exposure` is still called only from `api/app.py`, so no worker runs it,
+  and it cannot simply be hoisted the way its neighbour was: its signal *is* `service_host` being
+  non-loopback — a property of a **bind** — and a Temporal worker does not bind a request surface.
+  (It does bind `worker_metrics_host`, default `0.0.0.0`: an unauthenticated `/healthz`, `/readyz`
+  and `/metrics` surface whose exposition carries counts and capacity only, which is why reusing
+  that as the signal would refuse every worker in every deployment for a surface the NetworkPolicy
+  is what keeps inside the cluster.) So the question is a design one and it is genuinely open: with
+  `entra_required=false` a worker's activities run as the shared dev principal with every
+  authorization gate open, exactly as a request would — but nothing is *listening*, so what an
+  operator should be refused for is the thing to decide before any code moves. Whatever it turns
+  out to be, `CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY`'s shape is the precedent to weigh: a posture a
+  deployment states beats one inferred from a field that means something else in the process
+  reading it.
+  **The gateway half of this row is closed** — `core/llm_gateway.refuse_unconfigured_llm_gateway`
+  is called from `create_app`, `api/mcp_face.main`, `durable/background_worker.main` and
+  `cli/chat.main`, the two connector components are shown unable to reach the gateway, and
+  `tests/test_llm_gateway_guard.py` drives the processes. Do not read that as covering this one.
 
 - [ ] **A standing plan approval authorizes any state-changing tool, not the plan's steps** — [L],
   from the 2026-08 security review (proven live). `plan_gate.enforce_plan_approval` refuses a

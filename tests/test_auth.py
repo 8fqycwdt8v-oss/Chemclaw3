@@ -6,7 +6,14 @@ without a tenant or network. The HTTP tests prove the 401 gate and the dev-mode 
 """
 
 import logging
+import os
+import threading
 import time
+import urllib.request
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from types import SimpleNamespace
 from typing import Any
 
 import jwt
@@ -14,6 +21,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
+from jwt import PyJWKClient
 from jwt.exceptions import PyJWKClientConnectionError, PyJWKClientError
 
 import chemclaw.api.auth as auth
@@ -56,7 +64,15 @@ def _sign(key: Any, claims: dict[str, Any]) -> str:
 
 @pytest.fixture(autouse=True)
 def _entra_env(monkeypatch: pytest.MonkeyPatch, rsa_key: Any) -> None:
-    """Point the validator at the test audience/issuer and the local signing key (no network)."""
+    """Point the validator at the test audience/issuer and the local signing key (no network).
+
+    Also pins `no_proxy` in both spellings for the duration of every test here, because
+    `_client_for` writes to it: building a JWKS client takes its host out of the ambient proxy's
+    reach, and that is a mutation of the *process* environment, which outlives a test. Restoring it
+    per test keeps any file that runs after this one from inheriting a bypass it never set.
+    """
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.setenv(name, os.environ.get(name, ""))
     monkeypatch.setattr(settings, "entra_audience", _AUDIENCE)
     monkeypatch.setattr(settings, "entra_issuer", _ISSUER)
     monkeypatch.setattr(auth, "_signing_key", lambda _token: rsa_key.public_key())
@@ -287,6 +303,168 @@ def test_jwks_client_uses_the_configured_timeout(monkeypatch: pytest.MonkeyPatch
     assert captured["endpoint"] == settings.entra_jwks_endpoint
 
 
+@contextmanager
+def _proxy_recorder() -> Iterator[tuple[str, list[str]]]:
+    """A loopback HTTP server standing in for an ambient proxy, recording every request line.
+
+    Records `CONNECT` as well as `GET` so the `https` arm is observed rather than inferred: a
+    proxied `https` fetch reaches a proxy as a tunnel request naming the host, and answering it 502
+    fails the fetch fast instead of leaving urllib mid-handshake against a plain HTTP server.
+    """
+    received: list[str] = []
+
+    class _Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.0"
+
+        def do_GET(self) -> None:
+            received.append(f"{self.command} {self.path}")
+            body = b'{"keys": []}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_CONNECT(self) -> None:
+            received.append(f"{self.command} {self.path}")
+            self.send_error(502)
+
+        def log_message(self, *args: Any) -> None:
+            """Silence the handler's stderr logging; `received` is the record."""
+
+    server = HTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}", received
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_the_jwks_fetch_does_not_follow_an_ambient_proxy(
+    monkeypatch: pytest.MonkeyPatch, scheme: str
+) -> None:
+    """The key set every bearer token is validated against must not come from a proxy.
+
+    `PyJWKClient.fetch_data` calls `urllib.request.urlopen`, which reads the process environment for
+    proxies and takes no `trust_env`. A proxy that could answer this fetch could serve a key set of
+    its own choosing, so this is the one destination in the tree where following the environment is
+    a trust decision rather than a routing one.
+
+    Driven, not asserted as the shape of an env var. The **control arm** builds a bare
+    `PyJWKClient` for the same endpoint and requires the recorder to see the request — without it,
+    a recorder that was never wired up would make the real assertion pass for the wrong reason.
+    The control also leaves `urllib`'s default opener built and cached *with the proxy in it*, so
+    the second arm additionally proves what makes this fix viable at all: `ProxyHandler.proxy_open`
+    consults `proxy_bypass` per request, so a bypass added after the opener exists still diverts it.
+
+    The `no_proxy` the operator set is asserted to survive in both spellings: writing only the
+    lowercase one while the pod set `NO_PROXY` makes `getproxies_environment` prefer ours and drops
+    theirs, which would proxy destinations the operator had deliberately exempted.
+    """
+    with _proxy_recorder() as (proxy_url, received):
+        for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"):
+            monkeypatch.setenv(name, proxy_url)
+        monkeypatch.setenv("no_proxy", "keep.example")
+        monkeypatch.setenv("NO_PROXY", "keep.example")
+        # Rebuilt from the environment above rather than inherited from whatever earlier test
+        # first called `urlopen`: `ProxyHandler` snapshots the proxy *set* at construction.
+        monkeypatch.setattr(urllib.request, "_opener", None)
+        endpoint = f"{scheme}://jwks.invalid/tenant/discovery/v2.0/keys"
+        monkeypatch.setattr(settings, "entra_jwks_url", endpoint)
+        monkeypatch.setattr(auth, "_jwks_clients", {})
+
+        with suppress(Exception):
+            PyJWKClient(endpoint, timeout=2.0, cache_keys=False).fetch_data()
+        assert received, (
+            f"the control arm reached no recorder, so this test proves nothing about {scheme}"
+        )
+        received.clear()
+
+        with suppress(Exception):
+            auth._client_for(settings.entra_jwks_endpoint).fetch_data()
+        assert received == [], (
+            f"the JWKS fetch went to the ambient proxy ({received}) — a host that could answer it "
+            "chooses the keys every bearer token is validated against"
+        )
+
+    assert os.environ["no_proxy"] == "keep.example,jwks.invalid"
+    assert os.environ["NO_PROXY"] == "keep.example,jwks.invalid"
+    assert urllib.request.proxy_bypass("keep.example"), "the operator's own bypass was clobbered"
+
+
+def test_two_tenants_validating_at_once_both_reach_no_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_client_for` is called on concurrent worker threads and writes a process global.
+
+    `validate_token` runs under `asyncio.to_thread`, so two requests bearing tokens from two tenants
+    genuinely build their JWKS clients at the same moment, and the body of `_client_for` was an
+    unsynchronised read-modify-write of `os.environ`. Measured with the window widened, five
+    concurrent writers of five distinct hosts left **one** of the five in `no_proxy` — and the
+    loser's key set is then fetched through the ambient proxy, which is the precise failure
+    `_bypass_ambient_proxy` exists to prevent.
+
+    The widener is a slow *read* of the environment, injected where the window actually is —
+    between the `get` and the assignment. The real window is microseconds wide, so a test that
+    merely started five threads passes against the unlocked code most runs, which is worse than no
+    test: it reports a fixed race that is still there. The first version of this test widened
+    `proxy_bypass` instead, which sleeps *before* the window rather than inside it, and the unlocked
+    mutation survived it. Driven with the widener in the right place: unlocked retains 1 of 5,
+    locked retains 5 of 5.
+
+    The environment is a stand-in rather than the process's own, which also keeps the test from
+    leaving `no_proxy` behind for whatever runs next.
+    """
+    hosts = [f"tenant{index}.login.example" for index in range(5)]
+
+    class SlowEnviron:
+        """A mapping whose read is slow, so the read-modify-write below has a window to lose in.
+
+        The three operations `_bypass_ambient_proxy` performs and nothing else. Not a `dict`
+        subclass, because widening `get`'s signature to insert the sleep is exactly the override
+        `Mapping` forbids.
+        """
+
+        def __init__(self) -> None:
+            self.values: dict[str, str] = {}
+
+        def __contains__(self, key: object) -> bool:
+            return key in self.values
+
+        def get(self, key: str, default: str = "") -> str:
+            # Read *then* sleep, and return what was read. Sleeping and re-reading would close the
+            # window this exists to open, which is how the first version of this widener came out
+            # vacuous — every thread saw the value its predecessor had just written.
+            value = self.values.get(key, default)
+            time.sleep(0.05)
+            return value
+
+        def __setitem__(self, key: str, value: str) -> None:
+            self.values[key] = value
+
+    environment = SlowEnviron()
+    monkeypatch.setattr(auth, "os", SimpleNamespace(environ=environment))
+    monkeypatch.setattr(auth, "_jwks_clients", {})
+    monkeypatch.setattr(auth, "PyJWKClient", lambda endpoint, timeout: object())
+    monkeypatch.setattr(auth, "proxy_bypass", lambda host: False)
+    threads = [
+        threading.Thread(target=auth._client_for, args=(f"https://{host}/keys",)) for host in hosts
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    exempted = environment.values.get("no_proxy", "")
+    missing = [host for host in hosts if host not in exempted]
+    assert not missing, (
+        f"{len(missing)} of {len(hosts)} JWKS hosts were lost from no_proxy ({exempted!r}); their "
+        "key sets would be fetched through the ambient proxy"
+    )
+
+
 def test_an_unknown_kid_is_an_auth_error_not_an_unhandled_crash(
     monkeypatch: pytest.MonkeyPatch, rsa_key: Any
 ) -> None:
@@ -387,8 +565,8 @@ def test_unauthenticated_exposed_boots_only_with_explicit_opt_in(
     monkeypatch.setattr(settings, "entra_required", False)
     monkeypatch.setattr(settings, "service_host", "0.0.0.0")
     monkeypatch.setattr(settings, "service_allow_insecure", True)
-    # A non-loopback bind must name a real gateway or `_refuse_unconfigured_llm_gateway` fires
-    # (the shipped default is the loopback mock); this test is about auth exposure.
+    # A real gateway address, so this test is about auth exposure and nothing else: the sibling
+    # boot guard is satisfied by naming one, without relying on the suite's loopback opt-in.
     monkeypatch.setattr(settings, "llm_base_url", "http://internal-llm:8000/v1")
     with caplog.at_level(logging.WARNING, logger="chemclaw.api.app"):
         app = create_app()
@@ -409,38 +587,8 @@ def test_entra_required_exposed_boots_without_warning(
     assert not any("authorization gates OPEN" in r.message for r in caplog.records)
 
 
-def test_exposed_process_still_on_the_dev_gateway_refuses_to_boot(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A network-exposed process still pointed at the loopback mock fails closed at boot.
-
-    **This replaces a guard that was false in the direction that mattered.**
-    `_refuse_public_llm_exposure` refused `llm_provider="anthropic"` with no `llm_base_url`, and
-    returned early whenever `llm_base_url` was *truthy* — while on that provider the base URL was
-    never passed to the client at all. So the one shape it existed to catch (a gateway configured,
-    the provider left at its shipped default) was precisely the one it waved through, and
-    `core/netguard.derive_allowed` opened `api.anthropic.com` for the same reason.
-
-    With one destination there is no public default left to refuse
-    (`D-2026-09-04-a-gateway-is-the-only-provider`); what is new is that `llm_base_url` ships with a
-    value, the local mock. That default cannot leave the pod — but a deployment that forgot to
-    override it would meet it as a refused connection on a chemist's first question. This says so
-    at boot instead, on the same non-loopback-bind signal the auth guard uses.
-    """
-    monkeypatch.setattr(settings, "entra_required", True)
-    monkeypatch.setattr(settings, "service_host", "0.0.0.0")
-    monkeypatch.setattr(settings, "llm_base_url", "http://127.0.0.1:8820/v1")
-    with pytest.raises(RuntimeError, match="loopback address"):
-        create_app()
-
-
-def test_a_loopback_bind_may_keep_the_dev_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The other half: local dev against the mock is untouched.
-
-    A guard that also broke `make chat` would be a worse defect than the one it closes, and
-    `pytest.raises` on the test above cannot show that it does not.
-    """
-    monkeypatch.setattr(settings, "entra_required", False)
-    monkeypatch.setattr(settings, "service_host", "127.0.0.1")
-    monkeypatch.setattr(settings, "llm_base_url", "http://127.0.0.1:8820/v1")
-    create_app()
+# The gateway boot guard's own tests moved to `tests/test_llm_gateway_guard.py` with the guard
+# (`D-2026-09-12-a-gateway-guard-in-the-front-door-is-not-a-deployment-guard`). They were here
+# because `create_app` was its only caller, which is exactly the defect that ADR closes: the
+# refusal now has to hold in the background worker and the mcp face as well, and a test that can
+# only reach it through `create_app` cannot say so.

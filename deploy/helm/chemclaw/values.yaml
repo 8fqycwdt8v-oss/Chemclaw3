@@ -752,10 +752,21 @@ resources:
 config:
   # The one model destination. **Stated rather than left to the code default**, for the reason
   # `CHEMCLAW_CALC_SERVER_URL` below is: the default is the local dev mock on loopback, and a pod
-  # that inherited it would refuse to boot (`api/middleware._refuse_unconfigured_llm_gateway`).
+  # that inherited it would refuse to boot
+  # (`core/llm_gateway.refuse_unconfigured_llm_gateway`). **That was true of the front door alone**
+  # until 2026-09-12: the guard lived in `api/middleware.py` with `create_app` as its only caller,
+  # so the background worker — whose agent activity takes turns — inherited the mock and dialled it
+  # silently. It now runs in every component that makes model calls.
   # There is no `CHEMCLAW_LLM_PROVIDER` — this address is the whole knob
   # (`D-2026-09-04-a-gateway-is-the-only-provider`).
   CHEMCLAW_LLM_BASE_URL: "http://internal-llm.llm.svc:8000/v1"
+  # The one legitimate production case for a *loopback* gateway, stated here because a deployer who
+  # needs it will look for it here and nowhere else. A gateway **sidecar** in this pod is an
+  # ordinary topology, and the guard above refuses it by default — a loopback address is the dev
+  # mock's shipped default, and the guard cannot tell the two apart. Set this to `"true"` only
+  # beside a `CHEMCLAW_LLM_BASE_URL` that names a sidecar, never to make a refusal go away: with it
+  # on, every model call this pod makes goes to something on this host, and the boot log says so.
+  CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY: "false"
   CHEMCLAW_LLM_MODEL: "gpt-oss"
   # The window of the model on the line above, so the context policy's *second* bound is real.
   # `llm_context_window_tokens` defaults to 0 in code — "undeclared", the honest default for an
@@ -1677,6 +1688,29 @@ networkPolicy:
   # `tests/test_no_egress.py` enforces "this system takes no external sources" (D-089) by scanning
   # source code for third-party host literals. That catches a developer adding a data source and
   # catches nothing at runtime — set this to make the network agree with the decision.
+  #
+  # **What else bounds a destination, and the two shapes where this list is the only thing that
+  # does.** The in-process guard (`chemclaw.core.netguard`) patches `socket.socket` and the `socket`
+  # module's resolvers, so it bounds pure-Python clients and nothing else: measured, a
+  # `grpc.insecure_channel`, the OTLP gRPC span exporter and `temporalio.Client.connect` each
+  # reached an off-allowlist listener with its refusal counter flat, because all three open sockets
+  # below the interpreter. `chemclaw.core.netguard_preload` — the `LD_PRELOAD` interposition on
+  # libc, armed by `deploy/entrypoint.sh` — is the layer that refuses those, and
+  # `D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py` records what it covers. Two
+  # things are left over and they are this list's:
+  #
+  #   - A **statically linked** binary, or one issuing the syscall directly. There is no dynamic
+  #     symbol to interpose and no Python object to patch, so a destination list and a dropped
+  #     packet are the whole control.
+  #   - Any destination this deployment names in `CHEMCLAW_EGRESS_ALLOW` for one subsystem's sake.
+  #     Both process-level guards take the allowlist as one set for the whole pod; a rule here can
+  #     be narrower than that.
+  #
+  # **And one shape no `to:` list can reach at all: a proxy on loopback.** A sidecar — a service
+  # mesh, an egress gateway — shares the pod's network namespace, so its traffic never crosses a
+  # NetworkPolicy enforcement point, and the real destination is in the request line rather than in
+  # the address. Enumerating every peer below does not bound it. That case is refused at boot by
+  # `netguard.refuse_proxied_egress` instead, and there is no layer under that one.
   #
   # Entries are NetworkPolicyPeer objects, passed through verbatim:
   #   - ipBlock: {cidr: 10.0.1.0/24}                     # the database subnet

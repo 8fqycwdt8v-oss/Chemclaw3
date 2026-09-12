@@ -508,7 +508,27 @@ def test_a_rolled_back_release_re_applies_its_own_grant_file() -> None:
     other end of it — and it fails with the reason rather than as a diff in an annotation string.
     """
     migrate = _MIGRATE_JOB.read_text(encoding="utf-8").split("\n---\n")[0]
-    assert "python -m chemclaw.core.grants" in migrate, "wrong document: this one applies no grants"
+    # The guard that picks the right document, and it had to change with the thing it selects. It
+    # used to look for `python -m chemclaw.core.grants` in the Job's own `command:`; W21 moved that
+    # command into `deploy/entrypoint.sh` so the Job reaches the image ENTRYPOINT and is therefore
+    # covered by the compiled egress layer, which a `command:` override bypasses entirely. So the
+    # document is now identified by the component it dispatches, and the claim the old assertion
+    # actually carried — that grants run after the migrations, in that order — is asserted below
+    # against the script that now owns it. Selecting by `command:` again would pass while the
+    # sequence had moved somewhere unexecuted, which is the shape this whole wave is about.
+    assert re.search(r'value:\s*"?migrate"?', migrate), (
+        "wrong document: this one is not the migrate Job"
+    )
+    entrypoint = (_ROOT / "deploy" / "entrypoint.sh").read_text(encoding="utf-8")
+    case = entrypoint.split("migrate)", 1)[-1].split(";;", 1)[0]
+    assert "python -m chemclaw.core.migrate" in case and "python -m chemclaw.core.grants" in case, (
+        "the migrate component no longer runs both halves, so a release applies schema without "
+        "reconciling the runtime role's grants"
+    )
+    assert case.index("chemclaw.core.migrate") < case.index("chemclaw.core.grants"), (
+        "grants run before the migrations that create the tables they name, and a grant applied "
+        "before its table exists fails"
+    )
     assert re.search(r'"helm\.sh/hook":[^\n]*\bpre-rollback\b', migrate), (
         "the Job that reconciles the grants does not run on rollback, so `helm rollback` restores "
         "the older image against the newer release's ACL — and the grant set contracts, so that "

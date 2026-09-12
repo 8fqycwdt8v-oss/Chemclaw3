@@ -41,6 +41,14 @@ metrics.** `evals/metric.py` is the `@metric` decorator and registry for scored 
 `evals/metrics.py` the seed criteria themselves; three files, one word, no relationship. `metrics`
 here counts turns, tokens and jobs for an operator.
 
+`llm_gateway` is one *policy*, not a primitive, and the reason it lives in the kernel is the reason
+the kernel exists. It refuses to boot a process pointed at a loopback model gateway, which is a
+question every process that takes a turn has to answer — the front door, the read-only MCP face, the
+background worker whose agent activity builds a graph, and the terminal CLI. It was written in
+`api/middleware.py`, where `create_app` was its only possible caller, so three of those four ran
+without it (`D-2026-09-12-a-gateway-guard-in-the-front-door-is-not-a-deployment-guard`). It reads
+`config` and `http.is_loopback_url` and nothing else, so no edge is created by it being here.
+
 **The rule that defines this package: `core` imports no sibling.** Not `agent`, not `durable`, not
 `connectors` — nothing. Everything else builds on it, so a single edge the other way would make the
 dependency graph a cycle and the four layers a suggestion. `tests/test_layering.py` runs each

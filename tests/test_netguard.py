@@ -90,8 +90,8 @@ def test_localhost_suffix_is_not_trusted() -> None:
 # parsed, so `127.0.0.2`, `0.0.0.0`, `::` and a bracketed `[::1]` were loopback to one and not to
 # the other. The consequence was not cosmetic — a pod with the shipped `service_host="0.0.0.0"`
 # bind and `CHEMCLAW_LLM_BASE_URL=http://127.0.0.2:8820/v1` passed
-# `api.middleware._refuse_unconfigured_llm_gateway`, the guard added to catch exactly that, and
-# then failed every turn on a refused connection.
+# `refuse_unconfigured_llm_gateway` (then in `api.middleware`, now `core.llm_gateway`), the guard
+# added to catch exactly that, and then failed every turn on a refused connection.
 _ADDRESSES: list[tuple[str, bool]] = [
     ("127.0.0.1", True),
     ("127.0.0.2", True),  # was: loopback to the guard, network-exposed to the front door
@@ -108,6 +108,19 @@ _ADDRESSES: list[tuple[str, bool]] = [
     ("0.0.0.0", False),
     ("::", False),
     ("", False),
+    # The short, decimal, octal and hexadecimal spellings `inet_aton(3)` accepts and
+    # `ipaddress.ip_address` does not. Every one was driven against a real listener and reached
+    # `('127.0.0.1', <port>)`, while this predicate called all four network-reachable — so a
+    # gateway named any of these booted past `core.llm_gateway` and sent every prompt to whatever
+    # answered inside the pod. `0177.1` is the fifth and was found by taking the measurement
+    # rather than by reading the four in the report.
+    ("127.1", True),
+    ("2130706433", True),
+    ("0x7f.1", True),
+    ("0177.1", True),
+    # And the other direction, so the fallback cannot be read as "any number is loopback":
+    # `inet_aton` accepts this one too, as 0.0.48.57.
+    ("12345", False),
     ("exfil.localhost", False),  # a suffix is never resolved, never trusted
     ("127.0.0.1.nip.io", False),
     # An IPv4-mapped literal follows its mapped address, both ways. This row was written the
@@ -947,9 +960,10 @@ def test_arm_from_settings_is_where_the_refusal_is_wired(monkeypatch: pytest.Mon
     """The tests above call the function; this one pins that anything *calls the function*.
 
     `arm_from_settings` is the single call `chemclaw.core.config` makes, which is what puts this
-    refusal in front of the durable worker as well as the front door — the gap
-    `api/middleware._refuse_unconfigured_llm_gateway` has by construction, since its signal is a
-    non-loopback *bind* and a worker does not bind.
+    refusal in front of the durable worker as well as the front door. The gateway guard reached the
+    front door only, for a whole year, because it lived in `api/middleware.py` with one caller;
+    `core/llm_gateway.py` plus a call in each entrypoint is the other way to close that, and
+    `tests/test_llm_gateway_guard.py` drives the processes to prove it.
     """
     _proxy_env(monkeypatch, HTTPS_PROXY="http://127.0.0.1:15001")
     with pytest.raises(RuntimeError, match="SECURITY: a proxy is configured"):
@@ -1191,23 +1205,6 @@ def test_the_environment_store_is_read_the_way_httpx_reads_it(
         )
 
 
-# The modules that build an httpx client without `trust_env=False`, each with the reason it is
-# tolerated. Every one is a *lane*, never a served path: `cli/live_*` and `evals/live.py` drive the
-# live/e2e lane against a loopback mock or a named gateway, and `cli/phoenix_publish.py` posts an
-# eval run to a locally-run Phoenix. None of them runs inside a pod that serves a chemist.
-#
-# It is a list rather than an absence because the fix belongs in those files and this file does not
-# own them; `docs/planning/BACKLOG.md` carries the row. What the list does buy is the ratchet: a
-# *new* client anywhere else fails on the day it is written, which is what the claim in
-# `core/netguard.py`'s docstring was standing in for and could not do.
-_TRUST_ENV_LANE_EXEMPTIONS = {
-    "src/chemclaw/cli/live_probes.py",
-    "src/chemclaw/cli/live_storm.py",
-    "src/chemclaw/cli/phoenix_publish.py",
-    "src/chemclaw/evals/live.py",
-}
-
-
 def _httpx_client_constructions() -> list[tuple[str, int, bool]]:
     """Every `httpx.Client`/`AsyncClient` construction in `src/`, and whether it refuses the env.
 
@@ -1216,6 +1213,13 @@ def _httpx_client_constructions() -> list[tuple[str, int, bool]]:
     unconditional in it (`core/http.py`), and the two call sites that use it are the LLM gateway
     and the embeddings client — the two the proxy ADR was written about. Bare `**kwargs` from
     anywhere else does *not* count, so the escape hatch is one named function rather than a shape.
+
+    **An `http_client=` delegation counts too, and it has to.** The scan keys on the bare name
+    `Client`, so it also catches an SDK's own client — `phoenix.client.Client` was in this list for
+    that reason, having no `trust_env` of its own to pass. What such an SDK offers instead is a
+    seam to hand it a transport, and handing it one that refuses the environment is the same
+    property reached one call deeper; the delegate is checked by this same function rather than
+    accepted on the strength of the keyword's name.
     """
     src = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
     found: list[tuple[str, int, bool]] = []
@@ -1230,6 +1234,28 @@ def _httpx_client_constructions() -> list[tuple[str, int, bool]]:
             for target in node.targets
             if isinstance(target, ast.Name)
         }
+
+        def refuses_the_environment(call: ast.Call, bound: set[str] = bound) -> bool:
+            """Whether this client construction cannot read a proxy variable."""
+            for keyword in call.keywords:
+                if (
+                    keyword.arg == "trust_env"
+                    and isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value is False
+                ):
+                    return True
+                if keyword.arg == "http_client" and isinstance(keyword.value, ast.Call):
+                    return refuses_the_environment(keyword.value)
+                if keyword.arg is None and (
+                    (
+                        isinstance(keyword.value, ast.Call)
+                        and getattr(keyword.value.func, "id", "") == "gateway_client_kwargs"
+                    )
+                    or (isinstance(keyword.value, ast.Name) and keyword.value.id in bound)
+                ):
+                    return True
+            return False
+
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -1237,23 +1263,13 @@ def _httpx_client_constructions() -> list[tuple[str, int, bool]]:
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
             if name not in ("Client", "AsyncClient"):
                 continue
-            refuses = any(
-                keyword.arg == "trust_env"
-                and isinstance(keyword.value, ast.Constant)
-                and keyword.value.value is False
-                for keyword in node.keywords
-            ) or any(
-                keyword.arg is None
-                and (
-                    (
-                        isinstance(keyword.value, ast.Call)
-                        and getattr(keyword.value.func, "id", "") == "gateway_client_kwargs"
-                    )
-                    or (isinstance(keyword.value, ast.Name) and keyword.value.id in bound)
+            found.append(
+                (
+                    path.relative_to(src.parents[1]).as_posix(),
+                    node.lineno,
+                    refuses_the_environment(node),
                 )
-                for keyword in node.keywords
             )
-            found.append((path.relative_to(src.parents[1]).as_posix(), node.lineno, refuses))
     return found
 
 
@@ -1267,10 +1283,18 @@ def test_every_served_http_client_refuses_the_ambient_proxy() -> None:
     the socket guard cannot see it either, because a proxy moves the destination out of the
     address (`D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`).
 
-    Measured when this test was written, the sentence was false for six clients. All six are in the
-    live/eval lane, so the *served* half of the claim held — but nothing was keeping it true, and
-    the next client to be added would have been the one that mattered. `httpx` defaults
+    Measured when this test was written, the sentence was false for eight constructions across four
+    live/eval-lane modules, so the *served* half of the claim held — but nothing was keeping it
+    true, and the next client to be added would have been the one that mattered. `httpx` defaults
     `trust_env` to True, so this is a property that decays by omission rather than by edit.
+
+    **The named exemption list those four modules sat in is gone**
+    (`D-2026-09-12-an-ambient-proxy-is-a-destination-nobody-declared`), and deleting it is what
+    closes the hole *in the ratchet itself*: the list keyed on a **module path**, so every later
+    client added inside one of those four files was exempt on the day it was written — the exact
+    property this test exists to deny. There is now no exemption at all, so the scan is wider than
+    its own name: **`served` no longer narrows anything here**, and the name is kept only because
+    merged ADRs and `core/netguard.py` cite it, and a merged ADR is not edited.
 
     Verified to bite: deleting `"trust_env": False` from `core/http.gateway_client_kwargs` turns
     this red. The first version of this test did *not* — it accepted the unpacking on the strength
@@ -1283,9 +1307,7 @@ def test_every_served_http_client_refuses_the_ambient_proxy() -> None:
         "refusing the environment, every client built from it reads a proxy variable again."
     )
     offenders = sorted(
-        f"{module}:{line}"
-        for module, line, refuses in _httpx_client_constructions()
-        if not refuses and module not in _TRUST_ENV_LANE_EXEMPTIONS
+        f"{module}:{line}" for module, line, refuses in _httpx_client_constructions() if not refuses
     )
     assert not offenders, (
         f"{offenders} build an httpx client without `trust_env=False`. A proxy variable on the pod "

@@ -16,8 +16,12 @@ apply here — this is a user-scoped resource access, so it is fully Entra-scope
 
 import asyncio
 import logging
+import os
+import threading
 import time
 from typing import Any
+from urllib.parse import urlsplit
+from urllib.request import proxy_bypass
 
 import jwt
 from fastapi import HTTPException, Request
@@ -77,6 +81,17 @@ class IdentityProviderUnavailable(Exception):
 # finding). Keyed by endpoint so a config change is still picked up.
 _jwks_clients: dict[str, PyJWKClient] = {}
 
+# `_client_for` runs on concurrent worker threads — `validate_token` is dispatched through
+# `asyncio.to_thread`, so two requests bearing tokens from two tenants genuinely build their clients
+# at the same moment. Its body is a read-modify-write of `os.environ` followed by a
+# check-then-insert into the dict above, and the first of those is the one that loses data rather
+# than merely duplicating work: measured with the window widened, five concurrent writers of five
+# distinct hosts left **one** of the five in `no_proxy`, and the loser's key set is then fetched
+# through the ambient proxy — exactly what `_bypass_ambient_proxy` exists to prevent. A dict
+# insertion racing itself only builds a second client, which is why this lock is stated as being
+# about the environment.
+_client_lock = threading.Lock()
+
 # When an unknown `kid` was last allowed to force a JWKS re-fetch, per endpoint. Caching the client
 # — the earlier fix above — bounds the *warm* path but not this one: `PyJWKClient.get_signing_key`
 # retries with `refresh=True` whenever the `kid` is absent from the cached set, and the `kid` comes
@@ -85,13 +100,67 @@ _jwks_clients: dict[str, PyJWKClient] = {}
 _last_forced_refresh: dict[str, float] = {}
 
 
+def _bypass_ambient_proxy(host: str) -> None:
+    """Put `host` beyond the reach of an ambient proxy variable, for this process.
+
+    `PyJWKClient.fetch_data` calls `urllib.request.urlopen`, which resolves proxies from the
+    process-global default opener and takes no `trust_env` — so on a pod with `HTTPS_PROXY` set,
+    the fetch of **the key set every bearer token is validated against** goes to the proxy, which
+    could answer it with a key set of its own choosing. Measured with a loopback recorder standing
+    in for the proxy: it received `GET http://<tenant-host>/…/discovery/v2.0/keys`.
+
+    The fix is host-scoped rather than process-wide. `ProxyHandler.proxy_open` consults
+    `proxy_bypass` **per request**, so naming the host in `no_proxy` diverts this one destination
+    and leaves every other `urlopen` caller in the process exactly as it was — where
+    `urllib.request.install_opener` would have re-pointed all of them. It also keeps working after
+    the default opener has been built and cached, which is what makes it safe to do lazily here.
+    Driven both ways in `tests/test_auth.py::test_the_jwks_fetch_does_not_follow_an_ambient_proxy`.
+
+    It is `core/netguard.py`'s own vocabulary: the boot refusal's message already tells an operator
+    to "add these destinations to NO_PROXY", and both sides ask `proxy_bypass` the question, so the
+    refusal and this bypass cannot disagree about whether the JWKS host is still carried.
+
+    Two details are load-bearing and both are measured rather than reasoned:
+
+    * **The form.** `proxy_bypass_environment` compares the bare host, or a dotted suffix of it —
+      never a substring. `login.microsoftonline.com:443` and the full URL both leave the fetch
+      proxied; the bare host is what it honours.
+    * **The existing value.** An operator's `no_proxy` is appended to, never replaced, and every
+      spelling already in the environment is extended — writing lowercase `no_proxy` while the
+      operator set `NO_PROXY` makes `getproxies_environment` prefer ours and silently drops theirs.
+
+    Called per client build rather than once at arming time because the endpoint is a *setting*: a
+    process that never validates a token never touches the environment, and a reconfigured endpoint
+    is diverted by the same call that builds its client.
+    """
+    if not host or proxy_bypass(host):
+        return
+    names = [name for name in ("no_proxy", "NO_PROXY") if name in os.environ] or ["no_proxy"]
+    for name in names:
+        current = os.environ.get(name, "").strip()
+        os.environ[name] = f"{current},{host}" if current else host
+    logger.info("JWKS host %s added to no_proxy: its key set must not come from a proxy", host)
+
+
 def _client_for(endpoint: str) -> PyJWKClient:
-    """The cached `PyJWKClient` for `endpoint`, built on first use with our configured timeout."""
-    client = _jwks_clients.get(endpoint)
-    if client is None:
-        client = PyJWKClient(endpoint, timeout=settings.entra_http_timeout_seconds)
-        _jwks_clients[endpoint] = client
-    return client
+    """The cached `PyJWKClient` for `endpoint`, built on first use with our configured timeout.
+
+    The endpoint's host is taken out of the ambient proxy's reach first — see
+    `_bypass_ambient_proxy` for why that is the whole seam PyJWT leaves us.
+
+    **Serialised**, because this runs on the validation thread pool and its body writes a process
+    global that is read back in the same breath. See `_client_lock`. The lock covers the whole body
+    rather than the environment write alone: the cheapest correct scope, and holding it across a
+    `PyJWKClient` construction costs nothing, since that constructor performs no I/O — the key set
+    is fetched lazily on the first `get_signing_key`.
+    """
+    with _client_lock:
+        client = _jwks_clients.get(endpoint)
+        if client is None:
+            _bypass_ambient_proxy(urlsplit(endpoint).hostname or "")
+            client = PyJWKClient(endpoint, timeout=settings.entra_http_timeout_seconds)
+            _jwks_clients[endpoint] = client
+        return client
 
 
 def _match_kid(signing_keys: list[Any], kid: str) -> Any | None:

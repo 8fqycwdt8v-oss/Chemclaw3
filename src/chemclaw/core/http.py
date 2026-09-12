@@ -5,9 +5,11 @@ else's HTTP endpoint" and exists only to stop a second copy appearing:
 
 - **`is_loopback_host` / `is_loopback_url`** — the one definition of "this address cannot be
   reached from the network", which every safety rule in the tree that asks the question calls: the
-  front door refuses to boot unauthenticated on a non-loopback *bind* (`api.middleware`, SEC-2), it
-  refuses to boot pointed at the dev model gateway on a non-loopback bind (`api.middleware`), a
-  connector manifest refuses `auth: mode: none` for a non-loopback *endpoint*
+  front door refuses to boot unauthenticated on a non-loopback *bind* (`api.middleware`, SEC-2),
+  **every** process that makes a model call refuses to boot pointed at a loopback gateway
+  (`core.llm_gateway`, in every posture — the non-loopback-*bind* condition this line used to state
+  is exactly what `D-2026-09-12-a-gateway-guard-in-the-front-door-is-not-a-deployment-guard` §2
+  retired), a connector manifest refuses `auth: mode: none` for a non-loopback *endpoint*
   (`connectors.manifest`), and the egress guard permits a *destination* without allowlisting it
   (`core.netguard`). The questions differ; the answer must not, or one of them would be enforcing a
   weaker notion of "safe address" than the other claims. It lives here because `connectors -> api`
@@ -17,7 +19,8 @@ else's HTTP endpoint" and exists only to stop a second copy appearing:
   **It was a set of three literal strings and a parsed predicate, and they disagreed.** Measured on
   2026-09-05, before this was one function: a second address in `127.0.0.0/8`, and the unspecified
   address, were loopback to the guard and not to the front door — so a pod bound non-loopback with
-  its gateway on such an address passed `_refuse_unconfigured_llm_gateway`, the check written to
+  its gateway on such an address passed `refuse_unconfigured_llm_gateway` (then in
+  `api/middleware.py`, now `core/llm_gateway.py`), the check written to
   stop exactly that, and then failed every turn on a refused connection. (The addresses are
   described rather than written as URLs: `tests/test_no_egress.py` scans this file's *text* for
   `http(s)://` host literals and cannot tell a measurement in a docstring from a default in code,
@@ -78,6 +81,7 @@ error body again should write it back with the caller that needs it, not before.
 """
 
 import ipaddress
+import socket
 import ssl
 from functools import cache
 from typing import Any
@@ -86,16 +90,65 @@ from urllib.parse import urlsplit
 import certifi
 
 
+def parse_host(host: str | None) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The address `host` names, in every spelling `connect(2)` accepts, or `None` for a name.
+
+    **`ipaddress.ip_address` is not that set, and the gap was measured.** It accepts only the
+    dotted-quad form, while `inet_aton(3)` — which is what `connect(2)` is ultimately handed, and
+    what `socket.create_connection` reaches through `getaddrinfo` — also accepts the short, octal
+    and hexadecimal forms. Driven on this tree against a real listener on `127.0.0.1:8820`, five
+    spellings resolved to `127.0.0.1` and four of them were *not* loopback to this module:
+
+        127.1  ·  2130706433  ·  0x7f.1  ·  0177.1   → peer ('127.0.0.1', 8820)
+
+    So a deployment naming any of them as its model gateway booted clean and sent every prompt to
+    whatever was listening inside its own pod, which is the failure `core.llm_gateway` exists to
+    refuse. Nothing downstream caught it either: `core.netguard.derive_allowed` puts the same
+    literal on the allowlist, and the compiled interposer sees `inet_ntop`'s canonical
+    `127.0.0.1`, which is loopback-exempt.
+
+    A *name* is never resolved — in `core.netguard` resolving one would itself be egress — so this
+    answers `None` for anything that is not a literal, and every caller decides what that means.
+    Whitespace disqualifies a host before `inet_aton` sees it, because that function tolerates
+    trailing blanks and a "host" with a space in it is not one.
+
+    Args:
+        host: A bare host — a settings field, a URL's `hostname`, or a socket address's first
+            element. A bracketed IPv6 literal and a zone id (`[::1]`, `fe80::1%eth0`) are read.
+
+    Returns:
+        The parsed address, or `None` when `host` is empty, a name, or unparseable.
+    """
+    if not host:
+        return None
+    bare = host.strip("[]").lower()
+    if any(character.isspace() for character in bare):
+        return None
+    try:
+        return ipaddress.ip_address(bare.split("%", 1)[0])
+    except ValueError:
+        pass
+    try:
+        packed = socket.inet_aton(bare)
+    except OSError:
+        return None
+    return ipaddress.IPv4Address(packed)
+
+
 def is_loopback_host(host: str | None) -> bool:
     """Whether `host` is unreachable from the network — decided by parsing, never by name.
 
-    `localhost` and any literal that parses as a loopback IP (the whole of `127.0.0.0/8`, `::1`)
-    qualify. A *name* is never resolved — in `core.netguard` resolving it would itself be egress —
-    so a `.localhost` suffix is not trusted: an `/etc/hosts` line or a wildcard zone would otherwise
-    turn the suffix into "any destination" (the sibling fleet guard's own recorded bug). A bracketed
-    IPv6 literal and a zone id (`[::1]`, `fe80::1%eth0`) are read; the unspecified address
-    (`0.0.0.0`, `::`) and an empty host are not loopback, because as a *bind* they mean every
-    interface.
+    `localhost` and any literal that parses as a loopback IP (the whole of `127.0.0.0/8`, `::1`,
+    and the short/octal/hex spellings `parse_host` covers) qualify. A *name* is never resolved — in
+    `core.netguard` resolving it would itself be egress — so a `.localhost` suffix is not trusted:
+    an `/etc/hosts` line or a wildcard zone would otherwise turn the suffix into "any destination"
+    (the sibling fleet guard's own recorded bug).
+
+    The unspecified address (`0.0.0.0`, `::`) and an empty host are **not** loopback here, because
+    as a *bind* they mean every interface and two of the four callers are binds. As a *destination*
+    `0.0.0.0` never leaves the host, and the one caller that reads a destination it can be wrong
+    about — `core.llm_gateway` — asks `parse_host(...).is_unspecified` itself rather than moving
+    this predicate under the binds' feet.
 
     Args:
         host: A bare host — a settings field like `service_host`, or a socket address's first
@@ -106,13 +159,10 @@ def is_loopback_host(host: str | None) -> bool:
     """
     if not host:
         return False
-    bare = host.strip("[]").lower()
-    if bare == "localhost":
+    if host.strip("[]").lower() == "localhost":
         return True
-    try:
-        return ipaddress.ip_address(bare.split("%", 1)[0]).is_loopback
-    except ValueError:
-        return False
+    address = parse_host(host)
+    return address is not None and address.is_loopback
 
 
 def is_loopback_url(url: str) -> bool:

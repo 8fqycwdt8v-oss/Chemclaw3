@@ -6,6 +6,26 @@
 # component is PID 1 and receives SIGTERM directly for graceful shutdown on pod termination.
 set -euo pipefail
 
+# **The base image puts its own interpreter in front of ours, and bash is what does it.**
+# `deploy/Containerfile` sets `ENV PATH="/app/.venv/bin:${PATH}"`, which is correct and is not what
+# a component sees. The UBI python-311 base also sets `BASH_ENV=/opt/app-root/bin/activate`, and
+# bash sources `$BASH_ENV` on *non-interactive* startup -- before the first line of this script --
+# whereupon `activate` prepends `/opt/app-root/bin` ahead of everything. Measured in the base image:
+#
+#   $ docker run -e PATH="/app/.venv/bin:..." ubi9/python-311 bash -c 'command -v python'
+#   /opt/app-root/bin/python
+#
+# That interpreter has no `chemclaw` installed, so every `exec python -m chemclaw...` below -- the
+# background worker, the mcp face, and both connector forms -- resolved to it. `service` escaped
+# only by accident: `uvicorn` is not in `/opt/app-root/bin`, so its lookup fell through to the venv.
+#
+# It stayed invisible because nothing ran a real component through this script. `image.yml`'s smoke
+# step uses `docker run --entrypoint python`, which Docker resolves from the image's own `ENV PATH`
+# without a shell, so `BASH_ENV` never fires; and the one step that does execute this ENTRYPOINT
+# passes an *unknown* component, which exits 64 above every `exec`. That header already records the
+# same class of miss for an earlier defect. The smoke step now drives a real component too.
+export PATH="/app/.venv/bin:${PATH}"
+
 # Defence in depth for the LangSmith egress decision, not the control itself. The real control is
 # in-process — `chemclaw.core.egress.pin_langsmith_egress`, called from `chemclaw.core.config`,
 # which every component below imports — because langsmith's env read is `lru_cache`d and an
@@ -17,6 +37,40 @@ set -euo pipefail
 # CHEMCLAW_LANGSMITH_TRACING_ALLOWED, one layer up, where it can be read and audited.
 export LANGSMITH_TRACING="${LANGSMITH_TRACING:-false}"
 export LANGCHAIN_TRACING_V2="${LANGCHAIN_TRACING_V2:-false}"
+
+# Arm the compiled half of the egress guard, for every component below.
+#
+# `netguard.py` patches `socket.socket` and the `socket` module's resolvers at
+# `chemclaw.core.config` import, which covers the whole pure-Python surface and nothing else:
+# measured, a `grpc.insecure_channel`, the OTLP gRPC span exporter and `temporalio.Client.connect`
+# each reached an off-allowlist listener with its refusal counter flat, because all three open
+# sockets below the interpreter. `src/chemclaw/core/netguard_preload.c` interposes libc's `connect`,
+# `getaddrinfo`, `sendto` and `sendmsg` and refuses them there; see
+# `D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py`.
+#
+# **It has to be here and cannot be in Python.** `LD_PRELOAD` is read by the dynamic loader before
+# the interpreter exists, so nothing a process imports can arm it for itself. One interpreter start
+# at container boot is what the layer costs.
+#
+# **And here rather than in the Helm chart, which is the shape this repository has twice recorded as
+# a mistake** (the Helm-only LangSmith pin; the Helm-only LLM provider). In the image, every
+# component gets it — including a plain `docker run` — and the chart cannot hold a value that
+# silently disagrees. It also keeps the knowledge-sync containers out of it on purpose: they set
+# their own `command` and so never pass through here, and what they dial is `git`'s remote, which is
+# not on the settings object the allowlist is derived from.
+#
+# `chemclaw.cli.egress_preload` prints `enabled|disabled` and the allowlist
+# `netguard.derive_allowed` returns — the *same* derivation the in-process guard arms with, so there
+# is one list rather than a second one written in shell. Under `set -e` a failure here stops the
+# container rather than starting it unguarded, which is the direction that matters: a pod missing the
+# library or the variable runs with the compiled path open.
+chemclaw_egress_posture="$(python -m chemclaw.cli.egress_preload)"
+if [ "${chemclaw_egress_posture%% *}" = "enabled" ]; then
+  export CHEMCLAW_NETGUARD_PRELOAD_ALLOW="${chemclaw_egress_posture#* }"
+  # Prepended rather than assigned, so an operator's own preload (a profiler, a memory checker) is
+  # not silently dropped by the security layer.
+  export LD_PRELOAD="/app/lib/libchemclaw_netguard.so${LD_PRELOAD:+:${LD_PRELOAD}}"
+fi
 
 component="${CHEMCLAW_COMPONENT:-service}"
 
@@ -85,6 +139,29 @@ case "${component}" in
     # independently — and because a front door that also spoke MCP would have one bearer token
     # standing in for two very different authorities.
     exec python -m chemclaw.api.mcp_face
+    ;;
+  schedules)
+    # The Temporal Schedules reconciler, run as a post-install/post-upgrade hook Job
+    # (`templates/schedules-job.yaml`). A component rather than a chart `command:`, and that is the
+    # security fix rather than a tidy-up: a Kubernetes `command:` **replaces** the image
+    # `ENTRYPOINT`, so this Job started with no `LD_PRELOAD` at all — while its only outbound
+    # traffic is gRPC to Temporal through the Rust sdk-core, which is exactly the class `netguard.py`
+    # measurably cannot see and this arming block exists for. It also runs on every `helm upgrade`.
+    exec python -m chemclaw.cli.schedules
+    ;;
+  migrate)
+    # The pre-upgrade DDL hook Job: the migrations, then the runtime role's grants, in that order,
+    # because a grant names tables the migrations create and one applied before its table exists
+    # fails. The order was the chart's `sh -c "… && …"` and is this script's now, for the same
+    # reason as `schedules` above; under `set -e` the sequence means exactly what the `&&` meant.
+    python -m chemclaw.core.migrate
+    exec python -m chemclaw.core.grants
+    ;;
+  convert)
+    # The post-upgrade stored-message conversion
+    # (D-2026-08-27-a-conversion-that-cannot-be-rolled-back-is-not-a-pre-upgrade-step). It runs as
+    # the *runtime* role, which is why the chart gives it `chemclaw.env` and not the DDL credential.
+    exec python -m chemclaw.agent.message_migration
     ;;
   connector-worker-*)
     # A connector bundle's own Temporal worker, for a bundle that owns durable work

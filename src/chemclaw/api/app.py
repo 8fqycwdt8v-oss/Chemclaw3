@@ -56,7 +56,6 @@ from chemclaw.api.middleware import (
     _add_security_headers,
     _database_unavailable,
     _refuse_unauthenticated_exposure,
-    _refuse_unconfigured_llm_gateway,
     _subsystem_unavailable,
 )
 from chemclaw.api.routes import (
@@ -87,6 +86,7 @@ from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.executor import front_door_reserved, install_default_executor
+from chemclaw.core.llm_gateway import refuse_unconfigured_llm_gateway
 from chemclaw.core.logging import configure_logging, configure_telemetry
 from chemclaw.core.metrics import METRICS
 from chemclaw.durable.job_record import search_job_records
@@ -349,7 +349,7 @@ def create_app(
         A configured `FastAPI` application.
     """
     _refuse_unauthenticated_exposure()
-    _refuse_unconfigured_llm_gateway()
+    refuse_unconfigured_llm_gateway()
     # `openapi_url=None` keeps FastAPI from registering the schema on a plain `Route`, which is not
     # an `APIRoute` and therefore carries no dependency tree `require_principal` could sit in — the
     # defect D-2026-08-06 §4 closed, where the full route/parameter/model surface was readable by

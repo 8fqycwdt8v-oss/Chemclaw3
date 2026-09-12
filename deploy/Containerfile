@@ -16,6 +16,7 @@
 # record what a build actually contained: if the bytes cannot be pinned in advance, they must at
 # least be *named* afterwards.
 ARG BASE_IMAGE=registry.access.redhat.com/ubi9/python-311:latest
+
 FROM ${BASE_IMAGE}
 
 # uv drives the install to match local/CI exactly (same lockfile). Copy metadata first for layer reuse.
@@ -95,6 +96,32 @@ COPY infra ./infra
 COPY schema ./schema
 COPY deploy/entrypoint.sh /usr/local/bin/chemclaw-entrypoint
 COPY deploy/knowledge-sync.sh /usr/local/bin/chemclaw-knowledge-sync
+
+# The compiled half of the egress guard (`src/chemclaw/core/netguard_preload.c`): an `LD_PRELOAD`
+# interposition on libc's `connect`, `getaddrinfo`, `sendto` and `sendmsg`, which is the only layer
+# that reaches grpc's C-core and Temporal's Rust sdk-core — the two destinations `netguard.py`
+# measurably cannot bound, and the ones that carry prompts when `otel_include_sensitive_data` is on.
+# `deploy/entrypoint.sh` arms it; `D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py`
+# records what it covers and what it does not.
+#
+# **The base image's own compiler, and no `dnf install`.** Measured against the base this file
+# defaults to: `gcc` is already at `/usr/bin/gcc` (11.5.0, glibc 2.34) because the s2i Python image
+# ships a toolchain for building wheels — so a `dnf` line would add a network dependency to the build
+# for something already present, and a builder stage would exist to keep a compiler out of a runtime
+# image that ships one regardless. A base that drops it fails *this* line, loudly, which is the
+# behaviour a missing build dependency should have.
+#
+# The flags are in `deploy/build-netguard-preload.sh` rather than on this line, because
+# `tests/test_netguard_preload.py` compiles the same source to drive its four-arm measurement: two
+# `gcc` invocations would let that suite prove a binary this image does not ship.
+#
+# The destination is `chemclaw.core.netguard_preload.LIBRARY_PATH`, the path the entrypoint
+# preloads. An `LD_PRELOAD` naming a file that is not there is ignored by the loader **in silence**,
+# so the two spellings are pinned against each other by a test rather than kept equal by hand.
+COPY deploy/build-netguard-preload.sh ./build-netguard-preload.sh
+RUN sh ./build-netguard-preload.sh \
+      src/chemclaw/core/netguard_preload.c /app/lib/libchemclaw_netguard.so \
+    && rm ./build-netguard-preload.sh
 
 # Install into a project venv; --frozen fails if the lockfile drifted (reproducible builds).
 #

@@ -132,7 +132,13 @@ check: lint type test  ## The fast inner-loop gate: lint + type + test (no cover
 ci: lint type cov kg-validate eval-strict eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate template-validate prose-validate helm-validate deps-audit  ## The full pre-push gate: lint + type + coverage + all validators + the dependency audit (what CI runs).
 
 chat:  ## Chat with the agent from the terminal (admin/testing; needs CHEMCLAW_LLM_BASE_URL up).
-	uv run chemclaw --admin
+	@# The shipped gateway is `chemclaw.cli.mock_llm` on loopback, and every process that makes model
+	@# calls refuses that unless the posture is stated
+	@# (`core/llm_gateway.refuse_unconfigured_llm_gateway`). Stated here rather than in `.env.example`,
+	@# which ships the code defaults: this target *is* the local-dev lane, and a deployment never runs
+	@# `make`. Harmless when a real gateway is configured — the guard only looks at loopback
+	@# addresses — and an operator's own value wins.
+	CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY=$${CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY:-true} uv run chemclaw --admin
 
 db-migrate:  ## Apply infra/sql migrations to the configured database.
 	uv run python -m chemclaw.core.migrate

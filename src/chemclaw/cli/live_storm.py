@@ -214,7 +214,7 @@ async def storm(
     limits = httpx.Limits(max_connections=concurrency + 16, max_keepalive_connections=concurrency)
 
     async with httpx.AsyncClient(
-        base_url=FRONT_DOOR, timeout=httpx.Timeout(timeout), limits=limits
+        base_url=FRONT_DOOR, timeout=httpx.Timeout(timeout), limits=limits, trust_env=False
     ) as client:
 
         async def one(index: int) -> TurnResult:
@@ -256,7 +256,7 @@ async def _scalar(sql: str, params: tuple[Any, ...] = ()) -> Any:
 
 async def mock_requests() -> int:
     """How many requests the mock actually served — the storm's proof no real model was called."""
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
         try:
             response = await client.get(MOCK_STATS)
             return int(response.json()["requests"])
@@ -530,7 +530,7 @@ async def family_g_limits() -> list[Finding]:
     of them tells an operator what to change.
     """
     findings: list[Finding] = []
-    async with httpx.AsyncClient(base_url=FRONT_DOOR, timeout=30.0) as client:
+    async with httpx.AsyncClient(base_url=FRONT_DOOR, timeout=30.0, trust_env=False) as client:
         oversized = "x" * (settings.service_max_message_chars + 1_000)
         created = await client.post("/sessions", json={})
         session_id = str(created.json()["session_id"])
@@ -647,7 +647,7 @@ async def _chaos_client_disconnect() -> Finding:
     released and a session that answers are different statements and only the second one is what a
     chemist experiences.
     """
-    async with httpx.AsyncClient(base_url=FRONT_DOOR, timeout=60.0) as client:
+    async with httpx.AsyncClient(base_url=FRONT_DOOR, timeout=60.0, trust_env=False) as client:
         created = await client.post("/sessions", json={})
         created.raise_for_status()
         session_id = str(created.json()["session_id"])
@@ -1290,7 +1290,7 @@ async def _require_mock_lane() -> None:
         RuntimeError: The mock is not serving, with the setting that would fix it.
     """
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
             response = await client.get(MOCK_STATS)
         reachable = response.status_code == 200
     except httpx.HTTPError:
