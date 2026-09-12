@@ -247,15 +247,20 @@ def _fresh_attached_connections() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def loopback_service_host(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run tests in the loopback dev posture, so `create_app`'s fail-closed guard admits them.
+def loopback_dev_posture(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run tests in the loopback dev posture, so the fail-closed boot guards admit them.
 
-    The front door refuses to boot unauthenticated on a non-loopback bind (SEC-2); tests drive
-    the app entirely in-process (TestClient — no socket is ever bound), so they use the loopback
-    posture. The guard's own refuse/opt-in/boot behavior is proven explicitly in test_auth.py,
-    which overrides these settings per test.
+    Two guards, two postures, and both are *stated* here rather than inferred from the suite's
+    circumstances. The front door refuses to boot unauthenticated on a non-loopback bind (SEC-2);
+    tests drive the app entirely in-process (TestClient — no socket is ever bound), so they use the
+    loopback bind. And every process that makes model calls refuses a loopback `llm_base_url`
+    unless the posture is declared (`core/llm_gateway`) — the suite's gateway is
+    `chemclaw.cli.mock_llm`'s shipped default address, which is exactly that case, so it declares
+    it. Each guard's own refuse/opt-in/boot behaviour is proven explicitly — `test_auth.py` for the
+    first, `tests/test_llm_gateway_guard.py` for the second — by overriding these per test.
     """
     monkeypatch.setattr(settings, "service_host", "127.0.0.1")
+    monkeypatch.setattr(settings, "llm_allow_loopback_gateway", True)
 
 
 def timeout_scale() -> float:

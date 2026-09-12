@@ -154,9 +154,18 @@ whose own text says the stated guarantee is narrower than the sentence asserting
       reached an external listener with the counter at 0. **Decide what enforces egress** (LD_PRELOAD
       / seccomp / per-library) and close the cheap half now: `networkPolicy.egressDestinations` must
       say it is the only layer bounding these two. ADR.
-- [ ] W21.4 `Chemclaw3` — the gateway boot guard reaches the front door and not the worker, and
-      `durable/template_activities.py` makes model calls from a worker. Decide what "exposed" means
-      for a process that only dials out.
+- [x] W21.4 `Chemclaw3` — the gateway boot guard reaches the front door and not the worker, and
+      `durable/template_activities.py` makes model calls from a worker. **Split, and the closable
+      half is closed** (`D-2026-09-12-a-gateway-guard-in-the-front-door-is-not-a-deployment-guard`):
+      `refuse_unconfigured_llm_gateway` moved to `core/llm_gateway.py` and is called from
+      `create_app`, `api/mcp_face.main`, `durable/background_worker.main` and `cli/chat.main` — the
+      three components of `deploy/entrypoint.sh` that make model calls, plus the terminal front
+      door; the two connector components are shown by an import check to be unable to reach the
+      gateway. The exemption is no longer a bind: `CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY` is stated by
+      the lanes that mean it. `tests/test_llm_gateway_guard.py` starts the real processes, each arm
+      against a positive control. **Deciding what "exposed" means for a process that only dials out
+      is the half that stays open** — it is `_refuse_unauthenticated_exposure`'s signal, it is a
+      design question rather than a move, and `BACKLOG.md` carries it under its own title.
 - [x] W21.5 `Chemclaw3` — the Qdrant client builds its own httpx outside the proxy fix. Measured in
       a scratch venv: a caller-supplied client is a `TypeError`, `trust_env` passes straight through
       `**kwargs`. One keyword. Same ADR.

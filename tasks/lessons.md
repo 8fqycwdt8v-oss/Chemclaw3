@@ -2327,3 +2327,20 @@ clean, and ran them serially instead while work in a *different repository* cont
 database, the full-tree gate — not only the files.** Parallelism is free across repositories and
 expensive inside one checkout. If it must be inside one, give each agent its own worktree, and
 remember a worktree needs its own environment before `uv run` means anything in it.
+
+## A mutation that did not apply reads exactly like a mutation that survived (2026-09-12)
+
+**What happened.** Running R3 over `tests/test_llm_gateway_guard.py`, eight of nine mutations turned
+their test red and one came back green — a connector bundle importing `core.embeddings`, which the
+new partition test exists to catch. The obvious reading is "that test is vacuous". The actual cause
+was my harness: the mutation was a `str.replace` anchored on `import asyncio`, and
+`connectors/bo/worker.py` has no such line, so the file was never edited and the test was asked to
+notice a change nobody had made. Re-anchored on a line the file does have, it went red immediately.
+
+Both outcomes print the same thing. A mutation harness that does not verify it mutated is the same
+shape as the guards this review keeps finding — a control whose success and whose no-op are
+indistinguishable from outside.
+
+**Rule: a mutation step asserts that the file changed before it runs the test.** `git diff --quiet
+<file> && echo "MUTATION DID NOT APPLY"` is the whole fix, and it belongs in the harness rather than
+in the reading of its output, because the reading is where the optimistic interpretation lives.

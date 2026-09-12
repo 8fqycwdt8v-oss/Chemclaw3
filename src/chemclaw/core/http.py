@@ -17,7 +17,8 @@ else's HTTP endpoint" and exists only to stop a second copy appearing:
   **It was a set of three literal strings and a parsed predicate, and they disagreed.** Measured on
   2026-09-05, before this was one function: a second address in `127.0.0.0/8`, and the unspecified
   address, were loopback to the guard and not to the front door — so a pod bound non-loopback with
-  its gateway on such an address passed `_refuse_unconfigured_llm_gateway`, the check written to
+  its gateway on such an address passed `refuse_unconfigured_llm_gateway` (then in
+  `api/middleware.py`, now `core/llm_gateway.py`), the check written to
   stop exactly that, and then failed every turn on a refused connection. (The addresses are
   described rather than written as URLs: `tests/test_no_egress.py` scans this file's *text* for
   `http(s)://` host literals and cannot tell a measurement in a docstring from a default in code,

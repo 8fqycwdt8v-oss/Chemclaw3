@@ -46,6 +46,18 @@ class LlmSettings(BaseSettings):
     # base URL would hand the request back to the OpenAI SDK's own hardcoded public host.
     llm_base_url: str = "http://127.0.0.1:8820/v1"
     llm_model: str = "mock"
+    # Explicit opt-in to run with the gateway on **this host** — the dev mock, or a gateway
+    # sidecar in the same pod. Every process that makes model calls refuses to boot on a loopback
+    # `llm_base_url` unless this is set (`core/llm_gateway.refuse_unconfigured_llm_gateway`),
+    # because the shipped default *is* a loopback address and a deployment that never overrode it
+    # would meet that as a refused connection on a chemist's first question — or, in a durable
+    # activity, inside a retry loop with nobody watching.
+    #
+    # A flag rather than the bind this check used to read. `api/middleware` exempted a loopback
+    # `service_host`, which is a fact about the front door's socket: it said nothing about a
+    # background worker, which is the process the guard turned out not to reach at all. A stated
+    # posture asks one question in every process kind.
+    llm_allow_loopback_gateway: bool = False
     # A `SecretStr`, like every other credential on this object
     # (`D-2026-08-26-a-credential-is-a-type-not-a-convention`): its `repr` is `**********`, so the
     # value cannot reach a log line, a `model_dump()` or a pydantic error message through a route

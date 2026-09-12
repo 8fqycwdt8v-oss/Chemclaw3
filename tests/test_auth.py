@@ -493,8 +493,8 @@ def test_unauthenticated_exposed_boots_only_with_explicit_opt_in(
     monkeypatch.setattr(settings, "entra_required", False)
     monkeypatch.setattr(settings, "service_host", "0.0.0.0")
     monkeypatch.setattr(settings, "service_allow_insecure", True)
-    # A non-loopback bind must name a real gateway or `_refuse_unconfigured_llm_gateway` fires
-    # (the shipped default is the loopback mock); this test is about auth exposure.
+    # A real gateway address, so this test is about auth exposure and nothing else: the sibling
+    # boot guard is satisfied by naming one, without relying on the suite's loopback opt-in.
     monkeypatch.setattr(settings, "llm_base_url", "http://internal-llm:8000/v1")
     with caplog.at_level(logging.WARNING, logger="chemclaw.api.app"):
         app = create_app()
@@ -515,38 +515,8 @@ def test_entra_required_exposed_boots_without_warning(
     assert not any("authorization gates OPEN" in r.message for r in caplog.records)
 
 
-def test_exposed_process_still_on_the_dev_gateway_refuses_to_boot(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A network-exposed process still pointed at the loopback mock fails closed at boot.
-
-    **This replaces a guard that was false in the direction that mattered.**
-    `_refuse_public_llm_exposure` refused `llm_provider="anthropic"` with no `llm_base_url`, and
-    returned early whenever `llm_base_url` was *truthy* — while on that provider the base URL was
-    never passed to the client at all. So the one shape it existed to catch (a gateway configured,
-    the provider left at its shipped default) was precisely the one it waved through, and
-    `core/netguard.derive_allowed` opened `api.anthropic.com` for the same reason.
-
-    With one destination there is no public default left to refuse
-    (`D-2026-09-04-a-gateway-is-the-only-provider`); what is new is that `llm_base_url` ships with a
-    value, the local mock. That default cannot leave the pod — but a deployment that forgot to
-    override it would meet it as a refused connection on a chemist's first question. This says so
-    at boot instead, on the same non-loopback-bind signal the auth guard uses.
-    """
-    monkeypatch.setattr(settings, "entra_required", True)
-    monkeypatch.setattr(settings, "service_host", "0.0.0.0")
-    monkeypatch.setattr(settings, "llm_base_url", "http://127.0.0.1:8820/v1")
-    with pytest.raises(RuntimeError, match="loopback address"):
-        create_app()
-
-
-def test_a_loopback_bind_may_keep_the_dev_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The other half: local dev against the mock is untouched.
-
-    A guard that also broke `make chat` would be a worse defect than the one it closes, and
-    `pytest.raises` on the test above cannot show that it does not.
-    """
-    monkeypatch.setattr(settings, "entra_required", False)
-    monkeypatch.setattr(settings, "service_host", "127.0.0.1")
-    monkeypatch.setattr(settings, "llm_base_url", "http://127.0.0.1:8820/v1")
-    create_app()
+# The gateway boot guard's own tests moved to `tests/test_llm_gateway_guard.py` with the guard
+# (`D-2026-09-12-a-gateway-guard-in-the-front-door-is-not-a-deployment-guard`). They were here
+# because `create_app` was its only caller, which is exactly the defect that ADR closes: the
+# refusal now has to hold in the background worker and the mcp face as well, and a test that can
+# only reach it through `create_app` cannot say so.

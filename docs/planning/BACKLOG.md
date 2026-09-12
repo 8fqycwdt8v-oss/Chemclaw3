@@ -121,32 +121,26 @@ topic).
   Anchors: `core/netguard_preload.c`, `core/netguard_preload.py`, `deploy/entrypoint.sh`,
   `kg/git_writer.py`.
 
-- [ ] **The gateway boot guard reaches one process, and the worker is the other one** — [M],
-  opened by `D-2026-09-04-a-gateway-is-the-only-provider`. `_refuse_unconfigured_llm_gateway` and
-  `_refuse_unauthenticated_exposure` are called only from `api/app.py`, so a background worker
-  never runs either — and `durable/template_activities.py` builds a graph inside an activity, so a
-  worker pod *does* make model calls to `llm_base_url` — driven end to end 2026-09-12: importing
-  `durable/background_worker.py` exposes neither guard, `template_activities.run_agent_step` is a
-  real `@activity.defn`, and in that guard-free process a model call reached a loopback recorder at
-  `/v1/chat/completions`. The shipped default that makes it silent is
-  `llm_base_url = "http://127.0.0.1:8820/v1"` (`core/config/llm.py:47`). The chart is not affected,
-  **and this row's own verification of that was wrong**: re-rendered with helm 3.16.3,
-  `CHEMCLAW_LLM_BASE_URL` lands in **two** ConfigMaps — 9 Deployments plus 2 Jobs `envFrom`
-  `chemclaw-config`, while `chemclaw-migrate` `envFrom`s `chemclaw-config-hook`, which carries the
-  same key. "9 Deployments plus 3 Jobs `envFrom` it" is false of any one ConfigMap; the conclusion
-  stands. So this bites a non-Helm or partially-overridden deployment, which gets a silent loopback
-  dial in the worker where the front door would have refused to boot.
-  **This is two rows, and only one of them carries the design question** (split 2026-09-12).
-  `_refuse_unconfigured_llm_gateway`'s signal is *configuration* — a loopback or empty `llm_base_url`
-  in a process that makes model calls — so it is closable now by hoisting it out of
-  `api/middleware.py` into a process-kind-agnostic home and calling it from `background_worker.main()`
-  and the connector-worker entrypoints. `_refuse_unauthenticated_exposure` is the half that cannot
-  follow: its signal is `service_host` being non-loopback, a property of a *bind*, and a worker does
-  not bind. Extending **that** one means deciding what "exposed" means for a process that only makes
-  outbound calls, which is a design question and stays open.
-  The front-door-only scope is pre-existing (`_refuse_unauthenticated_exposure` has always been
-  that way); what is new is that the ADR's argument — "loudly at boot rather than loudly on the
-  first turn" — only holds for one of the two process kinds.
+- [ ] **What "network-exposed" means for a process that only makes outbound calls** — [M],
+  opened by `D-2026-09-04-a-gateway-is-the-only-provider`, narrowed to this half by
+  `D-2026-09-12-a-gateway-guard-in-the-front-door-is-not-a-deployment-guard`.
+  `_refuse_unauthenticated_exposure` is still called only from `api/app.py`, so no worker runs it,
+  and it cannot simply be hoisted the way its neighbour was: its signal *is* `service_host` being
+  non-loopback — a property of a **bind** — and a Temporal worker does not bind a request surface.
+  (It does bind `worker_metrics_host`, default `0.0.0.0`: an unauthenticated `/healthz`, `/readyz`
+  and `/metrics` surface whose exposition carries counts and capacity only, which is why reusing
+  that as the signal would refuse every worker in every deployment for a surface the NetworkPolicy
+  is what keeps inside the cluster.) So the question is a design one and it is genuinely open: with
+  `entra_required=false` a worker's activities run as the shared dev principal with every
+  authorization gate open, exactly as a request would — but nothing is *listening*, so what an
+  operator should be refused for is the thing to decide before any code moves. Whatever it turns
+  out to be, `CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY`'s shape is the precedent to weigh: a posture a
+  deployment states beats one inferred from a field that means something else in the process
+  reading it.
+  **The gateway half of this row is closed** — `core/llm_gateway.refuse_unconfigured_llm_gateway`
+  is called from `create_app`, `api/mcp_face.main`, `durable/background_worker.main` and
+  `cli/chat.main`, the two connector components are shown unable to reach the gateway, and
+  `tests/test_llm_gateway_guard.py` drives the processes. Do not read that as covering this one.
 
 - [ ] **A standing plan approval authorizes any state-changing tool, not the plan's steps** — [L],
   from the 2026-08 security review (proven live). `plan_gate.enforce_plan_approval` refuses a

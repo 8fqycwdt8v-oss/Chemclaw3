@@ -752,7 +752,11 @@ resources:
 config:
   # The one model destination. **Stated rather than left to the code default**, for the reason
   # `CHEMCLAW_CALC_SERVER_URL` below is: the default is the local dev mock on loopback, and a pod
-  # that inherited it would refuse to boot (`api/middleware._refuse_unconfigured_llm_gateway`).
+  # that inherited it would refuse to boot
+  # (`core/llm_gateway.refuse_unconfigured_llm_gateway`). **That was true of the front door alone**
+  # until 2026-09-12: the guard lived in `api/middleware.py` with `create_app` as its only caller,
+  # so the background worker — whose agent activity takes turns — inherited the mock and dialled it
+  # silently. It now runs in every component that makes model calls.
   # There is no `CHEMCLAW_LLM_PROVIDER` — this address is the whole knob
   # (`D-2026-09-04-a-gateway-is-the-only-provider`).
   CHEMCLAW_LLM_BASE_URL: "http://internal-llm.llm.svc:8000/v1"

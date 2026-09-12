@@ -71,8 +71,8 @@ def test_the_default_gateway_is_the_mock_on_this_machine() -> None:
     process that configured nothing sent every prompt to the public vendor API. This one dials
     `cli/mock_llm`'s port on loopback, so the worst an unconfigured deployment can do is be refused
     a connection — loudly, on the first turn, rather than quietly and outbound
-    (`D-2026-09-04-a-gateway-is-the-only-provider`). A non-loopback bind on this default is refused
-    at boot by `api/middleware._refuse_unconfigured_llm_gateway`.
+    (`D-2026-09-04-a-gateway-is-the-only-provider`). Booting on this default at all is refused by
+    `core/llm_gateway.refuse_unconfigured_llm_gateway` unless the deployment states the posture.
 
     There is no `llm_provider` field to assert; that is the point, and
     `test_no_provider_field_survives` is what says so.

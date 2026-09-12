@@ -40,6 +40,7 @@ from typing import Any
 from temporalio.worker import Worker
 
 from chemclaw.core.config import settings
+from chemclaw.core.llm_gateway import refuse_unconfigured_llm_gateway
 from chemclaw.core.logging import configure_logging, configure_telemetry
 from chemclaw.core.temporal_client import connect
 
@@ -78,9 +79,20 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = registered_activities("bac
 
 
 async def main() -> None:
-    """Connect and poll the background-jobs queue: graph writes, ELN sync, jobs, templates."""
+    """Connect and poll the background-jobs queue: graph writes, ELN sync, jobs, templates.
+
+    The gateway guard runs here for the same reason it runs in `create_app`, and the reason it did
+    not used to is that it lived in `api/middleware.py`: `template_activities.run_agent_step` builds
+    a LangGraph agent inside an activity, so this process takes turns. Driven against the live
+    broker with this line deleted, an unconfigured worker connects and polls `background-jobs` with
+    `run_agent_step` registered and the mock's loopback address on the settings object; with the
+    line, it refuses before `connect()` is reached. After `configure_logging`, so the refusal and
+    the opt-in warning both go through this process's own handlers rather than the root logger's
+    default.
+    """
     configure_logging()
     configure_telemetry()
+    refuse_unconfigured_llm_gateway()
     client = await connect()
     worker = Worker(
         client,

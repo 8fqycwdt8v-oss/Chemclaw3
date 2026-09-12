@@ -185,10 +185,16 @@ def main() -> None:
     """
     import uvicorn
 
+    from chemclaw.core.llm_gateway import refuse_unconfigured_llm_gateway
     from chemclaw.core.logging import configure_logging, configure_telemetry
 
     configure_logging()
     configure_telemetry()
+    # This face makes model calls: `condense_protocols` is read-only, is not in `WITHHELD`, and
+    # builds a chat model of its own (`agent/condense.py`). So it is one of the process kinds the
+    # gateway guard has to reach, and it is one of the ones it did not while the guard lived in
+    # `api/middleware.py` beside `create_app`.
+    refuse_unconfigured_llm_gateway()
     logger.info("mcp face starting on %s:%s", settings.service_host, settings.service_port)
     uvicorn.run(
         "chemclaw.api.mcp_face:create_face_app",

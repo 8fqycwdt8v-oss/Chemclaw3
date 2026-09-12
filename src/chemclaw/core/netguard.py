@@ -541,9 +541,11 @@ def refuse_proxied_egress(settings: Any) -> None:
 
     Raises:
         RuntimeError: naming the proxy, the destination, *what reads the environment for it*, and
-            the one edit that proceeds. Loud at boot rather than loud on the first turn, and unlike
-            `api/middleware._refuse_unconfigured_llm_gateway` it reaches the durable worker too,
-            because it hangs off the `chemclaw.core.config` import every entrypoint makes.
+            the one edit that proceeds. Loud at boot rather than loud on the first turn, and it
+            reaches every process kind because it hangs off the `chemclaw.core.config` import every
+            entrypoint makes — which is the property the gateway guard beside it did *not* have
+            while it lived in `api/middleware.py`, and now has by being called from each entrypoint
+            instead (`core/llm_gateway.py`).
     """
     carried = proxied_destinations(settings)
     if not carried:

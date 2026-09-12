@@ -90,8 +90,8 @@ def test_localhost_suffix_is_not_trusted() -> None:
 # parsed, so `127.0.0.2`, `0.0.0.0`, `::` and a bracketed `[::1]` were loopback to one and not to
 # the other. The consequence was not cosmetic — a pod with the shipped `service_host="0.0.0.0"`
 # bind and `CHEMCLAW_LLM_BASE_URL=http://127.0.0.2:8820/v1` passed
-# `api.middleware._refuse_unconfigured_llm_gateway`, the guard added to catch exactly that, and
-# then failed every turn on a refused connection.
+# `refuse_unconfigured_llm_gateway` (then in `api.middleware`, now `core.llm_gateway`), the guard
+# added to catch exactly that, and then failed every turn on a refused connection.
 _ADDRESSES: list[tuple[str, bool]] = [
     ("127.0.0.1", True),
     ("127.0.0.2", True),  # was: loopback to the guard, network-exposed to the front door
@@ -947,9 +947,10 @@ def test_arm_from_settings_is_where_the_refusal_is_wired(monkeypatch: pytest.Mon
     """The tests above call the function; this one pins that anything *calls the function*.
 
     `arm_from_settings` is the single call `chemclaw.core.config` makes, which is what puts this
-    refusal in front of the durable worker as well as the front door — the gap
-    `api/middleware._refuse_unconfigured_llm_gateway` has by construction, since its signal is a
-    non-loopback *bind* and a worker does not bind.
+    refusal in front of the durable worker as well as the front door. The gateway guard reached the
+    front door only, for a whole year, because it lived in `api/middleware.py` with one caller;
+    `core/llm_gateway.py` plus a call in each entrypoint is the other way to close that, and
+    `tests/test_llm_gateway_guard.py` drives the processes to prove it.
     """
     _proxy_env(monkeypatch, HTTPS_PROXY="http://127.0.0.1:15001")
     with pytest.raises(RuntimeError, match="SECURITY: a proxy is configured"):

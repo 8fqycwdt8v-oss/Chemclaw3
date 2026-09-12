@@ -48,6 +48,7 @@ from chemclaw.connectors.registry import open_connector_specs
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.core.llm_gateway import refuse_unconfigured_llm_gateway
 from chemclaw.core.logging import configure_logging
 from chemclaw.core.turn_text import reset_current_user_texts, set_current_user_texts
 
@@ -460,6 +461,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     configure_logging()
     try:
+        # Inside the `try`, so an unconfigured gateway is one sentence and an exit code like every
+        # other startup failure here — it raises `RuntimeError`, which is already one of the three
+        # families this function translates. This is the terminal front door: it builds the same
+        # graph `create_app` builds, so it is one of the process kinds the guard has to reach.
+        refuse_unconfigured_llm_gateway()
         return asyncio.run(_run(_parse_args(argv)))
     except (ChemclawError, ConnectionError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)

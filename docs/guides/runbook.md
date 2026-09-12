@@ -137,7 +137,16 @@ The production ingress is Teams/Copilot with Entra-ID SSO (architektur.md §7). 
 testing there is a CLI: `make chat` (or `uv run chemclaw --admin`). It needs a model gateway
 answering at `CHEMCLAW_LLM_BASE_URL` — the default is `chemclaw.cli.mock_llm` on loopback, so a
 fresh checkout starts with no credential at all; point it at a real OpenAI-compatible gateway and
-put that gateway's credential on `CHEMCLAW_LLM_API_KEY`. **There is no credential preflight**
+put that gateway's credential on `CHEMCLAW_LLM_API_KEY`. **Running against that loopback default
+has to be said out loud**: every process that makes model calls — this CLI, the front door, the
+mcp face and the background worker — refuses to boot on a loopback gateway unless
+`CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY=true`, because the alternative is a deployment that never
+overrode the mock discovering it on a chemist's first question
+(`D-2026-09-12-a-gateway-guard-in-the-front-door-is-not-a-deployment-guard`). `make chat` and
+`infra/live/processes.sh` export it, because those are the lanes where running against the mock is
+actually true; `.env.example` ships it `false` with the rest of the code defaults. So the raw
+`uv run chemclaw --admin` form needs it in the environment, and without it gets one sentence naming
+the two edits that proceed. **There is no credential preflight**
 (`D-2026-09-04-a-gateway-is-the-only-provider`): an empty key is a legitimate configuration,
 because many internal gateways ignore the bearer, so a gateway that does want one answers 401 on
 the first turn rather than at construction. What still fails at construction is a *blanked*

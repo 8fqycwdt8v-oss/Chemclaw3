@@ -46,6 +46,14 @@ die() { printf '\033[31m[live] %s\033[0m\n' "$*" >&2; exit 1; }
 # chart ships, and LIVE-8's lesson is exactly that: a configuration only production sets is a
 # configuration nothing tests.
 export CHEMCLAW_SERVICE_HOST="${CHEMCLAW_SERVICE_HOST:-127.0.0.1}"
+# This lane's model gateway is `chemclaw.cli.mock_llm` on loopback, started below, and every
+# process that makes model calls now refuses to boot on a loopback `llm_base_url` unless the
+# posture is *stated* (`core/llm_gateway.refuse_unconfigured_llm_gateway`). Stated here, once, for
+# the whole lane: the front door, the background worker and the mcp face all read it (`make chat`
+# is its own lane and exports its own), and a lane
+# pointed at a real gateway (`CHEMCLAW_LLM_BASE_URL` set by `e2e-full-stack/up.sh`) is unaffected
+# either way because the guard only looks at loopback addresses.
+export CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY="${CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY:-true}"
 # The eval profile directory beside the shipped one, because the tool-utility A/B's control arm is
 # a profile (`data/evals/profiles/no-tools.yaml`) and a profile has to be registered by the process
 # that builds the agent. It is not in `data/profiles/` on purpose — a toolless agent is a
