@@ -367,6 +367,14 @@ _COUNTERS: dict[str, str] = {
         "Uploads refused with 503 because every parse slot was still busy after "
         "`attachment_parse_queue_seconds`."
     ),
+    # The other half of that story, and the one that used to be invisible *and* permanent: a parse
+    # that outran its deadline. Before `ingest/documents/isolate.py` such a parse kept its slot for
+    # the life of the process, so this series rising and `..._shed_total` rising with it is the
+    # signature of a pod losing parse capacity — which is now bounded and recovers, but is still
+    # what an operator wants to see before the shed rate tells them.
+    "chemclaw_document_parse_kills_total": (
+        "Document parses whose reader process was killed for outrunning its deadline."
+    ),
     # The two refusals that happen *before* a turn exists, and so were invisible to every counter
     # above: they are per-request, not per-turn. Unlabelled deliberately — a per-principal series
     # would key a metric on user identity, which `/metrics` is unauthenticated and must not carry

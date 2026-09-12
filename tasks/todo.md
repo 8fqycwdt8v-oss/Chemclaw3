@@ -282,8 +282,16 @@ rows: a per-call bound with nothing bounding N of them.
 - [ ] W23.5 `Chemclaw3` — **six tables still say "nothing bounds it"** [M]. One decision per table,
       recorded.
 - [ ] W23.6 `Chemclaw3` — nothing bounds what a helper writes into its caller's checkpointed state.
-- [ ] W23.7 `Chemclaw3` — a timed-out parse still runs to completion on the worker thread [L]:
-      the wall clock frees the caller, not the CPU.
+- [x] W23.7 `Chemclaw3` — a timed-out parse still runs to completion on the worker thread [L]:
+      the wall clock frees the caller, not the CPU. **Done** — and the row understated it. The pod
+      *was* bounded (`_ParseSlots` shed the third upload in 2.00 s); the defect is that a slot is
+      released only when its thread finishes, so two non-terminating parses took the replica's
+      upload path down **permanently** — driven, `in_flight` stayed at 2 five seconds after both
+      callers were freed and every later upload was shed. The parse now runs in a forkserver child
+      the thread `SIGKILL`s on the deadline (10 ms warm, vs 0.97 s for a fresh interpreter).
+      Driving it found `netguard._host_of` refusing the forkserver's own `AF_UNIX` socket as egress
+      while its docstring claimed local IPC was exempt.
+      `D-2026-09-12-a-parse-that-cannot-be-killed-wedges-its-replica`.
 - [ ] W23.8 `Chemclaw3` — `BoCampaignWorkflow` runs four sequential activities under a ceiling that
       funds one.
 
