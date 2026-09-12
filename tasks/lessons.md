@@ -95,6 +95,21 @@ file grew. If a rule is being broken repeatedly, the fix is a *mechanism* (a scr
    a verdict. And a constant that stands in for missing physics gets swept, not assumed — 37% of
    directions were landing on a "safety net" floor.
 
+   **And ask what the number could have come out as, before running it.** A measurement executed
+   correctly can still be about the wrong quantity, and the tell is that no reachable value would
+   have falsified the claim. This tree has paid for that twice on one question:
+   `D-2026-08-12-a-supervisor-that-holds-every-tool-has-no-reason-to-delegate` measured delegation
+   *rate* (2 of 15), which is a mediator rather than the isolation the specialists existed for, and
+   `D-2026-08-13-a-subagent-is-spawned-for-isolation-not-for-a-tool-it-lacks` put 14/15 against an
+   arm already at 14/15 — a ceiling with no headroom to show the improvement it was run to find.
+   The shape is clearest from outside the tree: a preprint (F.A.D.E.,
+   doi:10.64898/2026.06.20.733481) leads with a QED of 0.85 against 0.46 for the reference ligand,
+   where the generator samples a drug-likeness prior — so that number cannot come out low — and the
+   0.46 comparator is an approved drug, while predicted affinity, the axis the generator does *not*
+   optimize, moved the wrong way and appears only in the discussion. **Rule: write down the
+   falsifying value before running the measurement; if no reachable value would falsify it, the
+   metric is reporting some component's prior and the question needs a different quantity.**
+
 7. **A measurement script is code, and an unrun one is a claim.** A cross-validation number
    travelled from an unrun script into an ADR and a maintained capability map. If a number is going
    to be quoted, the command that produced it must be re-runnable and must have been re-run.
