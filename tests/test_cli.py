@@ -17,7 +17,7 @@ from chemclaw.agent import plan_approval_store as store_module
 from chemclaw.agent import plan_state
 from chemclaw.agent.checkpointer import process_checkpointer
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
-from chemclaw.agent.plan_approval_store import InMemoryPlanApprovalStore
+from chemclaw.agent.plan_approval_store import Decision, InMemoryPlanApprovalStore
 from chemclaw.agent.plan_gate import EMPTY_PLAN_HASH, plan_identity
 from chemclaw.cli import chat as cli
 from chemclaw.core.config import settings
@@ -233,16 +233,22 @@ def cli_approvals(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemoryPlanAppro
 def cli_plan(monkeypatch: pytest.MonkeyPatch) -> Callable[[list[str]], None]:
     """Set what the CLI's session is proposing, at the seam `_plan_command` reads it through.
 
-    The plan lives in the checkpointer now, and reading it is `agent/plan_state.session_todos`'s
+    The plan lives in the checkpointer now, and reading it is `agent/plan_state.session_plan`'s
     job — tested against a real one in `tests/test_plan_state.py`. What these tests are about is
     what `/plan` and `/approve` *decide* given a plan, so the read is the input, not the subject.
+
+    Each step declares `record_knowledge_note`, which is what makes the recorded approval's scope
+    non-empty and therefore worth asserting on; what a scope *does* is `tests/test_plan_scope.py`.
     """
 
     def _set(titles: list[str]) -> None:
-        async def _todos(session_id: str, **_kwargs: object) -> list[str]:
-            return list(titles)
+        async def _plan(session_id: str, **_kwargs: object) -> list[dict[str, object]]:
+            return [
+                {"content": t, "status": "pending", "tools": ["record_knowledge_note"]}
+                for t in titles
+            ]
 
-        monkeypatch.setattr(plan_state, "session_todos", _todos)
+        monkeypatch.setattr(plan_state, "session_plan", _plan)
 
     return _set
 
@@ -266,7 +272,7 @@ def test_approve_refuses_a_session_with_no_plan(
     """
     cli_plan([])
 
-    async def _run() -> tuple[str, tuple[bool, str] | None]:
+    async def _run() -> tuple[str, Decision | None]:
         reply = await cli._plan_command("/approve", settings.cli_admin_actor, saver=None)
         return reply, await cli_approvals.decision(cli._CLI_SESSION_ID, EMPTY_PLAN_HASH)
 
@@ -285,7 +291,7 @@ def test_approve_records_and_arms_a_real_plan(
     titles = ["screen the species", "compute the barrier"]
     cli_plan(titles)
 
-    async def _run() -> tuple[str, str, tuple[bool, str] | None]:
+    async def _run() -> tuple[str, str, Decision | None]:
         reply = await cli._plan_command("/approve", "alice@lab", saver=None)
         plan_hash = plan_identity(titles) or EMPTY_PLAN_HASH
         return reply, plan_hash, await cli_approvals.decision(cli._CLI_SESSION_ID, plan_hash)
@@ -297,7 +303,13 @@ def test_approve_records_and_arms_a_real_plan(
     # identity every audit row and `requested_by` reads, and the approval used to hardcode the
     # default instead — so the durable record of a sign-off named someone who took no action and
     # disagreed with the audit rows for its own session.
-    assert recorded == (True, "alice@lab")
+    assert recorded is not None and (recorded.approved, recorded.actor) == (True, "alice@lab")
+    # And the approval carries what the plan's steps declared: the gate reads this column rather
+    # than the live todo list, so a decision recorded with an empty scope authorizes nothing
+    # (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`).
+    assert recorded.scope == frozenset({"record_knowledge_note"}), (
+        f"the terminal recorded an approval that authorizes {sorted(recorded.scope)}"
+    )
 
 
 def test_plan_shows_no_approvable_identity_rather_than_the_empty_constant(
@@ -387,7 +399,19 @@ def test_the_plan_command_reads_the_store_the_turns_wrote_to(
                         tool_calls=[
                             {
                                 "name": "write_todos",
-                                "args": {"todos": [{"content": plan, "status": "pending"}]},
+                                "args": {
+                                    "todos": [
+                                        # `tools` is required: a step declares what it will call
+                                        # and the approval is scoped to the union
+                                        # (`agent/plan_scope.py`). Omitting it here is a tool
+                                        # validation error, not a plan.
+                                        {
+                                            "content": plan,
+                                            "status": "pending",
+                                            "tools": ["record_knowledge_note"],
+                                        }
+                                    ]
+                                },
                                 "id": "call-1",
                             }
                         ],
@@ -404,6 +428,10 @@ def test_the_plan_command_reads_the_store_the_turns_wrote_to(
 
     assert plan in reply, f"/plan did not show the plan the turn proposed: {reply!r}"
     assert "(no plan yet)" not in reply
+    # And what approving it would authorize, because that is half of what the person is deciding.
+    assert "declares: record_knowledge_note" in reply, (
+        f"/plan showed the steps without what they declared: {reply!r}"
+    )
 
 
 class _WriteTodosThenAnswer(GenericFakeChatModel):

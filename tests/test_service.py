@@ -2119,7 +2119,7 @@ def test_a_session_with_no_plan_has_nothing_to_decide_on() -> None:
         # back as an approval either, or the display disagrees with the gate that refuses it.
         asyncio.run(
             client.app.state.plan_approvals.record(  # type: ignore[attr-defined]
-                session_id, plan["plan_hash"], "someone", True
+                session_id, plan["plan_hash"], "someone", True, ()
             )
         )
         assert client.get(f"/sessions/{session_id}/plan").json()["approved"] is False, (

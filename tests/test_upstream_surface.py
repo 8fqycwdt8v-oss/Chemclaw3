@@ -97,6 +97,60 @@ def test_the_plan_is_written_by_a_tool_called_write_todos() -> None:
     )
 
 
+def test_the_todo_middleware_still_lets_a_subclass_replace_its_tool_and_read_its_prompts() -> None:
+    """`ScopedTodoListMiddleware` widens upstream's plan tool; three attributes are how.
+
+    `agent/plan_scope.py` subclasses `TodoListMiddleware` so each plan step declares the tools it
+    will call — which is what makes a plan approval bound anything at all
+    (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`). It does that by calling
+    `super().__init__()`, reading `self.system_prompt` and `self.tool_description` back off the
+    instance, appending to both, and replacing `self.tools`.
+
+    None of the three is published API. If upstream stops setting the two texts as instance
+    attributes the subclass would silently append to nothing and the model would never be told
+    about the field; if `tools` stopped being a plain list the subclass would either fail loudly or,
+    worse, leave upstream's narrower tool bound and every plan would declare nothing — which is an
+    approval that authorizes nothing, refusing every step of an approved plan. Both are failures a
+    unit test of the subclass alone cannot see, because the subclass would still be internally
+    consistent.
+    """
+    from langchain.agents.middleware import TodoListMiddleware
+
+    upstream = TodoListMiddleware()
+    assert isinstance(getattr(upstream, "system_prompt", None), str), (
+        "TodoListMiddleware no longer exposes `system_prompt`; agent/plan_scope.py appends to it"
+    )
+    assert isinstance(getattr(upstream, "tool_description", None), str), (
+        "TodoListMiddleware no longer exposes `tool_description`; agent/plan_scope.py appends to it"
+    )
+    assert isinstance(upstream.tools, list) and len(upstream.tools) == 1, (
+        "TodoListMiddleware no longer publishes exactly one tool in a plain list; "
+        "agent/plan_scope.ScopedTodoListMiddleware replaces that list wholesale"
+    )
+
+
+def test_a_todo_still_carries_only_content_and_status_upstream() -> None:
+    """`ScopedTodo` restates upstream's two keys and adds a third; a fourth would go unnoticed.
+
+    `agent/plan_scope.ScopedTodo` cannot inherit from `Todo` and still be the schema the model is
+    shown, so it spells `content` and `status` out. That copy is only safe while upstream's item
+    has no *other* key — a field added there would be one the plan tool silently stops accepting,
+    and the symptom would be a model writing a plan the way upstream's own prompt describes and
+    getting a validation error for it.
+    """
+    from langchain.agents.middleware.todo import Todo
+
+    from chemclaw.agent.plan_scope import ScopedTodo
+
+    upstream = set(get_type_hints(Todo, include_extras=True))
+    ours = set(get_type_hints(ScopedTodo, include_extras=True))
+    assert upstream <= ours, f"agent/plan_scope.ScopedTodo is missing {sorted(upstream - ours)}"
+    assert ours - upstream == {"tools"}, (
+        f"agent/plan_scope.ScopedTodo and upstream's Todo now differ by {sorted(ours - upstream)}; "
+        "the copy is only safe while `tools` is the single first-party addition"
+    )
+
+
 def test_a_subagent_still_cannot_see_the_parent_s_todos() -> None:
     """`plan_gate._plan_behind` has a fallback that exists only because of this exclusion.
 

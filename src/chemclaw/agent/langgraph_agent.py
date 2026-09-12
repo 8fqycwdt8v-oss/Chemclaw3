@@ -83,7 +83,6 @@ from deepagents.middleware.skills import (
     SkillsMiddleware,
     SkillsState,
 )
-from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.middleware.types import PrivateStateAttr
 from langgraph.channels.untracked_value import UntrackedValue
 
@@ -111,6 +110,7 @@ from chemclaw.agent.loop_cap import enforce_loop_cap
 from chemclaw.agent.model_calls import model_call_middleware, refuse_unparsed_arguments
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
 from chemclaw.agent.plan_link import stamp_plan_link
+from chemclaw.agent.plan_scope import ScopedTodoListMiddleware
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import refuse_repeated_calls
 from chemclaw.agent.scratchpad import (
@@ -785,6 +785,13 @@ def _harness_middleware(profile: AgentProfile) -> list[Any]:
     The todo list stays harness-only: a classic turn has no plan for the gate to read, and
     advertising `write_todos` there would be a capability the mode does not use.
 
+    **It is `ScopedTodoListMiddleware`, not upstream's**, because a plan step has to say what it
+    will call for the approval to bound anything
+    (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`). Everything else about
+    upstream's middleware is kept — its prompt, its parallel-rewrite guard, the `todos` channel and
+    the `write_todos` name — so the gate, the plan link and the two decision surfaces read exactly
+    what they read before, one field wider.
+
     `enforce_loop_cap` both enforces the cap and records it, and `loop_cap.loop_capped` reads that
     record. One counter for one number — and it counts in `before_model` deliberately: see
     `agent/loop_cap.py` for the four regressions that delegating it to `ModelCallLimitMiddleware`
@@ -803,7 +810,7 @@ def _harness_middleware(profile: AgentProfile) -> list[Any]:
     caps = [enforce_loop_cap, enforce_spend_cap, MeterTurnSpend()]
     if not harness_enabled_for(profile):
         return caps
-    return [TodoListMiddleware(), *caps]
+    return [ScopedTodoListMiddleware(), *caps]
 
 
 def _skills_middleware(backend: CompositeBackend, labelled: list[tuple[str, str]]) -> Any:

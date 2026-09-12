@@ -39,13 +39,23 @@ counts. It also deletes the seam — there is no longer a `plan_consumed` for a 
 The in-memory backend mirrors it exactly, which costs nothing and matters: `session_store="memory"`
 is a real deployment (the CLI is one), and a control with two implementations that disagree about
 when an approval is spent is a control nobody can reason about.
+
+**A row also carries what the approval permits**
+(`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`,
+`infra/sql/095_plan_approval_scope.sql`). Until that migration a decision said *which plan* a person
+said yes to and nothing about what saying yes let the agent do, so one approval of a read-only plan
+authorized every state-changing tool the deployment had. `scope` is the set of tool names the plan's
+steps declared when the human read it, stamped by the decision and never re-derived from the model's
+plan afterwards — which is what keeps a rewrite that widens a step's declaration from widening the
+authorization, since `plan_identity` deliberately hashes `content` only.
 """
 
+from collections.abc import Collection
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import cache
-from typing import Protocol, runtime_checkable
+from typing import NamedTuple, Protocol, runtime_checkable
 
 import psycopg
 from psycopg.rows import TupleRow
@@ -58,7 +68,8 @@ from chemclaw.core.config import settings
 # re-arms a plan: approving an unchanged plan again inserts a fresh, unspent row, so "yes, again"
 # needs no separate operation and cannot be performed by anything but a decision.
 _INSERT = (
-    "INSERT INTO plan_approvals (session_id, plan_hash, actor, approved) VALUES (%s, %s, %s, %s)"
+    "INSERT INTO plan_approvals (session_id, plan_hash, actor, approved, scope) "
+    "VALUES (%s, %s, %s, %s, %s)"
 )
 
 # The latest decision wins, so a rejection recorded after an approval revokes it — which is what a
@@ -68,7 +79,7 @@ _INSERT = (
 # is no longer an approval (D-167). The actor comes back either way, because "approved earlier,
 # already used" is a different thing for a surface to show than "nobody has decided".
 _LATEST = (
-    "SELECT approved AND consumed_at IS NULL, actor FROM plan_approvals "
+    "SELECT approved AND consumed_at IS NULL, actor, scope FROM plan_approvals "
     "WHERE session_id = %s AND plan_hash = %s "
     "ORDER BY decided_at DESC, id DESC LIMIT 1"
 )
@@ -86,20 +97,46 @@ _CONSUME_ALL = (
 )
 
 
+class Decision(NamedTuple):
+    """One decision as the store answers it: the verdict, who took it, and what it permits.
+
+    A `NamedTuple` rather than a dataclass because the two indexed readers that predate `scope`
+    (`api/routes/plan.py`, `cli/chat.py`) were reading `decision[0]` and `decision[1]`, and a third
+    field must not be an occasion to rewrite what the first two mean. New readers use the names.
+
+    `scope` is the set of tool names this approval authorizes — `plan_approvals.scope`, stamped by
+    the human's act and never re-derived from the model's plan
+    (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`). Empty is a real answer
+    and the one every row recorded before that migration carries: an approval that permits no
+    state-changing tool at all.
+    """
+
+    approved: bool
+    actor: str
+    scope: frozenset[str]
+
+
 @runtime_checkable
 class ApprovalStore(Protocol):
     """Reads and writes the human decision on one session's plan, whichever backend holds it."""
 
-    async def record(self, session_id: str, plan_hash: str, actor: str, approved: bool) -> None:
-        """Record one human decision about one specific plan."""
+    async def record(
+        self,
+        session_id: str,
+        plan_hash: str,
+        actor: str,
+        approved: bool,
+        scope: Collection[str],
+    ) -> None:
+        """Record one human decision about one specific plan, and what it authorizes."""
         ...
 
     async def consume_all(self, session_id: str) -> None:
         """Spend every live approval this session holds, so the next turn needs its own."""
         ...
 
-    async def decision(self, session_id: str, plan_hash: str) -> tuple[bool, str] | None:
-        """The latest *effective* `(approved, actor)`, or None if nobody has decided."""
+    async def decision(self, session_id: str, plan_hash: str) -> Decision | None:
+        """The latest *effective* decision, or None if nobody has decided."""
         ...
 
 
@@ -114,11 +151,24 @@ class PlanApprovalStore:
         """Borrow a connection on this store's database (see `chemclaw.agent.session_store`)."""
         return _session_connection(self._dsn)
 
-    async def record(self, session_id: str, plan_hash: str, actor: str, approved: bool) -> None:
-        """Record one human decision about one specific plan."""
+    async def record(
+        self,
+        session_id: str,
+        plan_hash: str,
+        actor: str,
+        approved: bool,
+        scope: Collection[str],
+    ) -> None:
+        """Record one human decision about one specific plan, and what it authorizes.
+
+        `scope` has no default, deliberately: it is the whole of what the approval permits, and a
+        caller that forgot it would silently record an approval authorizing nothing — a control
+        that fails closed, but by accident rather than by a decision. Written sorted so two
+        approvals of the same declaration compare equal in the trail.
+        """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(_INSERT, (session_id, plan_hash, actor, approved))
+                await cur.execute(_INSERT, (session_id, plan_hash, actor, approved, sorted(scope)))
             await conn.commit()
 
     async def consume_all(self, session_id: str) -> None:
@@ -134,20 +184,24 @@ class PlanApprovalStore:
                 await cur.execute(_CONSUME_ALL, (session_id,))
             await conn.commit()
 
-    async def decision(self, session_id: str, plan_hash: str) -> tuple[bool, str] | None:
-        """The latest *effective* `(approved, actor)`, or None if nobody has decided.
+    async def decision(self, session_id: str, plan_hash: str) -> Decision | None:
+        """The latest *effective* decision, or None if nobody has decided.
 
         Effective, not merely recorded: an approval that has already had its turn comes back
         `approved=False` (`_LATEST` folds `consumed_at IS NULL` into the verdict). Returning the
         actor as well is what lets a caller say *who* decided rather than only *that* it was
         approved — the difference between a usable record and a flag, and what separates
-        "approved earlier, already used" from "nobody has decided".
+        "approved earlier, already used" from "nobody has decided". The third field is what the
+        approval authorizes; a row written before `infra/sql/095_plan_approval_scope.sql` carries
+        the empty set, which authorizes no state-changing tool at all.
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_LATEST, (session_id, plan_hash))
                 row = await cur.fetchone()
-        return (bool(row[0]), str(row[1])) if row is not None else None
+        if row is None:
+            return None
+        return Decision(bool(row[0]), str(row[1]), frozenset(row[2] or ()))
 
 
 @dataclass
@@ -162,6 +216,7 @@ class _Decision:
     plan_hash: str
     actor: str
     approved: bool
+    scope: frozenset[str]
     consumed_at: datetime | None = None
 
 
@@ -199,9 +254,16 @@ class InMemoryPlanApprovalStore:
                 return decision
         return None
 
-    async def record(self, session_id: str, plan_hash: str, actor: str, approved: bool) -> None:
-        """Append one human decision about one specific plan."""
-        self._decisions.append(_Decision(session_id, plan_hash, actor, approved))
+    async def record(
+        self,
+        session_id: str,
+        plan_hash: str,
+        actor: str,
+        approved: bool,
+        scope: Collection[str],
+    ) -> None:
+        """Append one human decision about one specific plan, and what it authorizes."""
+        self._decisions.append(_Decision(session_id, plan_hash, actor, approved, frozenset(scope)))
 
     async def consume_all(self, session_id: str) -> None:
         """Spend every live approval this session holds, mirroring `_CONSUME_ALL` exactly."""
@@ -213,12 +275,12 @@ class InMemoryPlanApprovalStore:
             ):
                 decision.consumed_at = datetime.now(UTC)
 
-    async def decision(self, session_id: str, plan_hash: str) -> tuple[bool, str] | None:
-        """The latest *effective* `(approved, actor)`, or None if nobody has decided."""
+    async def decision(self, session_id: str, plan_hash: str) -> Decision | None:
+        """The latest *effective* decision, or None if nobody has decided."""
         latest = self._latest(session_id, plan_hash)
         if latest is None:
             return None
-        return (latest.approved and latest.consumed_at is None, latest.actor)
+        return Decision(latest.approved and latest.consumed_at is None, latest.actor, latest.scope)
 
 
 @cache

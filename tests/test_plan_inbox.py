@@ -44,7 +44,7 @@ class _Inbox:
     exist, on which profile, with which plan and which decision — and reading that arrangement in
     the test body is what makes each assertion legible.
 
-    The plan read is stubbed at `routes.plan.session_todos`, the seam `tests/test_runner.py` uses
+    The plan read is stubbed at `routes.plan.session_plan`, the seam `tests/test_runner.py` uses
     for the same purpose: what is under test here is which sessions get read and what the route
     concludes, not the checkpointer decode `tests/test_plan_state.py` already drives against a real
     saver.
@@ -54,19 +54,24 @@ class _Inbox:
         """Wire an app whose plan reads come from `self.todos` and are counted in `self.reads`."""
         self.owners = _FakeOwnerStore()
         self.approvals = InMemoryPlanApprovalStore()
-        # `None` for a session whose plan is unreadable, matching `plan_state.session_todos` — the
-        # distinction the route turns into `unread` rather than into "nothing waiting".
+        # `None` for a session whose plan is unreadable, matching `plan_state.session_plan` — the
+        # distinction the route turns into `unread` rather than into "nothing waiting". Held as
+        # bare lines because no case here varies a step's declaration; `_steps` puts each line
+        # into the shape the route reads.
         self.todos: dict[str, list[str] | None] = {}
         self.reads: list[str] = []
         self.app = create_app(owner_store=self.owners, connector_factory=_no_connectors)
         self.app.state.plan_approvals = self.approvals
         self.app.dependency_overrides[require_principal] = lambda: _ALICE
 
-        async def _todos(session_id: str, **_kwargs: Any) -> list[str] | None:
+        async def _plan(session_id: str, **_kwargs: Any) -> list[dict[str, Any]] | None:
             self.reads.append(session_id)
-            return self.todos.get(session_id)
+            lines = self.todos.get(session_id)
+            if lines is None:
+                return None
+            return [{"content": line, "status": "pending", "tools": []} for line in lines]
 
-        monkeypatch.setattr(plan_routes, "session_todos", _todos)
+        monkeypatch.setattr(plan_routes, "session_plan", _plan)
         self.client = TestClient(self.app)
 
     def add_session(
@@ -83,7 +88,12 @@ class _Inbox:
 
     def decide(self, session_id: str, plan: list[str], *, approved: bool, spent: bool) -> None:
         """Record a human decision on `session_id`'s plan, optionally already spent by its turn."""
-        asyncio.run(self.approvals.record(session_id, plan_identity(plan) or "", "alice", approved))
+        asyncio.run(
+            # The inbox lists what nobody has decided on, so *what* a decision authorizes is
+            # irrelevant here and the scope is empty on purpose — an approval that permits no
+            # tool is still a decision, and this route must not list it.
+            self.approvals.record(session_id, plan_identity(plan) or "", "alice", approved, ())
+        )
         if spent:
             asyncio.run(self.approvals.consume_all(session_id))
 
@@ -246,7 +256,7 @@ def test_the_scan_is_bounded_and_reports_what_it_did_not_reach(
 def test_an_unreadable_plan_is_counted_unread_rather_than_reported_as_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`session_todos` returning `None` means "unknown", and the inbox must not round it to "none".
+    """`session_plan` returning `None` means "unknown", and the inbox must not round it to "none".
 
     That distinction is `agent/plan_state`'s whole reason for not returning one list, and it fails
     open here in exactly the way it fails open there: a checkpointer nobody can reach would
@@ -273,7 +283,7 @@ def test_without_a_durable_registry_the_inbox_is_empty_and_says_which_emptiness(
     async def _unreached(session_id: str, **_kwargs: Any) -> list[str] | None:
         raise AssertionError(f"no registry, so no session should be read: {session_id}")
 
-    monkeypatch.setattr(plan_routes, "session_todos", _unreached)
+    monkeypatch.setattr(plan_routes, "session_plan", _unreached)
     app = create_app(owner_store=None, connector_factory=_no_connectors)
     app.dependency_overrides[require_principal] = lambda: _ALICE
     with TestClient(app) as client:
@@ -335,11 +345,13 @@ def test_a_blocked_plan_below_the_listings_page_boundary_is_still_found(
 
     reads: list[str] = []
 
-    async def _todos(session_id: str, **_kwargs: Any) -> list[str] | None:
+    async def _todos(session_id: str, **_kwargs: Any) -> list[dict[str, Any]]:
         reads.append(session_id)
-        return ["screen the hazards"] if session_id == blocked else []
+        if session_id != blocked:
+            return []
+        return [{"content": "screen the hazards", "status": "pending", "tools": []}]
 
-    monkeypatch.setattr(plan_routes, "session_todos", _todos)
+    monkeypatch.setattr(plan_routes, "session_plan", _todos)
     app = create_app(owner_store=owners, connector_factory=_no_connectors)
     app.state.plan_approvals = InMemoryPlanApprovalStore()
     app.dependency_overrides[require_principal] = lambda: _ALICE
@@ -413,7 +425,7 @@ def test_the_listing_walk_is_bounded_when_nothing_the_caller_owns_is_gated(
     async def _unreached(session_id: str, **_kwargs: Any) -> list[str] | None:
         raise AssertionError(f"no session is gated here, so {session_id} must not be read")
 
-    monkeypatch.setattr(plan_routes, "session_todos", _unreached)
+    monkeypatch.setattr(plan_routes, "session_plan", _unreached)
     app = create_app(owner_store=owners, connector_factory=_no_connectors)
     app.state.plan_approvals = InMemoryPlanApprovalStore()
     app.dependency_overrides[require_principal] = lambda: _ALICE

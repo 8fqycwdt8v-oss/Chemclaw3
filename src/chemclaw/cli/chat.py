@@ -292,7 +292,7 @@ async def _repl(agent: Any, actor: str, saver: Any) -> None:
     Prompts/errors go to stderr so a redirected stdout carries only the answers.
 
     `saver` is the checkpointer the graph was built on, threaded through so `/plan` reads the store
-    the turns actually wrote to. Passing it rather than letting `session_todos` resolve one is the
+    the turns actually wrote to. Passing it rather than letting `session_plan` resolve one is the
     whole fix: resolving gives the *configured* checkpointer, which under `session_store=memory` is
     not the one the graph holds and under either setting was not the one an unwired graph wrote to.
 
@@ -353,7 +353,7 @@ async def _repl(agent: Any, actor: str, saver: Any) -> None:
 async def _plan_command(prompt: str, actor: str, saver: Any) -> str:
     """Run `/plan` or `/approve` against the session, returning the line to show the operator.
 
-    **`saver` has no default**, and that is the fix rather than a style choice: `session_todos`
+    **`saver` has no default**, and that is the fix rather than a style choice: `session_plan`
     resolves the *configured* checkpointer when handed `None`, which under `session_store=memory`
     is not the store this session's turns wrote to. A default here would leave the defect reachable
     by omission — `/plan` answering "(no plan yet)" for a session that has one, and `/approve`
@@ -364,7 +364,7 @@ async def _plan_command(prompt: str, actor: str, saver: Any) -> str:
     no window in which a plan could change between being shown and being approved, because the
     person reading it and the person approving it are the same terminal.
 
-    **Both commands read the plan the same way the route does** — `plan_state.session_todos` off
+    **Both commands read the plan the same way the route does** — `plan_state.session_plan` off
     the checkpointer, hashed by `plan_gate.plan_identity` — which is what keeps the two front doors
     from drifting. They used to ask two different questions: `/approve` guarded on `todo_titles`
     and recorded against `current_plan_hash`, and those disagreed about the `awaiting-job:`
@@ -374,12 +374,15 @@ async def _plan_command(prompt: str, actor: str, saver: Any) -> str:
     """
     from chemclaw.agent.plan_approval_store import plan_approval_store
     from chemclaw.agent.plan_gate import plan_identity
-    from chemclaw.agent.plan_state import session_todos
+    from chemclaw.agent.plan_scope import declared_scope
+    from chemclaw.agent.plan_state import session_plan
 
-    # `or []`: `session_todos` answers `None` when the plan could not be *read* at all, which for
+    # `or []`: `session_plan` answers `None` when the plan could not be *read* at all, which for
     # this command is the same screen as a session that has proposed nothing — the gate is what
     # must tell the two apart, not the display.
-    plan = await session_todos(_CLI_SESSION_ID, saver=saver) or []
+    steps = await session_plan(_CLI_SESSION_ID, saver=saver) or []
+    plan = [str(step["content"]) for step in steps]
+    scope = declared_scope(steps)
     plan_hash = plan_identity(plan)
     if prompt.lower() == "/plan":
         lines = plan or ["(no plan yet)"]
@@ -388,8 +391,13 @@ async def _plan_command(prompt: str, actor: str, saver: Any) -> str:
         decision = await plan_approval_store().decision(_CLI_SESSION_ID, plan_hash)
         # The store's verdict is already the effective one — a spent approval reports as not
         # approved — so this line says what the gate would do, not merely what was once recorded.
-        verdict = "approved" if decision and decision[0] else "not approved"
-        return "\n".join([*lines, f"[{plan_hash} — {verdict}]"])
+        verdict = "approved" if decision and decision.approved else "not approved"
+        # The declared tools are shown beside the steps, because approving is approving *them*
+        # too: the gate refuses a state-changing tool no step declared
+        # (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`), so a person who
+        # only saw the prose would be saying yes to a bound they could not read.
+        declares = ", ".join(sorted(scope)) or "no state-changing tools"
+        return "\n".join([*lines, f"[declares: {declares}]", f"[{plan_hash} — {verdict}]"])
     if plan_hash is None:
         return "there is no plan to approve yet; ask a question first"
     # `actor`, not `settings.cli_admin_actor`. The session runs under whatever `--actor` resolved
@@ -397,7 +405,7 @@ async def _plan_command(prompt: str, actor: str, saver: Any) -> str:
     # made the durable approval record, which is the artifact of the "agent proposes, human decides"
     # line, name an identity that took no action and disagree with the audit rows for its own
     # session.
-    await plan_approval_store().record(_CLI_SESSION_ID, plan_hash, actor, True)
+    await plan_approval_store().record(_CLI_SESSION_ID, plan_hash, actor, True, scope)
     # Recording is the whole grant. It used to also call `grant_execute` to flip MAF's session
     # mode — a second piece of state saying the same thing on a different lifetime, which is what
     # let a displayed mode outlive the approval it came from.
