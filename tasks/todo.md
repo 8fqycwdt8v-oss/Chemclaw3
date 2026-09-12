@@ -1,189 +1,428 @@
-# Waves 16–20 — simplification, refactoring, maintainability
+# Waves 21–30 — production-readiness hardening across the family
 
-Planned on measurement at `e2f090e6`, not on intuition. Every figure below is reproducible
-from the scripts in each wave's brief; none of them is transcribed into prose anywhere that
-a later commit could falsify without failing a test (`D-2026-09-03`).
+**Numbered 21–30, not 1–10.** Twenty waves are already merged here; restarting at 1 would make
+every commit message, ADR and review note ambiguous about which effort it belongs to. The request
+was for ten waves, and these are the next ten.
 
-## What the tree measures today
+**The goal, stated so it can be checked.** A codebase a deployment team can take to production:
+every perimeter control actually enforced rather than declared, every resource bounded, every
+failure visible, every gate it claims to run actually run, and every number in prose either
+measured today or deleted. Not "fewer lines".
 
-| Axis | Measured | Decision |
-|---|---|---|
-| Prose : code in `src/` | **1.28 : 1** — 75,631 prose vs 59,021 code, 452 files | W17 |
-| Functions whose docstring is longer than their body | **1,110 of 3,473 (32%)** | W17 |
-| Structural duplication | 33 duplicated 8-statement shapes in 8,643 windows, nearly all pydantic field blocks and SQL row mapping | **no wave — the tree is DRY** |
-| Function body length | median **9**, p90 36, but 20 functions 130–315 lines | W18 |
-| Worst branch count | `protocols/render.py::render_markdown` — **41 branches, 257 lines** | W18 |
-| Top-level defs named exactly once in `src/` | **117**, of which **22** are named nowhere and 25 only by tests. *This row first said 144/46 and was wrong*: the scan behind it counted `tokenize` NAME tokens, and on Python 3.11 an f-string is a single `STRING` token, so every identifier interpolated into one is invisible. 27 live functions read as orphans — nine of them consecutive helpers in `ingest/eln/record.py`, which looks exactly like a dead cluster. Re-derived with `ast`. | W16 |
-| `Settings` fields | **422** | W16 |
-| Test tree | **179,332 lines, 384 files, 1.23× `src`**, full run 23:42 | W19 |
-| `__init__.py` re-exports | 49 | fine |
+## The premise, measured rather than assumed
 
-**The premise this plan rejects.** "Simplify" usually means deduplicate and shorten functions.
-Measured, neither is this tree's problem: duplication is negligible and the median function is
-nine lines. What is large is everything *around* the code — the prose that must be kept true, the
-tests that must be kept passing, and the settings that must be kept reachable. So these waves go
-after the maintenance *surface*, not the line count.
+The three repositories this session was opened on were surveyed at `252eb38` / `1b997de` /
+`637d5cc` before this plan was written. What the survey found decides its shape:
 
-**The constraint every wave inherits from waves 10–15.** A deletion is a change in behaviour until
-proven otherwise, and this tree has already been burned by both directions: it deleted 1,442 lines
-of unreachable specialist code correctly (`D-2026-08-15`), and it kept `reject_widening` alive for
-months as "a claim that a control exists". Nothing gets deleted on a name-count alone.
+| Repository | Gate today | Registered open work | What the survey actually found |
+|---|---|---|---|
+| `Chemclaw3` | `make lint` ✅ `make type` ✅ (840 files) | 67 queued rows + 221 archived findings + a `DEFERRED.md` with triggers | The queue is real, anchored and mostly **unworked**. No cleanup sweep needed; the rows are the work. |
+| `Chemclaw3-mcp` | `make check` = lint+type+test+deps-audit | **no** BACKLOG, **no** DEFERRED, **no** `docs/decisions/`, **no** lessons log | 0 TODO/FIXME. Strong posture, three real holes: unbounded MCP sessions, two heavy servers with no admission ceiling, and a supply chain that proves a property of `uv.lock` and not of any shipped image. |
+| `Chemclaw3_ui` | 19-step CI incl. axe + container assertions | `ISSUES.md` (4 open) + 5 known gaps | Already hardened: 0 TODO, 0 `as any`, 1 `@ts-expect-error`, 0 empty catches. Its gap is **gate reproducibility**, not code quality. |
 
-**That constraint earned itself inside this plan's first hour.** The dead-code row above was wrong
-in the direction that would have deleted live code, and the audit's own near-miss was reporting the
-egress guard's arming function as dead because it is imported under an alias
-(`from chemclaw.core.netguard import arm_from_settings as arm_egress_guard`). Two independent
-blind spots, both in the reassuring direction, before a line was removed.
+**Baseline, measured before a line was changed** (`252eb38`, this environment, Docker up):
+`make lint` ✅ · `make type` ✅ 840 files · `make test` **8,627 passed, 79 skipped, 0 failed in 18:07**.
+The skip count is the number that matters: the offline default skips **216**, so a run taken without
+`dockerd` is not evidence about the durable layer, the session store or retention. Every wave reports
+this pair — passed and skipped — in its PR body (R6).
+
+**So this plan rejects the default reading of "refactoring".** There is no duplication to extract and
+no dead-code harvest left — waves 16–20 did that and measured the tree DRY with a median function of
+nine lines. What is unfinished is the part that decides whether a deployment survives contact with
+production: controls that exist in prose, bounds that exist per-call but not per-pod, and gates that
+exist in a Makefile but not in the pipeline that ships the bytes.
+
+**Scope is four repositories, not three.** `Chemclaw3_mock` is cloned into this session
+(`b42572f`) because W30.7's four-repo live lane cannot run without it — it serves the two ELN
+datasources, the stand-in Entra tenant and an example HTTP-transport MCP tool. It carries no
+`CLAUDE.md`; its conventions come from its own `README.md` and `ISSUES.md`. It gets a branch and a PR
+only if a wave actually needs a change there.
+
+**Two asymmetries drive the ordering.** The fleet has no decision record at all, so its waves must
+*create* one as they go (W21 opens `Chemclaw3-mcp/docs/decisions/` and its own register). And the UI
+is nearly closed, so it appears in four waves only, on the items its own `ISSUES.md` already names.
 
 ---
 
-## W16 — Dead code, and the repo's own rules that nothing tests
+## Rules every wave inherits
 
-`CLAUDE.md` states three rules as non-negotiable and tests none of them: *"No abstraction without a
-second real caller (Rule of Three); an abstraction with one caller gets inlined"*, *"No boilerplate:
-only code that is actually used"*, *"Delete dead params, empty interfaces, and 'for later' stubs on
-sight"*.
+These are not aspirations. Each is here because this family has already paid for its absence, and
+each names the lesson it comes from.
 
-- [ ] W16.1 Decorator-aware reachability. The 144 single-reference defs include MCP `@tool`s,
-      Temporal `@workflow.defn`s and pydantic validators that are reached by *registration*, not by
-      name. Build the reachability set from the registries themselves, not from a token scan.
-- [ ] W16.2 The 46 named nowhere — classify each: registered, test-only, or genuinely dead.
-      `evals/autonomy.py` alone holds four (205 lines); `BACKLOG.md` already carries a row saying
-      `turn_cost_ratio` "scores a fixture, not the system".
-- [ ] W16.3 Settings with no reader. 422 fields; find every one nothing in `src/` reads, and every
-      one no deployment file can reach. This exact defect shipped before (`D-2026-08-11`: three
-      compaction settings with no reader, beside a config comment in the present tense).
-- [ ] W16.4 Dead parameters and single-caller abstractions, per the Rule of Three.
-- [ ] W16.5 Make the rules checkable where a machine can see them, with each guard watched refusing.
+- **R1 — Scout before implementing.** Every row is re-verified against `HEAD` first. `BACKLOG.md`'s
+  own header records a pass that found **17 of its rows not workable as written**; correcting or
+  deleting a stale row is as much a contribution as the code would have been. A wave's first output
+  is a verification table, not a diff.
+- **R2 — Measure it, don't argue it.** Every claim a wave makes gets a number from a run, and the
+  script that produced it is kept in the wave's brief. Prose is evidence about its author, never
+  about the code.
+- **R3 — Mutate the fix, watch the test fail.** Before the commit message. 7 of 30 tests written in
+  one day survived mutation, all of them asserting *the shape of a thing rather than its effect*
+  (`tasks/lessons.md`). A test and the fix it guards, written together, share a blind spot.
+- **R4 — No number in non-test prose unless a test fails when it goes stale.** Otherwise the number
+  belongs in the test and the prose gets the test's name (`D-2026-09-03`,
+  `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose`).
+- **R5 — A deletion is a behaviour change until proven otherwise.** Enumerate the tables, columns,
+  metrics and config keys the removed thing was the only **writer** of, then find every **reader**
+  of each. A reader with no producer returns `[]` and passes its own tests
+  (`D-2026-09-05-a-reader-with-no-caller-passes-its-own-tests`).
+- **R6 — The gate is the pipeline, not the habit.** Per wave, per repo:
+  `Chemclaw3`: `sudo -n dockerd &` → `make up` → `make db-migrate` → **`make ci`** (16 steps, not
+  `make check`), and the skip count from `tests/conftest.py`'s epilogue is **reported in the PR
+  body**. A local run with Postgres down is not evidence about the durable layer.
+  `Chemclaw3-mcp`: `make check` **and** `make offline-run`.
+  `Chemclaw3_ui`: `npm ci` then every step `.github/workflows/ci.yml` runs, `npm run test:e2e`
+  included — `vitest` green is not CI green (`tasks/lessons.md`, 2026-09-05).
+- **R7 — One decision, one ADR, one deleted row.** `D-YYYY-MM-DD-<slug>.md`, a row in
+  `docs/decisions/README.md`, and the `BACKLOG.md`/`DEFERRED.md` row deleted **in the same commit**
+  that closes it — never struck through, never annotated.
+- **R8 — One repo, one branch, one PR.** Branch `claude/10-wave-refactoring-plan-aqeurx` in each
+  repo; merge to `main`; delete the remote branch; then reset the designated branch off the new
+  `main` for the next wave. A merged PR is never reused.
+- **R9 — An unavailable gate step is tried once before it is recorded as unavailable.**
+  `kubeconform` was deferred to CI eight times on the strength of a "not installed" message and took
+  one `curl` and a `cp` (`tasks/lessons.md`). `helm` and `kubeconform` are absent here today.
 
-## W17 — The prose load: 1.28 : 1, and which half is a liability
+---
 
-**This wave does not delete docstrings.** This tree's prose is deliberate and load-bearing — it
-records *why*, and waves 10–15 depended on it. But 75,631 lines is 75,631 lines that must be kept
-true, and those waves found ~100 present-tense claims that were false.
+## The three decisions taken before W21
 
-- [ ] W17.1 Measure where the ~100 stale claims waves 10–15 corrected actually *were*: module
-      docstring, function docstring, or inline comment? Per 1,000 lines of each. That ratio is the
-      evidence for any policy, and nobody has computed it.
-- [ ] W17.2 Classify the 1,110 doc-longer-than-body functions: prose that **records a decision**
-      (load-bearing — keep), prose that **restates the code** (a liability — it drifts, and the code
-      is the better copy), prose that **belongs in an ADR** (move it, cite it).
-- [ ] W17.3 Find prose that is already a duplicate of an ADR it cites — the same argument in two
-      places, only one of which is allowed to be edited.
-- [ ] W17.4 Propose the rule, and enforce what a machine can see of it.
-- [ ] W17.5 Act only where the classification is unambiguous. Anything arguable stays and is listed.
+Asked and answered by the owner, recorded here so no wave re-litigates them:
 
-## W18 — The complexity hotspots, where change is riskiest
+1. **The `[L]` rows are built, not just recorded.** The standing plan approval's scope (W22.1), what
+   enforces egress (W21.3), the checkpointer's write volume (W28.4) and a first external benchmark
+   (W27.7) are implemented rather than moved to `DEFERRED.md` with a trigger. This is the expensive
+   answer and it is the reason W21, W22, W27 and W28 each carry a second PR slot. An
+   `LD_PRELOAD`/seccomp egress layer is the single largest item in the plan.
+2. **`Chemclaw3_mock` is in scope**, for the reason above.
+3. **`Chemclaw3_ui`'s two large files are left alone.** `results/renderers.tsx` (2,021 lines) and
+   `state/chatStore.ts` (1,869) are the only size outliers in a repository that surveyed clean, and
+   the second carries measured persist-budget and throttle logic pinned by five test files. Splitting
+   them is churn with regression risk and no robustness gain. The UI is worked on its own registered
+   items instead.
 
-Twenty functions carry 130–315 line bodies. These are the places a future change is most likely to
-break something, and the median function being nine lines is what makes them stand out rather than
-excuse them.
+## The team shape, and why a wave has two halves
 
-- [ ] W18.1 `protocols/render.py::render_markdown` — 41 branches, 257 lines.
-- [ ] W18.2 `api/runner.py::run_turn` (315) and `api/routes/turns.py::post_message` (308).
-- [ ] W18.3 `connectors/calc/activities.py::_dispatch` (289 lines, 25 branches) and
-      `publish/dialect.py::rows_for` (276, 18).
-- [ ] W18.4 Every refactor proven behaviour-identical against the base, by measurement rather than
-      by argument — the bar `CLAUDE.md` sets ("diff behavior between the base and your change").
-- [ ] W18.5 Refactor only where the split is genuinely clearer. A 300-line function that is one
-      honest dispatch table is not improved by scattering it.
+Each wave runs as a team of subagents, then a **separate** team reviews what the first one merged.
+The split is the point: this family's best findings have all come from fresh context reading a diff
+whose rationale it was never told (`D-2026-09-03`, four reviews → four stale sentences;
+`D-2026-09-05`, five reviews → nine defects, four of the same unlooked-for shape).
 
-## W19 — The test tree's own maintainability
+**Half A — build (before the PR)**
 
-179,332 lines against 145,730 of source, and 23:42 to run. Nothing has ever asked what that buys.
+| Role | Count | Brief |
+|---|---|---|
+| Scout | 1 | R1. Re-verify every row against `HEAD`; produce the verification table; correct or delete what is stale. Runs first, alone. |
+| Implementer | 2–4 | One coherent slice each, own commits, no shared files. Each writes the test before the fix and mutation-checks it (R3). |
+| Adversary | 1 | Mutates every test the wave added and reports which survived. A survivor is a defect in the wave, not a note. |
+| Claim auditor | 1 | Reads the whole diff against every docstring, ADR, README and `values.yaml` line it touches. R4. Runs `prose-validate`, `make upstream-check`. |
 
-- [ ] W19.1 Where the 23:42 actually goes: the slowest 1% of tests, and whether the cost is
-      structural (container setup, migrations per test) or a handful of slow cases.
-- [ ] W19.2 Redundant coverage: tests that exercise the same behaviour through the same path.
-- [ ] W19.3 Fixture sprawl and the six test files over 2,000 lines (`test_deploy_chart.py` is 5,205).
-- [ ] W19.4 The test tree's own prose is 0.60 : 1 — 57,346 lines. Same question as W17, asked of it.
-- [ ] W19.5 Act where it is safe; a test deleted is coverage deleted, so the bar is that the
-      behaviour is still covered somewhere, proven by driving it.
+**Half B — review (after the merge, before the next wave)**
 
-## W20 — Did the simplification remove a control?
+3 reviewers, fresh context, given **only** the merged diff and the repository's own rules — never
+the implementers' reasoning. Each is asked a different question, because a single "review this"
+prompt converges on the same findings:
 
-Wave 15's finding was that this review's own guards needed auditing. A *simplification* wave is
-precisely where a control gets deleted by accident — so this wave turns the lens on 16–19 rather
-than opening a new axis.
+1. *Does the control work for the attacker / the operator it is for?* Drive it, don't read it.
+2. *What does this diff make false?* Every number, docstring, ADR sentence and chart comment.
+3. *What does this diff orphan?* R5, run both directions — writers with no reader, readers with no
+   writer.
 
-- [ ] W20.1 Every deletion in W16–W19, re-examined against the question "what would now go
-      unnoticed?"
-- [ ] W20.2 Mutation-test the guards W16–W19 added, on wave 15's method: each must be watched
-      refusing its own defect.
-- [ ] W20.3 Re-derive every number this plan and those waves wrote into prose, at HEAD.
-- [ ] W20.4 Full gate, ADR, PR, merge.
+Whatever they find is fixed in a **second PR inside the same wave**, merged the same way. A wave is
+not closed while a reviewer finding is open.
+
+---
+
+## W21 — The perimeter: egress, the ambient proxy, and refusing at boot
+
+The controls most often *declared* rather than enforced. Five of these are live `BACKLOG.md` rows
+whose own text says the stated guarantee is narrower than the sentence asserting it.
+
+- [ ] W21.1 `Chemclaw3` — the JWKS fetch follows an ambient proxy with no seam to stop it
+      (`api/auth.py::_client_for`, `core/netguard.py::refuse_proxied_egress`). **This is the anchor
+      every bearer token is validated against.** Decide between a process-wide opener install and
+      vendoring `fetch_data`; the row states both costs. ADR.
+- [ ] W21.2 `Chemclaw3` — delete `tests/test_netguard.py::_TRUST_ENV_LANE_EXEMPTIONS`: six live-lane
+      httpx clients at `trust_env=True`, one of them carrying a bearer (`cli/live_probes.py:340`,
+      `cli/live_storm.py` ×5, `cli/phoenix_publish.py`, `evals/live.py`). One keyword per site.
+- [ ] W21.3 `Chemclaw3` — the egress guard is blind to gRPC and to Temporal, its two
+      highest-value destinations, and they compound through a loopback sidecar. Measured: all three
+      reached an external listener with the counter at 0. **Decide what enforces egress** (LD_PRELOAD
+      / seccomp / per-library) and close the cheap half now: `networkPolicy.egressDestinations` must
+      say it is the only layer bounding these two. ADR.
+- [ ] W21.4 `Chemclaw3` — the gateway boot guard reaches the front door and not the worker, and
+      `durable/template_activities.py` makes model calls from a worker. Decide what "exposed" means
+      for a process that only dials out.
+- [ ] W21.5 `Chemclaw3` — the Qdrant client builds its own httpx outside the proxy fix. Install the
+      extra, measure whether the SDK accepts a caller-supplied client, then close or re-file with
+      the measurement.
+- [ ] W21.6 `Chemclaw3-mcp` — **create `docs/decisions/` and a `BACKLOG.md`.** The fleet has no
+      decision record, so every argument in its `CLAUDE.md` is unanchored prose. This wave's own
+      findings are its first rows. (Prerequisite for R7 in every later fleet wave.)
+- [ ] W21.7 `Chemclaw3-mcp` — generalise `tests/test_fleet.py:666`'s pattern (no shipped deployment
+      widens `MCP_EGRESS_ALLOW`) to `MCP_EGRESS_GUARD=off` and to every resource bound. Today a
+      deployment can disable the guard and nothing refuses.
+
+**Acceptance** — R6 in both repos; an LD_PRELOAD/seccomp decision recorded either way; the counter
+and `chemclaw_egress_guard_armed` shown to move under a driven gRPC attempt, or the ADR stating
+plainly that they cannot.
+
+## W22 — Authorization, attribution and name-space integrity
+
+Four rows where a control's *scope* is wider than its name, plus the two name spaces a connector can
+quietly capture.
+
+- [ ] W22.1 `Chemclaw3` — a standing plan approval authorizes any state-changing tool, not the
+      plan's steps [L]. The largest authorization gap on the queue. ADR; `HumanInTheLoopMiddleware`
+      stays declined for the plan gate itself (`docs/planning/BACKLOG.md`).
+- [ ] W22.2 `Chemclaw3` — the unauthenticated `X-Chemclaw-Actor` header becomes durable attribution.
+- [ ] W22.3 `Chemclaw3` — a connector can claim a `run_<name>` step-template launcher and the
+      registry's docstring says it cannot (measured: **accepted**). Decide which registry owns the
+      name space; either a new `tests/test_layering.py` edge or moving the collision check after both
+      registrations.
+- [ ] W22.4 `Chemclaw3` — `build_langgraph_agent(connectors=...)` accepts a tool that shadows a
+      first-party name.
+- [ ] W22.5 `Chemclaw3` — two producers bind a template step's ambient identity and one suffices;
+      collapsing them moves a security control's proof onto a worker harness. Decide deliberately,
+      not by deletion (`tests/test_template_job_step.py`).
+- [ ] W22.6 `Chemclaw3-mcp` — verify bearer-on-`/mcp` against a **running** server for all seven,
+      not off the source: a mounted MCP surface bypasses the enclosing app's dependencies. The
+      fleet's own `CLAUDE.md` says verify this way and no test does it per-server.
+- [ ] W22.7 `Chemclaw3-mcp` — `assert` as a runtime invariant on caller-derived data
+      (`predictors/forward/molecular_transformer.py:37`), stripped under `python -O`, and it
+      interpolates raw caller SMILES past the fleet's own `_MAX_ECHO_CHARS` truncation.
+- [ ] W22.8 `Chemclaw3_ui` — `src/api/client.ts:538` is the one unencoded path interpolation among
+      eleven `encodeURIComponent` call sites. Low impact, breaks the invariant; fix and pin it.
+
+**Acceptance** — a driven probe per control: an approved plan refusing a tool outside its steps; a
+forged `X-Chemclaw-Actor` not reaching `audit_events`; a bundle claiming `run_*` refused; a live
+`tools/call` on each fleet server refused without a bearer.
+
+## W23 — Resource ceilings: what bounds a pod, not a call
+
+The fleet survey's highest-consequence finding sits here, and it is the same shape as four Chemclaw3
+rows: a per-call bound with nothing bounding N of them.
+
+- [ ] W23.1 `Chemclaw3-mcp` — **no ceiling on concurrent MCP sessions.** `sessions.py` reaps idle
+      sessions at 1800 s but nothing caps `_server_instances`; at the measured ~149 kB/session an
+      authenticated caller holds ~268 MB before the first expiry, against pods requesting `256Mi`.
+      No `MCP_MAX_SESSIONS`, no admission on `initialize`. Add the ceiling, refuse promptly, count it.
+- [ ] W23.2 `Chemclaw3-mcp` — `rxnpredict` (torch) and `rxnlabel` (RXNMapper, `MAX_BATCH=500`) are
+      the two heavy servers with **no `engine/admission.py`**, against their own `CLAUDE.md` rule.
+      Ceilings must count what the pod *spends*, not calls — the `servers/calc` lesson.
+- [ ] W23.3 `Chemclaw3-mcp` — `chem` has `engine/admission.py` and no `test_admission.py`.
+- [ ] W23.4 `Chemclaw3` — nothing bounds the scratchpad memory store: agent-writable, no size cap,
+      no window, no clock; a looping `remember` is the runaway. Decide a per-actor row cap in the
+      writer's own transaction (the `ingest/rejections.py` shape) or an explicit accepted-unbounded
+      posture — and change `retention._NOT_PRUNED["store"]` in the same commit.
+- [ ] W23.5 `Chemclaw3` — **six tables still say "nothing bounds it"** [M]. One decision per table,
+      recorded.
+- [ ] W23.6 `Chemclaw3` — nothing bounds what a helper writes into its caller's checkpointed state.
+- [ ] W23.7 `Chemclaw3` — a timed-out parse still runs to completion on the worker thread [L]:
+      the wall clock frees the caller, not the CPU.
+- [ ] W23.8 `Chemclaw3` — `BoCampaignWorkflow` runs four sequential activities under a ceiling that
+      funds one.
+
+**Acceptance** — a driven saturation probe per ceiling: N+1 concurrent sessions/calls refused
+promptly (not queued), the refusal counted, and the pod's RSS bounded across the probe.
+
+## W24 — The durable layer: races, lock order, loop teardown
+
+Defects that only appear under concurrency, on the layer a production deployment runs continuously.
+Postgres and Temporal are up in this environment, so every one of these is drivable.
+
+- [ ] W24.1 `Chemclaw3` — the detached settle of a cancelled `AwaitAnswerWorkflow` is racy [M].
+- [ ] W24.2 `Chemclaw3` — a nested `asyncio.run` inside a pooled process can hang on loop teardown.
+- [ ] W24.3 `Chemclaw3` — `delete_session` and the owner prune take two rows in opposite orders: a
+      deadlock by lock ordering.
+- [ ] W24.4 `Chemclaw3` — the checkpoint sweep and a live turn are two writers and only the read
+      side notices.
+- [ ] W24.5 `Chemclaw3` — the awaiting collapse keeps the oldest frame of each state, not the newest.
+- [ ] W24.6 `Chemclaw3` — a legitimate re-ask of an answered question fails loudly rather than
+      waiting blind.
+- [ ] W24.7 `Chemclaw3` — a result sink on the primary server opens connections no budget counts.
+- [ ] W24.8 `Chemclaw3` — settle `pytest-xdist` on a real runner [S]. A 24-minute suite is why R6
+      gets skipped; this is the wave that can afford it.
+
+**Acceptance** — each race driven to failure on the pre-fix code and to green on the post-fix code,
+in the same test. A race fixed without a reproduction is a race that was not understood.
+
+## W25 — Readiness, health, and what an operator can see
+
+A production deployment is judged on what it reports when something breaks. Seven rows say it
+currently reports health.
+
+- [ ] W25.1 `Chemclaw3` — `/readyz` cannot bound a Postgres that accepts the socket and stops
+      answering.
+- [ ] W25.2 `Chemclaw3` — neither net sees one Postgres server that two DSNs spell differently [M].
+- [ ] W25.3 `Chemclaw3` — three pool gauges read three different instants of one scrape.
+- [ ] W25.4 `Chemclaw3` — a front door scaled to zero renders a release in which every pod refuses
+      to start.
+- [ ] W25.5 `Chemclaw3` — the background worker is a singleton with no PDB, **and the PDB is not the
+      fix**; and a worker rollout that never becomes Ready is invisible until someone looks.
+- [ ] W25.6 `Chemclaw3` — a stalled append-only feed has no first-party signal (`corpus_cursors`).
+- [ ] W25.7 `Chemclaw3-mcp` — three `except Exception` swallows in `rxnlabel`
+      (`engine/mapping.py:52,134`, `engine/naming.py:73`) turn a torch OOM, a corrupt weight file and
+      an `EgressForbidden` into "this reaction could not be named", with **no counter and no test**.
+      Same shape in `rxnpredict/engine/predictors/__init__.py:92` — a silently degraded ensemble.
+      A degradation that is not counted is a degradation nobody sees.
+- [ ] W25.8 `Chemclaw3-mcp` — join `engine/readiness.py` to the degradation paths by a test: today a
+      broken image can start, pass the probe and serve degraded.
+- [ ] W25.9 Install `helm` + `kubeconform` (R9) and make `make helm-validate` part of the local gate
+      for the rest of this effort.
+
+**Acceptance** — per signal, break the thing and show the signal move: pause Postgres mid-query;
+kill a weight file; scale the front door to zero and render the chart.
+
+## W26 — Data integrity, provenance and retraction
+
+The answers a chemist acts on. Each row here is a way the record can be right and the answer wrong.
+
+- [ ] W26.1 `Chemclaw3` — a retracted ELN entry stays current evidence; closing it is a five-part
+      change [M]. The highest-consequence correctness row on the queue.
+- [ ] W26.2 `Chemclaw3` — the fingerprint index is keyed by source and the citation is not, so two
+      sources collapse.
+- [ ] W26.3 `Chemclaw3` — structure identity is canonical SMILES and nothing else: no InChI, no
+      InChIKey [M].
+- [ ] W26.4 `Chemclaw3` — a published calculation names no reaction, note or compound context [M].
+- [ ] W26.5 `Chemclaw3` — `_quote_supports` cannot tell whether the figure a quote carries is about
+      *this* slot.
+- [ ] W26.6 `Chemclaw3` — knowledge writes serialise cluster-wide on one advisory lock [M] (a
+      correctness-adjacent throughput bound on the one write path, `kg/record.py`).
+- [ ] W26.7 `Chemclaw3-mcp` — `rxnpredict/engine/cache.py:48,56` falls back to **raw caller text** as
+      a cache key when RDKit refuses canonicalisation: two spellings of one molecule, two rows, and
+      an unvalidated key.
+- [ ] W26.8 `Chemclaw3-mcp` — the `rxno_id` named-reaction → ontology table is unaudited. Validate it
+      against itself, the `servers/props/tests/test_dataset.py` pattern.
+
+**Acceptance** — each as a behavioural test over real Postgres: retract an entry and show it leaves
+the evidence set; ingest one structure under two spellings and show one row.
+
+## W27 — Answer honesty: retrieval, and the gates that score it
+
+Three of these gates currently score literals written in their own fixtures, which means they cannot
+fail. That is worse than no gate, because it reports green.
+
+- [ ] W27.1 `Chemclaw3` — the two eval gates score literals written in their own case files [M].
+- [ ] W27.2 `Chemclaw3` — `turn_cost_ratio` scores a fixture, not the system: the 32% prefix growth
+      `tests/test_context_floor.py` caught would leave its `baseline.json` row untouched. **Unblocked
+      now**: `API-KEY` is present in this environment, so a live lane can persist real `TurnCost`
+      rows and the case can be fed from them. Run it while the credential exists.
+- [ ] W27.3 `Chemclaw3` — the 44 labelled (query, note) pairs in `knowledge.yaml` are unreadable as
+      data because `Probe` is `extra="forbid"` [M]. Closing this also closes the `DEFERRED.md` row
+      whose parenthetical rested on them.
+- [ ] W27.4 `Chemclaw3` — RRF's premise is independent rankers and this system has correlated ones.
+- [ ] W27.5 `Chemclaw3` — `make kg-validate`'s two store-backed arms have no input in the shipped
+      corpus: two arms of a validator that cannot fail.
+- [ ] W27.6 `Chemclaw3` — half the probe corpus tests one tool [S] (the concentration half).
+- [ ] W27.7 `Chemclaw3` — no external benchmark has ever been run [M]. `make eval` gates 23 metric
+      values over 15 cases, all first-party. Decide: run one, or record in `DEFERRED.md` with its
+      trigger. Do not leave it implied.
+- [ ] W27.8 `Chemclaw3-mcp` — add ruff `S` (flake8-bandit) + `ASYNC` + a coverage floor. The fleet
+      selects `E,F,I,UP,B,SIM,RUF` and has **no coverage measurement anywhere**; `S` mechanically
+      surfaces W22.7 and W26.7.
+
+**Acceptance** — mutate the thing each gate scores and show the gate go red. A gate that stays green
+under a deliberate regression is the finding, not the test.
+
+## W28 — Cost and scale: the prefix, the O(corpus) read, the write volume
+
+What decides whether the system is affordable and whether it survives a real corpus.
+
+- [ ] W28.1 `Chemclaw3` — the `default` profile carries eleven names it could narrow, worth 5,787
+      tokens [M]; and a tool schema is 38% developer rationale, shipped on every turn.
+      Both move `tests/test_context_floor.py` — re-baseline in the same commit, never raise the
+      ceiling to accommodate prose (`tasks/lessons.md`).
+- [ ] W28.2 `Chemclaw3` — a memory run reads every source whole, three times [M].
+- [ ] W28.3 `Chemclaw3` — the `stated`-quote ambient reads the whole table's tail on every turn once
+      a database has history.
+- [ ] W28.4 `Chemclaw3` — the checkpointer's write volume is quadratic in a thread's length [L].
+      Decide: fix, or `DEFERRED.md` with a measured trigger.
+- [ ] W28.5 `Chemclaw3` — a note write costs ~1.8 s and a backfill is one write per record; a real
+      first sync is days. A backfill and an incremental sync want different write shapes.
+- [ ] W28.6 `Chemclaw3` — nothing has measured how many rows a real corpus produces [M]. Measure it;
+      it is the input to W23.5 and W28.4.
+- [ ] W28.7 `Chemclaw3_ui` — the SMILES parse blocks the main thread (~0.3 s parse + ~1.7 s draw);
+      the 600-char cap bounds the unrecoverable failure, not the slow one. Move it to a worker
+      (`ISSUES.md` known gap (e)).
+- [ ] W28.8 `Chemclaw3_ui` — `ISSUES.md` Issue 6: `MAX_JOB_STREAMS = 3` fits one tab and two tabs
+      429. BroadcastChannel leader election, built properly — it was filed rather than half-built
+      because a botched election loses notifications.
+
+**Acceptance** — a before/after number for every item, from the same script, in the PR body.
+
+## W29 — Supply chain and delivery: gates that actually run on the bytes that ship
+
+The fleet's supply-chain gate proves a property of `uv.lock` and **not** of any shipped image. Two
+of three repositories ship through a Jenkins pipeline that can skip its own gate.
+
+- [ ] W29.1 `Chemclaw3-mcp` — **image drift is unaudited**: no Containerfile reads `uv.lock`; all
+      seven re-resolve with pip, and 11 of 100 packages differ for `rxnpredict` with `pandas` off by
+      a major version. `uv sync --frozen` or `--require-hashes` in the images. The fleet's own
+      largest self-declared open item.
+- [ ] W29.2 `Chemclaw3-mcp` — eight permanent `--ignore-vuln` suppressions with **no expiry
+      mechanism**: the Makefile says in as many words that nothing goes red when a fix ships. Give
+      each a version assertion against the lock, so a shipped fix turns the suppression red.
+- [ ] W29.3 `Chemclaw3-mcp` — `Jenkinsfile:32` `RUN_GATE` defaults **false**: images are built and
+      published from revisions whose `make check` never ran in that pipeline, and nothing verifies
+      Actions was green for `env.REVISION`.
+- [ ] W29.4 `Chemclaw3-mcp` — `ci.yml:70` duplicates the lint command inline instead of calling
+      `make lint` — the *exact* defect the comment above it says was found and fixed for `make type`.
+      And `ci.yml:142` re-runs a strict subset of `ci.yml:80`.
+- [ ] W29.5 `Chemclaw3` — the image vulnerability scan is not merged as a gate [M], and the
+      runbook's claim about it is false. Turn it back on with its contradiction resolved.
+- [ ] W29.6 `Chemclaw3` — two of the four deployables have no chart, so a release changes their bytes
+      and nothing renders them.
+- [ ] W29.7 `Chemclaw3` — the note reindex prunes a shared index against one pod's disk [M].
+- [ ] W29.8 `Chemclaw3_ui` — **the gate-reproducibility gap**: CI steps ④⑪⑫⑬ and the whole
+      `container` job are inline shell with no npm script, so they cannot be run locally; `npm run
+      smoke` and `npm run check:openapi` are wired into nothing; and `Jenkinsfile` is a second,
+      narrower gate that omits `npm audit`, contrast and e2e. One `npm run ci`, one gate definition,
+      both pipelines calling it.
+- [ ] W29.9 `Chemclaw3` — snapshot refresh has no named owner or cadence in any fleet server README
+      (`MODULES.md` open question (c)). Assign or record the posture.
+
+**Acceptance** — build one fleet image and diff its resolved packages against `uv.lock` (expect
+zero); flip a suppressed advisory's pinned version and show the gate go red; run the UI's new `npm
+run ci` locally and show it covers what `ci.yml` runs.
+
+## W30 — Cross-repo contracts, and the production-readiness sign-off
+
+The last wave closes the seams between repositories — the only place a defect can hide from all
+three suites at once — and then states, with evidence, what a deployment team is getting.
+
+- [ ] W30.1 `Chemclaw3` + `Chemclaw3_ui` — nothing checks the client half of a wire contract, and it
+      has drifted twice [L]. This is the row that justifies the wave.
+- [ ] W30.2 `Chemclaw3` + `Chemclaw3_ui` — the `note_proposed` SSE event is not a proposal and the
+      name is a two-repo contract. Rename across both, in the order a deployment can survive.
+- [ ] W30.3 `Chemclaw3` — `propose_report` proposes nothing and the string is a **registered Temporal
+      activity name**: register both for one deployment cycle, drop the old one after the queue
+      drains. A release procedure, and the new ADR has to say what it now names.
+- [ ] W30.4 `Chemclaw3` — the labelling client is the one MCP leg with no identity or trace on the
+      wire (`ingest/labels/labeller.py:216`); closing it means deciding where identity stamping for a
+      **non-connector** MCP client belongs, which is a layering decision.
+- [ ] W30.5 `Chemclaw3` + `Chemclaw3-mcp` — run `tests/test_sibling_manifest_agreement.py` and
+      `tests/siblings.py` against a real sibling checkout (both are present in this environment) and
+      report what they *actually* compare, including the `calc` seam's hardcoded tool names that no
+      manifest covers in either direction.
+- [ ] W30.6 `Chemclaw3_ui` — decide `ISSUES.md` Issue 5 (`/s/:sessionId` implies sharing and is not
+      shareable) and Issue 8 (token in `sessionStorage`; the BFF cookie design exists on PR #11 and
+      is blocked on tenant admin, not code). **Do not re-derive Issue 8** — record the posture.
+- [ ] W30.7 All three — the full four-repo live lane: `make live-infra`, `make live-up`,
+      `make live-probes` with the `API-KEY`→`CHEMCLAW_LLM_API_KEY` mapping beside a gateway, and
+      `infra/live/e2e-full-stack/up.sh` across all four checkouts. This is the only step that
+      exercises the system as a deployment runs it.
+- [ ] W30.8 All three — **the production-readiness record**: one ADR per repo stating what is
+      enforced, what is bounded, what is measured, and what is explicitly accepted as unbounded or
+      unproven, each clause naming the test that holds it. Every remaining row moves to
+      `DEFERRED.md` with a trigger or stays in `BACKLOG.md`; nothing is left implied.
+
+**Acceptance** — a green four-repo live run with the probe set answered, and a readiness ADR in each
+repository in which every claim names a test.
 
 ---
 
 ## Review
 
-### The ratio that three measurements disagreed about
-
-`src/` prose:code was measured three times this wave, independently, and came back **1.16**,
-**1.28** and **1.49 : 1**. A 28% spread on the number the whole of W17 was planned around.
-
-The tree did not change between them. The *method* did — specifically how each classified a
-blank line inside a docstring, and a continuation line of a multi-line statement. None of the
-three stated its method beside its number, which is why the disagreement was invisible until
-someone put them side by side.
-
-Settled with one stated rule, reproducible from `tasks/todo.md` itself: every physical line of
-every `.py` under `src/chemclaw` lands in exactly one bucket — DOCSTRING if it falls inside the
-line span of a bare string-literal expression statement, else COMMENT if its stripped form starts
-with `#`, else BLANK if empty after stripping, else CODE. The four sum to the file's line count.
-
-| | lines | code | doc | comment | blank | prose:code |
-|---|---|---|---|---|---|---|
-| `src/chemclaw` | 145,949 | 59,030 | 53,992 | 21,848 | 11,079 | **1.28 : 1** |
-| `tests` | 179,999 | 96,126 | 49,849 | 7,758 | 26,266 | **0.60 : 1** |
-
-test code : source code = **1.63 : 1**.
-
-**This is the wave's own defect, one level up from the one it went looking for.** W17 corrected
-eight present-tense counts in docstrings for not stating how they were counted. The ratio that
-justified opening W17 had the same problem, and it took three disagreeing measurements to notice.
-A number without its method is not a measurement; it is a claim that someone measured.
-
-What survives unchanged: `src/` carries more than twice the prose density of `tests/` under every
-one of the three methods. The prose burden is in the source, not in the suite — which is the
-opposite of what a review looking for bloated test prose expects to find, and the reason W19's
-recommendation is *do not trim test prose*.
-
-### Per-wave outcomes
-
-Recorded as **premise → what measurement said**, because in five of six the premise lost. The
-full argument is `D-2026-09-11-the-debt-was-in-the-claims-not-in-the-code`.
-
-| wave | premise | measured |
-|---|---|---|
-| W16 dead code | 46 defs named nowhere | **1 dead definition in 3,133** (`DesignListing`, 6 lines) |
-| W16 settings | unread knobs among 422 | 2 declared-only, both read by `entrypoint.sh` and parity-tested |
-| W16 Rule of Three | 45% single-caller | not a defect rate; **net ~109 lines**, and 3 of the audit's own recommendations did not survive re-derivation |
-| W17 prose load | 1.28 : 1 is the liability | **98.9% DECISION, 1.1% restatement**; the ratio is not the finding |
-| W17 prose gate | 21,391 unchecked refs → build a gate | **declined at 82.9% false positives**; two narrow rules instead, 7.5% → 7.6% |
-| W18 complexity | 20 functions need splitting | **1 split of 20**; 13 had already had their extractable parts extracted |
-| W19 test tree | 179,332 lines is too many | ratio fine, 1 duplicate in 5,747, 1.6% restating prose; runtime concentrated — slowest 25 are 512 s of 1,552 s, BO files 389 s (25%) |
-
-**What was actually wrong, in none of those categories**: three of four HTTP surfaces unbounded;
-two metric series named as alert targets that nothing emits; a settings field documented for a
-subsystem that does not exist (found 2026-08-16, never fixed); 14 dangling symbol references; nine
-parametrised tables that could not say why they passed, one proven vacuous.
-
-### What this plan got wrong about itself
-
-Three times, all in the reassuring direction:
-
-1. **The dead-code figure.** 144/46 was really 117/22 — the scan counted `tokenize` NAME tokens and
-   an f-string is one `STRING` token on 3.11, so 27 live functions read as orphans.
-2. **The prose ratio.** Measured three times independently: 1.16, 1.28, 1.49 : 1. None stated its
-   method. Settled above.
-3. **The duration profile.** Declared invalid and an agent told to skip the question; it had been
-   read while still being written. The agent re-checked rather than complying, and was right.
-4. **The profile that replaced it.** Its "31 BO tests are 43.5% of the run" was measured while four
-   other pytest processes shared the database; GP fitting is CPU-bound, so contention inflated it
-   about threefold. Clean: BO files are 25%, and the fixture the figure motivated is worth 12% of
-   one file and under 1% of the suite. It reached an ADR draft, this file and a PR body first.
-
-Each was caught by something other than the session that made it — two by subagents re-deriving
-rather than accepting, one by putting three numbers side by side. That is the argument for the
-fan-out shape, and it is worth more than any line this wave deleted.
+*(Filled in per wave as it closes — one short section each: what was planned, what the measurement
+changed, what Half B found, and what is left. Empty until W21 merges.)*
