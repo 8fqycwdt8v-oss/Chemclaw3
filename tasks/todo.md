@@ -477,3 +477,38 @@ repository in which every claim names a test.
 
 *(Filled in per wave as it closes — one short section each: what was planned, what the measurement
 changed, what Half B found, and what is left. Empty until W21 merges.)*
+
+### W21 — pre-merge review of PR #350 (three fresh-context reviewers, fixes applied before merge)
+
+**Planned:** land the egress/gateway wave. **What the review changed:** eight code findings and six
+prose ones, all fixed on the branch so `main` never carries them.
+
+- **The compiled layer's DNS exemption was open at four entry points and the C header denied it.**
+  `getaddrinfo` was interposed; `gethostbyname`, `gethostbyname2` and both `_r` forms resolved an
+  off-allowlist name with the counter flat and nothing logged, so a name was a live exfiltration
+  channel through the port-53 exemption. The whole family shares one `check_name` now, refusing
+  exactly as glibc was *measured* answering NXDOMAIN. `res_query`/`res_search` and the
+  `dlopen`/`dlsym` path are named in the uncovered list rather than chased; `sendmmsg` came off that
+  list because it was measured sending.
+- **Three shipped chart Jobs never reached the entrypoint**, so none carried `LD_PRELOAD` — the
+  Schedules Job runs on every `helm upgrade` and dials Temporal over gRPC. They are components now,
+  and the new test *derives* the bypassing set from the templates instead of listing it.
+- **`is_loopback_host` missed five spellings that all reach loopback** (`127.1`, `2130706433`,
+  `0x7f.1`, `0177.1`, and the unspecified address as a destination). `core/http.parse_host` answers
+  every spelling `connect(2)` accepts; the unspecified address stays out of the shared predicate,
+  because a bind and a destination disagree about exactly that one.
+- **Both "guard disarmed" alerts read `max(...) < 1`** and so could not fire for a single disarmed
+  pod. `promtool test rules` over a two-pod series is the regression.
+- **`_bypass_ambient_proxy` raced on `os.environ`** — 1 of 5 hosts retained under concurrency, and
+  the loser's key set then comes from the proxy. One lock.
+- **Prose:** the repository's own quickstart did not boot after the bind exemption was retired
+  (`README.md`, `api/README.md`); the gateway ADR's "seven sentences, all corrected" was itself the
+  eighth; `ARCHITECTURE.md` stated a count of one over three; the runbook gave dead advice about a
+  collector and split the counters three ways over a code that splits them two; three files said
+  "three arms" against a four-arm table; and two ADRs cited branch SHAs a squash merge strands —
+  `tests/test_decision_log.py` now asks `git merge-base --is-ancestor` about any commit an ADR cites.
+
+**What is left:** `test_an_ipv4_mapped_address_is_not_a_way_around_the_check` still skips where
+`AF_INET6` cannot be created, which is this sandbox — the unwrapping is measured by a reviewer's
+harness and by no ratchet here. No local lane builds the `.so`, which `infra/README.md` and the ADR
+now say out loud rather than conceding generically.

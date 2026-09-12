@@ -74,7 +74,10 @@ where the proxy *is* declared.
 
 ## 2. The live/eval lane — eight constructions, one carrying a bearer
 
-Re-running the ratchet's own AST walker at `f3e9c1e`:
+Re-running the ratchet's own AST walker
+(`tests/test_netguard.py::test_every_served_http_client_refuses_the_ambient_proxy`) over this
+change as it stands in PR #350 — named by the walker rather than by a branch SHA, which a squash
+merge strands:
 
 ```
 src/chemclaw/cli/live_probes.py:340      src/chemclaw/cli/live_storm.py:216,259,533,650,1293
@@ -130,6 +133,33 @@ string, which is not a CA bundle path.
 **What is on this seam:** not prompts and not a bearer — it is not the LLM seam — but the embedded
 text of every note indexed and every query vector searched.
 
+## 4. The bypass raced itself, and the loser's key set came from the proxy
+
+Pre-merge review drove `_bypass_ambient_proxy` on concurrent threads, which is how it actually runs:
+`validate_token` is dispatched through `asyncio.to_thread`, so two requests bearing tokens from two
+tenants genuinely build their JWKS clients at the same moment. Its body is
+`os.environ[name] = f"{current},{host}"` over a `current` read a moment earlier — a non-atomic
+read-modify-write of a process global. Measured with the window widened, five writers of five
+distinct hosts:
+
+```
+unlocked (shipped shape)   no_proxy='tenant4.login.example'   retained 1 of 5
+```
+
+The damaging case is exactly the one this ADR is about: the loser's key set is then fetched through
+the proxy, which is the control failing silently while looking installed. A module-level
+`threading.Lock` around `_client_for`'s body fixes it, and the whole body is the cheapest correct
+scope — holding it across a `PyJWKClient` construction costs nothing, since that constructor
+performs no I/O and the key set is fetched lazily on the first `get_signing_key`. The dict beside it
+(`_jwks_clients`) was unsynchronised for the same reason and is benign: racing it builds a second
+client, it does not lose data.
+
+**The test's first widener was in the wrong place and the mutation survived it**, which is worth
+recording because the shape recurs: it slowed `proxy_bypass`, which runs *before* the window rather
+than inside it. The widener is now a slow environment *read* that returns what it read — a first
+version slept and then re-read, closing the window it existed to open, so every thread saw the value
+its predecessor had just written and the unlocked code passed.
+
 ## What it cost
 
 - **`no_proxy` gains an entry in the process environment**, which children inherit. It is a bypass,
@@ -151,8 +181,10 @@ text of every note indexed and every query vector searched.
 | every `Client`/`AsyncClient` construction in `src/` refuses the environment — **no exemptions**, and an `http_client=` delegation is followed rather than trusted | `tests/test_netguard.py::test_every_served_http_client_refuses_the_ambient_proxy` |
 | the one live-lane client carrying a credential does not hand it to a proxy, driven rather than scanned | `tests/test_live_probes.py::test_the_probe_client_does_not_hand_its_bearer_to_an_ambient_proxy` |
 | the Qdrant client is sent `trust_env=False`, unconditionally rather than only where a private CA is configured | `tests/test_vector_store.py::test_the_qdrant_client_refuses_the_ambient_proxy` |
+| two tenants validating at once both reach `no_proxy`, so neither key set is fetched through the proxy | `tests/test_auth.py::test_two_tenants_validating_at_once_both_reach_no_proxy` |
 
-Each was watched failing before it was kept. Eleven mutations were driven in total: dropping the
+Each was watched failing before it was kept. Twelve mutations were driven in total — the last of
+them removing the lock from `_client_for`, which takes the new row from 5 of 5 hosts retained to 1 — dropping the
 bypass call, writing the `host:443` form, clobbering the operator's `no_proxy`, writing only the
 lowercase spelling, removing one httpx keyword, removing the Phoenix delegation, delegating to a
 client that *does* read the environment, dropping `trust_env` from the Qdrant options, making it

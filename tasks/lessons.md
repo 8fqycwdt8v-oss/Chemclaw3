@@ -40,6 +40,18 @@ file grew. If a rule is being broken repeatedly, the fix is a *mechanism* (a scr
    against a mutated file and reported a test as biting when it does not. `rm -rf` the relevant
    `__pycache__` (or `touch` the file) between the mutation and the run.
 
+   **Recorded a sixth time, 2026-09-12, in the middle of a review whose own brief said "for every
+   test you add or change, mutate the code it guards".** The mutation loop for the chart templates
+   used `cp`/`mv` correctly four times and then reached for `git checkout -- tests/…` to undo a
+   *fifth* mutation that happened to live in the test file itself — destroying ~250 lines of new,
+   unstaged tests written that hour. Nothing failed: the suite went green, because the tests it
+   would have failed were gone. So the rule needs its sharper form, which is about the *habit*
+   rather than the command: **a mutation loop contains no git command at all.** Not `checkout`, not
+   `stash`, not `restore`. The moment a git verb appears in a loop whose job is to damage and
+   restore files, the loop can delete work instead of restoring it, and the only signal is a suite
+   that got quieter. What made this one survivable was that the edits had been applied by scripts
+   still in the session transcript; that is luck, not a procedure.
+
 2. **`Write` to a path that already exists destroys it.** Calling `Write` on `tests/test_graph.py`
    deleted 23 tests for the NetworkX indexer, and the suite still passed — nothing referenced them.
    Check for the file first. A green suite does not notice tests that no longer exist.

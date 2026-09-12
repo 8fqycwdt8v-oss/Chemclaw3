@@ -26,6 +26,8 @@ import re
 from collections import Counter
 from pathlib import Path
 
+import pytest
+
 _DECISIONS = Path(__file__).resolve().parents[1] / "docs" / "decisions"
 _INDEX = _DECISIONS / "README.md"
 # Two id shapes, and the second is the one new ADRs use.
@@ -620,4 +622,59 @@ def test_no_retired_test_citation_is_stale() -> None:
     resurrected = sorted(name for name in _RETIRED_TEST_CITATIONS if name in defined)
     assert not resurrected, (
         f"declared retired but defined in the suite again: {resurrected}; delete the row"
+    )
+
+
+#: A commit citation as this repository writes one: `at <sha>`, `commit <sha>`, `since <sha>`.
+#: Scoped to that phrasing rather than to "a hex token in backticks", which was measured first and
+#: matched a SMILES string (`c1ccccc`, benzene) and four content fingerprints — a check that cries
+#: wolf about prose is one nobody keeps.
+_COMMIT_CITATION = re.compile(
+    r"(?i)\b(?:at|commit|commits|sha|revision|since)\s+`([0-9a-f]{7,12})`"
+)
+
+
+def test_no_adr_cites_a_commit_a_squash_will_strand() -> None:
+    """A branch SHA is unreachable from `main` the moment the branch is squash-merged.
+
+    This repository merges branches by squash, so every commit an in-flight ADR cites is rewritten
+    into one new commit with a new hash and the cited objects are reachable from nothing. The ADR
+    then tells a reader to run a `git show` that fails — which is the worse half: the citation
+    reads as checkable provenance right up until somebody checks it. It is not hypothetical in this
+    family; the sibling repository had to correct four such citations after a squash.
+
+    So the rule is *reachability*, asked with `git merge-base --is-ancestor` rather than
+    `git cat-file -e`: the object resolves perfectly well in the authoring checkout, where the
+    branch is still checked out, and that is exactly the checkout the ADR is written in. Name the
+    state by what it is, or by the PR, and make the reproduction runnable from content.
+
+    Skipped rather than passed where the answer cannot be had — no git, no `origin/main` — because a
+    check that quietly shrinks is worse than one that says what it did not look at.
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("git") is None:  # pragma: no cover - toolchain-dependent
+        pytest.skip("no git: reachability cannot be asked")
+    root = Path(__file__).resolve().parents[1]
+    if subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", "origin/main"], cwd=root, capture_output=True
+    ).returncode:  # pragma: no cover - a checkout with no remote
+        pytest.skip("no origin/main in this checkout: reachability cannot be asked")
+
+    stranded: list[str] = []
+    for path in _adr_files():
+        for number, line in enumerate(path.read_text("utf-8").splitlines(), 1):
+            for sha in _COMMIT_CITATION.findall(line):
+                reachable = subprocess.run(
+                    ["git", "merge-base", "--is-ancestor", sha, "origin/main"],
+                    cwd=root,
+                    capture_output=True,
+                )
+                if reachable.returncode:
+                    stranded.append(f"{path.name}:{number} cites {sha}")
+    assert not stranded, (
+        "these ADRs cite commits that are not reachable from `origin/main`, so a reader on `main` "
+        f"cannot resolve them: {stranded}. Cite the pull request and name the state by what it is "
+        "— a squash merge rewrites every branch commit into one new hash"
     )

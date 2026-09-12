@@ -70,11 +70,26 @@ why it enumerates components rather than modules.
 
 **What the old home made safe, re-read rather than assumed.** Nothing. The function read two settings
 and raised; it held no import-time ordering and no resolved-at-boot state that `api/` provided. What
-the move *orphaned* is prose: seven sentences cited the old path in the present tense — two in
+the move *orphaned* is prose. This paragraph first counted **seven** sentences and said "all are
+corrected", and a fresh-context review found an eighth *inside* that claim: `core/http.py` carries
+two citations, at lines 9 and 21, and only the second had been fixed — line 9 still said the front
+door "refuses to boot pointed at the dev model gateway on a non-loopback **bind**", which is two
+falsehoods in one clause, since the guard is `core/llm_gateway` now and §2 below retired the
+non-loopback-bind condition outright. So the recount is **nine**, not "seven plus one": three in
 `src/` (`core/netguard.py`'s `Raises:` paragraph, which contrasted itself favourably against exactly
-this gap, and `core/http.py`'s loopback argument), one in `deploy/helm/chemclaw/values.yaml` (which
-claimed "a pod that inherited it would refuse to boot" — true of the front door and of no other
-pod the chart renders), and four in tests. All are corrected; the merged ADRs that cite the old name are left alone.
+this gap, and both of `core/http.py`'s), one in `deploy/helm/chemclaw/values.yaml` (which claimed "a
+pod that inherited it would refuse to boot" — true of the front door and of no other pod the chart
+renders), four in tests, and one in `src/chemclaw/api/README.md` that nobody had counted at all
+because it describes a *command* rather than the guard: "unauthenticated dev needs both on loopback"
+became two facts out of three the moment the exemption stopped being a bind. `README.md`'s own two
+start commands were in the same state and are the reason this is worth recounting rather than
+incrementing — **measured, both raised `SECURITY: … names a loopback address` before this change**,
+so the repository's documented quickstart did not boot. The merged ADRs that cite the old name are
+left alone.
+
+**The lesson is the one this repository keeps re-learning**: a sentence in a document saying "all N
+are corrected" is a claim about a commit, and the only thing that makes it true is having gone and
+looked at the Nth.
 
 `cli/chat.py` takes the call *inside* `main`'s existing `try`, because that function already turns a
 `RuntimeError` into one sentence and an exit code rather than nine frames of asyncio, which is the
@@ -102,6 +117,62 @@ This is **stricter** in one direction and **narrower** in another, and both are 
 - Narrower: a gateway sidecar on loopback inside the same pod is an ordinary deployment, and the old
   predicate refused it as though the dev mock were the only thing that could answer there. Such a
   deployment sets the flag and says so, with a WARNING on every boot recording that it did.
+
+## 2b. What "loopback" means, which four spellings got wrong
+
+Pre-merge review drove the predicate against a real listener on `127.0.0.1` rather than reading it,
+and found that `is_loopback_host` parsed with `ipaddress.ip_address` while what a socket is
+ultimately handed is `inet_aton(3)`. Measured, one listener, one port:
+
+```
+http://127.0.0.1:8820/v1     loopback?=True    REFUSED
+http://127.0.0.53:8820/v1    loopback?=True    REFUSED
+http://[::1]:8820/v1         loopback?=True    REFUSED
+http://0.0.0.0:8820/v1       loopback?=False   *BOOTED*   socket -> peer ('127.0.0.1', 8820)
+http://127.1:8820/v1         loopback?=False   *BOOTED*   socket -> peer ('127.0.0.1', 8820)
+http://2130706433:8820/v1    loopback?=False   *BOOTED*   socket -> peer ('127.0.0.1', 8820)
+http://0x7f.1:8820/v1        loopback?=False   *BOOTED*   socket -> peer ('127.0.0.1', 8820)
+http://0177.1:8820/v1        loopback?=False   *BOOTED*   socket -> peer ('127.0.0.1', 8820)
+```
+
+The fifth row is one the review's own report did not list and taking the measurement found: the
+octal form. So a deployment naming any of these booted clean and sent every prompt to whatever
+listened on that port **inside its own pod** — the precise failure this guard exists to refuse — and
+neither egress layer catches the follow-on, because `derive_allowed` puts the same literal on the
+allowlist and the compiled interposer sees `inet_ntop`'s canonical `127.0.0.1`, which is
+loopback-exempt.
+
+**The fix is split across two files on purpose, and the split is the argument.** `core/http.py`
+gains `parse_host`, which answers every spelling `connect(2)` accepts, and `is_loopback_host` is
+rebuilt on it — that widening is correct for *all four* callers, because `127.1` as a bind is as
+much a loopback bind as `127.0.0.1` is. The unspecified address is the one row where a bind and a
+destination genuinely disagree (`0.0.0.0` as a bind is every interface, which is the whole subject
+of SEC-2; as a destination it never leaves the host), so `D-2026-09-05`'s decision to keep it out of
+the shared predicate **stands**, and `core/llm_gateway._gateway_cannot_leave_this_pod` asks
+`parse_host(...).is_unspecified` itself. Widening the shared predicate instead would have waived the
+front door's unauthenticated-bind refusal for exactly the address it exists to catch.
+
+`tests/test_netguard.py`'s shared address table gains the five rows — driven through all three roles
+— plus `12345`, which `inet_aton` also accepts, as `0.0.48.57`, so the fallback cannot be read as
+"any number is loopback". `tests/test_llm_gateway_guard.py` drives each spelling against a real
+listener in a child process and reports the peer the kernel gave, so the refusal is asserted beside
+the reason for it rather than from a table of equivalences somebody wrote down.
+
+## 2c. One promise wider than its test, narrowed
+
+`core/llm_gateway`'s module docstring said the guard was "for every process that makes a model
+call", and `cli/verifier_margin.main` built a chat model without it — while that module's *own*
+docstring promises it "needs a model credential; refuses without one rather than measuring a mock",
+and the shipped `CHEMCLAW_LLM_BASE_URL` **is** the mock. So the band width an ADR is fitted from
+could have been the mock's spread reported as the judge's. It calls the guard now, which makes both
+sentences true at once.
+
+`retrieval/vector_index.main` is the other module that is its own process and reaches a model seam
+(the embedding endpoint, the same address), and it deliberately does **not** call the guard: `make
+reindex` is a documented local target and the index it writes is regenerable, while the
+deployment's own reindex is the background worker's scheduled job, which is guarded. Both verdicts
+are a *derived* partition in `tests/test_llm_gateway_guard.py` rather than a list, so the next such
+module fails until somebody writes one down.
 
 An **empty** `llm_base_url` is deliberately not checked here: `Settings._gateway_is_addressed`
 already refuses it unconditionally, in every process, before this function could run. A second check

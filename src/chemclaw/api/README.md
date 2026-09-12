@@ -28,8 +28,16 @@ A turn is a request. Anything long-running is a Temporal job: the tool returns a
 immediately and the result arrives later, pushed back into the session (F3). If it survives a pod
 restart, it is in `durable/`; if it dies with the connection, it belongs here.
 
-Run it: `CHEMCLAW_SERVICE_HOST=127.0.0.1 uvicorn chemclaw.api.app:create_app --factory --host
-127.0.0.1 --port 8080`, or `make chat` for the terminal path to the same agent. The env var and
-`--host` are two different facts — what the app is told and what the socket is — and unauthenticated
-dev needs both on loopback: `create_app` refuses to boot on the first, and `require_principal`
-refuses a request that arrived on the second.
+Run it: `CHEMCLAW_SERVICE_HOST=127.0.0.1 CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY=true uvicorn
+chemclaw.api.app:create_app --factory --host 127.0.0.1 --port 8080`, or `make chat` for the terminal
+path to the same agent (which exports the third variable for you).
+
+**Three facts, not two, and the third is why this line changed.** `CHEMCLAW_SERVICE_HOST` is what
+the app is told, `--host` is the socket, and unauthenticated dev needs both on loopback:
+`create_app` refuses to boot on the first, and `require_principal` refuses a request that arrived on
+the second. `CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY` is a different question entirely — where this
+process's *model gateway* is — and it became necessary when
+`D-2026-09-12-a-gateway-guard-in-the-front-door-is-not-a-deployment-guard` moved that check out of
+`api/middleware.py` and stopped exempting a loopback bind. The old exemption meant a deployment
+bound to loopback never had its gateway checked at all; the dev posture is now stated rather than
+inferred from a socket, and this paragraph said two of the three for as long as it stood.
