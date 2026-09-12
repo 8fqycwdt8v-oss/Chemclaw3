@@ -64,14 +64,17 @@ could not carry — every HTTP client on a *served* path passes `trust_env=False
 that genuinely are proxied went uncharged, and on the shipped loopback defaults it stopped a
 developer behind a corporate proxy from importing this module at all.
 
-**That clause is a control now rather than a claim, and the word "served" in it is load-bearing.**
-It was written here as "every first-party HTTP client", and measured it was false for six of them
-— all in the live/eval lane (`cli/live_probes.py`, `cli/live_storm.py`, `cli/phoenix_publish.py`,
-`evals/live.py`), none on a path a chemist reaches, one of them carrying a bearer.
-`tests/test_netguard.py::test_every_served_http_client_refuses_the_ambient_proxy` walks every
-`httpx.Client`/`AsyncClient` construction in `src/` and holds the lane exemptions in a named list,
-so a *new* client anywhere else fails on the day it is written. `httpx` defaults `trust_env` to
-True, which makes this a property that decays by omission — the one kind a docstring cannot hold.
+**That clause is a control now rather than a claim, and the word "served" is no longer doing any
+work in it.** It was written here as "every first-party HTTP client", and measured it was false for
+eight constructions in the live/eval lane, none on a path a chemist reaches, one carrying a bearer;
+so it was narrowed to *served* and those four modules were held in a named exemption list.
+`D-2026-09-12-an-ambient-proxy-is-a-destination-nobody-declared` closed them and deleted the list,
+including the Entra JWKS fetch, which PyJWT makes through `urlopen` and which no `trust_env`
+reaches. `tests/test_netguard.py::test_every_served_http_client_refuses_the_ambient_proxy` walks
+every `httpx.Client`/`AsyncClient` construction in `src/` with **no** exemption, so a new client
+anywhere fails on the day it is written — which the list could not do for a client added inside one
+of the four files it named. `httpx` defaults `trust_env` to True, which makes this a property that
+decays by omission — the one kind a docstring cannot hold.
 
 **And the boot refusal covers less than two backlog rows used to say.** It fires only where
 `_env_reading_destinations` charges something, and on this repository's own defaults

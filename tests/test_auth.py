@@ -6,7 +6,13 @@ without a tenant or network. The HTTP tests prove the 401 gate and the dev-mode 
 """
 
 import logging
+import os
+import threading
 import time
+import urllib.request
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
 import jwt
@@ -14,6 +20,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
+from jwt import PyJWKClient
 from jwt.exceptions import PyJWKClientConnectionError, PyJWKClientError
 
 import chemclaw.api.auth as auth
@@ -56,7 +63,15 @@ def _sign(key: Any, claims: dict[str, Any]) -> str:
 
 @pytest.fixture(autouse=True)
 def _entra_env(monkeypatch: pytest.MonkeyPatch, rsa_key: Any) -> None:
-    """Point the validator at the test audience/issuer and the local signing key (no network)."""
+    """Point the validator at the test audience/issuer and the local signing key (no network).
+
+    Also pins `no_proxy` in both spellings for the duration of every test here, because
+    `_client_for` writes to it: building a JWKS client takes its host out of the ambient proxy's
+    reach, and that is a mutation of the *process* environment, which outlives a test. Restoring it
+    per test keeps any file that runs after this one from inheriting a bypass it never set.
+    """
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.setenv(name, os.environ.get(name, ""))
     monkeypatch.setattr(settings, "entra_audience", _AUDIENCE)
     monkeypatch.setattr(settings, "entra_issuer", _ISSUER)
     monkeypatch.setattr(auth, "_signing_key", lambda _token: rsa_key.public_key())
@@ -285,6 +300,97 @@ def test_jwks_client_uses_the_configured_timeout(monkeypatch: pytest.MonkeyPatch
     assert _REAL_SIGNING_KEY(_token_with_kid(rsa_key, "known-kid")) == "the-key"
     assert captured["timeout"] == 7.5
     assert captured["endpoint"] == settings.entra_jwks_endpoint
+
+
+@contextmanager
+def _proxy_recorder() -> Iterator[tuple[str, list[str]]]:
+    """A loopback HTTP server standing in for an ambient proxy, recording every request line.
+
+    Records `CONNECT` as well as `GET` so the `https` arm is observed rather than inferred: a
+    proxied `https` fetch reaches a proxy as a tunnel request naming the host, and answering it 502
+    fails the fetch fast instead of leaving urllib mid-handshake against a plain HTTP server.
+    """
+    received: list[str] = []
+
+    class _Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.0"
+
+        def do_GET(self) -> None:
+            received.append(f"{self.command} {self.path}")
+            body = b'{"keys": []}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_CONNECT(self) -> None:
+            received.append(f"{self.command} {self.path}")
+            self.send_error(502)
+
+        def log_message(self, *args: Any) -> None:
+            """Silence the handler's stderr logging; `received` is the record."""
+
+    server = HTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}", received
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_the_jwks_fetch_does_not_follow_an_ambient_proxy(
+    monkeypatch: pytest.MonkeyPatch, scheme: str
+) -> None:
+    """The key set every bearer token is validated against must not come from a proxy.
+
+    `PyJWKClient.fetch_data` calls `urllib.request.urlopen`, which reads the process environment for
+    proxies and takes no `trust_env`. A proxy that could answer this fetch could serve a key set of
+    its own choosing, so this is the one destination in the tree where following the environment is
+    a trust decision rather than a routing one.
+
+    Driven, not asserted as the shape of an env var. The **control arm** builds a bare
+    `PyJWKClient` for the same endpoint and requires the recorder to see the request — without it,
+    a recorder that was never wired up would make the real assertion pass for the wrong reason.
+    The control also leaves `urllib`'s default opener built and cached *with the proxy in it*, so
+    the second arm additionally proves what makes this fix viable at all: `ProxyHandler.proxy_open`
+    consults `proxy_bypass` per request, so a bypass added after the opener exists still diverts it.
+
+    The `no_proxy` the operator set is asserted to survive in both spellings: writing only the
+    lowercase one while the pod set `NO_PROXY` makes `getproxies_environment` prefer ours and drops
+    theirs, which would proxy destinations the operator had deliberately exempted.
+    """
+    with _proxy_recorder() as (proxy_url, received):
+        for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"):
+            monkeypatch.setenv(name, proxy_url)
+        monkeypatch.setenv("no_proxy", "keep.example")
+        monkeypatch.setenv("NO_PROXY", "keep.example")
+        # Rebuilt from the environment above rather than inherited from whatever earlier test
+        # first called `urlopen`: `ProxyHandler` snapshots the proxy *set* at construction.
+        monkeypatch.setattr(urllib.request, "_opener", None)
+        endpoint = f"{scheme}://jwks.invalid/tenant/discovery/v2.0/keys"
+        monkeypatch.setattr(settings, "entra_jwks_url", endpoint)
+        monkeypatch.setattr(auth, "_jwks_clients", {})
+
+        with suppress(Exception):
+            PyJWKClient(endpoint, timeout=2.0, cache_keys=False).fetch_data()
+        assert received, (
+            f"the control arm reached no recorder, so this test proves nothing about {scheme}"
+        )
+        received.clear()
+
+        with suppress(Exception):
+            auth._client_for(settings.entra_jwks_endpoint).fetch_data()
+        assert received == [], (
+            f"the JWKS fetch went to the ambient proxy ({received}) — a host that could answer it "
+            "chooses the keys every bearer token is validated against"
+        )
+
+    assert os.environ["no_proxy"] == "keep.example,jwks.invalid"
+    assert os.environ["NO_PROXY"] == "keep.example,jwks.invalid"
+    assert urllib.request.proxy_bypass("keep.example"), "the operator's own bypass was clobbered"
 
 
 def test_an_unknown_kid_is_an_auth_error_not_an_unhandled_crash(

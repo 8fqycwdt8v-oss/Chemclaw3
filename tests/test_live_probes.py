@@ -17,14 +17,19 @@ agent testing could reach.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import httpx
 import pytest
 import yaml
+from pydantic import SecretStr
 
 from chemclaw.agent.chemclaw_agent import available_tool_names
+from chemclaw.cli import live_probes
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.evals.live import ProbeOutcome, _score_citations, load_probes, run_probe
@@ -981,3 +986,63 @@ def test_the_corpus_fidelity_run_writes_under_its_own_directory_too(
     assert written.is_file(), "the report must land in this run's own directory"
     assert written.parent.parent.parent == tmp_path, "one suite dir, one run dir, then the file"
     assert not (tmp_path / "corpus-fidelity.md").exists(), "never over the record"
+
+
+def test_the_probe_client_does_not_hand_its_bearer_to_an_ambient_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one live-lane client carrying a credential, driven rather than scanned.
+
+    `tests/test_netguard.py::test_every_served_http_client_refuses_the_ambient_proxy` is a ratchet
+    over the *tree*: it reads `trust_env=False` out of the source and cannot say what httpx then
+    does with it. This drives the real `_client()` against a loopback recorder standing in as the
+    proxy, with the probe token set, and asserts the recorder saw nothing at all — not merely that
+    it saw no `Authorization` header, because a proxy that receives the request receives the
+    credential on the next hop whatever this one carried.
+
+    The control arm is the same request through a client built without the keyword, which must
+    reach the recorder; otherwise a recorder that was never wired up would prove the property by
+    being broken.
+    """
+    received: list[str] = []
+
+    class _Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.0"
+
+        def do_POST(self) -> None:
+            received.append(self.headers.get("Authorization", "<no bearer>"))
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            """Silence the handler; `received` is the record."""
+
+    server = HTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    proxy = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        for name in ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
+            monkeypatch.setenv(name, proxy)
+        monkeypatch.setenv("no_proxy", "")
+        monkeypatch.setenv("NO_PROXY", "")
+        monkeypatch.setattr(settings, "live_probe_token", SecretStr("probe-secret"))
+
+        async def post(client: httpx.AsyncClient) -> None:
+            with contextlib.suppress(httpx.HTTPError, OSError):
+                await client.post("/sessions", json={})
+            await client.aclose()
+
+        control = httpx.AsyncClient(base_url="http://front-door.invalid", timeout=5.0)
+        asyncio.run(post(control))
+        assert received, "the control arm reached no recorder, so this test proves nothing"
+        received.clear()
+
+        asyncio.run(post(live_probes._client("http://front-door.invalid")))
+        assert received == [], (
+            f"the probe client went through the ambient proxy ({received}) — the bearer it carries "
+            "reaches whoever set the variable"
+        )
+    finally:
+        server.shutdown()
+        server.server_close()

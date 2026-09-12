@@ -138,13 +138,17 @@ not closed while a reviewer finding is open.
 The controls most often *declared* rather than enforced. Five of these are live `BACKLOG.md` rows
 whose own text says the stated guarantee is narrower than the sentence asserting it.
 
-- [ ] W21.1 `Chemclaw3` — the JWKS fetch follows an ambient proxy with no seam to stop it
+- [x] W21.1 `Chemclaw3` — the JWKS fetch follows an ambient proxy with no seam to stop it
       (`api/auth.py::_client_for`, `core/netguard.py::refuse_proxied_egress`). **This is the anchor
-      every bearer token is validated against.** Decide between a process-wide opener install and
-      vendoring `fetch_data`; the row states both costs. ADR.
-- [ ] W21.2 `Chemclaw3` — delete `tests/test_netguard.py::_TRUST_ENV_LANE_EXEMPTIONS`: six live-lane
-      httpx clients at `trust_env=True`, one of them carrying a bearer (`cli/live_probes.py:340`,
-      `cli/live_storm.py` ×5, `cli/phoenix_publish.py`, `evals/live.py`). One keyword per site.
+      every bearer token is validated against.** The decision this row posed — a process-wide opener
+      install versus vendoring `fetch_data` — was not the decision: `proxy_open` consults
+      `proxy_bypass` per request, so the fix is host-scoped. Closed by
+      `D-2026-09-12-an-ambient-proxy-is-a-destination-nobody-declared`.
+- [x] W21.2 `Chemclaw3` — delete `tests/test_netguard.py::_TRUST_ENV_LANE_EXEMPTIONS`: **eight**
+      constructions at `trust_env=True`, one carrying a bearer (`cli/live_probes.py:340`,
+      `cli/live_storm.py` ×5, `evals/live.py`) and one that is not an httpx client at all
+      (`cli/phoenix_publish.py`, which takes `http_client`). List deleted, so there is no exemption
+      left to be module-granular. Same ADR.
 - [ ] W21.3 `Chemclaw3` — the egress guard is blind to gRPC and to Temporal, its two
       highest-value destinations, and they compound through a loopback sidecar. Measured: all three
       reached an external listener with the counter at 0. **Decide what enforces egress** (LD_PRELOAD
@@ -153,9 +157,9 @@ whose own text says the stated guarantee is narrower than the sentence asserting
 - [ ] W21.4 `Chemclaw3` — the gateway boot guard reaches the front door and not the worker, and
       `durable/template_activities.py` makes model calls from a worker. Decide what "exposed" means
       for a process that only dials out.
-- [ ] W21.5 `Chemclaw3` — the Qdrant client builds its own httpx outside the proxy fix. Install the
-      extra, measure whether the SDK accepts a caller-supplied client, then close or re-file with
-      the measurement.
+- [x] W21.5 `Chemclaw3` — the Qdrant client builds its own httpx outside the proxy fix. Measured in
+      a scratch venv: a caller-supplied client is a `TypeError`, `trust_env` passes straight through
+      `**kwargs`. One keyword. Same ADR.
 - [ ] W21.6 `Chemclaw3-mcp` — **create `docs/decisions/` and a `BACKLOG.md`.** The fleet has no
       decision record, so every argument in its `CLAUDE.md` is unanchored prose. This wave's own
       findings are its first rows. (Prerequisite for R7 in every later fleet wave.)

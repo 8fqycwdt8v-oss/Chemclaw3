@@ -578,7 +578,7 @@ async def run_probes(
     semaphore = asyncio.Semaphore(settings.live_probe_concurrency)
     timeout = httpx.Timeout(settings.live_probe_timeout_seconds)
 
-    async with httpx.AsyncClient(base_url=url, timeout=timeout) as client:
+    async with httpx.AsyncClient(base_url=url, timeout=timeout, trust_env=False) as client:
 
         async def one(probe: Probe) -> ProbeOutcome:
             async with semaphore:

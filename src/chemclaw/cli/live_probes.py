@@ -341,6 +341,10 @@ def _client(base_url: str | None) -> httpx.AsyncClient:
         base_url=base_url if base_url is not None else settings.live_probe_base_url,
         timeout=httpx.Timeout(settings.live_probe_timeout_seconds),
         headers=headers,
+        # This client carries the bearer above, so an ambient proxy variable would hand the probe
+        # token to a host of the setter's choosing. `trust_env=False` is the tree's property, not
+        # this lane's preference — `tests/test_netguard.py` holds every client to it.
+        trust_env=False,
     )
 
 

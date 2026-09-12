@@ -101,59 +101,6 @@ topic).
   The false sentence is corrected in this commit; the gap is not. Anchors:
   `connectors/registry.py::_bound_by_this_process`, `agent/chemclaw_agent.py::_register_generated_tools`.
 
-- [ ] **The JWKS fetch follows an ambient proxy and has no seam to stop it** — **[S], re-sized from
-  [M] on 2026-09-12 because the decision this row said it needed turned out not to be needed.**
-  Opened 2026-09-05 by the review of `D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`.
-  `api/auth.py:92` (inside `_client_for`, `:88`) builds a `PyJWKClient`, whose `fetch_data` calls
-  `urllib.request.urlopen` —
-  which resolves proxies from the process-global default opener and has no `trust_env`. Measured
-  with a recorder standing in as the proxy: it received
-  `GET http://login.microsoftonline.com/tenant/discovery/v2.0/keys`. **This is the anchor every
-  bearer token is validated against**, so a proxy that could answer it could serve a key set of its
-  own choosing. Two things bound the severity and neither closes it: a real tenant endpoint is
-  `https`, where a proxy sees a CONNECT tunnel it can only open with a CA the pod already trusts
-  (which is exactly what a TLS-terminating corporate proxy arranges); and the boot refusal added by
-  that ADR stops a deployment that has *not* declared a proxy **and has `entra_required` on** —
-  which is the Helm chart (`values.yaml` sets `CHEMCLAW_ENTRA_REQUIRED: "true"` on every
-  component) and is **not** this repository's own defaults. This sentence said "every shipped one"
-  and that was measured false on 2026-09-06: on `Settings()` defaults `proxied_destinations`
-  charges nothing, so `make chat`, `make connectors`, CI, a hand-started worker and any site behind
-  `CHEMCLAW_SERVICE_ALLOW_INSECURE=true` boot with the hole open. For *this* row the identity-off
-  half is moot — the JWKS fetch only happens when `entra_required` is on — but the sentence was
-  being read as a statement about the boot refusal in general, and as that it is false. The
-  asymmetry with the LLM seam stands.
-  **The sentence that made this a row was measured false on 2026-09-12.** It said the only
-  in-process fix is `urllib.request.install_opener(build_opener(ProxyHandler({})))` — a process-wide
-  side effect on every library that reaches for `urlopen` — with vendoring `fetch_data` as the only
-  alternative. There is a second route and it is **host-scoped**: `ProxyHandler.proxy_open` consults
-  `proxy_bypass` per request, so adding the JWKS host to `no_proxy` before the client is built works
-  even after the default opener is cached, and touches no other `urlopen` caller. Driven three ways
-  against a loopback recorder — baseline proxied, `no_proxy` not proxied, `install_opener` not
-  proxied. It is also already this module's own vocabulary: `core/netguard.py:529` tells operators to
-  add these destinations to `NO_PROXY`. So no decision is outstanding; what is left is the edit plus a
-  regression test shaped like the probe. Confirmed against PyJWT 2.13.0, whose
-  `PyJWKClient.__init__` takes `ssl_context` and no opener, session or `trust_env`.
-  Anchors: `api/auth.py::_client_for`, `core/netguard.py::refuse_proxied_egress`.
-
-- [ ] **An external vector store's client builds its own httpx and is outside the proxy fix** —
-  [S], opened 2026-09-05 by `D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`.
-  `retrieval/vectors/qdrant.py:131` (inside `open_qdrant_client`, `:99`) constructs
-  `AsyncQdrantClient`, which builds its own httpx client internally and was passed only `verify` from
-  this repository — so `trust_env` stayed at its default and a configured proxy would carry that
-  traffic. It is **not** the LLM seam, so no prompt
-  or bearer is on it; what is on it is embedded note text and the query vectors. Recorded rather
-  than blind-patched for one reason: `qdrant_client` is not in this closure (`pgvector` is the
-  shipped provider), so the claim "passing a client works" would be untested prose, which is the
-  shape this repository keeps deleting. **The boot refusal covers less than this row said.** It
-  fires only where `_env_reading_destinations` charges a destination — the OTLP endpoint and the
-  Entra JWKS — so a deployment with `entra_required=false` and `otel_enabled=false`, which is what
-  `.env.example` ships, boots with a proxy variable set and nothing charged (measured 2026-09-06:
-  HTTP 200 through a real loopback proxy to an external listener, `netguard._refused` 0 before and
-  after, the proxy's log showing the absolute-URI request line). The residual is a site that has
-  declared a proxy **or** runs identity and tracing off, *and* runs the non-default vector store. Closing it needs the extra installed, then
-  one measurement of whether the SDK accepts a caller-supplied client. Anchors:
-  `retrieval/vectors/qdrant.py`, `core/http.py::gateway_client_kwargs`.
-
 - [ ] **The `git` remote is now a destination a deployment must declare, and nothing derives it** —
   [S], what is left of "the egress guard is blind to gRPC and to Temporal" after
   `D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py`. The blindness
@@ -162,7 +109,7 @@ topic).
   `netguard.derive_allowed` returns, and driven against a real gRPC server over a non-loopback route
   it refuses the plain socket, `grpc` and `temporalio` alike — grpc's own C-core reporting
   `connect failed: ... Operation not permitted` — while loopback and an allowlisted address continue
-  to work. Three things remain:
+  to work. Two things remain:
   - **`git` is now bounded and nothing derives its host.** A child inherits `LD_PRELOAD`, so
     `kg/git_writer.py`'s `git push` is refused unless the remote is named in
     `CHEMCLAW_EGRESS_ALLOW` — the first time that destination has been bounded at all, and a
@@ -173,28 +120,6 @@ topic).
     `test_an_ipv4_mapped_address_is_not_a_way_around_the_check` skips with the reason in the message.
   Anchors: `core/netguard_preload.c`, `core/netguard_preload.py`, `deploy/entrypoint.sh`,
   `kg/git_writer.py`.
-
-- [ ] **Seven live-lane httpx clients read the ambient proxy, one of them carrying a bearer — plus a
-  Phoenix SDK client that builds its own** — [S], opened 2026-09-06 by the same review. **The count
-  said six and one of the four modules was misattributed; both corrected 2026-09-12 by re-running the
-  test's own AST walker.** `cli/live_probes.py:340` builds an `Authorization: Bearer` client carrying
-  `live_probe_token`; `cli/live_storm.py:216,259,533,650,1293` and `evals/live.py:581` build httpx
-  clients, all at httpx's default `trust_env=True`. `cli/phoenix_publish.py:30` builds **no httpx
-  client at all** — it is `phoenix.client.Client`, matched by the detector only because it keys on the
-  bare name `Client`; the installed SDK takes `http_client`, so that site closes by passing
-  `httpx.Client(trust_env=False)`. None is on a path a chemist reaches, which is why it is [S] rather
-  than the finding itself — but
-  `core/netguard.py`'s docstring asserted "every first-party HTTP client here passes
-  `trust_env=False`" as the correctness argument for charging two destinations instead of twelve,
-  and that sentence was false for these seven.
-  `tests/test_netguard.py::test_every_served_http_client_refuses_the_ambient_proxy` now enforces the
-  property with these four modules in a named exemption list, so a *new* client anywhere else fails
-  on the day it is written — and the list's granularity is a **module path**, so a new client added
-  inside one of those four files is exempt too, which is worth closing in the same commit. Closing
-  this row is deleting the list, one keyword per site (eight sites, seven of them httpx). It is a row
-  rather than a patch only because those files belong to another surface than the one that found it.
-  Anchors: `cli/live_probes.py`, `cli/live_storm.py`, `cli/phoenix_publish.py`, `evals/live.py`,
-  `tests/test_netguard.py::_TRUST_ENV_LANE_EXEMPTIONS`.
 
 - [ ] **The gateway boot guard reaches one process, and the worker is the other one** — [M],
   opened by `D-2026-09-04-a-gateway-is-the-only-provider`. `_refuse_unconfigured_llm_gateway` and
