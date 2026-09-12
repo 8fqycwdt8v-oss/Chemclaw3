@@ -5393,7 +5393,8 @@ def test_the_image_workflow_derives_component_modules_that_actually_import() -> 
     script = (DEPLOY / "entrypoint.sh").read_text(encoding="utf-8")
     commands = re.sub(r"(?m)^[ \t]*#.*$", "", script)
     modules = re.findall(r"python -m ([a-z_][a-z0-9_.]*)", commands)
-    modules += [t.split(":")[0] for t in re.findall(r"uvicorn ([a-z_][a-z0-9_.]*:[a-zA-Z_]+)", commands)]
+    targets = re.findall(r"uvicorn ([a-z_][a-z0-9_.]*:[a-zA-Z_]+)", commands)
+    modules += [target.split(":")[0] for target in targets]
     assert len(modules) >= 2, "the derivation found nothing; it has drifted from the script"
 
     for module in modules:
