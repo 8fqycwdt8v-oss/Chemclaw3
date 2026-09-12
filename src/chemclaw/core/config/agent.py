@@ -410,6 +410,38 @@ class AgentSettings(BaseSettings):
     # written under a shared prefix would be one nobody can erase and everybody can read
     # (`agent/scratchpad.memory_namespace`).
     agent_memory_enabled: bool = False
+    # **What bounds the `store` table, which nothing did.** `durable/retention.py`'s register said
+    # of it "**nothing bounds it**", and it was right: `store` is agent-writable with no size cap,
+    # no window and no clock. Driven, 2,000 files of 5 kB each landed as `(2000, '816 kB')` under
+    # one namespace with nothing evicted. The runaway is not a looping turn — the loop cap and the
+    # parallel-call cap put a hard ceiling on writes *per turn* — it is accumulation across turns,
+    # because nothing ever removed a row.
+    #
+    # **A row count rather than a clock or a byte budget.** A memory is written in order to
+    # persist, so age is the wrong axis: the oldest memory is as likely to be the one worth keeping
+    # as the newest. Bytes are the wrong axis too, because the thing a chemist notices is a memory
+    # disappearing, and "your memories now hold fewer files because one of them was long" is not a
+    # rule anybody can hold in their head. A count is what `ingest/rejections.py` settled on for
+    # the same reason, and this is its per-actor twin. Past the cap the least *recently updated*
+    # file goes, which is a tiebreak rather than a policy — it is the only ordering the store
+    # carries.
+    #
+    # 200 at 5 kB is ~1 MB per person, which a namespace this is meant to hold does not approach:
+    # the working surface of one chemist's research turns, not an archive.
+    agent_memory_max_files: int = Field(default=200, ge=1)
+    # What `recall_preferences` may hand back, and the second half of the same finding.
+    # `user_preferences` is the other agent-writable table with no bound: `remember_preference`
+    # takes a **model-chosen** key, so the row count is not one-per-known-name, and the `SELECT …
+    # ORDER BY key` behind `recall_preferences` had no `LIMIT` at all — so every row a chemist has
+    # ever accumulated re-enters the prompt on every recall, for the life of the row.
+    #
+    # Two numbers because they bound different things. The row cap is storage and is enforced in
+    # the writer's own transaction; the recall cap is *prompt* spend and is enforced in the read,
+    # because a deployment that lowers the row cap still holds the rows it already wrote.
+    # 50 preferences at the measured ~44 characters each is ~2.2 kB of prompt — a paragraph, which
+    # is what "how this chemist works" should cost a turn.
+    preferences_max_per_owner: int = Field(default=200, ge=1)
+    preferences_recall_limit: int = Field(default=50, ge=1)
     # **How much of the chemist's own conversation stays quotable** — the ambient
     # `core/turn_text.py` binds and `agent/protocol_design_tools.require_quotes_are_verbatim`
     # checks a `basis="stated"` slot against.

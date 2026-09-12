@@ -493,9 +493,7 @@ def _queue_wait_seconds(budget: float, activity_seconds: float) -> float:
     return budget - activity_seconds - settings.activity_timeout_seconds
 
 
-def remaining_queue_wait_timeout(
-    remaining: timedelta, activity_seconds: float
-) -> timedelta | None:
+def remaining_queue_wait_timeout(remaining: timedelta, activity_seconds: float) -> timedelta | None:
     """The queue wait a bundle child may still afford, given what is left of its execution budget.
 
     **This is the bound a child that dispatches more than once needs, and there was none.** The

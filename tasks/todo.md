@@ -275,12 +275,23 @@ rows: a per-call bound with nothing bounding N of them.
       the two heavy servers with **no `engine/admission.py`**, against their own `CLAUDE.md` rule.
       Ceilings must count what the pod *spends*, not calls — the `servers/calc` lesson.
 - [ ] W23.3 `Chemclaw3-mcp` — `chem` has `engine/admission.py` and no `test_admission.py`.
-- [ ] W23.4 `Chemclaw3` — nothing bounds the scratchpad memory store: agent-writable, no size cap,
-      no window, no clock; a looping `remember` is the runaway. Decide a per-actor row cap in the
-      writer's own transaction (the `ingest/rejections.py` shape) or an explicit accepted-unbounded
-      posture — and change `retention._NOT_PRUNED["store"]` in the same commit.
-- [ ] W23.5 `Chemclaw3` — **six tables still say "nothing bounds it"** [M]. One decision per table,
-      recorded.
+- [x] W23.4 `Chemclaw3` — nothing bounds the scratchpad memory store. **Done**, and the row's
+      runaway is the wrong one: a looping `remember` is already capped at
+      `harness_max_loop_iterations` x `agent_max_parallel_tool_calls` <= 200 writes per turn; what
+      nothing bounded is accumulation *across* turns. Driven, 2,000 x 5 kB -> `(2000, '816 kB')`,
+      one prefix, nothing evicted. The `ingest/rejections.py` shape does not port — there is no
+      first-party writer, and `tests/test_scratchpad.py` forbids first-party `aput` — so the cap is
+      a `BoundedStoreBackend` over `StoreBackend`, and that test's rule is narrowed to name the one
+      exempt module rather than deleted. The invariant is **eventual** (the store's pool is
+      autocommit), which the docstring says rather than promising atomicity.
+- [x] W23.5 `Chemclaw3` — **six tables still say "nothing bounds it"** [M]. **Done** — five
+      decisions, not one. `store` and `user_preferences` were the two real bugs (both
+      agent-writable; `remember_preference` takes a model-chosen key, and `recall_preferences` had
+      no `LIMIT`, so every preference re-entered the prompt for ever). The fingerprint pair is
+      bounded by construction but **not by the corpus**: `094` put the definition in the key, so a
+      `STANDARDIZATION_VERSION` bump forks the table permanently and the runtime role holds no
+      DELETE. `predictions` needs a `calc_version` retirement policy, not a row cap; `measurements`
+      is unbounded and accepted. `D-2026-09-12-a-bound-on-an-agent-writable-table-is-a-row-count`.
 - [ ] W23.6 `Chemclaw3` — nothing bounds what a helper writes into its caller's checkpointed state.
 - [x] W23.7 `Chemclaw3` — a timed-out parse still runs to completion on the worker thread [L]:
       the wall clock frees the caller, not the CPU. **Done** — and the row understated it. The pod

@@ -72,20 +72,6 @@ topic).
   actually holds before choosing a number: a ceiling set from the SDK's default is the same
   unexamined posture this row is about, one value further on.
 
-- [ ] **Nothing bounds the scratchpad memory store** — [M].
-  `retention._NOT_PRUNED["store"]` read *"erasure reaches it per actor"* until wave 13, which is a
-  disposal route that fires only on a leaver request — the reasoning the `session_owners` entry
-  already rejects in its own words ("which a deployment that no one leaves never runs"). The entry
-  now says **nothing bounds it**, which is the finding; this row is the decision. `store` is
-  agent-writable (`agent/scratchpad.py`) with no size cap, no window and no clock, so a single agent
-  looping a `remember` tool is the runaway case — the same shape `ingest/rejections.py` already
-  answers with `_MAX_ROWS_PER_SOURCE` and least-recently-used eviction inside the writer's own
-  transaction. A clock is likely the wrong instrument here for the reason it is wrong there. Decide
-  between a per-actor (or per-namespace) row cap enforced by the writer and an explicit "unbounded,
-  accepted" posture; either way the register entry changes in the same commit, and
-  `tests/test_retention.py::test_no_disposal_entry_offers_actor_erasure_as_what_bounds_a_table` is
-  what stops the next rewording leaning on erasure again.
-
 - [ ] **The `git` remote is now a destination a deployment must declare, and nothing derives it** —
   [S], what is left of "the egress guard is blind to gRPC and to Temporal" after
   `D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py`. The blindness

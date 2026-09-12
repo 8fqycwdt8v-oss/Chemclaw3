@@ -372,6 +372,16 @@ _COUNTERS: dict[str, str] = {
     # the life of the process, so this series rising and `..._shed_total` rising with it is the
     # signature of a pod losing parse capacity — which is now bounded and recovers, but is still
     # what an operator wants to see before the shed rate tells them.
+    # The two agent-writable tables that had no bound until 2026-09-12, counted apart because the
+    # decisions differ: a memory is a file a turn authored, a preference is how one person works.
+    # An eviction is a chemist losing something they were told was remembered, so it is a WARNING
+    # in the log *and* a series here — a cap that is silently binding is a cap nobody knows about.
+    "chemclaw_memory_evictions_total": (
+        "Durable memory files dropped because a namespace was over `agent_memory_max_files`."
+    ),
+    "chemclaw_preference_evictions_total": (
+        "Preferences dropped because one owner was over `preferences_max_per_owner`."
+    ),
     "chemclaw_document_parse_kills_total": (
         "Document parses whose reader process was killed for outrunning its deadline."
     ),
