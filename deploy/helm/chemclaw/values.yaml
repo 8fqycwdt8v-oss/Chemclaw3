@@ -1104,8 +1104,12 @@ secrets:
     # content as data, so a thread replayed by another pod has its older retrieved material read as
     # ordinary prose — the injection marking switches itself off for precisely the oldest content it
     # exists to cover. Any deployment with `session_store="postgres"` or more than one replica
-    # should set this; `docs/planning/BACKLOG.md` carries the open question of whether the
-    # combination should be refused at startup.
+    # should set this. Whether such a combination is *refused* rather than warned was answered in
+    # `D-2026-09-13-the-lock-is-not-the-bound-the-commit-is`, which refuses the memory session
+    # store outright at render: the difference is whose deployments break — that key is stated in
+    # this file, this one is not, and refusing an unset key would fail every upgrade
+    # (D-2026-08-27-a-warning-is-the-shape-a-guard-takes-when-raising-would-break-a-deployment).
+    # The `BACKLOG.md` row this used to point at is gone.
     framingEnvelopeSecret: "CHEMCLAW_FRAMING_ENVELOPE_SECRET"
     # The bearer token the read-only MCP face requires on `/mcp`
     # (`CHEMCLAW_COMPONENT=mcp-face`, D-2026-08-29-a-digest-nobody-receives-is-not-delivered).

@@ -238,20 +238,6 @@ topic).
       the same three lines as `live.py:499-500`. Plus a cheap **offline** validator that every
       `expects_notes` id exists in `knowledge/`, which is the half CI can run. Its own PR: it needs
       a running front door to verify green.
-- [ ] **Knowledge writes serialise cluster-wide on one advisory lock** — [M], re-measured
-      2026-09-07 against real bare remotes (best of 3): **141.5 ms** per write at 100 notes,
-      152.2 ms at 1,000, **252.0 ms at 10,000**. The O(corpus) half of this row is closed and its
-      figures are deleted rather than corrected: the 2,916 ms it quoted was `git worktree add -B`
-      inside `git_submitter.py`, and `D-2026-09-05-the-gate-is-deleted-not-dormant` deleted that
-      module with the other 2,232 lines of the gate — `kg/git_writer.py` commits to the base branch
-      and no worktree is created anywhere in `src/`. What survives is the serialisation:
-      `git_writer.py:562-567` takes `_WRITE_LOCK` and then a Postgres advisory lock keyed on the
-      remote, so every pod's every note write queues behind every other one. At 252 ms that is a
-      ceiling near **14,000 writes/hour** for the whole fleet, which is not pressing — the row
-      exists because the ceiling is fleet-wide rather than per-pod, so it does not improve by
-      adding pods, and because `_cluster_lock`'s own docstring points here for the case it does
-      *not* cover (several writer pods with a memory session store take no lock at all).
-
 ## 3 — Work that is lost, dropped or invisible
 
 - [ ] **The two eval gates score literals written in their own case files** — [M], same review.

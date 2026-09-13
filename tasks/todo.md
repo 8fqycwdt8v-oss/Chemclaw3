@@ -475,8 +475,14 @@ The answers a chemist acts on. Each row here is a way the record can be right an
       figures over 295 chemist asks, of which **166 were never quantities** — a pasted SMILES's
       ring closures made `max_runs='1'` a stated value. That third is closed; the attribution half
       is in `DEFERRED.md` with the count and a trigger the row did not have.
-- [ ] W26.6 `Chemclaw3` — knowledge writes serialise cluster-wide on one advisory lock [M] (a
-      correctness-adjacent throughput bound on the one write path, `kg/record.py`).
+- [x] W26.6 `Chemclaw3` — knowledge writes serialise cluster-wide on one advisory lock [M] (a
+      correctness-adjacent throughput bound on the one write path, `kg/record.py`). Closed by
+      `D-2026-09-13-the-lock-is-not-the-bound-the-commit-is`: the row named the wrong thing. The
+      lock is **14.4 ms, flat**, against **298.8 ms** of git at 10,000 notes — 4.8% — and the
+      ceiling is one commit-and-push per note (31.6 ms/note at ten per commit, 8.5 at fifty).
+      Batching is deferred on the product argument, not the cost. The correctness half the row
+      named in passing is closed: the chart refuses to render on the memory session store, where
+      `_cluster_lock` is skipped and every note write is unguarded across pods.
 - [ ] W26.7 `Chemclaw3-mcp` — `rxnpredict/engine/cache.py:48,56` falls back to **raw caller text** as
       a cache key when RDKit refuses canonicalisation: two spellings of one molecule, two rows, and
       an unvalidated key.
