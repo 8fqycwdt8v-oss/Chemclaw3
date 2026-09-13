@@ -634,3 +634,46 @@ prose ones, all fixed on the branch so `main` never carries them.
 `AF_INET6` cannot be created, which is this sandbox — the unwrapping is measured by a reviewer's
 harness and by no ratchet here. No local lane builds the `.so`, which `infra/README.md` and the ADR
 now say out loud rather than conceding generically.
+
+### W24 review (Chemclaw3, plus the W22 follow-up that outranked it)
+
+**Planned:** a W22 privilege escalation, then eight durable-layer races. **What the measurement
+changed:** five of the nine rows were wrong about something load-bearing, and in four of those the
+row's own proposed fix was the wrong one.
+
+- **The W22 escalation was real and the gate was the wrong place to look for it.** `enforce_plan_approval`
+  reads the stamped scope and never the live plan, which is correct and is *why* the hole stayed open:
+  the scope is stamped by reading the **live** plan once the 409 freshness guard has matched, and that
+  guard compared an identity over step *text*. Driven through the real route, a plan shown as
+  authorizing nothing came back authorizing `record_knowledge_note` and `watch_for` on the chemist's
+  own hash. The identity now covers the declaration; `status` still does not.
+- **W24.1's mechanism was not the one the row named.** The dispatch race did not reproduce — 0 of 78
+  settles lost once the cancellation arrived where the clause could see it — so `asyncio.shield`, the
+  "cheap arm", is declined. Three uncovered windows did lose settles, and the worst of them is not a
+  lost settle at all: `notify_session_best_effort` caught `ActivityError(cause=CancelledError)` and
+  carried on, leaving the wait **RUNNING** on its seven-day timer 30 s after its parent was terminated.
+- **W24.3's victim is a coin flip.** 16 of 16 deadlocks, the route losing 9 and the prune 7 — so
+  "self-healing on the retention side" covered half the occurrences and the other half was a 500 with
+  no retry behind it.
+- **W24.4's central claim was already retracted in the code**, and the brief's replacement assertion
+  was itself half wrong: the psycopg half *is* pinned, with a control arm. What was unheld is that
+  `aput` still *uses* the pipeline.
+- **W24.8's four predicted failures did not occur**, and its two premises about the machine and the
+  CI target both needed correcting. 1.92x and 2.20x with identical failure sets.
+
+**What Half B found — about my own work:** two things, both worth keeping.
+
+1. My first reproduction of the W24.3 deadlock **passed six times out of six with the subject broken**.
+   It raced the cycle and asserted the retry in one test, and released the other side before the delete
+   had taken any lock, so no cycle ever formed. The fix was to split the two: race the cycle (asserting
+   *exactly one* side aborts, so two commits fail rather than pass silently) and inject the abort.
+2. Two mutation attempts in W24.6 were **invalid SQL** and reddened thirteen tests for the wrong
+   reason. Thirteen red lines look exactly like success, which is `tasks/lessons.md`'s
+   "a mutation that did not apply reads like a mutation that survived" in its other form — the
+   mutation applied and broke the fixture rather than the subject.
+
+**What is left:** the `due_at` reaper (a `BACKLOG.md` row, now covering terminate-without-cancel and
+worker loss rather than ordinary operation); the unbounded `tools` declaration and the 0/49 ratchet's
+argument-driven blind spot (two new rows, each with its own measurement); and `-n auto` on a high-core
+box, which nothing here measured. The W22 item's durable/Temporal and connector-job tool bodies were
+not driven on a real worker under the plan gate.
