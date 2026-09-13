@@ -925,7 +925,7 @@ def test_a_site_that_withdraws_a_row_reaches_the_record_without_touching_its_ame
         records=records,
     )
     assert first == {"RX-PULLED", "RX-KEPT"}, "neither row was ingested, so nothing below is a test"
-    assert asyncio.run(records.retracted(["RX-PULLED"])) == set()
+    assert asyncio.run(records.retracted([("eln-databricks", "RX-PULLED")])) == set()
 
     rows["RX-PULLED"] = dict(rows["RX-PULLED"], RETRACTED_TS=pulled)
     _prime()
@@ -945,5 +945,7 @@ def test_a_site_that_withdraws_a_row_reaches_the_record_without_touching_its_ame
     )
     stored = asyncio.run(records.read("RX-PULLED"))
     assert stored is not None and stored.retracted_at == pulled
-    assert asyncio.run(records.retracted(["RX-PULLED", "RX-KEPT"])) == {"RX-PULLED"}
+    assert asyncio.run(
+        records.retracted([("eln-databricks", "RX-PULLED"), ("eln-databricks", "RX-KEPT")])
+    ) == {("eln-databricks", "RX-PULLED")}
     assert asyncio.run(records.eligible(["RX-PULLED", "RX-KEPT"], {})) == {"RX-KEPT"}

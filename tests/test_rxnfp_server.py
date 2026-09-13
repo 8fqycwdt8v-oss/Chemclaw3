@@ -171,3 +171,32 @@ def test_a_withdrawn_reaction_is_not_served_as_a_precedent(
         "a run the source withdrew is still offered as a precedent by the tool a chemist asks "
         "directly"
     )
+
+
+def test_two_sites_behind_one_entry_id_are_cited_apart(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tool a chemist asks directly returned two hits citing one id, and neither resolved.
+
+    `063` keyed `reaction_fingerprints` by `(source, id)` so one site's chemistry cannot overwrite
+    another's, and this tool kept spelling the bare `reaction-<id>` — so a two-source deployment
+    answered "have we made anything like this?" with two hits carrying the same citation, and
+    `records._one_of` refused both when either was expanded
+    (`D-2026-09-13-a-citation-names-the-source-it-was-found-in`).
+
+    The two records are byte-identical apart from their source, which is the whole point: nothing
+    but the citation can tell them apart, so a tool that drops the source is offering the chemist a
+    link to neither run.
+    """
+    store = InMemoryFingerprintStore(definition=reaction_definition())
+    for site in ("site-alpha", "site-beta"):
+        asyncio.run(
+            store.add(
+                record_for_reaction("EXP-9001", _ESTER_ETHYL).model_copy(update={"source": site})
+            )
+        )
+
+    payload = _structured(store, monkeypatch)
+
+    assert sorted(hit["id"] for hit in payload["hits"]) == [
+        "reaction-site-alpha.EXP-9001",
+        "reaction-site-beta.EXP-9001",
+    ], "two sites behind one entry id are still cited by one id, which resolves to neither run"

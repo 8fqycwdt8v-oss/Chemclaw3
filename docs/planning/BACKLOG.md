@@ -252,21 +252,6 @@ topic).
       adding pods, and because `_cluster_lock`'s own docstring points here for the case it does
       *not* cover (several writer pods with a memory session store take no lock at all).
 
-- [ ] **The fingerprint index is keyed by source and the citation is not, so two sources collapse
-      to one note id** — [M], and it is the half `D-2026-08-27-a-fingerprint-is-keyed-by-its-source`
-      deliberately left. Migration 063 made the write side `(source, id)`, which is what stops one
-      site's chemistry being overwritten by another's. The read side still spells the bare form:
-      `retrieval/retrievers.py` and `connectors/rxnfp/server/tools.py` both call
-      `note_id_for_reaction(match.id)`, so a two-source deployment now returns **two hits that cite
-      one id**, and `records._one_of` raises `AmbiguousReactionRecord` when a reader expands it.
-      Better than silently citing the wrong run, which is what 063 fixed, and still not an answer.
-      The qualified form and its separator were written and then deleted rather than left as a dead
-      parameter no caller passed
-      (`D-2026-08-27-a-withdrawn-entry-is-a-fact-the-sync-must-carry`), so this starts from the six
-      readers rather than from the spelling: they move together or the id means two things at once.
-      Not urgent while one ELN is enabled anywhere; the ambiguity is loud when it happens, which is
-      the one improvement 063 already bought.
-
 ## 3 — Work that is lost, dropped or invisible
 
 - [ ] **The two eval gates score literals written in their own case files** — [M], same review.

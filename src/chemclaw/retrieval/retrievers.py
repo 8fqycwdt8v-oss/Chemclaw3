@@ -469,8 +469,8 @@ class ReactionMetadata(Protocol):
         """Which of `reaction_ids` pass `filters` and are current."""
         ...
 
-    async def retracted(self, reaction_ids: Sequence[str]) -> set[str]:
-        """Which of `reaction_ids` the source has reported withdrawn."""
+    async def retracted(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
+        """Which of `refs` — `(ingest_source, reaction_id)` — the source has reported withdrawn."""
         ...
 
 
@@ -546,12 +546,16 @@ class FingerprintReactionRetriever:
         if wanted:
             matches = await self._eligible(matches, wanted, page)
         else:
-            withdrawn = await self._records.retracted([match.id for match in matches])
-            matches = [match for match in matches if match.id not in withdrawn]
+            asked = [(match.source, match.id) for match in matches]
+            withdrawn = await self._records.retracted(asked)
+            matches = [match for match in matches if (match.source, match.id) not in withdrawn]
         return [
             EvidenceChunk(
                 content=f"Similar reaction {match.label} (Tanimoto {match.similarity:.2f})",
-                source_note_id=note_id_for_reaction(match.id),
+                # Qualified by the source the index matched in, because two sites behind one
+                # entry id are two hits and a bare id names both and neither
+                # (`D-2026-09-13-a-citation-names-the-source-it-was-found-in`).
+                source_note_id=note_id_for_reaction(match.id, match.source),
                 retriever=self.name,
                 # Structural hits score by their Tanimoto similarity — a closer precedent survives
                 # truncation first (KM-5). Clamped to [0, 1] to stay a valid chunk score.

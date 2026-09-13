@@ -135,7 +135,7 @@ async def sync_entries(
     skipped_existing: list[str] = []
     rejected: list[RejectedEntry] = []
     stored: dict[str, str] | None = None
-    withdrawn: set[str] = set()
+    withdrawn: set[tuple[str, str]] = set()
     cursor = since
     horizon = datetime.now(UTC) + timedelta(seconds=settings.eln_sync_future_tolerance_seconds)
     for raw in entries:
@@ -202,9 +202,9 @@ async def sync_entries(
                     # sync of a withdrawn entry booked it as `skipped_existing` and `retracted()`
                     # stayed empty. Asked in the same lazy, id-keyed way as the bodies, over the
                     # same page, against `066`'s partial index.
-                    withdrawn = await record_store.retracted(replayed)
+                    withdrawn = await record_store.retracted([(source, one) for one in replayed])
                 if stored.get(record.reaction_id) == record.body and (
-                    record.reaction_id in withdrawn
+                    (source, record.reaction_id) in withdrawn
                 ) == (raw.retracted_at is not None):
                     # Byte-identical to what is stored *and* in the same withdrawal state: nothing
                     # to index or write, so skip the whole ingest. A different body falls through

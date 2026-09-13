@@ -191,7 +191,12 @@ def external_record_id(note_id: str) -> str:
     so growing the namespace list cannot silently break the lookup.
 
     The id half of `external_record_ref`, for the one caller that asks only whether a record
-    *exists* — existence is a property of the id, and `kg.validate` says why it stays that way.
+    *exists* (`kg.validate.unresolved_citations`). **That is a deliberately weaker check than a
+    resolve, and saying so is the point**: a qualified citation whose source does not hold the id
+    passes the validator when another source does, and is then refused at read time by
+    `records.read`, loudly, naming the id. The cut is drawn there rather than closed because
+    `records.known` answers a page of ids with one indexed lookup, and this validator's own
+    message says what it asked.
     """
     return external_record_ref(note_id)[1]
 

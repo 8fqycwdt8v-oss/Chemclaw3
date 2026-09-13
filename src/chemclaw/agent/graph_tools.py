@@ -30,7 +30,7 @@ from chemclaw.ingest.eln.records import RECORD_TYPE, default_record_store
 from chemclaw.kg.analytics import GraphGaps, analyze
 from chemclaw.kg.git_writer import default_writer
 from chemclaw.kg.graph import build_graph, load_notes, neighborhood, note_in
-from chemclaw.kg.note import Note, Relation, external_record_id, resolves_outside_graph
+from chemclaw.kg.note import Note, Relation, external_record_ref, resolves_outside_graph
 from chemclaw.kg.record import record_note
 from chemclaw.kg.relations import DEFAULT_RELATION
 from chemclaw.kg.search import query_terms, term_coverage
@@ -390,7 +390,11 @@ async def _expand_record(note_id: str) -> NoteView:
     be mistaken for something the ELN said; `valid_to` carries the same fact in the structured half,
     which is what makes a retracted record fail `is_current` everywhere else.
     """
-    record = await default_record_store().read(external_record_id(note_id))
+    # A qualified citation names the source it was found in, so exactly one row can answer; a bare
+    # one — every citation committed before that spelling existed — reads across sources and is
+    # refused when two hold the id (`D-2026-09-13-a-citation-names-the-source-it-was-found-in`).
+    source, record_id = external_record_ref(note_id)
+    record = await default_record_store().read(record_id, source)
     if record is None:
         raise ChemclawError(f"no reaction record with id {note_id!r}")
     body = frame_untrusted(record.body, note_id=note_id)

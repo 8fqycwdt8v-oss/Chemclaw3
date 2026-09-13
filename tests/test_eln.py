@@ -38,13 +38,20 @@ from chemclaw.ingest.eln.ord import (
 from chemclaw.ingest.eln.ord_adapter import OrdFormatError, OrdJsonAdapter
 from chemclaw.ingest.eln.record import record_from_ord_reaction
 from chemclaw.ingest.eln.records import (
+    AmbiguousReactionRecord,
     InMemoryReactionRecordStore,
     PostgresReactionRecordStore,
     ReactionRecord,
 )
 from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.eln.validate import validate_ord
-from chemclaw.kg.note import ProcessConditions, cited_ids, cited_links, note_id_for_reaction
+from chemclaw.kg.note import (
+    ProcessConditions,
+    cited_ids,
+    cited_links,
+    external_record_ref,
+    note_id_for_reaction,
+)
 from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
 from chemclaw.science.fingerprints.molfp.search import find_similar_molecules
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
@@ -2400,7 +2407,11 @@ def test_ingesting_a_reaction_writes_the_label_index_record_phase() -> None:
         [row] = await labels.stale("any-version", limit=10)
         assert (row.source, row.reaction_id) == ("eln-json", reaction.reaction_id)
         assert row.record_smiles == reaction.reaction_smiles()
-        assert row.citation == note_id_for_reaction(reaction.reaction_id)
+        # Qualified by the source the row already carries, and asserted as a literal: deriving it
+        # from `note_id_for_reaction` would move both sides together, so a record phase that
+        # stopped passing the source would still pass. A precedent a chemist cannot follow back is
+        # not a precedent, and a bare id two sites both used follows back to a refusal.
+        assert row.citation == f"reaction-eln-json.{reaction.reaction_id}"
         # Every component, with the role the record stated and nothing derived from it yet.
         assert [(s.ordinal, s.role) for s in row.species] == [
             (i, c.role.value) for i, c in enumerate(reaction.compounds())
@@ -2641,12 +2652,16 @@ def test_a_withdrawn_entry_leaves_the_evidence_set_on_every_reader() -> None:
     The first pass asserts the entry *is* served, on every one of those readers. Without that half
     the second proves only that some ids are absent, which a broken retriever satisfies too.
     """
+    source = "retraction-probe"
+    # The literal, not `note_id_for_reaction(...)`: deriving it from the function under test would
+    # move both sides of the assertion together, and a sweep that stopped qualifying its citations
+    # would still pass (`D-2026-09-13-a-citation-names-the-source-it-was-found-in`).
+    cited = "reaction-retraction-probe.EXP-1001"
 
     async def _run() -> dict[str, object]:
         await migrated_db_or_skip()
         records = PostgresReactionRecordStore()
         reactions, molecules = InMemoryFingerprintStore(), InMemoryFingerprintStore()
-        source = "retraction-probe"
         retriever = FingerprintReactionRetriever(reactions, records)
         query = "CCO.CC(=O)O>>CCOC(C)=O"
 
@@ -2655,7 +2670,7 @@ def test_a_withdrawn_entry_leaves_the_evidence_set_on_every_reader() -> None:
             return {
                 "record": await records.read("EXP-1001"),
                 "eligible": await records.eligible(["EXP-1001"], {}),
-                "retracted": await records.retracted(["EXP-1001"]),
+                "retracted": await records.retracted([(source, "EXP-1001")]),
                 "sweep": [chunk.source_note_id for chunk in unfiltered],
             }
 
@@ -2694,7 +2709,7 @@ def test_a_withdrawn_entry_leaves_the_evidence_set_on_every_reader() -> None:
     assert before["record"] is not None and before["record"].is_current(today)
     assert before["eligible"] == {"EXP-1001"}
     assert before["retracted"] == set()
-    assert "reaction-EXP-1001" in before["sweep"], (
+    assert cited in before["sweep"], (
         "the entry was never served in the first place, so its later absence proves nothing"
     )
 
@@ -2705,8 +2720,8 @@ def test_a_withdrawn_entry_leaves_the_evidence_set_on_every_reader() -> None:
     assert after["record"].retracted_at is not None
     assert not after["record"].is_current(today)
     assert after["eligible"] == set()
-    assert after["retracted"] == {"EXP-1001"}
-    assert "reaction-EXP-1001" not in after["sweep"], (
+    assert after["retracted"] == {(source, "EXP-1001")}
+    assert cited not in after["sweep"], (
         "the unfiltered sweep still serves a withdrawn run as current evidence — the exact "
         "measurement D-2026-08-27 recorded against the storage-only implementation"
     )
@@ -2741,9 +2756,9 @@ def test_a_source_that_republishes_an_entry_un_retracts_it() -> None:
         # A replay on both the withdrawal and the re-publication, because that is how each of them
         # reaches a corpus whose cursor has already passed the entry.
         await _sync(datetime(2026, 3, 4, tzinfo=UTC), _EPOCH)
-        withdrawn = bool(await records.retracted(["EXP-2002"]))
+        withdrawn = bool(await records.retracted([(source, "EXP-2002")]))
         await _sync(None, datetime(2026, 2, 1, tzinfo=UTC))
-        still = bool(await records.retracted(["EXP-2002"]))
+        still = bool(await records.retracted([(source, "EXP-2002")]))
         return withdrawn, still
 
     withdrawn, still = asyncio.run(_run())
@@ -2785,3 +2800,137 @@ def test_a_json_export_stamped_withdrawn_is_fetched_and_carries_its_tombstone(
         "a withdrawal that does not move the fetch window is a tombstone nothing ever fetches"
     )
     assert fetched[0].retracted_at == datetime(2026, 7, 1, tzinfo=UTC)
+
+
+def test_two_sources_behind_one_entry_id_are_two_citations_that_each_resolve() -> None:
+    """The collapse: `063` keyed the index by source and the citation stayed bare.
+
+    Migration `063` made `reaction_fingerprints` `(source, id)`, which is what stops one site's
+    chemistry overwriting another's — and the read side still spelled `reaction-<id>`, so a
+    two-source deployment returned **two hits citing one id**, and `records._one_of` raised
+    `AmbiguousReactionRecord` the moment a reader expanded either. Loud rather than wrong, and
+    still not an answer: the chemist cannot open the run the search just found.
+
+    Driven over a real database, through the shipped retriever and the shipped resolver:
+
+    - the two hits carry **different** citations, and each names its site;
+    - each expands to **that site's own body**, which is the half a de-duplicating fix would fail;
+    - the **bare** form still resolves — every citation committed before this spells it — and still
+      refuses when two sources hold the id, because a bare citation genuinely does not name one run.
+
+    The two entries carry different operators, so the provenance each row renders differs — which
+    is what makes "each resolved to its own row" a distinction rather than a coincidence of two
+    identical transcriptions.
+    """
+
+    async def _run() -> tuple[list[str], list[str], object]:
+        await migrated_db_or_skip()
+        records = PostgresReactionRecordStore()
+        reactions = InMemoryFingerprintStore()
+        molecules = InMemoryFingerprintStore()
+        entry = "EXP-9001"
+        for site, operator in (("site-alpha", "a.chemist"), ("site-beta", "b.chemist")):
+            await sync_entries(
+                _ListAdapter(
+                    [
+                        RawEntry(
+                            entry_id=entry,
+                            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                            payload={
+                                "id": entry,
+                                "operator": operator,
+                                "reactants": [{"smiles": "CCO"}, {"smiles": "CC(=O)O"}],
+                                "products": [{"smiles": "CCOC(C)=O"}],
+                            },
+                        )
+                    ]
+                ),
+                reactions,
+                molecules,
+                records,
+                _EPOCH,
+                label_index=_labels(),
+                source=site,
+            )
+        retriever = FingerprintReactionRetriever(reactions, records)
+        chunks = await retriever.retrieve("CCO.CC(=O)O>>CCOC(C)=O", {})
+        cited = sorted(chunk.source_note_id for chunk in chunks)
+        bodies = []
+        for note_id in cited:
+            source, record_id = external_record_ref(note_id)
+            record = await records.read(record_id, source)
+            assert record is not None
+            # The rendered provenance, which differs by operator between the two sites — the one
+            # field that proves *which* row answered, where the transcription prose is identical.
+            bodies.append(record.source)
+        try:
+            await records.read(entry)
+            refusal: object = None
+        except AmbiguousReactionRecord as exc:
+            refusal = exc
+        return cited, bodies, refusal
+
+    cited, bodies, refusal = asyncio.run(_run())
+
+    assert cited == ["reaction-site-alpha.EXP-9001", "reaction-site-beta.EXP-9001"], (
+        "two sites behind one entry id still cite one id, so the chemist cannot open the run the "
+        "search found"
+    )
+    assert bodies == ["eln-json:EXP-9001:a.chemist", "eln-json:EXP-9001:b.chemist"], (
+        "the two citations resolved to the same row, so the qualification names a source the "
+        "resolver does not use"
+    )
+    assert isinstance(refusal, AmbiguousReactionRecord), (
+        "the bare form stopped refusing; a citation that does not name one run must not be "
+        "answered by a guess"
+    )
+
+
+def test_one_sites_withdrawal_does_not_retract_the_other_sites_run() -> None:
+    """A withdrawal belongs to the site that made it, and the index has always known which.
+
+    `retracted()` first shipped keyed on the bare entry id, which is the same collapse the citation
+    had: `reaction_fingerprints` is `(source, id)` since `063`, so two sites behind one entry id
+    are two hits — and asking "is EXP-9002 withdrawn?" let site-alpha's retraction delete
+    site-beta's run from the evidence set, silently, with nothing in the sweep saying so.
+
+    Both directions are asserted, because "nothing was dropped" is satisfied by a filter that never
+    runs: alpha's hit must be gone and beta's must remain.
+    """
+
+    async def _run() -> tuple[list[str], set[tuple[str, str]]]:
+        await migrated_db_or_skip()
+        records = PostgresReactionRecordStore()
+        reactions, molecules = InMemoryFingerprintStore(), InMemoryFingerprintStore()
+        entry = "EXP-9002"
+        sites: tuple[tuple[str, datetime | None], ...] = (
+            ("alpha-site", datetime(2026, 3, 4, tzinfo=UTC)),
+            ("beta-site", None),
+        )
+        for site, withdrawn in sites:
+            await sync_entries(
+                _WithdrawingAdapter([_withdrawal_entry(withdrawn, entry)]),
+                reactions,
+                molecules,
+                records,
+                _EPOCH,
+                label_index=_labels(),
+                source=site,
+            )
+        retriever = FingerprintReactionRetriever(reactions, records)
+        chunks = await retriever.retrieve("CCO.CC(=O)O>>CCOC(C)=O", {})
+        return (
+            sorted(chunk.source_note_id for chunk in chunks),
+            await records.retracted([("alpha-site", entry), ("beta-site", entry)]),
+        )
+
+    cited, withdrawn = asyncio.run(_run())
+
+    assert withdrawn == {("alpha-site", "EXP-9002")}, (
+        "the withdrawal was attributed to both sites, so one site's retraction removes another "
+        "site's run"
+    )
+    assert cited == ["reaction-beta-site.EXP-9002"], (
+        "the unfiltered sweep dropped the wrong hit, or dropped both: exactly the site that "
+        "withdrew its run must leave the evidence set, and exactly the other must stay"
+    )

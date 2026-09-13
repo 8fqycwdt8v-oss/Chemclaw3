@@ -79,13 +79,16 @@ async def similar_reactions(
     # the tool a chemist reaches directly. `retracted` is a positive question over this page of
     # ids, so a hit whose record is missing is still served: an unindexed record is not a
     # withdrawal (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`).
-    withdrawn = await _records.retracted([match.id for match in search.hits])
+    withdrawn = await _records.retracted([(match.source, match.id) for match in search.hits])
     return search.model_copy(
         update={
+            # The id a hit is cited by names the source it was found in, because
+            # `reaction_fingerprints` is keyed by `(source, id)` and a bare citation to an id two
+            # sites hold resolves to neither (`records._one_of` refuses rather than guessing).
             "hits": [
-                match.model_copy(update={"id": note_id_for_reaction(match.id)})
+                match.model_copy(update={"id": note_id_for_reaction(match.id, match.source)})
                 for match in search.hits
-                if match.id not in withdrawn
+                if (match.source, match.id) not in withdrawn
             ]
         }
     )

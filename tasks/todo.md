@@ -450,8 +450,12 @@ The answers a chemist acts on. Each row here is a way the record can be right an
       unchanged-check skipped it; `EntryBinding` could not name a site's withdrawal column, so the
       producer was unwritable for the one connector with a tenant; and the cursor watermark would
       never have re-fetched the row.
-- [ ] W26.2 `Chemclaw3` — the fingerprint index is keyed by source and the citation is not, so two
-      sources collapse.
+- [x] W26.2 `Chemclaw3` — the fingerprint index is keyed by source and the citation is not, so two
+      sources collapse. Closed by `D-2026-09-13-a-citation-names-the-source-it-was-found-in`, from
+      the readers as both prior ADRs required. Two things the row did not name: `record_phase`
+      wrote a bare `reaction_labels.citation` from a row that already carried its source, and
+      W26.1's own `retracted()` was keyed on the bare id, so one site's withdrawal dropped another
+      site's run out of the sweep.
 - [ ] W26.3 `Chemclaw3` — structure identity is canonical SMILES and nothing else: no InChI, no
       InChIKey [M].
 - [ ] W26.4 `Chemclaw3` — a published calculation names no reaction, note or compound context [M].

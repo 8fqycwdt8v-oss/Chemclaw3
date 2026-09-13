@@ -260,7 +260,11 @@ def test_a_structural_hit_still_expands_into_its_recipe(monkeypatch: pytest.Monk
         return cited, view.body
 
     cited, body = asyncio.run(_run())
-    assert cited == [note_id_for_reaction("rxn-recipe")]
+    # The literal rather than `note_id_for_reaction(...)`, because deriving the expectation from
+    # the function under test moves both sides together: a retriever that stopped naming the
+    # source it matched in would still pass. The round trip is what makes this a citation and not
+    # a string — `expand_note` below resolves this exact id.
+    assert cited == ["reaction-test-eln.rxn-recipe"]
     assert "80.0 °C" in body and "Ethanol and acetic acid" in body, (
         "a structural hit must expand into the run's conditions and procedure; a citation with no "
         "readable body is the D-018 failure this change was supposed to remove"

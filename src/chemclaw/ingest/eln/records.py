@@ -201,7 +201,7 @@ _SELECT_KNOWN = "SELECT reaction_id FROM reaction_records WHERE reaction_id = AN
 # (`reaction_records_retracted_idx`), and because the complement is the far larger set an
 # unfiltered sweep would otherwise have to enumerate on every query.
 _SELECT_RETRACTED = (
-    "SELECT reaction_id FROM reaction_records "
+    "SELECT ingest_source, reaction_id FROM reaction_records "
     "WHERE reaction_id = ANY(%s) AND retracted_at IS NOT NULL"
 )
 
@@ -373,8 +373,8 @@ class ReactionRecordStore(Protocol):
         """Which of `reaction_ids` pass `filters` and are current (`ReactionRecord.passes`)."""
         ...
 
-    async def retracted(self, reaction_ids: Sequence[str]) -> set[str]:
-        """Which of `reaction_ids` the source has reported withdrawn.
+    async def retracted(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
+        """Which of `refs` — `(ingest_source, reaction_id)` — the source has reported withdrawn.
 
         **Separate from `eligible`, and the separation is the point.** `eligible` answers "which of
         these pass a filter", and it drops a match with no stored record because a record nobody
@@ -383,6 +383,12 @@ class ReactionRecordStore(Protocol):
         through that gate without silently losing every hit whose record is missing. This asks only
         what a withdrawal is: a positive set, over the page of candidates, answered by `066`'s
         partial index.
+
+        **Asked per source, because a hit names one.** `reaction_fingerprints` is keyed by
+        `(source, id)` since `063`, so two sites behind one entry id are two hits — and asking by
+        bare id would let one site's withdrawal drop the other site's run, which is the same
+        collapse `D-2026-09-13-a-citation-names-the-source-it-was-found-in` fixes in the citation.
+        An empty source means "any source withdrew it", which is what a bare citation can ask.
         """
         ...
 
@@ -451,13 +457,18 @@ class InMemoryReactionRecordStore:
             )
         }
 
-    async def retracted(self, reaction_ids: Sequence[str]) -> set[str]:
-        """Which of `reaction_ids` this store holds a withdrawal for, under any source."""
-        wanted = set(reaction_ids)
+    async def retracted(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
+        """Which of `refs` this store holds a withdrawal for; an empty source matches any."""
+        withdrawn = {
+            (stored_source, stored_id)
+            for (stored_source, stored_id), record in self._records.items()
+            if record.retracted_at is not None
+        }
         return {
-            stored_id
-            for (_, stored_id), record in self._records.items()
-            if stored_id in wanted and record.retracted_at is not None
+            (source, reaction_id)
+            for source, reaction_id in refs
+            if (source, reaction_id) in withdrawn
+            or (not source and any(stored == reaction_id for _, stored in withdrawn))
         }
 
     async def known(self, reaction_ids: Sequence[str]) -> set[str]:
@@ -585,15 +596,28 @@ class PostgresReactionRecordStore:
                 rows = await cur.fetchall()
         return {row[0] for row in rows}
 
-    async def retracted(self, reaction_ids: Sequence[str]) -> set[str]:
-        """Which of `reaction_ids` the source has reported withdrawn."""
-        if not reaction_ids:
+    async def retracted(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
+        """Which of `refs` the source has reported withdrawn; an empty source matches any.
+
+        One statement over the ids, narrowed to the asked-for source in Python rather than in SQL.
+        The predicate that matters — `retracted_at IS NOT NULL` over a page of ids — is what `066`'s
+        partial index answers, and a withdrawal is rare, so what comes back is a handful of rows to
+        pair off. A per-ref `(source, id)` `IN` list would be a bind parameter per hit for a
+        narrowing that costs nothing here.
+        """
+        if not refs:
             return set()
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(_SELECT_RETRACTED, (list(reaction_ids),))
+                await cur.execute(_SELECT_RETRACTED, ([reaction_id for _, reaction_id in refs],))
                 rows = await cur.fetchall()
-        return {row[0] for row in rows}
+        withdrawn = {(row[0], row[1]) for row in rows}
+        return {
+            (source, reaction_id)
+            for source, reaction_id in refs
+            if (source, reaction_id) in withdrawn
+            or (not source and any(stored == reaction_id for _, stored in withdrawn))
+        }
 
     async def known(self, reaction_ids: Sequence[str]) -> set[str]:
         """Which of `reaction_ids` the corpus holds at all."""
