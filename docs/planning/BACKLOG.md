@@ -854,15 +854,6 @@ topic).
       that trade, not a patch. Anchors: `agent/checkpointer.py::_PRUNE_SUPERSEDED`,
       `core/config/memory.py::checkpoint_retain_per_thread`.
 
-- [ ] **The checkpoint sweep and a live turn are two writers, and only the read side notices** —
-      [M], stated by `D-2026-09-06-a-sweep-and-a-live-turn-are-two-writers`. `aput` writes blobs
-      first and the `checkpoints` row second, so a turn whose blobs land before `_DELETE_ORPHANED`'s
-      snapshot and whose row lands after it loses them; the guard that ADR shipped is on the
-      **read**, which detects the loss rather than preventing it. Nothing synchronises the two
-      parties without a lock on the turn-serving write path, and taking one there is the decision
-      this row is for.
-
-
 ## 5 — Where the field moved past us
 
 Filed by the 2026-08-25 field benchmark — see

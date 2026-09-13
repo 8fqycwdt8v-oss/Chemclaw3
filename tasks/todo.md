@@ -378,8 +378,11 @@ Postgres and Temporal are up in this environment, so every one of these is driva
       flip — 9 times the route, 7 the prune — so "self-healing on the retention side" covered half
       of them and the route had no retry. Both orders kept; the route retries.
       `D-2026-09-13-a-deadlock-victim-is-chosen-by-postgres-not-by-the-caller`.
-- [ ] W24.4 `Chemclaw3` — the checkpoint sweep and a live turn are two writers and only the read
-      side notices.
+- [x] W24.4 `Chemclaw3` — the checkpoint sweep and a live turn are two writers and only the read
+      side notices. **The central claim is false and the code had already retracted it**: `aput`'s
+      blobs and its `checkpoints` row carry one `xmin` (measured). Row deleted; what was genuinely
+      unheld — that `aput` still *uses* the pipeline — is now in `tests/test_upstream_surface.py`.
+      `D-2026-09-13-an-interleaving-whose-mechanism-is-absent-is-not-a-residual`.
 - [x] W24.5 `Chemclaw3` — the awaiting collapse keeps the oldest frame of each state, not the newest.
       Row accurate. Driven `[0, 14]` against `[14, 14]` through the real tailer.
       `D-2026-09-13-a-collapse-without-the-batch-keeps-the-oldest-frame`; the batched yield the row
