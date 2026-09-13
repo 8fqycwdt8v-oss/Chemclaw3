@@ -353,6 +353,16 @@ _NOT_PRUNED: dict[str, str] = {
         "for the reason `plan_approvals` is. Bounded by how often a person is asked "
         "something, which is human-paced"
     ),
+    # The same argument one table over, and deliberately stated as *inheriting* it rather than as a
+    # new one (`D-2026-09-13-an-answer-is-archived-so-the-question-can-be-asked-again`): these rows
+    # are `pending_requests`' own attribution, moved aside so the question can be asked again. A
+    # clock that collected them would reach exactly the record the refusal above protects, one hop
+    # later. The growth bound is the same and tighter — one row per *answered* cycle that was later
+    # re-asked, which is human-paced twice over.
+    "pending_request_answers": (
+        "refused: `pending_requests`' attribution, archived on a re-ask so the answer is not "
+        "blanked — the same record, so the same refusal"
+    ),
     "job_records": "refused: a durable run's evaluation record, which used to expire with "
     "Temporal's history and take a campaign's results with it (D-157)",
     "calculation_results": "refused: evicting a cached result converts a hit into a "

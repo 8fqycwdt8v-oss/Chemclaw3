@@ -387,10 +387,17 @@ class TemplateWorkflow:
         workflow, so an exception here would replace the original failure with a push-back error and
         lose the reason entirely. `notify_session_best_effort` swallows its own transport failures;
         the guard is for everything else, including a `cancelled` teardown that reaches this line.
+
+        **`BaseException`, because the cancelled teardown this docstring already named was the one
+        case `Exception` did not cover** — `asyncio.CancelledError` has not been an `Exception`
+        since 3.8, and since `D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-the-row-
+        waiting` `notify_session_best_effort` raises exactly that rather than swallowing a
+        cancelled push-back. The caller's own `raise` re-raises the original failure, so
+        suppressing everything here is what makes the original the one that reaches the broker.
         """
         if not run.session_id:
             return
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(BaseException):
             await notify_session_best_effort(
                 run.session_id,
                 "job_failed",

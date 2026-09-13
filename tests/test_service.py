@@ -1109,6 +1109,93 @@ def test_pushback_collapses_a_replayed_backlog_of_reminders(monkeypatch) -> None
     assert {e["request_id"] for e in events} == {"await-9f2c"}
 
 
+def test_pushback_reports_the_newest_state_of_a_collapsed_backlog(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The surviving frame of a collapsed run is the newest one, not the oldest.
+
+    `D-2026-09-13-a-collapse-without-the-batch-keeps-the-oldest-frame`. The sibling above asserts
+    that a month of reminders arrives as one open notice and one expiry. What it cannot see is
+    *which* open notice: its fake replaces the tailer, so the per-connection suppression is the only
+    thing running, and that suppression decides one row at a time against rows that arrive
+    oldest-first — so the frame it kept carried `reminders=0` while `reminders=14` was the truth at
+    connect time. Driven here: `[0, 14]` against the `[14, 14]` a surface needs.
+
+    **So this drives the real tailer**, with only its claim faked, because the defect and the fix
+    both live in the seam between the two: the batch exists inside one claim and nowhere else, and
+    the reduction is `stream_new_events`' `collapse` argument. Reading that argument out of
+    `kwargs` rather than passing `_newest_per_state` in by hand is what makes the test fail if the
+    route stops handing it over — a test that supplied the collapse itself would pass against a
+    route that had dropped it.
+    """
+    import chemclaw.api.app as app_module
+    from chemclaw.agent import session_events as session_events_module
+    from chemclaw.agent.session_events import SessionEvent
+    from chemclaw.durable.awaiting import AWAITING_KIND
+
+    backlog = [
+        SessionEvent(
+            session_id="s",
+            kind=AWAITING_KIND,
+            payload={
+                "request_id": "await-9f2c",
+                "kind": "measurement",
+                "subject": "Isolated yield for arm B3",
+                "asked_of": "process-chemist",
+                "due_at": "2026-09-06T00:00:00Z",
+                "reminders": reminder,
+                "state": "waiting",
+            },
+        )
+        for reminder in range(15)
+    ] + [
+        SessionEvent(
+            session_id="s",
+            kind=AWAITING_KIND,
+            payload={
+                "request_id": "await-9f2c",
+                "subject": "Isolated yield for arm B3",
+                "state": "expired",
+                "reminders": 14,
+            },
+        )
+    ]
+
+    async def _claim(_session_id: str) -> list[SessionEvent]:
+        return backlog
+
+    handed: list[object] = []
+
+    async def _one_poll(session_id: str, **kwargs: object) -> object:
+        """One claim through the production tailer, bounded so the SSE stream ends."""
+        handed.append(kwargs.get("collapse"))
+        async for event in session_events_module.stream_new_events(
+            session_id,
+            max_polls=1,
+            claim=_claim,
+            collapse=kwargs.get("collapse"),  # type: ignore[arg-type]
+        ):
+            yield event
+
+    monkeypatch.setattr(app_module, "stream_new_events", _one_poll)
+
+    with _client(_FakeAgent()) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        events = []
+        with client.stream("GET", f"/sessions/{session_id}/events") as res:
+            for line in res.iter_lines():
+                if line.startswith("data:"):
+                    events.append(json.loads(line[len("data:") :].strip()))
+
+    assert handed and handed[0] is not None, (
+        "the route no longer hands the tailer a batch reduction, so the collapse it does perform "
+        "can only ever keep the oldest frame of a run"
+    )
+    assert [e["state"] for e in events] == ["waiting", "expired"], events
+    assert [e["reminders"] for e in events] == [14, 14], (
+        "the collapse kept the oldest frame of the run, so the client was told the question had "
+        f"been chased {events[0]['reminders']} times when it had been chased 14"
+    )
+
+
 def test_pushback_does_not_collapse_two_different_requests(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """The collapse is per request, so two open questions are two notices."""
     import chemclaw.api.app as app_module

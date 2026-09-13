@@ -1649,6 +1649,86 @@ def test_a_pipeline_block_on_an_autocommit_connection_is_still_one_transaction()
     asyncio.run(_run())
 
 
+def test_aput_still_writes_its_blobs_and_its_checkpoint_row_in_one_transaction() -> None:
+    """The sibling above pins psycopg's pipeline. This pins that `aput` still *opens* one.
+
+    `D-2026-09-13-an-interleaving-whose-mechanism-is-absent-is-not-a-residual`. Three places in
+    `durable/retention.py` and `agent/checkpointer.py` rest on `aput` being atomic across its blob
+    writes and its `checkpoints` row — they say so explicitly, having retracted the opposite claim —
+    and the assertion next door is about **psycopg**: that an autocommit connection inside
+    `conn.pipeline()` does not commit per statement. Upstream could keep that true and stop using
+    it. `AsyncPostgresSaver.aput`'s `self._cursor(pipeline=True)` is the half nothing held: drop the
+    argument there and every sentence in those two modules becomes false with nothing going red.
+
+    **Measured through `xmin`, which is the transaction that inserted a row.** Driving `aput` with
+    two channels and reading `xmin` off the rows it wrote: all three — two `checkpoint_blobs` rows
+    and one `checkpoints` row — carried **one** xid. That is end-to-end rather than a source-shape
+    check, so it fails for any reason `aput` stops being atomic, including ones that have nothing to
+    do with the `pipeline=` keyword.
+
+    Two channels deliberately: one blob row plus one checkpoint row would pass if upstream committed
+    each *table* separately, and the interleaving the retracted residual named is exactly a blob
+    commit separated from a checkpoint commit.
+    """
+    import asyncio
+
+    from langgraph.checkpoint.base import empty_checkpoint
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+    from chemclaw.core.config import settings
+    from chemclaw.core.db import connect
+    from tests.pg import create_checkpoint_tables, migrated_db_or_skip
+
+    thread = "upstream-aput-one-transaction"
+
+    async def _run() -> tuple[set[str], int]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute("DELETE FROM checkpoints WHERE thread_id = %s", (thread,))
+            await conn.execute("DELETE FROM checkpoint_blobs WHERE thread_id = %s", (thread,))
+            await conn.commit()
+
+        async with await connect(settings.postgres_dsn) as writer:
+            # Autocommit, because that is what `agent/checkpointer.py` gives the saver and the whole
+            # question is what a pipeline does to a connection in that mode.
+            await writer.set_autocommit(True)
+            saver = AsyncPostgresSaver(writer)  # type: ignore[arg-type]
+            checkpoint = empty_checkpoint()
+            checkpoint["channel_values"] = {"messages": ["x" * 2048], "other": ["y" * 2048]}
+            await saver.aput(
+                {"configurable": {"thread_id": thread, "checkpoint_ns": ""}},
+                checkpoint,
+                {"source": "update", "step": 1},
+                {"messages": "1", "other": "1"},
+            )
+
+        async with await connect(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT xmin::text FROM checkpoint_blobs WHERE thread_id = %s", (thread,)
+                )
+                blobs = [str(row[0]) for row in await cur.fetchall()]
+                await cur.execute(
+                    "SELECT xmin::text FROM checkpoints WHERE thread_id = %s", (thread,)
+                )
+                rows = [str(row[0]) for row in await cur.fetchall()]
+        return set(blobs) | set(rows), len(blobs)
+
+    xids, blob_rows = asyncio.run(_run())
+
+    assert blob_rows >= 2, (
+        f"the fixture wrote {blob_rows} blob row(s); with fewer than two this cannot tell a "
+        "per-table commit from an atomic one, so it would pass for the wrong reason"
+    )
+    assert len(xids) == 1, (
+        f"aput wrote its blobs and its checkpoint row in {len(xids)} transactions "
+        f"({sorted(xids)}); durable/retention.py's three comments and agent/checkpointer.py's "
+        "header all state that it is one, and the residual they retracted — a turn whose blobs "
+        "commit before a sweep's snapshot and whose row commits after it — is real again"
+    )
+
+
 def test_the_editing_middleware_hands_its_edited_request_to_its_handler() -> None:
     """`agent/compaction.OffLoopContextEditing` reuses upstream's sync method for its request.
 

@@ -141,23 +141,60 @@ _OPEN = """
     WHERE pending_requests.state = 'waiting'
        OR (
             pending_requests.run_id <> EXCLUDED.run_id
-            AND pending_requests.state IN ('expired', 'cancelled')
+            AND pending_requests.state IN ('expired', 'cancelled', 'answered')
           )
 """
 
-# **Whose row is it now.** The upsert above is guarded, so "wrote nothing" is one of its ordinary
-# outcomes — and for the whole first life of this module the caller could not see it, because
-# `open_request` returned `None`. That is the difference between the two silent refusals it admits.
-# A *retry* of the opening activity carries the run that already owns the row, and it must be told
-# it still owns it however the row has since settled, or an at-least-once redelivery would fail
-# every time. A *re-ask* by a different run meeting an `answered` row owns nothing: the guard
-# deliberately refuses to blank somebody's attribution, and the workflow that was refused went on
-# to wait against a row nobody could see or answer, for the ninety days `awaiting_max_days` allows.
+# **Where the answer goes so the reopen above may have `'answered'` in it** (`D-2026-09-13-an-
+# answer-is-archived-so-the-question-can-be-asked-again`). Run before `_OPEN`, in the same
+# transaction, so the attribution is either moved aside or the reopen does not happen: migration
+# 079 excluded `answered` from the reopen because blanking somebody's answer is worse than refusing
+# the ask, and the consequence was that a legitimate re-ask met a non-retryable `ApplicationError`
+# in `durable/awaiting.py` and the workflow failed. With the answer archived there is nothing left
+# to destroy.
 #
-# Read rather than inferred from `rowcount`, because rowcount cannot tell those two apart: both
-# write zero rows. The read is in the same transaction as the write, so nothing can settle between
-# them.
-_CLAIMED_BY = "SELECT run_id FROM pending_requests WHERE request_id = %s"
+# `run_id <> %s` is what keeps a *retry* of the opening activity from archiving its own answer: the
+# retry carries the run that already owns the row, `_OPEN`'s `state = 'waiting'` arm does not apply
+# to an answered row, and `_CLAIMED_BY` then tells it that it still owns it. Only a different run
+# is a new cycle.
+#
+# `ON CONFLICT DO NOTHING` rather than an upsert: the archive is keyed on the run that *answered*,
+# so a second attempt at the same archive is the same row, and the application holds no UPDATE on
+# this table anyway (`infra/sql/grants/app_privileges.sql`).
+_ARCHIVE_ANSWER = """
+    INSERT INTO pending_request_answers
+        (request_id, run_id, kind, subject, asked_of, requested_by, session_id,
+         answered_at, answered_by, answer)
+    SELECT request_id, run_id, kind, subject, asked_of, requested_by, session_id,
+           answered_at, answered_by, answer
+      FROM pending_requests
+     WHERE request_id = %s
+       AND state = 'answered'
+       AND answered_at IS NOT NULL
+       AND run_id <> %s
+    ON CONFLICT (request_id, run_id) DO NOTHING
+"""
+
+# **There is no verdict to read any more, and that is what archiving the answer bought.**
+#
+# `open_request` used to return whether this run held the row, and `_CLAIMED_BY` was the read behind
+# it: `_OPEN` is a guarded upsert, so "wrote nothing" is one of its ordinary outcomes, and the one
+# case that mattered was a re-ask meeting an **answered** row — refused, because reopening blanked
+# an attribution nothing can delete. The workflow was told, and raised a non-retryable
+# `ApplicationError`, because no number of attempts changes whose answer is in that row.
+#
+# Since `_ARCHIVE_ANSWER` moves the answer aside
+# (`D-2026-09-13-an-answer-is-archived-so-the-question-can-be-asked-again`) every terminal state is
+# reopenable by a different run, so that refusal has **no reachable input**: driven over all five
+# shapes — first ask, retry by the owning run, re-ask after `answered`, re-ask after `expired`, and
+# a caller with no run id — the verdict was `True` in every one. A guard whose condition is provably
+# false reads as a control and is not one, which is the `reject_widening` shape this repository
+# deleted rather than kept alive by a test that calls it directly.
+#
+# The invariant is not lost, because an invariant is not a function: `tests/test_pending_store.py`
+# drives all five shapes and asserts what each one does to the row and to the archive. A future
+# narrowing of `_OPEN`'s `WHERE` — which has been rewritten three times, in 076, 079 and 096 — goes
+# red on the behaviour rather than on a verdict nobody reads.
 
 # `answered_at` only where somebody answered. It was stamped unconditionally, so an `expired` or
 # `cancelled` row carried a timestamp with an empty `answered_by` — a column saying "somebody
@@ -206,19 +243,25 @@ async def open_request(
     correlation_id: str,
     due_at: datetime,
     run_id: str = "",
-) -> bool:
-    """Record a wait as open, and report whether this run holds the projection.
+) -> None:
+    """Record a wait as open — archiving the previous cycle's answer when there is one.
 
     Idempotent within one Temporal run, and **reopening across runs** — see `_OPEN` for why those
     are different cases and what it cost to treat them as one. `run_id` defaults to empty so a
     caller with no run to name (a test, a backfill) keeps the old within-run behaviour.
 
-    Returns:
-        Whether `run_id` owns the row afterwards. `False` means the guard refused this open — the
-        only case that reaches it is a re-ask meeting a cycle somebody answered — and the caller
-        must not go on to wait against a row it does not hold. See `_CLAIMED_BY`.
+    **An answered cycle is archived first, which is what lets the reopen include `'answered'`**
+    (`D-2026-09-13-an-answer-is-archived-so-the-question-can-be-asked-again`). `_ARCHIVE_ANSWER` and
+    `_OPEN` are two statements in one transaction, in that order, so the attribution is either moved
+    aside or the reopen does not happen — there is no ordering in which an answer is blanked. The
+    archive is a no-op for every other case: a first ask, a retry by the owning run, a reopen of an
+    expired or cancelled cycle.
+
+    **Returns nothing, and the verdict it used to return is deleted** — see the comment above
+    `_ARCHIVE_ANSWER` for why no input can refuse an open any more.
     """
     async with _connect() as conn:
+        await conn.execute(_ARCHIVE_ANSWER, (request_id, run_id))
         await conn.execute(
             _OPEN,
             (
@@ -234,10 +277,6 @@ async def open_request(
                 run_id,
             ),
         )
-        async with conn.cursor() as cur:
-            await cur.execute(_CLAIMED_BY, (request_id,))
-            claimed = await cur.fetchone()
-    return claimed is not None and str(claimed[0]) == run_id
 
 
 async def settle_request(

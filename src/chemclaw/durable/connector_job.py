@@ -42,6 +42,7 @@ change"; the 2026-08-05 review measured `task_queue` at zero occurrences in
 `connectors/manifest.py`, so the offer had been false since D-150 landed.
 """
 
+import contextlib
 import logging
 from datetime import datetime, timedelta
 from typing import Any
@@ -1010,19 +1011,28 @@ class ConnectorJobWorkflow:
         already failing, and a push-back that failed on top would replace one lost message with two.
         The reason is carried as text because that is what the asker needs — the same discipline
         `SubsystemUnavailableError` applies to an outage, one layer out.
+
+        **"Never raising" was a claim about `notify_session_best_effort` and not a property of this
+        function**, and the suppression below is what makes it true. That helper swallows a failed
+        *delivery* and nothing else: a `ValidationError` building the input, or — since
+        `D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-the-row-waiting` — a
+        cancellation, both left here and replaced the real failure the caller is about to `raise`.
+        `BaseException` is deliberate: a cancelled teardown is the case `Exception` misses, and the
+        caller's `raise` is what puts the original failure back on the wire.
         """
         if not job.session_id:
             return
-        await notify_session_best_effort(
-            job.session_id,
-            "job_failed",
-            {
-                "job_id": workflow.info().workflow_id,
-                "connector": job.connector,
-                "job": job.job,
-                "reason": failure_reason(exc),
-            },
-        )
+        with contextlib.suppress(BaseException):
+            await notify_session_best_effort(
+                job.session_id,
+                "job_failed",
+                {
+                    "job_id": workflow.info().workflow_id,
+                    "connector": job.connector,
+                    "job": job.job,
+                    "reason": failure_reason(exc),
+                },
+            )
 
     async def _finish(
         self, job: ConnectorJobInput, result: ConnectorJobResult, started_at: datetime

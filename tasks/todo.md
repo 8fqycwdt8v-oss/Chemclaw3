@@ -364,18 +364,48 @@ the first checkpoint measurement here said 552 kB and was evidence about nothing
 Defects that only appear under concurrency, on the layer a production deployment runs continuously.
 Postgres and Temporal are up in this environment, so every one of these is drivable.
 
-- [ ] W24.1 `Chemclaw3` — the detached settle of a cancelled `AwaitAnswerWorkflow` is racy [M].
-- [ ] W24.2 `Chemclaw3` — a nested `asyncio.run` inside a pooled process can hang on loop teardown.
-- [ ] W24.3 `Chemclaw3` — `delete_session` and the owner prune take two rows in opposite orders: a
-      deadlock by lock ordering.
-- [ ] W24.4 `Chemclaw3` — the checkpoint sweep and a live turn are two writers and only the read
-      side notices.
-- [ ] W24.5 `Chemclaw3` — the awaiting collapse keeps the oldest frame of each state, not the newest.
-- [ ] W24.6 `Chemclaw3` — a legitimate re-ask of an answered question fails loudly rather than
-      waiting blind.
-- [ ] W24.7 `Chemclaw3` — a result sink on the primary server opens connections no budget counts.
-- [ ] W24.8 `Chemclaw3` — settle `pytest-xdist` on a real runner [S]. A 24-minute suite is why R6
-      gets skipped; this is the wave that can afford it.
+- [x] W24.1 `Chemclaw3` — the detached settle of a cancelled `AwaitAnswerWorkflow` is racy [M].
+      **The row was wrong about the mechanism.** The race did not reproduce (0 of 78 settles lost);
+      three uncovered windows did. `D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-
+      the-row-waiting`; `asyncio.shield` declined on measurement; the reaper stays a BACKLOG row.
+- [x] W24.2 `Chemclaw3` — a nested `asyncio.run` inside a pooled process can hang on loop teardown.
+      Reproduced 3/8 at the shipped pool defaults and 8/8 at `min_size=8`; the named test pinned
+      `min=max=1`, the one value that cannot reproduce it.
+      `D-2026-09-13-a-loop-that-abandons-its-pool-can-fail-to-end`; `db.pooling()` round the nested
+      loop declined (it would turn pooling off for the parent).
+- [x] W24.3 `Chemclaw3` — `delete_session` and the owner prune take two rows in opposite orders: a
+      deadlock by lock ordering. **"Not reproduced" was false: 16/16.** And the victim is a coin
+      flip — 9 times the route, 7 the prune — so "self-healing on the retention side" covered half
+      of them and the route had no retry. Both orders kept; the route retries.
+      `D-2026-09-13-a-deadlock-victim-is-chosen-by-postgres-not-by-the-caller`.
+- [x] W24.4 `Chemclaw3` — the checkpoint sweep and a live turn are two writers and only the read
+      side notices. **The central claim is false and the code had already retracted it**: `aput`'s
+      blobs and its `checkpoints` row carry one `xmin` (measured). Row deleted; what was genuinely
+      unheld — that `aput` still *uses* the pipeline — is now in `tests/test_upstream_surface.py`.
+      `D-2026-09-13-an-interleaving-whose-mechanism-is-absent-is-not-a-residual`.
+- [x] W24.5 `Chemclaw3` — the awaiting collapse keeps the oldest frame of each state, not the newest.
+      Row accurate. Driven `[0, 14]` against `[14, 14]` through the real tailer.
+      `D-2026-09-13-a-collapse-without-the-batch-keeps-the-oldest-frame`; the batched yield the row
+      proposed is declined because it would drop a mid-batch disconnect's restores.
+- [x] W24.6 `Chemclaw3` — a legitimate re-ask of an answered question fails loudly rather than
+      waiting blind. Built rather than deferred: `pending_request_answers` (096) takes the answer and
+      `'answered'` joins the reopen. The decision the row owed — the archive *inherits*
+      `pending_requests`' arguments in all three registers (retention, erasure, grant) rather than
+      getting new ones. `_CLAIMED_BY`, `open_request`'s verdict and the activity's raise are deleted
+      as unreachable over all five shapes the upsert admits.
+      `D-2026-09-13-an-answer-is-archived-so-the-question-can-be-asked-again`.
+- [x] W24.7 `Chemclaw3` — a result sink on the primary server opens connections no budget counts.
+      The row's fix raises (`AsyncConnection` has no `max_size`); the count is of *connections*, on
+      the endpoint they dial. A sink on its own warehouse counts zero and `deploy/README.md` says
+      whose arithmetic that is. `D-2026-09-13-a-connection-counted-where-the-budget-applies`.
+- [x] W24.8 `Chemclaw3` — settle `pytest-xdist` on a real runner [S]. **The speed is a clear win and
+      the failure set is not stable**, so four workers are an opt-in and the gate stays serial:
+      18:13 → 09:30 on `make test`, 27:25 → 12:28 on the `make cov` CI actually runs, coverage
+      unchanged at 90.53% — but over five parallel runs `test_a_burst_of_cold_prefix_measurements_
+      leaves_the_loop_schedulable` failed in 2 and `test_a_pass_reports_bytes_beside_rows_and_stops_
+      the_table_growing` in 1, both passing serially every time. **One of those is on the list of
+      four a prior reading predicted, which I had dismissed on two lucky runs.**
+      `D-2026-09-13-a-stable-failure-set-is-not-two-green-runs`.
 
 **Acceptance** — each race driven to failure on the pre-fix code and to green on the post-fix code,
 in the same test. A race fixed without a reproduction is a race that was not understood.
@@ -606,3 +636,53 @@ prose ones, all fixed on the branch so `main` never carries them.
 `AF_INET6` cannot be created, which is this sandbox — the unwrapping is measured by a reviewer's
 harness and by no ratchet here. No local lane builds the `.so`, which `infra/README.md` and the ADR
 now say out loud rather than conceding generically.
+
+### W24 review (Chemclaw3, plus the W22 follow-up that outranked it)
+
+**Planned:** a W22 privilege escalation, then eight durable-layer races. **What the measurement
+changed:** five of the nine rows were wrong about something load-bearing, and in four of those the
+row's own proposed fix was the wrong one.
+
+- **The W22 escalation was real and the gate was the wrong place to look for it.** `enforce_plan_approval`
+  reads the stamped scope and never the live plan, which is correct and is *why* the hole stayed open:
+  the scope is stamped by reading the **live** plan once the 409 freshness guard has matched, and that
+  guard compared an identity over step *text*. Driven through the real route, a plan shown as
+  authorizing nothing came back authorizing `record_knowledge_note` and `watch_for` on the chemist's
+  own hash. The identity now covers the declaration; `status` still does not.
+- **W24.1's mechanism was not the one the row named.** The dispatch race did not reproduce — 0 of 78
+  settles lost once the cancellation arrived where the clause could see it — so `asyncio.shield`, the
+  "cheap arm", is declined. Three uncovered windows did lose settles, and the worst of them is not a
+  lost settle at all: `notify_session_best_effort` caught `ActivityError(cause=CancelledError)` and
+  carried on, leaving the wait **RUNNING** on its seven-day timer 30 s after its parent was terminated.
+- **W24.3's victim is a coin flip.** 16 of 16 deadlocks, the route losing 9 and the prune 7 — so
+  "self-healing on the retention side" covered half the occurrences and the other half was a 500 with
+  no retry behind it.
+- **W24.4's central claim was already retracted in the code**, and the brief's replacement assertion
+  was itself half wrong: the psycopg half *is* pinned, with a control arm. What was unheld is that
+  `aput` still *uses* the pipeline.
+- **W24.8's two premises about the machine and the CI target both needed correcting** (same-shape
+  box; CI runs `make cov`), and its speed claim holds at 1.92x and 2.20x — but **the row's four
+  predicted timing failures were real and I dismissed them on two lucky runs**; see Half B below.
+
+**What Half B found — about my own work:** two things, both worth keeping.
+
+1. My first reproduction of the W24.3 deadlock **passed six times out of six with the subject broken**.
+   It raced the cycle and asserted the retry in one test, and released the other side before the delete
+   had taken any lock, so no cycle ever formed. The fix was to split the two: race the cycle (asserting
+   *exactly one* side aborts, so two commits fail rather than pass silently) and inject the abort.
+2. Two mutation attempts in W24.6 were **invalid SQL** and reddened thirteen tests for the wrong
+   reason. Thirteen red lines look exactly like success, which is `tasks/lessons.md`'s
+   "a mutation that did not apply reads like a mutation that survived" in its other form — the
+   mutation applied and broke the fixture rather than the subject.
+3. **I wrote an ADR claiming a parallel run's failure set was "identical", on two runs, and changed
+   `make test`'s default on the strength of it.** The verification run taken *because* the default had
+   changed failed two extra tests, one of them on the list of four the brief predicted and that ADR
+   dismissed. Five runs put the rate at 2-in-5 and 1-in-5. The ADR is renamed and rewritten around the
+   real finding, the default is back to serial, and the lesson is that a claim about a *set* being
+   stable carries its repetition count or it is not a claim.
+
+**What is left:** the `due_at` reaper (a `BACKLOG.md` row, now covering terminate-without-cancel and
+worker loss rather than ordinary operation); the unbounded `tools` declaration and the 0/49 ratchet's
+argument-driven blind spot (two new rows, each with its own measurement); and `-n auto` on a high-core
+box, which nothing here measured. The W22 item's durable/Temporal and connector-job tool bodies were
+not driven on a real worker under the plan gate.

@@ -46,8 +46,12 @@ when an approval is spent is a control nobody can reason about.
 said yes to and nothing about what saying yes let the agent do, so one approval of a read-only plan
 authorized every state-changing tool the deployment had. `scope` is the set of tool names the plan's
 steps declared when the human read it, stamped by the decision and never re-derived from the model's
-plan afterwards — which is what keeps a rewrite that widens a step's declaration from widening the
-authorization, since `plan_identity` deliberately hashes `content` only.
+plan afterwards — which is what keeps a rewrite *after* the approval from widening it. A rewrite
+*before* the approval is the other half and needed its own decision
+(`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`): the hash this
+column is keyed beside covers each step's declaration as well as its text, so a widened plan is a
+different plan and the chemist's own hash no longer matches it. Neither half covers a `status` flip,
+deliberately — an approved plan must be able to make progress without revoking itself.
 """
 
 from collections.abc import Collection
@@ -193,7 +197,13 @@ class PlanApprovalStore:
         approved — the difference between a usable record and a flag, and what separates
         "approved earlier, already used" from "nobody has decided". The third field is what the
         approval authorizes; a row written before `infra/sql/095_plan_approval_scope.sql` carries
-        the empty set, which authorizes no state-changing tool at all.
+        the empty set, which authorizes no state-changing tool at all — the column is
+        `TEXT[] NOT NULL DEFAULT '{}'`, so that backfill is the database's and not this reader's.
+        **`frozenset(row[2] or ())` was how this line read**, and the `or ()` was a fail-open branch
+        nothing can reach: a `NOT NULL` column cannot hand back `None`, and if it somehow did, an
+        empty scope is the *narrow* answer rather than the safe-looking one, so the branch was
+        defending against a case it would have got right by crashing. A guard with no reachable
+        input reads as a control and is not one.
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
@@ -201,7 +211,7 @@ class PlanApprovalStore:
                 row = await cur.fetchone()
         if row is None:
             return None
-        return Decision(bool(row[0]), str(row[1]), frozenset(row[2] or ()))
+        return Decision(bool(row[0]), str(row[1]), frozenset(row[2]))
 
 
 @dataclass

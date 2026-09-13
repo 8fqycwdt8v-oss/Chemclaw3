@@ -425,6 +425,13 @@ def test_the_topic_cursor_is_not_ahead_of_the_record() -> None:
 # different claim — "this guarantee is enforced right now, here" — which is why it is checked here
 # and there rather than exempted with the paths.
 _RETIRED_TEST_CITATIONS: dict[str, str] = {
+    # Deleted with the behaviour it asserted. `D-2026-09-13-an-answer-is-archived-so-the-question-
+    # can-be-asked-again` archives the previous cycle's answer and allows the reopen, so the refusal
+    # this test drove has no reachable input — and the raise behind it is gone with it.
+    "test_a_wait_refused_by_the_projection_fails_instead_of_waiting_blind": (
+        "replaced by `test_a_re_ask_of_an_answered_question_opens_through_the_activity` "
+        "(tests/test_awaiting.py), which asserts the opposite outcome for the same input"
+    ),
     # Renamed because the old name described a property the test does not check. It calls
     # `skill_permits` with the *manifest* basis, which is right for a tree-vs-manifest check and
     # wrong as a claim about what a turn can reach — and wave 14 made the production basis the

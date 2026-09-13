@@ -63,6 +63,31 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
+- [ ] **A plan step's `tools` declaration is unbounded, and it sizes both a durable row and a
+  refusal** — [S]. `agent/plan_scope.ScopedTodo.tools` is `list[str]` with no constraint, so a
+  `write_todos` declaring 50,000 names validates, the union lands in `plan_approvals.scope`
+  (`TEXT[]`, written by `api/routes/plan.py::decide_plan`), and
+  `plan_gate.out_of_scope_refusal` sorts and joins the whole set into one sentence — measured at
+  **600,192 characters** over ten-character names, bounded to 60,000 by
+  `agent/tool_authz._refusal_message` before the model reads it and unbounded everywhere before
+  that (the exception, the log, the audit row). Not an escalation: the scope
+  only ever *narrows* what a call may do, and a name no tool answers to is refused by
+  `enforce_tool_authz` regardless. What it is is an unpriced write a model can repeat, and the
+  natural fix is a `Field(max_length=...)` on the declaration plus a setting, which is a config
+  decision rather than an edit — a low ceiling refuses a legitimately broad plan at the tool's own
+  argument validation, where the model can read the error and split the plan.
+- [ ] **The 0/49 plan-scope ratchet cannot see the argument-driven gated call** — [S].
+  `tests/test_plan_scope.py::test_the_surface_a_read_only_plans_approval_reaches` drives every name
+  in `authz.side_effecting_tools()` through the gate under an approval that declared nothing, and
+  requires every one to be refused. `write_file` is not in that set: `authz.side_effecting_call`
+  classifies it on its *arguments* — durable under `/memories/`, turn-local under `/scratch/` — so
+  the one tool whose gatedness is a function of the call is the one the ratchet enumerates past.
+  Measured: `side_effecting_call("write_file", {"file_path": "/memories/x.md", ...})` is `True` and
+  `"write_file" in side_effecting_tools()` is `False`, so the gate does refuse it and nothing holds
+  that it will.
+  The fix is one more arm over the argument-driven cases rather than a change to the partition, and
+  it should derive them from `authz` rather than listing `write_file` by name.
+
 - [ ] **A helper's own subgraph checkpoints are 91% of what a spawn costs, and nothing bounds
   them** — [M]. `D-2026-09-12-a-helpers-scratch-file-crosses-into-its-callers-state` bounded what
   crosses into the *caller's* `files` channel, which is what W23.6 named. Measured on a real
@@ -281,19 +306,21 @@ topic).
       already fixed; only the wire literal is left. Needs a rollout order (accept both, then emit
       the new one, then drop the old), which is why it is a row rather than part of that fix.
 
-- [ ] **The detached settle of a cancelled `AwaitAnswerWorkflow` is racy** — [M], found 2026-09-04
-      while fixing the stranded-row HIGH. `ParentClosePolicy.REQUEST_CANCEL` is strictly better than
-      the alternatives (all three measured against a live broker), but the settle is scheduled from
-      an already-cancelling workflow and landed on some runs and not others under a 15 s grace, so
-      "the row always leaves the inbox" is not guaranteed. `asyncio.shield`, or a `due_at` reaper.
-      `durable/awaiting.py`.
-
-- [ ] **A legitimate re-ask of an answered question now fails loudly rather than waiting blind** —
-      [M], the deliberate half-fix in `durable/pending_store.py`. Making it work needs `_OPEN`'s
-      `WHERE` to accept `'answered'` **plus** an archive so attribution is not blanked: a migration
-      keyed `(request_id, run_id)`, its `infra/sql/README.md` row, an INSERT grant, and a disposal
-      decision in `durable/retention.py`.
-
+- [ ] **A `pending_requests` row whose run was terminated, or lost with its worker, has no
+      collector** — [M]. What is left of the row above after
+      `D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-the-row-waiting`, which closed
+      the three windows a *cancellation* could slip through and measured the "racy settle" reading
+      false: with every child past its open activity, 0 of 78 settles were lost across six runs, and
+      the real losses were the `try` starting below the activity that writes the row, a cancellation
+      arriving as `ActivityError(cause=CancelledError)`, and `notify_session_best_effort` swallowing
+      exactly that pair. Two cases remain and neither is reached by a parent dying in the ordinary
+      way: a child **terminated** rather than cancelled never resumes workflow code at all
+      (`tests/test_awaiting.py::test_a_wait_started_as_a_child_settles_when_its_parent_dies` pins
+      that for `ParentClosePolicy.TERMINATE`, and an operator can do it to a child directly), and a
+      worker lost between the row write and the settle. A `due_at` reaper is the answer and it is a
+      decision rather than an edit: a new Temporal Schedule, with its own disposal rule, against a
+      table that is in `retention._NOT_PRUNED` on purpose. `durable/awaiting.py`,
+      `durable/pending_store.py`.
 
 - [ ] **A timed-out parse still runs to completion on the worker thread** — [L]. **The cheap half
       is closed**: `ingest/documents/sync.py::_parse_changed` now bounds its `asyncio.to_thread`
@@ -315,19 +342,6 @@ topic).
       that ADR says plainly it does not scale to four repos. What it needs is one artefact both
       sides read: a published fixture, a generated types package, or a job in `make ci` that
       fetches the client's own declaration and diffs it against the fixture.
-
-- [ ] **The awaiting collapse keeps the oldest frame of each state, not the newest** — [S], found
-      2026-09-05 measuring `D-2026-09-05-a-push-nobody-claims-is-not-a-push`'s own collapse. That
-      change is right — fifteen `waiting` frames for a closed question is the defect it was written
-      for — but `awaiting_reported` suppresses a repeat of a state *already reported*, and the rows
-      arrive oldest-first, so the frame that survives is the first of each run. Replayed against
-      the backlog its ADR measured (one open, fourteen chases, an expiry) it emits
-      `waiting reminders=0` then `expired`, never the `reminders=14` that was true at connect; the
-      rows are consumed on that first claim, so the count never corrects on this channel.
-      `GET /pending` still answers it. Emitting the newest needs a batch boundary
-      `agent/session_events.stream_new_events` does not expose — it yields row by row — so the fix
-      is either a batched yield or a one-frame hold flushed per poll, and neither belongs in a
-      passing edit. Anchors: `api/routes/streams.py`, `agent/session_events.py`.
 
 - [ ] **`JsonCommitmentExport` cannot run a destructive sweep, and the grant for one already
       exists** — [S], the row `ingest/commitments/json_export.py`'s `snapshot` attribute says is
@@ -364,33 +378,6 @@ topic).
       match a real fleet with the bound relaxed); only the bound refuses it. Deciding whether a
       front-doorless release is legal is the work. Anchors: `core/config/service.py`,
       `deploy/helm/chemclaw/templates/config.yaml`.
-
-- [ ] **A result sink on the primary server opens connections no budget counts** — [S], found
-      2026-09-05 beside the fleet-budget review. `publish/drivers/postgres.py` holds an un-pooled,
-      unregistered connection, so it is invisible to both `pg_fleet_pools` and
-      `chemclaw_pg_pool_max_size`. Harmless while a site points `CHEMCLAW_RESULT_SINKS` at a
-      database of its own, and a silent under-count of exactly the kind this budget exists to
-      prevent when it points at `postgres_dsn`'s server. Either register it the way
-      `agent/checkpointer.py` registers its foreign pool, or state in `values.yaml` that a sink's
-      connections are the operator's to add. Anchors: `publish/drivers/postgres.py`,
-      `core/db.py::_FOREIGN_POOLS`.
-
-- [ ] **A nested `asyncio.run` inside a pooled process can hang on loop teardown** — [M], found
-      2026-09-05 by a fresh-context review of `core/db`. `_forget_pools_of_ended_loops`
-      institutionalises abandoning a nested loop's pool and reclaiming it later, and nothing closes
-      it *before* that loop ends — so `asyncio.run`'s teardown cancels the pool's background fill
-      and then gathers it, while `psycopg_pool` treats `CancelledError` as a client exception,
-      logs an empty `error connecting in 'pool-N': ` and **reschedules the retry**. The gather never
-      completes. Measured, 15 runs an arm: abandoned pool at `pg_pool_min_size=2` hangs 7/15 and at
-      8 hangs 15/15; closing it first or leaving `_POOLING` off hangs 0/15.
-      `tests/test_db_pool.py::test_a_pool_whose_loop_has_ended_is_neither_counted_nor_left_holding_backends`
-      covers this path by name and opens by pinning `min_size = max_size = 1` — the one value at
-      which no second fill can be in flight; the same body at the shipped defaults hangs 8 of 12.
-      Reachable only through `durable/eval_drift` -> `evals/retrieval._run_sync`, which is
-      `eval_drift_enabled=False` by default and did not hang in 60 end-to-end runs, so this is a
-      mechanism with no structural guard rather than a live outage. The fix is to close a pool
-      before its loop ends rather than after. Anchors: `core/db.py::_forget_pools_of_ended_loops`,
-      `evals/retrieval.py::_run_sync`.
 
 - [ ] **`/readyz` cannot bound a Postgres that accepts the socket and stops answering** — [S],
       found 2026-09-05, upstream in origin and recorded here because `api/routes/ops.py` claimed
@@ -573,52 +560,6 @@ topic).
       treatment, since the content is a chemist's message rather than a helper's notes.
       One probe, not a measurement pass: what is owed first is the threshold, whether it is
       configurable, and whether it fires on any real turn.
-
-- [ ] **`delete_session` and the owner prune take two rows in opposite orders** — [S], not
-      reproduced. `_session_delete_statements` deletes `session_turns` then `session_owners`;
-      `retention._DELETE_SESSIONS` takes `session_owners` then `session_turns`. The window is narrow
-      — the route claims the live lease first and the prune re-checks it inside the DELETE — but a
-      retention statement holding the owner row microseconds before the route's claim lands can
-      deadlock, and Postgres aborts one side.
-
-      **"Order the two consistently" was examined on 2026-08-28 and is not available**, which is
-      what this row now records instead of an instruction that cannot be followed. Each order is
-      required by its own invariant — but only one of the two paths is *forced*, and a first
-      telling of this correction claimed both were. **Erasure** must remove session-scoped rows
-      before `session_owners`, because its statements re-resolve through a subquery over that table
-      every time (measured by reordering `_ERASE`: `session_turns` keeps a row). **The
-      single-session delete is not forced** — `_SESSION_DELETE`'s predicates are
-      `session_id = %(session_id)s` lookups, and reversing it strands nothing (measured). It shares
-      erasure's order because `_session_delete_statements` *derives* it, which is a coupling worth
-      keeping rather than an invariant of that path.
-      `_DELETE_SESSIONS` must take the ownership row *first*, because the lease deletion reads that
-      DELETE's `RETURNING` — which is what makes "a lease goes only if its ownership row went" true
-      rather than intended; deleting leases first would collect the lease of a live turn whose
-      ownership row the re-check then spares. Reversing either side trades a deadlock window for a
-      correctness bug, and the deadlock is one statement wide, self-healing on the retention side
-      (a Temporal activity retries) and has not been reproduced. **Keep both orders; the row stays
-      open only as the record that the obvious fix was tried and rejected.**
-
-- [ ] **Settle `pytest-xdist` on a real runner** — [S].
-      The `check` job is 87% one step: `make lint type cov` was **12m06s of a 13m56s job** on
-      `d8c312a`, of which lint is 1s and type 68s (measured), so ~11 min is the suite itself.
-      `D-2026-08-26-a-cancelled-run-on-main-is-a-missing-answer-not-a-superseded-one` took the free
-      half — lint and type now run in parallel in `static` — and deliberately left this one open,
-      because the evidence for it is a *reading* rather than a measurement.
-      **What the reading says**: the suite looks parallel-safe already. `tests/pg.py` suffixes its
-      `TEST_SCHEMA` with a fresh `uuid4` at import time (it was `os.getpid()` until 2026-09-04, and
-      this row went on naming the pid for a day after the commit that removed it), so an xdist
-      worker — its own process, re-importing the module — draws its own Postgres schema with no
-      change at all, and the two files that use Temporal go through
-      `start_time_skipping()`, which binds an ephemeral port per environment. `pytest-cov` combines
-      across workers natively, so the 84% floor survives.
-      **Why it is not done**: "looks safe" is not a number, and the sandbox this was reviewed in ran
-      the suite far slower than a GitHub runner does, so a local figure would say nothing about CI.
-      The unknowns worth checking are tests that write into the repo tree rather than `tmp_path`,
-      and whether four workers on a 4-core runner contend on the single Postgres service container.
-      Closing this is one experiment: add `pytest-xdist`, run `-n auto` on a branch, compare the
-      job's wall time and its failure set against the serial run on the same commit. If it is not
-      a clear win, say so and delete this row.
 
 - [ ] **Two of the four deployables have no chart, so a release changes their bytes and nothing
       else** — [M]. `D-2026-08-26-a-release-is-a-descriptor-and-a-target` deploys `Chemclaw3_ui`
@@ -874,15 +815,6 @@ topic).
       `D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has` — so this is a decision about
       that trade, not a patch. Anchors: `agent/checkpointer.py::_PRUNE_SUPERSEDED`,
       `core/config/memory.py::checkpoint_retain_per_thread`.
-
-- [ ] **The checkpoint sweep and a live turn are two writers, and only the read side notices** —
-      [M], stated by `D-2026-09-06-a-sweep-and-a-live-turn-are-two-writers`. `aput` writes blobs
-      first and the `checkpoints` row second, so a turn whose blobs land before `_DELETE_ORPHANED`'s
-      snapshot and whose row lands after it loses them; the guard that ADR shipped is on the
-      **read**, which detects the loss rather than preventing it. Nothing synchronises the two
-      parties without a lock on the turn-serving write path, and taking one there is the decision
-      this row is for.
-
 
 ## 5 — Where the field moved past us
 

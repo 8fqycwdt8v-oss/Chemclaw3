@@ -2400,3 +2400,62 @@ and is better when the fix is finished; the backup is what covers mutating work 
 The tell that something was wrong was a mutation reddening a test it had no business touching
 (`test_a_refusal_outside_the_scope_names_what_was_approved` failing on a change to the HTTP route).
 **A mutation that reddens the wrong test is a signal about the tree, not about the test.**
+
+## A race test that orchestrates both sides can reproduce neither (2026-09-13)
+
+**What happened.** W24.3 asked for a lock-order deadlock driven to failure on the pre-fix code. I wrote
+one test that raced two real Postgres connections *and* asserted the route's retry. It passed. It also
+passed **six times out of six with the retry removed**, because it released the other transaction
+before the delete under test had taken any lock — so no cycle ever formed and the assertion was about
+nothing. A hand-written probe of the same two orders, with the release gated on the other side being
+*known* to hold its lock, deadlocked 16 times out of 16.
+
+The deeper reason it could not be one test: which transaction Postgres kills is decided by which lock
+request *closes* the cycle, so external orchestration can reliably make the other side the victim and
+cannot reliably make the side under test the victim. One test wanted two incompatible timings.
+
+**Rule: a concurrency test asserts that the interleaving it needed actually happened.** "Exactly one of
+the two transactions was aborted" is one line, and it turns a run where no cycle formed into a failure
+instead of a pass. And when the outcome to be asserted depends on *which* party loses a race nobody
+controls, split it: race the mechanism, inject the response.
+
+## Thirteen red tests can be a broken fixture, not a caught mutation (2026-09-13)
+
+**What happened.** Mutation-testing W24.6 I edited a SQL string to invert its intent, twice, and both
+times produced invalid SQL — an unterminated quote, then an untyped placeholder. Each run reddened
+**thirteen** tests in the file. Thirteen red lines read like a mutation being caught emphatically.
+Neither run tested anything: the fixture was broken, so no test reached its subject. The valid mutation
+(`run_id <> (%s::text || '-never')`) reddened exactly **one** test, on the assertion written for it.
+
+This is the other half of the 2026-09-12 lesson. That one was a mutation that did not apply and looked
+like one that survived; this one applied, broke something upstream of the subject, and looked like one
+that was caught.
+
+**Rule: a mutation is checked against the test it was written to redden, not against the count.** If a
+mutation reddens tests it has no business touching, read it as a signal about the mutation — the same
+way a mutation reddening the *wrong* test is a signal about the tree. And for SQL specifically, run the
+mutated statement once before believing its result: a syntax error is indistinguishable from a finding
+in a pytest summary.
+
+## Two green runs are not a stable failure set (2026-09-13)
+
+**What happened.** W24.8 asked whether `pytest-xdist` is a win. I ran the suite twice under `-n 4`,
+both clean, and wrote an ADR whose headline was *"the failure set is identical in every arm"* — then
+changed `make test`'s default to four workers on the strength of it. The verification run I took
+**because** the default had changed failed two extra tests. Five runs put the rates at 2-in-5 and
+1-in-5, and both tests pass serially every time. One of them was on a list of four the brief had
+predicted and my ADR had dismissed as "a problem that did not occur".
+
+The wrong conclusion is not the interesting part; the sample size is. Two clean runs of an 8,800-test
+suite is an ordinary outcome for a 40 %-per-run flake. What the claim asserted was *stability* — a
+statement about the distribution — and two samples cannot support that in the "always" direction. The
+speed half of the same measurement was fine on two runs, because a wall clock is one number and a
+failure set is a sample.
+
+**Rule: a claim that something is stable carries its repetition count, and the count has to be big
+enough for the rate it is excluding.** "Identical in every arm" over n=2 is "identical in two runs";
+write that instead, and then decide whether two is enough for the decision being taken. When the
+decision is to change a *gate*, it is not.
+
+The corollary that saved it: **after changing a default, re-run the thing the default governs.** The
+only reason this was caught before merge is that changing `make test` meant running `make test`.

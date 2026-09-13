@@ -26,7 +26,8 @@ import chemclaw.agent.verifier as verifier_module
 import chemclaw.api.runner as runner
 import chemclaw.api.runner_trace as runner_trace
 from chemclaw.agent.loop_cap import record_loop_cap
-from chemclaw.agent.plan_gate import PLAN_APPROVAL_PROMPT
+from chemclaw.agent.plan_approval_store import plan_approval_store
+from chemclaw.agent.plan_gate import PLAN_APPROVAL_PROMPT, approval_stands, plan_identity
 from chemclaw.agent.session import TurnSession
 from chemclaw.agent.spend_cap import record_spend_cap
 from chemclaw.agent.verifier import ClaimCheck, VerificationResult
@@ -821,23 +822,29 @@ def test_the_transcript_stores_what_the_agent_did_not_only_what_it_said() -> Non
 # --- the plan-approval prompt: a gated turn that ends blocked must say so on the stream ----------
 
 
-def _plan_gated(monkeypatch: pytest.MonkeyPatch, todos: list[str] | None, approved: bool) -> None:
-    """Arrange a `plan_only` turn whose session proposes `todos` under a given decision state.
+def _plan_gated(monkeypatch: pytest.MonkeyPatch, titles: list[str] | None, approved: bool) -> None:
+    """Arrange a `plan_only` turn whose session proposes `titles` under a given decision state.
 
     The plan and the decision are faked at the runner's own imports — the same seam the
     verification tests above use — because what is under test is the emission rule, not the
     checkpointer read or the approval store, which have their own tests.
+
+    The fake answers `session_plan`'s shape — whole steps, declaration included — because that is
+    what the identity is taken over
+    (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`).
     """
     monkeypatch.setattr(settings, "harness_enabled", True)
     monkeypatch.setattr(settings, "harness_autonomy", "plan_only")
 
-    async def _todos(_session_id: str) -> list[str] | None:
-        return todos
+    async def _plan(_session_id: str) -> list[dict[str, Any]] | None:
+        if titles is None:
+            return None
+        return [{"content": t, "status": "pending", "tools": []} for t in titles]
 
     async def _stands(_session_id: str, _plan_hash: str | None) -> bool:
         return approved
 
-    monkeypatch.setattr(runner, "session_todos", _todos)
+    monkeypatch.setattr(runner, "session_plan", _plan)
     monkeypatch.setattr(runner, "approval_stands", _stands)
 
 
@@ -892,12 +899,47 @@ def test_an_unreadable_plan_stays_silent_rather_than_failing_the_turn(
     assert _answer(events) is not None
 
 
+def test_an_approval_that_authorizes_no_tool_is_still_an_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read-only plan's approval must not re-ask forever — the `None`-vs-empty rule, as an effect.
+
+    `approval_stands` is `await approved_scope(...) is not None`, and the comparison is the control:
+    `frozenset()` means *somebody approved a plan that declared no state-changing tool*, which is a
+    real and common decision, while `None` means nobody has decided. A truthiness test
+    (`bool(await approved_scope(...))`) collapses them, and the visible consequence is here rather
+    than in the gate — the card is re-emitted on every turn of a plan the chemist has already
+    approved, which is the one thing an approval prompt must never do.
+
+    **Deliberately *not* stubbing `approval_stands`**, which every other case in this block does.
+    That stub is why the rule was docstring-only: collapsing the comparison left the whole suite
+    green, because its one caller was patched away two functions up. This drives the real predicate
+    against the real store, so the assertion is about the chain rather than about the emission rule.
+    """
+    monkeypatch.setattr(settings, "session_store", "memory")
+    plan_approval_store.cache_clear()
+    store = plan_approval_store()
+    _plan_gated(monkeypatch, ["look up the melting point of aspirin"], approved=False)
+    monkeypatch.setattr(runner, "approval_stands", approval_stands)
+    steps = [{"content": "look up the melting point of aspirin", "status": "pending", "tools": []}]
+    plan_hash = plan_identity(steps)
+    assert plan_hash is not None
+    asyncio.run(store.record("s-1", plan_hash, "chemist-1", True, frozenset()))
+    try:
+        assert [e for e in _run_turn() if isinstance(e, ApprovalRequestEvent)] == [], (
+            "a plan whose approval authorizes no tool was read as unapproved, so the chemist is "
+            "asked again for a decision they have already made"
+        )
+    finally:
+        plan_approval_store.cache_clear()
+
+
 def test_a_classic_turn_never_asks_for_plan_approval(monkeypatch: pytest.MonkeyPatch) -> None:
     """With the harness off there is no plan and no gate — the prompt would be unanswerable."""
     monkeypatch.setattr(settings, "harness_enabled", False)
 
-    async def _todos(_session_id: str) -> list[str] | None:
+    async def _plan(_session_id: str) -> list[dict[str, Any]] | None:
         raise AssertionError("an ungated turn must not read the plan at all")
 
-    monkeypatch.setattr(runner, "session_todos", _todos)
+    monkeypatch.setattr(runner, "session_plan", _plan)
     assert [e for e in _run_turn() if isinstance(e, ApprovalRequestEvent)] == []

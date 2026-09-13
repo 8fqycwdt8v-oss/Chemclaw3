@@ -383,7 +383,10 @@ async def _plan_command(prompt: str, actor: str, saver: Any) -> str:
     steps = await session_plan(_CLI_SESSION_ID, saver=saver) or []
     plan = [str(step["content"]) for step in steps]
     scope = declared_scope(steps)
-    plan_hash = plan_identity(plan)
+    # The steps, not `plan`: the identity covers each step's declaration as well as its text
+    # (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`), so hashing
+    # the text alone would record a decision against a plan identity the gate never asks about.
+    plan_hash = plan_identity(steps)
     if prompt.lower() == "/plan":
         lines = plan or ["(no plan yet)"]
         if plan_hash is None:

@@ -79,7 +79,7 @@ async def _read_plan(session_id: str, approvals: ApprovalStore) -> _PlanRead:
     """
     plan = await session_plan(session_id)
     todos = None if plan is None else [str(step["content"]) for step in plan]
-    approvable = plan_identity(todos or [])
+    approvable = plan_identity(plan or [])
     decision = await approvals.decision(session_id, approvable) if approvable else None
     return _PlanRead(
         todos=todos,
@@ -340,6 +340,16 @@ async def decide_plan(
     409, not a silent approval of the current plan: it means the plan changed between being
     shown and being approved, and the human agreed to something else.
 
+    **"The plan" there includes what each step declares**, and for a while it did not
+    (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`). The guard
+    compared the posted hash against an identity taken over step *text*, while the scope recorded
+    below is read off the live plan — so a rewrite keeping every step's text and widening its
+    `tools` passed the guard on the chemist's own hash and was stamped as what they had approved.
+    Measured end to end: shown scope `[]`, rewritten scope `['record_knowledge_note', 'watch_for']`,
+    hash unchanged, 204, both tools then ran. No concurrency was needed — an unapproved plan is not
+    a hold, so any follow-up message takes a turn while the card is open, and `out_of_scope_refusal`
+    tells the model in as many words to make exactly that rewrite.
+
     A session proposing **no** work items has nothing to decide on, and this refused nothing:
     the empty todo list hashes to a global constant, so a decision could be recorded against
     "the empty plan" — an identity every session shares and comes back to whenever it loses its
@@ -348,7 +358,7 @@ async def decide_plan(
     what counts as a plan.
     """
     plan = await session_plan(session_id) or []
-    plan_hash = plan_identity([str(step["content"]) for step in plan])
+    plan_hash = plan_identity(plan)
     if plan_hash is None:
         raise HTTPException(
             status_code=409,
@@ -372,9 +382,16 @@ async def decide_plan(
         principal.oid or "",
         body.approved,
         # The scope is taken from the plan being decided on, here, once — not read back from the
-        # todo list when a call is gated. That is what stops the model widening what it was
-        # granted: `plan_identity` hashes `content` only, so a rewrite that keeps the text and adds
-        # a tool to a step hashes to this same approved plan, and the gate still reads this row.
+        # todo list when a call is gated. That is what stops the model widening an approval it
+        # already has: the gate reads this row and never the live declaration.
+        #
+        # **What stops it widening the approval being given is the guard above**, and that took a
+        # second decision (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-
+        # nobody-read`). This comment used to argue the opposite — that hashing `content` only was
+        # harmless here because the gate reads the row — and the hole was that this line derives the
+        # row from the *live* plan: a rewrite keeping every step's text and widening its `tools`
+        # hashed identically, so the chemist's own hash matched and the widened declaration was what
+        # got stamped. `plan_identity` covers the declaration now, so the 409 fires instead.
         declared_scope(plan),
     )
     # Nothing else to flip. This used to call `grant_execute` as well, moving the session's MAF

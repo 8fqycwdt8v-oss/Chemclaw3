@@ -42,7 +42,7 @@ from chemclaw.agent.chemclaw_agent import (
 from chemclaw.agent.framing import ENVELOPE_TAG, SYSTEM_SPEECH_MARK
 from chemclaw.agent.langgraph_agent import _labelled, build_langgraph_agent, skills_backend
 from chemclaw.agent.loop_cap import loop_capped
-from chemclaw.agent.plan_gate import PLAN_GATE_REASON, plan_approval_refusal, plan_identity
+from chemclaw.agent.plan_gate import PLAN_GATE_REASON, plan_approval_refusal
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
@@ -704,22 +704,6 @@ def test_a_read_only_call_is_untouched_by_the_gate(monkeypatch: pytest.MonkeyPat
     assert content != _as_the_model_sees_it(
         denial_result(plan_approval_refusal("ask_clarifying_question"))
     )
-
-
-def test_both_engines_hash_a_plan_to_the_same_identity() -> None:
-    """An approval is a durable row, so the two engines must agree on what it identifies.
-
-    This is the one place a divergence would be *retroactive*: a hash computed differently would
-    silently invalidate every decision a chemist has already recorded, rather than merely behaving
-    oddly from now on. `plan_identity` is the single definition; what is pinned here is that the
-    LangGraph state shape (`todos[i]["content"]`) feeds it the same items MAF's `todo_plan_items`
-    does, and that the empty plan is nobody's plan under either.
-    """
-    titles = ["gather the evidence", "compute the barrier", "propose the note"]
-    todos = [{"content": title, "status": "pending"} for title in titles]
-
-    assert plan_identity([todo["content"] for todo in todos]) == plan_identity(titles)
-    assert plan_identity([]) is None, "the empty plan is a constant every session shares"
 
 
 def test_the_gate_is_absent_when_the_deployment_did_not_ask_for_it(

@@ -558,6 +558,12 @@ invocations — CI runs exactly these, so a green `make` locally means a green C
 
 - **The gate**: `make lint` (ruff lint + format) · `make type` (`mypy --strict`, every first-party
   package) · `make test` (pytest) · `make check` runs all three · `make cov` adds the coverage floor.
+  **`make test PYTEST_WORKERS=4` is about twice as fast and is an opt-in rather than the default**
+  (`D-2026-09-13-a-stable-failure-set-is-not-two-green-runs`): measured 18:13 → 09:30 on the suite and
+  27:25 → 12:28 on `cov`, coverage unchanged — but two tests fail 2-in-5 and 1-in-5 in parallel and
+  never serially, and a gate that reds for a scheduling artefact teaches everybody to re-run. So the
+  gate is serial; four workers are for a local loop, and a failure under them is re-run serially
+  before it is believed. `-n auto` is declined: every worker draws its own Postgres pool.
 - **The validators**, each guarding a declaration against the live surface: `kg-validate`,
   `skill-validate`, `connector-validate`, `datasource-validate`, `sink-validate`,
   `channel-validate`,

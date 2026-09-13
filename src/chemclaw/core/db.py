@@ -693,17 +693,53 @@ async def pooling() -> AsyncIterator[None]:
         # `clear()` below is the release rather than a tidy-up after one.
         # `_forget_pools_of_ended_loops` is the same act, performed as soon as the loop ends
         # instead of at shutdown. Production has one loop per process and closes what it opened.
-        here = asyncio.get_running_loop()
+        await close_pools_of_this_loop()
         with _POOL_REGISTRY_LOCK:
-            mine = [key for key in _POOLS if key[0] is here]
-            pools = [_POOLS.pop(key) for key in mine]
             abandoned = list(_POOLS.values())
             _POOLS.clear()
-        # Both drops happen outside the lock, for the reason `_forget_pools_of_ended_loops` gives:
-        # the release runs psycopg's five-second `__del__`, and `close()` awaits.
+        # The drop happens outside the lock, for the reason `_forget_pools_of_ended_loops` gives:
+        # a registry the request path reads should not be held across a refcount drop.
         abandoned.clear()
-        for pool in pools:
-            await pool.close()
+
+
+async def close_pools_of_this_loop() -> None:
+    """Close and forget every pool the *running* loop opened — before that loop ends.
+
+    **A loop that opened a pool and ends without closing it does not merely leak, it can hang**
+    (`D-2026-09-13-a-loop-that-abandons-its-pool-can-fail-to-end`). `asyncio.run` closes its loop
+    through `runners._cancel_all_tasks`, which cancels every remaining task and then *awaits* them
+    all; `psycopg_pool`'s background connect and health-check workers are tasks on that loop, and
+    one that is mid-reconnect does not come back. Measured inside a pooled process with a nested
+    `asyncio.run` on a second thread — the shape `evals/retrieval._run_sync` and
+    `durable/eval_drift` both produce — the nested thread never returned, stack in
+    `_cancel_all_tasks`:
+
+        min_size=1,  max_size=1   ->  0 of 8 rounds hung
+        min_size=2,  max_size=16  ->  3 of 8      (the shipped defaults)
+        min_size=8,  max_size=16  ->  8 of 8
+
+    `min_size=max_size=1` is the one configuration that does not hang, and it is the configuration
+    `tests/test_db_pool.py` pinned — which is why a defect reachable on the shipped defaults had a
+    green test sitting on top of it.
+
+    **This is the *pair* of `_forget_pools_of_ended_loops`, not a duplicate of it.** That function
+    reclaims a pool whose loop has *already* ended, which is all anybody can do by then: psycopg
+    schedules a pool's shutdown on its own loop, so `close()` on a dead one raises
+    `RuntimeError: Event loop is closed`. This one runs while the loop is still alive, which is the
+    only moment `close()` is available — so the abandon-and-reclaim path stays as the fallback for a
+    loop nobody closed, rather than being the plan.
+
+    Safe to call on a loop that opened nothing: it closes the pools keyed on this loop and there are
+    none. Called by `pooling()` on the way out, and by any caller that runs its own loop to
+    completion inside a process that pools.
+    """
+    here = asyncio.get_running_loop()
+    with _POOL_REGISTRY_LOCK:
+        mine = [key for key in _POOLS if key[0] is here]
+        pools = [_POOLS.pop(key) for key in mine]
+    # Outside the lock, because `close()` awaits and the registry is read from the request path.
+    for pool in pools:
+        await pool.close()
 
 
 def register_pool(pool: Any) -> None:
@@ -738,6 +774,66 @@ def unregister_pool(pool: Any) -> None:
             _FOREIGN_POOLS.remove(pool)
 
 
+# Dedicated connections a caller holds open and asked to be counted — see `register_connection`.
+# A list of `(connection, conninfo)` rather than a set, because `AsyncConnection` is unhashable
+# in psycopg 3 and the conninfo has to travel with it: the connection itself does not keep the
+# string it was dialled with in a form `pg_endpoint` can read.
+_HELD_CONNECTIONS: list[tuple[Any, str]] = []
+
+
+def register_connection(conn: Any, conninfo: str) -> None:
+    """Count one *dedicated* connection a caller holds open, for as long as it holds it.
+
+    **A pool is not the only thing that occupies a backend, and the budget could only see pools**
+    (`D-2026-09-13-a-connection-counted-where-the-budget-applies`). `publish/drivers/postgres.py`
+    opens a bare `AsyncConnection` and keeps it for the driver's life; it is in neither `_POOLS` nor
+    `_FOREIGN_POOLS`, so a process holding one reported a ceiling one lower than it could reach.
+    Registering it as a *pool* is what the `BACKLOG.md` row proposed and it raises:
+    `_process_max_connections` sums `pool.max_size`, and measured,
+    `AttributeError: 'AsyncConnection' object has no attribute 'max_size'`.
+
+    **Counted only where the budget it feeds applies, which is `postgres_dsn`'s server.**
+    `pg_fleet_max_connections` is a ceiling on *that* server, and a result sink points by design at
+    a database this system does not own (`D-2026-08-25-a-cache-is-not-a-record`). Charging a
+    foreign warehouse's connection to the primary's budget would be the same error as the
+    under-count, in the other direction — so the endpoint decides, through the same `pg_endpoint`
+    the session-store split already uses. A sink on its own server counts 0 here and is the
+    operator's to size; `deploy/README.md` says so.
+
+    Registration only: the caller keeps the lifecycle, exactly as `register_pool` leaves a foreign
+    pool's close to the module that opens it. A closed connection stops counting without being
+    unregistered, because the count reads `conn.closed` — but `unregister_connection` is still the
+    right call on a deliberate close, so the list does not grow by one per drain.
+
+    Args:
+        conn: The open connection. Counted while `conn.closed` is false.
+        conninfo: The connection string it was dialled with, so the endpoint can be compared.
+            Not read off the connection: psycopg keeps no such attribute.
+    """
+    with _POOL_REGISTRY_LOCK:
+        if all(held is not conn for held, _ in _HELD_CONNECTIONS):
+            _HELD_CONNECTIONS.append((conn, conninfo))
+
+
+def unregister_connection(conn: Any) -> None:
+    """Stop counting a dedicated connection — called when its holder closes it."""
+    with _POOL_REGISTRY_LOCK:
+        _HELD_CONNECTIONS[:] = [entry for entry in _HELD_CONNECTIONS if entry[0] is not conn]
+
+
+def _held_connections_on(endpoint: tuple[str, str] | None) -> int:
+    """How many live registered connections this process holds on one endpoint.
+
+    A closed one is dropped rather than counted, so a holder that closed without unregistering
+    stops inflating the reading the moment it does — which is the direction that matters for a
+    gauge an alert compares against a ceiling.
+    """
+    with _POOL_REGISTRY_LOCK:
+        live = [(conn, info) for conn, info in _HELD_CONNECTIONS if not conn.closed]
+        _HELD_CONNECTIONS[:] = live
+    return sum(1 for _, info in live if pg_endpoint(info) == endpoint)
+
+
 def _all_pools() -> list[Any]:
     """Every pool this process holds: the ones built here, plus the registered foreign ones."""
     _forget_pools_of_ended_loops()
@@ -750,8 +846,13 @@ def _process_max_connections() -> int:
 
     Not `settings.pg_pool_max_size`, which is one pool's ceiling: see `bind_pool_metrics` for the
     measurement that separates the two.
+
+    **Plus the dedicated connections a caller registered**, each worth exactly one backend, and only
+    those on `postgres_dsn`'s server — see `register_connection` for why the endpoint decides.
     """
-    return sum(int(pool.max_size) for pool in _all_pools())
+    return sum(int(pool.max_size) for pool in _all_pools()) + _held_connections_on(
+        pg_endpoint(settings.postgres_dsn)
+    )
 
 
 def _session_store_max_connections() -> int:
@@ -778,7 +879,7 @@ def _session_store_max_connections() -> int:
     there = pg_endpoint(settings.session_store_dsn)
     return sum(
         int(pool.max_size) for pool in _all_pools() if pg_endpoint(str(pool.conninfo)) == there
-    )
+    ) + _held_connections_on(there)
 
 
 def pool_stats() -> dict[str, int]:

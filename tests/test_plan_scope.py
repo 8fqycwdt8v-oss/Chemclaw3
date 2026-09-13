@@ -61,7 +61,7 @@ async def _approve(
     `api/routes/plan.py` and `cli/chat.py` record with: a test that passed its own scope would
     prove the gate reads the column and nothing about what the column ever gets.
     """
-    plan_hash = plan_identity([str(step["content"]) for step in steps])
+    plan_hash = plan_identity(steps)
     assert plan_hash is not None
     await store.record(session_id, plan_hash, "chemist-1", True, declared_scope(steps))
 
@@ -146,10 +146,19 @@ def test_widening_a_step_after_approval_does_not_widen_the_approval(
 ) -> None:
     """The model cannot grant itself a tool by editing its own declaration.
 
-    `plan_identity` hashes `content` only — deliberately, so the canonical "tick the step, run its
-    tool" batch keeps its approval — which means a plan whose text is unchanged and whose `tools`
-    have grown hashes to the *same approved plan*. The gate must therefore read the recorded scope
-    and never the live one. If it read the live one this test's second call would run.
+    **Two independent reasons, and this test used to assert the weaker one as its precondition.**
+    The gate reads the recorded scope and never the live one, so a widened declaration gains nothing
+    even where the approval still stands — and since
+    `D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read` the approval no
+    longer stands either: the identity covers each step's declaration, so the widened plan is a
+    different plan with no decision against it at all.
+
+    The precondition therefore runs the other way now. It asserted that widening leaves the identity
+    *unchanged* — which was true, and was the hole: the decision route's 409 freshness guard read
+    that same identity, so a rewrite made between the chemist reading the card and posting their
+    decision was stamped as what they had approved
+    (`tests/test_plan_scope.py::test_a_rewrite_that_widens_a_declaration_does_not_pass_the_freshness_guard`
+    drives it). The effect assertion is untouched, and is what this test is for.
     """
 
     async def _run() -> bool:
@@ -158,9 +167,10 @@ def test_widening_a_step_after_approval_does_not_widen_the_approval(
         widened = [
             _step("write up what we know about aspirin", "record_knowledge_note", "watch_for")
         ]
-        assert plan_identity([s["content"] for s in approved]) == plan_identity(
-            [s["content"] for s in widened]
-        ), "the precondition is that widening a declaration does not change the plan's identity"
+        assert plan_identity(approved) != plan_identity(widened), (
+            "widening a step's declaration left the plan's identity unchanged, so the decision "
+            "route's freshness guard cannot see the rewrite"
+        )
         return await _ran("watch_for", "widened", widened)
 
     assert not asyncio.run(_run()), (
@@ -325,3 +335,107 @@ def test_the_decision_route_records_what_the_plan_declared(
     assert recorded is not None and recorded.scope == frozenset({"record_knowledge_note"}), (
         f"the route recorded an approval authorizing {recorded and sorted(recorded.scope)}"
     )
+
+
+def test_a_rewrite_that_widens_a_declaration_does_not_pass_the_freshness_guard(
+    monkeypatch: pytest.MonkeyPatch, approvals: InMemoryPlanApprovalStore
+) -> None:
+    """The approval-time widening window, driven through the real route.
+
+    `D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`. Stamping the
+    scope at decide time (above) stops a rewrite widening an approval that has already been given.
+    It does nothing about a rewrite made *while the decision card is open*, because the scope the
+    route stamps is read off the **live** plan once the posted hash has matched — and the hash
+    matched, since the identity covered step text only. So: show a plan declaring nothing, keep
+    every step's text, widen its `tools`, and the chemist's own hash still satisfies the 409 guard.
+
+    Measured on the pre-fix code through this exact sequence: shown scope `[]`, rewritten scope
+    `['record_knowledge_note', 'watch_for']`, identity unchanged, **204**, and the row came back
+    authorizing both. No concurrency is involved — an unapproved plan is not a hold, so any
+    follow-up message takes a turn while the card is open, and `out_of_scope_refusal` tells the
+    model in as many words to rewrite the plan so a step declares the tool it wants.
+
+    The assertion is the route's answer and the absence of a row, not the hash: a hash comparison
+    here would be a second copy of `plan_identity`'s rule, which is the vacuous shape
+    `tasks/lessons.md` records. What makes it non-vacuous is that nothing in this test computes an
+    identity at all — it posts the one the server rendered on the card, and asks what the server
+    does with it.
+    """
+    from fastapi.testclient import TestClient
+
+    from chemclaw.api.app import create_app
+    from chemclaw.api.auth import Principal, require_principal
+    from chemclaw.api.routes import plan as plan_routes
+    from tests.test_service import _FakeOwnerStore, _no_connectors
+
+    shown = [_step("look up the melting point of aspirin")]
+    widened = [_step("look up the melting point of aspirin", "record_knowledge_note", "watch_for")]
+    live: list[list[dict[str, Any]]] = [shown]
+
+    async def _plan(_session_id: str, **_kwargs: Any) -> list[dict[str, Any]]:
+        return live[0]
+
+    monkeypatch.setattr(plan_routes, "session_plan", _plan)
+    app = create_app(owner_store=_FakeOwnerStore(), connector_factory=_no_connectors)
+    app.state.plan_approvals = approvals
+    app.dependency_overrides[require_principal] = lambda: Principal(
+        oid="alice", upn="alice@corp", roles=frozenset()
+    )
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["session_id"]
+    card = client.get(f"/sessions/{session_id}/plan").json()
+    assert card["scope"] == [], card
+    live[0] = widened
+    res = client.post(
+        f"/sessions/{session_id}/plan/decision",
+        json={"approved": True, "plan_hash": card["plan_hash"]},
+    )
+    assert res.status_code == 409, (
+        f"the widened plan was stamped approved on the hash of the plan the chemist read: "
+        f"{res.status_code}"
+    )
+
+    async def _read() -> Any:
+        return await approvals.decision(session_id, card["plan_hash"])
+
+    recorded = asyncio.run(_read())
+    assert recorded is None, (
+        f"an approval was recorded authorizing {recorded and sorted(recorded.scope)}"
+    )
+
+
+def test_the_plans_identity_moves_with_its_declaration_and_not_with_its_progress() -> None:
+    """The two sensitivities the identity has to have, asserted directly and in one place.
+
+    **Sensitive to the declaration**, or the decision route's freshness guard cannot see a widening
+    rewrite — the hole
+    `D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read` closes, driven
+    through the route above. **Insensitive to `status`**, or the canonical "tick the completed step,
+    run the next one" batch revokes its own approval and an approved multi-step plan livelocks
+    against the repeat guard (`tests/test_plan_gate.py` drives that half as an effect).
+
+    It replaces a test in `tests/test_langgraph_agent.py` that claimed both engines hashed a plan to
+    one identity, which survived this whole change green and could not have failed it: its assertion
+    was
+    `plan_identity([t["content"] for t in todos]) == plan_identity(titles)` over `todos` built from
+    `titles` one line above — a value compared with itself, and about a second engine that no longer
+    exists. That is the vacuous shape `tasks/lessons.md` records.
+    """
+    narrow = [_step("write up what we know", "record_knowledge_note")]
+    widened = [_step("write up what we know", "record_knowledge_note", "watch_for")]
+    assert plan_identity(narrow) != plan_identity(widened), (
+        "a step's declaration is outside the plan's identity, so a widening rewrite is invisible "
+        "to the decision route's 409 guard"
+    )
+    ticked = [{**narrow[0], "status": "completed"}]
+    assert plan_identity(ticked) == plan_identity(narrow), (
+        "ticking a step changed the plan's identity, which revokes the approval it is making "
+        "progress under"
+    )
+    # Neither sensitivity is a property of the *order* a step declares its tools in, which nothing
+    # about authorization depends on — an identity that moved on a reorder would revoke a live
+    # approval for a change a chemist could not see.
+    assert plan_identity(
+        [_step("write up what we know", "watch_for", "record_knowledge_note")]
+    ) == (plan_identity(widened))
+    assert plan_identity([]) is None, "the empty plan is a constant every session shares"

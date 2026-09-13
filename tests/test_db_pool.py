@@ -16,6 +16,7 @@ Three properties matter, and none can be proven without a live backend:
 """
 
 import asyncio
+import threading
 
 import psycopg
 import pytest
@@ -25,6 +26,7 @@ from psycopg_pool import AsyncConnectionPool
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import Metrics
+from chemclaw.evals.retrieval import _run_sync
 from tests.pg import migrated_db_or_skip
 
 
@@ -282,6 +284,84 @@ def test_a_second_event_loop_gets_its_own_pool_rather_than_borrowing_a_broken_on
         assert not (mine & theirs), (
             "the second loop was handed a pool bound to the first loop's futures; its checkouts "
             "are woken by nothing and are served only when the pool timeout expires"
+        )
+
+    asyncio.run(_run())
+
+
+def test_a_nested_loop_that_opened_a_pool_still_ends(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A loop that abandons its pool does not merely leak it — it can fail to end at all.
+
+    `D-2026-09-13-a-loop-that-abandons-its-pool-can-fail-to-end`. `asyncio.run` shuts its loop down
+    through `asyncio.runners._cancel_all_tasks`, which cancels every remaining task and then
+    **awaits** them; `psycopg_pool`'s background connect and health-check workers are tasks on that
+    loop, and one mid-reconnect does not come back. So the nested `asyncio.run` never returns, with
+    its stack in `_cancel_all_tasks` — measured, dumped, and not a leak but a wedged thread.
+
+    The shape is the one two modules already produce on purpose:
+    `evals/retrieval._run_sync` runs a live metric's retrieval on its own loop, and
+    `durable/eval_drift` runs `run_eval` through `asyncio.to_thread` *inside* the background
+    worker's `db.pooling()`.
+
+    **`min_size` is 8 here because the rate depends on it, and because the one configuration that
+    does not hang is the one the rest of this file pins.** Measured over 8 rounds per setting:
+
+        min_size=1, max_size=1   ->  0 hangs
+        min_size=2, max_size=16  ->  3 hangs   (the shipped defaults)
+        min_size=8, max_size=16  ->  8 hangs
+
+    Every other pool test here sets `min_size` to 0 or 1 — `test_pool_exhaustion_surfaces_as_a_`
+    `connection_error` pins `min=max=1` outright — so the suite's own fixtures sat on exactly the
+    value that cannot reproduce it. A test at the shipped defaults would be red three times in
+    eight; this one is deterministic, which is what a regression test owes its reader.
+
+    The assertion is that the nested thread **joins**, bounded by a wall clock, and that is the
+    whole property. It deliberately does not inspect `_POOLS`: a registry that is empty because the
+    pool was closed and one that is empty because `_forget_pools_of_ended_loops` reclaimed it
+    afterwards look identical, and only one of them is a thread that came back.
+    """
+    monkeypatch.setattr(settings, "pg_pool_min_size", 8)
+    monkeypatch.setattr(settings, "pg_pool_max_size", 16)
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        async with db.pooling():
+            # The parent loop has to hold a pool too, or the process is not the pooled one the
+            # defect needs: `connection()` outside `pooling()` opens a dedicated connection and no
+            # pool exists to be abandoned anywhere.
+            async with db.connection(settings.postgres_dsn):
+                pass
+            returned = threading.Event()
+
+            async def _touch() -> None:
+                async with db.connection(settings.postgres_dsn):
+                    pass
+
+            def _nested_loop() -> None:
+                """`evals/retrieval._run_sync` itself, on a thread with no loop of its own.
+
+                The real function rather than its wrapper, and that is the difference between this
+                test and a vacuous one: `_closing_this_loops_pools` could be perfect and `_run_sync`
+                could stop calling it, which is the arm a test driving the wrapper directly cannot
+                see. This is also production's own arm — `durable/eval_drift` reaches `_run_sync`
+                through `asyncio.to_thread` from inside the worker's `pooling()`, so the thread it
+                lands on has no running loop and the process has pools.
+                """
+                try:
+                    _run_sync(_touch())
+                finally:
+                    returned.set()
+
+            thread = threading.Thread(target=_nested_loop, daemon=True)
+            thread.start()
+            # Daemon and generously bounded: a hang here is the defect, and a test that hung with it
+            # would report as a timeout in whatever ran next rather than as this assertion.
+            joined = returned.wait(timeout=30.0)
+
+        assert joined, (
+            "the nested asyncio.run never returned: its loop is in _cancel_all_tasks awaiting "
+            "psycopg_pool's background workers, which a cancelled mid-reconnect worker does not "
+            "leave — so the thread that called a live metric is wedged for the life of the process"
         )
 
     asyncio.run(_run())

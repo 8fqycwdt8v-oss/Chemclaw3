@@ -32,11 +32,26 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from chemclaw.core.config import NOTE_INDEX_SOURCES, settings
+from chemclaw.core.db import close_pools_of_this_loop
 from chemclaw.evals.metric import Direction, EvalCase, MetricError, MetricResult, metric
 from chemclaw.kg.graph import scan_notes_dir
 from chemclaw.retrieval.retrievers import GraphRetriever
 
 _T = TypeVar("_T")
+
+
+async def _closing_this_loops_pools(coro: Coroutine[Any, Any, _T]) -> _T:
+    """Await `coro`, then close the pools its loop opened — inside that loop, where it is legal.
+
+    A `finally` rather than a success path, because the hang `_run_sync` records is a property of
+    the loop's *teardown* and happens whether the coroutine answered or raised.
+    `close_pools_of_this_loop` is `core/db`'s, because that is the module that knows what a pool is
+    keyed on; this wrapper exists so `evals` does not.
+    """
+    try:
+        return await coro
+    finally:
+        await close_pools_of_this_loop()
 
 
 def _run_sync(coro: Coroutine[Any, Any, _T]) -> _T:
@@ -57,18 +72,27 @@ def _run_sync(coro: Coroutine[Any, Any, _T]) -> _T:
     already running on this thread is a second thread spun up with its own fresh loop, so retrieval
     still completes instead of raising; the calling thread just blocks on `join` like any other
     synchronous call.
+
+    **Both arms close the pools their loop opened before that loop ends, and without it the first
+    one hangs** (`D-2026-09-13-a-loop-that-abandons-its-pool-can-fail-to-end`). `asyncio.run` shuts
+    its loop down by cancelling every remaining task and *awaiting* them, and `psycopg_pool`'s
+    background workers are tasks on that loop: measured inside a pooled process, the nested
+    `asyncio.run` never returned on 3 of 8 rounds at the shipped pool defaults and 8 of 8 at
+    `min_size=8`. The first arm is the one production takes —
+    `durable/eval_drift` runs `run_eval` through `asyncio.to_thread` *inside* the background
+    worker's `pooling()`, so the thread this lands in has no running loop and the process has pools.
     """
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(coro)
+        return asyncio.run(_closing_this_loops_pools(coro))
 
     outcome: list[_T] = []
     failure: list[BaseException] = []
 
     def _target() -> None:
         try:
-            outcome.append(asyncio.run(coro))
+            outcome.append(asyncio.run(_closing_this_loops_pools(coro)))
         except BaseException as exc:  # re-raised on the calling thread below, not swallowed here
             failure.append(exc)
 

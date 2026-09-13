@@ -13,6 +13,7 @@ processes.
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
@@ -23,17 +24,25 @@ REQUESTER = "pending-test-requester"
 
 
 async def _clean() -> None:
-    """Remove this file's rows, so a re-run starts from the same place."""
+    """Remove this file's rows, so a re-run starts from the same place.
+
+    The archive too: the application holds no DELETE on `pending_request_answers` by design
+    (`infra/sql/grants/app_privileges.sql`), and this runs as the owner, so a left-over row from a
+    previous run would make the re-ask assertions read the wrong cycle.
+    """
     async with await connect(settings.postgres_dsn) as conn:
         await conn.execute("DELETE FROM pending_requests WHERE requested_by = %s", (REQUESTER,))
+        await conn.execute(
+            "DELETE FROM pending_request_answers WHERE requested_by = %s", (REQUESTER,)
+        )
         await conn.commit()
 
 
 async def _open(
     request_id: str, *, asked_of: str = "", days: float = 7.0, run_id: str = "run-1"
-) -> bool:
-    """Open one wait with this file's requester, returning whether it claimed the row."""
-    return await pending_store.open_request(
+) -> None:
+    """Open one wait with this file's requester."""
+    await pending_store.open_request(
         request_id=request_id,
         kind="measurement",
         subject="run the four conditions",
@@ -249,55 +258,94 @@ def test_a_retry_of_the_opening_activity_does_not_disturb_a_settled_row() -> Non
     asyncio.run(_run())
 
 
-def test_an_opening_write_that_could_not_claim_the_row_says_so() -> None:
-    """The verdict `open_request` used to throw away, and the 90-day ghost that cost.
+def test_a_re_ask_of_an_answered_question_opens_and_the_answer_is_archived() -> None:
+    """All five shapes `_OPEN`'s guard admits, and what each does to the row and to the archive.
 
-    `_OPEN` is a *guarded* upsert, and the guard refuses one case on purpose: a re-ask of a
-    question somebody already **answered**, because reopening blanks `answered_by` and `answer`
-    and this table is in `retention._NOT_PRUNED` as "the attribution for an answer that released a
-    durable workflow" — the only record of it there is. Refusing is right. Refusing *in silence*
-    was not: `open_request` returned `None`, so the workflow could not tell "this projection is
-    mine" from "this projection belongs to a cycle that ended", and went on to wait against a row
-    reading `answered`. `open_requests` filters `state = 'waiting'`, so the new wait appeared in
-    nobody's inbox; the answer route read the stale state and returned 409 naming somebody else's
-    answer; and its own `settle_request` was refused too, so it ran blind to its whole deadline —
-    clamped at `awaiting_max_days`, which is 90 days — and left the row still reading `answered`.
+    `D-2026-09-13-an-answer-is-archived-so-the-question-can-be-asked-again`. Migration 079 scoped
+    the reopen to the terminal states in which **nobody answered**, because reopening blanks
+    `answered_at`/`answered_by`/`answer` and this table is in `retention._NOT_PRUNED` as "the
+    attribution for an answer that released a durable workflow" — the only record there is.
+    Refusing was the right direction and the wrong outcome: a legitimate re-ask of a standing
+    question — the same measurement in a later campaign round, a re-launched approval — met an
+    `answered` row, wrote nothing, and `durable/awaiting.py` raised a **non-retryable**
+    `ApplicationError`, so the workflow failed rather than waiting. The question could not be asked
+    again for as long as the old answer stood, which for this table is for ever.
 
-    Three verdicts, because the guard has to tell three cases apart and only one of them is a
-    conflict: a first open claims the row, a *retry* of the same run still holds it however the
-    row has since settled (an at-least-once activity must be replayable), and a different run
-    meeting an answered row does not hold it and must be told so.
+    So `_ARCHIVE_ANSWER` moves the answer into `pending_request_answers`, keyed on the run that
+    *answered*, in the same transaction and before the upsert — and `'answered'` joins the reopen.
+
+    **This test replaced the one that asserted the refusal, and it drives every shape rather than
+    the one that changed**, because the edit is to a `WHERE` clause that has now been rewritten
+    three times (076, 079, 096) and each rewrite broke a different one of these:
+
+    * a first ask opens;
+    * a **retry by the owning run** against an answered row leaves that row alone — an at-least-once
+      activity must be replayable, and archiving its own answer or blanking it would both be wrong;
+    * a **re-ask by a different run** reopens, and the previous answer is in the archive, whole;
+    * a re-ask after an `expired` cycle reopens and archives **nothing**, because nobody answered;
+    * a caller with no `run_id` is a different run to any named one, and behaves like one.
+
+    The archive is read with a direct query rather than through a store function: there is no reader
+    for it in `src/` and deliberately none — nothing in the system consults an archived answer, it
+    exists so that the record is not destroyed. A helper written only for this test would be the
+    reader, and then the test would be asserting its own code.
     """
+
+    async def _archived(request_id: str) -> list[tuple[str, str, dict[str, Any]]]:
+        async with await connect(settings.postgres_dsn) as conn:
+            cur = await conn.execute(
+                "SELECT run_id, answered_by, answer FROM pending_request_answers "
+                "WHERE request_id = %s ORDER BY run_id",
+                (request_id,),
+            )
+            return [(str(r[0]), str(r[1]), dict(r[2])) for r in await cur.fetchall()]
 
     async def _run() -> None:
         await migrated_db_or_skip()
         request_id = "req-claim"
         await _clean()
 
-        assert await _open(request_id, run_id="run-1") is True, (
-            "the first open did not claim the row it just wrote"
-        )
+        await _open(request_id, run_id="run-1")
         await pending_store.settle_request(
             request_id, state="answered", answered_by="u-9", answer={"value": 1}
         )
-        assert await _open(request_id, run_id="run-1") is True, (
-            "a retry of the opening activity was told it lost a row that is still its own run's; "
-            "an at-least-once activity would fail every time it was redelivered"
-        )
 
-        assert await _open(request_id, run_id="run-2") is False, (
-            "a re-ask met an answered row, wrote nothing, and was told nothing — so the wait runs "
-            "to its deadline invisible in every inbox and refused by the answer route"
-        )
-        stored = await pending_store.get_request(request_id)
-        assert stored is not None
-        assert (stored.state, stored.answered_by, stored.answer) == (
+        # A retry of the opening activity: the row is this run's already, and must not move.
+        await _open(request_id, run_id="run-1")
+        retried = await pending_store.get_request(request_id)
+        assert retried is not None
+        assert (retried.state, retried.answered_by, retried.answer) == (
             "answered",
             "u-9",
             {"value": 1},
-        ), (
-            "the refused open destroyed the previous cycle's attribution, which is the one thing "
-            "this table exists to keep"
+        ), "a retry by the run that already owns the row disturbed a state it had settled"
+        assert await _archived(request_id) == [], (
+            "a retry archived its own answer, which makes the archive a log of redeliveries "
+            "rather than of cycles"
+        )
+
+        # The re-ask. This is the case that used to fail the workflow.
+        await _open(request_id, run_id="run-2")
+        reopened = await pending_store.get_request(request_id)
+        assert reopened is not None
+        assert reopened.state == "waiting", (
+            f"the re-ask left the row {reopened.state!r}, so the new wait is absent from every "
+            "inbox and the answer route refuses it with a 409 naming somebody else's answer"
+        )
+        assert (reopened.answered_by, reopened.answer) == ("", {}), (
+            "the reopened row still carries the previous cycle's attribution"
+        )
+        assert await _archived(request_id) == [("run-1", "u-9", {"value": 1})], (
+            "the previous cycle's answer was not archived, so reopening destroyed the one record "
+            f"of it: {await _archived(request_id)}"
+        )
+
+        # An expired cycle has nothing to archive, and reopening it is unchanged behaviour.
+        await pending_store.settle_request(request_id, state="expired", answered_by="", answer={})
+        await _open(request_id, run_id="run-3")
+        assert await _archived(request_id) == [("run-1", "u-9", {"value": 1})], (
+            "an expired cycle was archived; the archive is for answers, and a row with no "
+            "`answered_by` violates its own CHECK"
         )
 
     asyncio.run(_run())

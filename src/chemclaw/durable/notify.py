@@ -10,6 +10,7 @@ scientific result is already done — the push-back is a notification, not a dur
 (durability stays in the job's own result path).
 """
 
+import asyncio
 import hashlib
 import json
 from datetime import timedelta
@@ -18,6 +19,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 from temporalio import activity, workflow
 from temporalio.exceptions import ActivityError
+from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.agent.session_events import record_session_event
@@ -136,10 +138,25 @@ async def notify_session_best_effort(session_id: str, kind: str, payload: dict[s
     the result and the notification is not. A caller that advances a *watermark* past what it just
     tried to send must not: for it, "delivered" and "swallowed" are different facts, and treating
     them alike loses the matches the failed send covered forever (`durable/digest.py`).
+
+    **A cancellation is not a delivery failure, and swallowing it left a durable wait alive**
+    (`D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-the-row-waiting`). A workflow
+    cancelled while this activity is in flight gets `ActivityError(cause=CancelledError)` —
+    measured, that exact pair — and catching it here told the caller "the push-back was dropped,
+    carry on". For `AwaitAnswerWorkflow` that meant the cancellation never reached its `except`
+    clause at all: the child went back to waiting on a seven-day timer and was **still `RUNNING` 30
+    s after its parent was terminated**, with the `pending_requests` row still `waiting` and
+    `retention._NOT_PRUNED` guaranteeing nobody would ever collect it. So the cancellation is re-
+    raised as the workflow-level `asyncio.CancelledError` its caller's cleanup clause is written
+    for, and this function keeps its promise only about the thing it promised: a *failed* delivery.
     """
     try:
         await notify_session(session_id, kind, payload)
     except ActivityError as exc:
+        if isinstance(exc.cause, TemporalCancelledError):
+            raise asyncio.CancelledError(
+                f"the push-back to session {session_id} was cancelled with its workflow"
+            ) from exc
         # **Named, not just counted.** Every drop used to read the same whatever caused it, so the
         # two states an operator has to tell apart — "the background queue is unserved" and "the
         # insert failed" — arrived as one line. `TimeoutType.SCHEDULE_TO_START` is the first one,

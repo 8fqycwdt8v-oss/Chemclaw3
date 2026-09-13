@@ -1063,6 +1063,36 @@ class SessionOwnerStore:
         """
         statements = _session_delete_statements()
         removed: dict[str, int] = {}
+        for attempt in range(settings.pg_deadlock_retries + 1):
+            try:
+                removed = await self._delete_session_once(session_id, statements)
+                break
+            except (psycopg.errors.DeadlockDetected, psycopg.errors.SerializationFailure):
+                if attempt == settings.pg_deadlock_retries:
+                    raise
+                log.warning(
+                    "deleting session %s was aborted as a deadlock victim (attempt %d); retrying",
+                    session_id,
+                    attempt + 1,
+                )
+        log.info(
+            "deleted session %s: %d row(s) across %d table(s)",
+            session_id,
+            sum(removed.values()),
+            len([table for table, count in removed.items() if count]),
+        )
+        return removed
+
+    async def _delete_session_once(
+        self, session_id: str, statements: tuple[tuple[str, str], ...]
+    ) -> dict[str, int]:
+        """One attempt at the delete transaction — the body `delete_session` retries.
+
+        Extracted so the retry wraps a whole transaction rather than a statement: a deadlock abort
+        rolls the transaction back, so resuming inside it is not available and the unit that can be
+        tried again is this one.
+        """
+        removed: dict[str, int] = {}
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 present = await existing_tables(cur, {table for table, _ in statements})
@@ -1073,12 +1103,6 @@ class SessionOwnerStore:
                     await cur.execute(statement, {"session_id": session_id})
                     removed[table] = cur.rowcount if cur.rowcount > 0 else 0
             await conn.commit()
-        log.info(
-            "deleted session %s: %d row(s) across %d table(s)",
-            session_id,
-            sum(removed.values()),
-            len([table for table, count in removed.items() if count]),
-        )
         return removed
 
 

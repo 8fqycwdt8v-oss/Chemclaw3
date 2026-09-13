@@ -26,11 +26,22 @@ list stays expressible and means what it says — this step changes nothing.
 
 **A declaration is not an authorization.** `declared_scope` is only ever read to *record* what a
 human approved (`api/routes/plan.py`, `cli/chat.py`); the gate reads the recorded scope back off
-`plan_approvals`, never off the live plan. That is what makes the model unable to widen its own
-scope: `plan_identity` hashes `content` only — deliberately, so the canonical "tick the step, run
-its tool" batch keeps its approval — so a rewrite that keeps every step's text and adds a tool to
-it hashes to the same approved plan and gains nothing, because the stamped scope is the one the
-human saw.
+`plan_approvals`, never off the live plan. That direction is what stops a rewrite widening an
+approval that has already been given.
+
+**It is not what stops one widening an approval that is still being given, and that took a second
+decision** (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`). This
+paragraph used to end by arguing that hashing `content` only was safe *because* the stamped scope is
+the one the human saw. Both clauses were true and the conclusion was false, because the scope is
+stamped by reading the **live** plan at decide time: shown a plan declaring nothing, a model that
+keeps every step's text and widens its `tools` leaves the identity unchanged, so the chemist's own
+hash still satisfies the route's 409 freshness guard and the widened declaration is what gets
+recorded. Driven end to end through `POST /sessions/{id}/plan/decision`: shown scope `[]`, rewritten
+scope `['record_knowledge_note', 'watch_for']`, hash unchanged, 204, both tools then ran.
+`plan_identity` now hashes each step's `content` *and* its declaration, by way of
+`step_declaration` below — so the identity a human decides on is the whole of what they are
+deciding, and a widening rewrite is a different plan that has to be shown and approved again. A
+status flip still hashes identically, which is the property the content-only rule existed for.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
@@ -141,6 +152,31 @@ class ScopedTodoListMiddleware(TodoListMiddleware):
         ]
 
 
+def step_declaration(todo: Mapping[str, Any]) -> list[str]:
+    """One step's declaration as the scope reader sees it: sorted, deduplicated, strings only.
+
+    The primitive under both readings of a declaration — the scope a decision records
+    (`declared_scope`) and the identity a decision is keyed on (`plan_gate.plan_identity`) — and it
+    is one function because the two must not be able to disagree. **An identity derived from a
+    *different* reading of `tools` than the scope is derived from is the defect this module's header
+    records**, one layer down: if this narrowed a value that the hash kept whole, or kept one the
+    hash narrowed, there would again be a pair of plans that authorize differently and hash alike.
+
+    Unreadable entries contribute nothing — a non-list `tools`, a non-string element. That is the
+    fail-closed direction for the scope, and for the identity it is merely conservative: a
+    declaration this cannot read narrows the authorization, and a change to the unreadable part
+    leaves the hash alone, which costs at most a re-approval nobody needed.
+
+    Sorted and deduplicated because neither the order of a step's declaration nor a repeat in it
+    changes what the step may call, and an identity that moved on a reordering would revoke a live
+    approval for no reason a chemist could see.
+    """
+    declared = todo.get(TOOLS_FIELD)
+    if not isinstance(declared, Sequence) or isinstance(declared, str | bytes):
+        return []
+    return sorted({name for name in declared if isinstance(name, str)})
+
+
 def declared_scope(todos: Iterable[Mapping[str, Any]]) -> frozenset[str]:
     """Every tool this plan's steps declare — the scope a human approving it would authorize.
 
@@ -149,14 +185,7 @@ def declared_scope(todos: Iterable[Mapping[str, Any]]) -> frozenset[str]:
     running step N+1's tool is the canonical harness shape (`plan_gate.plan_after_batch`), and a
     per-step scope would refuse exactly it.
 
-    Unreadable entries contribute nothing — a non-list `tools`, a non-string element. That is the
-    fail-closed direction: the scope is what a call is checked *against*, so anything this cannot
-    read narrows the authorization instead of widening it.
+    Per-step reading is `step_declaration`'s, so the scope and the plan identity narrow a malformed
+    declaration the same way.
     """
-    names: set[str] = set()
-    for todo in todos:
-        declared = todo.get(TOOLS_FIELD)
-        if not isinstance(declared, Sequence) or isinstance(declared, str | bytes):
-            continue
-        names.update(name for name in declared if isinstance(name, str))
-    return frozenset(names)
+    return frozenset(name for todo in todos for name in step_declaration(todo))

@@ -558,6 +558,20 @@ undeclared — the whole fleet's 278 against `256 + 0` — while the primary sat
 store, so the primary's side is the difference; with no split it is 0 in every pod and both
 branches are the original comparison.
 
+**A result sink's connection is counted only when its warehouse is `postgres_dsn`'s own server, and
+a sink elsewhere is yours to size** (`D-2026-09-13-a-connection-counted-where-the-budget-applies`).
+`publish/drivers/postgres.py` holds one un-pooled connection per enabled sink for the life of each
+drain pass, and it used to be invisible to the left-hand side of that alert — a pool-shaped reading
+of a thing that is not a pool. It now registers itself with `core/db` and counts as exactly one
+backend, on the endpoint it dials: a sink pointed at `postgres_dsn` raises
+`chemclaw_pg_pool_max_size` by one in the worker that holds it, and a sink pointed at a warehouse of
+its own contributes **nothing** here. That second half is deliberate rather than an omission. A
+result sink writes to a database this system does not own (`D-2026-08-25-a-cache-is-not-a-record`),
+`postgres.maxConnections` is a ceiling on *this* deployment's server, and charging a foreign
+warehouse's backend to it would be the same error as the under-count in the other direction. So the
+arithmetic for a sink on its own database is the operator's: one connection per worker replica that
+runs the drain, per enabled sink on that server, held for the pass.
+
 The last of those reads *held sessions* rather than a configured capacity, and the difference is
 forced rather than stylistic: two kinds of process dispatch to the calculation backend and they do
 not share a cap — a `calc` worker is bounded by `CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES`, while
