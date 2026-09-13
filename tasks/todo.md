@@ -368,7 +368,11 @@ Postgres and Temporal are up in this environment, so every one of these is driva
       **The row was wrong about the mechanism.** The race did not reproduce (0 of 78 settles lost);
       three uncovered windows did. `D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-
       the-row-waiting`; `asyncio.shield` declined on measurement; the reaper stays a BACKLOG row.
-- [ ] W24.2 `Chemclaw3` — a nested `asyncio.run` inside a pooled process can hang on loop teardown.
+- [x] W24.2 `Chemclaw3` — a nested `asyncio.run` inside a pooled process can hang on loop teardown.
+      Reproduced 3/8 at the shipped pool defaults and 8/8 at `min_size=8`; the named test pinned
+      `min=max=1`, the one value that cannot reproduce it.
+      `D-2026-09-13-a-loop-that-abandons-its-pool-can-fail-to-end`; `db.pooling()` round the nested
+      loop declined (it would turn pooling off for the parent).
 - [ ] W24.3 `Chemclaw3` — `delete_session` and the owner prune take two rows in opposite orders: a
       deadlock by lock ordering.
 - [ ] W24.4 `Chemclaw3` — the checkpoint sweep and a live turn are two writers and only the read

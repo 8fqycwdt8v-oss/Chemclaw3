@@ -409,23 +409,6 @@ topic).
       connections are the operator's to add. Anchors: `publish/drivers/postgres.py`,
       `core/db.py::_FOREIGN_POOLS`.
 
-- [ ] **A nested `asyncio.run` inside a pooled process can hang on loop teardown** — [M], found
-      2026-09-05 by a fresh-context review of `core/db`. `_forget_pools_of_ended_loops`
-      institutionalises abandoning a nested loop's pool and reclaiming it later, and nothing closes
-      it *before* that loop ends — so `asyncio.run`'s teardown cancels the pool's background fill
-      and then gathers it, while `psycopg_pool` treats `CancelledError` as a client exception,
-      logs an empty `error connecting in 'pool-N': ` and **reschedules the retry**. The gather never
-      completes. Measured, 15 runs an arm: abandoned pool at `pg_pool_min_size=2` hangs 7/15 and at
-      8 hangs 15/15; closing it first or leaving `_POOLING` off hangs 0/15.
-      `tests/test_db_pool.py::test_a_pool_whose_loop_has_ended_is_neither_counted_nor_left_holding_backends`
-      covers this path by name and opens by pinning `min_size = max_size = 1` — the one value at
-      which no second fill can be in flight; the same body at the shipped defaults hangs 8 of 12.
-      Reachable only through `durable/eval_drift` -> `evals/retrieval._run_sync`, which is
-      `eval_drift_enabled=False` by default and did not hang in 60 end-to-end runs, so this is a
-      mechanism with no structural guard rather than a live outage. The fix is to close a pool
-      before its loop ends rather than after. Anchors: `core/db.py::_forget_pools_of_ended_loops`,
-      `evals/retrieval.py::_run_sync`.
-
 - [ ] **`/readyz` cannot bound a Postgres that accepts the socket and stops answering** — [S],
       found 2026-09-05, upstream in origin and recorded here because `api/routes/ops.py` claimed
       otherwise. `asyncio.wait_for` bounds acquisition; on a warm pooled connection psycopg's

@@ -693,17 +693,53 @@ async def pooling() -> AsyncIterator[None]:
         # `clear()` below is the release rather than a tidy-up after one.
         # `_forget_pools_of_ended_loops` is the same act, performed as soon as the loop ends
         # instead of at shutdown. Production has one loop per process and closes what it opened.
-        here = asyncio.get_running_loop()
+        await close_pools_of_this_loop()
         with _POOL_REGISTRY_LOCK:
-            mine = [key for key in _POOLS if key[0] is here]
-            pools = [_POOLS.pop(key) for key in mine]
             abandoned = list(_POOLS.values())
             _POOLS.clear()
-        # Both drops happen outside the lock, for the reason `_forget_pools_of_ended_loops` gives:
-        # the release runs psycopg's five-second `__del__`, and `close()` awaits.
+        # The drop happens outside the lock, for the reason `_forget_pools_of_ended_loops` gives:
+        # a registry the request path reads should not be held across a refcount drop.
         abandoned.clear()
-        for pool in pools:
-            await pool.close()
+
+
+async def close_pools_of_this_loop() -> None:
+    """Close and forget every pool the *running* loop opened — before that loop ends.
+
+    **A loop that opened a pool and ends without closing it does not merely leak, it can hang**
+    (`D-2026-09-13-a-loop-that-abandons-its-pool-can-fail-to-end`). `asyncio.run` closes its loop
+    through `runners._cancel_all_tasks`, which cancels every remaining task and then *awaits* them
+    all; `psycopg_pool`'s background connect and health-check workers are tasks on that loop, and
+    one that is mid-reconnect does not come back. Measured inside a pooled process with a nested
+    `asyncio.run` on a second thread — the shape `evals/retrieval._run_sync` and
+    `durable/eval_drift` both produce — the nested thread never returned, stack in
+    `_cancel_all_tasks`:
+
+        min_size=1,  max_size=1   ->  0 of 8 rounds hung
+        min_size=2,  max_size=16  ->  3 of 8      (the shipped defaults)
+        min_size=8,  max_size=16  ->  8 of 8
+
+    `min_size=max_size=1` is the one configuration that does not hang, and it is the configuration
+    `tests/test_db_pool.py` pinned — which is why a defect reachable on the shipped defaults had a
+    green test sitting on top of it.
+
+    **This is the *pair* of `_forget_pools_of_ended_loops`, not a duplicate of it.** That function
+    reclaims a pool whose loop has *already* ended, which is all anybody can do by then: psycopg
+    schedules a pool's shutdown on its own loop, so `close()` on a dead one raises
+    `RuntimeError: Event loop is closed`. This one runs while the loop is still alive, which is the
+    only moment `close()` is available — so the abandon-and-reclaim path stays as the fallback for a
+    loop nobody closed, rather than being the plan.
+
+    Safe to call on a loop that opened nothing: it closes the pools keyed on this loop and there are
+    none. Called by `pooling()` on the way out, and by any caller that runs its own loop to
+    completion inside a process that pools.
+    """
+    here = asyncio.get_running_loop()
+    with _POOL_REGISTRY_LOCK:
+        mine = [key for key in _POOLS if key[0] is here]
+        pools = [_POOLS.pop(key) for key in mine]
+    # Outside the lock, because `close()` awaits and the registry is read from the request path.
+    for pool in pools:
+        await pool.close()
 
 
 def register_pool(pool: Any) -> None:
