@@ -307,6 +307,13 @@ _RETAINED: tuple[tuple[str, tuple[str, ...], str], ...] = (
         "is deliberately not here — it is advisory routing rather than an act, and it may hold "
         "an entitlement rather than a person",
     ),
+    (
+        "pending_request_answers",
+        ("requested_by", "answered_by"),
+        "the same answer, archived when the question was asked again — `pending_requests`' row one "
+        "hop later, so scrubbed on the same columns and for the same reason. `asked_of` stays here "
+        "for the reason it stays there",
+    ),
     ("turn_costs", ("actor",), "what a person's turns cost, the record an operator bills against"),
     # The three prescriptive-tier columns, retained on `bo_campaigns.opened_by`'s line: a design is
     # a shared scientific artifact and who framed it is part of its provenance, not an incidental

@@ -322,13 +322,6 @@ topic).
       table that is in `retention._NOT_PRUNED` on purpose. `durable/awaiting.py`,
       `durable/pending_store.py`.
 
-- [ ] **A legitimate re-ask of an answered question now fails loudly rather than waiting blind** —
-      [M], the deliberate half-fix in `durable/pending_store.py`. Making it work needs `_OPEN`'s
-      `WHERE` to accept `'answered'` **plus** an archive so attribution is not blanked: a migration
-      keyed `(request_id, run_id)`, its `infra/sql/README.md` row, an INSERT grant, and a disposal
-      decision in `durable/retention.py`.
-
-
 - [ ] **A timed-out parse still runs to completion on the worker thread** — [L]. **The cheap half
       is closed**: `ingest/documents/sync.py::_parse_changed` now bounds its `asyncio.to_thread`
       with the front door's own `attachment_parse_timeout_seconds` and counts the outcome as

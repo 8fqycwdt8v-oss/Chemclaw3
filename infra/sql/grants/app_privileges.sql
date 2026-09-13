@@ -164,9 +164,15 @@ BEGIN
     -- draft: a credential that could UPDATE an approval row could rewrite who approved what, and
     -- one that could DELETE it could make an approval that happened disappear. The header's
     -- `status` is the mutable projection; these rows are the record it is projected from.
+    --
+    -- `pending_request_answers` is the strongest case in this list and it is here for the reason the
+    -- table exists (`D-2026-09-13-an-answer-is-archived-so-the-question-can-be-asked-again`): it
+    -- holds an answer that was moved aside precisely so a reopen could not blank it, so a credential
+    -- able to UPDATE or DELETE one would undo the move. The application writes it once, from
+    -- `pending_store.open_request`, and never reads it back to revise it.
     EXECUTE format(
         'GRANT INSERT ON bo_suggestions, structures, experiment_protocol_revisions, '
-        'experiment_protocol_status_events TO %I',
+        'experiment_protocol_status_events, pending_request_answers TO %I',
         app_role
     );
 

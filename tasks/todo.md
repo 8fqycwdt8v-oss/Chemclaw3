@@ -387,7 +387,7 @@ Postgres and Temporal are up in this environment, so every one of these is driva
       Row accurate. Driven `[0, 14]` against `[14, 14]` through the real tailer.
       `D-2026-09-13-a-collapse-without-the-batch-keeps-the-oldest-frame`; the batched yield the row
       proposed is declined because it would drop a mid-batch disconnect's restores.
-- [ ] W24.6 `Chemclaw3` — a legitimate re-ask of an answered question fails loudly rather than
+- [x] W24.6 `Chemclaw3` — a legitimate re-ask of an answered question fails loudly rather than
       waiting blind.
 - [x] W24.7 `Chemclaw3` — a result sink on the primary server opens connections no budget counts.
       The row's fix raises (`AsyncConnection` has no `max_size`); the count is of *connections*, on
