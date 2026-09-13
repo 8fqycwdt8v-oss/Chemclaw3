@@ -108,19 +108,29 @@ file grew. If a rule is being broken repeatedly, the fix is a *mechanism* (a scr
    directions were landing on a "safety net" floor.
 
    **And ask what the number could have come out as, before running it.** A measurement executed
-   correctly can still be about the wrong quantity, and the tell is that no reachable value would
-   have falsified the claim. This tree has paid for that twice on one question:
+   correctly can still be about the wrong quantity, in two distinct ways this tree has one instance
+   of each of — and the first draft of this paragraph filed both under the second, which passes the
+   very case it cites. **A mediator** is falsifiable and answers a neighbouring question:
    `D-2026-08-12-a-supervisor-that-holds-every-tool-has-no-reason-to-delegate` measured delegation
-   *rate* (2 of 15), which is a mediator rather than the isolation the specialists existed for, and
+   *rate* (2 of 15) where the question was whether isolation helps. That number *did* falsify
+   something and did settle the flag — "the flag stays off for a different reason than it went off"
+   — so the tell is not that nothing could have refuted it, it is that the quantity was a step
+   removed from the one asked about. **A metric with no reachable falsifying value** is the other:
    `D-2026-08-13-a-subagent-is-spawned-for-isolation-not-for-a-tool-it-lacks` put 14/15 against an
-   arm already at 14/15 — a ceiling with no headroom to show the improvement it was run to find.
-   The shape is clearest from outside the tree: a preprint (F.A.D.E.,
+   arm already at 14/15, no headroom to show the improvement it was run to find, and
+   `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability` records that two of those fifteen
+   probes span two specialists and fail in *both* arms — a floor before any model ran — and that the
+   accuracy it divided by was *delegated* turns, so one correct delegation read 100%. (Both the
+   metric and the panel it scored were deleted with that ADR; the numbers survive only in it, which
+   is why they are cited to the ADR and not to a symbol.)
+   Outside the tree the second kind is clearest: a preprint (F.A.D.E.,
    doi:10.64898/2026.06.20.733481) leads with a QED of 0.85 against 0.46 for the reference ligand,
    where the generator samples a drug-likeness prior — so that number cannot come out low — and the
    0.46 comparator is an approved drug, while predicted affinity, the axis the generator does *not*
-   optimize, moved the wrong way and appears only in the discussion. **Rule: write down the
-   falsifying value before running the measurement; if no reachable value would falsify it, the
-   metric is reporting some component's prior and the question needs a different quantity.**
+   optimize, moved the wrong way and appears only in the discussion. **Rule: before measuring, name
+   both the quantity the question is actually about and the value that would falsify the claim. A
+   number that cannot come out falsifying, and a number about a mediator, are different defects and
+   only the second one's conclusion is worth keeping.**
 
 7. **A measurement script is code, and an unrun one is a claim.** A cross-validation number
    travelled from an unrun script into an ADR and a maintained capability map. If a number is going
