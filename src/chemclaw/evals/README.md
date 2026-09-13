@@ -3,7 +3,10 @@
 **Responsibility:** measuring whether the system still answers the way it should. `metric.py` is the
 metric interface and registry, `metrics.py` the seed metrics (importing the package registers them,
 so callers resolve by name), `harness.py` runs a case-set, `retrieval.py` scores retrieval quality,
-`baseline.py` compares a run against the committed baseline, `ab.py` is the tool-utility A/B.
+`baseline.py` compares a run against the committed baseline, `ab.py` is the tool-utility A/B, and
+`delegation.py` is the three-arm delegation comparison built on it — quality through `ab.py`'s own
+noise floor, billed tokens and wall clock reported beside it rather than folded in, because
+"cheaper but worse" and "better but slower" are different answers that one number hides.
 
 ## Code here, cases in `data/evals/`
 

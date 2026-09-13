@@ -497,8 +497,25 @@ topic).
       the moment the unit is a task rather than a delegation.
       **The arms exist as of that ADR**: no helper (the model simply not calling `task`), helper on
       the caller's model, and helper on its own via `CHEMCLAW_MODEL_ROUTES='{"helper": "…"}'`.
-      Nothing here needs new code; it needs a corpus and a run. Until it exists, no claim that
-      helpers do or do not pay is evidence about this deployment.
+
+      **The instrument and the corpus exist as of 2026-09-13, and "nothing here needs new code" was
+      wrong.** That sentence stood here until the work was attempted: `evals/ab.py` is pairwise and
+      dimensionless, and this comparison is three-armed and has two cost axes, so
+      `chemclaw.evals.delegation.compare_arms` is genuinely new — quality through `ab.py`'s own
+      noise floor, billed tokens and wall clock reported beside it rather than folded in, because
+      "cheaper but worse" and "better but slower" are different answers that one number hides.
+      `data/evals/probes/delegation.yaml` is the corpus, eight reading-heavy multi-source tasks
+      chosen so that isolation has a mechanism by which it could appear at all.
+      One design fact worth carrying: the `no-helper` arm is **behavioural**, because `task` cannot
+      be removed — `SubAgentMiddleware` is required and an empty roster makes upstream re-insert its
+      own. So compliance is observed per run, and a baseline that delegated anyway is reported as
+      contaminated rather than averaged in.
+
+      **What is left is the run, and it needs a gateway.** Nothing in `src/` dials a vendor
+      (`D-2026-09-04-a-gateway-is-the-only-provider`), so the environment's `API-KEY` is a
+      credential *for* a gateway rather than one this stack can use — probed 2026-09-13, the key
+      answers 200 against the vendor and no gateway is configured. Until the run exists, no claim
+      that helpers do or do not pay is evidence about this deployment.
 
 - [ ] **A helper reaches no connector, and only the behavioural half of this row is still open**
       — [L], and it is gated on the row above rather than on an argument. The prose half is

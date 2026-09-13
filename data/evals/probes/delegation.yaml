@@ -1,0 +1,175 @@
+# Live-test probes — the delegation corpus (issue #359).
+#
+# **These are not questions about a capability; they are questions about how the work gets done.**
+# Every probe here is bucket A — the system can answer all of them today, with one helper or with
+# none. What varies is the arm: `no-helper` (the model asked not to call `task`), `helper` (a helper
+# on the caller's model), and `helper-routed` (one on its own model via
+# `CHEMCLAW_MODEL_ROUTES='{"helper": "…"}'`). `chemclaw.evals.delegation.compare_arms` reads the
+# recorded runs and reports per task, on quality and on both costs.
+#
+# **Why these questions and not the rest of the corpus.** The instrument this replaces
+# (`data/evals/probes/m12/routing.yaml`, deleted with the specialist team) measured delegation
+# *rate* over fifteen one-tool probes. A one-tool question gives context isolation no mechanism by
+# which it could appear: there is nothing to read in bulk, so there is nothing for a helper to read
+# in its own context and report back small. Every probe below is deliberately the opposite shape —
+# many sources, or many entities, or long documents — because that is the only place the claimed
+# benefit can show up at all. If delegation does not pay here it does not pay.
+#
+# **What a good answer looks like is not what is being measured**, which is why `direction` is
+# thinner here than anywhere else in this directory. Each probe is graded on the same axis as the
+# tool-utility A/B (`evals/tool_utility.VERDICT_SCORES`), and the finding is the *comparison*
+# between arms, not the absolute verdict. A probe whose arms all score `partial` is still a
+# measurement.
+#
+# **A baseline that delegates anyway is data, not a spoiled run.** The `no-helper` arm is
+# behavioural — `task` cannot be removed, because `SubAgentMiddleware` is in `create_deep_agent`'s
+# required set and an empty roster makes upstream re-insert its own ungoverned subagent. So
+# `compare_arms` records whether each run delegated and reports the non-compliant pairs as
+# contaminated rather than averaging them in.
+#
+# Buckets: A = capability exists · B = partial · C = absent.
+# `expects_tools` is ANY-OF. Every tool name is from the agent-callable surface.
+
+probes:
+  - id: dg-01
+    section: 1
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Sweep everything we hold on palladium-catalysed couplings of deactivated aryl chlorides —
+      the knowledge graph, the ELN, the mounted share and the reaction store — and give me one
+      page: what conditions recur, what failed, and where the evidence is thin.
+    expects_tools:
+      - gather_evidence
+      - conditions_for_similar_reaction
+      - substrate_precedent
+      - find_notes
+      - expand_note
+      - find_knowledge_gaps
+    direction: >-
+      The six-source sweep, and the canonical shape for this measurement: a lot of reading, a short
+      answer, every claim cited. The arms differ in where the reading is billed, not in what a good
+      answer says.
+
+  - id: dg-02
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      For these twenty intermediates, give me a table of predicted pKa, logD and aqueous
+      solubility, and flag any where the ionisation state would change between pH 4 and pH 8.
+    expects_tools:
+      - predict_pka
+      - predict_logd
+      - predict_solubility
+      - predict_developability_profile
+      - resolve_compound
+    direction: >-
+      The many-entity shape. Twenty compounds times three properties is a large volume of tool
+      results whose individual payloads the final table does not need — the case where a helper's
+      report is a genuine reduction rather than a paraphrase. Must not silently drop compounds, and
+      must say which refusals it hit rather than leaving gaps in the table.
+
+  - id: dg-03
+    section: 9
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Compare what the three development reports on the biaryl programme say about the catalyst
+      choice. Where do they disagree, and which is most recent?
+    expects_tools:
+      - gather_evidence
+      - find_notes
+      - expand_note
+    direction: >-
+      The multi-document comparison. Long sources, a short comparative answer, and a disagreement
+      that only appears once all three have been read. Bi-temporal validity is the tiebreak and a
+      good answer uses it rather than preferring whichever it read last.
+
+  - id: dg-04
+    section: 1
+    persona: manager
+    bucket: A
+    question: >-
+      Across every campaign we have recorded, which transformations have we run most often, and
+      which of those has the worst spread in yield?
+    expects_tools:
+      - gather_evidence
+      - find_notes
+      - expand_note
+      - reagent_frequency
+      - similar_reactions
+    direction: >-
+      A corpus-wide aggregation: many notes read, two numbers out. Must say how many campaigns it
+      actually read rather than implying the whole corpus if it sampled.
+
+  - id: dg-05
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Take these eight candidate substrates and tell me, for each, whether we have run anything
+      close and what happened.
+    expects_tools:
+      - substrate_precedent
+      - similar_molecules
+      - conditions_for_similar_reaction
+      - gather_evidence
+    direction: >-
+      Eight independent precedent searches whose results are mostly discarded — the fan-out shape
+      the `task` description tells the model to spawn several helpers for. An empty precedent for a
+      substrate is a finding and must be reported as one, not omitted from the list.
+
+  - id: dg-06
+    section: 15
+    persona: lab_leader
+    bucket: A
+    question: >-
+      A new starter is taking over the amide coupling workstream. Pull together what they need to
+      know from everything we have: the settled conditions, the failures worth knowing about, and
+      the open questions.
+    expects_tools:
+      - gather_evidence
+      - find_notes
+      - expand_note
+      - find_knowledge_gaps
+      - recall_observations
+    direction: >-
+      Wide reading, heavily synthesised, and the one probe here where a summary losing its
+      provenance would be a real defect rather than a cost — a handover document whose claims cannot
+      be traced back is worse than no document. Worth watching across arms for exactly that.
+
+  - id: dg-07
+    section: 11
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Read the last six months of entries on the hydrogenation step and tell me whether the
+      impurity profile has drifted.
+    expects_tools:
+      - gather_evidence
+      - find_notes
+      - expand_note
+      - conditions_for_similar_reaction
+    direction: >-
+      Long serial reading with a temporal question over it. The honest answer may well be that the
+      records do not support a drift conclusion, which is a legitimate outcome and should score the
+      same in every arm.
+
+  - id: dg-08
+    section: 10
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Screen these twelve intermediates for structural hazards and genotoxic alerts, and give me
+      just the ones that flag anything, with the alert and its citation.
+    expects_tools:
+      - screen_hazards
+      - screen_genotoxic_alerts
+      - ich_impurity_limit
+      - resolve_compound
+    direction: >-
+      Twelve screens whose clean results are discarded and whose flagged results must arrive intact
+      with their citations. The filtering is the point: a helper reporting "three of twelve flagged"
+      without the alerts and their sources has lost the answer while looking like it compressed it.
+      An empty screen is never reported as safe.
