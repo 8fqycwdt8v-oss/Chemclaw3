@@ -386,16 +386,6 @@ topic).
       front-doorless release is legal is the work. Anchors: `core/config/service.py`,
       `deploy/helm/chemclaw/templates/config.yaml`.
 
-- [ ] **A result sink on the primary server opens connections no budget counts** — [S], found
-      2026-09-05 beside the fleet-budget review. `publish/drivers/postgres.py` holds an un-pooled,
-      unregistered connection, so it is invisible to both `pg_fleet_pools` and
-      `chemclaw_pg_pool_max_size`. Harmless while a site points `CHEMCLAW_RESULT_SINKS` at a
-      database of its own, and a silent under-count of exactly the kind this budget exists to
-      prevent when it points at `postgres_dsn`'s server. Either register it the way
-      `agent/checkpointer.py` registers its foreign pool, or state in `values.yaml` that a sink's
-      connections are the operator's to add. Anchors: `publish/drivers/postgres.py`,
-      `core/db.py::_FOREIGN_POOLS`.
-
 - [ ] **`/readyz` cannot bound a Postgres that accepts the socket and stops answering** — [S],
       found 2026-09-05, upstream in origin and recorded here because `api/routes/ops.py` claimed
       otherwise. `asyncio.wait_for` bounds acquisition; on a warm pooled connection psycopg's

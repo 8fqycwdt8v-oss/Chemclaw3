@@ -774,6 +774,66 @@ def unregister_pool(pool: Any) -> None:
             _FOREIGN_POOLS.remove(pool)
 
 
+# Dedicated connections a caller holds open and asked to be counted — see `register_connection`.
+# A list of `(connection, conninfo)` rather than a set, because `AsyncConnection` is unhashable
+# in psycopg 3 and the conninfo has to travel with it: the connection itself does not keep the
+# string it was dialled with in a form `pg_endpoint` can read.
+_HELD_CONNECTIONS: list[tuple[Any, str]] = []
+
+
+def register_connection(conn: Any, conninfo: str) -> None:
+    """Count one *dedicated* connection a caller holds open, for as long as it holds it.
+
+    **A pool is not the only thing that occupies a backend, and the budget could only see pools**
+    (`D-2026-09-13-a-connection-counted-where-the-budget-applies`). `publish/drivers/postgres.py`
+    opens a bare `AsyncConnection` and keeps it for the driver's life; it is in neither `_POOLS` nor
+    `_FOREIGN_POOLS`, so a process holding one reported a ceiling one lower than it could reach.
+    Registering it as a *pool* is what the `BACKLOG.md` row proposed and it raises:
+    `_process_max_connections` sums `pool.max_size`, and measured,
+    `AttributeError: 'AsyncConnection' object has no attribute 'max_size'`.
+
+    **Counted only where the budget it feeds applies, which is `postgres_dsn`'s server.**
+    `pg_fleet_max_connections` is a ceiling on *that* server, and a result sink points by design at
+    a database this system does not own (`D-2026-08-25-a-cache-is-not-a-record`). Charging a
+    foreign warehouse's connection to the primary's budget would be the same error as the
+    under-count, in the other direction — so the endpoint decides, through the same `pg_endpoint`
+    the session-store split already uses. A sink on its own server counts 0 here and is the
+    operator's to size; `deploy/README.md` says so.
+
+    Registration only: the caller keeps the lifecycle, exactly as `register_pool` leaves a foreign
+    pool's close to the module that opens it. A closed connection stops counting without being
+    unregistered, because the count reads `conn.closed` — but `unregister_connection` is still the
+    right call on a deliberate close, so the list does not grow by one per drain.
+
+    Args:
+        conn: The open connection. Counted while `conn.closed` is false.
+        conninfo: The connection string it was dialled with, so the endpoint can be compared.
+            Not read off the connection: psycopg keeps no such attribute.
+    """
+    with _POOL_REGISTRY_LOCK:
+        if all(held is not conn for held, _ in _HELD_CONNECTIONS):
+            _HELD_CONNECTIONS.append((conn, conninfo))
+
+
+def unregister_connection(conn: Any) -> None:
+    """Stop counting a dedicated connection — called when its holder closes it."""
+    with _POOL_REGISTRY_LOCK:
+        _HELD_CONNECTIONS[:] = [entry for entry in _HELD_CONNECTIONS if entry[0] is not conn]
+
+
+def _held_connections_on(endpoint: tuple[str, str] | None) -> int:
+    """How many live registered connections this process holds on one endpoint.
+
+    A closed one is dropped rather than counted, so a holder that closed without unregistering
+    stops inflating the reading the moment it does — which is the direction that matters for a
+    gauge an alert compares against a ceiling.
+    """
+    with _POOL_REGISTRY_LOCK:
+        live = [(conn, info) for conn, info in _HELD_CONNECTIONS if not conn.closed]
+        _HELD_CONNECTIONS[:] = live
+    return sum(1 for _, info in live if pg_endpoint(info) == endpoint)
+
+
 def _all_pools() -> list[Any]:
     """Every pool this process holds: the ones built here, plus the registered foreign ones."""
     _forget_pools_of_ended_loops()
@@ -786,8 +846,13 @@ def _process_max_connections() -> int:
 
     Not `settings.pg_pool_max_size`, which is one pool's ceiling: see `bind_pool_metrics` for the
     measurement that separates the two.
+
+    **Plus the dedicated connections a caller registered**, each worth exactly one backend, and only
+    those on `postgres_dsn`'s server — see `register_connection` for why the endpoint decides.
     """
-    return sum(int(pool.max_size) for pool in _all_pools())
+    return sum(int(pool.max_size) for pool in _all_pools()) + _held_connections_on(
+        pg_endpoint(settings.postgres_dsn)
+    )
 
 
 def _session_store_max_connections() -> int:
@@ -814,7 +879,7 @@ def _session_store_max_connections() -> int:
     there = pg_endpoint(settings.session_store_dsn)
     return sum(
         int(pool.max_size) for pool in _all_pools() if pg_endpoint(str(pool.conninfo)) == there
-    )
+    ) + _held_connections_on(there)
 
 
 def pool_stats() -> dict[str, int]:

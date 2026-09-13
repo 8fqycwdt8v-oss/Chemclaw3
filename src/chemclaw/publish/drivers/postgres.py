@@ -19,12 +19,13 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import psycopg
-from psycopg.conninfo import conninfo_to_dict
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from chemclaw.core.config import PG_LOOPBACK_HOSTS, require_pg_tls, settings
 from chemclaw.core.connect import check_identifier
+from chemclaw.core.db import register_connection, unregister_connection
 from chemclaw.ingest.eln.warehouse.driver import (
     VectorDialect,
     WarehouseCursor,
@@ -202,7 +203,15 @@ class PostgresWarehouse:
         return None
 
     async def _connection(self) -> psycopg.AsyncConnection[Any]:
-        """The live connection, opened on first use and reopened if it was closed."""
+        """The live connection, opened on first use and reopened if it was closed.
+
+        **Registered with `core/db` while it is held**, because a bare connection occupies a backend
+        exactly as a pool slot does and the process's own reading could only see pools
+        (`D-2026-09-13-a-connection-counted-where-the-budget-applies`). It counts against
+        `chemclaw_pg_pool_max_size` only when its endpoint is `postgres_dsn`'s: a sink pointed at
+        a warehouse of its own is on a ceiling this deployment does not declare, and charging it to
+        the primary's would be the under-count's mirror image.
+        """
         if self._conn is None or self._conn.closed:
             # **Not passed when the site's own connection string already sets one.** A keyword wins
             # over a conninfo key in psycopg, so passing it unconditionally would silently overrule
@@ -233,7 +242,21 @@ class PostgresWarehouse:
                     **self._parts,
                     **timeout,
                 )
+            # The conninfo is passed rather than read back off the connection: psycopg keeps no
+            # attribute carrying it, and a driver built from `connection:` parts has no single
+            # string at all until `make_conninfo` builds one from them.
+            register_connection(self._conn, self._conninfo())
         return self._conn
+
+    def _conninfo(self) -> str:
+        """The connection string this driver dials, in libpq's own keyword form.
+
+        One spelling for the endpoint comparison `core/db` makes, whichever of the two ways this
+        driver was configured: a site's own `dsn`, or the `connection:` block's keyword arguments.
+        Built through `make_conninfo` rather than concatenated, so a part carrying a space or an
+        equals sign is quoted the way libpq quotes it.
+        """
+        return self._dsn or make_conninfo(**{k: str(v) for k, v in self._parts.items()})
 
     async def aclose(self) -> None:
         """Release the held connection. Safe to call twice, and on one never opened.
@@ -247,6 +270,7 @@ class PostgresWarehouse:
         the publish.
         """
         if self._conn is not None and not self._conn.closed:
+            unregister_connection(self._conn)
             await self._conn.close()
         self._conn = None
 

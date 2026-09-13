@@ -389,7 +389,10 @@ Postgres and Temporal are up in this environment, so every one of these is driva
       proposed is declined because it would drop a mid-batch disconnect's restores.
 - [ ] W24.6 `Chemclaw3` — a legitimate re-ask of an answered question fails loudly rather than
       waiting blind.
-- [ ] W24.7 `Chemclaw3` — a result sink on the primary server opens connections no budget counts.
+- [x] W24.7 `Chemclaw3` — a result sink on the primary server opens connections no budget counts.
+      The row's fix raises (`AsyncConnection` has no `max_size`); the count is of *connections*, on
+      the endpoint they dial. A sink on its own warehouse counts zero and `deploy/README.md` says
+      whose arithmetic that is. `D-2026-09-13-a-connection-counted-where-the-budget-applies`.
 - [ ] W24.8 `Chemclaw3` — settle `pytest-xdist` on a real runner [S]. A 24-minute suite is why R6
       gets skipped; this is the wave that can afford it.
 
