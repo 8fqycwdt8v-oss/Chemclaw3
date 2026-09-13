@@ -418,7 +418,7 @@ topic).
 ## 4 — Operating it
 
 - [ ] **The shipped default and the chart disagree about the harness, so the whole offline suite
-      measures a graph shape production does not run** — [M], found 2026-09-13 by the capability
+      measures a graph shape production does not run** — [M] (issue #357), found 2026-09-13 by the capability
       audit in [`docs/archive/REVIEW-2026-09-13-capability-audit-and-plan.md`](../archive/REVIEW-2026-09-13-capability-audit-and-plan.md).
       `core/config/agent.py:525` ships `harness_enabled: bool = False` and `.env.example:1057`
       repeats it, while `deploy/helm/chemclaw/values.yaml:786-787` sets
@@ -482,7 +482,7 @@ topic).
 
 
 - [ ] **Measure whether delegation pays, with an instrument the deleted one could not be**
-      — [M], opened by `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller`. The corpus
+      — [M] (issue #359), opened by `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller`. The corpus
       that was supposed to settle this (`data/evals/probes/m12/routing.yaml`, deleted with the
       specialist team) measured **delegation rate** over fifteen one-tool probes. Rate is a mediator
       rather than an outcome, and a one-tool question gives context isolation no mechanism by which
@@ -854,7 +854,7 @@ not revisited. That is a different kind of debt and it needs its own section, be
 only holds defects can only ever restore the system to what it already intended to be.
 
 - [ ] **Process chemistry is probed incidentally and nowhere systematically, so the fleet's largest
-      capability gap has no exit criterion** — [M], found 2026-09-13 by the capability audit.
+      capability gap has no exit criterion** — [M] (issue #358), found 2026-09-13 by the capability audit.
       `data/evals/probes/analytical.yaml` is the pattern: a section-scoped set that names what the
       system does *not* have in its header, buckets every question A/B/C, and grades a bucket-C
       probe on whether the refusal is honest rather than on content
@@ -994,7 +994,7 @@ only holds defects can only ever restore the system to what it already intended 
       deployment's own model: it measured `claude-haiku-4-5-20251001`, and re-running on a site's
       model is one command.
 
-- [ ] **No external benchmark has ever been run** — [M]. `make eval` gates 23 metric values over 15
+- [ ] **No external benchmark has ever been run** — [M] (issue #360). `make eval` gates 23 metric values over 15
       case files (re-counted 2026-08-27; one has been added since the 2026-08-25 figure of 14), a
       **7-document** retrieval corpus and a **39-note** knowledge graph, with the science half
       resting on one solubility value, one BO regret replay and two mass balances. It is honest and

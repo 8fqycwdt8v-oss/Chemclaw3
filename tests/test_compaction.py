@@ -1139,13 +1139,19 @@ CLEAR_TRIGGER_THREAD_ALLOWANCE = 30_000
 #:
 #: Written here rather than imported, for the same reason as the constant above: this is the
 #: assertion and `core/config/agent.py` is the prose.
-#: **42,500 since wave 13, and the 500 is the ceiling's price rather than a re-derivation.**
-#: `CEILINGS["__default__"]` rose 65,000 → 65,500 for eight record-surface reads that can now say
-#: their answer is only a page. The trigger rose with it and kept its allowance whole, because
-#: nothing bounds it from above; this one cannot, because the budget is derived *downwards* from
-#: the 128k window. So the thread loses 500 tokens — 1.16% — and it is recorded here, at the
-#: assertion, rather than left as a claim in prose.
-BUDGET_THREAD_ALLOWANCE = 42_500
+#: **40,500 since D-2026-09-13, and the 2,000 is the ceiling's price rather than a re-derivation.**
+#: `CEILINGS["__default__"]` rose 65,500 → 67,500 to seat `write_todos` and the todo prompt in every
+#: profile's prefix once `harness_enabled` became the default — measured at 1,862 tokens on every
+#: profile but `computation`, which already set the flag itself. The trigger rose with it and kept
+#: its allowance whole, because nothing bounds it from above; this one cannot, because the budget is
+#: derived *downwards* from the 128k window. So the thread loses 2,000 tokens — **4.7%** — and it is
+#: recorded here, at the assertion, rather than left as a claim in prose.
+#:
+#: Wave 13 paid 500 here for eight record-surface reads and called it 1.16%. This is four times that
+#: for one middleware's schema, which is worth saying plainly rather than burying: a todo list is
+#: expensive, and what it buys is the plan gate attached in the posture every supported deployment
+#: already ran while no test measured it.
+BUDGET_THREAD_ALLOWANCE = 40_500
 
 #: The smallest context window this stack is designed against, in billed tokens.
 #:

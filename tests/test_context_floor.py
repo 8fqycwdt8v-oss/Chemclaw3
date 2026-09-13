@@ -420,7 +420,26 @@ load_profiles()
 #: bound tool's schema *shrank*. That is why the figure is dated here rather than stated: a
 #: headroom transcribed as current is a claim about a commit, which is the defect the paragraph
 #: above spends fifteen lines on.
-CEILINGS: dict[str, int] = {"__default__": 65_500}
+#:
+#: **67,500 since D-2026-09-13, and this one was bought outright.** Turning `harness_enabled` on by
+#: default puts `write_todos` and upstream's todo prompt into every profile's prefix: measured both
+#: ways in one process, +1,372 for `tool:write_todos` and +490 for `prompt:middleware-sections`,
+#: **1,862 on every profile except `computation`**, which already set the flag itself and moved by
+#: 0. Only `default` was near enough to matter — 64,907 → 66,769, over the old ceiling by 1,269.
+#:
+#: Nothing was narrowed to pay for it, and that is deliberate rather than lazy: the narrowing this
+#: wants is §5's `default`-profile allow-list, worth a measured -5,787, and it is blocked on a live
+#: lane that can show every probe still reaching its tool. Buying the ceiling now and narrowing
+#: later is the right order; narrowing blind to buy a ceiling is how a cheaper prompt stops finding
+#: tools.
+#:
+#: The price, by the rule stated above: `agent_tool_result_clear_trigger` rises 2,000 with it and
+#: costs nothing, while `agent_context_token_budget` cannot follow, so the thread allowance falls
+#: 42,500 → 40,500 — **4.7% of the thread**, an order of magnitude more than wave 13's 500 paid.
+#: What it buys is the plan gate attached in the posture every supported deployment already runs,
+#: which `D-2026-09-06-the-write-gate-is-three-names-and-the-plan-gate-carries-the-rest` names as
+#: the only cover over 29 write tools.
+CEILINGS: dict[str, int] = {"__default__": 67_500}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.

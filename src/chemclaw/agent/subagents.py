@@ -259,12 +259,31 @@ def helper_profile(caller: AgentProfile, held: frozenset[str]) -> AgentProfile:
     """
     # `model_copy` rather than a fresh `AgentProfile(...)`: a field added to the model later is
     # carried into the helper automatically, where an explicit constructor call would drop it in
-    # silence and read as deliberate. The three values below are typed as the model declares them,
+    # silence and read as deliberate. The four values below are typed as the model declares them,
     # which is what makes skipping validation safe here.
+    #
+    # **`harness_enabled=False` is the one of the four that is a narrowing rather than a rename**,
+    # and it became necessary when D-2026-09-13 made the harness the deployment default: a helper
+    # profile inherits `None`, which resolves to that default, so the helper silently acquired a
+    # todo list and a plan gate. Both are pure cost here, for two independent reasons:
+    #
+    #   - The gate can never fire. It refuses `side_effecting_call`, and the line above has just
+    #     removed `side_effecting_tools()` from the surface — so there is nothing left for it to
+    #     refuse, on every helper this function builds.
+    #   - The plan is written where nobody reads it. A helper's state is discarded when its report
+    #     crosses back (`agent/tool_result_shape.py` keeps the spend keys and not the rest), so
+    #     `write_todos` would cost 1,372 tokens of the helper's own prefix to write a plan that
+    #     never reaches the chemist, the caller, or the gate.
+    #
+    # Measured: the helper's namespace wrote an eighth checkpoint per turn with the harness
+    # inherited, which `tests/test_checkpointer_prune.py` bounds at one turn's own writes. That is
+    # the assertion that caught this, and it is the cheaper statement of the same argument
+    # `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller` makes throughout.
     return caller.model_copy(
         update={
             "name": f"{caller.name}-helper",
             "tool_names": held - side_effecting_tools() - SPEAKS_TO_THE_CHEMIST,
             "model_route": "helper",
+            "harness_enabled": False,
         }
     )

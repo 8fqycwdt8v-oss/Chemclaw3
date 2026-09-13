@@ -739,14 +739,21 @@ def test_enforcing_identity_without_the_plan_gate_is_refused() -> None:
 
     `_refuse_unauthenticated_exposure` already makes exactly this argument for the analogous
     "the safe posture is one env var away" pair.
+
+    **The pairing has to be asked for explicitly since D-2026-09-13**, because `harness_enabled`
+    now defaults to `True` — so the refusal below names it rather than relying on the default to
+    produce it. That is a weaker trigger than it was and the refusal is no less necessary: a
+    deployment can still set the flag off, and this is what happens when it does so while claiming
+    to enforce identity.
     """
     with pytest.raises(ValueError, match="harness_enabled"):
-        Settings(_env_file=None, **_ENFORCED)  # type: ignore[call-arg]
+        Settings(_env_file=None, harness_enabled=False, **_ENFORCED)  # type: ignore[call-arg]
 
 
 def test_the_enforced_posture_with_the_gate_attached_constructs() -> None:
-    """The control: what the shipped chart sets must still boot."""
+    """The control: what the shipped chart sets must still boot — and is now also the default."""
     assert Settings(_env_file=None, harness_enabled=True, **_ENFORCED) is not None  # type: ignore[call-arg]
+    assert Settings(_env_file=None, **_ENFORCED) is not None  # type: ignore[call-arg]
 
 
 def test_the_opt_out_is_stated_in_the_same_vocabulary_as_the_thing_it_declines() -> None:
@@ -763,8 +770,17 @@ def test_the_opt_out_is_stated_in_the_same_vocabulary_as_the_thing_it_declines()
 
     A per-profile `harness_autonomy` still wins over it (`autonomy_for` prefers the profile), so
     the opt-out cannot silently disarm a profile that narrowed on purpose.
+
+    **What the opt-out now buys is different, and better.** While `harness_enabled` defaulted off,
+    `harness_autonomy=execute` changed no behaviour at all — it was a statement and nothing more.
+    With the harness on by default it is the real thing it always claimed to be: the todo list stays
+    attached and the gate comes off, which is what an unsupervised deployment actually wants and is
+    why the refusal points at this knob rather than at `harness_enabled`. Turning the harness off
+    would drop the plan with the gate.
     """
-    relaxed = Settings(_env_file=None, harness_autonomy="execute", **_ENFORCED)  # type: ignore[call-arg]
+    relaxed = Settings(  # type: ignore[call-arg]
+        _env_file=None, harness_enabled=False, harness_autonomy="execute", **_ENFORCED
+    )
     assert relaxed.entra_required and not relaxed.harness_enabled
     assert (
         Settings(  # type: ignore[call-arg]
