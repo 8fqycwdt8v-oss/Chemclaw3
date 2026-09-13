@@ -364,7 +364,10 @@ the first checkpoint measurement here said 552 kB and was evidence about nothing
 Defects that only appear under concurrency, on the layer a production deployment runs continuously.
 Postgres and Temporal are up in this environment, so every one of these is drivable.
 
-- [ ] W24.1 `Chemclaw3` — the detached settle of a cancelled `AwaitAnswerWorkflow` is racy [M].
+- [x] W24.1 `Chemclaw3` — the detached settle of a cancelled `AwaitAnswerWorkflow` is racy [M].
+      **The row was wrong about the mechanism.** The race did not reproduce (0 of 78 settles lost);
+      three uncovered windows did. `D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-
+      the-row-waiting`; `asyncio.shield` declined on measurement; the reaper stays a BACKLOG row.
 - [ ] W24.2 `Chemclaw3` — a nested `asyncio.run` inside a pooled process can hang on loop teardown.
 - [ ] W24.3 `Chemclaw3` — `delete_session` and the owner prune take two rows in opposite orders: a
       deadlock by lock ordering.

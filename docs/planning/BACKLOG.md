@@ -63,6 +63,31 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
+- [ ] **A plan step's `tools` declaration is unbounded, and it sizes both a durable row and a
+  refusal** — [S]. `agent/plan_scope.ScopedTodo.tools` is `list[str]` with no constraint, so a
+  `write_todos` declaring 50,000 names validates, the union lands in `plan_approvals.scope`
+  (`TEXT[]`, written by `api/routes/plan.py::decide_plan`), and
+  `plan_gate.out_of_scope_refusal` sorts and joins the whole set into one sentence — measured at
+  **600,192 characters** over ten-character names, bounded to 60,000 by
+  `agent/tool_authz._refusal_message` before the model reads it and unbounded everywhere before
+  that (the exception, the log, the audit row). Not an escalation: the scope
+  only ever *narrows* what a call may do, and a name no tool answers to is refused by
+  `enforce_tool_authz` regardless. What it is is an unpriced write a model can repeat, and the
+  natural fix is a `Field(max_length=...)` on the declaration plus a setting, which is a config
+  decision rather than an edit — a low ceiling refuses a legitimately broad plan at the tool's own
+  argument validation, where the model can read the error and split the plan.
+- [ ] **The 0/49 plan-scope ratchet cannot see the argument-driven gated call** — [S].
+  `tests/test_plan_scope.py::test_the_surface_a_read_only_plans_approval_reaches` drives every name
+  in `authz.side_effecting_tools()` through the gate under an approval that declared nothing, and
+  requires every one to be refused. `write_file` is not in that set: `authz.side_effecting_call`
+  classifies it on its *arguments* — durable under `/memories/`, turn-local under `/scratch/` — so
+  the one tool whose gatedness is a function of the call is the one the ratchet enumerates past.
+  Measured: `side_effecting_call("write_file", {"file_path": "/memories/x.md", ...})` is `True` and
+  `"write_file" in side_effecting_tools()` is `False`, so the gate does refuse it and nothing holds
+  that it will.
+  The fix is one more arm over the argument-driven cases rather than a change to the partition, and
+  it should derive them from `authz` rather than listing `write_file` by name.
+
 - [ ] **A helper's own subgraph checkpoints are 91% of what a spawn costs, and nothing bounds
   them** — [M]. `D-2026-09-12-a-helpers-scratch-file-crosses-into-its-callers-state` bounded what
   crosses into the *caller's* `files` channel, which is what W23.6 named. Measured on a real
@@ -281,12 +306,21 @@ topic).
       already fixed; only the wire literal is left. Needs a rollout order (accept both, then emit
       the new one, then drop the old), which is why it is a row rather than part of that fix.
 
-- [ ] **The detached settle of a cancelled `AwaitAnswerWorkflow` is racy** — [M], found 2026-09-04
-      while fixing the stranded-row HIGH. `ParentClosePolicy.REQUEST_CANCEL` is strictly better than
-      the alternatives (all three measured against a live broker), but the settle is scheduled from
-      an already-cancelling workflow and landed on some runs and not others under a 15 s grace, so
-      "the row always leaves the inbox" is not guaranteed. `asyncio.shield`, or a `due_at` reaper.
-      `durable/awaiting.py`.
+- [ ] **A `pending_requests` row whose run was terminated, or lost with its worker, has no
+      collector** — [M]. What is left of the row above after
+      `D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-the-row-waiting`, which closed
+      the three windows a *cancellation* could slip through and measured the "racy settle" reading
+      false: with every child past its open activity, 0 of 78 settles were lost across six runs, and
+      the real losses were the `try` starting below the activity that writes the row, a cancellation
+      arriving as `ActivityError(cause=CancelledError)`, and `notify_session_best_effort` swallowing
+      exactly that pair. Two cases remain and neither is reached by a parent dying in the ordinary
+      way: a child **terminated** rather than cancelled never resumes workflow code at all
+      (`tests/test_awaiting.py::test_a_wait_started_as_a_child_settles_when_its_parent_dies` pins
+      that for `ParentClosePolicy.TERMINATE`, and an operator can do it to a child directly), and a
+      worker lost between the row write and the settle. A `due_at` reaper is the answer and it is a
+      decision rather than an edit: a new Temporal Schedule, with its own disposal rule, against a
+      table that is in `retention._NOT_PRUNED` on purpose. `durable/awaiting.py`,
+      `durable/pending_store.py`.
 
 - [ ] **A legitimate re-ask of an answered question now fails loudly rather than waiting blind** —
       [M], the deliberate half-fix in `durable/pending_store.py`. Making it work needs `_OPEN`'s

@@ -47,7 +47,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 from temporalio import activity, workflow
-from temporalio.exceptions import ApplicationError
+from temporalio.exceptions import ActivityError, ApplicationError
+from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
@@ -273,44 +274,76 @@ class AwaitAnswerWorkflow:
         # appears or vanishes is not.
         activity_timeout = timedelta(seconds=settings.awaiting_activity_timeout_seconds)
 
-        # **The clamp is applied by the activity, and `due_at` comes back from it.**
+        # **The `try` opens here, not at the wait, and that is the whole of
+        # `D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-the-row-waiting`.**
         #
-        # It cannot be computed here: `due_at` decides how many timers `_wait_until` schedules, so a
-        # `settings` read on this line puts the *number of commands* under a value that can change
-        # between an execution and its replay — lower `CHEMCLAW_AWAITING_MAX_DAYS` while a 30-day
-        # wait is open, restart the worker, and the replay computes a `due_at` already in the past,
-        # returns from the first iteration, and emits a settle where history holds a timer. That is
-        # a `NonDeterminismError` retried forever, on the workflow with the longest designed
-        # lifetime in the tree.
+        # It used to start below, around `_wait_until` alone, on the reading that a cancellation can
+        # only arrive while the wait is waiting. It cannot: `open_pending_request_activity` is the
+        # activity that *writes the `waiting` row*, and a cancellation landing while it is in flight
+        # leaves that row committed with no settle ever attempted — the row's own run is gone, so
+        # nothing will ever move it. Measured against a real broker with 12 parents terminated under
+        # `REQUEST_CANCEL` the instant their children existed: 12 rows opened, **10** settled, and
+        # every child `CANCELED`. With a session attached the window is wider by the push-back
+        # activity as well, which is the second `await` outside the old `try`: at a 3 s notify, 8 of
+        # 12.
         #
-        # The first fix moved the clamp to the callers, and that was wrong in the way a per-caller
-        # rule always is: it reached two of the three. `connectors/bo/workflows.py` passes
-        # `bo_measurement_deadline_days` straight through, so a mis-set value opened a ten-year run
-        # on the broker — exactly what `awaiting_max_days` exists to prevent — while two docstrings
-        # went on claiming the value was clamped. An activity's *result* is recorded in history, so
-        # taking `due_at` from it is both deterministic on replay and impossible for a caller to
-        # skip. One definition, on the path every caller already takes.
-        opened = await workflow.execute_activity(
-            open_pending_request_activity,
-            _OpenInput(
-                request_id=request_id,
-                request=request,
-                started_at=workflow.now().isoformat(),
-                run_id=workflow.info().run_id,
-            ),
-            start_to_close_timeout=activity_timeout,
-            schedule_to_start_timeout=queue_wait_timeout(),
-            retry_policy=BAD_DATA_RETRY,
-        )
-        due_at = datetime.fromisoformat(opened)
-        await self._notify(request, request_id, due_at.isoformat())
-
+        # Settling a request that was never opened is harmless by construction:
+        # `pending_store.settle_request` reports `rowcount == 1`, so a missing row answers `False`
+        # and writes nothing. That is the cheap direction, and it is why this covers the open rather
+        # than trying to tell "opened" from "not yet opened" inside a cancelled workflow, which is
+        # a question the workflow cannot answer — the activity's result is exactly what it did not
+        # get.
         try:
+            # **The clamp is applied by the activity, and `due_at` comes back from it.**
+            #
+            # It cannot be computed here: `due_at` decides how many timers `_wait_until` schedules,
+            # so a `settings` read on this line puts the *number of commands* under a value that can
+            # change between an execution and its replay — lower `CHEMCLAW_AWAITING_MAX_DAYS` while
+            # a 30-day wait is open, restart the worker, and the replay computes a `due_at` already
+            # in the past, returns from the first iteration, and emits a settle where history
+            # holds a timer. That is a `NonDeterminismError` retried forever, on the workflow with
+            # the longest designed lifetime in the tree.
+            #
+            # The first fix moved the clamp to the callers, and that was wrong in the way a
+            # per-caller rule always is: it reached two of the three.
+            # `connectors/bo/workflows.py` passes `bo_measurement_deadline_days` straight through,
+            # so a mis-set value opened a ten-year run on the broker — exactly what
+            # `awaiting_max_days` exists to prevent — while two docstrings went on claiming the
+            # value was clamped. An activity's *result* is recorded in history, so taking `due_at`
+            # from it is both deterministic on replay and impossible for a caller to skip. One
+            # definition, on the path every caller already takes.
+            opened = await workflow.execute_activity(
+                open_pending_request_activity,
+                _OpenInput(
+                    request_id=request_id,
+                    request=request,
+                    started_at=workflow.now().isoformat(),
+                    run_id=workflow.info().run_id,
+                ),
+                start_to_close_timeout=activity_timeout,
+                schedule_to_start_timeout=queue_wait_timeout(),
+                retry_policy=BAD_DATA_RETRY,
+            )
+            due_at = datetime.fromisoformat(opened)
+            await self._notify(request, request_id, due_at.isoformat())
             await self._wait_until(due_at, request, request_id)
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, ActivityError) as exc:
             # A cancelled wait must still stop *saying* it is open, or the inbox shows a question
             # nothing is listening for. The settle runs `ABANDON`, because an ordinary activity
             # scheduled from a cancelled workflow is cancelled with it and would never write.
+            #
+            # **`ActivityError` is here because a cancellation does not always arrive as one
+            # exception type, and the difference is which `await` was in flight.** Blocked on
+            # `wait_condition` — the wait's whole designed lifetime — a cancellation is
+            # `asyncio.CancelledError`. Blocked *inside an activity* it is
+            # `ActivityError(cause=CancelledError)`, so the clause above caught nothing: measured
+            # against a real broker, a parent terminated while the child sat in the open activity
+            # left the child `CANCELED` with **no settle attempted**. Everything else an activity
+            # can raise is re-raised unchanged, which is what keeps a projection refusal a failure
+            # (`tests/test_awaiting.py::test_a_wait_refused_by_the_projection_fails_instead_of_`
+            # `waiting_blind`) rather than a wait that quietly reports itself cancelled.
+            if isinstance(exc, ActivityError) and not isinstance(exc.cause, TemporalCancelledError):
+                raise
             await self._settle(request_id, "cancelled", activity_timeout, detached=True)
             raise
 
