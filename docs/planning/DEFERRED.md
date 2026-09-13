@@ -37,13 +37,15 @@ depends on. Re-check whenever `langchain-*` or `langgraph-*` is bumped in `pypro
 
 ## Gated on a live model budget
 
-Three answer-quality questions that only a live lane can settle. Each was queued in `BACKLOG.md` as
-work; none of them is, because the missing input is measurement against a real model, not code.
+Answer-quality questions that only a live lane can settle. Each was queued in `BACKLOG.md` as
+work; none of them is, because the missing input is a measurement against a real model or a real
+deployment's turns, not code. (No count here: the one that stood said three over four.)
 
 | Item | Why not now | Trigger to revisit |
 |---|---|---|
 | **A flagged answer is never revised** | Measured and answered *no* for the cheap version (`D-2026-08-16-a-second-judge-is-a-second-answer-about-the-same-answer`): 51 probes, 39 flagged, 39 revised — revision cleared 10, but **8 of the 10 were deletions**, and the 2 that kept their substance are exactly the number that clear with no edit at all when the judge re-rolls. Benefit over doing nothing: zero, at $0.0149 and 3.4 s per flagged turn. `promised but not called` was "fixed" by deleting the promise 8 times out of 8. `RubricMiddleware` is **not** the fix and that is a merged decision. The ADR says explicitly to keep this recorded rather than delete it, so that the next session does not reach for the same library again | A model stronger than haiku-4.5 for **both** the judge and reviser legs. (The reproducibility prerequisite this trigger used to name as "the row above" is answered: D-2026-08-27-a-verdict-at-the-margin-is-a-coin-toss re-rolls the margin and the median decides, so a future reviser is no longer tuned against a coin toss) |
 | **The judge names no claims on 88% of turns** (measurement half) | The *schema* half is closed (2026-08-17): `claims` was legally omittable because a pydantic default made it optional even under `method="json_schema"`, and it is now required with an explicit "empty means none found" contract. That is a strong causal argument and **not** a verified improvement — a provider may still return `{"claims": []}`, which is legal under the new contract and looks identical downstream | A live run re-counts non-empty `claims` over a comparable probe set. If it is still ~6/51, the cause is the judge's prompt rather than the schema |
+| **Whether a `stated` quote's figure is about *this* slot** | `_quote_supports` relates a value to its quote and refuses every fabrication measured so far, and it cannot do attribution: `max_runs='24'` quoting "24 wells" passes when the chemist said 24 wells about the plate. `D-2026-09-13-a-digit-inside-a-word-is-not-a-figure-somebody-stated` delivered the count the queue row asked for first — over the 295 chemist asks in `data/evals/probes/`, **537** distinct quotable figures, of which **166 were never quantities** (SMILES ring closures, a `C18` column, the halves of a decimal) and are now refused. The remaining **371** are the attribution exposure. Closing it needs a per-slot unit vocabulary — a table that will be wrong for the first ask nobody anticipated — or a second model call inside a check that costs a regex | A deployment's own turns, so the count can be taken over what chemists actually typed rather than over asks written to grade answers. The anchor: `agent/protocol_design_tools.py::_quote_supports` |
 
 ## Gated on a scale not yet reached
 

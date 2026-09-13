@@ -469,8 +469,12 @@ The answers a chemist acts on. Each row here is a way the record can be right an
       dropped by both publish paths (carried now), and the reaction context is not dropped but
       never recorded anywhere — deferred with its trigger. Also found: `tests/test_publish_sql.py`
       says it runs the shipped DDL and applied the first of its three files.
-- [ ] W26.5 `Chemclaw3` — `_quote_supports` cannot tell whether the figure a quote carries is about
-      *this* slot.
+- [x] W26.5 `Chemclaw3` — `_quote_supports` cannot tell whether the figure a quote carries is about
+      *this* slot. The row asked for a count first and
+      `D-2026-09-13-a-digit-inside-a-word-is-not-a-figure-somebody-stated` took it: 537 quotable
+      figures over 295 chemist asks, of which **166 were never quantities** — a pasted SMILES's
+      ring closures made `max_runs='1'` a stated value. That third is closed; the attribution half
+      is in `DEFERRED.md` with the count and a trigger the row did not have.
 - [ ] W26.6 `Chemclaw3` — knowledge writes serialise cluster-wide on one advisory lock [M] (a
       correctness-adjacent throughput bound on the one write path, `kg/record.py`).
 - [ ] W26.7 `Chemclaw3-mcp` — `rxnpredict/engine/cache.py:48,56` falls back to **raw caller text** as
