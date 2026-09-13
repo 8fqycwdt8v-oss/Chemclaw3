@@ -1072,11 +1072,22 @@ class CampaignCarryOver(BaseModel):
     campaign at the configured `bo_max_rounds` would be terminated by the server mid-run, losing
     every already-paid evaluation. Carrying the state across a fresh run resets that growth; the
     carry-over is one list of observations, kilobytes at any round count this ceiling allows.
+
+    `spent_seconds` is carried for a reason of the same shape one layer out. The ceiling a campaign
+    runs under is a workflow *execution* timeout, which spans the whole continue-as-new chain, while
+    `workflow.info().workflow_start_time` is the run's own start and resets on every continuation.
+    A continued run that measured only its own elapsed time would believe it had the full budget
+    again and hand its last dispatch a queue wait the ceiling cannot honour. Nothing on
+    `workflow.info()` carries the chain's start, so the campaign carries it. It defaults to 0.0 so a
+    carry-over written by an older worker mid-upgrade still deserializes — and a run that
+    deserializes one under-counts what it has spent, which errs towards a longer wait exactly once
+    before the next continuation writes the field.
     """
 
     history: list[Observation]
     rounds_remaining: int = Field(ge=0)
     rounds_done: int = Field(default=0, ge=0)
+    spent_seconds: float = Field(default=0.0, ge=0)
 
 
 def observed_value(

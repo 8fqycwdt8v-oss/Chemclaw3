@@ -453,15 +453,83 @@ def connector_queue_wait_timeout() -> timedelta:
     unserved, and asking the same absent worker again finds the same absence (measured in
     `tests/test_activity_queue_bound.py`).
 
+    **"By construction" is a claim about one activity, and this docstring used to make it about
+    every bundle child.** The composite that fits is `q + w`, singular — so a child that runs
+    activities *in sequence* gets `n × (q + w)` against the same ceiling, which this number funds
+    for `n = 2` and no more. Measured at the shipped settings: `q` = 10,170 s, a `bo` activity's
+    `w` = 300 s, composite 10,470 s; two fit inside 25,200 s and three do not.
+    `BoCampaignWorkflow` runs **six** for a one-round campaign — worst case 62,820 s, 2.5× its
+    ceiling — and the overrun arrives as a `WorkflowExecutionTimedOut`, which reaches no workflow
+    code and names neither the queue nor the reason. `remaining_queue_wait_timeout` below is what
+    such a child passes instead; this one is still exactly right for a child that dispatches once,
+    which `calc` and `results` both do.
+
     Returns:
-        The `schedule_to_start_timeout` every connector-bundle activity call passes. Strictly
+        The `schedule_to_start_timeout` a single-activity connector-bundle child passes. Strictly
         positive by construction: `Settings` refuses a ceiling that does not exceed the longest
         activity plus one activity's overhead.
     """
     longest, _ = settings.longest_bundle_activity
-    return timedelta(
-        seconds=settings.connector_job_timeout_seconds - longest - settings.activity_timeout_seconds
-    )
+    return timedelta(seconds=_queue_wait_seconds(settings.connector_job_timeout_seconds, longest))
+
+
+def _queue_wait_seconds(budget: float, activity_seconds: float) -> float:
+    """What is left of `budget` for a queue wait once one attempt and its overhead are paid for.
+
+    The one arithmetic behind both bounds above and below, written once because the pair is a
+    *narrowing* — the sequential form is the same subtraction against what is left of the execution
+    budget rather than against all of it — and two spellings of one subtraction is how `q + w` came
+    apart on the connector side in the first place.
+
+    Args:
+        budget: The execution budget this wait has to fit inside, in seconds.
+        activity_seconds: The start-to-close budget of the attempt that follows the wait.
+
+    Returns:
+        The wait in seconds. May be zero or negative, which the callers read differently: for the
+        deployment-wide ceiling `Settings` has already refused that case, and for a run partway
+        through its budget it means there is nothing left to fund another activity.
+    """
+    return budget - activity_seconds - settings.activity_timeout_seconds
+
+
+def remaining_queue_wait_timeout(remaining: timedelta, activity_seconds: float) -> timedelta | None:
+    """The queue wait a bundle child may still afford, given what is left of its execution budget.
+
+    **This is the bound a child that dispatches more than once needs, and there was none.** The
+    ceiling above is derived so that one wait plus one attempt fits the parent's execution timeout.
+    A child running a *sequence* spends that composite once per step, so the ceiling funds two steps
+    at the shipped settings and a campaign runs six for a single round. `continue_as_new` does not
+    help: `durable/connector_job.py` applies the ceiling as `execution_timeout`, which spans the
+    whole continue-as-new chain — only a *run* timeout resets, and the chain is precisely what the
+    ceiling is meant to bound.
+
+    So the budget is spent down rather than re-granted. Each dispatch asks what is left, and the
+    answer shrinks as the campaign runs. The composite is then `Σ(qᵢ + wᵢ) ≤ C - overhead` for any
+    number of steps, which is the property `connector_queue_wait_timeout` claims for one.
+
+    **`None` is an answer, not an error.** A run whose remaining budget cannot fund one more
+    attempt has no wait to offer, and the caller must stop with what it has rather than dispatch an
+    activity that the execution timeout will kill mid-flight — an ending delivered to nobody. It is
+    returned rather than raised because raising inside workflow code is a workflow *task* failure,
+    which Temporal retries forever against a condition that only gets worse.
+
+    `activity_seconds` is the caller's own start-to-close budget rather than
+    `longest_bundle_activity`, and that is a real difference: the fleet-wide maximum is
+    `xtb_job_timeout_seconds` at 15,000 s, which would exhaust a 25,200 s ceiling in one step for a
+    campaign whose activities are budgeted at 300. The queue-wide bound still applies — a caller
+    takes the *minimum* of the two, since both have to hold.
+
+    Args:
+        remaining: What is left of this run's execution budget.
+        activity_seconds: The start-to-close budget of the activity about to be dispatched.
+
+    Returns:
+        The `schedule_to_start_timeout` for the next dispatch, or None when the budget can no
+        longer fund one.
+    """
+    seconds = _queue_wait_seconds(remaining.total_seconds(), activity_seconds)
+    return timedelta(seconds=seconds) if seconds > 0 else None
 
 
 # How far *down* the first capacity retry may be moved, as a fraction of it. A quarter, which

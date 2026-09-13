@@ -1553,6 +1553,49 @@ def test_the_task_tool_returns_a_dict_shaped_command_update() -> None:
     )
 
 
+def test_a_file_a_helper_hands_back_is_a_mapping_carrying_its_text_under_content() -> None:
+    """`agent/tool_result_shape.rewritten_command_files` reads `FileData["content"]`.
+
+    The other half of what `task` writes into its caller's state, and the same class of assumption
+    as the one above. Upstream's `_return_command_with_state_update` copies every non-excluded key
+    of the helper's final state into the update, `files` included, and this repository bounds that
+    channel (`D-2026-09-12-a-helpers-scratch-file-crosses-into-its-callers-state`) by rewriting the
+    text in place — in place rather than through `create_file_data`, because rebuilding a file would
+    restamp its `created_at`.
+
+    So two things have to stay true of upstream's own constructor: a file is a mapping, and its
+    text lives under `content`. If either moves, the bound goes quiet on every file rather than
+    failing, which is the failure mode this file exists to convert into a red test.
+    """
+    from deepagents.backends.utils import create_file_data
+    from langgraph.types import Command
+
+    from chemclaw.agent.tool_result_shape import rewritten_command_files
+
+    data = create_file_data("the helper's notes")
+    assert isinstance(data, dict), (
+        "deepagents no longer represents a file as a mapping, so "
+        "`agent/tool_result_shape.rewritten_command_files` reads nothing and the bound on what a "
+        "helper writes into its caller's checkpointed state is silently off"
+    )
+    assert data.get("content") == "the helper's notes", (
+        "a file's text is no longer under `content`, so the same bound is silently off"
+    )
+
+    bounded = rewritten_command_files(
+        Command(update={"files": {"/scratch/n.md": data}, "model_calls": 1}),
+        lambda content, sharing: content[:3],
+    )
+    assert bounded.update["files"]["/scratch/n.md"]["content"] == "the"
+    assert bounded.update["files"]["/scratch/n.md"]["created_at"] == data["created_at"], (
+        "bounding a file restamped it, so a helper's file arrives looking newer than it is"
+    )
+    assert bounded.update["model_calls"] == 1, (
+        "bounding a helper's files dropped another update key; those keys are how a fan-out's "
+        "spend reaches the single budget it shares"
+    )
+
+
 def test_a_pipeline_block_on_an_autocommit_connection_is_still_one_transaction() -> None:
     """Psycopg's pipeline is a transaction boundary, and two first-party modules reason from it.
 

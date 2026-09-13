@@ -349,7 +349,7 @@ def test_a_slow_upload_does_not_stall_every_other_request(
     the loop blocked, the probe still answers quickly once it finally runs.
     """
     parse = _SlowParse()
-    monkeypatch.setattr(attachments, "parse_attachment", parse)
+    monkeypatch.setattr(attachments, "parse_attachment_isolated", parse)
 
     async def _drive() -> None:
         app = create_app()
@@ -394,7 +394,7 @@ def test_uploads_past_the_parse_cap_are_shed_rather_than_queued(
     from chemclaw.core.config import settings
 
     parse = _SlowParse()
-    monkeypatch.setattr(attachments, "parse_attachment", parse)
+    monkeypatch.setattr(attachments, "parse_attachment_isolated", parse)
     monkeypatch.setattr(settings, "attachment_max_concurrent_parses", 1)
     monkeypatch.setattr(settings, "attachment_parse_queue_seconds", 0)
 
@@ -431,7 +431,7 @@ def test_a_burst_inside_the_queue_window_is_served_rather_than_shed(
     from chemclaw.core.config import settings
 
     parse = _SlowParse()
-    monkeypatch.setattr(attachments, "parse_attachment", parse)
+    monkeypatch.setattr(attachments, "parse_attachment_isolated", parse)
     monkeypatch.setattr(settings, "attachment_max_concurrent_parses", 2)
     monkeypatch.setattr(settings, "attachment_parse_queue_seconds", 10)
 
@@ -462,7 +462,7 @@ def test_a_shed_upload_is_counted(monkeypatch: pytest.MonkeyPatch) -> None:
     from chemclaw.core.metrics import METRICS
 
     parse = _SlowParse()
-    monkeypatch.setattr(attachments, "parse_attachment", parse)
+    monkeypatch.setattr(attachments, "parse_attachment_isolated", parse)
     monkeypatch.setattr(settings, "attachment_max_concurrent_parses", 1)
     monkeypatch.setattr(settings, "attachment_parse_queue_seconds", 0)
 
@@ -526,21 +526,37 @@ def test_a_worker_thread_that_never_starts_gives_its_slot_back(
     asyncio.run(_drive())
 
 
-def test_a_parse_past_its_timeout_is_refused_and_keeps_its_slot_until_the_thread_ends(
+def test_a_parse_past_its_timeout_is_refused_to_its_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two halves of one contract, and the second is what makes the cap true.
+    """The client stops waiting on the deadline and is told which deadline it was.
 
-    The client stops waiting after `attachment_parse_timeout_seconds` and is told so (422 — the
-    file is unreadable *here*, and sending it again would do the same thing). But Python cannot
-    kill the thread, so the slot must stay taken until that thread actually ends: releasing it when
-    the request gives up would let one attacker hold every CPU while the counter reads zero.
+    422 rather than 503: the file is unreadable *here*, and sending it again would do the same
+    thing. The message names the budget because "it failed" and "it was too slow for this pod" send
+    a chemist to different next steps.
+
+    **This test used to assert the wedge as though it were the design.** It read
+    `..._and_keeps_its_slot_until_the_thread_ends` and checked `in_flight == 1` after the refusal,
+    on the reasoning that "Python cannot kill the thread, so the slot must stay taken until that
+    thread actually ends". The first clause is true and the conclusion is a permanent capacity
+    loss: driven at the shipped cap, two such parses took the replica's upload path down for the
+    life of the process. Killing the *work* is what was missing, and it is not something this test
+    could ever have seen, because the fake parse it patches in is a thread that blocks on an
+    `Event` — unkillable by construction, so the old assertion was about the fixture. The real
+    property is driven against a real slow parse in
+    `tests/test_parse_isolation.py::test_a_parse_past_its_deadline_frees_its_slot_for_the_next_upload`.
+
+    What stays here is the bookkeeping either way: the slot is released when the worker thread
+    ends, whatever ends it.
     """
     from chemclaw.core.config import settings
 
     parse = _SlowParse()
-    monkeypatch.setattr(attachments, "parse_attachment", parse)
+    monkeypatch.setattr(attachments, "parse_attachment_isolated", parse)
     monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", 0.2)
+    # No grace: the thread's own deadline is what normally fires, and this fake has none, so the
+    # caller's backstop is the control under test and must not sit through five spare seconds.
+    monkeypatch.setattr(settings, "attachment_parse_reap_grace_seconds", 0.0)
 
     async def _drive() -> None:
         app = create_app()
@@ -549,9 +565,6 @@ def test_a_parse_past_its_timeout_is_refused_and_keeps_its_slot_until_the_thread
             refused = await _upload(client, session_id)
             assert refused.status_code == 422
             assert "0.2s" in refused.json()["detail"]
-
-            # The thread is still running, so the slot it stands for is still taken.
-            assert attachments._PARSE_SLOTS.in_flight == 1
 
             parse.release.set()
             async with asyncio.timeout(5):

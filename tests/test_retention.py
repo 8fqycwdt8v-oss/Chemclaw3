@@ -2675,11 +2675,23 @@ def test_no_disposal_entry_offers_actor_erasure_as_what_bounds_a_table() -> None
         "of the two registers moved out from under it"
     )
     rests_on_erasure = re.compile(r"erasure|erase[sd]|per[- ]actor|actor[- ]scoped|leaver", re.I)
+    knobs = set(type(settings).model_fields)
     for table in examined:
         stated = _NOT_PRUNED[table]
         if not rests_on_erasure.search(stated):
             continue
-        assert "nothing bounds it" in stated or stated.startswith(("refused:", "cascades from")), (
+        # A fourth accepted form, added when `store` gained an actual bound
+        # (`D-2026-09-12-a-bound-on-an-agent-writable-table-is-a-row-count`): the entry may *name
+        # the knob*. Not the word "bounded" — "bounded by actor erasure" is the defect this test
+        # exists for, and it contains that word. A `Settings` field name is the thing erasure is
+        # not, and requiring it to be a field that exists means a renamed setting turns this red
+        # rather than leaving a register sentence pointing at nothing.
+        named = knobs & set(re.findall(r"[a-z][a-z0-9_]+", stated))
+        assert (
+            "nothing bounds it" in stated
+            or stated.startswith(("refused:", "cascades from"))
+            or named
+        ), (
             f"{table} is erased per actor and its disposal entry leans on that erasure without "
             f"saying what bounds the table; `_NOT_PRUNED` says {stated!r}. A leaver's request is "
             "not a clock — this register's own `session_owners` entry argues so"

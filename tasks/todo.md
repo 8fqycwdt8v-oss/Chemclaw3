@@ -275,20 +275,89 @@ rows: a per-call bound with nothing bounding N of them.
       the two heavy servers with **no `engine/admission.py`**, against their own `CLAUDE.md` rule.
       Ceilings must count what the pod *spends*, not calls — the `servers/calc` lesson.
 - [ ] W23.3 `Chemclaw3-mcp` — `chem` has `engine/admission.py` and no `test_admission.py`.
-- [ ] W23.4 `Chemclaw3` — nothing bounds the scratchpad memory store: agent-writable, no size cap,
-      no window, no clock; a looping `remember` is the runaway. Decide a per-actor row cap in the
-      writer's own transaction (the `ingest/rejections.py` shape) or an explicit accepted-unbounded
-      posture — and change `retention._NOT_PRUNED["store"]` in the same commit.
-- [ ] W23.5 `Chemclaw3` — **six tables still say "nothing bounds it"** [M]. One decision per table,
-      recorded.
-- [ ] W23.6 `Chemclaw3` — nothing bounds what a helper writes into its caller's checkpointed state.
-- [ ] W23.7 `Chemclaw3` — a timed-out parse still runs to completion on the worker thread [L]:
-      the wall clock frees the caller, not the CPU.
-- [ ] W23.8 `Chemclaw3` — `BoCampaignWorkflow` runs four sequential activities under a ceiling that
-      funds one.
+- [x] W23.4 `Chemclaw3` — nothing bounds the scratchpad memory store. **Done**, and the row's
+      runaway is the wrong one: a looping `remember` is already capped at
+      `harness_max_loop_iterations` x `agent_max_parallel_tool_calls` <= 200 writes per turn; what
+      nothing bounded is accumulation *across* turns. Driven, 2,000 x 5 kB -> `(2000, '816 kB')`,
+      one prefix, nothing evicted. The `ingest/rejections.py` shape does not port — there is no
+      first-party writer, and `tests/test_scratchpad.py` forbids first-party `aput` — so the cap is
+      a `BoundedStoreBackend` over `StoreBackend`, and that test's rule is narrowed to name the one
+      exempt module rather than deleted. The invariant is **eventual** (the store's pool is
+      autocommit), which the docstring says rather than promising atomicity.
+- [x] W23.5 `Chemclaw3` — **six tables still say "nothing bounds it"** [M]. **Done** — five
+      decisions, not one. `store` and `user_preferences` were the two real bugs (both
+      agent-writable; `remember_preference` takes a model-chosen key, and `recall_preferences` had
+      no `LIMIT`, so every preference re-entered the prompt for ever). The fingerprint pair is
+      bounded by construction but **not by the corpus**: `094` put the definition in the key, so a
+      `STANDARDIZATION_VERSION` bump forks the table permanently and the runtime role holds no
+      DELETE. `predictions` needs a `calc_version` retirement policy, not a row cap; `measurements`
+      is unbounded and accepted. `D-2026-09-12-a-bound-on-an-agent-writable-table-is-a-row-count`.
+- [x] W23.6 `Chemclaw3` — nothing bounds what a helper writes into its caller's checkpointed state.
+      **Done for the channel the row names, and the residual is measured rather than implied.**
+      Driven: 2,000,137 chars of `files` against a 57-character thread, now capped at
+      `agent_subagent_files_max_chars` (a total several files share). On a real saver with
+      **incompressible** text — the first measurement padded with `"x"` and measured TOAST
+      compression instead — one 2 MB helper write costs 20,712 kB of checkpoint rows above a 296 kB
+      baseline (10.4x, not 7.8x), and this cap reclaims 1,824 kB, **8.8%**. The other 91% is the
+      helper's *own* subgraph checkpoints, which a `wrap_tool_call` middleware cannot reach; that is
+      a `BACKLOG.md` row with the measurement. It is a one-off per spawn, not recurring: two later
+      turns on the same thread added 56 kB in both arms.
+      `D-2026-09-12-a-helpers-scratch-file-crosses-into-its-callers-state`.
+- [x] W23.7 `Chemclaw3` — a timed-out parse still runs to completion on the worker thread [L]:
+      the wall clock frees the caller, not the CPU. **Done** — and the row understated it. The pod
+      *was* bounded (`_ParseSlots` shed the third upload in 2.00 s); the defect is that a slot is
+      released only when its thread finishes, so two non-terminating parses took the replica's
+      upload path down **permanently** — driven, `in_flight` stayed at 2 five seconds after both
+      callers were freed and every later upload was shed. The parse now runs in a forkserver child
+      the thread `SIGKILL`s on the deadline (10 ms warm, vs 0.97 s for a fresh interpreter).
+      Driving it found `netguard._host_of` refusing the forkserver's own `AF_UNIX` socket as egress
+      while its docstring claimed local IPC was exempt.
+      `D-2026-09-12-a-parse-that-cannot-be-killed-wedges-its-replica`.
+- [x] W23.8 `Chemclaw3` — `BoCampaignWorkflow` runs four sequential activities under a ceiling that
+      funds one. **Done** — and the row was wrong twice over: it is **six** activities for a
+      one-round campaign, and the ceiling funds **two** (20,940 <= 25,200), breaking at the third.
+      Measured, 6 x 10,470 = 62,820 s against 25,200. `continue_as_new` cannot fix it because
+      `connector_job.py` applies the ceiling as `execution_timeout`, which spans the chain. A run
+      now spends its budget down and shares what is left between the dispatches still to come: all
+      six fit at ~3,880 s each, totalling 25,170. Bounding each by the *whole* remainder was tried
+      and funds only three — measured, not argued.
+      `D-2026-09-12-a-ceiling-that-funds-one-attempt-does-not-fund-a-sequence`.
 
 **Acceptance** — a driven saturation probe per ceiling: N+1 concurrent sessions/calls refused
 promptly (not queued), the refusal counted, and the pod's RSS bounded across the probe.
+
+### W23 review (Chemclaw3 half: W23.4–W23.8)
+
+Five items, five decisions, four ADRs. **Four of the five plan rows were wrong about their own
+subject, in the same direction each time — they described the resource that was easy to see rather
+than the one that was actually unbounded.**
+
+- **W23.7** said "a timed-out parse still runs to completion on the worker thread", which reads as a
+  CPU leak. The pod *was* bounded. What was unbounded was the pod's *lifetime*: a slot is released
+  by its thread's completion, so a parse that never returns holds it for ever. Driven,
+  `in_flight` stayed at 2 five seconds after both callers were freed and every later upload was
+  shed. The fix is a killable child process, and the reason it is affordable is measured rather
+  than assumed: 10 ms warm against 0.97 s for a fresh interpreter.
+- **W23.8** said "four sequential activities under a ceiling that funds one". Six, and it funds two.
+  And the obvious remedy (`continue_as_new` per round) does not work, because the ceiling is an
+  *execution* timeout. The one that does — sharing the remaining budget between the dispatches
+  still to come — was itself chosen against a measurement: bounding each dispatch by the *whole*
+  remainder also fits the ceiling and funds only three of the six.
+- **W23.4** named "a looping `remember`" as the runaway; a turn is already capped at ~200 writes.
+  The runaway is accumulation across turns.
+- **W23.5** grouped six tables as one finding; they are five decisions, and two of the "obviously
+  fine" ones were not what they looked like — the fingerprint tables are bounded by the corpus
+  *times every definition ever written*, and `user_preferences` was the second agent-writable table
+  with no bound at all.
+- **W23.6** was right about the channel and wrong about the size of the prize. Bounding what
+  crosses into the caller's state is 8.8% of what a 2 MB helper write costs the checkpoint tables;
+  the other 91% is the helper's own subgraph, which this seam cannot reach. That is now a
+  `BACKLOG.md` row carrying the measurement rather than a gap the ADR implies is closed.
+
+Two findings came out of *driving* a fix rather than out of the plan: `netguard._host_of` refused
+`AF_UNIX` while its own docstring said it exempted local IPC (and the C half of the same control had
+it right all along), and a 2 MB payload of `"x"` measures TOAST compression rather than storage —
+the first checkpoint measurement here said 552 kB and was evidence about nothing.
 
 ## W24 — The durable layer: races, lock order, loop teardown
 

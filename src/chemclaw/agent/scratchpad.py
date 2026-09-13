@@ -74,10 +74,13 @@ from typing import Any, cast
 
 from deepagents import FsToolName
 from deepagents.backends import CompositeBackend, StateBackend, StoreBackend
+from deepagents.backends.protocol import WriteResult
 from langgraph.store.postgres.aio import AsyncPostgresStore
 
+from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor
 from chemclaw.core.ids import stable_hash
+from chemclaw.core.metrics import METRICS
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +226,100 @@ async def close_memory_store() -> None:
     _store = None
 
 
+class BoundedStoreBackend(StoreBackend):
+    """`StoreBackend` with a row cap per namespace — the bound `store` did not have.
+
+    **The table was unbounded and agent-writable, which is a combination this repository has one
+    other instance of and already answered.** `durable/retention.py`'s disposal register said of
+    `store`, in as many words, "**nothing bounds it**": no size cap, no window, no clock, and a
+    retention sweep that deliberately does not touch it because a memory is written *to persist*.
+    Driven before this, 2,000 writes of 5 kB under one namespace left `(2000, '816 kB')` with
+    nothing evicted and nothing counted.
+
+    The runaway is **not** a looping turn. `harness_max_loop_iterations` x
+    `agent_max_parallel_tool_calls` is a hard ceiling on how many writes one turn can make. It is
+    accumulation *across* turns, over a deployment's life, because nothing ever removed a row —
+    which is the same shape `ingest/rejections.py` answers with `_MAX_ROWS_PER_SOURCE`, and this is
+    its per-actor twin.
+
+    **Here rather than in a `BaseStore` wrapper, and that is what keeps the audit property true.**
+    `tests/test_scratchpad.py` asserts that no first-party module calls `aput`/`adelete` on a store,
+    because every memory write has to arrive as a `write_file`/`edit_file` *tool* call — that is
+    what crosses the `wrap_tool_call` chain and produces the audit row, the authorization decision
+    and the dry-run refusal. This class is the one exemption and it is an eviction rather than a
+    write: it removes what the cap says may not stay, in the same call the tool made, so nothing
+    enters the store outside the chain. That rule is refined rather than deleted, in the shape
+    `kg/record.py` already has — exactly one module may, and a test names it.
+
+    **The invariant is eventual, not atomic, and the reason is the pool.** The memory store shares
+    the checkpointer's **autocommit** pool (`memory_store`, and `agent/checkpointer.py` for why it
+    is autocommit), so the write and the eviction are two statements rather than one transaction.
+    What holds is therefore "at most the cap, plus whatever is in flight" — two turns writing the
+    same namespace at the same instant can both see the count at the cap and both evict one, or
+    both land before either evicts. Neither outcome is a leak: the next write converges. Saying so
+    is the point; `ingest_rejections` can promise atomicity because its writer owns a transaction,
+    and claiming the same here would be claiming a property the pool cannot give.
+    """
+
+    async def awrite(self, file_path: str, content: str) -> WriteResult:
+        """Write, then evict whatever the cap no longer has room for.
+
+        After rather than before, because a write of an *existing* key replaces a row instead of
+        adding one — checking first would evict on every overwrite of a namespace sitting exactly
+        at the cap, which is a memory lost to a write that added nothing.
+
+        Args:
+            file_path: The memory's path under `/memories/`.
+            content: What to store.
+
+        Returns:
+            Upstream's result, unchanged — the cap is about what stays, not about what a turn is
+            told it wrote.
+        """
+        result = await super().awrite(file_path, content)
+        await self._evict_past_the_cap()
+        return result
+
+    async def _evict_past_the_cap(self) -> None:
+        """Drop the least recently updated memories until this namespace is inside the cap.
+
+        `updated_at` is a tiebreak rather than a policy. The bound is a *count*; when it is reached
+        something has to go, and the store carries exactly one ordering that is not arbitrary. It
+        is deliberately not an age cutoff: the oldest memory is as likely to be the one worth
+        keeping as the newest, which is why the retention sweep leaves this table alone.
+
+        One page of `agent_memory_max_files + _EVICTION_PAGE` is read rather than the whole
+        namespace. Eviction runs on every write, so a namespace in steady state is at most one over
+        the cap and the page is never the limiting factor; a deployment that *lowers* the cap under
+        an already-large namespace converges over the next writes instead of paying for the whole
+        table in one of them.
+        """
+        cap = settings.agent_memory_max_files
+        store = self._get_store()
+        namespace = self._get_namespace()
+        held = await store.asearch(namespace, limit=cap + _EVICTION_PAGE)
+        if len(held) <= cap:
+            return
+        doomed = sorted(held, key=lambda item: item.updated_at)[: len(held) - cap]
+        for item in doomed:
+            await store.adelete(namespace, item.key)
+        METRICS.increment("chemclaw_memory_evictions_total", len(doomed))
+        # Logged the way `ingest/rejections.py` logs its own eviction: an operator who set the cap
+        # needs to know it is binding, and a chemist whose memory vanished has no other trace.
+        logger.warning(
+            "evicted %d memory file(s) past the %d-file cap: %s",
+            len(doomed),
+            cap,
+            ", ".join(item.key for item in doomed),
+        )
+
+
+#: How far past the cap one eviction pass will look. Not a `Settings` field, for the reason
+#: `_EVICTED_NAMES_REMEMBERED` in `agent/attachments.py` is not one: it is the page size of a
+#: convergence loop, not a posture a deployment states. See `_evict_past_the_cap`.
+_EVICTION_PAGE = 64
+
+
 def scratchpad_backend(skills: CompositeBackend, store: Any | None = None) -> CompositeBackend:
     """Extend a turn's skills backend with a scratchpad and, when enabled, durable memories.
 
@@ -255,7 +352,7 @@ def scratchpad_backend(skills: CompositeBackend, store: Any | None = None) -> Co
         namespace = memory_namespace(actor)
         # A closure over the value, not a read through the runtime: see the module docstring. The
         # lambda takes the runtime upstream passes and ignores it, which is the whole point.
-        routes[MEMORY_ROOT] = StoreBackend(namespace=lambda _runtime: namespace, store=store)
+        routes[MEMORY_ROOT] = BoundedStoreBackend(namespace=lambda _runtime: namespace, store=store)
     return CompositeBackend(default=StateBackend(), routes=routes)
 
 

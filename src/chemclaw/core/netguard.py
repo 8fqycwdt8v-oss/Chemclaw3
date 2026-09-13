@@ -131,15 +131,37 @@ class EgressForbidden(OSError):
 def _host_of(address: Any) -> str | None:
     """The host string from a socket address, or None when there is nothing that leaves the host.
 
-    Returns None for a family the check cannot read (AF_UNIX is a path, not a host) so `_check`
-    treats it as "nothing to leave for" rather than refusing local IPC. A `bytes` host is decoded,
-    because a `bytes` host in the address tuple walked past a `str`-only check in pure Python.
+    **An internet address is a tuple, and everything else is local IPC.** That is the whole rule,
+    and the previous version of this function claimed it while doing the opposite: it fell through
+    to `host = address` for a non-tuple, so an `AF_UNIX` address — which is a bare `str` path, or
+    `bytes` in the abstract namespace — arrived at `_check` as a hostname, failed `is_loopback_host`
+    and was refused. The docstring said "Returns None for a family the check cannot read (AF_UNIX is
+    a path, not a host) so `_check` treats it as 'nothing to leave for' rather than refusing local
+    IPC", and nothing asserted it in either direction.
+
+    Measured: `multiprocessing`'s forkserver — which `ingest/documents/isolate.py` needs to run a
+    parse in a killable child — connects to its own listener at `/tmp/pymp-*/listener-*`, and every
+    such connect was refused with "outbound connection to '/tmp/pymp-…/listener-…' is not on the
+    allowlist". A path under `/tmp` leaves this host by no route, so refusing it protected nothing
+    and broke local process IPC.
+
+    `netguard_preload.c` — the same control one layer down — had it right all along: it reads
+    `sa_family` and checks only `AF_INET`/`AF_INET6`, and its comment states the same reason. The
+    two layers disagreed, and the C one was the correct half.
+
+    A `bytes` host inside a tuple is still decoded, because a `bytes` host in an address tuple
+    walked past a `str`-only check in pure Python.
+
+    Args:
+        address: Whatever the caller handed `connect`/`sendto`.
+
+    Returns:
+        The hostname or IP an internet address names, or None when the address names nothing
+        outside this host.
     """
-    host: Any
-    if isinstance(address, (tuple, list)) and address:
-        host = address[0]
-    else:
-        host = address
+    if not isinstance(address, (tuple, list)) or not address:
+        return None
+    host: Any = address[0]
     if isinstance(host, bytes):
         try:
             host = host.decode("ascii")

@@ -41,6 +41,7 @@ from chemclaw.core.metrics import METRICS
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.tool_registry import tool
 from chemclaw.ingest.documents.formats import content_type_for
+from chemclaw.ingest.documents.isolate import parse_document_isolated
 from chemclaw.ingest.documents.parse import DocumentParseError, parse_document
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ __all__ = [
     "content_type_for",
     "list_attachments",
     "parse_attachment",
+    "parse_attachment_isolated",
     "parse_attachment_off_loop",
     "read_attachment",
 ]
@@ -95,19 +97,79 @@ def _safe_name(name: str) -> str:
     return _NAME_UNSAFE.sub("_", base) or "upload"
 
 
-def parse_attachment(name: str, raw: bytes, declared_type: str | None = None) -> Attachment:
-    """Parse an upload, or refuse it with a message naming the supported formats.
+def _accepted_name(name: str, raw: bytes) -> str:
+    """Sanitize the caller's filename and refuse the upload if it is over the byte limit.
 
-    The caller's filename is reduced to a sanitized basename first (`_safe_name`), so every
-    downstream use — refusal messages, the session store, the model-facing handle, the framing
-    envelope — sees only the safe form.
+    The two checks that must happen in *this* process whichever way the parse itself runs: the size
+    limit is about the bytes already in hand, and the name has to be safe before it appears in a
+    refusal message. Shared by the in-process parser and the isolated one so the two cannot drift —
+    they did not, and a size limit enforced in one of two entry points is the shape that ends that
+    way.
+
+    Args:
+        name: The client-supplied filename.
+        raw: The upload's bytes.
+
+    Returns:
+        The sanitized basename.
+
+    Raises:
+        AttachmentError: The upload is over `attachment_max_bytes`.
     """
     name = _safe_name(name)
     if len(raw) > settings.attachment_max_bytes:
         raise AttachmentError(
             f"{name} is {len(raw)} bytes; the limit is {settings.attachment_max_bytes}"
         )
+    return name
+
+
+def parse_attachment(name: str, raw: bytes, declared_type: str | None = None) -> Attachment:
+    """Parse an upload in this process, or refuse it with a message naming the supported formats.
+
+    The caller's filename is reduced to a sanitized basename first (`_safe_name`), so every
+    downstream use — refusal messages, the session store, the model-facing handle, the framing
+    envelope — sees only the safe form.
+
+    **In-process, and that is right for its callers and wrong for the front door.**
+    `cli/backfill_corpus.py` is a one-document-at-a-time operator command where a slow parse costs
+    the operator their own wait, and the format tests call this to assert what each parser
+    extracts. The upload route uses `parse_attachment_isolated` instead, because there a parse that
+    does not terminate takes a shared replica down: see that function and
+    `ingest/documents/isolate.py`.
+    """
+    name = _accepted_name(name, raw)
     parsed = parse_document(name, raw, declared_type)
+    return Attachment(
+        name=name, content_type=parsed.content_type, text=parsed.text, rows=parsed.rows
+    )
+
+
+def parse_attachment_isolated(
+    name: str, raw: bytes, declared_type: str | None = None
+) -> Attachment:
+    """`parse_attachment`, with the parse itself in a child process that can be killed.
+
+    **This is the function the upload path runs on its worker thread**, and the difference from the
+    one above is the whole of `D-2026-09-12-a-parse-that-cannot-be-killed-wedges-its-replica`: a
+    parse slot is released by its thread's completion, CPython cannot stop a thread, so before this
+    a non-terminating parse held its slot for the life of the process. Driven at the shipped cap of
+    2, `in_flight` stayed at 2 indefinitely and every later upload was shed — the replica's upload
+    path down permanently, with nothing saying so.
+
+    The size check and the name sanitising stay here rather than crossing into the child: they are
+    cheap, they are about bytes already in this process, and a refusal that never forks is a
+    refusal that costs nothing.
+
+    Raises:
+        AttachmentError: The upload is over `attachment_max_bytes`, unsupported, or unreadable —
+            including `ParseWorkerLost` when the child was killed for outrunning
+            `attachment_parse_timeout_seconds`.
+    """
+    name = _accepted_name(name, raw)
+    parsed = parse_document_isolated(
+        name, raw, declared_type, settings.attachment_parse_timeout_seconds
+    )
     return Attachment(
         name=name, content_type=parsed.content_type, text=parsed.text, rows=parsed.rows
     )
@@ -131,6 +193,16 @@ class _ParseSlots:
     still runs would let the cap be exceeded without bound — exactly the case the cap exists for.
     And a counter has no event loop bound to it, so nothing here has to be rebuilt per loop, which
     a module-level `asyncio` primitive would need across the many loops this process runs.
+
+    **That release rule is sound and it used to be a permanent wedge, which is a different
+    property.** Releasing on completion is right; what was missing is that nothing bounded when
+    completion happened. A thread parsing in-process runs until the parse returns, so a parse that
+    does not return holds its slot for the life of the process — driven at the shipped cap of 2,
+    `in_flight` was still 2 five seconds after both callers had been freed and every later upload
+    was shed, forever. The cap was doing its job and the pod was dead. The work now runs in a child
+    process the thread kills on the parse deadline
+    (`D-2026-09-12-a-parse-that-cannot-be-killed-wedges-its-replica`), so "the slot comes back when
+    the thread does" is finally a bound rather than a hope.
 
     Waiters are the exception, and they are safe because each belongs to one in-flight request:
     a `Future` created on whichever loop is asking. Queueing *these* is not the thing the cap
@@ -284,21 +356,34 @@ async def parse_attachment_off_loop(
     # doing those as two statements here left a window in which a failing `run_in_executor` lost
     # the slot for the life of the process.
     future = _PARSE_SLOTS.submit(
-        asyncio.get_running_loop(), partial(parse_attachment, name, raw, declared_type)
+        asyncio.get_running_loop(), partial(parse_attachment_isolated, name, raw, declared_type)
     )
     try:
         # Shielded, and that is what makes the cap true: `wait_for` cancels what it waits on, and
         # cancelling this future would fire the release callback while the thread it stands for is
         # still running. The shield takes the cancellation instead, so the slot comes back exactly
         # when the thread does.
+        #
+        # **The deadline here is a backstop, not the control.** The parse timeout is enforced
+        # inside the worker thread, where it can kill the child process that is actually doing the
+        # work (`ingest/documents/isolate.py`); that is what makes the thread end at all. This one
+        # covers what that enforcement cannot see — the forkserver's own first start, measured at
+        # 0.86 s — so it is the parse budget plus `attachment_parse_reap_grace_seconds` rather than
+        # the parse budget itself. If it is ever the one that fires, the thread is still bounded and
+        # the slot still comes back; the caller simply hears about it a few seconds early.
         return await asyncio.wait_for(
-            asyncio.shield(future), timeout=settings.attachment_parse_timeout_seconds
+            asyncio.shield(future),
+            timeout=(
+                settings.attachment_parse_timeout_seconds
+                + settings.attachment_parse_reap_grace_seconds
+            ),
         )
     except TimeoutError as exc:
         logger.warning(
-            "parsing %s exceeded %ss; the upload was refused and its worker thread runs on",
+            "parsing %s was still unanswered %ss after its worker thread started; refused",
             name,
-            settings.attachment_parse_timeout_seconds,
+            settings.attachment_parse_timeout_seconds
+            + settings.attachment_parse_reap_grace_seconds,
         )
         raise AttachmentError(
             f"{name} was still being read after "

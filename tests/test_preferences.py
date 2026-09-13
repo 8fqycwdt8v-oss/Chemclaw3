@@ -23,6 +23,7 @@ from chemclaw.agent.preferences import (
     remember_preference,
 )
 from chemclaw.core.config import settings
+from tests.pg import migrated_db_or_skip
 
 
 def test_a_preference_round_trips_per_owner() -> None:
@@ -192,3 +193,87 @@ def test_a_preference_cannot_carry_a_live_envelope_delimiter_into_a_later_turn(
     # so a reader of the store still sees exactly what the turn wrote — the same relation
     # `agent/tool_framing.py` keeps for a scratch file.
     assert asyncio.run(_STORE.recall("anna-injected"))[0].value == live
+
+
+def test_a_chemists_preferences_are_bounded_in_number() -> None:
+    """The second agent-writable table with no bound, and the reason the obvious reading missed it.
+
+    `durable/retention.py` said of `user_preferences` "one row per person per key, and a preference
+    has no age at which it stops being current" — true of the second clause and misleading about
+    the first, because `remember_preference` takes a **model-chosen** `key`. One row per person per
+    key is not a bound when the model invents the key, and nothing capped how many a person could
+    accumulate.
+
+    Driven in memory mode, which is the configured store here and therefore the thing that must
+    hold the bound — a cap that existed only where a database did would be a cap this deployment
+    does not have.
+    """
+    cap = 4
+    patch = pytest.MonkeyPatch()
+    patch.setattr(settings, "preferences_max_per_owner", cap)
+    try:
+        store = PreferenceStore()
+        for index in range(cap * 3):
+            asyncio.run(store.remember("anna", f"k{index:02d}", "v"))
+        held = asyncio.run(store.recall("anna"))
+    finally:
+        patch.undo()
+    assert len(held) == cap, f"{len(held)} preferences survived a {cap}-preference cap"
+    # The last written survive: eviction takes the least recently set, so a chemist's current
+    # preferences are the ones that stay.
+    assert [p.key for p in held] == [f"k{index:02d}" for index in range(cap * 2, cap * 3)]
+
+
+def test_recall_is_bounded_so_a_chemists_preferences_cannot_grow_a_prompt_without_limit() -> None:
+    """The other half, and it is about the prompt rather than about the table.
+
+    The `SELECT ... ORDER BY key` behind `recall_preferences` had no `LIMIT`, so every preference a
+    chemist had ever set re-entered the model's context on every recall, in every later session,
+    for the life of the row — behind a tool the model is told to call "early in a substantive
+    answer". Two caps rather than one because a deployment that lowers the row cap still holds the
+    rows it already wrote, so the read has to bound itself.
+
+    The recall limit is set *above* the row cap here on purpose: with it below, a passing test
+    could not tell the two caps apart.
+    """
+    patch = pytest.MonkeyPatch()
+    patch.setattr(settings, "preferences_max_per_owner", 50)
+    patch.setattr(settings, "preferences_recall_limit", 3)
+    try:
+        store = PreferenceStore()
+        for index in range(10):
+            asyncio.run(store.remember("anna", f"k{index:02d}", "v"))
+        recalled = asyncio.run(store.recall("anna"))
+    finally:
+        patch.undo()
+    assert len(recalled) == 3
+    # Selected by recency, presented by key: a truncation by key alone would drop what the chemist
+    # said five minutes ago in favour of a year-old preference that sorts early.
+    assert [p.key for p in recalled] == ["k07", "k08", "k09"]
+
+
+def test_the_preference_cap_holds_against_a_real_table() -> None:
+    """The in-memory fallback and the table must agree, and only one of them is what ships.
+
+    The two paths are written separately — a `DELETE ... NOT IN` in the writer's own transaction,
+    and a dict trim — so agreeing is a property to assert rather than one to assume. This is the
+    half that skips without Postgres, which is why the memory-mode test above is not redundant.
+    """
+    cap = 4
+
+    async def _run() -> list[str]:
+        await migrated_db_or_skip()
+        patch = pytest.MonkeyPatch()
+        patch.setattr(settings, "session_store", "postgres")
+        patch.setattr(settings, "preferences_max_per_owner", cap)
+        patch.setattr(settings, "preferences_recall_limit", 100)
+        try:
+            store = PreferenceStore()
+            for index in range(cap * 3):
+                assert await store.remember("bounded-probe", f"k{index:02d}", "v")
+            return [preference.key for preference in await store.recall("bounded-probe")]
+        finally:
+            patch.undo()
+
+    keys = asyncio.run(_run())
+    assert keys == [f"k{index:02d}" for index in range(cap * 2, cap * 3)], keys

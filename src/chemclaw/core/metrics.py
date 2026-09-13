@@ -367,6 +367,32 @@ _COUNTERS: dict[str, str] = {
         "Uploads refused with 503 because every parse slot was still busy after "
         "`attachment_parse_queue_seconds`."
     ),
+    # The other half of that story, and the one that used to be invisible *and* permanent: a parse
+    # that outran its deadline. Before `ingest/documents/isolate.py` such a parse kept its slot for
+    # the life of the process, so this series rising and `..._shed_total` rising with it is the
+    # signature of a pod losing parse capacity — which is now bounded and recovers, but is still
+    # what an operator wants to see before the shed rate tells them.
+    # The two agent-writable tables that had no bound until 2026-09-12, counted apart because the
+    # decisions differ: a memory is a file a turn authored, a preference is how one person works.
+    # An eviction is a chemist losing something they were told was remembered, so it is a WARNING
+    # in the log *and* a series here — a cap that is silently binding is a cap nobody knows about.
+    "chemclaw_memory_evictions_total": (
+        "Durable memory files dropped because a namespace was over `agent_memory_max_files`."
+    ),
+    "chemclaw_preference_evictions_total": (
+        "Preferences dropped because one owner was over `preferences_max_per_owner`."
+    ),
+    # A helper's scratch file cut on its way into the caller's checkpointed state. Its own series
+    # rather than the tool-result truncation counter because it bounds a different resource — that
+    # one is context, this is what a checkpoint costs — and an operator reading a rising rate here
+    # is being told a helper is writing more than the channel budget allows, which is a prompt
+    # problem rather than a storage one.
+    "chemclaw_subagent_file_truncations_total": (
+        "Files a helper wrote that were cut on their way into its caller's state."
+    ),
+    "chemclaw_document_parse_kills_total": (
+        "Document parses whose reader process was killed for outrunning its deadline."
+    ),
     # The two refusals that happen *before* a turn exists, and so were invisible to every counter
     # above: they are per-request, not per-turn. Unlabelled deliberately — a per-principal series
     # would key a metric on user identity, which `/metrics` is unauthenticated and must not carry
