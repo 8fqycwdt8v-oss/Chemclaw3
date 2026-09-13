@@ -462,7 +462,13 @@ The answers a chemist acts on. Each row here is a way the record can be right an
       row's own justification false: an InChIKey taken after standardization moves exactly when
       `compound_id` moves (measured across the solvate fix), and one taken before it fragments the
       join. The row's ordering constraint pointed at a §2 solvate row that is closed and gone.
-- [ ] W26.4 `Chemclaw3` — a published calculation names no reaction, note or compound context [M].
+- [x] W26.4 `Chemclaw3` — a published calculation names no reaction, note or compound context [M].
+      Closed by `D-2026-09-13-a-publication-carries-the-link-the-system-already-holds`. The row is
+      three claims with three answers: the compound context already exists, the note→calculation
+      direction already exists, the note a run *produced* was held by `job_records.note_id` and
+      dropped by both publish paths (carried now), and the reaction context is not dropped but
+      never recorded anywhere — deferred with its trigger. Also found: `tests/test_publish_sql.py`
+      says it runs the shipped DDL and applied the first of its three files.
 - [ ] W26.5 `Chemclaw3` — `_quote_supports` cannot tell whether the figure a quote carries is about
       *this* slot.
 - [ ] W26.6 `Chemclaw3` — knowledge writes serialise cluster-wide on one advisory lock [M] (a

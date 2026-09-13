@@ -576,20 +576,6 @@ topic).
       trigger on the `DEFERRED.md` row for reagent/solvent set diffs in the turn-time comparison —
       one change answers both.
 
-- [ ] **A published calculation names no reaction, note or compound context** — [M]. `grep -n
-      "reaction_id\|note_id\|citation" src/chemclaw/publish/` returns nothing:
-      `schema/result-store/001_core.sql` models a `subject` of kind `reaction` and
-      `subject_member` rows with roles, and neither carries the id of the `reaction_records` or
-      `reaction_labels` row the calculation was about. So a result computed for the product of ELN
-      entry `EXP-1001` cannot be joined back to the run that motivated it, in either direction. The
-      two stores are also separate databases (`sink.yaml` targets `chemclaw-results`;
-      `corpus_molecules.id` is a bare standardized SMILES against `compound.canonical_smiles`), so
-      the join has to be designed rather than discovered. **Needs an ADR.** Deliberately not taken
-      while the row below is open: `D-2026-08-26-a-route-is-not-a-shape` records the composite half
-      of that path being inert for a release with no test noticing, because every test started at a
-      projector rather than at a hook — deciding a cross-reference against a store nobody has run
-      repeats exactly that. **Trigger:** the results store gets a live target.
-
 - [ ] **A stalled append-only feed has no first-party signal** — [S]. `corpus_cursors`
       (`infra/sql/072`) records where each feed's drain stopped, and nothing reads `updated_at`:
       `ingest/labels/cursor.py::load_corpus_cursor` selects `after` only. The module declines a lag gauge for a

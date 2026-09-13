@@ -292,6 +292,8 @@ class JobPublishInput(BaseModel):
     correlation_id: str = ""
     job_id: str = ""
     rationale: str = ""
+    # The note the job's envelope produced, which `job_records.note_id` stores from the same value.
+    note_id: str = ""
 
 
 @durable_activity("background")
@@ -317,5 +319,6 @@ async def publish_job_result(request: JobPublishInput) -> int:
             correlation_id=request.correlation_id,
             job_id=request.job_id,
             rationale=request.rationale,
+            note_id=request.note_id,
         ),
     )

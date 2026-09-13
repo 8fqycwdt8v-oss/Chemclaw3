@@ -40,7 +40,12 @@ from chemclaw.science.calc.models import (
 )
 from tests.pg import migrated_db_or_skip
 
-_DDL = Path(__file__).resolve().parents[1] / "schema" / "result-store" / "001_core.sql"
+# The **directory**, not `001_core.sql`. This file's docstring has always said it runs the shipped
+# DDL, and it ran the first file of it — so every migration after the first was outside the one
+# lane that drives real queries against a real store, which is the same "a basis that is
+# re-derived rather than observed" shape this repository keeps finding
+# (`D-2026-09-13-a-publication-carries-the-link-the-system-already-holds` found it here).
+_DDL = Path(__file__).resolve().parents[1] / "schema" / "result-store"
 _NOW = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
 
 
@@ -217,7 +222,8 @@ async def _open_loaded() -> psycopg.AsyncConnection[Any]:
     """
     await migrated_db_or_skip()
     conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
-    await conn.execute(_DDL.read_text(encoding="utf-8"))
+    for path in sorted(_DDL.glob("*.sql")):
+        await conn.execute(path.read_text(encoding="utf-8"))
     await conn.commit()
 
     records: list[ResultRecord] = [
