@@ -377,7 +377,10 @@ Postgres and Temporal are up in this environment, so every one of these is driva
       deadlock by lock ordering.
 - [ ] W24.4 `Chemclaw3` — the checkpoint sweep and a live turn are two writers and only the read
       side notices.
-- [ ] W24.5 `Chemclaw3` — the awaiting collapse keeps the oldest frame of each state, not the newest.
+- [x] W24.5 `Chemclaw3` — the awaiting collapse keeps the oldest frame of each state, not the newest.
+      Row accurate. Driven `[0, 14]` against `[14, 14]` through the real tailer.
+      `D-2026-09-13-a-collapse-without-the-batch-keeps-the-oldest-frame`; the batched yield the row
+      proposed is declined because it would drop a mid-batch disconnect's restores.
 - [ ] W24.6 `Chemclaw3` — a legitimate re-ask of an answered question fails loudly rather than
       waiting blind.
 - [ ] W24.7 `Chemclaw3` — a result sink on the primary server opens connections no budget counts.

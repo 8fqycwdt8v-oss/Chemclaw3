@@ -40,7 +40,7 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse, SendTimeoutError
 from starlette.types import Receive, Scope, Send
 
-from chemclaw.agent.session_events import claim_unconsumed
+from chemclaw.agent.session_events import SessionEvent, claim_unconsumed
 from chemclaw.api import app as front_door
 from chemclaw.api.deps import CurrentUser, resolve_session
 from chemclaw.api.events import (
@@ -88,6 +88,64 @@ def _spread_poll_interval() -> float:
     """This stream's own poll interval: the configured one, off-phase from every other stream."""
     interval = settings.session_event_poll_seconds
     return interval * random.uniform(1.0 - _POLL_SPREAD, 1.0 + _POLL_SPREAD)
+
+
+def _newest_per_state(batch: list[SessionEvent]) -> list[SessionEvent]:
+    """One claim's `awaiting-answer` rows reduced to the newest frame of each request-and-state.
+
+    `D-2026-09-13-a-collapse-without-the-batch-keeps-the-oldest-frame`. Nothing prunes
+    `session_events` until it is consumed and `retention_session_events_days` defaults to 0, so the
+    first connect claims every row the wait has ever written: measured on one BO campaign opened,
+    chased daily and expired a month ago, **sixteen frames on a single poll**, fifteen of them
+    `waiting` for a question that is closed. A reminder carries no fact the open did not, so what a
+    surface needs is each request's current state rather than its log.
+
+    **Why this cannot be done in the consumer's loop, which is where it was.** The tailer yields row
+    by row, so a consumer that suppresses a state it has already reported keeps the row it saw
+    *first* — and the rows arrive oldest-first, so the surviving `waiting` frame carried
+    `reminders=0` where `reminders=14` was the truth at connect time. The batch exists only inside
+    one claim, which is why this is `stream_new_events`' `collapse` argument rather than a few lines
+    in the route.
+
+    **The surviving row is the last occurrence, emitted at the first occurrence's position**, and
+    each half of that is deliberate. Taking the *last object* keeps `payload` and `event_id`
+    consistent, so a consumer that drops mid-stream restores the newest row rather than a stale one
+    whose successors have already been consumed. Keeping the *first position* leaves the order of
+    two different requests exactly as the rows arrived, because nothing about one request's state is
+    news about another's and a reduction should not reorder them.
+
+    Rows of every other kind pass through untouched, in place: a `job_completed` and a
+    `job_failed` are distinct facts about distinct jobs and nothing here may fold them.
+    """
+    newest: dict[tuple[str, str], SessionEvent] = {}
+    for event in batch:
+        if event.kind == AWAITING_KIND:
+            newest[_awaiting_key(event)] = event
+    seen: set[tuple[str, str]] = set()
+    kept: list[SessionEvent] = []
+    for event in batch:
+        if event.kind != AWAITING_KIND:
+            kept.append(event)
+            continue
+        key = _awaiting_key(event)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(newest[key])
+    return kept
+
+
+def _awaiting_key(event: SessionEvent) -> tuple[str, str]:
+    """What makes two `awaiting-answer` rows the same fact: one request, one state.
+
+    A missing `state` reads as `waiting`, matching `_awaiting_event`'s own default — the expiry push
+    carries fewer fields than the open, and a row whose state this could not read would otherwise
+    become a key of its own and defeat the reduction for exactly the frame that matters.
+    """
+    return (
+        str(event.payload.get("request_id", "")),
+        str(event.payload.get("state", "waiting")),
+    )
 
 
 class _SlotBoundEventStream(EventSourceResponse):
@@ -226,6 +284,9 @@ async def session_events(
             async for pushed in front_door.stream_new_events(
                 session_id,
                 kinds=("job_completed", "job_failed", AWAITING_KIND),
+                # One claim's redundant `awaiting-answer` rows are one fact; see
+                # `_newest_per_state` and the comment on the per-connection suppression below.
+                collapse=_newest_per_state,
                 # This stream's own interval, so a pod's idle tabs do not poll as one wavefront —
                 # see `_POLL_SPREAD`. Chosen here rather than inside the tailer because this route
                 # is the only thing that runs many of them at once, and it is what caps how many
@@ -260,16 +321,15 @@ async def session_events(
                 # `expired`) is always sent, because that is the transition the whole feature is
                 # for. Per connection rather than per batch.
                 #
-                # **The frame that survives is the oldest of each run, not the newest**, and this
-                # comment said the opposite. The rows arrive oldest-first and the first of a state
-                # is what gets through, so the measured backlog — one open, fourteen chases, an
-                # expiry — emits `waiting reminders=0` and then `expired`, never the `waiting
-                # reminders=14` that was true when the client connected. The collapse is still
-                # right: fifteen frames saying "open" is the defect it was written for. What is
-                # lost is only the chase *count* on this channel, which a surface renders beside
-                # the deadline and which `GET /pending` still answers correctly. Emitting the
-                # newest instead needs a batch boundary the tailer does not expose — it yields row
-                # by row — so it is a `BACKLOG.md` row rather than a wider change made in passing.
+                # **The frame that survives is the newest of each run, and getting there needed
+                # the batch** (`D-2026-09-13-a-collapse-without-the-batch-keeps-the-oldest-frame`).
+                # This suppression alone can only keep the *first* row of a state run, because the
+                # rows arrive oldest-first and it decides one row at a time: the measured backlog —
+                # one open, fourteen chases, an expiry — emitted `waiting reminders=0` and then
+                # `expired`, never the `waiting reminders=14` that was true when the client
+                # connected. `_newest_per_state` is the other half, handed to the tailer as its
+                # `collapse` because the claim is the only place a batch exists; the two compose,
+                # and this one is still what stops a *second* poll re-reporting an unchanged state.
                 if pushed.kind == AWAITING_KIND:
                     frame = _awaiting_event(pushed.payload)
                     request_id = str(pushed.payload.get("request_id", ""))
