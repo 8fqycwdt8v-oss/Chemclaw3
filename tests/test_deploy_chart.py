@@ -5408,7 +5408,8 @@ def test_the_image_workflow_derives_component_modules_that_actually_import() -> 
 def test_a_release_on_the_memory_session_store_refuses_to_render() -> None:
     """The one lock that stops two pods racing a note write is gated on the postgres store.
 
-    `kg/git_writer.py::_cluster_lock` takes a Postgres advisory lock keyed on the git remote and
+    `kg/git_writer.py::GitNoteWriter._cluster_lock` takes a Postgres advisory lock keyed on the
+    git remote and
     skips it entirely when `session_store != "postgres"` — correctly, because a memory-store
     deployment is single-process *as a CLI or a test*. A chart release is not: this chart renders a
     front door and a background worker as separate pods, each with its own `emptyDir` clone, so the

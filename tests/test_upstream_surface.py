@@ -1844,15 +1844,16 @@ def test_a_store_search_still_pages_by_offset_and_still_dates_every_item() -> No
     everything = store.search(namespace, limit=10)
     assert len(everything) == 4
     assert all(item.updated_at is not None for item in everything), (
-        "a store item no longer carries `updated_at`; `agent/scratchpad.py::_evict_past_the_cap` "
-        "orders the eviction by it and would now evict in an arbitrary order"
+        "a store item no longer carries `updated_at`; "
+        "`agent/scratchpad.py::BoundedStoreBackend._evict_past_the_cap` orders the eviction by it "
+        "and would now evict in an arbitrary order"
     )
     assert [item.key for item in store.search(namespace, limit=2, offset=2)] == [
         item.key for item in everything[2:]
     ], (
         "a store search no longer skips `offset` items; "
-        "`agent/scratchpad.py::_evict_past_the_cap` pages a namespace with it and would loop on "
-        "its first page"
+        "`agent/scratchpad.py::BoundedStoreBackend._evict_past_the_cap` pages a namespace with it "
+        "and would loop on its first page"
     )
     assert [item.key for item in everything] == ["c", "a", "d", "b"], (
         "`InMemoryStore` no longer answers a query-less search in insertion order — the "
