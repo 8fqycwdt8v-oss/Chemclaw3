@@ -399,15 +399,22 @@ def test_a_blocked_plan_below_the_listings_page_boundary_is_still_found(
 def test_the_listing_walk_is_bounded_when_nothing_the_caller_owns_is_gated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The paged walk must terminate on the *shipped* posture, where nothing is ever gated.
+    """The paged walk must terminate on a posture where nothing is ever gated.
 
     `_owned_sessions` exited only on a short page or on `len(gated) > budget`, and `gated` counts
-    plan-gated sessions — so with `harness_enabled` off (the code's own default, and the case
-    `_plan_gated`'s docstring names as the one this route is "free" in) the budget can never bind
-    and the loop pages through the caller's entire history on every request. Measured against the
-    real `_owned_sessions` at 5,000 sessions and the shipped page of 100: **51** keyset statements
-    where the route before paging issued exactly one, returning `plans: []` every time, repeatable
-    by the caller at will.
+    plan-gated sessions — so where nothing is gated the budget can never bind and the loop pages
+    through the caller's entire history on every request. Measured against the real
+    `_owned_sessions` at 5,000 sessions and the shipped page of 100: **51** keyset statements where
+    the route before paging issued exactly one, returning `plans: []` every time, repeatable by the
+    caller at will.
+
+    **This said "the *shipped* posture" and named `harness_enabled` off as "the code's own
+    default", and D-2026-09-13 inverted both.** The shipped default now attaches the gate, so the
+    ungated posture is the one a deployment opts into (`harness_autonomy=execute`, or the flag off)
+    rather than the one it gets — and the flag is set explicitly below instead of inherited, which
+    is what makes this case still be the case it describes. The defect is unchanged and so is its
+    reach: a deployment that turns the gate off is exactly the one this unbounded walk was measured
+    against.
 
     Driven against the real `SessionOwnerStore` for the reason the page-boundary test above gives —
     a fake registry has no page boundary to fall off — with the page and the budget shrunk so the
@@ -450,6 +457,8 @@ def test_the_listing_walk_is_bounded_when_nothing_the_caller_owns_is_gated(
     asyncio.run(_seed())
     monkeypatch.setattr(settings, "service_max_listed_sessions", 2)
     monkeypatch.setattr(settings, "service_max_plan_scans", 3)
+    # The posture this case is about, stated rather than inherited — see the docstring.
+    monkeypatch.setattr(settings, "harness_enabled", False)
 
     async def _unreached(session_id: str, **_kwargs: Any) -> list[str] | None:
         raise AssertionError(f"no session is gated here, so {session_id} must not be read")

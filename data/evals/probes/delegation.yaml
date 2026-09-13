@@ -31,7 +31,7 @@
 # `expects_tools` is ANY-OF. Every tool name is from the agent-callable surface.
 
 probes:
-  - id: dg-01
+  - id: dl-01
     section: 1
     persona: lab_leader
     bucket: A
@@ -46,12 +46,16 @@ probes:
       - find_notes
       - expand_note
       - find_knowledge_gaps
+    forbids_claims:
+      - "a cited note id that no tool call in this turn returned"
+      - "a recurring condition presented without saying how many entries it rests on"
+      - "a claim of completeness over sources the turn did not actually read"
     direction: >-
       The six-source sweep, and the canonical shape for this measurement: a lot of reading, a short
       answer, every claim cited. The arms differ in where the reading is billed, not in what a good
       answer says.
 
-  - id: dg-02
+  - id: dl-02
     section: 6
     persona: lab_technician
     bucket: A
@@ -64,13 +68,17 @@ probes:
       - predict_solubility
       - predict_developability_profile
       - resolve_compound
+    forbids_claims:
+      - "a compound silently omitted from the table rather than reported as refused"
+      - "a predicted value stated without the property's own caveat (predict_solubility is aqueous)"
+      - "an ionisation-state flag for a compound whose pKa the turn did not obtain"
     direction: >-
       The many-entity shape. Twenty compounds times three properties is a large volume of tool
       results whose individual payloads the final table does not need — the case where a helper's
       report is a genuine reduction rather than a paraphrase. Must not silently drop compounds, and
       must say which refusals it hit rather than leaving gaps in the table.
 
-  - id: dg-03
+  - id: dl-03
     section: 9
     persona: lab_leader
     bucket: A
@@ -81,12 +89,16 @@ probes:
       - gather_evidence
       - find_notes
       - expand_note
+    forbids_claims:
+      - "a disagreement asserted without quoting or citing both sides"
+      - "a recency claim not grounded in the notes' own validity dates"
+      - "a report summarised that the turn did not retrieve"
     direction: >-
       The multi-document comparison. Long sources, a short comparative answer, and a disagreement
       that only appears once all three have been read. Bi-temporal validity is the tiebreak and a
       good answer uses it rather than preferring whichever it read last.
 
-  - id: dg-04
+  - id: dl-04
     section: 1
     persona: manager
     bucket: A
@@ -99,11 +111,15 @@ probes:
       - expand_note
       - reagent_frequency
       - similar_reactions
+    forbids_claims:
+      - "a corpus-wide claim when only part of the corpus was read"
+      - "a yield spread stated without the number of runs behind it"
+      - "a transformation ranked by frequency with no count given"
     direction: >-
       A corpus-wide aggregation: many notes read, two numbers out. Must say how many campaigns it
       actually read rather than implying the whole corpus if it sampled.
 
-  - id: dg-05
+  - id: dl-05
     section: 6
     persona: lab_technician
     bucket: A
@@ -115,12 +131,16 @@ probes:
       - similar_molecules
       - conditions_for_similar_reaction
       - gather_evidence
+    forbids_claims:
+      - "a substrate omitted from the list rather than reported as having no precedent"
+      - "a precedent asserted for a substrate whose search returned nothing"
+      - "a similarity claim with no score or anchor given"
     direction: >-
       Eight independent precedent searches whose results are mostly discarded — the fan-out shape
       the `task` description tells the model to spawn several helpers for. An empty precedent for a
       substrate is a finding and must be reported as one, not omitted from the list.
 
-  - id: dg-06
+  - id: dl-06
     section: 15
     persona: lab_leader
     bucket: A
@@ -134,12 +154,16 @@ probes:
       - expand_note
       - find_knowledge_gaps
       - recall_observations
+    forbids_claims:
+      - "a claim in the handover that carries no citation back to a note or entry"
+      - "a settled condition presented as house standard on the strength of one entry"
+      - "an open question invented rather than taken from a gap the tools reported"
     direction: >-
       Wide reading, heavily synthesised, and the one probe here where a summary losing its
       provenance would be a real defect rather than a cost — a handover document whose claims cannot
       be traced back is worse than no document. Worth watching across arms for exactly that.
 
-  - id: dg-07
+  - id: dl-07
     section: 11
     persona: lab_leader
     bucket: A
@@ -151,12 +175,16 @@ probes:
       - find_notes
       - expand_note
       - conditions_for_similar_reaction
+    forbids_claims:
+      - "a drift conclusion the retrieved entries do not support"
+      - "a trend stated without the number of entries and the period actually read"
+      - "an impurity level quoted that no retrieved record contains"
     direction: >-
       Long serial reading with a temporal question over it. The honest answer may well be that the
       records do not support a drift conclusion, which is a legitimate outcome and should score the
       same in every arm.
 
-  - id: dg-08
+  - id: dl-08
     section: 10
     persona: lab_technician
     bucket: A
@@ -168,6 +196,10 @@ probes:
       - screen_genotoxic_alerts
       - ich_impurity_limit
       - resolve_compound
+    forbids_claims:
+      - "an empty screen result reported as the compound being safe"
+      - "a flagged alert passed on without its citation"
+      - "a compound dropped from the twelve without being accounted for"
     direction: >-
       Twelve screens whose clean results are discarded and whose flagged results must arrive intact
       with their citations. The filtering is the point: a helper reporting "three of twelve flagged"

@@ -115,12 +115,30 @@ _VARIATIONS: dict[str, Any] = {
     "value": 1.9,
 }
 
-#: The tools whose identity the sibling refuses to derive without the `crest` binary, by design
-#: (`crest_search.require_crest()` — "the probe refuses precisely where the calculation would").
-#: A bound rather than a list of expected refusals: a refusal from any *other* tool is a real
-#: divergence and fails below, and where a checkout does have crest these two are measured like
-#: everything else.
-_REFUSED_WITHOUT_CREST = frozenset({"search_conformer_ensemble", "search_binding_modes"})
+#: The tools whose identity the sibling refuses to derive when a *binary* the shipped image carries
+#: is absent, by design ("the probe refuses precisely where the calculation would"). A bound rather
+#: than a list of expected refusals: a refusal from any *other* tool is a real divergence and fails
+#: below, and where a checkout has the binaries these four are measured like everything else.
+#:
+#: **Two binaries, not one, and the second half was found by making this check actually run.** It
+#: named only `crest` until 2026-09-13, because every run that could have falsified it skipped:
+#: the sibling had no `.venv`, so the check reported its own absence and nobody saw the other pair.
+#: Installing it surfaced `compute_atomic_descriptors` and `compute_surface_potential` refusing on
+#: the same terms for `xtb` — "nothing here approximates them: tblite exposes no atomic multipoles,
+#: no polarisability and no potential grid, so there is no in-process fallback to fall back to".
+#: That is the same design as `crest_search.require_crest()`, one binary over.
+#:
+#: This widens the bound and does not weaken it: the property is still that a refusal from a tool
+#: *outside* this set is a divergence between the fake and the server, and all four entries name a
+#: tool whose refusal is a missing binary rather than a missing key.
+_REFUSED_WITHOUT_A_BINARY = frozenset(
+    {
+        "search_conformer_ensemble",
+        "search_binding_modes",
+        "compute_atomic_descriptors",
+        "compute_surface_potential",
+    }
+)
 
 #: Arguments the server will not let a probe vary independently of the subject, with the reason.
 #: `charge` is folded into the *structure* on that side (it embeds the molecule and refuses a
@@ -193,10 +211,10 @@ def test_the_fake_keys_calculations_the_way_the_server_keys_them() -> None:
         )
 
     refused = {tool: entry["error"] for tool, entry in answers.items() if "error" in entry}
-    assert set(refused) <= _REFUSED_WITHOUT_CREST, (
+    assert set(refused) <= _REFUSED_WITHOUT_A_BINARY, (
         "the sibling refused to derive an identity for "
-        f"{sorted(set(refused) - _REFUSED_WITHOUT_CREST)}: {refused}. Only the CREST searches may "
-        "refuse, and only for a missing binary"
+        f"{sorted(set(refused) - _REFUSED_WITHOUT_A_BINARY)}: {refused}. Only the tools that need "
+        "a binary the shipped image carries may refuse, and only for that binary being absent"
     )
 
     # Coverage, both directions. A tool the server keys must be in the fake's table, or a fake
