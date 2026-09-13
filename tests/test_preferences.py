@@ -277,3 +277,91 @@ def test_the_preference_cap_holds_against_a_real_table() -> None:
 
     keys = asyncio.run(_run())
     assert keys == [f"k{index:02d}" for index in range(cap * 2, cap * 3)], keys
+
+
+def test_updating_a_preference_makes_it_the_most_recent_in_both_modes() -> None:
+    """A *re-written* preference is the newest one, and memory mode said it was the oldest.
+
+    **The defect.** `_evict_in_memory` deletes from the front of `self._memory` and `recall`'s
+    memory arm keeps its tail, both on the stated understanding that "`remember` re-inserts on
+    every write, so the front of it is the least recently written". `d[k] = v` on a key that is
+    already present does **not** move it, so that order was least recently *created*. Driven at a
+    cap of 3 — write a, b, c, update a, add d — memory answered `[b, c, d]` and Postgres answered
+    `[a(v2), c, d]`: the two shipped configurations disagreed about which preference a chemist
+    currently holds, and memory mode evicted the one they had just restated.
+
+    Asserted as an *agreement between the two modes* rather than against a transcribed list,
+    because the claim the code makes is that they answer the same question the same way — and
+    `_EVICT`'s `ORDER BY updated_at DESC` is the definition memory mode is imitating. The Postgres
+    arm is what makes the memory arm mean something, so the whole test skips without a database
+    rather than half-running.
+
+    Every key is distinct *and re-used*, which the two existing cap tests are not: both write only
+    fresh keys, so neither can reach the line under test.
+    """
+    cap = 3
+
+    async def _sequence(mode: str) -> list[tuple[str, str]]:
+        patch = pytest.MonkeyPatch()
+        patch.setattr(settings, "session_store", mode)
+        patch.setattr(settings, "preferences_max_per_owner", cap)
+        patch.setattr(settings, "preferences_recall_limit", 100)
+        try:
+            store = PreferenceStore()
+            owner = f"reorder-probe-{mode}"
+            for key in ("a", "b", "c"):
+                assert await store.remember(owner, key, "v1")
+            assert await store.remember(owner, "a", "v2")
+            assert await store.remember(owner, "d", "v1")
+            return [(p.key, p.value) for p in await store.recall(owner)]
+        finally:
+            patch.undo()
+
+    async def _run() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+        await migrated_db_or_skip()
+        return await _sequence("memory"), await _sequence("postgres")
+
+    in_memory, in_postgres = asyncio.run(_run())
+    assert in_postgres == [("a", "v2"), ("c", "v1"), ("d", "v1")], in_postgres
+    assert in_memory == in_postgres, (
+        f"memory mode holds {in_memory} where the table holds {in_postgres}; a chemist's "
+        "preferences depend on which store the deployment configured"
+    )
+
+
+def test_a_preference_that_was_evicted_is_not_reported_as_remembered() -> None:
+    """A row eviction has already deleted must not be reported as remembered.
+
+    The worse half of the ordering defect, because it reaches the chemist as a sentence. With the
+    cap lowered under an owner who is already over it, `remember` wrote the row and then
+    `_evict_in_memory` deleted it again — the least recently *created* key being exactly the one
+    just rewritten — while `remember` returned True and `remember_preference` answered
+    "Remembered". Driven in memory mode at a cap of 2 over three existing keys: True, and the
+    preference gone.
+
+    Memory mode only, because it is the arm that had the defect: the SQL `_EVICT` can never delete
+    the row it just upserted, since that row's `updated_at` is the maximum.
+    """
+    patch = pytest.MonkeyPatch()
+    patch.setattr(settings, "session_store", "memory")
+    patch.setattr(settings, "preferences_max_per_owner", 3)
+    patch.setattr(settings, "preferences_recall_limit", 100)
+
+    async def _run() -> tuple[bool, list[str]]:
+        store = PreferenceStore()
+        for key in ("a", "b", "c"):
+            assert await store.remember("shrunk-probe", key, "v1")
+        settings.preferences_max_per_owner = 2
+        stored = await store.remember("shrunk-probe", "a", "v2")
+        return stored, [p.key for p in await store.recall("shrunk-probe")]
+
+    try:
+        reported, held = asyncio.run(_run())
+    finally:
+        patch.undo()
+
+    assert reported is True
+    assert "a" in held, (
+        "`remember` returned True about a preference eviction had already deleted, so the tool "
+        f"answered 'Remembered for future sessions' about nothing; held {held}"
+    )

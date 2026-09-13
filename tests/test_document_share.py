@@ -37,6 +37,7 @@ from chemclaw.core.identity_context import (
     reset_current_identity,
     set_current_identity,
 )
+from chemclaw.core.metrics import METRICS
 from chemclaw.ingest.documents import retriever as retriever_module
 from chemclaw.ingest.documents import sync as sync_module
 from chemclaw.ingest.documents.binding import DocumentShareError, load_binding
@@ -51,6 +52,7 @@ from chemclaw.ingest.documents.index import (
     InMemoryDocumentIndex,
     PostgresDocumentIndex,
 )
+from chemclaw.ingest.documents.isolate import parse_context
 from chemclaw.ingest.documents.parse import (
     DocumentParseError,
     ParsedDocument,
@@ -2351,10 +2353,16 @@ def test_a_systematic_read_failure_costs_log_lines_by_the_pass_not_by_the_corpus
 
 
 class _BlockingParse:
-    """A parser that never finishes for one named file, and is the real one for every other.
+    """A read that never comes back for one named file, and is the real parse for every other.
 
-    A `threading.Event` rather than a `sleep`: the point is not that the parse is slow but that it
-    is *still running* when the pass returns, which is precisely what a wall-clock sleep leaves
+    **It stands in for `parse_document_isolated`, which is what the crawl calls now, and the thing
+    it models is the half that call does not bound**: the mount. The parse itself runs in a child
+    that is killed on its own deadline (`ingest/documents/isolate.py`), so the crawl's `wait_for`
+    is a backstop over a *read* that hangs — a share that stopped answering — and that is exactly
+    what blocking in the calling worker thread here is.
+
+    A `threading.Event` rather than a `sleep`: the point is not that it is slow but that it is
+    *still running* when the pass returns, which is precisely what a wall-clock sleep leaves
     ambiguous. The wait is bounded all the same, so a regression fails the assertions instead of
     hanging the suite.
     """
@@ -2365,7 +2373,9 @@ class _BlockingParse:
         self.entered = threading.Event()
         self.release = threading.Event()
 
-    def __call__(self, name: str, raw: bytes, declared_type: str | None = None) -> ParsedDocument:
+    def __call__(
+        self, name: str, raw: bytes, declared_type: str | None = None, timeout: float = 0.0
+    ) -> ParsedDocument:
         """Block in the calling worker thread for the armed file; otherwise parse for real."""
         if name.endswith(self.blocked_name):
             self.entered.set()
@@ -2414,8 +2424,12 @@ def test_a_document_that_never_finishes_parsing_does_not_hold_the_pass(
     """The bound frees the pass — the rest of the share is indexed while that parse runs on."""
     share = _share_with_a_slow_file(tmp_path)
     trap = _BlockingParse("slow.txt")
-    monkeypatch.setattr(sync_module, "parse_document", trap)
+    monkeypatch.setattr(sync_module, "parse_document_isolated", trap)
     monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", 0.1)
+    # The pass's backstop is the parse budget *plus* this, because the forkserver's own first
+    # start happens before a child's clock begins. Set here so the assertions below measure the
+    # bound rather than the shipped five-second margin.
+    monkeypatch.setattr(settings, "attachment_parse_reap_grace_seconds", 0.5)
     index = InMemoryDocumentIndex()
 
     report, elapsed = _pass_with_a_blocked_file(load_binding(share), index, trap)
@@ -2449,8 +2463,12 @@ def test_a_timed_out_document_is_visible_in_the_run_summary(
     """
     share = _share_with_a_slow_file(tmp_path)
     trap = _BlockingParse("slow.txt")
-    monkeypatch.setattr(sync_module, "parse_document", trap)
+    monkeypatch.setattr(sync_module, "parse_document_isolated", trap)
     monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", 0.1)
+    # The pass's backstop is the parse budget *plus* this, because the forkserver's own first
+    # start happens before a child's clock begins. Set here so the assertions below measure the
+    # bound rather than the shipped five-second margin.
+    monkeypatch.setattr(settings, "attachment_parse_reap_grace_seconds", 0.5)
 
     with caplog.at_level(logging.DEBUG, logger="chemclaw.ingest.documents"):
         report, _ = _pass_with_a_blocked_file(load_binding(share), InMemoryDocumentIndex(), trap)
@@ -2488,8 +2506,12 @@ def test_a_document_that_times_out_keeps_the_row_it_already_had(
     target = tmp_path / "mount" / "Docs" / "slow.txt"
     target.write_text(target.read_text() + " and now it has changed")  # the fingerprint moves
     trap = _BlockingParse("slow.txt")
-    monkeypatch.setattr(sync_module, "parse_document", trap)
+    monkeypatch.setattr(sync_module, "parse_document_isolated", trap)
     monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", 0.1)
+    # The pass's backstop is the parse budget *plus* this, because the forkserver's own first
+    # start happens before a child's clock begins. Set here so the assertions below measure the
+    # bound rather than the shipped five-second margin.
+    monkeypatch.setattr(settings, "attachment_parse_reap_grace_seconds", 0.5)
 
     later = asyncio.run(index.clock())
     report, _ = _pass_with_a_blocked_file(binding, index, trap)
@@ -2506,3 +2528,62 @@ def test_a_normal_share_is_untouched_by_the_bound(share: dict[str, Any]) -> None
 
     assert report.skipped_timeout == 0
     assert report.indexed == 4 and report.deduplicated == 1  # the fixture share's own numbers
+
+
+def test_a_share_document_is_parsed_in_a_process_the_crawl_can_kill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The crawl's worker thread must end, and for a whole release it did not.
+
+    **The defect.** `sync.py` wrapped `asyncio.to_thread(_read_and_parse, …)` in `wait_for`, and
+    its own docstring stated the consequence in the present tense: Python cannot interrupt a
+    running parser, so the pass moved on while the thread ran the hostile document to completion.
+    That thread belongs to the **shared** default executor inside the Temporal worker, so N
+    pathological documents on an SMB share consume N executor threads for the life of the process
+    — the same wedge `agent/attachments.py` had, on a pool nothing caps, with the killable
+    subprocess already sitting one module over as a drop-in.
+
+    Driven against the real `parse_document_isolated` — no stand-in, because the claim is that the
+    shipped crawl reaches it — with a document whose parse is an order of magnitude past the
+    deadline. The counter it lands on is `skipped_timeout` and not `skipped_unreadable`:
+    `ParseWorkerLost` is a `DocumentParseError` subclass, so without its own `except` arm a killed
+    parse would be filed beside a corrupt PDF and the one number that says a bound fired would
+    read zero.
+
+    The sibling tests above drive a stand-in for the *read*, which is the half the crawl's own
+    `wait_for` still covers and a child process cannot.
+    """
+    mount = tmp_path / "mount"
+    (mount / "Docs").mkdir(parents=True)
+    (mount / "Docs" / "quick.txt").write_text("the palladium catalyst deactivated above 80 degrees")
+    # Measured on this tree: 6 MB of CSV parses in 0.694 s, so 20 MB is ~2.3 s — an order of
+    # magnitude past the 0.2 s deadline below rather than a race with it.
+    (mount / "Docs" / "slow.csv").write_bytes(b"aaaa,bbbb,cccc,dddd\n" * 1_000_000)
+    share = {
+        "mount": str(mount),
+        "roots": [{"path": "Docs"}],
+        "public": True,
+        "extensions": [".txt", ".csv"],
+        "max_file_bytes": 50_000_000,
+    }
+    monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", 0.2)
+    monkeypatch.setattr(settings, "attachment_parse_reap_grace_seconds", 5.0)
+    binding = load_binding(share)
+    index = InMemoryDocumentIndex()
+    # Pay the forkserver's one-off start outside the measurement, the way the upload tests do.
+    parse_context()
+
+    before = METRICS.value("chemclaw_document_parse_kills_total")
+    started = time.perf_counter()
+    report = asyncio.run(sync_share(SOURCE, binding, index, limit=100))
+    elapsed = time.perf_counter() - started
+
+    assert report.skipped_timeout == 1, report
+    assert report.skipped_unreadable == 0, report
+    assert report.indexed == 1, report
+    assert METRICS.value("chemclaw_document_parse_kills_total") - before == 1, (
+        "no parse child was killed, so the crawl parsed that document on its own worker thread"
+    )
+    # `asyncio.run` joins the default executor before returning, so this duration *includes* the
+    # worker thread — which is the whole claim: before the fix it would have been the 2.3 s parse.
+    assert elapsed < 5.0, elapsed

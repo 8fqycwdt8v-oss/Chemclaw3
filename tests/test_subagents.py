@@ -20,7 +20,7 @@ The properties, in the order they would hurt:
 
 import asyncio
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
@@ -1020,4 +1020,48 @@ def test_several_files_share_one_budget() -> None:
     assert stored <= budget, (
         f"four files of {budget} characters each stored {stored} against a {budget} budget, so the "
         "cap is per file and four helpers' worth of files is four times the bound"
+    )
+
+
+def test_a_second_delegation_shares_the_budget_the_first_one_spent() -> None:
+    """`files` accumulates, so the bound has to be on the channel and it was on one `Command`.
+
+    **The gap.** `rewritten_command_files` bounds what one `task` return writes, and `files` is a
+    `DeltaChannel` — it merges rather than replaces. So a caller that delegates N times stored up
+    to N x `agent_subagent_files_max_chars`, which is the same shape `_bounded_file`'s own
+    docstring rejects one level down ("a per-file cap times an unbounded number of files is not a
+    bound"), one level up. It is a *storage* bound, so the cost is checkpoint rows: measured at
+    10.4x amplification, ten delegations at the shipped setting is ~20 MB of checkpoint rows per
+    superstep instead of ~2.
+
+    Driven through `bound_tool_results` — the shipped middleware — rather than on `_bounded_file`,
+    because what changed is that the bound now reads the caller's state, and a test that called
+    the helper directly could not see whether the middleware passes it.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from deepagents.backends.utils import create_file_data
+    from langgraph.types import Command
+
+    from chemclaw.agent.tool_result_size import bound_tool_results
+
+    budget = settings.agent_subagent_files_max_chars
+    already = {"/scratch/first.md": create_file_data("y" * budget)}
+    request = SimpleNamespace(
+        tool_call={"id": "call-2", "name": "task"},
+        state={"messages": [], "files": already},
+    )
+
+    async def _handler(_request: Any) -> Any:
+        return Command(update={"files": {"/scratch/second.md": create_file_data("z" * budget)}})
+
+    bounded = cast("Any", asyncio.run(bound_tool_results.awrap_tool_call(request, _handler)))  # type: ignore[arg-type]
+
+    landed = sum(len(str(d.get("content", ""))) for d in bounded.update["files"].values())
+    held = sum(len(str(d.get("content", ""))) for d in already.values())
+    assert held == budget, "the fixture no longer spends the whole budget, so nothing is shared"
+    assert landed < budget, (
+        f"a second delegation added {landed} characters to a channel already holding {held}, so "
+        f"the {budget}-character bound is per `task` call rather than per channel"
     )

@@ -43,6 +43,25 @@ parent's memory. It is armed, by a chain worth naming because it is not obvious:
 `tests/test_parse_isolation.py::test_a_parse_child_is_still_inside_the_no_egress_posture` drives a
 non-loopback connect from inside a child and reads both the refusal and `netguard._armed` back.
 
+**A child re-executes the serving process's `__main__` on every parse, and that is a constraint on
+what may go in one.** `multiprocessing.spawn.prepare` calls `_fixup_main_from_path` in each child,
+which `runpy`-executes the parent's `__main__` file under the name `__mp_main__`. The shipped front
+door is `exec uvicorn … --factory`, so that file is `.venv/bin/uvicorn`, whose body is
+`from uvicorn.main import main` *outside* any `__name__` guard — benign, and 14 ms: measured, a warm
+parse costs 0.017 s with a cheap `__main__` and 0.031 s with uvicorn's, while `runpy.run_path` on
+that file alone is 0.090 s cold. **Latency is the small half.** The hazard is that any side effect
+in the serving process's `__main__` body now runs once per upload, in a child — and it is not
+hypothetical: a probe script written while measuring this module had no `if __name__ ==
+"__main__"` guard, so every child re-ran the probe and the parse came back `ParseWorkerLost`. An
+entry point that starts a server, opens a connection or writes a file at module scope would do the
+same thing invisibly. Anything this process may be started as must keep its work behind a guard.
+
+**A warm forkserver is a second resident copy of the parsers, not a shared one.** It is started by
+fork **and exec**, so none of its pages are copy-on-write with the front door's: measured on this
+tree, the front door holds 111,140 kB and the forkserver 111,188 kB, ~109 MB of *new* resident
+memory in a pod whose `resources.service` requests 512Mi. `docs/planning/BACKLOG.md` carries that
+against the chart.
+
 **What a child reads from `Settings` is the forkserver's, not the caller's.** The server is exec'd
 once with the process's environment and imports `parse` at that moment, so a child's
 `document_max_expanded_bytes` is whatever the environment said when the first upload arrived. That
@@ -53,9 +72,13 @@ test must drive `parse_document` directly, which is where that behaviour belongs
 
 import logging
 import multiprocessing as mp
+import os
+import signal
 import threading
+import time
 from multiprocessing.connection import Connection
 from multiprocessing.context import ForkServerContext
+from multiprocessing.process import BaseProcess
 from typing import cast
 
 from chemclaw.core.metrics import METRICS
@@ -133,6 +156,21 @@ def _parse_into(
         declared: The client-declared content type, or None.
     """
     try:
+        # **Lead a new process group, so a kill reaches whatever this parse starts.**
+        # `Process.kill()` signals one pid: a parser that shells out leaves the grandchild running
+        # when its parent is killed, and the slot comes back while the CPU does not. Measured on a
+        # child that opened `sleep 600` and then stalled — killed, slot released, one orphan left.
+        # The sibling repository reached the same answer for `xtb` (`run_isolated`:
+        # `start_new_session=True` plus a group kill), and this is that shape for a `forkserver`
+        # child, which has no `start_new_session` to pass.
+        #
+        # Failure is survivable and must not be fatal: the parent checks the group it is about to
+        # signal is not its own before using `killpg`, so a child that could not detach is killed
+        # singly, exactly as before.
+        try:
+            os.setsid()
+        except OSError:  # pragma: no cover - only reachable if the child already leads a group
+            logger.debug("parse child could not lead its own process group; kills stay per-pid")
         connection.send(("parsed", parse_document(name, raw, declared)))
     except DocumentParseError as exc:
         connection.send(("refused", exc))
@@ -142,6 +180,74 @@ def _parse_into(
         connection.send(("failed", f"{type(exc).__name__}: {exc}"))
     finally:
         connection.close()
+
+
+#: How long a reap waits on a child that has just been SIGKILLed. Not a `Settings` field, for the
+#: reason `_EVICTION_PAGE` in `agent/scratchpad.py` is not one: it is the latency of a signal
+#: being delivered, not a posture a deployment states. A `join` that outlives it logs and returns,
+#: because holding the worker thread is the one outcome this module exists to prevent.
+_REAP_SECONDS = 2.0
+
+
+def _left(deadline: float) -> float:
+    """Seconds remaining until `deadline`, never negative.
+
+    A negative timeout means "block forever" to `Connection.poll` and "do not wait" to
+    `Process.join`, so the two stages of one exchange would disagree about an exhausted budget in
+    opposite directions. Clamping here is what makes one deadline mean one thing.
+
+    Args:
+        deadline: A `time.monotonic()` value.
+
+    Returns:
+        The non-negative remainder.
+    """
+    return max(deadline - time.monotonic(), 0.0)
+
+
+def _kill(child: BaseProcess, name: str, timeout: float, why: str) -> None:
+    """SIGKILL `child` and everything it started, and record that it happened.
+
+    `SIGKILL` rather than `terminate()`: a parse that ignores a signal is exactly the parse this
+    exists for, and a terminate would leave the same runaway holding the same slot one indirection
+    further out.
+
+    **The group, not the pid, and the guard on that is load-bearing.** `_parse_into` calls
+    `setsid()` so the child leads its own group and a grandchild dies with it. If that call failed
+    the child is still in *this* process's group, and `killpg` would take the front door down with
+    it — so the group is signalled only when it is demonstrably not our own, and otherwise the kill
+    is the single-pid one this function replaced.
+
+    Called from the watchdog thread as well as from the calling thread, and is safe there: every
+    step is a syscall against a pid, and a double kill is a `ProcessLookupError` that is swallowed.
+
+    Args:
+        child: The parse child.
+        name: The document name, for the log.
+        timeout: The deadline that was exceeded, for the log.
+        why: What the child did, for the log.
+    """
+    pid = child.pid
+    if pid is None:  # pragma: no cover - a child that never started has no slot to free
+        return
+    METRICS.increment("chemclaw_document_parse_kills_total")
+    logger.warning(
+        "killed the reader process for %s after %ss (%s); the parse slot is released",
+        name,
+        timeout,
+        why,
+    )
+    try:
+        group = os.getpgid(pid)
+    except OSError:  # pragma: no cover - the child is already gone, which is the outcome wanted
+        return
+    if group != os.getpgid(0):
+        try:
+            os.killpg(group, signal.SIGKILL)
+            return
+        except OSError:  # pragma: no cover - already reaped between the two syscalls
+            return
+    child.kill()
 
 
 def parse_document_isolated(
@@ -158,17 +264,31 @@ def parse_document_isolated(
     the same runaway holding the same slot one indirection further out. `join()` after the kill is
     what reaps it, so the pod does not accumulate zombies at one per timed-out upload.
 
-    The timeout covers time-to-first-byte rather than the whole transfer, because `Connection.poll`
-    is what can be given a deadline. That is the right boundary: by the time a byte appears the
-    parse is finished and what remains is a copy of already-computed text, bounded by
-    `attachment_max_bytes` upstream. A child large enough to block on the pipe buffer unblocks as
-    soon as the `recv` below starts reading.
+    **`timeout` is one deadline over the whole exchange, and it used to be one deadline over the
+    first stage of it.** The only bound was `reader.poll`, and `poll` returning True *consumes* it:
+    `recv` then blocks until the whole pickled message arrives or the pipe reaches EOF, and
+    `join()` had no timeout at all. Neither path killed anything, so the two failures a hostile or
+    merely broken child can produce — writing a truncated message and stopping, or answering
+    correctly and then never exiting — held the worker thread, and therefore its parse slot,
+    **forever**. That is precisely the wedge this module exists to close, reappearing one stage
+    later, and `attachments.py`'s `wait_for` backstop cannot see it: that wait is `shield`ed, so it
+    frees the *caller* while the thread it stands for runs on.
+
+    So every stage measures against the same monotonic deadline. `recv` gets it through a watchdog
+    that kills the child rather than through a parameter it does not have — a dead child closes the
+    write end, which is what turns a stalled `recv` into the `EOFError` this function already
+    handles. The reap that follows is bounded the same way and escalates to a kill.
+
+    The transfer after the first byte is a copy of already-computed text, bounded by
+    `document_max_expanded_bytes` — 64 MB, not the 2 MB `attachment_max_bytes` this paragraph used
+    to name, which is 32x smaller and the wrong setting entirely. A child large enough to block on
+    the pipe buffer unblocks as soon as the `recv` below starts reading.
 
     Args:
         name: The already-sanitized document name, used in refusal messages.
         raw: The document's bytes.
         declared_type: The client-declared content type, or None to infer from the name.
-        timeout: Seconds to wait for the child's answer before killing it.
+        timeout: Seconds this whole exchange may take before the child is killed.
 
     Returns:
         The parsed document.
@@ -180,35 +300,67 @@ def parse_document_isolated(
     """
     context = parse_context()
     reader, writer = context.Pipe(duplex=False)
-    child = context.Process(target=_parse_into, args=(writer, name, raw, declared_type))
-    child.start()
+    try:
+        child = context.Process(target=_parse_into, args=(writer, name, raw, declared_type))
+        child.start()
+    except BaseException:
+        # Both ends, because neither is owned by anything else yet: a failed `start()` used to
+        # leave the pipe's two descriptors open for the life of the process.
+        reader.close()
+        writer.close()
+        raise
     # Closed in the parent as soon as the child holds it, or `poll` never sees EOF when the child
     # dies: a pipe stays open while any process holds a write end, and this process is one.
     writer.close()
+    deadline = time.monotonic() + timeout
+    # Set by whichever of the three stages kills, and read by the reap so one pathological parse
+    # books one kill rather than three. It is an `Event` because the watchdog sets it from its own
+    # thread while this one reads it.
+    killed = threading.Event()
+
+    def _kill_once(why: str) -> None:
+        """Kill the child and record it, unless something already has."""
+        if not killed.is_set():
+            killed.set()
+            _kill(child, name, timeout, why)
+
     try:
-        if not reader.poll(timeout):
-            child.kill()
-            METRICS.increment("chemclaw_document_parse_kills_total")
-            logger.warning(
-                "killed the reader process for %s after %ss; the parse slot is released",
-                name,
-                timeout,
-            )
+        if not reader.poll(_left(deadline)):
+            _kill_once("never answered")
             raise ParseWorkerLost(
                 f"{name} was still being read after {timeout:g}s and was refused; a smaller or "
                 "simpler file will work"
             )
+        # The watchdog is what gives `recv` a deadline it has no argument for. It is armed on every
+        # parse rather than only on a suspect one, because "suspect" is not knowable from here, and
+        # it costs a timer thread that is cancelled microseconds later on every healthy parse.
+        watchdog = threading.Timer(_left(deadline), _kill_once, args=("stopped mid-answer",))
+        watchdog.start()
         try:
             answer = cast("tuple[str, object]", reader.recv())
-        except EOFError as exc:
+        # `EOFError` when nothing of the message arrived, `OSError` when part of it did — the
+        # second is what a truncated write, or the watchdog's kill partway through one, produces.
+        except (EOFError, OSError) as exc:
             raise ParseWorkerLost(
                 f"{name} could not be read: the reader process stopped without answering"
             ) from exc
+        finally:
+            watchdog.cancel()
     finally:
         reader.close()
-        # Unconditional, and it is what reaps the child in every path — the kill above, a clean
-        # answer, or the caller's own cancellation. `join` on an already-exited child is a no-op.
-        child.join()
+        # Unconditional, and it is what reaps the child in every path — a kill above, a clean
+        # answer, or the caller's own cancellation. A child that has been killed only has to be
+        # reaped; one that answered and then declined to exit is given what is left of the deadline
+        # and then killed, because waiting on it is what held the worker thread for ever.
+        if killed.is_set():
+            child.join(_REAP_SECONDS)
+        else:
+            child.join(_left(deadline))
+            if child.is_alive():
+                _kill_once("answered and did not exit")
+                child.join(_REAP_SECONDS)
+        if child.is_alive():  # pragma: no cover - a SIGKILL this process may send cannot be refused
+            logger.error("the reader process for %s outlived its kill; the pod is leaking", name)
     outcome, payload = answer
     if outcome == "parsed" and isinstance(payload, ParsedDocument):
         return payload

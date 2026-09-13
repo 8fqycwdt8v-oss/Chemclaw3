@@ -1817,3 +1817,44 @@ def test_the_skills_prompt_still_contains_every_sentence_this_deployment_removes
         f"({why}); re-read upstream's template and update `_SKILLS_PROMPT_REMOVALS` in "
         "agent/langgraph_agent.py"
     )
+
+
+def test_a_store_search_still_pages_by_offset_and_still_dates_every_item() -> None:
+    """The two `BaseStore` shapes `agent/scratchpad.py`'s eviction is built on, and only those.
+
+    `_evict_past_the_cap` pages a namespace whole with `asearch(..., limit=…, offset=len(seen))`
+    and then orders the result by `Item.updated_at` itself. Both halves are upstream's: an
+    `offset` that did not skip would make the walk loop on its first page, and a `SearchItem`
+    without a usable `updated_at` would make the ordering arbitrary and the cap evict at random.
+
+    **What is deliberately *not* asserted is the search's own ordering, and measuring it is why.**
+    The eviction used to read one page over the cap and take the oldest of it, which is a bet that
+    a query-less search answers most-recently-updated first. It does against
+    `AsyncPostgresStore`; `InMemoryStore` answers in *insertion* order, asserted below so the
+    disagreement is on the record rather than rediscovered. Two shipped implementations of one
+    interface ordering differently is the definition of a shape upstream has not promised.
+    """
+    from langgraph.store.memory import InMemoryStore
+
+    store = InMemoryStore()
+    namespace = ("upstream-order-probe",)
+    for key in ("c", "a", "d", "b"):
+        store.put(namespace, key, {"v": key})
+
+    everything = store.search(namespace, limit=10)
+    assert len(everything) == 4
+    assert all(item.updated_at is not None for item in everything), (
+        "a store item no longer carries `updated_at`; `agent/scratchpad.py::_evict_past_the_cap` "
+        "orders the eviction by it and would now evict in an arbitrary order"
+    )
+    assert [item.key for item in store.search(namespace, limit=2, offset=2)] == [
+        item.key for item in everything[2:]
+    ], (
+        "a store search no longer skips `offset` items; "
+        "`agent/scratchpad.py::_evict_past_the_cap` pages a namespace with it and would loop on "
+        "its first page"
+    )
+    assert [item.key for item in everything] == ["c", "a", "d", "b"], (
+        "`InMemoryStore` no longer answers a query-less search in insertion order — the "
+        "disagreement with `AsyncPostgresStore` that `_evict_past_the_cap` declines to rely on"
+    )

@@ -75,6 +75,7 @@ from typing import Any, cast
 from deepagents import FsToolName
 from deepagents.backends import CompositeBackend, StateBackend, StoreBackend
 from deepagents.backends.protocol import WriteResult
+from langgraph.store.base import SearchItem
 from langgraph.store.postgres.aio import AsyncPostgresStore
 
 from chemclaw.core.config import settings
@@ -288,19 +289,48 @@ class BoundedStoreBackend(StoreBackend):
         is deliberately not an age cutoff: the oldest memory is as likely to be the one worth
         keeping as the newest, which is why the retention sweep leaves this table alone.
 
-        One page of `agent_memory_max_files + _EVICTION_PAGE` is read rather than the whole
-        namespace. Eviction runs on every write, so a namespace in steady state is at most one over
-        the cap and the page is never the limiting factor; a deployment that *lowers* the cap under
-        an already-large namespace converges over the next writes instead of paying for the whole
-        table in one of them.
+        **The whole surplus goes, and reading one page over the cap was what made it the wrong
+        surplus.** Against `AsyncPostgresStore` a query-less `asearch` resolves to
+        `ORDER BY updated_at DESC LIMIT …` — most recently updated *first* — so reading
+        `cap + _EVICTION_PAGE` rows and then taking the oldest of that page takes a middle band:
+        the newest of the surplus, and never the tail. Driven on real Postgres with 89 files
+        written oldest-first, a cap of 5 and one bounded write, it deleted **021-084** and kept
+        **000-020** — every one of the twenty-one files the stated policy says go first, retained,
+        while the twenty-one *most recent* of the surplus were destroyed. Both spellings converge
+        to the same steady state over later writes, which is why this survived review; what differs
+        is the state a deployment is left in when the writes stop, and it is the exact inverse of
+        the policy. The case is the one this docstring already addressed — a deployment lowering
+        the cap under a large namespace — and it is the measured pre-fix state (2,000 files,
+        cap 200).
+
+        **So the namespace is paged whole and ordered here, rather than sampled and trusted.**
+        Fixing it by asking for `offset=cap` instead looks like the small change and is the same
+        bug: that page is the *newest* of the surplus, not the oldest, and it is also a bet on an
+        ordering `BaseStore` does not promise — measured, `InMemoryStore` answers a query-less
+        search in *insertion* order, so the two shipped store implementations disagree and the
+        Postgres one is the only reason the old spelling converged at all. Sorting by `updated_at`
+        over every row in the namespace depends on nothing but the field `Item` documents, and it
+        reaches the whole surplus in one write rather than a page of it.
+
+        `_EVICTION_PAGE` is the page size of that walk rather than a bound on the deletion. In
+        steady state — a namespace at most one over its cap — the walk is one query for
+        `cap + 1` rows, fewer than the `cap + _EVICTION_PAGE` this replaced.
         """
         cap = settings.agent_memory_max_files
         store = self._get_store()
         namespace = self._get_namespace()
-        held = await store.asearch(namespace, limit=cap + _EVICTION_PAGE)
+        held: dict[str, SearchItem] = {}
+        while True:
+            page = await store.asearch(namespace, limit=_EVICTION_PAGE, offset=len(held))
+            # A page that adds nothing is the end of the namespace — or a store that ignores
+            # `offset`, which would otherwise walk the first page for ever.
+            fresh = {item.key: item for item in page if item.key not in held}
+            if not fresh:
+                break
+            held.update(fresh)
         if len(held) <= cap:
             return
-        doomed = sorted(held, key=lambda item: item.updated_at)[: len(held) - cap]
+        doomed = sorted(held.values(), key=lambda item: item.updated_at)[: len(held) - cap]
         for item in doomed:
             await store.adelete(namespace, item.key)
         METRICS.increment("chemclaw_memory_evictions_total", len(doomed))
@@ -314,9 +344,11 @@ class BoundedStoreBackend(StoreBackend):
         )
 
 
-#: How far past the cap one eviction pass will look. Not a `Settings` field, for the reason
-#: `_EVICTED_NAMES_REMEMBERED` in `agent/attachments.py` is not one: it is the page size of a
-#: convergence loop, not a posture a deployment states. See `_evict_past_the_cap`.
+#: How many rows one page of the surplus walk reads. Not a `Settings` field, for the reason
+#: `_EVICTED_NAMES_REMEMBERED` in `agent/attachments.py` is not one: it is the page size of a walk,
+#: not a posture a deployment states. It bounds one *query*, never the deletion — a page that
+#: bounded the deletion is what made eviction take the newest of the surplus. See
+#: `_evict_past_the_cap`.
 _EVICTION_PAGE = 64
 
 

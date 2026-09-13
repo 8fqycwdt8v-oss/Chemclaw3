@@ -322,15 +322,18 @@ topic).
       table that is in `retention._NOT_PRUNED` on purpose. `durable/awaiting.py`,
       `durable/pending_store.py`.
 
-- [ ] **A timed-out parse still runs to completion on the worker thread** — [L]. **The cheap half
-      is closed**: `ingest/documents/sync.py::_parse_changed` now bounds its `asyncio.to_thread`
-      with the front door's own `attachment_parse_timeout_seconds` and counts the outcome as
-      `skipped_timeout` through every rendering a run is read through. What remains is the half
-      that was always [L]: `agent/attachments.py:284` shields the future deliberately, so on both
-      paths the timeout frees the caller and the slot and never the thread — no parser behind
-      `parse_document` offers an interruption hook, so a hostile document still burns a worker to
-      completion in the background. The only real fix is a killable subprocess, with pickling and a
-      new child-OOM failure mode to classify (~150-250 lines).
+- [ ] **A warm parse forkserver is ~109 MB the front door's pod was not sized for** — [S],
+      measured 2026-09-13. `ingest/documents/isolate.py` starts its server by fork **and exec**, so
+      its pages are not copy-on-write with the front door's: driven on this tree, RSS was
+      111,140 kB in the front door and 111,188 kB in the forkserver — a second, full resident copy of pypdf,
+      python-docx, openpyxl and python-pptx. `deploy/chemclaw/values.yaml`'s `resources.service` is
+      unchanged at `requests: 512Mi / limits: 1Gi`, so that is 21% of the request arriving the
+      first time anybody uploads a document, and it is *per replica*. Nothing is wrong today; what
+      is missing is that the chart was sized before this process existed. The decision is whether
+      to raise the request, keep the forkserver cold (it is lazy, so a replica that never parses
+      never pays), or both — and it wants a measurement of the Temporal worker too, which now
+      starts one as well (`ingest/documents/sync.py`). Anchor: `isolate.parse_context`,
+      `deploy/chemclaw/values.yaml`.
 
 - [ ] **Nothing checks the client half of a wire contract, and it has drifted twice** — [L], the
       row `D-2026-09-04-a-contract-has-two-halves-and-a-server-test-sees-one` says it is queuing

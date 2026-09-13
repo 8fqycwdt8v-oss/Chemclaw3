@@ -110,6 +110,17 @@ class PreferenceStore:
         is still right — a lost preference must degrade personalization, not fail a turn — but
         answering "Remembered for future sessions" afterwards is not.
         """
+        # **Popped before it is set, because `d[k] = v` on a key that is already there does not
+        # move it.** Both readers of this dict take its insertion order to be *write* order:
+        # `_evict_in_memory` deletes from the front and `recall` keeps the tail. Without the pop
+        # that order is *creation* order, so updating a preference left it at the front and the
+        # next write evicted the most recently stated one. Driven in memory mode at a cap of 3 —
+        # write a, b, c, update a, add d — memory answered `[b, c, d]` where Postgres answered
+        # `[a(v2), c, d]`: the two configurations disagreed about which preference a chemist
+        # currently has. Worse, with the cap lowered under an existing owner, rewriting the
+        # oldest-inserted key evicted the row it had just written while this function returned
+        # True and the tool answered "Remembered for future sessions".
+        self._memory.pop((owner, key), None)
         self._memory[(owner, key)] = value
         self._evict_in_memory(owner)
         if settings.session_store != "postgres":
@@ -170,7 +181,8 @@ class PreferenceStore:
                     raise
         # The same two bounds as the Postgres path, so a deployment in memory mode and one in
         # Postgres mode answer the same question the same way. Insertion order is this dict's
-        # recency, so the *last* `preferences_recall_limit` are the current ones and they are then
+        # recency — which is true because `remember` pops before it sets, and was false while it
+        # did not — so the *last* `preferences_recall_limit` are the current ones and they are then
         # key-sorted for the model, exactly as the SQL does it.
         mine = [
             Preference(key=key, value=value)
@@ -185,9 +197,11 @@ class PreferenceStore:
 
         Not a convenience: in memory mode this dict *is* the configured store, so leaving it
         unbounded would mean the bound existed only where a database did. `dict` preserves
-        insertion order and `remember` re-inserts on every write, so the front of it is the least
+        insertion order and `remember` pops before it sets, so the front of it is the least
         recently written — which is the same ordering `_EVICT` takes, one instrument apart
-        (`updated_at` is a clock, this is arrival).
+        (`updated_at` is a clock, this is arrival). That pop is load-bearing and was not there:
+        a plain assignment to an existing key leaves it where it was, which made this the least
+        recently *created* rather than the least recently written.
         """
         cap = settings.preferences_max_per_owner
         keys = [pair for pair in self._memory if pair[0] == owner]

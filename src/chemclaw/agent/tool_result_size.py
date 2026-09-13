@@ -458,10 +458,41 @@ async def bound_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any
             return message
         return message.model_copy(update={"content": content})
 
-    return rewritten_command_files(rewritten_tool_messages(result, _bounded), _bounded_file)
+    def _bounded_for_this_command(content: str, sharing: int) -> str:
+        return _bounded_file(content, sharing, _files_already_held(request))
+
+    return rewritten_command_files(
+        rewritten_tool_messages(result, _bounded), _bounded_for_this_command
+    )
 
 
-def _bounded_file(content: str, sharing: int) -> str:
+def _files_already_held(request: Any) -> int:
+    """How many characters of `files` the caller's state carries before this command lands.
+
+    **`files` is a `DeltaChannel`: it accumulates.** A bound applied to one `Command` is a bound on
+    one `task` call, so N of them each contributed up to `agent_subagent_files_max_chars` to the
+    same channel — which is the shape `_bounded_file`'s own argument rejects one level down ("a
+    per-file cap times an unbounded number of files is not a bound"), one level up. Charging what
+    is already there against the same budget is what makes the setting a bound on the channel,
+    which is the resource its comment in `core/config/agent.py` names.
+
+    Args:
+        request: The tool-call request, whose `state` carries the caller's channels.
+
+    Returns:
+        The characters already stored, or 0 when the state is unavailable or holds no files.
+    """
+    files = (getattr(request, "state", None) or {}).get("files") or {}
+    if not isinstance(files, dict):
+        return 0
+    return sum(
+        len(data["content"])
+        for data in files.values()
+        if isinstance(data, dict) and isinstance(data.get("content"), str)
+    )
+
+
+def _bounded_file(content: str, sharing: int, held: int = 0) -> str:
     """One file's share of `agent_subagent_files_max_chars`, cut with a notice that says so.
 
     **The resource is the caller's `files` channel, so the budget is the channel's and the share is
@@ -474,26 +505,38 @@ def _bounded_file(content: str, sharing: int) -> str:
     caller *can* read one back (`read_file` reaches the file this crossed with) and a silent cut
     would hand a chemist a document that simply stops.
 
+    **`held` is what makes it a bound on the channel rather than on one `task` call.** `files` is a
+    `DeltaChannel` and accumulates, so without it a caller that delegates ten times stores ten
+    times the setting. What is left of the budget is divided, and an exhausted budget cuts to
+    `bounded_content`'s brief form rather than to nothing — a floor of 1 rather than 0, because 0
+    is how this setting is switched off entirely.
+
     The tool name passed to the notice is `task`, because that is the call the caller sees in its
     own thread and the one an operator would go looking at.
 
     Args:
         content: The file's text as the helper left it.
         sharing: How many files cross in this command.
+        held: Characters of `files` the caller's state already carries.
 
     Returns:
         The text to store, or `content` itself when nothing was cut.
     """
-    share = settings.agent_subagent_files_max_chars // max(sharing, 1)
+    budget = settings.agent_subagent_files_max_chars
+    if budget > 0:
+        budget = max(budget - held, 1)
+    share = budget // max(sharing, 1)
     bounded, removed = bounded_content(content, "task", share)
     if not removed:
         return content
     record_metric(lambda m: m.increment("chemclaw_subagent_file_truncations_total"))
     logger.warning(
         "cut %d character(s) from a file a helper wrote into its caller's state; the share of "
-        "`agent_subagent_files_max_chars` across %d file(s) is %d",
+        "`agent_subagent_files_max_chars` across %d file(s) is %d, with %d character(s) of the "
+        "budget already held",
         removed,
         sharing,
         share,
+        held,
     )
     return str(bounded)
