@@ -413,18 +413,18 @@ _NOT_PRUNED: dict[str, str] = {
     "not see are removed, so a file deleted from the share leaves the index",
     "subscriptions": "deleted on unsubscribe, which is an event rather than an age",
     "observations": "stale rows are retired by status, not deleted",
-    # **This entry used to read "erasure reaches it per actor", and that is not a bound.** The
-    # `session_owners` entry above rejects exactly that reasoning in its own words — "the only
-    # DELETE against this table was actor-scoped erasure, which a deployment that no one leaves
-    # never runs" — so one register applied one argument in two directions in the same file. An
-    # agent-writable table with no size cap, no window and no clock is a "nothing bounds it" case;
-    # naming a disposal route that fires only on a leaver request dressed it as a bounded one.
-    # `docs/planning/BACKLOG.md` carries the capability question (a per-actor or per-session size
-    # cap on the scratchpad, the shape `ingest_rejections` already has); what belongs here is the
-    # finding.
-    "store": "**nothing bounds it** — the scratchpad memory store (`agent/scratchpad.py`), which "
-    "an agent writes to at will. Erasure reaches it per actor, which is a leaver's request and "
-    "not a bound; no decision is on record",
+    # **This entry read "erasure reaches it per actor", then "nothing bounds it", and now names a
+    # bound.** The first was the defect the `session_owners` entry already rejects in its own words
+    # ("which a deployment that no one leaves never runs"); the second was the honest finding, and
+    # driven it measured 2,000 files of 5 kB under one namespace as `(2000, '816 kB')` with nothing
+    # evicted. `D-2026-09-12-a-bound-on-an-agent-writable-table-is-a-row-count` is the decision.
+    # A clock stays wrong here for the reason it was always wrong — a memory is written *to
+    # persist* — so the bound is a count and `updated_at` is only how the count picks.
+    "store": "bounded by its writer (`agent/scratchpad.BoundedStoreBackend`): at most "
+    "`agent_memory_max_files` per actor namespace, the least recently updated evicted on write. "
+    "A clock is the wrong bound — a memory is written to persist, so age says nothing about "
+    "worth. Eventual rather than atomic: the store shares the checkpointer's autocommit pool, so "
+    "the invariant is the cap plus whatever is in flight",
     # Cascades. A `ON DELETE CASCADE` parent is the whole policy, and listing the child separately
     # would be a second, racing definition of one disposal.
     "bo_suggestions": "cascades from `bo_campaigns`",
@@ -457,15 +457,41 @@ _NOT_PRUNED: dict[str, str] = {
     "audit_anchors": "retired with the audit hash chain; nothing writes it and the table is empty",
     "store_vectors": "not created in this deployment — the memory store is built without an "
     "`index_config`, so `AsyncPostgresStore.setup()` never makes it",
-    # Nothing bounds these, and no decision is on record. Each is a real open question, not a
-    # shorthand for "unimportant"; naming them is what this register is for.
-    "molecule_fingerprints": "**nothing bounds it**, and no decision is on record",
-    "reaction_fingerprints": "**nothing bounds it**, and no decision is on record",
-    "user_preferences": "**nothing bounds it** — one row per person per key, and a preference has "
-    "no age at which it stops being current",
-    "predictions": "**nothing bounds it** — the calibration ledger's evidence, where pruning a row "
-    "changes a calibration rather than reclaiming space; no decision is on record",
-    "measurements": "**nothing bounds it** — the calibration ledger's other half, same question",
+    # **The fingerprint pair is bounded by construction and it is not bounded by the corpus**,
+    # which is the distinction the obvious reading misses. The write is an upsert on a *structural*
+    # key, so traffic cannot grow the table: re-fingerprinting the same molecule replaces its row.
+    # But `094` put the fingerprint *definition* in that key on purpose — two generations of one
+    # standardization must not evict each other mid-rebuild — so the real bound is the corpus
+    # multiplied by every definition ever written, and nothing reclaims the superseded generation:
+    # `app_privileges.sql` grants these tables INSERT and UPDATE only, which is what makes this
+    # register's refusal enforced rather than intended. A `STANDARDIZATION_VERSION` bump is
+    # therefore a permanent doubling, measured from the other side by
+    # `D-2026-09-09-a-rebuild-nothing-counts-reports-as-finished`. That is a decision about *bumps*
+    # and not a row cap, which is why no cap is proposed here.
+    "molecule_fingerprints": "bounded by the corpus times the fingerprint definitions ever "
+    "written: the key is `(id, definition)` (094), so traffic cannot grow it and a definition "
+    "bump forks it permanently — the runtime role holds no DELETE, so nothing reclaims the "
+    "superseded generation",
+    "reaction_fingerprints": "same as `molecule_fingerprints`, keyed `(source, id, definition)`",
+    "user_preferences": "bounded by its writer (`agent/preferences.py`): at most "
+    "`preferences_max_per_owner` per person, the least recently updated evicted in the same "
+    "transaction as the write. Agent-writable on a *model-chosen* key, which is why one row per "
+    "person per key was never a bound; `preferences_recall_limit` separately bounds what re-enters "
+    "the prompt",
+    # **The calibration pair is unbounded, accepted, and the two halves are accepted for different
+    # reasons.** `predictions` is keyed `(calc_type, calc_version, input_hash)` — `calc_version` is
+    # *in* the key, so a version bump forks the table exactly as a definition bump forks the
+    # fingerprints, and for the same reason: a calibration compares versions, so the old rows are
+    # the comparison. Pruning one changes a calibration rather than reclaiming a cache, so the bound
+    # that would be right is a `calc_version` retirement policy, which nothing in this repository
+    # has and which is a scientific decision rather than a storage one. `measurements` is
+    # human-paced: a row arrives when somebody measures something, so the rate is the lab's.
+    "predictions": "unbounded, accepted — the calibration ledger's evidence, keyed by "
+    "`calc_version`, so a version bump forks it and the old rows are what a calibration compares "
+    "against. The bound that would be right is a `calc_version` retirement policy, which is a "
+    "scientific decision and is not made here",
+    "measurements": "unbounded, accepted — the calibration ledger's other half, written at human "
+    "pace: one row per measurement somebody actually made",
     "note_proposals": "refused: the PR-gate's record of what was proposed and who decided it, for "
     "as long as there was a gate to decide anything "
     "(`D-2026-09-05-the-gate-is-deleted-not-dormant` retired it and nothing writes a row now). "

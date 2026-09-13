@@ -63,19 +63,27 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
-- [ ] **Nothing bounds the scratchpad memory store** — [M].
-  `retention._NOT_PRUNED["store"]` read *"erasure reaches it per actor"* until wave 13, which is a
-  disposal route that fires only on a leaver request — the reasoning the `session_owners` entry
-  already rejects in its own words ("which a deployment that no one leaves never runs"). The entry
-  now says **nothing bounds it**, which is the finding; this row is the decision. `store` is
-  agent-writable (`agent/scratchpad.py`) with no size cap, no window and no clock, so a single agent
-  looping a `remember` tool is the runaway case — the same shape `ingest/rejections.py` already
-  answers with `_MAX_ROWS_PER_SOURCE` and least-recently-used eviction inside the writer's own
-  transaction. A clock is likely the wrong instrument here for the reason it is wrong there. Decide
-  between a per-actor (or per-namespace) row cap enforced by the writer and an explicit "unbounded,
-  accepted" posture; either way the register entry changes in the same commit, and
-  `tests/test_retention.py::test_no_disposal_entry_offers_actor_erasure_as_what_bounds_a_table` is
-  what stops the next rewording leaning on erasure again.
+- [ ] **A helper's own subgraph checkpoints are 91% of what a spawn costs, and nothing bounds
+  them** — [M]. `D-2026-09-12-a-helpers-scratch-file-crosses-into-its-callers-state` bounded what
+  crosses into the *caller's* `files` channel, which is what W23.6 named. Measured on a real
+  `AsyncPostgresSaver` with incompressible text, one helper writing 2 MB costs **20,712 kB** of
+  checkpoint rows above a 296 kB baseline — 10.4x — and that cap reclaims **1,824 kB**, 8.8%. The
+  rest is the helper's own `files` and `messages` channels in `checkpoint_blobs`, re-serialised per
+  version, which a `wrap_tool_call` middleware cannot reach: it runs when `task` returns, after
+  those checkpoints are written. Two levers exist and both are decisions rather than edits — a
+  bound on `write_file`'s *content argument*, which would also silently truncate a chemist's own
+  scratchpad, or compiling a helper with no checkpointer at all, which changes what a mid-turn
+  interrupt can resume. Measure which before choosing; the probe is
+  `/tmp`-free and is the one in that ADR's table.
+
+- [ ] **`max_concurrent_workflow_tasks` is set nowhere, so nothing this repository chose bounds
+  workflow-task concurrency** — [M]. `durable/background_worker.py` sets `max_concurrent_activities`
+  and stops there, so the workflow-task ceiling is whatever the SDK defaults to. A **child workflow
+  is not an activity**, so the activity ceiling does not bound the bundle children core starts at
+  all — which is the population `D-2026-09-12-a-ceiling-that-funds-one-attempt-does-not-fund-a-sequence`
+  has just finished reasoning about from the *inside* of one child. Measure what a saturated worker
+  actually holds before choosing a number: a ceiling set from the SDK's default is the same
+  unexamined posture this row is about, one value further on.
 
 - [ ] **The `git` remote is now a destination a deployment must declare, and nothing derives it** —
   [S], what is left of "the egress guard is blind to gRPC and to Temporal" after

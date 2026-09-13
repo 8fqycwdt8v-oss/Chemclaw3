@@ -242,8 +242,24 @@ class MemorySettings(BaseSettings):
     # the cap itself punishes the ordinary burst (four spreadsheets dropped on the UI at once
     # measured as two 200s and two 503s) while doing nothing extra against a sustained flood.
     # Queueing is safe here only because a waiter holds a future rather than a thread.
-    # The timeout bounds the *wait*, not the thread: Python cannot kill one, so a parse past this
-    # limit is refused to its client while the thread runs to completion against the cap.
+    #
+    # **The timeout bounds the work, and for a long time it did not.** These three lines used to
+    # end "Python cannot kill one, so a parse past this limit is refused to its client while the
+    # thread runs to completion against the cap" — which was an accurate description of a liveness
+    # bug, written as though it were a design. A slot is released by its thread's completion
+    # callback, so a parse that never terminates held its slot for the life of the process: driven
+    # at this cap of 2, both callers were freed at their timeout, `in_flight` stayed at 2 five
+    # seconds later, and every later upload was shed. The replica's upload path was down for good.
+    # The parse now runs in a `forkserver` child that is killed on this deadline
+    # (`chemclaw.ingest.documents.isolate`), so the thread ends and the slot comes back — measured
+    # at 10 ms per parse once the forkserver is warm, against 0.97 s for a fresh interpreter.
     attachment_parse_timeout_seconds: float = Field(default=30.0, gt=0)
     attachment_parse_queue_seconds: float = Field(default=10.0, ge=0)
     attachment_max_concurrent_parses: int = Field(default=2, ge=1)
+    # What the caller waits *beyond* the parse deadline before giving up on its own worker thread.
+    # The thread enforces the deadline itself, so this is a backstop over the one thing that
+    # enforcement cannot see: the forkserver's first start, which happens before the child's clock
+    # begins and measured **0.86 s** on this tree. Five seconds is that with room, and it is the
+    # margin rather than a second parse budget — if this is ever what fires, the thread is still
+    # bounded and the slot still comes back.
+    attachment_parse_reap_grace_seconds: float = Field(default=5.0, ge=0)

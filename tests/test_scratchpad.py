@@ -35,7 +35,9 @@ from chemclaw.agent.scratchpad import (
     scratchpad_backend,
     scratchpad_tools,
 )
+from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.core.metrics import METRICS
 from tests.pg import migrated_db_or_skip
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
@@ -207,9 +209,20 @@ def test_no_first_party_module_writes_to_a_store_directly() -> None:
     against adopting `BaseStore` at all. The design answers it by construction, and this asserts the
     construction holds — an AST walk rather than a grep, so a call spelled across two lines or
     hidden behind an alias is still caught.
+
+    **Exactly one module may, and the exemption is narrowed rather than the rule deleted.**
+    `agent/scratchpad.BoundedStoreBackend` evicts past `agent_memory_max_files`, which needs
+    `adelete`, and is the whole of `D-2026-09-12-a-bound-on-an-agent-writable-table-is-a-row-count`.
+    It does not weaken the property this test holds: an eviction *removes* what the cap says may not
+    stay, inside the same call the tool made, so nothing enters the store outside the chain. Naming
+    one file rather than relaxing the matcher is the `kg/record.py` idiom — one write path, and a
+    test that says which — and it is why a second module acquiring the verb turns this red.
     """
+    allowed = {"agent/scratchpad.py"}
     offenders: list[str] = []
     for path in sorted(_SRC.rglob("*.py")):
+        if path.relative_to(_SRC).as_posix() in allowed:
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
@@ -423,3 +436,88 @@ def test_the_store_table_list_is_derived_from_upstream_not_asserted_against_itse
         "the memory store creates a table the erasure sweep does not clear (or clears one it does "
         "not create): " + str(sorted((created - ledgers) ^ set(STORE_TABLES)))
     )
+
+
+def test_the_memory_store_is_bounded_per_namespace() -> None:
+    """The bound `store` did not have, driven against a real store rather than asserted.
+
+    Before this, `durable/retention.py`'s disposal register said of `store` "**nothing bounds it**"
+    and was right: agent-writable, no size cap, no window, no clock. Driven, 2,000 writes of 5 kB
+    under one namespace left 2,000 rows and nothing evicted. The runaway is not a looping turn —
+    `harness_max_loop_iterations` x `agent_max_parallel_tool_calls` caps writes per *turn* — it is
+    accumulation across turns over a deployment's life.
+
+    Written through `BoundedStoreBackend.awrite`, which is the function the `write_file` tool
+    reaches, rather than through `store.aput`: the whole design property is that a memory write
+    arrives as a tool call, and a test that wrote around it would be proving the cap on a path
+    nothing uses.
+
+    The eviction order is asserted too, because a cap that kept an arbitrary subset would pass a
+    bare count: the least recently updated go, so the newest survive.
+    """
+    cap = 5
+
+    async def _run() -> tuple[int, list[str]]:
+        await migrated_db_or_skip()
+        patch = pytest.MonkeyPatch()
+        patch.setattr(settings, "agent_memory_max_files", cap)
+        try:
+            store = await scratchpad.memory_store()
+            namespace = scratchpad.memory_namespace("bounded-probe")
+            backend = scratchpad.BoundedStoreBackend(
+                namespace=lambda _runtime: namespace, store=store
+            )
+            for index in range(cap * 3):
+                await backend.awrite(f"/memories/note-{index:02d}.md", "x" * 5_000)
+            held = await store.asearch(namespace, limit=100)
+            for item in held:
+                await store.adelete(namespace, item.key)
+            return len(held), sorted(item.key for item in held)
+        finally:
+            patch.undo()
+            await ckpt.close_checkpointer()
+
+    count, keys = asyncio.run(_run())
+    assert count == cap, f"{count} memories survived a {cap}-file cap"
+    # The last `cap` written, so the eviction took the least recently updated rather than a
+    # convenient set.
+    assert keys == sorted(f"/memories/note-{index:02d}.md" for index in range(cap * 2, cap * 3)), (
+        keys
+    )
+
+
+def test_evicting_a_memory_is_counted_and_logged() -> None:
+    """A cap that binds silently is a chemist losing a memory with nothing anywhere saying so.
+
+    Two channels because they have different readers: the counter is what an operator sees on a
+    scrape (is the cap binding at all, for anyone?), the WARNING names the files, which is the only
+    trace of *which* memory went. `ingest/rejections.py` logs its own eviction the same way and for
+    the same reason.
+    """
+    cap = 2
+
+    async def _run() -> tuple[float, int]:
+        await migrated_db_or_skip()
+        patch = pytest.MonkeyPatch()
+        patch.setattr(settings, "agent_memory_max_files", cap)
+        try:
+            store = await scratchpad.memory_store()
+            namespace = scratchpad.memory_namespace("counted-probe")
+            backend = scratchpad.BoundedStoreBackend(
+                namespace=lambda _runtime: namespace, store=store
+            )
+            before = METRICS.value("chemclaw_memory_evictions_total")
+            for index in range(cap + 3):
+                await backend.awrite(f"/memories/n{index}.md", "hello")
+            after = METRICS.value("chemclaw_memory_evictions_total")
+            held = await store.asearch(namespace, limit=100)
+            for item in held:
+                await store.adelete(namespace, item.key)
+            return after - before, len(held)
+        finally:
+            patch.undo()
+            await ckpt.close_checkpointer()
+
+    evicted, held = asyncio.run(_run())
+    assert held == cap
+    assert evicted == 3, f"{evicted} evictions counted for three files over the cap"

@@ -68,7 +68,7 @@ from langchain_core.messages import ToolMessage
 
 from chemclaw.agent.audit import metric_tool_name
 from chemclaw.agent.framing import SYSTEM_SPEECH_MARK
-from chemclaw.agent.tool_result_shape import rewritten_tool_messages
+from chemclaw.agent.tool_result_shape import rewritten_command_files, rewritten_tool_messages
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
@@ -458,4 +458,42 @@ async def bound_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any
             return message
         return message.model_copy(update={"content": content})
 
-    return rewritten_tool_messages(result, _bounded)
+    return rewritten_command_files(rewritten_tool_messages(result, _bounded), _bounded_file)
+
+
+def _bounded_file(content: str, sharing: int) -> str:
+    """One file's share of `agent_subagent_files_max_chars`, cut with a notice that says so.
+
+    **The resource is the caller's `files` channel, so the budget is the channel's and the share is
+    per file** — the same division `bounded_for_batch` applies across a batch of tool calls, and
+    for the same reason: a per-file cap times an unbounded number of files is not a bound. A helper
+    that writes one note gets the whole budget; one that writes ten gets a tenth each.
+
+    `bounded_content` is reused rather than reimplemented, so a truncated file keeps both ends and
+    carries the same system-marked notice a truncated tool result does — which matters, because the
+    caller *can* read one back (`read_file` reaches the file this crossed with) and a silent cut
+    would hand a chemist a document that simply stops.
+
+    The tool name passed to the notice is `task`, because that is the call the caller sees in its
+    own thread and the one an operator would go looking at.
+
+    Args:
+        content: The file's text as the helper left it.
+        sharing: How many files cross in this command.
+
+    Returns:
+        The text to store, or `content` itself when nothing was cut.
+    """
+    share = settings.agent_subagent_files_max_chars // max(sharing, 1)
+    bounded, removed = bounded_content(content, "task", share)
+    if not removed:
+        return content
+    record_metric(lambda m: m.increment("chemclaw_subagent_file_truncations_total"))
+    logger.warning(
+        "cut %d character(s) from a file a helper wrote into its caller's state; the share of "
+        "`agent_subagent_files_max_chars` across %d file(s) is %d",
+        removed,
+        sharing,
+        share,
+    )
+    return str(bounded)

@@ -27,6 +27,7 @@ from chemclaw.agent.authz import require_actor
 from chemclaw.agent.framing import defang
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.metrics import METRICS
 from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.tool_registry import tool
 
@@ -37,7 +38,34 @@ INSERT INTO user_preferences (owner, key, value, updated_at)
 VALUES (%s, %s, %s, now())
 ON CONFLICT (owner, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
 """
-_SELECT = "SELECT key, value FROM user_preferences WHERE owner = %s ORDER BY key"
+# **Bounded, and it was not.** `remember_preference` takes a *model-chosen* key, so this table is
+# agent-writable with no ceiling on rows — `durable/retention.py` names it "**nothing bounds it**"
+# and the retention sweep leaves it alone for the right reason (a preference has no age at which it
+# stops being current). A count is the instrument, as it is for `ingest_rejections` and for the
+# memory store: the least *recently updated* preference goes, which is a tiebreak rather than a
+# policy, because the bound is on how many a person may hold and not on how old one may be.
+#
+# In the writer's own transaction, so the invariant is exact rather than eventual: unlike the memory
+# store this path owns its connection and commits once. `NOT IN` over the keeps rather than `IN`
+# over the doomed, so the statement is one round trip whatever the overflow is.
+_EVICT = """
+DELETE FROM user_preferences
+WHERE owner = %s AND key NOT IN (
+    SELECT key FROM user_preferences WHERE owner = %s ORDER BY updated_at DESC, key LIMIT %s
+)
+"""
+# **`LIMIT` is the half that is about the prompt rather than about the table.** This read had none,
+# so every preference a chemist had ever set re-entered the model's context on every recall, in
+# every later session, for the life of the row. Ordered by `updated_at DESC` *first* so the limit
+# keeps what is current rather than what sorts early alphabetically — a truncation by key would
+# silently drop the preference stated five minutes ago in favour of one from last year beginning
+# with "a". The key sort is the stable tiebreak underneath it, which is what the model reads.
+_SELECT = (
+    "SELECT key, value FROM ("
+    "  SELECT key, value, updated_at FROM user_preferences WHERE owner = %s"
+    "  ORDER BY updated_at DESC, key LIMIT %s"
+    ") AS recent ORDER BY key"
+)
 _DELETE = "DELETE FROM user_preferences WHERE owner = %s AND key = %s"
 
 
@@ -83,25 +111,51 @@ class PreferenceStore:
         answering "Remembered for future sessions" afterwards is not.
         """
         self._memory[(owner, key)] = value
+        self._evict_in_memory(owner)
         if settings.session_store != "postgres":
             return True
         try:
             async with self._connection() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(_UPSERT, (owner, key, value))
+                    # Same transaction as the write, which is what makes this bound exact — the
+                    # shape `ingest/rejections.py` uses and the memory store cannot, because that
+                    # one sits on an autocommit pool.
+                    await cur.execute(_EVICT, (owner, owner, settings.preferences_max_per_owner))
+                    evicted = cur.rowcount
                 await conn.commit()
+            if evicted > 0:
+                METRICS.increment("chemclaw_preference_evictions_total", evicted)
+                logger.warning(
+                    "evicted %d preference(s) for %s past the %d-preference cap",
+                    evicted,
+                    owner,
+                    settings.preferences_max_per_owner,
+                )
         except Exception:
             degraded(logger, "preferences", "could not persist preference %r for %s", key, owner)
             return False
         return True
 
     async def recall(self, owner: str) -> list[Preference]:
-        """Every preference `owner` has set, key-sorted (stable for the model to read)."""
+        """The `preferences_recall_limit` most recent preferences `owner` has set, key-sorted.
+
+        **Bounded, and the bound is about the prompt rather than the table.** This read had no
+        `LIMIT`, so every preference a chemist had ever set re-entered the model's context on every
+        recall, in every later session, for the life of the row — unbounded prompt spend behind a
+        tool the model is told to call "early in a substantive answer". The row cap in `remember`
+        is the storage half; this is the context half, and a deployment that lowers the row cap
+        still holds the rows it already wrote.
+
+        Key-sorted for the model — a stable order is what keeps one turn's reading comparable with
+        the next — but selected by recency, so the limit keeps what is current rather than what
+        sorts early alphabetically.
+        """
         if settings.session_store == "postgres":
             try:
                 async with self._connection() as conn:
                     async with conn.cursor() as cur:
-                        await cur.execute(_SELECT, (owner,))
+                        await cur.execute(_SELECT, (owner, settings.preferences_recall_limit))
                         rows = await cur.fetchall()
                 return [Preference(key=row[0], value=row[1]) for row in rows]
             except Exception:
@@ -114,11 +168,31 @@ class PreferenceStore:
                     # answer is worse than a failed one, because the chemist then re-states
                     # preferences that also will not persist.
                     raise
-        return [
+        # The same two bounds as the Postgres path, so a deployment in memory mode and one in
+        # Postgres mode answer the same question the same way. Insertion order is this dict's
+        # recency, so the *last* `preferences_recall_limit` are the current ones and they are then
+        # key-sorted for the model, exactly as the SQL does it.
+        mine = [
             Preference(key=key, value=value)
-            for (row_owner, key), value in sorted(self._memory.items())
+            for (row_owner, key), value in self._memory.items()
             if row_owner == owner
         ]
+        recent = mine[-settings.preferences_recall_limit :]
+        return sorted(recent, key=lambda preference: preference.key)
+
+    def _evict_in_memory(self, owner: str) -> None:
+        """Hold the in-memory fallback to the same row cap as the table.
+
+        Not a convenience: in memory mode this dict *is* the configured store, so leaving it
+        unbounded would mean the bound existed only where a database did. `dict` preserves
+        insertion order and `remember` re-inserts on every write, so the front of it is the least
+        recently written — which is the same ordering `_EVICT` takes, one instrument apart
+        (`updated_at` is a clock, this is arrival).
+        """
+        cap = settings.preferences_max_per_owner
+        keys = [pair for pair in self._memory if pair[0] == owner]
+        for pair in keys[: max(len(keys) - cap, 0)]:
+            del self._memory[pair]
 
     async def forget(self, owner: str, key: str) -> bool:
         """Drop one preference — a chemist must be able to take a preference back.
@@ -189,7 +263,8 @@ async def recall_preferences() -> list[Preference]:
     a preference, and never assume one from a single past message.
 
     Returns:
-        Every preference this chemist has set, key-sorted.
+        This chemist's most recently set preferences, key-sorted. Bounded — a chemist with more
+        than `preferences_recall_limit` of them gets the current ones, not all of them.
     """
     # A preference is free text the model wrote — through `remember_preference`, out of whatever it
     # had just read, including framed third-party content — and it re-enters a prompt on every
