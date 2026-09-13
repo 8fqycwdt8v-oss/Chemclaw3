@@ -456,8 +456,12 @@ The answers a chemist acts on. Each row here is a way the record can be right an
       wrote a bare `reaction_labels.citation` from a row that already carried its source, and
       W26.1's own `retracted()` was keyed on the bare id, so one site's withdrawal dropped another
       site's run out of the sweep.
-- [ ] W26.3 `Chemclaw3` — structure identity is canonical SMILES and nothing else: no InChI, no
-      InChIKey [M].
+- [x] W26.3 `Chemclaw3` — structure identity is canonical SMILES and nothing else: no InChI, no
+      InChIKey [M]. Closed by
+      `D-2026-09-13-a-second-identity-scheme-inherits-the-first-ones-instability`, which found the
+      row's own justification false: an InChIKey taken after standardization moves exactly when
+      `compound_id` moves (measured across the solvate fix), and one taken before it fragments the
+      join. The row's ordering constraint pointed at a §2 solvate row that is closed and gone.
 - [ ] W26.4 `Chemclaw3` — a published calculation names no reaction, note or compound context [M].
 - [ ] W26.5 `Chemclaw3` — `_quote_supports` cannot tell whether the figure a quote carries is about
       *this* slot.

@@ -590,18 +590,6 @@ topic).
       projector rather than at a hook — deciding a cross-reference against a store nobody has run
       repeats exactly that. **Trigger:** the results store gets a live target.
 
-- [ ] **Structure identity is canonical SMILES and nothing else** — [M]. No InChI, InChIKey,
-      formula, molecular weight, CAS or external registry number exists anywhere in `infra/sql/` or
-      `schema/`; `051_reaction_labels.sql:72` states the omission as a decision ("nothing asks, and
-      this tree deletes dead columns") and it was right when written. What now asks is a
-      cross-system join — an identifier a site's other systems can match on, and one that survives a
-      `STANDARDIZATION_VERSION` bump, which a `standard_smiles` string by construction does not.
-      **Needs an ADR, and the honest form of it is "name the reader", not "add a column"**: an
-      InChIKey nothing queries is precisely the dead column that comment refuses. Candidate readers
-      to argue in it: `schema/result-store/001_core.sql`'s `compound` row, and a lookup that stays
-      valid across a re-standardization. Note the ordering constraint with the solvate row in §2 —
-      any identifier minted before that fix inherits the collapse.
-
 - [ ] **A stalled append-only feed has no first-party signal** — [S]. `corpus_cursors`
       (`infra/sql/072`) records where each feed's drain stopped, and nothing reads `updated_at`:
       `ingest/labels/cursor.py::load_corpus_cursor` selects `after` only. The module declines a lag gauge for a
