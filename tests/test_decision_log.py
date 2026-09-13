@@ -648,8 +648,20 @@ def test_no_adr_cites_a_commit_a_squash_will_strand() -> None:
     branch is still checked out, and that is exactly the checkout the ADR is written in. Name the
     state by what it is, or by the PR, and make the reproduction runnable from content.
 
-    Skipped rather than passed where the answer cannot be had — no git, no `origin/main` — because a
-    check that quietly shrinks is worse than one that says what it did not look at.
+    Skipped rather than passed where the answer cannot be had — no git, no `origin/main`, or **an
+    object this checkout does not have** — because a check that quietly shrinks is worse than one
+    that says what it did not look at.
+
+    That third condition was missing and the omission inverted the check. On a **shallow** clone —
+    which is what the container this repository provisions hands a session — `origin/main` resolves
+    and the history behind it does not, so `merge-base --is-ancestor` exits non-zero for want of the
+    *object* rather than for want of reachability. Measured on such a checkout: seven citations
+    across five ADRs nobody had touched were reported as stranded, and all seven are reachable from
+    `main` once the clone is completed. So a red gate blamed five innocent ADRs, in a message whose
+    wording ("not reachable from `origin/main`") a reader has no way to tell from the real fault.
+    An absent object is only a strand where the history is actually present, so the two cases are
+    now distinguished: with full history this behaves exactly as before (CI's suite job clones at
+    `fetch-depth: 0`), and on a shallow one it says how much it could not ask about.
     """
     import shutil
     import subprocess
@@ -662,19 +674,45 @@ def test_no_adr_cites_a_commit_a_squash_will_strand() -> None:
     ).returncode:  # pragma: no cover - a checkout with no remote
         pytest.skip("no origin/main in this checkout: reachability cannot be asked")
 
+    shallow = (
+        subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == "true"
+    )
+
     stranded: list[str] = []
+    unasked: list[str] = []
     for path in _adr_files():
         for number, line in enumerate(path.read_text("utf-8").splitlines(), 1):
             for sha in _COMMIT_CITATION.findall(line):
+                citation = f"{path.name}:{number} cites {sha}"
+                present = not subprocess.run(
+                    ["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=root, capture_output=True
+                ).returncode
+                if not present and shallow:
+                    # The object is outside this clone's slice of history, so reachability is not a
+                    # question this checkout can answer either way.
+                    unasked.append(citation)
+                    continue
                 reachable = subprocess.run(
                     ["git", "merge-base", "--is-ancestor", sha, "origin/main"],
                     cwd=root,
                     capture_output=True,
                 )
                 if reachable.returncode:
-                    stranded.append(f"{path.name}:{number} cites {sha}")
+                    stranded.append(citation)
     assert not stranded, (
         "these ADRs cite commits that are not reachable from `origin/main`, so a reader on `main` "
         f"cannot resolve them: {stranded}. Cite the pull request and name the state by what it is "
         "— a squash merge rewrites every branch commit into one new hash"
     )
+    if unasked:  # pragma: no cover - only on a shallow clone, and CI's suite job is not one
+        pytest.skip(
+            f"shallow clone: {len(unasked)} of the cited commits are outside this checkout's "
+            "history, so they were not asked about (the rest passed). Run "
+            "`git fetch --unshallow origin` to check them all."
+        )
