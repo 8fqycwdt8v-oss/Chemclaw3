@@ -388,7 +388,12 @@ Postgres and Temporal are up in this environment, so every one of these is driva
       `D-2026-09-13-a-collapse-without-the-batch-keeps-the-oldest-frame`; the batched yield the row
       proposed is declined because it would drop a mid-batch disconnect's restores.
 - [x] W24.6 `Chemclaw3` — a legitimate re-ask of an answered question fails loudly rather than
-      waiting blind.
+      waiting blind. Built rather than deferred: `pending_request_answers` (096) takes the answer and
+      `'answered'` joins the reopen. The decision the row owed — the archive *inherits*
+      `pending_requests`' arguments in all three registers (retention, erasure, grant) rather than
+      getting new ones. `_CLAIMED_BY`, `open_request`'s verdict and the activity's raise are deleted
+      as unreachable over all five shapes the upsert admits.
+      `D-2026-09-13-an-answer-is-archived-so-the-question-can-be-asked-again`.
 - [x] W24.7 `Chemclaw3` — a result sink on the primary server opens connections no budget counts.
       The row's fix raises (`AsyncConnection` has no `max_size`); the count is of *connections*, on
       the endpoint they dial. A sink on its own warehouse counts zero and `deploy/README.md` says

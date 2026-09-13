@@ -332,9 +332,9 @@ class AwaitAnswerWorkflow:
             # `ActivityError(cause=CancelledError)`, so the clause above caught nothing: measured
             # against a real broker, a parent terminated while the child sat in the open activity
             # left the child `CANCELED` with **no settle attempted**. Everything else an activity
-            # can raise is re-raised unchanged, which is what keeps a projection refusal a failure
-            # (`tests/test_awaiting.py::test_a_wait_refused_by_the_projection_fails_instead_of_`
-            # `waiting_blind`) rather than a wait that quietly reports itself cancelled.
+            # can raise is re-raised unchanged, so a genuine activity failure still fails the wait
+            # rather than being absorbed as a wait that quietly reports itself cancelled — a
+            # `BAD_DATA_RETRY` exhaustion on the open, say, or a projection the database refused.
             if isinstance(exc, ActivityError) and not isinstance(exc.cause, TemporalCancelledError):
                 raise
             await self._settle(request_id, "cancelled", activity_timeout, detached=True)

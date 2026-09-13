@@ -414,8 +414,9 @@ def test_the_plans_identity_moves_with_its_declaration_and_not_with_its_progress
     run the next one" batch revokes its own approval and an approved multi-step plan livelocks
     against the repeat guard (`tests/test_plan_gate.py` drives that half as an effect).
 
-    It replaces `tests/test_langgraph_agent.py::test_both_engines_hash_a_plan_to_the_same_identity`,
-    which survived this whole change green and could not have failed it: its assertion was
+    It replaces a test in `tests/test_langgraph_agent.py` that claimed both engines hashed a plan to
+    one identity, which survived this whole change green and could not have failed it: its assertion
+    was
     `plan_identity([t["content"] for t in todos]) == plan_identity(titles)` over `todos` built from
     `titles` one line above — a value compared with itself, and about a second engine that no longer
     exists. That is the vacuous shape `tasks/lessons.md` records.
