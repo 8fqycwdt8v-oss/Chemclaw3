@@ -17,19 +17,29 @@ KUBE_VERSION ?= 1.29.0
 EVAL_CASE_SET_VERSION ?= retrieval-2026-09-05
 
 # How many pytest worker processes `test` and `cov` run across
-# (`D-2026-09-13-four-workers-is-a-third-of-the-wall-clock-and-a-different-failure-set`).
+# (`D-2026-09-13-a-stable-failure-set-is-not-two-green-runs`).
 #
-# **4 and not `auto`, and the difference is a resource nobody counts.** `-n auto` takes
+# **0 — serial — because the gate's answer has to mean one thing, and in parallel it does not.**
+# Four workers are genuinely much faster: measured on this 4-core box, `make test` 18:13 -> 09:30 and
+# `make cov` 27:25 -> 12:28, with coverage unchanged at 90.53%. What they are not is *stable*. Over
+# five full parallel runs, `tests/test_context_budget.py::test_a_burst_of_cold_prefix_measurements_`
+# `leaves_the_loop_schedulable` failed in **2** and
+# `tests/test_retention.py::test_a_pass_reports_bytes_beside_rows_and_stops_the_table_growing` in
+# **1**; both pass serially, every time. A gate that reds about 40% of the time for a reason that is
+# not a finding is worse than a slow one — the first spurious red teaches everybody to re-run, and
+# then a real red teaches them the same thing.
+#
+# **So this is an opt-in and the plugin stays installed**, because the speedup is real and a local
+# iteration loop is the right place to spend it: `make test PYTEST_WORKERS=4`. When something fails
+# under it, re-run that test serially before believing it — a test that fails only in parallel is
+# evidence about the scheduler.
+#
+# **Not `auto` even when opting in, and the difference is a resource nobody counts.** `-n auto` takes
 # `os.cpu_count()`, and every worker is its own process that draws its own Postgres pool — at
-# `CHEMCLAW_PG_POOL_MAX_SIZE`'s default of 16 that is 16 backends per worker against one server, so a
-# 16-core developer box would ask a stock `max_connections` of 100 for four times what it has while a
-# 4-core runner sits inside it. 4 is the width this was measured at and the shape `check` runs on
-# (`ubuntu-latest` is 4 vCPU / 16 GB).
-#
-# `make test PYTEST_WORKERS=0` runs serially, which is what to reach for when a failure might be a
-# contention artefact: a test that fails only in parallel is evidence about the scheduler, not about
-# the code, and the serial run is the one that tells them apart.
-PYTEST_WORKERS ?= 4
+# `CHEMCLAW_PG_POOL_MAX_SIZE`'s default of 16 that is up to 16 backends per worker against one
+# server, so a 16-core developer box would ask a stock `max_connections` of 100 for four times what
+# it has while a 4-core runner sits inside it.
+PYTEST_WORKERS ?= 0
 # Empty when serial is asked for, so the flag is absent rather than `-n 0` (which xdist reads as
 # "no workers" and then still installs its plugin machinery).
 PYTEST_XDIST := $(if $(filter-out 0,$(PYTEST_WORKERS)),-n $(PYTEST_WORKERS),)
@@ -111,7 +121,7 @@ lint:  ## Ruff lint + format check (no writes; use `uv run ruff format` to fix).
 type:  ## Static type check, strict (the whole package, plus examples and tests).
 	uv run mypy src examples tests
 
-test:  ## Run the test suite (parallel; `PYTEST_WORKERS=0` for serial).
+test:  ## Run the test suite (serial; `PYTEST_WORKERS=4` for ~2x, see the variable).
 	uv run pytest $(PYTEST_XDIST)
 
 cov:  ## Run the test suite with coverage (first-party packages; report missing lines).

@@ -2426,3 +2426,26 @@ mutation reddens tests it has no business touching, read it as a signal about th
 way a mutation reddening the *wrong* test is a signal about the tree. And for SQL specifically, run the
 mutated statement once before believing its result: a syntax error is indistinguishable from a finding
 in a pytest summary.
+
+## Two green runs are not a stable failure set (2026-09-13)
+
+**What happened.** W24.8 asked whether `pytest-xdist` is a win. I ran the suite twice under `-n 4`,
+both clean, and wrote an ADR whose headline was *"the failure set is identical in every arm"* — then
+changed `make test`'s default to four workers on the strength of it. The verification run I took
+**because** the default had changed failed two extra tests. Five runs put the rates at 2-in-5 and
+1-in-5, and both tests pass serially every time. One of them was on a list of four the brief had
+predicted and my ADR had dismissed as "a problem that did not occur".
+
+The wrong conclusion is not the interesting part; the sample size is. Two clean runs of an 8,800-test
+suite is an ordinary outcome for a 40 %-per-run flake. What the claim asserted was *stability* — a
+statement about the distribution — and two samples cannot support that in the "always" direction. The
+speed half of the same measurement was fine on two runs, because a wall clock is one number and a
+failure set is a sample.
+
+**Rule: a claim that something is stable carries its repetition count, and the count has to be big
+enough for the rate it is excluding.** "Identical in every arm" over n=2 is "identical in two runs";
+write that instead, and then decide whether two is enough for the decision being taken. When the
+decision is to change a *gate*, it is not.
+
+The corollary that saved it: **after changing a default, re-run the thing the default governs.** The
+only reason this was caught before merge is that changing `make test` meant running `make test`.

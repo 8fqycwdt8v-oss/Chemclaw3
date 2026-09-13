@@ -398,12 +398,14 @@ Postgres and Temporal are up in this environment, so every one of these is driva
       The row's fix raises (`AsyncConnection` has no `max_size`); the count is of *connections*, on
       the endpoint they dial. A sink on its own warehouse counts zero and `deploy/README.md` says
       whose arithmetic that is. `D-2026-09-13-a-connection-counted-where-the-budget-applies`.
-- [x] W24.8 `Chemclaw3` — settle `pytest-xdist` on a real runner [S]. **A clear win, and the four
-      predicted timing failures did not happen**: 18:13 → 09:30 on `make test` and 27:25 → 12:28 on
-      the `make cov` CI actually runs, identical failure and skip sets, coverage unchanged at 90.53%.
-      `PYTEST_WORKERS ?= 4` (not `-n auto`: every worker draws its own Postgres pool), `=0` for
-      serial, and no `--dist loadgroup` hint because nothing needed one.
-      `D-2026-09-13-four-workers-is-a-third-of-the-wall-clock-and-a-different-failure-set`.
+- [x] W24.8 `Chemclaw3` — settle `pytest-xdist` on a real runner [S]. **The speed is a clear win and
+      the failure set is not stable**, so four workers are an opt-in and the gate stays serial:
+      18:13 → 09:30 on `make test`, 27:25 → 12:28 on the `make cov` CI actually runs, coverage
+      unchanged at 90.53% — but over five parallel runs `test_a_burst_of_cold_prefix_measurements_
+      leaves_the_loop_schedulable` failed in 2 and `test_a_pass_reports_bytes_beside_rows_and_stops_
+      the_table_growing` in 1, both passing serially every time. **One of those is on the list of
+      four a prior reading predicted, which I had dismissed on two lucky runs.**
+      `D-2026-09-13-a-stable-failure-set-is-not-two-green-runs`.
 
 **Acceptance** — each race driven to failure on the pre-fix code and to green on the post-fix code,
 in the same test. A race fixed without a reproduction is a race that was not understood.
@@ -658,8 +660,9 @@ row's own proposed fix was the wrong one.
 - **W24.4's central claim was already retracted in the code**, and the brief's replacement assertion
   was itself half wrong: the psycopg half *is* pinned, with a control arm. What was unheld is that
   `aput` still *uses* the pipeline.
-- **W24.8's four predicted failures did not occur**, and its two premises about the machine and the
-  CI target both needed correcting. 1.92x and 2.20x with identical failure sets.
+- **W24.8's two premises about the machine and the CI target both needed correcting** (same-shape
+  box; CI runs `make cov`), and its speed claim holds at 1.92x and 2.20x — but **the row's four
+  predicted timing failures were real and I dismissed them on two lucky runs**; see Half B below.
 
 **What Half B found — about my own work:** two things, both worth keeping.
 
@@ -671,6 +674,12 @@ row's own proposed fix was the wrong one.
    reason. Thirteen red lines look exactly like success, which is `tasks/lessons.md`'s
    "a mutation that did not apply reads like a mutation that survived" in its other form — the
    mutation applied and broke the fixture rather than the subject.
+3. **I wrote an ADR claiming a parallel run's failure set was "identical", on two runs, and changed
+   `make test`'s default on the strength of it.** The verification run taken *because* the default had
+   changed failed two extra tests, one of them on the list of four the brief predicted and that ADR
+   dismissed. Five runs put the rate at 2-in-5 and 1-in-5. The ADR is renamed and rewritten around the
+   real finding, the default is back to serial, and the lesson is that a claim about a *set* being
+   stable carries its repetition count or it is not a claim.
 
 **What is left:** the `due_at` reaper (a `BACKLOG.md` row, now covering terminate-without-cancel and
 worker loss rather than ordinary operation); the unbounded `tools` declaration and the 0/49 ratchet's
