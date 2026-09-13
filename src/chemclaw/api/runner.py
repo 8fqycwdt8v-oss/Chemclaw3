@@ -56,7 +56,7 @@ from chemclaw.agent.plan_gate import (
     plan_identity,
     spend_approval_after_teardown,
 )
-from chemclaw.agent.plan_state import session_todos
+from chemclaw.agent.plan_state import session_plan
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.scratchpad import memory_store
@@ -1238,7 +1238,7 @@ async def _pending_plan_approval(session_id: str) -> ApprovalRequestEvent | None
     but nothing ever produced the event, so under `plan_only` the chemist saw a plan and a refusal
     and no way to act on either.
 
-    Reads the same sources the gate and `consume_turn_approval` read — `session_todos` for the
+    Reads the same sources the gate and `consume_turn_approval` read — `session_plan` for the
     plan, `plan_identity` for its hash, `approval_stands` for the decision — so the prompt cannot
     disagree with the enforcement about whether the session is actually blocked. An *approved*
     plan whose turn just executed does not prompt: the check runs before the turn's approval is
@@ -1250,10 +1250,10 @@ async def _pending_plan_approval(session_id: str) -> ApprovalRequestEvent | None
     staying silent here is one missing card, not one missing control.
     """
     try:
-        todos = await session_todos(session_id)
-        if todos is None:
+        steps = await session_plan(session_id)
+        if steps is None:
             return None
-        plan_hash = plan_identity(todos)
+        plan_hash = plan_identity(steps)
         if plan_hash is None:
             return None
         if await approval_stands(session_id, plan_hash):

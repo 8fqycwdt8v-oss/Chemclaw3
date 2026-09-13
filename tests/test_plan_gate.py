@@ -90,14 +90,20 @@ async def _approve(store: InMemoryPlanApprovalStore, session: _Session) -> None:
     await store.record(session.session_id, _hash(session), "chemist-1", True, session.declares)
 
 
-async def _titles(session: _Session) -> list[str]:
-    """The session's plan, as `plan_state.session_todos` would return it."""
-    return list(session.titles)
+async def _steps(session: _Session) -> list[dict[str, Any]]:
+    """The session's plan, as `plan_state.session_plan` would return it."""
+    return _todos(session)
 
 
 def _hash(session: _Session) -> str:
-    """The identity of the session's current plan, or the empty-plan constant."""
-    return plan_identity(session.titles) or EMPTY_PLAN_HASH
+    """The identity of the session's current plan, or the empty-plan constant.
+
+    Over the steps, not the titles: the identity covers each step's declaration as well as its
+    content (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`), and
+    `_todos` is the one place this file builds a step, so the hash the test approves and the plan
+    the gate is driven with cannot diverge.
+    """
+    return plan_identity(_todos(session)) or EMPTY_PLAN_HASH
 
 
 def _todos(session: _Session | None) -> list[dict[str, Any]]:
@@ -376,7 +382,7 @@ def test_an_approval_is_spent_by_the_turn_that_used_it(
         # `consume_turn_approval` reads the plan off the checkpointer, which this test has none of
         # — the session here is a fixture, not a turn that ran. Pointed at the same titles the gate
         # is driven with, so both halves ask about one plan.
-        monkeypatch.setattr(plan_gate_module, "session_todos", lambda _sid, **_kw: _titles(session))
+        monkeypatch.setattr(plan_gate_module, "session_plan", lambda _sid, **_kw: _steps(session))
         await _approve(approvals, session)
         during = await _call("record_knowledge_note", session)
         await consume_turn_approval(session.session_id)  # the turn ends
@@ -624,8 +630,15 @@ def test_ticking_a_step_beside_the_steps_own_call_is_allowed(
     step's tool call. The blanket batch refusal denied it on *every* step — the model retried, an
     identical retry tripped `refuse_repeated_calls`, and a fully approved multi-step plan could
     burn its loop allowance making no progress. A status flip does not perturb `plan_identity`
-    (the hash reads `content` only), so judging against the plan the batch *writes* lets this
-    through while the DARK-1 rewrite above still refuses on its own unapproved hash.
+    (the hash covers each step's `content` and its declaration, never its `status`), so judging
+    against the plan the batch *writes* lets this through while the DARK-1 rewrite above still
+    refuses on its own unapproved hash.
+
+    The flip carries each step's `tools` because the tool's own schema requires it
+    (`plan_scope.ScopedTodoListMiddleware`) — a rewrite that dropped the declaration would be a
+    different plan, which is the point of
+    `D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read` and is why this
+    fixture cannot be written without it.
     """
 
     async def _run() -> None:
@@ -637,8 +650,16 @@ def test_ticking_a_step_beside_the_steps_own_call_is_allowed(
             "name": "write_todos",
             "args": {
                 "todos": [
-                    {"content": "compute the barrier", "status": "completed"},
-                    {"content": "propose the note", "status": "in_progress"},
+                    {
+                        "content": "compute the barrier",
+                        "status": "completed",
+                        "tools": list(session.declares),
+                    },
+                    {
+                        "content": "propose the note",
+                        "status": "in_progress",
+                        "tools": list(session.declares),
+                    },
                 ]
             },
             "id": "c-plan",
@@ -650,7 +671,15 @@ def test_ticking_a_step_beside_the_steps_own_call_is_allowed(
         # A *content* rewrite in the same shape is a different plan, and refuses on its own hash.
         reword = {
             "name": "write_todos",
-            "args": {"todos": [{"content": "something else entirely", "status": "pending"}]},
+            "args": {
+                "todos": [
+                    {
+                        "content": "something else entirely",
+                        "status": "pending",
+                        "tools": list(session.declares),
+                    }
+                ]
+            },
             "id": "c-plan-2",
         }
         with pytest.raises(PlanNotApprovedError):

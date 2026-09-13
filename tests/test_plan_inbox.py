@@ -37,6 +37,25 @@ _ALICE = Principal(oid="alice", upn="alice@corp", roles=frozenset())
 _BOB = Principal(oid="bob", upn="bob@corp", roles=frozenset())
 
 
+# What every step in this file declares. Non-empty on purpose: the row carries the scope an approval
+# would grant (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`), and a fixture
+# declaring nothing cannot tell a route that reports the scope from one that reports `[]`. No case
+# here *varies* it, because which sessions are listed does not depend on what they declare.
+_DECLARES = ["record_knowledge_note"]
+
+
+def _steps(lines: list[str]) -> list[dict[str, Any]]:
+    """Plan lines in the shape `plan_state.session_plan` answers — steps, declaration included.
+
+    One function, because three places in this file need it: the stubbed read, the decision the
+    store records, and the identity the row is checked against. A step's declaration is part of
+    the plan's identity
+    (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`), so a second
+    shaping here would record a decision against a plan the route never hashed.
+    """
+    return [{"content": line, "status": "pending", "tools": list(_DECLARES)} for line in lines]
+
+
 class _Inbox:
     """The front door with the two stores this route reads, both in memory and both inspectable.
 
@@ -67,9 +86,7 @@ class _Inbox:
         async def _plan(session_id: str, **_kwargs: Any) -> list[dict[str, Any]] | None:
             self.reads.append(session_id)
             lines = self.todos.get(session_id)
-            if lines is None:
-                return None
-            return [{"content": line, "status": "pending", "tools": []} for line in lines]
+            return None if lines is None else _steps(lines)
 
         monkeypatch.setattr(plan_routes, "session_plan", _plan)
         self.client = TestClient(self.app)
@@ -92,7 +109,9 @@ class _Inbox:
             # The inbox lists what nobody has decided on, so *what* a decision authorizes is
             # irrelevant here and the scope is empty on purpose — an approval that permits no
             # tool is still a decision, and this route must not list it.
-            self.approvals.record(session_id, plan_identity(plan) or "", "alice", approved, ())
+            self.approvals.record(
+                session_id, plan_identity(_steps(plan)) or "", "alice", approved, ()
+            )
         )
         if spent:
             asyncio.run(self.approvals.consume_all(session_id))
@@ -116,10 +135,16 @@ def gated(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_an_undecided_plan_is_listed_with_the_conversation_that_holds_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The row carries what a chemist navigates by: the session, its name, and the steps.
+    """The row carries what a chemist navigates by: the session, its name, the steps, and the scope.
 
     The session id is the load-bearing field — it is the one thing a chemist who closed the tab
     cannot reconstruct, and every other plan route needs it as a path segment.
+
+    `scope` is asserted here because nothing else asserted it: the inbox is a place a chemist can
+    decide from, and a row that listed the steps without what approving them would authorize would
+    be collecting a yes to a bound the reader could not see
+    (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`). Mutating the route to
+    report `scope=[]` left this file green before this line existed.
     """
     inbox = _Inbox(monkeypatch)
     plan = ["screen the hazards", "file the note"]
@@ -134,7 +159,11 @@ def test_an_undecided_plan_is_listed_with_the_conversation_that_holds_it(
     row = body["plans"][0]
     assert row["plan"] == plan
     assert row["title"] == "conversation sess-blocked"
-    assert row["plan_hash"] == plan_identity(plan), (
+    assert row["scope"] == _DECLARES, (
+        "the row does not say what approving this plan would authorize: "
+        f"{row['scope']} against the {_DECLARES} its steps declare"
+    )
+    assert row["plan_hash"] == plan_identity(_steps(plan)), (
         "the row must name the plan the gate would ask about, not a second hashing of it"
     )
     assert (body["considered"], body["gated"], body["unread"]) == (2, 2, 0)

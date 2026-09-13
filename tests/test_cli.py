@@ -290,10 +290,18 @@ def test_approve_records_and_arms_a_real_plan(
     """
     titles = ["screen the species", "compute the barrier"]
     cli_plan(titles)
+    # The steps the fixture feeds the command, in `session_plan`'s shape: the identity covers each
+    # step's declaration as well as its content
+    # (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`), so a hash
+    # taken over the titles alone would be one the command never records against.
+    steps = [
+        {"content": title, "status": "pending", "tools": ["record_knowledge_note"]}
+        for title in titles
+    ]
 
     async def _run() -> tuple[str, str, Decision | None]:
         reply = await cli._plan_command("/approve", "alice@lab", saver=None)
-        plan_hash = plan_identity(titles) or EMPTY_PLAN_HASH
+        plan_hash = plan_identity(steps) or EMPTY_PLAN_HASH
         return reply, plan_hash, await cli_approvals.decision(cli._CLI_SESSION_ID, plan_hash)
 
     reply, plan_hash, recorded = asyncio.run(_run())

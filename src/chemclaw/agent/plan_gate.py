@@ -43,7 +43,8 @@ from langchain.agents.middleware import wrap_tool_call
 
 from chemclaw.agent.authz import AuthorizationError, side_effecting_call
 from chemclaw.agent.plan_approval_store import plan_approval_store
-from chemclaw.agent.plan_state import session_todos
+from chemclaw.agent.plan_scope import step_declaration
+from chemclaw.agent.plan_state import session_plan
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.core.config import settings
 from chemclaw.core.config.agent import HarnessAutonomy
@@ -77,7 +78,7 @@ class PlanNotApprovedError(AuthorizationError):
 EMPTY_PLAN_HASH = stable_hash([])
 
 
-def plan_identity(items: Sequence[str]) -> str | None:
+def plan_identity(steps: Sequence[Mapping[str, Any]]) -> str | None:
     """The hash a human decision is recorded against, or `None` when there is no plan.
 
     The decision, framework-free, so both engines bind an approval to the same identity. A second
@@ -89,8 +90,35 @@ def plan_identity(items: Sequence[str]) -> str | None:
     "nothing" yields a constant every session in every deployment also proposes, so a decision
     recorded against it approves the empty plan globally rather than this session's work. An
     identity nobody can distinguish is not something a person can meaningfully decide about.
+
+    **It takes the steps, not their text, and that is the whole of
+    `D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`.** Hashing
+    `content` alone left the freshness guard on `POST /sessions/{id}/plan/decision` unable to see a
+    rewrite that kept every step's text and widened its `tools`: the chemist's own hash still
+    matched, and the route stamped the *live* plan's declaration as what they had approved. Driven
+    through the real route, an approval shown as authorizing nothing came back authorizing
+    `record_knowledge_note` and `watch_for`, and both ran. So what a decision is keyed on is now
+    what a decision is about — each step's `content` beside its declaration, read by the same
+    `plan_scope.step_declaration` the recorded scope is derived from, so the two cannot disagree
+    about what a malformed `tools` means.
+
+    **The status is still not in it**, which is the property the content-only rule existed for: the
+    canonical "tick the completed step, run the next one" batch leaves the identity alone, so an
+    approved plan does not revoke itself by making progress.
+
+    Every `plan_approvals` row written before this change is keyed on the old, narrower hash and can
+    no longer be matched. That is the fail-closed direction and it is cheap: an approval authorizes
+    one turn and is spent when that turn ends (D-167), so the cost is a chemist re-approving a plan
+    that is still on their screen.
+
+    Args:
+        steps: The plan's steps as `write_todos` writes them — mappings carrying `content` and the
+            `tools` declaration. A step with no readable `content` contributes its empty text; the
+            callers (`plan_state.session_plan`, `plan_after_batch`) drop such steps before this.
     """
-    return stable_hash(list(items)) if items else None
+    if not steps:
+        return None
+    return stable_hash([[str(step.get("content", "")), step_declaration(step)] for step in steps])
 
 
 async def approved_scope(session_id: str, plan_hash: str | None) -> frozenset[str] | None:
@@ -364,9 +392,10 @@ def rewrite_todos_in_batch(request: Any) -> Any:
 
     The raw half of `plan_after_batch` — the batch-scoped lookup both it and
     `plan_link.plan_link_from_todos` need, extracted so the two readings cannot drift on what
-    counts as "this batch's rewrite". `plan_after_batch` reduces the result to bare `content`
-    strings for the identity hash, which is all *it* needs; `plan_link`'s caller needs `status`
-    too, to find the step the batch marks `in_progress`, so this returns the items unreduced.
+    counts as "this batch's rewrite". `plan_after_batch` checks the items are readable and hands
+    them to the identity hash; `plan_link`'s caller reads `status` off them as well, to find the
+    step the batch marks `in_progress`. Either way the items travel unreduced, which is what lets
+    the identity cover each step's declaration as well as its text.
 
     The batch is read off the *message*, not the state, because that is the only place the other
     calls in it are visible: `ToolNode` hands each call a runtime built from one pre-batch
@@ -406,8 +435,9 @@ def plan_after_batch(request: Any) -> Any:
     the step's tool call — and the blanket refusal denied it on *every* step of a plan: the model
     retried, an identical retry then tripped `refuse_repeated_calls`, and a fully approved
     multi-step plan could burn its whole loop allowance making no progress. A status flip does not
-    perturb `plan_identity` (the hash reads `content` only, which is what lets an approved plan
-    start a job without revoking itself), so judging the call against the plan the batch *writes*
+    perturb `plan_identity` (the hash covers each step's `content` and its declaration, never its
+    `status` — which is what lets an approved plan start a job without revoking itself), so judging
+    the call against the plan the batch *writes*
     lets the canonical shape through — while the DARK-1 batch (`write_todos(plan B)` beside a
     write, under plan A's approval) still refuses, because plan B has no approval. Fails closed on
     anything unanswerable: two rewrites in one message, or arguments the middleware itself would
@@ -416,17 +446,23 @@ def plan_after_batch(request: Any) -> Any:
     Returns `None` when the message cannot be found rather than guessing. That is not a hole: the
     approval check then runs against the pre-batch plan, which is the behaviour this function's
     predecessor was added to tighten, not a new one.
+
+    **It returns the steps, not their text.** It returned the text for as long as `plan_identity`
+    took text, and the two changed together in
+    `D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`: a batch whose
+    rewrite keeps every step's content and widens its declaration is now a *different* plan here,
+    so it is refused for having no approval at all rather than being checked against the standing
+    one. `enforce_plan_approval`'s docstring records why that is the same answer by a shorter route.
     """
     items = rewrite_todos_in_batch(request)
     if items is None or items is _UNANSWERABLE:
         return items
-    contents = [item.get("content") for item in items]
-    if not all(isinstance(c, str) for c in contents):
+    if not all(isinstance(item.get("content"), str) for item in items):
         return _UNANSWERABLE
-    return contents
+    return items
 
 
-async def _plan_behind(request: Any, session_id: str) -> list[str] | None:
+async def _plan_behind(request: Any, session_id: str) -> list[dict[str, Any]] | None:
     """The plan this call is being judged against, or `None` when there is none to judge against.
 
     Normally the turn's own state: `TodoListMiddleware` owns `todos` and `request.state` is this
@@ -446,8 +482,8 @@ async def _plan_behind(request: Any, session_id: str) -> list[str] | None:
     """
     state = request.state or {}
     if "todos" in state:
-        return [todo["content"] for todo in state.get("todos") or []]
-    return await session_todos(session_id)
+        return [todo for todo in state.get("todos") or [] if isinstance(todo, dict)]
+    return await session_plan(session_id)
 
 
 @wrap_tool_call
@@ -479,10 +515,11 @@ async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> 
     whole shape outright, which failed closed and also failed the canonical harness pattern:
     "tick the completed step, do the next one" batches a status-flip `write_todos` beside every
     step's tool call, and refusing it livelocked approved multi-step plans against the repeat
-    guard. A status flip hashes identically (`plan_identity` reads `content` only), so the
-    canonical shape passes on its standing approval; a genuine rewrite is approved or refused on
-    *its own* hash, which is exactly D-167's question. Anything unanswerable — two rewrites in one
-    batch, unparseable arguments — still refuses without asking the store.
+    guard. A status flip hashes identically (`plan_identity` reads `content` and the declaration,
+    not `status`), so the canonical shape passes on its standing approval; a genuine rewrite is
+    approved or refused on *its own* hash, which is exactly D-167's question. Anything
+    unanswerable — two rewrites in one batch, unparseable arguments — still refuses without asking
+    the store.
 
     **Waiting jobs need no exclusion here.** Under MAF a todo waiting on a durable job was marked by
     prefixing its description, and the identity had to filter those out or an approved plan revoked
@@ -496,11 +533,18 @@ async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> 
     against a one-line, read-only plan authorized every name in `authz.side_effecting_tools()`.
     Each step now declares the tools it will call (`agent/plan_scope.py`), the decision stamps the
     union of those declarations onto the row (`plan_approvals.scope`), and the scope is read back
-    from **there** rather than from the live plan. That direction is the whole of it:
-    `plan_identity`
-    hashes `content` only, so a rewrite that keeps every step's text and widens its declaration
-    hashes to the same approved plan — and gains nothing, because the model's declaration is never
-    what is consulted.
+    from **there** rather than from the live plan — so a rewrite cannot widen an approval that has
+    already been given.
+
+    **That direction was necessary and not sufficient**
+    (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`). This
+    paragraph used to close by noting that `plan_identity` hashed `content` only, so a widening
+    rewrite "gains nothing, because the model's declaration is never what is consulted" — true of
+    this gate, and false of the route that writes the row it consults, which derives the scope from
+    the *live* plan once the chemist's hash has matched. The identity covers each step's declaration
+    now, so such a rewrite is a plan with no approval at all: this gate refuses it with
+    `plan_approval_refusal` rather than `out_of_scope_refusal`, one step earlier than before and for
+    the stronger reason.
 
     Raises:
         PlanNotApprovedError: The plan behind this call has no live approval, or has one that does
@@ -525,8 +569,8 @@ async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> 
     rewritten = plan_after_batch(request)
     if rewritten is _UNANSWERABLE:
         raise plan_approval_refusal(name)
-    lines = rewritten if rewritten is not None else await _plan_behind(request, session_id)
-    scope = None if lines is None else await approved_scope(session_id, plan_identity(lines))
+    steps = rewritten if rewritten is not None else await _plan_behind(request, session_id)
+    scope = None if steps is None else await approved_scope(session_id, plan_identity(steps))
     if scope is None:
         raise plan_approval_refusal(name)
     if name not in scope:

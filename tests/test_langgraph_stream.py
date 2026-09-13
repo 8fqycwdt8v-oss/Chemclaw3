@@ -492,9 +492,10 @@ def test_a_streamed_plan_carries_the_hash_a_decision_must_be_posted_against() ->
     from chemclaw.api.graph_stream import _from_update
 
     titles = ["screen the reagents", "compute the barrier", "write it up"]
-    update = {
-        "agent": {"todos": [{"content": title, "status": "pending"} for title in titles]},
-    }
+    steps = [
+        {"content": title, "status": "pending", "tools": ["gather_evidence"]} for title in titles
+    ]
+    update = {"agent": {"todos": steps}}
 
     async def _collect() -> list[Any]:
         trace = ToolCallTrace()
@@ -506,17 +507,23 @@ def test_a_streamed_plan_carries_the_hash_a_decision_must_be_posted_against() ->
     plans = [event for event in asyncio.run(_collect()) if event.type == "plan"]
     assert len(plans) == 1
     assert plans[0].plan_hash, "an empty hash is not something a client can post back"
-    assert plans[0].plan_hash == plan_identity(titles)
+    assert plans[0].plan_hash == plan_identity(steps)
 
-    # **The displayed list and the hashed list are different strings, and that is the trap.**
+    # **The displayed list and the hashed list are different values, and that is the trap.**
     # `todos` carries `_todo_titles`'s checkbox rendering — status is a thing a surface must not
-    # have to infer — while the gate and the decision route hash `content` alone
-    # (`plan_state.session_todos`). The first version of this hashed `plan` and produced a
+    # have to infer — while the gate and the decision route hash each step's `content` beside its
+    # declaration (`plan_state.session_plan`). The first version of this hashed `plan` and
+    # produced a
     # `plan_hash` no decision could ever match: authoritative-looking and wrong on every plan,
     # which is worse than the missing field it replaces. Asserting both here is what keeps them
     # from being quietly collapsed into one.
     assert plans[0].todos == [f"[ ] {title}" for title in titles]
-    assert plans[0].plan_hash != plan_identity(plans[0].todos)
+    assert plans[0].plan_hash != plan_identity(
+        [
+            {"content": line, "status": "pending", "tools": ["gather_evidence"]}
+            for line in plans[0].todos
+        ]
+    )
 
 
 @pytest.mark.parametrize("streamed", [False, True])
