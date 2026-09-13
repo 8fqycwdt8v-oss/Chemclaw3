@@ -54,6 +54,10 @@ class _NoMetadata:
         """Every id passes; no filter is ever given here."""
         return set(reaction_ids)
 
+    async def retracted(self, reaction_ids: Sequence[str]) -> set[str]:
+        """Nothing is withdrawn, which is what makes the unfiltered path below the subject."""
+        return set()
+
 
 class _Live:
     """A source that answers — with `count` hits, possibly none."""

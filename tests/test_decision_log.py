@@ -425,6 +425,14 @@ def test_the_topic_cursor_is_not_ahead_of_the_record() -> None:
 # different claim — "this guarantee is enforced right now, here" — which is why it is checked here
 # and there rather than exempted with the paths.
 _RETIRED_TEST_CITATIONS: dict[str, str] = {
+    # Deleted by the implementation it existed to demand. `D-2026-08-27` wrote it to fail whoever
+    # re-added a retraction's storage half without the readers that honour it, and said so in its
+    # own docstring; `D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports` brought the readers, so
+    # what is left is an absence test asserting the opposite of what ships.
+    "test_no_retraction_tier_claims_to_exist_without_the_readers_that_honour_it": (
+        "replaced by `test_a_withdrawn_entry_leaves_the_evidence_set_on_every_reader` "
+        "(tests/test_eln.py), which drives all five readers it demanded"
+    ),
     # Deleted with the behaviour it asserted. `D-2026-09-13-an-answer-is-archived-so-the-question-
     # can-be-asked-again` archives the previous cycle's answer and allows the reopen, so the refusal
     # this test drove has no reachable input — and the raise behind it is gone with it.

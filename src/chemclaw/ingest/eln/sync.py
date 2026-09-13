@@ -135,6 +135,7 @@ async def sync_entries(
     skipped_existing: list[str] = []
     rejected: list[RejectedEntry] = []
     stored: dict[str, str] | None = None
+    withdrawn: set[str] = set()
     cursor = since
     horizon = datetime.now(UTC) + timedelta(seconds=settings.eln_sync_future_tolerance_seconds)
     for raw in entries:
@@ -147,7 +148,7 @@ async def sync_entries(
         # reactions created afterwards are never ingested again. Nothing reports it — the batch is
         # not truncated by the *workflow's* reckoning either, so the wedge guard in
         # `durable/eln_sync.py` is never reached and the log reads `ingested=N rejected=0`.
-        window = entry_window(raw.created_at, raw.modified_at)
+        window = entry_window(raw.created_at, raw.modified_at, raw.retracted_at)
         # **A timestamp beyond the wall clock costs the cursor, and only sometimes the entry.**
         # Nothing ever lowers a stored cursor, so an implausible value that became one would
         # silently skip every later real entry — that is the whole of what this guard is for.
@@ -192,14 +193,25 @@ async def sync_entries(
                 # this branch never sees it at all. Loaded lazily, once per run, and only when a
                 # replay actually happened; keyed on the ids this batch holds, never on the corpus.
                 if stored is None:
-                    stored = await record_store.bodies(
-                        _replay_record_ids(adapter, entries, since), source
-                    )
-                if stored.get(record.reaction_id) == record.body:
-                    # Byte-identical to what is stored: nothing to index or write, so skip the
-                    # whole ingest. A *different* body falls through and overwrites the record,
-                    # which is what an amendment is — no versioning scheme and no review needed,
-                    # because the transcription asserts nothing either way.
+                    replayed = _replay_record_ids(adapter, entries, since)
+                    stored = await record_store.bodies(replayed, source)
+                    # **The withdrawal is not in the body, so the body cannot decide this alone.**
+                    # A source withdrawing an entry re-exports it unchanged with a tombstone on it,
+                    # which is byte-identical prose — so the comparison below skipped the ingest
+                    # and the retraction never reached the row. Measured end to end: the second
+                    # sync of a withdrawn entry booked it as `skipped_existing` and `retracted()`
+                    # stayed empty. Asked in the same lazy, id-keyed way as the bodies, over the
+                    # same page, against `066`'s partial index.
+                    withdrawn = await record_store.retracted(replayed)
+                if stored.get(record.reaction_id) == record.body and (
+                    record.reaction_id in withdrawn
+                ) == (raw.retracted_at is not None):
+                    # Byte-identical to what is stored *and* in the same withdrawal state: nothing
+                    # to index or write, so skip the whole ingest. A different body falls through
+                    # and overwrites the record, which is what an amendment is — no versioning
+                    # scheme and no review needed, because the transcription asserts nothing
+                    # either way. So does a changed withdrawal, in either direction: a retraction
+                    # landing, and a re-publication lifting one.
                     skipped_existing.append(raw.entry_id)
                     continue
             await ingest_reaction(
@@ -209,6 +221,7 @@ async def sync_entries(
                 record_store,
                 label_index=label_index,
                 source=source,
+                retracted_at=raw.retracted_at,
             )
         except (ChemclawError, ValidationError) as exc:
             # The shared bad-data base covers *any* per-entry failure: an adapter's

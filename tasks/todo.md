@@ -441,8 +441,15 @@ kill a weight file; scale the front door to zero and render the chart.
 
 The answers a chemist acts on. Each row here is a way the record can be right and the answer wrong.
 
-- [ ] W26.1 `Chemclaw3` — a retracted ELN entry stays current evidence; closing it is a five-part
-      change [M]. The highest-consequence correctness row on the queue.
+- [x] W26.1 `Chemclaw3` — a retracted ELN entry stays current evidence; closing it is a five-part
+      change [M]. The highest-consequence correctness row on the queue. Closed by
+      `D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`, and the row was wrong in one place:
+      (b) demanded `_BoundedIngest` expose a public `inner` for a capability walk, and a *field* on
+      `RawEntry` passes that wrapper untouched, so there is no walk. Three defects the row did not
+      name were found by driving it — a withdrawal is byte-identical prose, so the sync's
+      unchanged-check skipped it; `EntryBinding` could not name a site's withdrawal column, so the
+      producer was unwritable for the one connector with a tenant; and the cursor watermark would
+      never have re-fetched the row.
 - [ ] W26.2 `Chemclaw3` — the fingerprint index is keyed by source and the citation is not, so two
       sources collapse.
 - [ ] W26.3 `Chemclaw3` — structure identity is canonical SMILES and nothing else: no InChI, no

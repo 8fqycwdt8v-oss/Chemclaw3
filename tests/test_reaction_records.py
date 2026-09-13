@@ -21,10 +21,12 @@ import sys
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from chemclaw.agent.condense import Protocol
+from chemclaw.agent.framing import SYSTEM_SPEECH_MARK
 from chemclaw.agent.graph_tools import expand_note
 from chemclaw.agent.protocol_tools import _from_record
 from chemclaw.cli.validate_kg import main as _validate_kg_main
@@ -798,3 +800,42 @@ def test_one_entry_reporting_a_non_finite_number_does_not_wedge_every_later_run(
         f"the rejection does not name the field to correct: {summary.rejected[0].reason!r}"
     )
     assert summary.next_cursor > _EPOCH, "the cursor did not advance, so the next run repeats this"
+
+
+def test_expanding_a_withdrawn_record_resolves_and_says_it_was_withdrawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retraction a chemist cannot see is a withdrawn run answering as a precedent.
+
+    The fifth reader of `retracted_at`, and the one that must *not* stop serving. `read()` keeps
+    answering for a retracted row while `eligible()` stops, deliberately: a row is the only
+    readable form of an ELN run, so a campaign note that already cites a withdrawn one has to
+    expand into "this was withdrawn" rather than into "no note with that id", which is
+    indistinguishable from a typo.
+
+    Both halves are asserted. The notice carries `SYSTEM_SPEECH_MARK` and sits *outside* the framed
+    source body, because it is this system speaking and not the ELN; and `valid_to` carries the
+    same fact in the structured half, where every other reader of a `NoteRef` looks for "this
+    stopped being current".
+    """
+    withdrawn = datetime(2026, 3, 4, tzinfo=UTC)
+
+    async def _run() -> Any:
+        store = InMemoryReactionRecordStore()
+        adapter = _ListAdapter([_entry("rxn-pulled", datetime(2026, 3, 1, tzinfo=UTC))])
+        record = record_from_ord_reaction(adapter.map_to_ord(adapter._entries[0]))
+        await store.record([record.model_copy(update={"retracted_at": withdrawn})], "eln-json")
+        monkeypatch.setattr("chemclaw.agent.graph_tools.default_record_store", lambda: store)
+        return await expand_note(note_id_for_reaction("rxn-pulled"))
+
+    view = asyncio.run(_run())
+
+    assert "Ethanol and acetic acid" in view.body, "the transcription stopped being served at all"
+    assert "withdrew this ELN entry on 2026-03-04" in view.body, (
+        "a withdrawn run expanded with nothing saying it was withdrawn"
+    )
+    assert SYSTEM_SPEECH_MARK in view.body.split("Ethanol")[0], (
+        "the withdrawal notice is not marked as system speech, so it reads as something the ELN "
+        "said about itself"
+    )
+    assert view.note.valid_to == withdrawn.date()

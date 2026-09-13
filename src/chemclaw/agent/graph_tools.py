@@ -19,7 +19,7 @@ import networkx as nx
 from pydantic import BaseModel, Field, computed_field
 
 from chemclaw.agent.authz import require_actor
-from chemclaw.agent.framing import frame_untrusted
+from chemclaw.agent.framing import SYSTEM_SPEECH_MARK, frame_untrusted
 from chemclaw.agent.tool_framing import defanged_payload
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
@@ -381,10 +381,26 @@ async def _expand_record(note_id: str) -> NoteView:
 
     `created_by` is reported as `agent` because a program rendered the file, which is what that
     field has always meant; it no longer implies anything is waiting for review.
+
+    **A withdrawn entry resolves and says so, rather than disappearing.** `read()` deliberately
+    keeps serving a retracted row while `eligible()` stops, because a row is the only readable form
+    of an ELN run and a citation to a withdrawn one must not become a dangling link — a chemist
+    reading a campaign note that cites it has to be told the run was withdrawn, not that the id is
+    unknown. The notice is prepended as *system* text, outside the framed source body, so it cannot
+    be mistaken for something the ELN said; `valid_to` carries the same fact in the structured half,
+    which is what makes a retracted record fail `is_current` everywhere else.
     """
     record = await default_record_store().read(external_record_id(note_id))
     if record is None:
         raise ChemclawError(f"no reaction record with id {note_id!r}")
+    body = frame_untrusted(record.body, note_id=note_id)
+    if record.retracted_at is not None:
+        notice = (
+            f"The source withdrew this ELN entry on {record.retracted_at:%Y-%m-%d}. It is no "
+            "longer current evidence and must not be cited as a precedent; it is shown because "
+            f"something already cites it. {SYSTEM_SPEECH_MARK}"
+        )
+        body = f"{notice}\n\n{body}"
     return NoteView(
         note=NoteRef(
             id=note_id,
@@ -395,11 +411,14 @@ async def _expand_record(note_id: str) -> NoteView:
             source=record.source,
             confidence=None,
             valid_from=record.performed_at,
-            valid_to=None,
+            # The withdrawal in the structured half, where every other reader of a `NoteRef` already
+            # looks for "this stopped being current". Not a claim that the run expired — `valid_to`
+            # is the field a reader has, and `retracted_at` is why it is set.
+            valid_to=record.retracted_at.date() if record.retracted_at else None,
         ),
         # Source text a chemist typed into an ELN, so it is framed as data for the same reason a
         # note body is: it reaches the model verbatim and must not be read as instruction.
-        body=frame_untrusted(record.body, note_id=note_id),
+        body=body,
         neighbors=[],
     )
 

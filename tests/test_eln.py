@@ -12,12 +12,12 @@ import logging
 import os
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
 
 from chemclaw.core.config import settings
-from chemclaw.ingest.eln import adapter as eln_adapter
 from chemclaw.ingest.eln.adapter import (
     DatedIngest,
     RawEntry,
@@ -42,12 +42,14 @@ from chemclaw.ingest.eln.records import (
     PostgresReactionRecordStore,
     ReactionRecord,
 )
-from chemclaw.ingest.eln.sync import IngestSummary, sync_entries
+from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.eln.validate import validate_ord
 from chemclaw.kg.note import ProcessConditions, cited_ids, cited_links, note_id_for_reaction
+from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
 from chemclaw.science.fingerprints.molfp.search import find_similar_molecules
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 from chemclaw.science.labels.store import InMemoryLabelIndex
+from tests.pg import migrated_db_or_skip
 
 _EPOCH = datetime.min.replace(tzinfo=UTC)
 
@@ -2582,36 +2584,204 @@ def test_the_seam_wrapper_does_not_swallow_an_optional_capability() -> None:
     assert fetch_was_truncated(_ListAdapter([])) is False
 
 
-def test_no_retraction_tier_claims_to_exist_without_the_readers_that_honour_it() -> None:
-    """A tombstone nothing sets, and that three of its four readers ignore, is not a control.
+def _withdrawal_entry(retracted_at: datetime | None, entry_id: str = "EXP-1001") -> RawEntry:
+    """One ELN entry, optionally carrying the source's own withdrawal.
 
-    **This test exists to be deleted by whoever implements this properly**, and to make them read
-    `D-2026-08-27` first. What was removed had a `RetractionAware` protocol, a `RetractionReport`,
-    a `retract` on all three stores, a sweep in `sync_entries` and a `retracted_at` column bound —
-    and every one of the following was measured against it:
-
-    - **No producer.** `RetractionAware` had zero implementers in `src/`; the only one was a fake
-      in this file, so `fetch_retractions` answered `None` in every deployment.
-    - **No path to one.** `durable/eln_sync.py::_BoundedIngest` — which `sync_eln_entries` wraps
-      every adapter in — keeps `self._inner` private, and the capability walk follows the public
-      `inner`. So the report was `None` through production even for an adapter that could answer:
-      bare and `DatedIngest`-wrapped returned the report, `_BoundedIngest` returned `None`.
-    - **Three of the four readers ignored the tombstone.** Only the *filtered* leg of
-      `retrieval.retrievers.FingerprintReactionRetriever` consults the record store; the ordinary
-      unfiltered `gather_evidence` sweep still returned `reaction-EXP-1001` for a run whose
-      `is_current` was `False` and whose `eligible(no filters)` was empty. `agent.graph_tools`
-      never reads it, `connectors.rxnfp` never asks the store at all, and
-      `ingest.eln.record.record_from_ord_reaction` renders no withdrawal into the body — so a
-      chemist handed a withdrawn run had no way to see that it was withdrawn.
-
-    So re-adding the storage half alone recreates a control that reads as enabled and is not, which
-    is worse than the gap it closes. Migration `066`'s column is still in the database, unread and
-    deliberately not dropped; a real implementation starts from the readers and reuses it.
+    `entry_id` is a parameter because `retracted()` is deliberately **not** scoped by ingest
+    source — a `reaction-<id>` citation is a bare id, so a withdrawal by any source that
+    transcribed it counts — and two tests sharing one id in one schema would answer each other.
     """
-    assert not hasattr(ReactionRecord(reaction_id="x", body="b", source="s"), "retracted_at")
-    assert not hasattr(InMemoryReactionRecordStore(), "retract")
-    assert not hasattr(PostgresReactionRecordStore(), "retract")
-    absent = ("Retraction", "RetractionReport", "RetractionAware", "fetch_retractions")
-    present = [name for name in absent if hasattr(eln_adapter, name)]
-    assert not present, f"the retraction tier is back without its readers: {present}"
-    assert "retracted" not in IngestSummary.model_fields
+    return RawEntry(
+        entry_id=entry_id,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        payload={
+            "id": entry_id,
+            "reactants": [{"smiles": "CCO"}, {"smiles": "CC(=O)O"}],
+            "products": [{"smiles": "CCOC(C)=O"}],
+        },
+        retracted_at=retracted_at,
+    )
+
+
+class _WithdrawingAdapter:
+    """An adapter whose source re-exports an entry with a tombstone on it."""
+
+    def __init__(self, entries: list[RawEntry]) -> None:
+        """Serve exactly `entries` on every fetch."""
+        self._entries = entries
+
+    async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
+        """Every entry, every time — the overlap replay an amendment arrives through."""
+        return self._entries
+
+    def map_to_ord(self, raw: RawEntry) -> OrdReaction:
+        """The shared JSON mapping; a withdrawal is not in the reaction."""
+        return JsonExportAdapter().map_to_ord(raw)
+
+
+def test_a_withdrawn_entry_leaves_the_evidence_set_on_every_reader() -> None:
+    """Retract an entry, and show it stops being current evidence everywhere it was served.
+
+    **The state this replaces.** `D-2026-08-27-a-withdrawn-entry-is-a-fact-the-sync-must-carry`
+    built the storage half and removed it, because the tombstone had no producer and three of its
+    four readers ignored it — measured then as `is_current` False, `eligible()` empty, and the
+    retracted reaction **still returned by the unfiltered sweep**. `infra/sql/066`'s column stayed,
+    unread, for whoever rebuilt it from the readers.
+
+    This drives all five halves through the shipped code, against a real database:
+
+    - the **producer** is `RawEntry.retracted_at`, riding the delta an adapter already exports —
+      never an entry's absence, which is the normal state of every entry ever ingested;
+    - the **store** persists it and `is_current`/`eligible` honour it;
+    - the **unfiltered** retrieval sweep — the one `gather_evidence` runs — drops it;
+    - the bundle tool `similar_reactions` drops it;
+    - `expand_note` still **resolves** it and says it was withdrawn, because a citation to a
+      withdrawn run must not become a dangling link.
+
+    The first pass asserts the entry *is* served, on every one of those readers. Without that half
+    the second proves only that some ids are absent, which a broken retriever satisfies too.
+    """
+
+    async def _run() -> dict[str, object]:
+        await migrated_db_or_skip()
+        records = PostgresReactionRecordStore()
+        reactions, molecules = InMemoryFingerprintStore(), InMemoryFingerprintStore()
+        source = "retraction-probe"
+        retriever = FingerprintReactionRetriever(reactions, records)
+        query = "CCO.CC(=O)O>>CCOC(C)=O"
+
+        async def _served() -> dict[str, object]:
+            unfiltered = await retriever.retrieve(query, {})
+            return {
+                "record": await records.read("EXP-1001"),
+                "eligible": await records.eligible(["EXP-1001"], {}),
+                "retracted": await records.retracted(["EXP-1001"]),
+                "sweep": [chunk.source_note_id for chunk in unfiltered],
+            }
+
+        await sync_entries(
+            _WithdrawingAdapter([_withdrawal_entry(None)]),
+            reactions,
+            molecules,
+            records,
+            _EPOCH,
+            label_index=_labels(),
+            source=source,
+        )
+        before = await _served()
+        # **The second pass is a replay, which is what a real one is.** The cursor has advanced
+        # past the entry's `created_at` by the time a source withdraws it, so the withdrawal
+        # arrives through `sync_entries`' unchanged-check branch — and a withdrawal is not in the
+        # body, so that check used to skip it and the retraction never reached the row. Running
+        # this from `_EPOCH` again would take the new-entry path and never test that.
+        await sync_entries(
+            _WithdrawingAdapter([_withdrawal_entry(datetime(2026, 3, 4, tzinfo=UTC))]),
+            reactions,
+            molecules,
+            records,
+            datetime(2026, 2, 1, tzinfo=UTC),
+            label_index=_labels(),
+            source=source,
+        )
+        after = await _served()
+        return {"before": before, "after": after}
+
+    outcome = asyncio.run(_run())
+    before = cast("dict[str, Any]", outcome["before"])
+    after = cast("dict[str, Any]", outcome["after"])
+
+    today = date.today()
+    assert before["record"] is not None and before["record"].is_current(today)
+    assert before["eligible"] == {"EXP-1001"}
+    assert before["retracted"] == set()
+    assert "reaction-EXP-1001" in before["sweep"], (
+        "the entry was never served in the first place, so its later absence proves nothing"
+    )
+
+    assert after["record"] is not None, (
+        "the retracted row stopped resolving; a citation to a withdrawn run must not become a "
+        "dangling link"
+    )
+    assert after["record"].retracted_at is not None
+    assert not after["record"].is_current(today)
+    assert after["eligible"] == set()
+    assert after["retracted"] == {"EXP-1001"}
+    assert "reaction-EXP-1001" not in after["sweep"], (
+        "the unfiltered sweep still serves a withdrawn run as current evidence — the exact "
+        "measurement D-2026-08-27 recorded against the storage-only implementation"
+    )
+
+
+def test_a_source_that_republishes_an_entry_un_retracts_it() -> None:
+    """The row is what the source last said, and that has to run in both directions.
+
+    A withdrawal that could not be reversed would make one bad export permanent, on a tier whose
+    whole rule is that an amendment overwrites. The upsert therefore refreshes `retracted_at` like
+    every other field rather than coalescing it, and this is the assertion that stops somebody
+    "fixing" that into a one-way door.
+    """
+
+    async def _run() -> tuple[bool, bool]:
+        await migrated_db_or_skip()
+        records = PostgresReactionRecordStore()
+        reactions, molecules = InMemoryFingerprintStore(), InMemoryFingerprintStore()
+        source = "unretraction-probe"
+
+        async def _sync(retracted_at: datetime | None, since: datetime) -> None:
+            await sync_entries(
+                _WithdrawingAdapter([_withdrawal_entry(retracted_at, "EXP-2002")]),
+                reactions,
+                molecules,
+                records,
+                since,
+                label_index=_labels(),
+                source=source,
+            )
+
+        # A replay on both the withdrawal and the re-publication, because that is how each of them
+        # reaches a corpus whose cursor has already passed the entry.
+        await _sync(datetime(2026, 3, 4, tzinfo=UTC), _EPOCH)
+        withdrawn = bool(await records.retracted(["EXP-2002"]))
+        await _sync(None, datetime(2026, 2, 1, tzinfo=UTC))
+        still = bool(await records.retracted(["EXP-2002"]))
+        return withdrawn, still
+
+    withdrawn, still = asyncio.run(_run())
+    assert withdrawn, "the withdrawal never landed, so the reversal below tests nothing"
+    assert not still, "a re-published entry stayed retracted; the withdrawal is a one-way door"
+
+
+def test_a_json_export_stamped_withdrawn_is_fetched_and_carries_its_tombstone(
+    tmp_path: Path,
+) -> None:
+    """The file-drop source's producer half: `retracted` on the export, and the cursor reaching it.
+
+    Two halves, and the second is the one that is easy to omit. Reading the field is arithmetic;
+    what makes it *reachable* is that a withdrawal joins the fetch window, because a source that
+    stamps a retraction without touching `modified` leaves the entry behind the cursor forever —
+    the tombstone written at the source and read by nobody, which is the whole failure
+    `D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports` names.
+
+    So the entry is created in January, the cursor sits in June, and only the withdrawal is newer.
+    A control entry created on the same January day and never withdrawn is written beside it: it
+    must *not* come back, or the assertion below would also pass on an adapter that had simply
+    stopped filtering.
+    """
+
+    async def _run() -> list[RawEntry]:
+        _write_entry(tmp_path / "pulled.json", "pulled", "2026-01-01T00:00:00Z")
+        payload = json.loads((tmp_path / "pulled.json").read_text(encoding="utf-8"))
+        (tmp_path / "pulled.json").write_text(
+            json.dumps(payload | {"retracted": "2026-07-01T00:00:00Z"}), encoding="utf-8"
+        )
+        _write_entry(tmp_path / "kept.json", "kept", "2026-01-01T00:00:00Z")
+        return await JsonExportAdapter(str(tmp_path)).fetch_new_entries(
+            datetime(2026, 6, 1, tzinfo=UTC)
+        )
+
+    fetched = asyncio.run(_run())
+
+    assert [entry.entry_id for entry in fetched] == ["pulled"], (
+        "a withdrawal that does not move the fetch window is a tombstone nothing ever fetches"
+    )
+    assert fetched[0].retracted_at == datetime(2026, 7, 1, tzinfo=UTC)
