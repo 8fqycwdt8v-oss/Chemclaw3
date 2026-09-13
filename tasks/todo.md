@@ -398,8 +398,12 @@ Postgres and Temporal are up in this environment, so every one of these is driva
       The row's fix raises (`AsyncConnection` has no `max_size`); the count is of *connections*, on
       the endpoint they dial. A sink on its own warehouse counts zero and `deploy/README.md` says
       whose arithmetic that is. `D-2026-09-13-a-connection-counted-where-the-budget-applies`.
-- [ ] W24.8 `Chemclaw3` — settle `pytest-xdist` on a real runner [S]. A 24-minute suite is why R6
-      gets skipped; this is the wave that can afford it.
+- [x] W24.8 `Chemclaw3` — settle `pytest-xdist` on a real runner [S]. **A clear win, and the four
+      predicted timing failures did not happen**: 18:13 → 09:30 on `make test` and 27:25 → 12:28 on
+      the `make cov` CI actually runs, identical failure and skip sets, coverage unchanged at 90.53%.
+      `PYTEST_WORKERS ?= 4` (not `-n auto`: every worker draws its own Postgres pool), `=0` for
+      serial, and no `--dist loadgroup` hint because nothing needed one.
+      `D-2026-09-13-four-workers-is-a-third-of-the-wall-clock-and-a-different-failure-set`.
 
 **Acceptance** — each race driven to failure on the pre-fix code and to green on the post-fix code,
 in the same test. A race fixed without a reproduction is a race that was not understood.

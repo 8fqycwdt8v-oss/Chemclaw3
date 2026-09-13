@@ -561,27 +561,6 @@ topic).
       One probe, not a measurement pass: what is owed first is the threshold, whether it is
       configurable, and whether it fires on any real turn.
 
-- [ ] **Settle `pytest-xdist` on a real runner** — [S].
-      The `check` job is 87% one step: `make lint type cov` was **12m06s of a 13m56s job** on
-      `d8c312a`, of which lint is 1s and type 68s (measured), so ~11 min is the suite itself.
-      `D-2026-08-26-a-cancelled-run-on-main-is-a-missing-answer-not-a-superseded-one` took the free
-      half — lint and type now run in parallel in `static` — and deliberately left this one open,
-      because the evidence for it is a *reading* rather than a measurement.
-      **What the reading says**: the suite looks parallel-safe already. `tests/pg.py` suffixes its
-      `TEST_SCHEMA` with a fresh `uuid4` at import time (it was `os.getpid()` until 2026-09-04, and
-      this row went on naming the pid for a day after the commit that removed it), so an xdist
-      worker — its own process, re-importing the module — draws its own Postgres schema with no
-      change at all, and the two files that use Temporal go through
-      `start_time_skipping()`, which binds an ephemeral port per environment. `pytest-cov` combines
-      across workers natively, so the 84% floor survives.
-      **Why it is not done**: "looks safe" is not a number, and the sandbox this was reviewed in ran
-      the suite far slower than a GitHub runner does, so a local figure would say nothing about CI.
-      The unknowns worth checking are tests that write into the repo tree rather than `tmp_path`,
-      and whether four workers on a 4-core runner contend on the single Postgres service container.
-      Closing this is one experiment: add `pytest-xdist`, run `-n auto` on a branch, compare the
-      job's wall time and its failure set against the serial run on the same commit. If it is not
-      a clear win, say so and delete this row.
-
 - [ ] **Two of the four deployables have no chart, so a release changes their bytes and nothing
       else** — [M]. `D-2026-08-26-a-release-is-a-descriptor-and-a-target` deploys `Chemclaw3_ui`
       and each `Chemclaw3-mcp` server with `oc set image` against a Deployment an operator created

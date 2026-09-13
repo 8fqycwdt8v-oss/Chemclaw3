@@ -185,6 +185,13 @@ dev = [
     # still diverge in both directions; making them provably agree needs the server to publish the
     # list, which is a cross-repo contract rather than a dependency move.
     "tblite>=0.7.0",
+    # Parallel test execution, opt-in through `make test-parallel`
+    # (`D-2026-09-13-four-workers-is-a-third-of-the-wall-clock-and-a-different-failure-set`).
+    # A *dev* dependency and not a default: it also registers the `xdist_group` marker, and this
+    # suite runs under `--strict-markers` with no markers of its own registered anywhere, so a
+    # `@pytest.mark.xdist_group` in `tests/` would make the suite unrunnable for anyone who
+    # installed the project without this group. Nothing in `tests/` carries one for that reason.
+    "pytest-xdist>=3.6",
 ]
 
 [project.scripts]

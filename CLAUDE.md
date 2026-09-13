@@ -558,6 +558,11 @@ invocations — CI runs exactly these, so a green `make` locally means a green C
 
 - **The gate**: `make lint` (ruff lint + format) · `make type` (`mypy --strict`, every first-party
   package) · `make test` (pytest) · `make check` runs all three · `make cov` adds the coverage floor.
+  `test` and `cov` run on **four workers** (`D-2026-09-13-four-workers-is-a-third-of-the-wall-clock-and-a-different-failure-set`):
+  measured 18:13 → 09:30 and 27:25 → 12:28, with the same failure set, the same skip set and the same
+  coverage. `PYTEST_WORKERS=0` runs serially, and reaching for it is how you tell a contention
+  artefact from a finding — a test that fails only in parallel is evidence about the scheduler.
+  `-n auto` is deliberately not the default: every worker draws its own Postgres pool.
 - **The validators**, each guarding a declaration against the live surface: `kg-validate`,
   `skill-validate`, `connector-validate`, `datasource-validate`, `sink-validate`,
   `channel-validate`,
