@@ -373,8 +373,11 @@ Postgres and Temporal are up in this environment, so every one of these is driva
       `min=max=1`, the one value that cannot reproduce it.
       `D-2026-09-13-a-loop-that-abandons-its-pool-can-fail-to-end`; `db.pooling()` round the nested
       loop declined (it would turn pooling off for the parent).
-- [ ] W24.3 `Chemclaw3` — `delete_session` and the owner prune take two rows in opposite orders: a
-      deadlock by lock ordering.
+- [x] W24.3 `Chemclaw3` — `delete_session` and the owner prune take two rows in opposite orders: a
+      deadlock by lock ordering. **"Not reproduced" was false: 16/16.** And the victim is a coin
+      flip — 9 times the route, 7 the prune — so "self-healing on the retention side" covered half
+      of them and the route had no retry. Both orders kept; the route retries.
+      `D-2026-09-13-a-deadlock-victim-is-chosen-by-postgres-not-by-the-caller`.
 - [ ] W24.4 `Chemclaw3` — the checkpoint sweep and a live turn are two writers and only the read
       side notices.
 - [x] W24.5 `Chemclaw3` — the awaiting collapse keeps the oldest frame of each state, not the newest.

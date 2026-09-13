@@ -1243,3 +1243,138 @@ def test_the_batch_turn_claims_take_refresh_and_release_only_what_is_theirs() ->
         f"the batch release removed another holder's claim (left: {theirs_left}), which is a live "
         "turn's turn slot"
     )
+
+
+def test_the_two_session_delete_orders_really_do_deadlock() -> None:
+    """The reproduction. `_session_delete_statements` and `retention._DELETE_SESSIONS` cycle.
+
+    `D-2026-09-13-a-deadlock-victim-is-chosen-by-postgres-not-by-the-caller`. The route's delete
+    takes `session_turns` before `session_owners`; the retention pass takes the ownership row first
+    and reads its `RETURNING`. **Neither order can be changed** — the `BACKLOG.md` row this closes
+    measured both alternatives and each trades the deadlock for a correctness bug — and that row
+    recorded the consequence as **"has not been reproduced"**. It reproduces on every attempt.
+
+    Driven 16 times on a migrated schema with the real orders: the deadlock fired **every time**,
+    and Postgres chose the victim — **9 times the route's side, 7 the retention pass's**. That is
+    the half of the row that was wrong in the direction that matters: it called the deadlock
+    "self-healing on the retention side (a Temporal activity retries)", which covers about half the
+    occurrences, and the other half was a chemist's `DELETE /sessions/{id}` with no retry behind it.
+
+    The assertion is that **exactly one** of the two transactions is aborted. Both committing means
+    no cycle formed and the run is evidence about nothing, which is why it is asserted rather than
+    assumed; both aborting would mean Postgres resolved a deadlock by killing everyone, which it
+    does not do. Which one loses is deliberately *not* asserted — that is the finding.
+
+    Real concurrency on two real connections, because a deadlock is not a thing a double has.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        import psycopg
+
+        session_id = "sess-deadlock-cycle"
+        async with db.connection(settings.postgres_dsn) as seed:
+            await seed.execute(
+                "INSERT INTO session_owners (session_id, owner) VALUES (%s, 'alice') "
+                "ON CONFLICT (session_id) DO UPDATE SET owner = 'alice'",
+                (session_id,),
+            )
+            await seed.execute(
+                "INSERT INTO session_turns (session_id, holder, expires_at) "
+                "VALUES (%s, 'w1', now() + interval '1 hour') "
+                "ON CONFLICT (session_id) DO UPDATE SET holder = 'w1'",
+                (session_id,),
+            )
+
+        holding = asyncio.Event()
+        go = asyncio.Event()
+
+        async def _in_order(first: str, second: str, ready: asyncio.Event | None) -> str:
+            """Take `first`'s row lock, wait for the other side, then reach for `second`'s."""
+            conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
+            try:
+                await conn.execute(f"DELETE FROM {first} WHERE session_id = %s", (session_id,))
+                if ready is not None:
+                    ready.set()
+                await go.wait()
+                await conn.execute(f"DELETE FROM {second} WHERE session_id = %s", (session_id,))
+                await conn.commit()
+                return "committed"
+            except (psycopg.errors.DeadlockDetected, psycopg.errors.SerializationFailure):
+                await conn.rollback()
+                return "aborted"
+            finally:
+                await conn.close()
+
+        # The two real orders, spelled out rather than imported, because what is under test is that
+        # *these two sequences* cycle — a test that ran one order against itself would deadlock
+        # never, and one that imported both statement sets would be asserting SQL rather than locks.
+        route = asyncio.create_task(_in_order("session_turns", "session_owners", holding))
+        prune = asyncio.create_task(_in_order("session_owners", "session_turns", None))
+        await asyncio.wait_for(holding.wait(), timeout=30)
+        await asyncio.sleep(0.5)
+        go.set()
+        outcomes = await asyncio.wait_for(asyncio.gather(route, prune), timeout=120)
+
+        assert sorted(outcomes) == ["aborted", "committed"], (
+            "the two delete orders did not deadlock, so this run is evidence about nothing: "
+            f"{outcomes}"
+        )
+
+    asyncio.run(_run())
+
+
+def test_deleting_a_session_survives_being_the_deadlock_victim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The route's half of the remedy: a delete aborted as the victim is tried again, and lands.
+
+    `D-2026-09-13-a-deadlock-victim-is-chosen-by-postgres-not-by-the-caller`. Since neither lock
+    order can be changed, retrying is what is left, and the sibling above is why the route needed
+    it: Postgres picked the route as the victim 9 times in 16, and the retention side's retry
+    (a Temporal activity) covers only the other seven.
+
+    **The abort is injected rather than raced, and that is deliberate.** Which transaction Postgres
+    kills is decided by which lock request closes the cycle, so a test orchestrating two real
+    connections can reliably make the *other* side the victim and cannot reliably make this one —
+    the window in which the route holds `session_turns` and has not yet asked for `session_owners`
+    is inside one transaction and microseconds wide. So the cycle is proven against real
+    connections next door, and the response to losing it is proven here, against the real exception
+    class on the real transaction boundary.
+
+    Both halves of the assertion matter: the delete has to **answer**, and the rows have to be
+    **gone**. A retry that swallowed the abort and reported an empty result would pass a test that
+    only checked for an absent exception — which is the shape `tasks/lessons.md` records.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        import psycopg
+
+        session_id = "sess-deadlock-victim"
+        store = SessionOwnerStore()
+        await store.record(session_id, "alice")
+        await _spoke_in(session_id)
+
+        once = SessionOwnerStore._delete_session_once
+        attempts: list[int] = []
+
+        async def _aborts_first(
+            self: SessionOwnerStore, sid: str, statements: tuple[tuple[str, str], ...]
+        ) -> dict[str, int]:
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise psycopg.errors.DeadlockDetected("deadlock detected")
+            return await once(self, sid, statements)
+
+        monkeypatch.setattr(SessionOwnerStore, "_delete_session_once", _aborts_first)
+        removed = await store.delete_session(session_id)
+
+        assert len(attempts) == 2, f"the aborted transaction was not tried again: {attempts}"
+        assert removed, f"the delete answered with no counts at all: {removed}"
+        assert await store.lookup(session_id) == (False, None, None), (
+            "the delete answered without removing the ownership row, so the retry reported success "
+            "over a transaction that never ran"
+        )
+
+    asyncio.run(_run())

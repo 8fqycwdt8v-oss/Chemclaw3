@@ -578,31 +578,6 @@ topic).
       One probe, not a measurement pass: what is owed first is the threshold, whether it is
       configurable, and whether it fires on any real turn.
 
-- [ ] **`delete_session` and the owner prune take two rows in opposite orders** — [S], not
-      reproduced. `_session_delete_statements` deletes `session_turns` then `session_owners`;
-      `retention._DELETE_SESSIONS` takes `session_owners` then `session_turns`. The window is narrow
-      — the route claims the live lease first and the prune re-checks it inside the DELETE — but a
-      retention statement holding the owner row microseconds before the route's claim lands can
-      deadlock, and Postgres aborts one side.
-
-      **"Order the two consistently" was examined on 2026-08-28 and is not available**, which is
-      what this row now records instead of an instruction that cannot be followed. Each order is
-      required by its own invariant — but only one of the two paths is *forced*, and a first
-      telling of this correction claimed both were. **Erasure** must remove session-scoped rows
-      before `session_owners`, because its statements re-resolve through a subquery over that table
-      every time (measured by reordering `_ERASE`: `session_turns` keeps a row). **The
-      single-session delete is not forced** — `_SESSION_DELETE`'s predicates are
-      `session_id = %(session_id)s` lookups, and reversing it strands nothing (measured). It shares
-      erasure's order because `_session_delete_statements` *derives* it, which is a coupling worth
-      keeping rather than an invariant of that path.
-      `_DELETE_SESSIONS` must take the ownership row *first*, because the lease deletion reads that
-      DELETE's `RETURNING` — which is what makes "a lease goes only if its ownership row went" true
-      rather than intended; deleting leases first would collect the lease of a live turn whose
-      ownership row the re-check then spares. Reversing either side trades a deadlock window for a
-      correctness bug, and the deadlock is one statement wide, self-healing on the retention side
-      (a Temporal activity retries) and has not been reproduced. **Keep both orders; the row stays
-      open only as the record that the obvious fix was tried and rejected.**
-
 - [ ] **Settle `pytest-xdist` on a real runner** — [S].
       The `check` job is 87% one step: `make lint type cov` was **12m06s of a 13m56s job** on
       `d8c312a`, of which lint is 1s and type 68s (measured), so ~11 min is the suite itself.

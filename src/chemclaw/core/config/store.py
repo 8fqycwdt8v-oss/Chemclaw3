@@ -181,6 +181,23 @@ class StoreSettings(BaseSettings):
     # How long a caller waits for a free pooled connection before the request fails as a
     # transient infrastructure fault (a `ConnectionError`, which Temporal retries).
     pg_pool_timeout_seconds: float = Field(default=10.0, gt=0)
+    # How many times a transaction Postgres aborted as a deadlock victim is tried again.
+    #
+    # **Two transactions in this system take `session_owners` and `session_turns` in opposite
+    # orders, and neither order can be changed** — each is required by its own invariant, which
+    # `D-2026-09-13-a-deadlock-victim-is-chosen-by-postgres-not-by-the-caller` sets out and the
+    # `BACKLOG.md` row it closes measured first. Driven 16 times against a migrated schema, the
+    # deadlock fired every time and Postgres chose the victim: **9 times the chemist's
+    # `DELETE /sessions/{id}`, 7 times the retention pass**. The retention side is a Temporal
+    # activity and retries itself; the route had nothing, so half the occurrences were a 500.
+    #
+    # Retrying is the standard remedy for a cycle that cannot be ordered away, and it is safe here
+    # because the transaction it guards is a set of idempotent `DELETE ... WHERE session_id = ...`
+    # statements: a retry that runs after the other side committed deletes what is left, which is
+    # nothing, and still answers. 2 rather than 1 because the victim of the retry's *own* collision
+    # would otherwise be the answer; 0 restores the pre-fix behaviour for a deployment that would
+    # rather see the error.
+    pg_deadlock_retries: int = Field(default=2, ge=0)
     # Artifact store (D-124): a calculation's by-products — Hessians, optimized geometries,
     # conformer ensembles — kept past the temporary directory that used to delete them.
     # On by default because the value is immediate (a Hessian reused instead of recomputed) and
