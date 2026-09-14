@@ -246,17 +246,6 @@ topic).
       starts one as well (`ingest/documents/sync.py`). Anchor: `isolate.parse_context`,
       `deploy/chemclaw/values.yaml`.
 
-- [ ] **Nothing checks the client half of a wire contract, and it has drifted twice** — [L], the
-      row `D-2026-09-04-a-contract-has-two-halves-and-a-server-test-sees-one` says it is queuing
-      and which was never written. `tests/fixtures/turn_events_contract.json` pins what this
-      repository *sends*; nothing pins what a client accepts, so the `at_capacity` error code and
-      `PendingPlansResponse.truncated` both shipped here and reached `Chemclaw3_ui` as an
-      unhandled default — the second without anyone recording that it had not. The hand-written
-      case in `tests/test_protocol_routes.py` is the only cross-repo assertion in the tree, and
-      that ADR says plainly it does not scale to four repos. What it needs is one artefact both
-      sides read: a published fixture, a generated types package, or a job in `make ci` that
-      fetches the client's own declaration and diffs it against the fixture.
-
 - [ ] **`JsonCommitmentExport` cannot run a destructive sweep, and the grant for one already
       exists** — [S], the row `ingest/commitments/json_export.py`'s `snapshot` attribute says is
       queued and which was never written. It is hard-coded `False`, so a commitment withdrawn at

@@ -22,7 +22,7 @@ from starlette.types import Receive, Scope, Send
 from chemclaw.api.budget import BudgetExceeded
 from chemclaw.api.deps import CurrentSession, CurrentUser
 from chemclaw.api.detach import DetachableTurn
-from chemclaw.api.events import ErrorEvent, QueuedEvent, sse_frame
+from chemclaw.api.events import TURN_EVENT_REF, ErrorEvent, QueuedEvent, sse_frame
 from chemclaw.api.middleware import AT_CAPACITY
 from chemclaw.api.runner import failure_event, run_turn
 from chemclaw.api.schemas import MessageIn, session_title
@@ -469,5 +469,18 @@ def register(app: FastAPI) -> None:
     Registering on the app keeps both exactly as they were when these handlers lived in
     `create_app`.
     """
-    app.post("/sessions/{session_id}/messages")(post_message)
+    app.post(
+        "/sessions/{session_id}/messages",
+        # The SSE body is `text/event-stream`, which FastAPI cannot infer from the
+        # return annotation — so without this the one artefact `Chemclaw3_ui` reads
+        # says nothing at all about what this route streams
+        # (`D-2026-09-14-a-contract-the-client-cannot-read-is-a-contract-one-side-remembers`).
+        # `create_app` is what merges the referenced components.
+        responses={
+            200: {
+                "description": "One SSE frame per turn event.",
+                "content": {"text/event-stream": {"schema": {"$ref": TURN_EVENT_REF}}},
+            }
+        },
+    )(post_message)
     app.post("/sessions/{session_id}/turn/stop")(stop_turn)

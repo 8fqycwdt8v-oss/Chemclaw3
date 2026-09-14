@@ -49,6 +49,7 @@ from chemclaw.agent.verifier import require_verifier_capability
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.deps import CurrentUser
 from chemclaw.api.detach import RunningTurns
+from chemclaw.api.events import event_schemas
 from chemclaw.api.middleware import (
     _add_body_size_limit,
     _add_cors,
@@ -594,6 +595,29 @@ def create_app(
     ):
         module.register(app)
 
+    # **The turn-event union, merged into the document the client actually reads.**
+    # `D-2026-09-14-a-contract-the-client-cannot-read-is-a-contract-one-side-remembers`: the SSE
+    # body is `text/event-stream`, which FastAPI cannot infer, so measured on 2026-09-14 the
+    # published document declared 2 of the union's 17 members and 0 of its 10 error codes — while
+    # `Chemclaw3_ui/shared/events.ts` mirrors all of it by hand and has been wrong nine times.
+    # The two streaming routes declare `TURN_EVENT_REF` in their 200 response; this is what makes
+    # that `$ref` resolve.
+    #
+    # Wrapped around `app.openapi` rather than done in the handler because FastAPI caches the
+    # generated document on `app.openapi_schema` — a handler-side merge would run per request
+    # against an already-frozen dict, and the first caller to mutate it would be racing the rest.
+    _generate = app.openapi
+
+    def _openapi_with_events() -> dict[str, Any]:
+        """The generated document with the turn-event components merged into it, generated once."""
+        document = _generate()
+        components = document.setdefault("components", {}).setdefault("schemas", {})
+        for name, schema in event_schemas().items():
+            components.setdefault(name, schema)
+        return document
+
+    app.openapi = _openapi_with_events  # type: ignore[method-assign]
+
     # The schema, gated like everything else — and registered here rather than in a `routes/`
     # module because it is not a resource of any domain: it is this app describing itself, and it
     # has to be declared after the loop above so its own path lands last in the listing.
@@ -615,7 +639,9 @@ def create_app(
         """The OpenAPI document, for an authenticated caller only.
 
         `app.openapi()` caches into `app.openapi_schema` on the first call, so this is one
-        generation per process rather than per request.
+        generation per process rather than per request — which is also why the turn-event union is
+        merged inside `app.openapi` below rather than here: doing it here would rebuild it per
+        request against a document FastAPI has already frozen.
         """
         return app.openapi()
 

@@ -623,3 +623,36 @@ def sse_frame(event: Event) -> dict[str, str]:
     and neither is the owner — `api/routes/streams.py` already imports four members from here.
     """
     return {"event": event.type, "data": event.model_dump_json()}
+
+
+#: The name the union is published under in the OpenAPI document's `components.schemas`.
+TURN_EVENT_SCHEMA = "TurnEvent"
+TURN_EVENT_REF = f"#/components/schemas/{TURN_EVENT_SCHEMA}"
+
+
+def event_schemas() -> dict[str, object]:
+    """Every OpenAPI component this union needs, keyed by component name.
+
+    **Why the SSE contract has to reach the document at all**
+    (`D-2026-09-14-a-contract-the-client-cannot-read-is-a-contract-one-side-remembers`). The
+    fixture in `tests/fixtures/turn_events_contract.json` holds this union against the *models*,
+    which makes a change here loud on this side. What it cannot do is give the other side anything
+    to read: `Chemclaw3_ui`'s `shared/events.ts` is hand-mirrored and has been wrong nine times,
+    and `scripts/check-openapi.mjs` fetches the one artefact this service publishes. Measured
+    2026-09-14, that artefact declared **2 of 17** members and **0 of 10** error codes, because a
+    `text/event-stream` response is a body FastAPI cannot infer.
+
+    `TypeAdapter` rather than a hand-built `oneOf`: the union is already discriminated on `type`,
+    and pydantic emits the `discriminator` mapping an OpenAPI client generator needs. The
+    `ref_template` points at `components/schemas`, which is where these are merged, so every
+    `$ref` pydantic writes resolves in the merged document rather than at `#/$defs`.
+
+    Returns:
+        The union's own component plus every member component it references.
+    """
+    from pydantic import TypeAdapter
+
+    schema = TypeAdapter(Event).json_schema(ref_template="#/components/schemas/{model}")
+    components: dict[str, object] = dict(schema.pop("$defs", {}))
+    components[TURN_EVENT_SCHEMA] = schema
+    return components
