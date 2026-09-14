@@ -145,6 +145,7 @@ def _marked_partial(note: Note) -> Note:
     """
     return note.model_copy(update={"body": f"{note.body}{PARTIAL_READ_CAVEAT}"})
 
+
 def supported_from(reaction_ids: list[str], reactions: dict[str, OrdReaction]) -> date | None:
     """The day the corpus first supported a synthesis over these runs, or `None` when it cannot say.
 

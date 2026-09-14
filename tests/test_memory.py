@@ -22,11 +22,11 @@ from chemclaw.memory.chains import detect_chains
 from chemclaw.memory.ids import stable_id
 from chemclaw.memory.interaction import note_from_confirmed_answer
 from chemclaw.memory.jobs import (
+    PARTIAL_READ_CAVEAT,
+    SynthesisUnit,
     build_campaign_notes,
     build_playbook_notes,
-    PARTIAL_READ_CAVEAT,
     supported_from,
-    SynthesisUnit,
 )
 from chemclaw.memory.observations import Observation
 from chemclaw.memory.playbook import (
