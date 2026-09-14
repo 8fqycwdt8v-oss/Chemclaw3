@@ -1,10 +1,44 @@
 # Automated dependency updates.
 #
-# The pipeline already *detects* a vulnerable closure — `make deps-audit` runs `pip-audit` against
-# `uv.lock`, blocking, in both workflows. What nothing did was *propose the fix*: a finding turned
-# into a red build and then into somebody hand-resolving a bump, which is the step that decides how
-# long the window between "we know" and "it is fixed" actually is. These two ecosystems are the ones
-# that gate a merge here.
+# The pipeline *detects* a vulnerable **Python** closure — `make deps-audit` runs `pip-audit`
+# against `uv.lock`, blocking, in both workflows. What nothing did was *propose the fix*: a finding
+# turned into a red build and then into somebody hand-resolving a bump, which is the step that
+# decides how long the window between "we know" and "it is fixed" actually is.
+#
+# **That sentence used to say "a vulnerable closure", and the word it was missing is the whole
+# point of this file** (`D-2026-09-14-a-gate-for-one-ecosystem-is-not-a-gate-for-the-file`). It
+# was written twelve lines above an updater for a *second* ecosystem that nothing in `make ci`
+# audits, so a reader checking whether this repository's dependencies were gated got "yes" for a
+# claim that is only true of one of the two declared here.
+#
+# **Which ecosystem holds the findings, measured rather than assumed.** On 2026-09-12 `make
+# deps-audit` reported no known vulnerabilities over both the production closure (212 packages)
+# and the full one (248) while a push returned "GitHub found 7 vulnerabilities (1 high, 6
+# moderate)". Read back on 2026-09-14 from GitHub's own dependency graph for this repository
+# (`GET /repos/.../dependency-graph/sbom`: 447 packages, 439 PyPI, 7 GitHub Actions) and queried
+# against OSV:
+#
+#   * every one of the four actions this repository uses carries **zero** advisories, at any
+#     version. `github-actions` holds none of the seven.
+#   * the seven are PyPI, and every one names a version this lockfile does not contain:
+#     `cryptography` 49.0.0 (GHSA-g6cj-pr64-35w5, HIGH — locked at 50.0.0, the fixed version) and
+#     `pypdf` 6.14.2 (six MODERATE advisories — locked at 6.16.2). 1 high + 6 moderate.
+#   * they persist because GitHub's dependency graph is a **union over the branch's history**
+#     rather than a snapshot of it: 23 packages appear at two versions, and `agent-framework-*` is
+#     still listed though M13 deleted it from `pyproject.toml` entirely.
+#
+# So the gate is not too narrow on the ecosystem axis, and widening it to `github-actions` would
+# have closed nothing. It is too narrow on a different axis, which is recorded as an accepted risk
+# rather than fixed by a claim:
+#
+# **ACCEPTED RISK — `github-actions` is audited by nothing that runs here.** Actions are pinned by
+# commit (`tests/test_deploy_chart.py::test_every_action_is_pinned_to_a_commit_not_a_tag`), which
+# bounds *what runs* and says nothing about whether it is vulnerable. The advisory data exists
+# (OSV's `GitHub Actions` ecosystem), and an audit of it is a `BACKLOG.md` row. Until one lands,
+# Dependabot's own alerting is the only detection for this ecosystem, and it is not a gate.
+#
+# `tests/test_deploy_chart.py::test_every_declared_ecosystem_is_audited_or_accepted` is what keeps
+# this comment and the `updates:` list below from drifting apart again.
 version: 2
 updates:
   # The actions are SHA-pinned (see `.github/workflows/*.yml`), which is the reason this entry has

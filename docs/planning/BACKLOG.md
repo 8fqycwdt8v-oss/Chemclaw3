@@ -626,6 +626,25 @@ topic).
       same build listed neither, and a gate whose last word contradicts the artifact it scanned
       makes every red build ambiguous. Re-check that against a current trivy before merging.
 
+- [ ] **Nothing audits the `github-actions` closure for advisories** — [S], the accepted risk
+      `.github/dependabot.yml` now names out loud
+      (`D-2026-09-14-a-gate-for-one-ecosystem-is-not-a-gate-for-the-file`). Actions are pinned by
+      commit, which bounds *what runs* and says nothing about whether it is vulnerable, and
+      `make ci` reads that ecosystem nowhere.
+      **Not built yet because the set is empty, and that is the argument rather than the excuse**:
+      measured 2026-09-14 against OSV's `GitHub Actions` ecosystem, all four actions this
+      repository uses carry zero advisories at any version, so a gate merged today would be a
+      control that ships green forever with nothing behind it —
+      `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability`.
+      The data source is named so the next person does not have to find it: OSV's
+      `/v1/querybatch` takes `{"package": {"name": "owner/repo", "ecosystem": "GitHub Actions"},
+      "version": ...}`, and the version is the `# vX.Y.Z` comment
+      `test_every_action_is_pinned_to_a_commit_not_a_tag` already requires beside every pin — which
+      is a *claim* about the SHA rather than a resolution of it, and any gate built on it should
+      say so. Trigger: the first advisory that lands on an action in `.github/workflows/`.
+      Anchors: `Makefile::ci`, `.github/dependabot.yml`,
+      `tests/test_deploy_chart.py::test_every_declared_ecosystem_is_audited_or_accepted`.
+
 - [ ] **Two pods sharing one note index re-embed the whole corpus on every alternating pass** —
       [M], measured 2026-09-14 while closing the prune half
       (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`), and it is the *larger* of

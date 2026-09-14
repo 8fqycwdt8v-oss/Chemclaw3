@@ -5435,3 +5435,59 @@ def test_a_release_on_the_memory_session_store_refuses_to_render() -> None:
     assert 'CHEMCLAW_SESSION_STORE: "postgres"' in shipped.stdout, (
         "the shipped defaults no longer state the session store the guard above requires"
     )
+
+
+# The ecosystems `.github/dependabot.yml` declares an updater for, mapped to the `make ci` target
+# that audits one for known vulnerabilities. An ecosystem absent from here is one nothing gates,
+# and the file has to say so in the accepted-risk form below.
+_AUDITED_ECOSYSTEMS = {"uv": "deps-audit"}
+_ACCEPTED_RISK = "ACCEPTED RISK"
+
+
+def test_every_declared_ecosystem_is_audited_or_accepted() -> None:
+    """A dependency gate that covers one of two declared ecosystems, claiming both.
+
+    `.github/dependabot.yml` opened with "the pipeline already *detects* a vulnerable closure —
+    `make deps-audit` runs `pip-audit` against `uv.lock`, blocking, in both workflows", twelve
+    lines above an updater for `github-actions`, which nothing in `make ci` reads. The sentence was
+    true of Python and silent about the ecosystem the file itself adds below it, so a reader
+    checking whether this repository's dependencies were gated got a yes for half a claim
+    (`D-2026-09-14-a-gate-for-one-ecosystem-is-not-a-gate-for-the-file`).
+
+    **Asserted as a choice rather than as coverage**, because the measurement says widening the
+    gate to `github-actions` would close nothing today: every action this repository uses carries
+    zero advisories at any version, and the seven findings GitHub reports are PyPI, at versions
+    this lockfile does not contain. So the requirement is that each declared ecosystem is either
+    audited by a target `make ci` actually runs, or named in the file as an accepted risk. Adding a
+    third ecosystem without doing one of the two fails here, and so does dropping `deps-audit` from
+    `make ci` while the claim about it stands.
+    """
+    dependabot = DEPLOY.parent / ".github" / "dependabot.yml"
+    document: Any = yaml.safe_load(dependabot.read_text(encoding="utf-8"))
+    declared = {update["package-ecosystem"] for update in document["updates"]}
+    assert declared, "no updaters are declared; this check is reading the wrong file"
+
+    ci_target = next(
+        line
+        for line in (DEPLOY.parent / "Makefile").read_text().splitlines()
+        if line.startswith("ci:")
+    )
+    gates = set(ci_target.split(":", 1)[1].split("##")[0].split())
+    assert len(gates) > 10, f"the `make ci` prerequisite list did not parse: {sorted(gates)}"
+    prose = dependabot.read_text(encoding="utf-8")
+
+    unheld: list[str] = []
+    for ecosystem in sorted(declared):
+        target = _AUDITED_ECOSYSTEMS.get(ecosystem)
+        if target is not None and target in gates:
+            continue
+        accepted = any(_ACCEPTED_RISK in line and ecosystem in line for line in prose.splitlines())
+        if not accepted:
+            unheld.append(ecosystem)
+
+    assert not unheld, (
+        f"`.github/dependabot.yml` declares updater(s) for {unheld} that no `make ci` target "
+        "audits and that the file does not record as an accepted risk. Either audit the ecosystem "
+        f"(and name its target in _AUDITED_ECOSYSTEMS) or write the `{_ACCEPTED_RISK}` line "
+        "naming it — an updater without either is a control a reader will assume exists."
+    )
