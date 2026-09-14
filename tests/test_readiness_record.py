@@ -110,8 +110,17 @@ def test_the_external_benchmark_number_is_still_in_it() -> None:
     **And the variable is asserted beside it**, because the pair was published as a tools contrast
     and is not one: the control arm replaces the whole system prompt, so a record stating the two
     numbers without naming what moved between them repeats the attribution
-    `D-2026-09-14-tools-were-never-the-variable` withdrew. The second assertion is what stops the
+    `D-2026-09-14-tools-were-never-the-variable` withdrew. That assertion is what stops the
     correction being edited out while the flattering half of it stays.
+
+    **Asserted as the claim rather than as the digits, which is a change**
+    (`D-2026-09-14-a-pinned-figure-is-a-control-only-if-it-can-go-stale`). This test pinned the
+    literal `62 → 58`, a figure from a three-arm run whose transcripts are in no tree here and
+    which nothing in this repository can re-derive. A pin like that cannot notice the number going
+    stale — only a document that stops repeating it — so it does not detect staleness, it enforces
+    it, and whoever re-runs the arm on a gateway with a balance would have had to edit the control
+    to record the measurement. `62/100` and `74/100` stay pinned because `make live-benchmark`
+    produces them from a keyed corpus this repository vendors.
     """
     text = _record_text()
     assert "62/100" in text and "74/100" in text, (
@@ -119,8 +128,17 @@ def test_the_external_benchmark_number_is_still_in_it() -> None:
         "number this repository has, and it is 12 points worse with tools than without — which is "
         "exactly why it is the one a later edit would drop."
     )
-    assert "62 → 58" in text and "D-2026-09-14-tools-were-never-the-variable" in text, (
-        "the readiness record states the ChemBench pair without saying which variable moved. "
-        "The arms differ by the whole system prompt as well as by the tools; with the prompt held "
-        "fixed, removing every tool moves 62 → 58."
+    row = next((line for line in text.splitlines() if "62/100" in line), "")
+    assert "D-2026-09-14-tools-were-never-the-variable" in row, (
+        "the readiness record states the ChemBench pair without citing the ADR that withdrew its "
+        "attribution. The arms differ by the whole system prompt as well as by the tools."
+    )
+    assert "system prompt" in row, (
+        "the ChemBench row no longer names the variable that moved between the two arms, which is "
+        "the correction rather than the measurement."
+    )
+    assert "not reproducible from this tree" in row, (
+        "the ChemBench row carries the three-arm figures without saying that run's record is not "
+        "in this tree. Section 3's heading promises a number somebody can reproduce, and the row "
+        "below it ships 331 transcripts for exactly that reason."
     )

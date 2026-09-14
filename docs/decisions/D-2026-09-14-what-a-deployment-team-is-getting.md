@@ -21,7 +21,10 @@ a claim about one commit
 (`D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`), and every one of those has gone stale
 inside a day at least once here. The measured figures in §3 are the exception and are *not* that
 shape: a benchmark score and a live run's readings describe one execution somebody can repeat, and
-each names the ADR or the target that produced it. It makes no claim about `Chemclaw3-mcp`, `Chemclaw3_ui` or
+each names the ADR or the target that produced it. **Where that execution's own record is not in
+this tree, the row says so** — repeatable and reproduced-here are different claims, and a row
+carrying figures nobody here can re-derive owes a reader the difference
+(`D-2026-09-14-a-pinned-figure-is-a-control-only-if-it-can-go-stale`). It makes no claim about `Chemclaw3-mcp`, `Chemclaw3_ui` or
 `Chemclaw3_mock` beyond what a test in *this* tree reads out of them. And it does not grade: there
 is no "ready / not ready" verdict, because that judgement belongs to whoever is accepting the risks
 in the fourth section, and a verdict here would let them skip reading it.
@@ -72,7 +75,7 @@ in the fourth section, and a verdict here would let them skip reading it.
 
 | Measurement | Where |
 | --- | --- |
-| **ChemBench: the full system scores 62/100; the same model under the toolless control arm scores 74/100** — 12 points worse, with 20 answers naming no option against 10. **The variable is the system prompt, not the tools**: that control arm replaces the default prose wholesale, and with the prompt held fixed removing every tool moves 62 → 58 while holding the tools at zero and swapping the prompt moves 58 → 76 (paired, p = 0.00012) | `D-2026-09-14-a-number-somebody-else-can-produce` as corrected by `D-2026-09-14-tools-were-never-the-variable`, `make live-benchmark` |
+| **ChemBench: the full system scores 62/100; the same model under the toolless control arm scores 74/100** — 12 points worse, with 20 answers naming no option against 10. **The variable is the system prompt, not the tools**: that control arm replaces the default prose wholesale, and the three-arm run behind that correction held one variable at a time. **That run's own figures are not reproducible from this tree**: it was a review session's, against a gateway this environment cannot reach (HTTP 400, credit balance too low), and no transcripts of it are committed — unlike the 331-probe row below, whose transcripts ship. The published pair is `make live-benchmark`'s and the vendored corpus is keyed, so both halves are one run away for anybody with a balance: `data/evals/profiles/tools-removed.yaml` is the arm that varies only the tools, and `infra/live/processes.sh` already registers it | `D-2026-09-14-a-number-somebody-else-can-produce` as corrected by `D-2026-09-14-tools-were-never-the-variable`, `make live-benchmark` |
 | Tool use helps about a third of the time and hurts about a quarter, on this repository's own probes — measured against the same control arm, so it carries the same confound and is queued for a re-run | `D-2026-09-04-tools-help-a-third-of-the-time-and-hurt-a-quarter`, `D-2026-09-14-tools-were-never-the-variable` |
 | Retrieval recall over the labelled (query, note) pairs the probe set declares — how many there are is what `tests/test_probe_coverage.py` counts, not a figure here | `make live-probes`, `tests/test_probe_coverage.py` |
 | A turn's cost ratio, over turns the system really ran | `make live-turn-cost` |
