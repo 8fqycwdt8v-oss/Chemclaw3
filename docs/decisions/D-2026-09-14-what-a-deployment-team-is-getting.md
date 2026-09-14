@@ -118,10 +118,16 @@ decides it.
 
 ## What keeps it true
 
-- Every test named in §1–§3 exists and is collected by the suite —
-  `tests/test_readiness_record.py::test_every_test_the_readiness_record_names_exists`, which
-  resolves each name against the collected suite the way
-  `Chemclaw3-mcp`'s `tests/test_decision_log.py` resolves its own "what keeps it true" citations.
-  A rename cannot retire a clause in silence, and a clause added with no test cannot be written.
+- Every test this record names **anywhere in it, §4 included**, exists —
+  `tests/test_readiness_record.py::test_every_test_the_readiness_record_names_exists` resolves
+  every `tests/…` path, and every `::function` where one is named, against the tree. A rename
+  cannot retire a clause in silence, and a clause written against a test nobody wrote fails rather
+  than reading as a control. What it cannot check is whether a clause *fairly describes* what its
+  test proves — that is a review matter, like an ADR's prose, and the preamble says so.
+- `tests/test_readiness_record.py::test_the_record_still_carries_all_four_sections` — a record that
+  keeps "enforced / bounded / measured" and loses "accepted" reads as a stronger claim than the
+  original while being strictly less honest.
+- `tests/test_readiness_record.py::test_the_external_benchmark_number_is_still_in_it` — the one
+  figure nobody here chose the questions for is the one a later edit would drop.
 - `tests/test_deferred_register.py` and `tests/test_decision_log.py` hold the two registers §4
   points at.
