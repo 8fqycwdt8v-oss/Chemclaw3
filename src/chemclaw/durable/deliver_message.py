@@ -23,6 +23,17 @@ activity is what this generalises: it is gone, and its two hard-won properties a
 the enablement check runs *inside* the activity (a workflow that branched on `delivery_enabled()`
 would emit a command its replayed history does not contain), and the `Message` is *constructed*
 inside it (see `OutboundMessage`).
+
+**What it costs, said rather than discovered.** That first property has a price, and generalising
+it to four callers is what makes the price worth stating: because `delivery_enabled()` cannot be
+read in workflow code, a deployment with delivery *off* — which is every shipped one — still
+schedules one activity per notice that returns `[]` on its first line. That is a second light write
+on `background-jobs` beside `durable/notify.py`'s, on a queue whose contention that module measures
+at length. It is accepted rather than optimised: `light_write_queue_wait_timeout()` bounds the wait,
+a copy that cannot be scheduled is dropped rather than waited on, and the alternative trades a
+bounded cost for a non-determinism that surfaces as a stuck workflow. The digest already made this
+trade; three more callers now make it, which is the part worth knowing before enabling a channel on
+a busy fleet.
 """
 
 import asyncio
