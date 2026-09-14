@@ -96,8 +96,18 @@ async def retrieve_section(request: SectionRequest) -> SynthesizedSection:
 
 @durable_activity("background")
 @activity.defn
-async def propose_report(report: Report, requested_by: str = "", correlation_id: str = "") -> str:
+async def record_report_note(
+    report: Report, requested_by: str = "", correlation_id: str = ""
+) -> str:
     """Render the gathered report as a recorded `report` note; return the reference.
+
+    **It was called `propose_report` and it proposed nothing**
+    (`D-2026-09-14-an-activity-name-is-a-wire-name-so-it-is-renamed-in-two-releases`).
+    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the gate and the proposal queue
+    behind it; wave 15 corrected every docstring on this path and could not correct this, because
+    the name is not prose — it is the string a Temporal history schedules against. `propose_report`
+    below is the compatibility alias that keeps an in-flight history resolvable for one deployment
+    cycle, and the release procedure for removing it is in that ADR.
 
     `correlation_id` is never read in this body, and that is the shape rather than an oversight:
     `durable/interceptor.py` binds an activity's ids from its *own* arguments, reading the four
@@ -120,6 +130,29 @@ async def propose_report(report: Report, requested_by: str = "", correlation_id:
         return await record_note(report_note(report), default_writer())
     finally:
         reset_current_identity(token)
+
+
+@durable_activity("background")
+@activity.defn(name="propose_report")
+async def propose_report(report: Report, requested_by: str = "", correlation_id: str = "") -> str:
+    """The old Temporal name for `record_report_note`, kept for exactly one deployment cycle.
+
+    **A registered activity name is a wire name.** An in-flight `DevelopmentReportWorkflow` history
+    that has scheduled `propose_report` and not yet completed it resolves against whichever worker
+    picks the task up next; a worker that no longer offers the name fails the activity with
+    `NotFoundError` and the workflow retries it forever. So the rename is two releases, not a
+    commit: this release offers **both** names and schedules the new one, and a later release —
+    after `background-jobs` has drained every history that scheduled the old one — deletes this
+    function. `docs/planning/DEFERRED.md` carries the trigger.
+
+    The signature is identical on purpose, including `correlation_id`, which no body reads:
+    `durable/interceptor.py` binds an activity's ids by *parameter name* off the signature, so an
+    alias that dropped it would make a replayed old task the one unattributed write on this path.
+
+    Delegates rather than duplicating: two functions writing a note is two chances for them to
+    disagree about what a `report` note is.
+    """
+    return await record_report_note(report, requested_by, correlation_id)
 
 
 @durable_workflow("background")
@@ -260,7 +293,7 @@ class DevelopmentReportWorkflow:
         # The note reference *is* this workflow's result, so the publish is not
         # best-effort — but it shares the bounded-attempts discipline (G4).
         note_ref = await publish_note(
-            propose_report, [report, request.requested_by, request.correlation_id]
+            record_report_note, [report, request.requested_by, request.correlation_id]
         )
         # **Out of the building too, when a deployment has said where.** A report is the one
         # durable job whose product is a document a chemist asked for by name, and until this

@@ -208,15 +208,6 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
-- [ ] **The `note_proposed` SSE event is not a proposal, and the name is a two-repo contract** —
-      [S], found 2026-09-05 in the gate-deletion review. Nothing reviews a note, so the accurate
-      name is `note_recorded`; the literal is switched on by `Chemclaw3_ui`
-      (`state/types.ts`, `chatStore.ts`, `TracePanel.tsx`, `chem/entities.ts`, `turnActivity.ts`)
-      and by `evals/live.py`, so renaming it is a coordinated deploy with a skew window in which
-      one side drops the event silently. The internal names and the text a chemist reads are
-      already fixed; only the wire literal is left. Needs a rollout order (accept both, then emit
-      the new one, then drop the old), which is why it is a row rather than part of that fix.
-
 - [ ] **A `pending_requests` row whose run was terminated, or lost with its worker, has no
       collector** — [M]. What is left of the row above after
       `D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-the-row-waiting`, which closed
@@ -1065,27 +1056,6 @@ Replaces "two producers bind a template step's ambient identity, and only one of
 whose title was its premise: the two producers disagree about `roles`, on purpose, and collapsing
 them would refuse entitled work rather than weaken a refusal
 (`D-2026-09-12-two-producers-of-one-identity-are-not-redundant-when-they-disagree`).
-
-## `propose_report` proposes nothing, and its name is a registered activity name
-
-`durable/report_workflow.py::propose_report` calls `record_note`. There is nothing to propose to:
-`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the gate and the proposal queue
-behind it, and wave 15 corrected every *docstring* on that path — this is the one thing it did not
-touch, because the name is not prose.
-
-Renaming it is a Temporal concern rather than a refactor. The string is the registered activity
-name, so an in-flight history that has scheduled `propose_report` and not yet completed it resolves
-against a worker that no longer offers it; the safe shape is to register both names for one
-deployment cycle and drop the old one after the queue has drained, which is a release procedure and
-not a commit. Its callers also span `tests/test_report_workflow.py`,
-`tests/test_durable_observability.py` and a merged ADR (`D-2026-08-27-…`), and a merged ADR is never
-edited — so the citation outlives the rename either way and the new ADR has to say what it now
-names.
-
-Worth doing because a symbol name is read far more often than the docstring under it, and this one
-says a control exists. Not worth doing as part of a prose sweep.
-
-Found by wave 15's PR-gate claim audit.
 
 ## A truncated argument document is completed by upstream and the tool runs on the guess
 
