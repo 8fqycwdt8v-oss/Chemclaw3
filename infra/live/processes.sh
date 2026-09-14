@@ -55,8 +55,9 @@ export CHEMCLAW_SERVICE_HOST="${CHEMCLAW_SERVICE_HOST:-127.0.0.1}"
 # either way because the guard only looks at loopback addresses.
 export CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY="${CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY:-true}"
 # The eval profile directory beside the shipped one, because every control arm this repository
-# measures against is a profile — `no-tools.yaml` for the tool-utility A/B, `tools-removed.yaml` for
-# the benchmark arm that varies only the tools — and a profile has to be registered by the process
+# measures against is a profile — `no-tools.yaml`, which swaps the system prompt as well as the
+# tools, for the merged tool-utility A/B, and `tools-removed.yaml` for the arm that varies only the
+# tools — and a profile has to be registered by the process
 # that builds the agent. It is not in `data/profiles/` on purpose — a toolless agent is a
 # measurement instrument, and every deployment that starts the front door advertises what is in
 # there. This lane is where measurements run, so this is where the two directories meet.

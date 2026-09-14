@@ -68,6 +68,11 @@ logger = logging.getLogger(__name__)
 #: The profile the A/B's control arm talks to. A constant rather than a flag: it names a file this
 #: repository ships (`data/evals/profiles/no-tools.yaml`), and a run that could point the control
 #: arm at any profile would produce reports whose "baseline" means something different each time.
+#: **It is a prompt contrast, not a tools contrast**: that profile supplies its own `instructions:`,
+#: which replace the default domain prose wholesale, so a delta this suite reports varies prompt and
+#: tools together (`D-2026-09-14-tools-were-never-the-variable`). `tools-removed` is the arm that
+#: varies only the tools; pointing this constant at it is a re-run, which is the open
+#: `docs/planning/BACKLOG.md` row rather than an edit.
 #: Index-only helpers below are generic over what they select; see `_systematic_sample`.
 _T = TypeVar("_T")
 
@@ -527,17 +532,23 @@ def _ab_report(
 ) -> str:
     """The A/B's report: what was asked, what each bucket says, and every per-probe delta.
 
-    The per-probe table is not decoration. The aggregate answers "do tools pay on this corpus", and
-    the only thing anybody can *act* on is which questions they paid on — which is the whole reason
-    `compare_tool_utility` scores per task instead of returning a rate.
+    The per-probe table is not decoration. The aggregate answers "does the control arm pay on this
+    corpus", and the only thing anybody can *act* on is which questions it paid on — which is the
+    whole reason `compare_tool_utility` scores per task instead of returning a rate.
+
+    **The heading names the variable rather than the tools.** `_AB_BASELINE_PROFILE` swaps the
+    system prompt as well as emptying the tool set, so a report that called this "with and without
+    tools" would attribute a two-variable delta to one of them
+    (`D-2026-09-14-tools-were-never-the-variable`).
     """
     lines = [
-        "# Tool utility: the same questions with and without tools",
+        "# Control-arm utility: the same questions, both arms",
         "",
         f"- probes asked in both arms: **{len(probes)}**",
         f"- pairs scored: **{len(tasks)}**"
         + (f" ({len(dropped)} dropped ungraded: {', '.join(dropped)})" if dropped else ""),
-        f"- baseline arm: `{_AB_BASELINE_PROFILE}` (`tool_names: []`)",
+        f"- baseline arm: `{_AB_BASELINE_PROFILE}` — `tool_names: []` **and** its own"
+        " `instructions:`, so this delta varies prompt and tools together",
         f"- judge: `{judge_model()}`",
         "",
         "| set | n | helped | hurt | no effect | net delta |",
@@ -827,8 +838,9 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default="corpus",
         choices=["corpus", "ab", *sorted(_M12_SUITES)],
         help=(
-            "corpus (the default single-arm run), ab (the same probes with and without tools), "
-            "or one M12 re-validation suite"
+            "corpus (the default single-arm run), ab (the same probes in both arms, the baseline "
+            "one being a profile that swaps the prompt as well as the tools), or one M12 "
+            "re-validation suite"
         ),
     )
     parser.add_argument(
