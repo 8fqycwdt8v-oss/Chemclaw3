@@ -328,6 +328,30 @@ class EvidenceRef(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
+class UncitedPrecedent(BaseModel):
+    """One run the record holds that resembles this design and that the design does not cite.
+
+    Beside `RecordedFailure` and for the same layering reason: the fingerprint index answers in
+    `science.fingerprints`'s vocabulary, `agent/` reduces what it found, and the check stays pure
+    over its arguments.
+
+    **`searched` is the honest half and it is not optional.** An empty list of hits means three
+    different things — nobody looked, the index is empty or mid-rebuild, or the record genuinely
+    holds nothing like this — and `FingerprintSearch` exists in the first place because a chemist
+    told "no precedent" over an unindexed corpus is worse than one told nothing. A check cannot
+    re-derive that distinction from a list, so the caller carries it across.
+    """
+
+    #: The reaction record's id, so a chemist can open what is being pointed at.
+    id: str = Field(min_length=1)
+    #: How close it is, on the same Tanimoto scale `similar_reactions` reports.
+    similarity: float = Field(ge=0.0, le=1.0)
+    #: What the record calls it.
+    label: str = ""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
+
+
 class ProtocolBody(BaseModel):
     """What every arm of the design shares."""
 

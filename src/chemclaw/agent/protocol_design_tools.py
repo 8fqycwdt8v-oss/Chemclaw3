@@ -37,6 +37,7 @@ from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_text import get_current_user_texts
 from chemclaw.kg.graph import load_notes
+from chemclaw.kg.note import external_record_ref
 from chemclaw.memory.failure import failures_against, observation_of
 from chemclaw.protocols.checks import (
     _used_structures,
@@ -57,6 +58,7 @@ from chemclaw.protocols.models import (
     ProtocolArm,
     ProtocolBody,
     RecordedFailure,
+    UncitedPrecedent,
     design_id_for,
 )
 from chemclaw.protocols.render import (
@@ -65,6 +67,8 @@ from chemclaw.protocols.render import (
     render_markdown,
 )
 from chemclaw.protocols.store import DesignStore, RevisionConflict, default_design_store
+from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions
+from chemclaw.science.fingerprints.store import default_reaction_store
 
 logger = logging.getLogger(__name__)
 
@@ -379,6 +383,54 @@ async def _recorded_failures(design: ExperimentDesign) -> list[RecordedFailure]:
     return [RecordedFailure(id=note.id, summary=observation_of(note)) for note in notes]
 
 
+async def _uncited_precedent(design: ExperimentDesign) -> list[UncitedPrecedent]:
+    """Runs the record already holds that resemble this design and that it does not cite.
+
+    **The second caller of the seam `_recorded_failures` opened**, and deliberately the same shape:
+    a check must stay pure over its arguments, `protocols` may import only `core` and `science`, so
+    the lookup lives here and `precedent_consulted` decides. Two instances is what makes that a
+    pattern rather than one function's arrangement — and it is why `run_checks` now dispatches
+    through a mapping instead of a chain of identity tests.
+
+    **It offers, it never cites.** A hit is a thing that exists; a citation is a claim the chemist
+    makes about what a decision rests on. Writing a hit into `design.evidence` would forge the
+    first out of the second and leave `evidence_present` passing on a design nobody grounded, which
+    is a check satisfying itself.
+
+    **Already-cited hits are dropped, and the comparison is the citation's own spelling.**
+    `EvidenceRef.ref` carries `reaction-<source>.<id>` or the bare `reaction-<id>` that
+    `note_id_for_reaction` mints, while a `Match.id` is the record id alone — so comparing the two
+    raw would report every citation the design *does* carry as uncited, which is the noisiest
+    possible way to be wrong. `external_record_ref` is the inverse that already exists.
+
+    It never raises, for `_recorded_failures`' reason and one more: this search reaches Postgres,
+    so an unreachable index is an ordinary condition of a laptop rather than a fault of the design.
+    The cost of that is the same — a silent "nothing to offer" is indistinguishable from having
+    looked — which is why the failure is counted through `degraded()` and why
+    `precedent_consulted`'s passing text says nothing was *offered* rather than that nothing exists.
+    """
+    reaction = design.request.reaction_smiles.strip()
+    if not reaction:
+        return []
+    cited = {external_record_ref(ref.ref)[1] for ref in design.evidence if ref.ref}
+    try:
+        search = await find_similar_reactions(default_reaction_store(), reaction)
+    except Exception as exc:
+        degraded(
+            logger,
+            "precedent_lookup",
+            "could not search the reaction index for precedent, so this design was checked "
+            "without it: %s",
+            exc,
+        )
+        return []
+    return [
+        UncitedPrecedent(id=hit.id, similarity=hit.similarity, label=hit.label)
+        for hit in search.hits
+        if hit.id not in cited
+    ]
+
+
 @tool
 async def structure_experiment_request(request: ExperimentRequest, salt: str = "") -> str:
     """Turn a chemist's free-text ask into the structured request a protocol is drafted from.
@@ -451,6 +503,7 @@ async def structure_experiment_request(request: ExperimentRequest, salt: str = "
         design,
         stage="protocol" if design.has_protocol else "request",
         failures=await _recorded_failures(design),
+        precedent=await _uncited_precedent(design),
     )
     revision = await store.append(
         design_id,
@@ -573,7 +626,11 @@ async def draft_experiment_protocol(
             }
         )
 
-    checks = run_checks(design, failures=await _recorded_failures(design))
+    checks = run_checks(
+        design,
+        failures=await _recorded_failures(design),
+        precedent=await _uncited_precedent(design),
+    )
     if failed := blockers(checks):
         raise ChemclawError(
             "this design is not storable yet — "

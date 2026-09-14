@@ -40,6 +40,7 @@ from chemclaw.protocols.models import (
     ProtocolCheck,
     RecordedFailure,
     Setpoints,
+    UncitedPrecedent,
 )
 from chemclaw.science.labels.vocabulary import SpeciesRole
 
@@ -952,6 +953,59 @@ def no_documented_failure(
     )
 
 
+def precedent_consulted(
+    design: ExperimentDesign, precedent: Sequence[UncitedPrecedent] = ()
+) -> ProtocolCheck:
+    """The record holds runs like this one, and this design cites none of them.
+
+    **Advisory, and it does not touch `evidence`.** A citation is a claim the chemist makes about
+    what a decision rests on; a search hit is a thing that exists. Writing a hit into `evidence`
+    would forge the first out of the second, and `evidence_present` would then pass on a design
+    nobody had actually grounded — a check satisfying itself, which is worse than the gap it
+    closes. So this names ids to go and read and stops there.
+
+    A `note`, for the same reason `no_documented_failure` is one: a structurally similar reaction
+    is not automatically relevant. A Tanimoto neighbour can share a scaffold and nothing else, the
+    chemist may have read it and judged it inapplicable, and a deliberate re-run under changed
+    conditions is ordinary work. Blocking on it would teach people to cite noise.
+
+    **The empty case is silence, not a pass claiming a negative.** `UncitedPrecedent` carries no
+    "nothing found" arm because the three reasons a search returns nothing — nobody looked, the
+    index is empty or mid-rebuild, the record genuinely holds nothing — are what
+    `FingerprintSearch.verdict` exists to keep apart, and a check that flattened them into "no
+    precedent" would be the `ScreenResult.verdict` lesson repeated. The caller passes only hits it
+    is willing to stand behind; everything else arrives here as `()`.
+
+    Args:
+        design: The design being checked.
+        precedent: Similar runs the record holds that this design does not cite, as
+            `agent.protocol_design_tools._uncited_precedent` reduced them.
+
+    Returns:
+        A passing `note` when there is nothing to offer, and a failing one naming what to read.
+    """
+    if not precedent:
+        return _ok(
+            "precedent_consulted", "note", "no uncited precedent was offered for this design"
+        )
+    named = "; ".join(
+        f"{hit.id} ({hit.similarity:.2f})" for hit in precedent[:_MAX_NAMED_PRECEDENT]
+    )
+    more = len(precedent) - _MAX_NAMED_PRECEDENT
+    tail = f", and {more} more" if more > 0 else ""
+    return _fail(
+        "precedent_consulted",
+        "note",
+        f"the record holds {len(precedent)} similar run(s) this design does not cite: {named}"
+        f"{tail}. Read them before running this — or say why they do not apply",
+    )
+
+
+#: How many precedents to name before the detail is the problem. A design that ignored twenty near
+#: neighbours has one thing wrong with it, and the count still reports the rest.
+_MAX_NAMED_PRECEDENT = 3
+
+
 #: How many failures to name before the detail is itself the problem. A design citing more than a
 #: handful of refuted notes has one thing wrong with it, not five, and the count still reports the
 #: rest.
@@ -979,6 +1033,7 @@ _CHECKS: tuple[Callable[..., ProtocolCheck], ...] = (
     objectives_are_measured,
     quantities_are_plausible,
     no_documented_failure,
+    precedent_consulted,
     coverage_is_stated,
 )
 
@@ -1000,7 +1055,13 @@ _CHECKS: tuple[Callable[..., ProtocolCheck], ...] = (
 #: design running in 2-MeTHF. The exclusion is still a blocker where it means something — on a
 #: design that actually *uses* the species, at the protocol stage, which is the only place a chemist
 #: can be harmed by it.
-_REQUEST_STAGE: frozenset[str] = frozenset({"components_resolve", "no_documented_failure"})
+#:
+#: `precedent_consulted` joins that pair on the same argument: `ExperimentRequest.reaction_smiles`
+#: is part of the ask, so what the record already holds like it is knowable before there is a
+#: procedure — which is the moment it is cheapest to read.
+_REQUEST_STAGE: frozenset[str] = frozenset(
+    {"components_resolve", "no_documented_failure", "precedent_consulted"}
+)
 
 
 def run_checks(
@@ -1008,6 +1069,7 @@ def run_checks(
     *,
     stage: CheckStage = "protocol",
     failures: Sequence[RecordedFailure] = (),
+    precedent: Sequence[UncitedPrecedent] = (),
 ) -> list[ProtocolCheck]:
     """Every check that means something at this stage, in reading order.
 
@@ -1028,10 +1090,19 @@ def run_checks(
     It runs at **both** stages, unlike every other protocol-only check: a structured ask already
     names reagents and can already cite evidence, so a failure bearing on it is knowable before
     there is a procedure — which is the moment it is cheapest to act on.
+
+    `precedent` is the second input of that kind and arrives on the same terms, which is why the
+    dispatch below is a mapping rather than a chain of identity tests: there is now a *class* of
+    checks the caller feeds from a corpus, and the next one should not need this function edited in
+    two places to be wired up.
     """
+    supplied: dict[Callable[..., ProtocolCheck], Sequence[Any]] = {
+        no_documented_failure: failures,
+        precedent_consulted: precedent,
+    }
     return [
-        no_documented_failure(design, failures)
-        if check is no_documented_failure
+        check(design, supplied[check])
+        if check in supplied
         else check(design)
         if stage == "protocol" or check.__name__ in _REQUEST_STAGE
         else _ok(check.__name__, "note", "not checked yet — this design holds only the ask")

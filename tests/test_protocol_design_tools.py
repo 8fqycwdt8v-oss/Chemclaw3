@@ -47,6 +47,7 @@ from chemclaw.protocols.models import (
 )
 from chemclaw.protocols.render import ProtocolReadout, ProtocolReceipt
 from chemclaw.protocols.store import InMemoryDesignStore
+from chemclaw.science.fingerprints.store import FingerprintSearch, Match
 
 _SOURCE = (
     "We need to get the Suzuki on the deactivated chloride working. "
@@ -1190,3 +1191,103 @@ def test_no_tool_here_replays_a_live_envelope_delimiter(store: InMemoryDesignSto
             assert "SM-3 Suzuki" in json.dumps(json.loads(payload))
 
     asyncio.run(_body())
+
+
+# --- draft-time precedent ------------------------------------------------------------------------
+
+
+def _search(hits: list[Match]) -> FingerprintSearch[Match]:
+    """A `FingerprintSearch` carrying `hits` — what `find_similar_reactions` returns."""
+    return FingerprintSearch[Match](subject="reaction", hits=hits)
+
+
+def _hit(record_id: str, similarity: float = 0.9) -> Match:
+    return Match(id=record_id, label="a coupling", similarity=similarity)
+
+
+def test_a_precedent_the_design_already_cites_is_not_reported_as_uncited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The comparison is the citation's own spelling, and getting it wrong is maximally noisy.
+
+    `EvidenceRef.ref` carries `reaction-<source>.<id>` or the bare `reaction-<id>` that
+    `note_id_for_reaction` mints; a `Match.id` is the record id alone. Compared raw, every citation
+    a design *does* carry comes back as uncited — so a chemist who did the reading would be told
+    off for exactly the work they did.
+    """
+    design = ExperimentDesign(
+        request=ExperimentRequest(title="SM-3", goal="couple it", reaction_smiles="CC>>CCO"),
+        evidence=[
+            EvidenceRef(kind="precedent", ref="reaction-eln.ord-9f2", summary="ran at 80 C"),
+        ],
+    )
+    monkeypatch.setattr(tools, "default_reaction_store", lambda: object())
+    monkeypatch.setattr(
+        tools,
+        "find_similar_reactions",
+        lambda store, smiles: _resolved(_search([_hit("ord-9f2"), _hit("ord-aaa")])),
+    )
+
+    found = asyncio.run(tools._uncited_precedent(design))
+
+    assert [one.id for one in found] == ["ord-aaa"]
+
+
+def test_a_design_with_no_reaction_smiles_does_not_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """There is nothing to be similar to, and a search costs a round trip to Postgres."""
+    called = False
+
+    def _fail(store: object, smiles: str) -> object:
+        nonlocal called
+        called = True
+        raise AssertionError("searched with no reaction")
+
+    monkeypatch.setattr(tools, "default_reaction_store", lambda: object())
+    monkeypatch.setattr(tools, "find_similar_reactions", _fail)
+
+    found = asyncio.run(
+        tools._uncited_precedent(
+            ExperimentDesign(request=ExperimentRequest(title="SM-3", goal="couple it"))
+        )
+    )
+
+    assert found == [] and not called
+
+
+def test_an_unreachable_index_is_counted_rather_than_failing_the_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Postgres that is not there is an ordinary condition of a laptop, not a fault of the design.
+
+    The cost is that a silent "nothing to offer" is indistinguishable from having looked, which is
+    why it is counted through `degraded()` — a lookup that has quietly stopped working otherwise
+    returns every draft clean forever.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    def _boom(store: object, smiles: str) -> object:
+        raise OSError("no route to host")
+
+    monkeypatch.setattr(tools, "default_reaction_store", lambda: object())
+    monkeypatch.setattr(tools, "find_similar_reactions", _boom)
+    marker = 'chemclaw_degraded_total{subsystem="precedent_lookup"}'
+    before = [line for line in METRICS.render().splitlines() if line.startswith(marker)]
+
+    found = asyncio.run(
+        tools._uncited_precedent(
+            ExperimentDesign(
+                request=ExperimentRequest(title="SM-3", goal="couple it", reaction_smiles="CC>>CCO")
+            )
+        )
+    )
+    after = [line for line in METRICS.render().splitlines() if line.startswith(marker)]
+
+    assert found == []
+    assert after and after != before
+
+
+async def _resolved(value: object) -> object:
+    """An awaitable of an already-known value — the search is async, these tests are not."""
+    return value
