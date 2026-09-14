@@ -431,6 +431,14 @@ def test_the_topic_cursor_is_not_ahead_of_the_record() -> None:
 # different claim — "this guarantee is enforced right now, here" — which is why it is checked here
 # and there rather than exempted with the paths.
 _RETIRED_TEST_CITATIONS: dict[str, str] = {
+    # Renamed because the name asserted the opposite of what the test pinned. It said "once" and
+    # drove a single call, over a branch that returned `True` unconditionally — so what it actually
+    # held was "every time, forever", which is the DARK-7 failure it was written to prevent
+    # (`D-2026-09-14-an-undated-note-is-not-news-every-hour`, measured at 32 of 39 shipped notes).
+    "test_a_note_with_no_date_is_reported_once_rather_than_never": (
+        "replaced by `test_an_undated_note_is_told_once_and_then_not_again` "
+        "(tests/test_digest.py), which drives both calls and so can tell the two apart"
+    ),
     # Deleted by the implementation it existed to demand. `D-2026-08-27` wrote it to fail whoever
     # re-added a retraction's storage half without the readers that honour it, and said so in its
     # own docstring; `D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports` brought the readers, so

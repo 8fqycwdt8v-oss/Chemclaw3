@@ -108,10 +108,43 @@ def test_a_same_day_note_that_arrives_later_is_still_reported() -> None:
     assert _is_new(arrived_later, _subscription(_TODAY, ["reaction-1"])) is True
 
 
-def test_a_note_with_no_date_is_reported_once_rather_than_never() -> None:
-    """An undated note has no watermark to compare against; silence is the worse answer."""
-    assert _is_new(_note("playbook-1", None), _subscription(_TODAY)) is True
+def test_an_undated_note_is_told_once_and_then_not_again() -> None:
+    """This asserted "silence is the worse answer" and the code delivered the other failure.
+
+    The branch returned `True` unconditionally, and the id memory cannot help because it is scoped
+    to the watermark's date and resets when that rolls over — so an undated note re-qualified on
+    **every** run, forever. Measured on the shipped corpus, 32 of 39 notes carry no `valid_from`,
+    so a subscriber's hourly digest was mostly the same notes over and over, which is the exact
+    promise `agent/subscriptions.py` makes (DARK-7) being broken by the branch written to keep it.
+
+    What `None` means settles it rather than a preference between two failures: `Note.is_current`
+    reads it as *open-ended*, true for as long as anyone has known, so such a note did not become
+    knowledge after a subscriber was last told. A subscriber who has never been told anything still
+    hears it once — that is the first arm below, and it is the whole of "silence is the worse
+    answer" that survives.
+    """
+    undated = _note("playbook-1", None)
+
+    assert _is_new(undated, _subscription(None)) is True
+    assert _is_new(undated, _subscription(_TODAY)) is False
     assert _is_new(_note("playbook-1", date(2026, 7, 31)), _subscription(None)) is True
+
+
+def test_a_distilled_playbook_carries_the_day_it_was_minted() -> None:
+    """The other half of the same fix, and the reason the half above can be strict.
+
+    A playbook is the one note type nobody writes on a day — a miner concludes it — so it shipped
+    with no `valid_from` and therefore, under the rule above, would reach only a subscriber who had
+    never been told anything. `minted_on` is the honest statement that it became knowledge when the
+    corpus first supported it, which is the day the miner ran.
+    """
+    from chemclaw.memory.playbook import playbook_note
+
+    minted = playbook_note("playbook-x", "it holds", ["reaction-1"], minted_on=date(2026, 7, 31))
+
+    assert minted.valid_from == date(2026, 7, 31)
+    assert _is_new(minted, _subscription(datetime(2026, 7, 30, 9, tzinfo=UTC))) is True
+    assert _is_new(minted, _subscription(datetime(2026, 8, 1, 9, tzinfo=UTC))) is False
 
 
 def test_the_digest_reads_the_tree_the_notes_are_actually_written_to(

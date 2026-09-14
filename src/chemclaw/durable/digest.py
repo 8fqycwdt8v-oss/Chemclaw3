@@ -206,12 +206,28 @@ def _is_new(note: Note, subscription: Subscription) -> bool:
     subscription therefore also remembers which ids it sent *at that date*, which separates
     "dated today and already sent" from "dated today and new" without having to choose between
     the two failures.
+
+    **A note with no date was DARK-7 again, and the comment that used to sit below said it had
+    been handled.** It read "report it once"; the branch returned `True` unconditionally, so a
+    dateless note re-qualified on *every* run forever — the id memory could not help, since it is
+    scoped to the watermark's date and resets when that rolls over. Measured on the shipped corpus:
+    **32 of 39 notes carry no `valid_from`**, so a subscriber's hourly digest was mostly the same
+    notes over and over, which is the failure the feature's own promise names.
+
+    What `None` means is not a gap to be patched around: `Note.is_current` reads it as
+    *open-ended* — true for as long as anyone has known — so a note carrying it is by definition
+    not something that became knowledge after a subscriber was last told. The branch now says
+    that, and the honest consequence is stated rather than hidden: a genuinely new note that omits
+    its date reaches only a subscriber who has never been told anything. That is why
+    `memory.playbook.playbook_note` takes `minted_on` — a distilled rule is the one note type
+    nobody writes on a day, and it was the note type this silence actually cost.
     """
     valid_from = note.valid_from
-    if valid_from is None or subscription.last_seen_at is None:
-        # No date on either side: report it once. Being told about something already seen is a
-        # nuisance; never being told is the failure this feature exists to prevent.
+    if subscription.last_seen_at is None:
+        # Nobody has been told anything yet, so everything matching is news.
         return True
+    if valid_from is None:
+        return False
     if valid_from > subscription.last_seen_at.date():
         return True
     if valid_from < subscription.last_seen_at.date():

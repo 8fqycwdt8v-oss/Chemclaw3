@@ -15,6 +15,7 @@ function's docstring.
 """
 
 import logging
+from datetime import date
 
 from pydantic import BaseModel
 
@@ -104,7 +105,9 @@ def find_playbook_candidates(
     return candidates
 
 
-def playbook_note(note_id: str, summary: str, evidence_note_ids: list[str]) -> Note:
+def playbook_note(
+    note_id: str, summary: str, evidence_note_ids: list[str], *, minted_on: date | None = None
+) -> Note:
     """Build an agent `playbook` note citing its evidence; reject one with no citations.
 
     `note_id` is the full note id (e.g. from `chemclaw.memory.ids.stable_id("playbook", ...)`).
@@ -130,6 +133,19 @@ def playbook_note(note_id: str, summary: str, evidence_note_ids: list[str]) -> N
     `memory.supersede._is_synthesis_minted` has to reconstruct the id rather than read `source`.
     Deriving both from one function means the note's stated provenance and the retirement pass's
     lineage rule cannot come apart.
+
+    **`minted_on` is what makes a distilled rule *reach* anybody, and its absence is why it did
+    not.** A playbook is the one note type that is entirely derived: nobody wrote it down on a day,
+    a miner concluded it. With `valid_from` unset the note means "open-ended, always been true",
+    which is what `Note.is_current` reads `None` as everywhere else — and `durable/digest._is_new`
+    reads it the same way, so a subscriber who had ever been told anything was never told about a
+    promotion. Passing the day it was minted is the honest statement: this became knowledge when
+    the corpus first supported it, which is the day the miner ran.
+
+    A parameter rather than `date.today()` inside, because one caller is a Temporal activity and
+    only activities may read a wall clock — `observation_jobs.workflow_safe_today` exists for
+    exactly this and is the argument it passes. `None` keeps the open-ended note, which is what a
+    test constructing one by hand wants.
     """
     if not evidence_note_ids:
         raise PlaybookError(f"playbook {note_id!r} has no evidence references")
@@ -145,4 +161,5 @@ def playbook_note(note_id: str, summary: str, evidence_note_ids: list[str]) -> N
             else SOURCE_PROMOTED_OBSERVATION
         ),
         body=body,
+        valid_from=minted_on,
     )
