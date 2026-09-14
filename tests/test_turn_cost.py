@@ -300,6 +300,9 @@ def test_every_turn_cost_reader_has_the_surface_that_asks_it() -> None:
     - `operations/activity.py` — the aggregate read model, reached by the `review_activity` tool.
     - `operations/evidence_pack.py` — `assemble`, the context-of-use record for one session.
     - `cli/explain.py` — `python -m chemclaw.cli.explain`, the audit reconstruction.
+    - `cli/live_turn_cost.py` — `make live-turn-cost`, which drives a fixed workload and scores
+      what the ledger says it cost. Its surface is the command itself, and it reads back only the
+      session it just opened.
 
     Note what the count never protected: `evidence_pack.py` has always read `audit_events`,
     `job_records`, `effects` and `plan_approvals` with its own SQL, so "operations/activity.py is
@@ -316,6 +319,7 @@ def test_every_turn_cost_reader_has_the_surface_that_asks_it() -> None:
     )
     assert readers == [
         "cli/explain.py",
+        "cli/live_turn_cost.py",
         "operations/activity.py",
         "operations/evidence_pack.py",
     ], (

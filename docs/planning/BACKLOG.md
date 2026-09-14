@@ -1090,16 +1090,26 @@ cluster, a real Databricks workspace — are in
 [`DEFERRED.md`](DEFERRED.md), each with the trigger that would revisit it, which is the register
 those belong in.
 
-## `turn_cost_ratio` scores a fixture, not the system
+## The same three questions cost 2.1x more on one boot than on another
 
-`data/evals/cases/autonomy-turn-cost.md` carries literal turn records, so the metric returns
-0.9845458333333333 whatever changes in the agent — the 32% static-prefix growth that
-`tests/test_context_floor.py` caught would leave its `baseline.json` row untouched. The metric's
-arithmetic is right and tested; what is missing is a case fed from real recorded `TurnCost` rows.
+Found by `make live-turn-cost`, the lane
+`D-2026-09-14-a-cost-metric-that-reads-a-file-measures-the-file` built. Across two boots of the
+**same commit**, the same scripted three-turn workload cost **900,198** and **429,076** billed
+token-equivalents — stable and byte-identical within each boot across repeated runs, so this is a
+property of the process rather than of the run.
 
-Blocked on the same thing the memory-distillation row is: a deployment with turns in it. This
-system has 12 session messages and 0 recorded turns, so there is nothing to build the case from
-yet. Trigger: the first live lane run that persists a session's worth of turns.
+What the ledger already says about the difference: `context_unreducible` true on 3 of 3 turns of the
+expensive boot and false on 3 of 3 of the cheap one, the model calling a tool on 3 of 3 turns
+against 1 of 3, and a per-model-call request of 299,826 characters against 214,206. The ~21,000
+estimated tokens between them is the size of two or three connectors' tool schemas against a
+measured total of 31,208 (`chemclaw_connector_tool_schema_tokens`), so **a bundle whose tools were
+not bound on one boot is the leading candidate and is not evidence** — nothing was observed binding
+a different set, and the inventory line was identical in both.
+
+Why it matters beyond the lane: if it is a binding race, a deployment can serve a *narrower tool
+surface* than it advertises, silently, and the only trace is a cost half what the other pod's is.
+The next step is to record the bound tool names and the schema gauge at each boot and compare, which
+`make live-turn-cost`'s regime line now makes visible from outside.
 
 ## Recover the flow-Suzuki screen, or decide it stays out
 

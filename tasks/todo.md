@@ -502,10 +502,14 @@ fail. That is worse than no gate, because it reports green.
       finding is that 2 of 6 *gated* metrics had no failing case at all, so replacing either with a
       constant `0.0` left `make eval-strict` at exit 0. `gates_no_demonstration_can_fire` + two
       demonstration cases; both mutations now exit 1.
-- [ ] W27.2 `Chemclaw3` — `turn_cost_ratio` scores a fixture, not the system: the 32% prefix growth
-      `tests/test_context_floor.py` caught would leave its `baseline.json` row untouched. **Unblocked
-      now**: `API-KEY` is present in this environment, so a live lane can persist real `TurnCost`
-      rows and the case can be fed from them. Run it while the credential exists.
+- [x] W27.2 `Chemclaw3` — `turn_cost_ratio` scores a fixture, not the system.
+      **Done** (`D-2026-09-14-a-cost-metric-that-reads-a-file-measures-the-file`): `make
+      live-turn-cost` drives a fixed three-turn workload through a running front door and scores the
+      `turn_costs` rows it produced. No credential was needed — the lane's own mock gateway bills by
+      request size, which is what puts the prefix in the number; a real gateway was reachable and is
+      the better instrument for the same measurement. Driven with ~10k characters added to the
+      default prompt: `make eval-baseline-check` exit 0 in both arms, `live-turn-cost` 0.900198 ->
+      0.950454, exit 1. Found a 2.1x cost swing between boots of one commit — `BACKLOG.md` row.
 - [ ] W27.3 `Chemclaw3` — the 44 labelled (query, note) pairs in `knowledge.yaml` are unreadable as
       data because `Probe` is `extra="forbid"` [M]. Closing this also closes the `DEFERRED.md` row
       whose parenthetical rested on them.

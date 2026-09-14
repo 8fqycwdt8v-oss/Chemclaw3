@@ -1,10 +1,10 @@
 {
-  "case_set_version": "gates-2026-09-14",
+  "case_set_version": "live-cost-2026-09-14",
   "metrics": {
     "plan_execute_utility": 0.5,
     "plan_quality": 0.75,
     "runaway_rate": 0.25,
-    "turn_cost_ratio": 0.9845458333333333,
+    "turn_cost_ratio": 0.9423719166666666,
     "bo_regret": 3.4000000000000057,
     "e_factor": 35.37689393939394,
     "pmi": 36.37689393939394,
