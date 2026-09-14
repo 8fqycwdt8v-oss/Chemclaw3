@@ -28,6 +28,26 @@ class DeliverySettings(BaseSettings):
         description="Comma-separated channel names to enable. Empty means deliver nothing.",
     )
 
+    # **What one outbound send may spend, and it is not one activity's worth.**
+    # `deliver_message_activity` was given `activity_timeout_seconds` (30 s) by copying the shape of
+    # `durable/notify.py`'s session push-back, which is one small database insert. This is not that:
+    # `registry.deliver` walks the enabled channels **serially**, and the shipped webhook channel's
+    # own `timeout_seconds` is 10 s — so three webhook channels can reach 30 s on their own, at
+    # which point the activity's whole budget is spent inside the last one. A `start_to_close`
+    # expiry is *retryable*, and `activity_max_attempts` is 5, so the retry re-POSTs to every
+    # channel that already took the message: duplicate tickets manufactured by a budget that was
+    # 300 s a commit earlier, when the only caller was the digest.
+    #
+    # 300 s rather than a number derived from the channel list, because the derivation would have to
+    # read each channel's own `config:` — a per-driver key this model does not know and should not
+    # learn. What it buys is room for the serial walk; what bounds a *single* channel stays the
+    # channel's own setting, which is where an operator who adds a slow one will look.
+    delivery_timeout_seconds: float = Field(
+        default=300.0,
+        gt=0,
+        description="Wall clock for one outbound send across every enabled channel, serially.",
+    )
+
     @property
     def delivery_channels_dirs(self) -> list[str]:
         """The discovery path, split and stripped."""

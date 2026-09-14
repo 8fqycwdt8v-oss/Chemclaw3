@@ -68,7 +68,11 @@ _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
 # Every tree whose workflows dispatch activities onto a task queue, with the floor each must not
 # fall below. `connectors/` is walked whole rather than as `connectors/*/workflows.py`: a bundle
 # that puts a workflow anywhere else in its package is the same rule and the same failure.
-_WORKFLOW_TREES = {"durable": 30, "connectors": 7}
+# **A floor, re-based when it drifts far enough that it stops being one.** It read 30 for `durable`
+# against 41 real dispatch sites — 27% slack, which is a floor that would not notice a third of the
+# tree's scheduling disappearing. Measured on 2026-09-14 at 41 and 7; set at the measurement rather
+# than below it, because the number's whole job is to fail when a walk silently stops finding sites.
+_WORKFLOW_TREES = {"durable": 41, "connectors": 7}
 
 # The two ways a call can bound its queue wait. `schedule_to_start_timeout` is the general one
 # (`durable/publish.py::queue_wait_timeout`, and `light_write_queue_wait_timeout` for the

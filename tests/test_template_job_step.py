@@ -679,22 +679,34 @@ def test_the_wrappers_headroom_covers_what_its_post_child_steps_may_spend() -> N
     Asserted against the call sites' own helpers rather than against a literal, because the number
     is not the invariant: a step whose bound moves must move this with it, and a restated sum is
     exactly the drift the count above already suffered.
+
+    **Equality, not `>=`, and the difference is a step that went unreserved for a whole release.**
+    A `>=` catches a step whose bound *moves* — the invariant the paragraph above names — and is
+    blind to a step being *added*, because an added step makes the left side larger and the
+    assertion truer. `D-2026-09-14-a-declared-kind-with-no-producer-is-not-a-channel` put a sixth
+    post-child activity in `_finish`, worth 930 s of permitted spend, and this test stayed green
+    over a ceiling that reserved none of it. Equality fails in both directions, which is what a
+    reservation needs: reserving too much wedges a long job no less than reserving too little
+    reaps it early.
     """
     from datetime import timedelta
 
     from chemclaw.durable.publish import light_write_queue_wait_timeout, queue_wait_timeout
 
-    assert finish_headroom() >= (
-        # `_settle_effect`, `_publish_result` and the note PR-gate take core's hour...
+    assert finish_headroom() == (
+        # `_settle_effect`, `_publish_result` and the note write take core's hour...
         queue_wait_timeout() * 3
-        # ...the durable record and the push-back take the tighter end-of-job bound...
-        + light_write_queue_wait_timeout() * 2
-        # ...and each of the five then does its own work.
+        # ...while the durable record, the push-back and the outbound copy take the tighter
+        # end-of-job bound...
+        + light_write_queue_wait_timeout() * 3
+        # ...and each of the six then does its own work. The outbound copy's is
+        # `delivery_timeout_seconds` rather than an activity's: it walks the channels serially.
         + timedelta(
             seconds=settings.activity_timeout_seconds * 2
             + settings.job_record_timeout_seconds
             + settings.result_publish_timeout_seconds
             + settings.note_write_timeout_seconds
+            + settings.delivery_timeout_seconds
         )
     )
     assert wrapper_execution_timeout() == (

@@ -35,7 +35,7 @@ import logging
 from collections.abc import Sequence
 from datetime import timedelta
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from temporalio import activity, workflow
 
 with workflow.unsafe.imports_passed_through():
@@ -46,7 +46,11 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.kg.note import Note
     from chemclaw.kg.search import query_terms, term_coverage
 
-from chemclaw.durable.deliver_message import OutboundMessage, deliver_best_effort
+from chemclaw.durable.deliver_message import (
+    OutboundMessage,
+    deliver_best_effort,
+    deliver_message_activity,
+)
 from chemclaw.durable.notify import notify_session_best_effort
 from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
@@ -179,6 +183,48 @@ async def acknowledge_digest(subscription_id: int, note_ids: list[str]) -> None:
     await mark_reported(subscription_id, note_ids)
 
 
+class DeliveryInput(BaseModel):
+    """The typed argument for `deliver_digest_activity` — kept only for replay.
+
+    See that function. Nothing constructs one on the current path.
+    """
+
+    owner: str
+    query: str
+    note_ids: list[str] = Field(default_factory=list)
+
+
+@durable_activity("background")
+@activity.defn
+async def deliver_digest_activity(payload: DeliveryInput) -> list[str]:
+    """Deprecated: here only so a run opened on the previous release can replay.
+
+    `D-2026-09-14-a-declared-kind-with-no-producer-is-not-a-channel` generalised this into
+    `durable/deliver_message.deliver_message_activity`, and deleting it outright was the defect:
+    an in-flight `DigestWorkflow` has `ActivityTaskScheduled(deliver_digest_activity)` at this
+    position, and the new code emitted `deliver_message_activity` there. Replayed, that is
+    `[TMPRL1100] Nondeterminism error: Activity type of scheduled event 'deliver_digest_activity'
+    does not match activity type of activity command 'deliver_message_activity'`. This workflow
+    declares no `failure_exception_types`, so it does not fail — it **parks** its workflow task in
+    an unbounded retry; and because the digest is a Schedule under `ScheduleOverlapPolicy.SKIP`,
+    one wedged run then skips every subsequent nightly digest silently. The ADR's "nothing changes
+    in a shipped deployment" was true of a fresh deployment and false of every live one.
+
+    So the body is gone and the *name* stays. It is scheduled only on the `workflow.patched` off
+    branch below, which no new run takes, and it delegates rather than duplicating: whatever a
+    replayed run does here, it does through the one seam. Removable once no run opened before this
+    release can still be replayed — for a nightly Schedule, the day after it ships.
+    """
+    return await deliver_message_activity(
+        OutboundMessage(
+            recipient=payload.owner,
+            subject=f"New for your standing query: {payload.query}",
+            body="\n".join(f"- {note_id}" for note_id in payload.note_ids),
+            kind="digest",
+        )
+    )
+
+
 @durable_workflow("background")
 @workflow.defn
 class DigestWorkflow:
@@ -230,14 +276,30 @@ class DigestWorkflow:
             # unacknowledge a delivered digest. Its result is deliberately not part of the
             # acknowledging condition: outbound delivery is a courtesy on top of a delivered digest,
             # not a second delivery the watermark waits on.
-            await deliver_best_effort(
-                OutboundMessage(
-                    recipient=item.owner,
-                    subject=f"New for your standing query: {item.query}",
-                    body="\n".join(f"- {note_id}" for note_id in item.note_ids),
-                    kind="digest",
+            #
+            # **Behind a patch**, because this position already holds an
+            # `ActivityTaskScheduled(deliver_digest_activity)` in every run opened on the previous
+            # release, and emitting a different activity type there parks the workflow task
+            # forever — see `deliver_digest_activity` above for the measured error and why a
+            # parked digest is silent rather than loud. The off branch emits exactly what those
+            # histories record; no new run takes it.
+            if workflow.patched("digest-outbound-delivery-seam"):
+                await deliver_best_effort(
+                    OutboundMessage(
+                        recipient=item.owner,
+                        subject=f"New for your standing query: {item.query}",
+                        body="\n".join(f"- {note_id}" for note_id in item.note_ids),
+                        kind="digest",
+                    )
                 )
-            )
+            else:
+                await workflow.execute_activity(
+                    deliver_digest_activity,
+                    DeliveryInput(owner=item.owner, query=item.query, note_ids=list(item.note_ids)),
+                    start_to_close_timeout=timeout,
+                    schedule_to_start_timeout=queue_wait_timeout(),
+                    retry_policy=BAD_DATA_RETRY,
+                )
             delivered += 1
         return delivered
 

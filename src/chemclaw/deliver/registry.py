@@ -109,6 +109,35 @@ def enabled() -> list[DeliveryChannelManifest]:
     return chosen
 
 
+def resolvable() -> tuple[list[DeliveryChannelManifest], list[str]]:
+    """The channels that resolve, and the names that do not — for a caller that must still send.
+
+    **`enabled()` raising is right at startup and wrong inside a send, and one caller needed both.**
+    That function resolves the whole list or raises, which is what `make channel-validate` and a
+    boot want: an operator who spelled a channel wrong means to be delivering and is not. But it is
+    called *before* the per-channel `try` in `deliver`, so a single typo took every healthy channel
+    down with it — measured with a working file channel beside one bad name: `took == []`, one
+    `degraded[message_delivery]`, and **zero** files written by the channel that was fine. That is
+    the opposite of `deliver`'s own headline promise, "a failing channel does not stop the others",
+    and it was true of a *delivery* failure and false of a *configuration* one.
+
+    So the loudness moves rather than going away: the bad name is reported by the caller through
+    `degraded()` — alerted, not skimmed — and the channels that resolve still get the message. A
+    message nobody receives because somebody mistyped a fourth channel is not a safer failure than
+    a counted one.
+    """
+    available = discovered()
+    chosen: list[DeliveryChannelManifest] = []
+    unresolved: list[str] = []
+    for name in settings.delivery_channel_list:
+        manifest = available.get(name)
+        if manifest is None:
+            unresolved.append(name)
+        else:
+            chosen.append(manifest)
+    return chosen, unresolved
+
+
 def delivery_enabled() -> bool:
     """Whether anything would be delivered at all.
 
@@ -172,7 +201,20 @@ async def deliver(message: Message) -> list[str]:
     """
     scrubbed = message.redacted()
     delivered: list[str] = []
-    for manifest in enabled():
+    channels, unresolved = resolvable()
+    if unresolved:
+        # Counted rather than raised, so the channels that *do* resolve still receive this message.
+        # See `resolvable` for the measurement this replaces.
+        degraded(
+            logger,
+            "delivery_channel_config",
+            "CHEMCLAW_DELIVERY_CHANNELS names %s, which is not on the discovery path; the other "
+            "%d channel(s) still received this message",
+            ", ".join(repr(name) for name in unresolved),
+            len(channels),
+            exc_info=False,
+        )
+    for manifest in channels:
         try:
             driver = build(manifest)
         except Exception as exc:

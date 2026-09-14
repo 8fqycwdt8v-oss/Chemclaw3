@@ -99,10 +99,17 @@ def _plan_gated(profile_name: str | None) -> bool:
     `harness_autonomy="execute"` there is a plan but no gate — the agent acts without asking, so
     nothing about that plan is anyone's decision.
 
-    This is also the filter that keeps `GET /plans/pending` free in the default deployment, where
-    `gate_applies` is False for a session: a skipped session costs no checkpointer statement, and
-    every
-    checkpointer statement is serialized against every concurrent turn on the pod.
+    This is also the filter that keeps `GET /plans/pending` cheap for every session the gate does
+    not govern: a skipped session costs no checkpointer statement, and every checkpointer statement
+    is serialized against every concurrent turn on the pod.
+
+    **It is not free in the *default* deployment, and this sentence said it was twice.** It first
+    said "where `harness_enabled` is off", which `D-2026-09-13-the-default-is-the-posture-every-
+    deployment-already-runs` falsified; the correction swapped the mechanism name to `gate_applies`
+    and left the premise standing. Measured at the shipped settings — `harness_enabled=True`,
+    `harness_autonomy="plan_only"` — `gate_applies(DEFAULT_PROFILE)` is **True**, so the default
+    deployment reads a checkpoint per session here. What the filter still saves is a session on a
+    profile that turns the harness off or sets `autonomy="execute"`.
 
     A profile the registry no longer knows is treated as gated rather than skipped: the deployment
     dropped a profile out from under an existing session, and guessing *away* from a plan that may

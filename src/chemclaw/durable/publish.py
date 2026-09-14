@@ -332,12 +332,19 @@ def queue_wait_timeout() -> timedelta:
 def light_write_queue_wait_timeout() -> timedelta:
     """How long a *small* write may wait on the shared background queue, before it is a fault.
 
-    Three calls want this rather than the hour above, and all three sit at the end of a job: the
-    session push-back (`durable/notify.py`) and the durable job record, written once by
-    `durable/connector_job.py` and once by `durable/template_job.py`. All are swallowed by their
-    caller, and the connector wrapper's record additionally sits *in front of* the message telling
-    a chemist their job died — so an hour of patience there is an hour in which a failed job is not
-    reported (`tests/test_durable_observability.py` holds exactly that).
+    Every call that wants this rather than the hour above sits at the end of a job: the session
+    push-back (`durable/notify.py`), the durable job record written once by
+    `durable/connector_job.py` and once by `durable/template_job.py`, and the outbound copy
+    (`durable/deliver_message.py`). All are swallowed by their caller, and the connector wrapper's
+    record additionally sits *in front of* the message telling a chemist their job died — so an
+    hour of patience there is an hour in which a failed job is not reported
+    (`tests/test_durable_observability.py` holds exactly that).
+
+    **The count is not written here, and it used to be.** It said "three calls" and the fourth
+    arrived with `D-2026-09-14-a-declared-kind-with-no-producer-is-not-a-channel` without touching
+    this line — in the same docstring that already carries "the third was found by a reviewer
+    rather than by this sentence, which is why the count is here at all". A count that has gone
+    stale twice is the argument against keeping one.
 
     **The third was found by a reviewer rather than by this sentence, which is why the count is
     here at all.** `template_job.py`'s record is the identical activity on the identical queue with
@@ -365,7 +372,7 @@ def light_write_queue_wait_timeout() -> timedelta:
     keep in step with the first, and the relationship is what has to hold.
 
     Returns:
-        The `schedule_to_start_timeout` the two end-of-job writes pass.
+        The `schedule_to_start_timeout` every end-of-job write passes.
     """
     return timedelta(seconds=settings.template_step_timeout_seconds)
 

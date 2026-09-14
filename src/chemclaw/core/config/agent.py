@@ -811,7 +811,16 @@ class AgentSettings(BaseSettings):
 
         At the shipped defaults this is `25 * 6 + 8 = 158` against the 132 a 25-iteration harness
         turn actually needs — so the cap fires first, which is the intent. The ceiling should never
-        be what stops a harness turn; it is what stops a turn that has no cap, because the loop cap
-        is attached only when the harness is on.
+        be what stops a turn at all; it is the backstop under the cap, sized so the cap always
+        fires first.
+
+        **This said "it is what stops a turn that has no cap, because the loop cap is attached only
+        when the harness is on", and that was the opposite of the code.** `_harness_middleware`
+        builds `[enforce_loop_cap, enforce_spend_cap, MeterTurnSpend()]` and returns them *before*
+        the harness branch, so every profile carries the cap — its own docstring says "the cap is
+        unconditional and the todo list is not, and they used to travel together", and this file
+        says it correctly 230 lines up ("the iteration cap stays on regardless"). There is no turn
+        with no cap, so a reader sizing this margin was being told to leave room for a case that
+        cannot arise.
         """
         return self.harness_max_loop_iterations * self.agent_supersteps_per_model_call + 8
