@@ -19,6 +19,26 @@
 {{- if kindIs "string" .Values.retention.unboundedGrowthAccepted }}
 {{- fail (printf "retention.unboundedGrowthAccepted must be a boolean, not the string %q — a quoted boolean is truthy in Helm and would satisfy the retention posture gate while reading as off, leaving every durable table growing forever. Set it as `unboundedGrowthAccepted: true`/`false` (no quotes), and do not pass it via --set-string." .Values.retention.unboundedGrowthAccepted) }}
 {{- end }}
+{{- /* **A chart render is multi-process by construction, so the memory session store is not an
+       option here.** `kg/git_writer.py::_cluster_lock` is what stops two pods racing a note write
+       to one remote, and it is gated on `session_store == "postgres"` — correctly, because a
+       memory-store deployment is single-process *as a CLI or a test*. A release is not: this chart
+       renders a front door and a background worker at minimum, each a separate pod with its own
+       `emptyDir` clone, so the host-local `flock` beneath the advisory lock excludes nothing
+       between them. Set to `memory`, every note write in the release is unguarded and two pods
+       proposing one note id are last-writer-wins with no error.
+
+       Refused rather than warned, which is the opposite of `framingEnvelopeSecret`'s answer next
+       door, and the difference is whose deployments break: the shipped `values.yaml` already says
+       `postgres`, so no existing release changes, while that key is *unset* in the shipped chart
+       and refusing it would fail every upgrade
+       (D-2026-08-27-a-warning-is-the-shape-a-guard-takes-when-raising-would-break-a-deployment).
+
+       Evaluated at the top of the file so any render refuses, exactly as the retention and egress
+       postures are. See D-2026-09-13-the-lock-is-not-the-bound-the-commit-is. */ -}}
+{{- if ne (default "" (get .Values.config "CHEMCLAW_SESSION_STORE")) "postgres" }}
+{{- fail (printf "config.CHEMCLAW_SESSION_STORE is %q; a chart release must set \"postgres\". This chart renders a front door and a background worker as separate pods, and `kg/git_writer.py::_cluster_lock` — the only thing that stops two pods racing a note write to one git remote — is taken *only* under the postgres session store. Under `memory` each pod holds its own host-local flock against one origin, so two pods proposing the same note id are last-writer-wins with no error. The memory store is for the CLI and the tests, which are single-process." (default "" (get .Values.config "CHEMCLAW_SESSION_STORE"))) }}
+{{- end }}
 {{- if eq (empty .Values.retention.windows) (empty .Values.retention.unboundedGrowthAccepted) }}
 {{- fail "retention: set exactly one of `retention.windows` (the CHEMCLAW_RETENTION_* day windows this release keeps history for) or `retention.unboundedGrowthAccepted: true` (the durable tables grow forever, which is not a safe end state but is now a stated one). Neither is set, or both are." }}
 {{- end }}

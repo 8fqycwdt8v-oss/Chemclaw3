@@ -90,7 +90,20 @@ def _store() -> DesignStore:
 
 
 #: Digit runs, for relating a stated value to the words offered as evidence for it.
-_DIGITS = re.compile(r"\d+")
+#: A figure somebody wrote as a **quantity**, which is not the same as a run of digits.
+#:
+#: Measured over the 295 chemist asks in `data/evals/probes/`, a bare `\d+` finds **537** distinct
+#: figures and this finds **371**: 31% of what a quote could be credited with stating was never a
+#: quantity at all. What it drops is digits welded to letters — a SMILES's ring closures
+#: (`COc1ccc(-c2ccccc2C(=O)O)cc1` offered `1` and `2`, so `max_runs='1'` quoting a *structure*
+#: passed), a `C18` column — and the halves of a decimal, where `3.87 min` offered `3` and `87` and
+#: therefore supported `max_runs='87'`.
+#:
+#: Every legitimate spelling survives, which is the half that decides the shape: `96-well`, `2 g`,
+#: `24 wells`, `48 runs` and the `2026-09-01` of an ISO date all still state their figures, because
+#: a digit run beside punctuation is a figure and only a digit run beside a *letter* is not.
+#: See `D-2026-09-13-a-digit-inside-a-word-is-not-a-figure-somebody-stated`.
+_DIGITS = re.compile(r"(?<![A-Za-z0-9.])\d+(?:\.\d+)?(?![A-Za-z])")
 
 
 #: Figures written as words, so a quote that states a number in prose is not read as stating no
@@ -139,12 +152,15 @@ def _quote_supports(value: str, quote: str) -> bool:
     **This is a heuristic and the docstring should not pretend otherwise.** It refuses a quote that
     cannot state the value; it cannot tell whether the figure the quote does carry is *about* this
     slot, so "24 wells" still supports `max_runs='24'` when the chemist said 24 wells about the
-    plate. `docs/planning/BACKLOG.md` carries what would close that and why it is not free.
+    plate. What it no longer does is credit a quote with figures nobody wrote as quantities — see
+    `_DIGITS` for the 166-of-537 measurement and for why that is a different question from
+    attribution. `docs/planning/DEFERRED.md` carries the attribution half, with the count it is
+    waiting on.
     """
-    value_numbers = {int(digits) for digits in _DIGITS.findall(value)}
+    value_numbers = {float(digits) for digits in _DIGITS.findall(value)}
     quote_tokens = set(_TOKEN.findall(quote.lower()))
     if value_numbers:
-        quote_numbers = {int(digits) for digits in _DIGITS.findall(quote)}
+        quote_numbers = {float(digits) for digits in _DIGITS.findall(quote)}
         if quote_numbers:
             return bool(value_numbers & quote_numbers)
         return bool(quote_tokens & _NUMBER_WORDS)

@@ -2459,3 +2459,33 @@ decision is to change a *gate*, it is not.
 
 The corollary that saved it: **after changing a default, re-run the thing the default governs.** The
 only reason this was caught before merge is that changing `make test` meant running `make test`.
+
+## Three of four surviving mutations were the fixture, not the test (2026-09-13)
+
+**What happened.** Wave 26 ran 33 mutations and four survived. One was a genuinely missing assertion.
+The other three shared one shape: **the fixture made the subject's change invisible, so the assertion
+could not have failed whatever the code did.**
+
+- `WatermarkWarehouse` is a fake that mirrors the watermark's *semantics* and is told its columns
+  directly. So the end-to-end drain test passed with `sql.watermark_expression` reverted: the fake
+  was computing the right answer independently of the code under test.
+- `tests/test_rxnfp_server.py` indexed its fingerprint records with no `source`, so the citation was
+  bare whether or not the tool qualified it. The test asserted a string that both versions produce.
+- Nothing asserted that the new `note_id` column reaches SQL, so the dialect could drop it and the
+  producer tests — which assert what the *producer* hands over — stayed green.
+
+Each is a different surface, and none of them is the shape the existing rules name (a constant
+compared to itself, a re-typed expression, a string that also appears in a comment). The common
+element is that the fixture was built to make the test *run*, not to make the subject *observable*.
+
+**Rule: before writing the assertion, ask what value in the fixture the subject is supposed to
+change — and check that the fixture actually carries a value the subject can change.** A record with
+no `source` cannot show a citation being qualified. A fake that computes the answer itself cannot
+show a query being rewritten. Where a fake deliberately duplicates the subject's semantics (which is
+sometimes right), the clause the subject emits has to be pinned somewhere else, in both directions —
+and say in the test's docstring that the pinning is why the duplication is safe.
+
+**And a mutation harness can lie in one direction only.** A mutation that fails to *apply* reports a
+pass, indistinguishable from a survivor; an unquoted bash heredoc mangled one of mine and produced
+exactly that. A mutation that applies can never produce a false red. So every RED is evidence and
+every SURVIVED is a hypothesis — re-apply a survivor by hand before concluding the test is weak.

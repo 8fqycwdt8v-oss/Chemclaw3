@@ -20,6 +20,7 @@ call on the read path would make search depend on a background service being up.
 
 from mcp.server.fastmcp import FastMCP
 
+from chemclaw.ingest.eln.records import ReactionRecordStore, default_record_store
 from chemclaw.kg.note import note_id_for_reaction
 from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions
 from chemclaw.science.fingerprints.store import (
@@ -46,6 +47,9 @@ from chemclaw.science.labels.vocabulary import SpeciesRole
 
 server = FastMCP("mcp-rxnfp")
 _store: FingerprintStore = default_reaction_store()
+# The transcription store, for the one question the fingerprint index cannot answer: whether the
+# source has withdrawn the run a hit stands for.
+_records: ReactionRecordStore = default_record_store()
 _labels: LabelIndex = default_label_index()
 _molecules = CorpusMolecules()
 
@@ -69,11 +73,22 @@ async def similar_reactions(
     be both, and `verdict` says so when it is.
     """
     search = await find_similar_reactions(_store, reaction_smiles, top_k, threshold)
+    # **The index knows bits and a label; whether the run still stands is the record store's.**
+    # This tool asked the store nothing, so a reaction the source had withdrawn was served as a
+    # precedent with `verdict` saying nothing about it — the same hole the retrieval sweep had, in
+    # the tool a chemist reaches directly. `retracted` is a positive question over this page of
+    # ids, so a hit whose record is missing is still served: an unindexed record is not a
+    # withdrawal (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`).
+    withdrawn = await _records.retracted([(match.source, match.id) for match in search.hits])
     return search.model_copy(
         update={
+            # The id a hit is cited by names the source it was found in, because
+            # `reaction_fingerprints` is keyed by `(source, id)` and a bare citation to an id two
+            # sites hold resolves to neither (`records._one_of` refuses rather than guessing).
             "hits": [
-                match.model_copy(update={"id": note_id_for_reaction(match.id)})
+                match.model_copy(update={"id": note_id_for_reaction(match.id, match.source)})
                 for match in search.hits
+                if (match.source, match.id) not in withdrawn
             ]
         }
     )

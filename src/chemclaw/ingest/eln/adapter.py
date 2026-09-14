@@ -91,19 +91,29 @@ def warn_late_arrivals(logger: Logger, source: str, names: list[str]) -> None:
     )
 
 
-def entry_window(created_at: datetime, modified_at: datetime | None) -> datetime:
-    """The timestamp an entry should be filtered on: the later of creation and amendment.
+def entry_window(
+    created_at: datetime, modified_at: datetime | None, retracted_at: datetime | None = None
+) -> datetime:
+    """The timestamp an entry should be filtered on: the latest thing the source did to it.
 
     One definition, because an adapter that filtered on `created_at` alone would silently drop
     every in-place correction its source makes — the failure this exists to close — and an adapter
     that filtered on `modified_at` alone would drop every entry that has never been amended.
 
-    `max` rather than "modified if present, else created" only differs when a source reports an
-    amendment *older* than the creation it amends, which is clock skew rather than chemistry. It is
+    **A withdrawal is one of those things, and it is here because it is the only way the producer
+    half of a retraction can reach a cursor-based sync.** A source stamping a retraction column
+    without touching its amendment column leaves the entry behind the cursor forever, so the
+    tombstone is written at the site and never fetched — a producer nobody can write, which is the
+    shape `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` deleted three
+    modules for. Folding it in costs nothing where a source *does* amend in place (the retraction
+    stamp is then no later than the amendment) and is the whole of the fix where it does not.
+
+    `max` rather than "the latest present one" only differs when a source reports an amendment
+    *older* than the creation it amends, which is clock skew rather than chemistry. It is
     cheap insurance and no test can distinguish the two; said here so the choice does not read as
     load-bearing.
     """
-    return max(created_at, modified_at) if modified_at is not None else created_at
+    return max(stamp for stamp in (created_at, modified_at, retracted_at) if stamp is not None)
 
 
 class ElnMappingError(ChemclawError):
@@ -134,6 +144,20 @@ class RawEntry(BaseModel):
     # Optional because a source may genuinely not record one; `None` means "not reported", not
     # "never amended", and the overlap replay remains the only thing that catches those.
     modified_at: datetime | None = None
+    # When the source reported this entry **withdrawn**, if it reports withdrawals at all.
+    #
+    # **An explicit field, never absence**, and that is the whole producer half of a retraction: an
+    # ELN fetch is a delta, so "not seen this run" is the normal state of every entry ever
+    # ingested, and reading it as a withdrawal would retract the entire corpus on the first quiet
+    # pass. A source that amends entries in place already re-exports a withdrawn one — the same
+    # channel that carries a corrected yield — so a tombstone rides the delta an adapter already
+    # produces and needs no second fetch, no capability probe and no corpus sweep.
+    #
+    # `None` means "not reported withdrawn", which is also what every adapter that says nothing
+    # about withdrawals produces. Re-publishing an entry without one *un*-retracts it, because this
+    # tier's rule is that the row is what the source last said
+    # (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`).
+    retracted_at: datetime | None = None
 
 
 @runtime_checkable

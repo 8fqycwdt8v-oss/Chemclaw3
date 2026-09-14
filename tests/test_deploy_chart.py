@@ -5402,3 +5402,36 @@ def test_the_image_workflow_derives_component_modules_that_actually_import() -> 
             f"image.yml would smoke-test {module!r}, which is not an importable module — the "
             "derivation has picked up prose rather than a command"
         )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_a_release_on_the_memory_session_store_refuses_to_render() -> None:
+    """The one lock that stops two pods racing a note write is gated on the postgres store.
+
+    `kg/git_writer.py::GitNoteWriter._cluster_lock` takes a Postgres advisory lock keyed on the
+    git remote and
+    skips it entirely when `session_store != "postgres"` — correctly, because a memory-store
+    deployment is single-process *as a CLI or a test*. A chart release is not: this chart renders a
+    front door and a background worker as separate pods, each with its own `emptyDir` clone, so the
+    host-local `flock` beneath that lock excludes nothing between them and two pods proposing one
+    note id are last-writer-wins with no error. Its own docstring named that combination as the
+    case it does not cover; a chart is the one place it is knowable, because the process cannot
+    count its own replicas.
+
+    Both arms, because a gate nobody has watched refuse is a claim that a gate exists — and the
+    positive arm is the load-bearing one here: the shipped `values.yaml` already says `postgres`,
+    which is what makes refusing safe rather than a break for every existing release
+    (`D-2026-09-13-the-lock-is-not-the-bound-the-commit-is`).
+    """
+    refused = _render("--set", "config.CHEMCLAW_SESSION_STORE=memory")
+    assert refused.returncode != 0, (
+        "a release still renders on the memory session store, so every note write in it is "
+        f"unguarded across pods:\n{refused.stdout[:2000]}"
+    )
+    assert "CHEMCLAW_SESSION_STORE" in refused.stderr, refused.stderr
+
+    shipped = _render()
+    assert shipped.returncode == 0, shipped.stderr
+    assert 'CHEMCLAW_SESSION_STORE: "postgres"' in shipped.stdout, (
+        "the shipped defaults no longer state the session store the guard above requires"
+    )

@@ -419,11 +419,19 @@ class AgentSettings(BaseSettings):
     #
     # A separate number from `agent_max_tool_result_chars`, because it bounds a different resource.
     # That one is context — what a model is sent. This is storage: LangGraph writes the whole
-    # channel per superstep and again per version, so one 2 MB write measured 7,818 kB of
-    # `checkpoint_blobs` plus 7,815 kB of `checkpoint_writes` — **~15.6 MB, 7.8x** — and a turn has
-    # many supersteps. 200,000 characters is ~1.6 MB of checkpoint rows per superstep at that
-    # amplification, and it is a *total*: several files share it, the way a batch of tool calls
-    # shares `agent_max_tool_result_chars`, because the resource is the channel and not the file.
+    # channel per superstep and again per version, so one 2 MB write costs **20,712 kB of
+    # checkpoint rows above baseline, 10.4x** — and a turn has many supersteps. 200,000 characters
+    # is ~2 MB of checkpoint rows per superstep at that amplification, and it is a *total*:
+    # several files share it, the way a batch of tool calls shares `agent_max_tool_result_chars`,
+    # because the resource is the channel and not the file.
+    #
+    # **This comment shipped with a third, smaller figure for the same probe (~15.6 MB, 7.8x) and
+    # it was the discarded measurement**, not a disagreement worth splitting: the first attempt
+    # padded the 2 MB with `"x"` and measured TOAST compression rather than the write.
+    # `D-2026-09-12-a-helpers-scratch-file-crosses-into-its-callers-state` says so, `.env.example`
+    # already carried the corrected number, and only this line did not — one probe with two
+    # answers in the tree is the defect
+    # `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` names.
     agent_subagent_files_max_chars: int = Field(default=200_000, ge=0)
     agent_memory_enabled: bool = False
     # **What bounds the `store` table, which nothing did.** `durable/retention.py`'s register said

@@ -28,6 +28,18 @@ class BoSettings(BaseSettings):
     # `xtb_job_heartbeat_timeout_seconds` applies to calc's durable jobs, sized down for a
     # per-round budget an order of magnitude smaller.
     bo_activity_heartbeat_timeout_seconds: float = Field(default=60.0, gt=0)
+    # The shortest queue wait a campaign's dispatch may be given, whatever its share of the
+    # execution ceiling works out to. `BoCampaignWorkflow._queue_wait` divides what is left of the
+    # ceiling between the dispatches still to come so that the first step cannot eat the whole of
+    # it — a fairness device, since the sum already fits by being measured against what is left.
+    # Without a floor that division answers the wrong question: at the default ten-round spec it
+    # hands every dispatch 433.6 s instead of the 10,170 s queue-wide bound, so a `bo` worker
+    # rolling, scaled to zero or merely slow to pull expires `schedule_to_start` and kills a
+    # healthy campaign. This is the deployment's answer to "how long may a `bo` worker be absent
+    # before a campaign gives up on it", which is why it is a setting and not an arithmetic:
+    # fifteen minutes is comfortably above a rolling restart and far below the queue-wide ceiling
+    # the `min` in `_queue_wait` still applies.
+    bo_queue_wait_floor_seconds: float = Field(default=900.0, gt=0)
     # Seed for BoFire's random design + SOBO strategies, so a campaign is reproducible
     # (deterministic seeding + proposals) rather than flaky run-to-run.
     bo_seed: int = 42

@@ -19,7 +19,7 @@ import networkx as nx
 from pydantic import BaseModel, Field, computed_field
 
 from chemclaw.agent.authz import require_actor
-from chemclaw.agent.framing import frame_untrusted
+from chemclaw.agent.framing import SYSTEM_SPEECH_MARK, frame_untrusted
 from chemclaw.agent.tool_framing import defanged_payload
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
@@ -30,7 +30,7 @@ from chemclaw.ingest.eln.records import RECORD_TYPE, default_record_store
 from chemclaw.kg.analytics import GraphGaps, analyze
 from chemclaw.kg.git_writer import default_writer
 from chemclaw.kg.graph import build_graph, load_notes, neighborhood, note_in
-from chemclaw.kg.note import Note, Relation, external_record_id, resolves_outside_graph
+from chemclaw.kg.note import Note, Relation, external_record_ref, resolves_outside_graph
 from chemclaw.kg.record import record_note
 from chemclaw.kg.relations import DEFAULT_RELATION
 from chemclaw.kg.search import query_terms, term_coverage
@@ -381,10 +381,30 @@ async def _expand_record(note_id: str) -> NoteView:
 
     `created_by` is reported as `agent` because a program rendered the file, which is what that
     field has always meant; it no longer implies anything is waiting for review.
+
+    **A withdrawn entry resolves and says so, rather than disappearing.** `read()` deliberately
+    keeps serving a retracted row while `eligible()` stops, because a row is the only readable form
+    of an ELN run and a citation to a withdrawn one must not become a dangling link — a chemist
+    reading a campaign note that cites it has to be told the run was withdrawn, not that the id is
+    unknown. The notice is prepended as *system* text, outside the framed source body, so it cannot
+    be mistaken for something the ELN said; `valid_to` carries the same fact in the structured half,
+    which is what makes a retracted record fail `is_current` everywhere else.
     """
-    record = await default_record_store().read(external_record_id(note_id))
+    # A qualified citation names the source it was found in, so exactly one row can answer; a bare
+    # one — every citation committed before that spelling existed — reads across sources and is
+    # refused when two hold the id (`D-2026-09-13-a-citation-names-the-source-it-was-found-in`).
+    source, record_id = external_record_ref(note_id)
+    record = await default_record_store().read(record_id, source)
     if record is None:
         raise ChemclawError(f"no reaction record with id {note_id!r}")
+    body = frame_untrusted(record.body, note_id=note_id)
+    if record.retracted_at is not None:
+        notice = (
+            f"The source withdrew this ELN entry on {record.retracted_at:%Y-%m-%d}. It is no "
+            "longer current evidence and must not be cited as a precedent; it is shown because "
+            f"something already cites it. {SYSTEM_SPEECH_MARK}"
+        )
+        body = f"{notice}\n\n{body}"
     return NoteView(
         note=NoteRef(
             id=note_id,
@@ -395,11 +415,14 @@ async def _expand_record(note_id: str) -> NoteView:
             source=record.source,
             confidence=None,
             valid_from=record.performed_at,
-            valid_to=None,
+            # The withdrawal in the structured half, where every other reader of a `NoteRef` already
+            # looks for "this stopped being current". Not a claim that the run expired — `valid_to`
+            # is the field a reader has, and `retracted_at` is why it is set.
+            valid_to=record.retracted_at.date() if record.retracted_at else None,
         ),
         # Source text a chemist typed into an ELN, so it is framed as data for the same reason a
         # note body is: it reaches the model verbatim and must not be read as instruction.
-        body=frame_untrusted(record.body, note_id=note_id),
+        body=body,
         neighbors=[],
     )
 

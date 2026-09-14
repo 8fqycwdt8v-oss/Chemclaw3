@@ -77,8 +77,18 @@ def cited_links(text: str) -> list[tuple[str, str]]:
     return list(ordered)
 
 
-def note_id_for_reaction(record_id: str) -> str:
-    """The `reaction` note id for a fingerprint-index record id.
+#: What separates a source from an entry id inside a qualified `reaction-` citation.
+#:
+#: A `.` because `_SLUG` already admits it, so a qualified id is a legal note slug, a legal git ref
+#: component and a legal filename with no widening anywhere. It splits on the **first** occurrence,
+#: so an entry id containing dots survives and a *source* name containing one is refused at the
+#: point it would be spelled — a source name is a token in `CHEMCLAW_DATA_SOURCES` and an
+#: unsplittable id is a citation that silently names the wrong run.
+_SOURCE_SEPARATOR = "."
+
+
+def note_id_for_reaction(record_id: str, source: str = "") -> str:
+    """The `reaction` note id for a fingerprint-index record id, qualified by its source.
 
     One definition, because three callers were each spelling `f"reaction-{id}"` themselves and one
     of them did not. `connectors.rxnfp.similar_reactions` returned the raw index key while
@@ -86,23 +96,41 @@ def note_id_for_reaction(record_id: str) -> str:
     straight to `expand_note` was told the note did not exist — while it sat on disk under the
     prefixed name. Two spellings of one id is how a search stops reaching the thing it found.
 
-    **There is no source-qualified form, and its absence is deliberate.** One existed here for a
-    day: an optional `source` argument spelling `reaction-<source>.<id>`, so that two sites behind
-    one entry id could be cited apart — the read `ingest.eln.records._one_of` refuses rather than
-    guessing. Nothing in `src/` ever passed it. Every reader that would have to *resolve* such an
-    id — `agent.graph_tools.expand_note`, `agent.protocol_tools`, `ingest.eln.records.read`,
-    `ingest.labels.record.record_phase`, `retrieval.retrievers`, `connectors.rxnfp.tools` — still
-    spells and strips the bare form, so the qualified id it built resolved to nothing anywhere, and
-    its own docstring said so. A spelling no reader accepts is not a spelling; it is a claim that
-    two sites can be told apart in a citation, which is exactly the shape `reject_widening` and
-    `map_to_hpc_identity` were deleted for.
+    **The qualified form exists now, and what makes it real is that the readers take it.** One
+    existed here for a day and was deleted, correctly: nothing passed it, every reader still
+    spelled and stripped the bare form, and a spelling no reader accepts is a claim that two sites
+    can be told apart rather than a way of telling them apart. Migration `063` had already keyed
+    the fingerprint index on `(source, id)`, so a two-source deployment returned **two hits citing
+    one id** and `ingest.eln.records._one_of` raised `AmbiguousReactionRecord` the moment a reader
+    expanded either — loud rather than wrong, and still not an answer. `Match.source` is what the
+    search knows and the citation did not carry.
 
-    The need is real and unchanged — `_one_of`'s refusal is still a chemist unable to open a run a
-    search just found — and it is a knowledge-graph *identity* change: the readers, the stored
-    citations and the validator move together or not at all. That is its own decision, and it starts
-    from the six readers above, not from a citation spelling waiting for them.
+    **The bare form is not deprecated and must keep resolving.** Every citation already committed
+    to `knowledge/` and every `reaction_labels.citation` row written before this spells it, so the
+    resolvers (`kg.note.external_record_ref`, `ingest.eln.records.read`) accept both: a qualified
+    id names one source's row exactly, and a bare one resolves through `_one_of`, which is
+    unchanged — it still refuses when two sources hold the id, because a bare citation genuinely
+    does not name one run.
+
+    Args:
+        record_id: The ELN's own entry id, as the store and the index key it.
+        source: The registry source name that transcribed it — `Match.source`, or the `source`
+            argument an ingest already carries. Empty produces the bare, unqualified form.
+
+    Returns:
+        `reaction-<source>.<id>`, or `reaction-<id>` when no source is given.
+
+    Raises:
+        ValueError: `source` contains the separator, so the id could not be split back apart.
     """
-    return f"reaction-{record_id}"
+    if not source:
+        return f"reaction-{record_id}"
+    if _SOURCE_SEPARATOR in source:
+        raise ValueError(
+            f"ingest source {source!r} contains {_SOURCE_SEPARATOR!r}, so a "
+            "`reaction-<source>.<id>` citation could not be split back into its two halves"
+        )
+    return f"reaction-{source}{_SOURCE_SEPARATOR}{record_id}"
 
 
 # Id namespaces that resolve *outside* the markdown graph (D-2026-08-25).
@@ -130,18 +158,47 @@ def resolves_outside_graph(note_id: str) -> bool:
     return note_id.startswith(EXTERNAL_ID_PREFIXES)
 
 
+def external_record_ref(note_id: str) -> tuple[str, str]:
+    """The `(source, record_id)` an external citation names — `("", id)` for the bare form.
+
+    The inverse of `note_id_for_reaction`, and the pair rather than the id alone because a
+    qualified citation's whole point is that the source is part of what it names: a resolver handed
+    only the id back would ask the store the same ambiguous question the qualification was written
+    to answer.
+
+    Split on the **first** separator, so an entry id containing dots is returned whole.
+    `note_id_for_reaction` refuses a source containing one, which is what makes that split exact
+    rather than a guess.
+
+    A citation with no separator is bare — every one committed to `knowledge/` before this — and
+    comes back with an empty source, which every caller reads as "ask across all sources", the
+    behaviour it has always had.
+    """
+    for prefix in EXTERNAL_ID_PREFIXES:
+        if note_id.startswith(prefix):
+            stripped = note_id[len(prefix) :]
+            source, separator, record_id = stripped.partition(_SOURCE_SEPARATOR)
+            return (source, record_id) if separator and record_id else ("", stripped)
+    return "", note_id
+
+
 def external_record_id(note_id: str) -> str:
-    """The store-side id behind an external citation — the prefix stripped, whichever matched.
+    """The store-side id behind an external citation — the prefix and any source stripped.
 
     `unresolved_citations` used to spell `removeprefix("reaction-")` twice against a constant that
     is a *tuple*, so a second entry in `EXTERNAL_ID_PREFIXES` would have queried the store with an
     unstripped id and reported every such citation missing. One function, driven by the constant,
     so growing the namespace list cannot silently break the lookup.
+
+    The id half of `external_record_ref`, for the one caller that asks only whether a record
+    *exists* (`kg.validate.unresolved_citations`). **That is a deliberately weaker check than a
+    resolve, and saying so is the point**: a qualified citation whose source does not hold the id
+    passes the validator when another source does, and is then refused at read time by
+    `records.read`, loudly, naming the id. The cut is drawn there rather than closed because
+    `records.known` answers a page of ids with one indexed lookup, and this validator's own
+    message says what it asked.
     """
-    for prefix in EXTERNAL_ID_PREFIXES:
-        if note_id.startswith(prefix):
-            return note_id[len(prefix) :]
-    return note_id
+    return external_record_ref(note_id)[1]
 
 
 def note_relative_path(note_type: str, note_id: str) -> str:

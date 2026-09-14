@@ -521,3 +521,80 @@ def test_evicting_a_memory_is_counted_and_logged() -> None:
     evicted, held = asyncio.run(_run())
     assert held == cap
     assert evicted == 3, f"{evicted} evictions counted for three files over the cap"
+
+
+def test_the_memories_route_the_wiring_installs_is_the_bounded_one(
+    skills: CompositeBackend,
+) -> None:
+    """The cap has to be on the route the turn actually gets, not only on a class.
+
+    **A vacuity, measured.** Both cap tests below construct their own `BoundedStoreBackend` and
+    write through it — which proves the class enforces a cap and says nothing about whether
+    `scratchpad_backend`, the one function `build_langgraph_agent` calls, installs that class.
+    Mutated to `StoreBackend(` — the cap absent in production, every memory namespace unbounded
+    again — `tests/test_scratchpad.py` passed 17 of 17, and six related files passed 145.
+
+    So this asserts the type of the route, which is the one thing the mutation changes.
+    """
+    token = set_current_identity("wiring-probe", frozenset())
+    try:
+        route = scratchpad_backend(skills, store=object()).routes[MEMORY_ROOT]
+    finally:
+        reset_current_identity(token)
+    assert isinstance(route, scratchpad.BoundedStoreBackend), (
+        f"the /memories/ route is a {type(route).__name__}, so nothing bounds a namespace "
+        "written through the shipped wiring"
+    )
+
+
+def test_eviction_takes_the_least_recently_updated_even_far_past_the_cap() -> None:
+    """The policy this cap states, driven in the one case that used to invert it.
+
+    **The defect.** `asearch` with no query answers most-recently-updated first, so reading
+    `cap + _EVICTION_PAGE` rows and taking the oldest of *that page* selects a middle band: the
+    newest of the surplus, never the tail. Driven on real Postgres with 89 files written
+    oldest-first and a cap of 5, one bounded write deleted **021-084** and kept **000-020** —
+    every one of the twenty-one least recently updated files retained, and the twenty-one most
+    recent of the surplus destroyed, which is the exact inverse of "least recently updated
+    evicted on write" as stated in the code, in `durable/retention.py`, in `.env.example` and in
+    the ADR.
+
+    The namespace is deliberately more than `_EVICTION_PAGE` past its cap, because that is the
+    case the old spelling could not see and the existing tests write fifteen files — always
+    inside one page. Written through `store.aput` while seeding, so eviction runs exactly once,
+    on the one write under test.
+    """
+    cap = 5
+    seeded = scratchpad._EVICTION_PAGE + cap + 20
+
+    async def _run() -> list[str]:
+        await migrated_db_or_skip()
+        patch = pytest.MonkeyPatch()
+        patch.setattr(settings, "agent_memory_max_files", cap)
+        try:
+            store = await scratchpad.memory_store()
+            namespace = scratchpad.memory_namespace("evict-order-probe")
+            for stale in await store.asearch(namespace, limit=1000):
+                await store.adelete(namespace, stale.key)
+            for index in range(seeded):
+                await store.aput(namespace, f"/memories/f-{index:03d}.md", {"content": "x"})
+            backend = scratchpad.BoundedStoreBackend(
+                namespace=lambda _runtime: namespace, store=store
+            )
+            await backend.awrite("/memories/newest.md", "y")
+            held = sorted(item.key for item in await store.asearch(namespace, limit=1000))
+            for item in await store.asearch(namespace, limit=1000):
+                await store.adelete(namespace, item.key)
+            return held
+        finally:
+            patch.undo()
+            await ckpt.close_checkpointer()
+
+    survivors = asyncio.run(_run())
+    expected = sorted(
+        [
+            "/memories/newest.md",
+            *(f"/memories/f-{i:03d}.md" for i in range(seeded - cap + 1, seeded)),
+        ]
+    )
+    assert survivors == expected, survivors

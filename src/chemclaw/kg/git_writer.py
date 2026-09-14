@@ -587,10 +587,18 @@ class GitNoteWriter:
         **What it is gated on, and what that leaves.** `session_store` defaults to `memory`, and a
         memory-store deployment (the CLI, tests) is single-process by construction, so skipping the
         lock there is right rather than a gap. The shipped chart sets `CHEMCLAW_SESSION_STORE:
-        postgres`, so a multi-pod OpenShift deployment does take it. What is uncovered is the
-        combination in between — several writer pods with a memory session store — which is the same
-        misconfiguration `values.yaml` flags for `framingEnvelopeSecret`, and `BACKLOG.md` carries
-        the open question of refusing it at startup.
+        postgres`, so a multi-pod OpenShift deployment does take it. The combination in between —
+        several writer pods with a memory session store — **is refused where it is knowable**: a
+        process cannot count its own replicas and a chart can, so `templates/config.yaml` fails the
+        render of any release whose `CHEMCLAW_SESSION_STORE` is not `postgres`
+        (`D-2026-09-13-the-lock-is-not-the-bound-the-commit-is`). What is left uncovered is a
+        multi-process deployment somebody assembles without the chart.
+
+        **And this lock is not what bounds a write.** Measured at a 10,000-note corpus against a
+        real remote: the lock is 14.4 ms, flat in the corpus, against 298.8 ms of git — 4.8%. The
+        bound is one commit and one push per note, and batching is what would move it (31.6 ms per
+        note at ten per commit, 8.5 at fifty). Said here because the row that named this lock
+        pointed at the cheapest twentieth of the problem.
 
         Its consequence is now much smaller than it was, which is why this is a note rather than a
         second mechanism: two pods racing produce a divergence, and `_replay_our_unpushed_commits`

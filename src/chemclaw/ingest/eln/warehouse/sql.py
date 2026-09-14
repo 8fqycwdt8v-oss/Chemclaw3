@@ -42,10 +42,27 @@ def watermark_expression(entry: EntryBinding) -> str:
     contract is that an amended entry counts as new (`chemclaw.ingest.eln.adapter.entry_window`
     says so, and both file-drop adapters honour it). Filtering on creation alone would ingest a run
     once and never see the correction a chemist made to it the following week.
+
+    **A declared `retracted_at:` joins it, because a withdrawal is the same kind of fact.** A site
+    that stamps its retraction column without touching its amendment column leaves the withdrawn
+    row behind the cursor forever — the tombstone is written at the site and fetched by nobody,
+    which is a producer nobody can write
+    (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`).
+
+    `GREATEST(W, COALESCE(retracted, W))` rather than `GREATEST(W, retracted)`, and the nesting is
+    not decoration: warehouses disagree about `GREATEST` over a NULL — Postgres and Databricks skip
+    it, others propagate it — and a propagating one would move every *un*-retracted row's watermark
+    to NULL and stop the source dead. Neither argument here is ever NULL unless `W` is, so the
+    expression means `max(W, retracted)` under both readings. This module names no vendor
+    (`D-2026-08-26-the-driver-s-signature-is-the-schema`), so it may not assume either one.
     """
     if entry.modified_at:
-        return f"COALESCE({entry.modified_at}, {entry.created_at})"
-    return entry.created_at
+        window = f"COALESCE({entry.modified_at}, {entry.created_at})"
+    else:
+        window = entry.created_at
+    if entry.retracted_at:
+        return f"GREATEST({window}, COALESCE({entry.retracted_at}, {window}))"
+    return window
 
 
 def entry_statement(

@@ -588,3 +588,49 @@ def test_both_entrypoints_of_one_walk_refuse_when_this_deployment_publishes_nowh
     assert backfill_publications.main([]) == 1, (
         "the operator's half of the same walk has always refused; the two must not disagree"
     )
+
+
+def test_the_jobs_walk_carries_the_note_the_run_produced(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The backfill reads the very row `job_records.note_id` sits in, and dropped it.
+
+    The live publish path and this one are two producers of one field, and both had the value in
+    hand (`D-2026-09-13-a-publication-carries-the-link-the-system-already-holds`). This is the half
+    that re-publishes history: a deployment turning a sink on for the first time gets its whole
+    corpus through here, so a walk that drops the note link drops it for every row ever computed.
+
+    A second row with no note is walked beside it, so the assertion is a difference — empty means
+    "this run produced none", and a walk that hard-coded the empty string would pass on one row.
+    """
+    _publishing(monkeypatch)
+    captured: list[Any] = []
+
+    def _capture(**kwargs: Any) -> list[Any]:
+        captured.append(kwargs["publication"])
+        return [object()]
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        at = datetime(2026, 1, 1, tzinfo=UTC)
+        async with db.connection(settings.postgres_dsn) as conn:
+            await _reset(conn)
+            for job_id, note_id in (("n1", "note-from-the-run"), ("n2", "")):
+                await _insert_composite(
+                    conn,
+                    job_id,
+                    at,
+                    "compute_reaction_energy",
+                    "ReactionEnergyResult",
+                    {"method": "GFN2-xTB"},
+                )
+                await conn.execute(
+                    "UPDATE job_records SET note_id = %s WHERE job_id = %s", (note_id, job_id)
+                )
+            await conn.commit()
+        monkeypatch.setattr("chemclaw.publish.outbox.project_payload", _capture)
+        await backfill.backfill_jobs(dry_run=True, batch=10)
+
+    asyncio.run(_run())
+
+    assert [publication.note_id for publication in captured] == ["note-from-the-run", ""], (
+        "the walk that re-publishes a deployment's whole history drops the note link on every row"
+    )

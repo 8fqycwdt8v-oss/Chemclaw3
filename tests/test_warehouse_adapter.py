@@ -174,6 +174,40 @@ def test_the_cursor_filters_on_the_later_of_created_and_modified() -> None:
     assert params[0] == since
 
 
+def test_a_declared_withdrawal_column_is_in_the_cursor_and_an_undeclared_one_is_not() -> None:
+    """A retraction the cursor cannot see is a tombstone written at the site and fetched by nobody.
+
+    Asserted on the emitted SQL for the same reason the amendment case above is, and because the
+    fake warehouse mirrors the watermark's *semantics* rather than parsing the clause — so only
+    this pins the two together. Both directions: a binding that declares the column filters on it,
+    and one that does not is byte-for-byte unchanged, because every site without a withdrawal
+    column must keep the predicate it had.
+
+    `COALESCE(retracted, W)` inside the `GREATEST` is the load-bearing half: warehouses disagree
+    about `GREATEST` over a NULL, and under the propagating reading the bare form would move every
+    un-retracted row's watermark to NULL and stop the source dead. This module names no vendor, so
+    it may not assume the forgiving one.
+    """
+    binding = _binding()
+    binding["ingest"]["entry"]["retracted_at"] = "RETRACTED_TS"
+    _fetch(binding, _rows())
+    window = "COALESCE(LAST_MODIFIED_TS, CREATED_TS)"
+    withdrawn = f"GREATEST({window}, COALESCE(RETRACTED_TS, {window}))"
+
+    statement, _ = _primed().executed[0]
+    assert f"{withdrawn} >= ?" in statement
+    assert f"ORDER BY {withdrawn} ASC, REACTION_ID ASC" in statement
+
+    # `open_warehouse` memoises per connection block, so the second fetch would otherwise be served
+    # the fake the first one primed and record nothing at all.
+    forget_open_warehouses()
+    _fetch(_binding(), _rows())
+    plain, _ = _primed().executed[0]
+    assert "RETRACTED_TS" not in plain and "GREATEST" not in plain, (
+        "a site with no withdrawal column had its cursor predicate rewritten anyway"
+    )
+
+
 def test_a_source_without_amendments_filters_on_creation_alone() -> None:
     """No `modified_at` declared means no COALESCE — the predicate degrades, it does not break."""
     binding = _binding()
@@ -547,7 +581,12 @@ def test_a_page_of_amended_rows_does_not_stall_the_sync_forever() -> None:
 
 
 def _drain(
-    adapter: WarehouseElnAdapter, since: datetime, *, batch: int, chunks: int
+    adapter: WarehouseElnAdapter,
+    since: datetime,
+    *,
+    batch: int,
+    chunks: int,
+    records: InMemoryReactionRecordStore | None = None,
 ) -> tuple[set[str], list[str]]:
     """Run `ElnSyncWorkflow`'s own chunk loop against `adapter`, returning what it ingested.
 
@@ -555,13 +594,17 @@ def _drain(
     when to come back for another chunk (`has_more`), and its wedge guard decides when a source
     that reports more work but no cursor advance is stopped and said out loud. A test that called
     `sync_entries` directly would see neither.
+
+    `records` is supplied by a caller that needs to read what was transcribed rather than only
+    which ids were, and it survives between calls — which is what lets one test drive a first sync
+    and then a withdrawal against the same corpus.
     """
 
     async def _run() -> tuple[set[str], list[str]]:
         rxn, mol, rec = (
             InMemoryFingerprintStore(),
             InMemoryFingerprintStore(),
-            InMemoryReactionRecordStore(),
+            records or InMemoryReactionRecordStore(),
         )
         label_index = InMemoryLabelIndex()
         seen: set[str] = set()
@@ -825,3 +868,84 @@ def test_a_bounded_chunk_asks_the_warehouse_for_the_chunk_and_not_for_the_page()
     entries, warehouse = _drive(None)
     assert _entry_limits(warehouse) == [150]
     assert len(entries) == 120
+
+
+def test_a_site_that_withdraws_a_row_reaches_the_record_without_touching_its_amendment_column() -> (
+    None
+):
+    """The live connector's producer half, through the wiring a scheduled sync actually runs.
+
+    `RawEntry.retracted_at` is the only thing that may set `reaction_records.retracted_at`, so a
+    binding that cannot name the site's withdrawal column makes the whole five-part retraction
+    change unreachable in every shipped configuration — a producer nobody can write
+    (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`).
+
+    Driven through `_drain`, which is the workflow's own chunk loop over `_BoundedIngest`. That
+    matters twice over: `BACKLOG.md` recorded this half as needing `_BoundedIngest` to expose a
+    public `inner` for a capability walk, and it does not — a field on `RawEntry` rides the wrapper
+    through untouched, which only a run through the wrapper can show.
+
+    The withdrawal deliberately leaves `LAST_MODIFIED_TS` alone, which is the case the watermark
+    exists for: the cursor has passed the row's creation, so a source stamping only its retraction
+    column would never re-export it. `RX-KEPT` is created alongside and never withdrawn, so the
+    assertion is a difference rather than an emptiness.
+    """
+    created = datetime(2026, 5, 1, tzinfo=UTC)
+    pulled = datetime(2026, 8, 1, tzinfo=UTC)
+    binding = _binding()
+    binding["ingest"]["entry"]["retracted_at"] = "RETRACTED_TS"
+    rows = {
+        "RX-PULLED": dict(_reaction_row("RX-PULLED", created), RETRACTED_TS=None),
+        "RX-KEPT": dict(_reaction_row("RX-KEPT", created), RETRACTED_TS=None),
+    }
+    charges = [row for entry in rows for row in _charge_rows(entry)]
+
+    def _prime() -> None:
+        # Memoised per connection block, so a second prime without this is simply ignored and the
+        # run below would be served the first fake's rows.
+        forget_open_warehouses()
+        warehouse_fake.prime_warehouse(
+            warehouse_fake.WatermarkWarehouse(
+                {"V_REACTION": list(rows.values()), "V_CHARGE": charges},
+                entry_relation="V_REACTION",
+                created_at="CREATED_TS",
+                modified_at="LAST_MODIFIED_TS",
+                key="REACTION_ID",
+                retracted_at="RETRACTED_TS",
+            )
+        )
+
+    records = InMemoryReactionRecordStore()
+    _prime()
+    first, _ = _drain(
+        WarehouseElnAdapter(binding=binding, name="eln-test"),
+        created - timedelta(days=1),
+        batch=10,
+        chunks=2,
+        records=records,
+    )
+    assert first == {"RX-PULLED", "RX-KEPT"}, "neither row was ingested, so nothing below is a test"
+    assert asyncio.run(records.retracted([("eln-databricks", "RX-PULLED")])) == set()
+
+    rows["RX-PULLED"] = dict(rows["RX-PULLED"], RETRACTED_TS=pulled)
+    _prime()
+    # The cursor now sits past the creation of both rows and past any amendment, which is exactly
+    # where a scheduled sync is when a site withdraws something a month later.
+    second, _ = _drain(
+        WarehouseElnAdapter(binding=binding, name="eln-test"),
+        created + timedelta(days=1),
+        batch=10,
+        chunks=2,
+        records=records,
+    )
+
+    assert second == {"RX-PULLED"}, (
+        "the withdrawn row was not re-fetched, so its tombstone is written at the site and read "
+        "by nobody — and the row that was not withdrawn must not come back either"
+    )
+    stored = asyncio.run(records.read("RX-PULLED"))
+    assert stored is not None and stored.retracted_at == pulled
+    assert asyncio.run(
+        records.retracted([("eln-databricks", "RX-PULLED"), ("eln-databricks", "RX-KEPT")])
+    ) == {("eln-databricks", "RX-PULLED")}
+    assert asyncio.run(records.eligible(["RX-PULLED", "RX-KEPT"], {})) == {"RX-KEPT"}

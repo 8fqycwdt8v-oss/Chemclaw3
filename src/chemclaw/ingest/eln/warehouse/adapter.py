@@ -317,6 +317,13 @@ class WarehouseElnAdapter:
                 _optional_timestamp(row.get(entry.modified_at)) if entry.modified_at else None
             ),
             payload=bundle,
+            # The site's own withdrawal, when the binding names the column that carries it. Absent
+            # means "this source does not report withdrawals", never "withdrawn" — the row's
+            # disappearance from a page says nothing at all
+            # (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`).
+            retracted_at=(
+                _optional_timestamp(row.get(entry.retracted_at)) if entry.retracted_at else None
+            ),
         )
 
     def map_to_ord(self, raw: RawEntry) -> OrdReaction:

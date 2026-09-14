@@ -233,12 +233,22 @@ def dispatches_left(rounds_remaining: int, seeding: bool) -> int:
 class CampaignBudgetSpent(Exception):
     """This campaign's execution budget can no longer fund another activity.
 
-    Raised by `_queue_wait` and caught by `run`, which ends the campaign with what it has. Not a
-    workflow failure: the evaluations already paid for are real, and a campaign that ran out of
-    wall clock has a best point and a history to return. What it must *not* do is dispatch one more
-    activity — the execution timeout would fire mid-flight, and a `WorkflowExecutionTimedOut`
+    Raised by `_queue_wait` when the execution budget can no longer fund a wait plus an attempt.
+    Not a workflow failure: the evaluations already paid for are real, and a campaign that ran out
+    of wall clock has a best point and a history to return. What it must *not* do is dispatch one
+    more activity — the execution timeout would fire mid-flight, and a `WorkflowExecutionTimedOut`
     reaches no workflow code, names neither the queue nor the reason, and pushes the chemist
     nothing.
+
+    **Where it is caught is `run`'s round loop and its terminal write, and saying "caught by `run`"
+    unqualified was how a regression hid.** The loop's guard is
+    `_cannot_afford_another_dispatch`, which asks the same question on the same basis before any
+    of a round's three dispatches; the terminal `record_campaign_run` is wrapped because it runs
+    after the guard's last chance. The seed's two dispatches are neither guarded nor wrapped, and
+    that is sound only because they run with the budget untouched: `Settings` refuses a ceiling
+    that cannot fund one attempt, so a fresh run's first dispatch is affordable by construction
+    and a resumed run does not seed. It was *not* sound while affordability was read off the
+    share — see `_queue_wait`.
     """
 
 
@@ -306,14 +316,30 @@ class BoCampaignWorkflow:
             # (`durable/connector_job.child_execution_timeout`), so there is no budget to spend
             # down and the queue-wide bound is the whole of it.
             return queue_bound
+        remaining = budget - self._spent()
+        # **Affordability is a property of what is left, never of the share**, and reading it off
+        # the share is what made a `n_rounds >= 25` campaign fail before doing any work: the
+        # divisor is `3n + 3`, so at 25 rounds the first dispatch's share of a full 25,200 s
+        # ceiling fell under one attempt plus its overhead and `propose_initial` — the very first
+        # activity, with 25,200 s of budget untouched in front of it — raised instead of running.
+        # `dispatches_left`'s own docstring already said why that cannot be right ("being wrong
+        # here is a fairness bug, never a safety one"): the sum fits because each dispatch is
+        # measured against what is *left*, so the share may narrow a wait and must never refuse one.
+        affordable = remaining_queue_wait_timeout(remaining, settings.bo_activity_timeout_seconds)
+        if affordable is None:
+            raise CampaignBudgetSpent
         share = max(self._dispatches_left, 1)
         self._dispatches_left = share - 1
-        left = remaining_queue_wait_timeout(
-            (budget - self._spent()) / share, settings.bo_activity_timeout_seconds
-        )
-        if left is None:
-            raise CampaignBudgetSpent
-        return min(queue_bound, left)
+        fair = remaining_queue_wait_timeout(remaining / share, settings.bo_activity_timeout_seconds)
+        # **And a share below the floor is not a wait.** Sharing made the common case worse to
+        # improve one where the campaign fails either way: at the default ten-round spec every
+        # dispatch went from the 10,170 s queue-wide bound to 433.6 s, so a `bo` worker rolling,
+        # scaled to zero or slow to pull expires `schedule_to_start` and the campaign dies — the
+        # misdiagnosis `connector_queue_wait_timeout`'s own docstring warns about. The floor is a
+        # deployment fact (how long a worker may be absent), so it is configured rather than
+        # derived, and the `min` above keeps it inside both bounds that actually have to hold.
+        floor = timedelta(seconds=settings.bo_queue_wait_floor_seconds)
+        return min(queue_bound, affordable, max(fair or timedelta(0), floor))
 
     def _cannot_afford_another_dispatch(self) -> bool:
         """Whether this campaign's execution ceiling can still fund a wait plus an attempt.
@@ -322,16 +348,19 @@ class BoCampaignWorkflow:
         decrements `_dispatches_left` as part of handing one out, and a probe that did the same
         would make the round it is probing for smaller than the round it then runs.
 
+        It asks the same question `_queue_wait` raises on, on the same basis — what is *left*,
+        undivided. Reading it off the share instead made the two disagree in the direction that
+        stops a campaign the dispatcher would happily have funded.
+
         Returns:
             True when the budget is spent and the loop must end with what it has.
         """
         budget = workflow.info().execution_timeout
         if budget is None:
             return False
-        share = max(self._dispatches_left, 1)
         return (
             remaining_queue_wait_timeout(
-                (budget - self._spent()) / share, settings.bo_activity_timeout_seconds
+                budget - self._spent(), settings.bo_activity_timeout_seconds
             )
             is None
         )
@@ -587,6 +616,10 @@ class BoCampaignWorkflow:
         # from the rows it left, which is the guarantee that write exists for. Attempting it
         # anyway would trade a named, complete answer for a `WorkflowExecutionTimedOut` that
         # reaches nobody and loses the whole run.
+        # One dispatch is left and the divisor has to say so. `_dispatches_left` was last re-synced
+        # at the top of a round that has since finished, so without this the terminal write asks
+        # `_queue_wait` at `3R + 1` and is handed a share sized for rounds that will never run.
+        self._dispatches_left = 1
         try:
             campaign_id: str | None = await workflow.execute_activity(
                 record_campaign_run,
@@ -626,11 +659,19 @@ class BoCampaignWorkflow:
             if campaign_id
             else "its terminal record could not be written, but every completed round is on file"
         )
-        if budget_spent:
+        if budget_spent and rounds_remaining > 0:
             ending = (
                 f"{ending}. It stopped with {rounds_remaining} round(s) unrun because the job's "
                 "execution ceiling was spent — mostly waiting for a worker on the 'bo' queue. "
                 "Re-run it to continue from here"
+            )
+        elif budget_spent:
+            # Every round ran and only the terminal write could not be funded. Saying "it stopped
+            # with 0 round(s) unrun ... re-run it to continue from here" invites a chemist to
+            # re-run a campaign that has nothing left to do.
+            ending = (
+                f"{ending}. Every round ran; only the terminal record was left unfunded when the "
+                "job's execution ceiling was spent"
             )
         return ConnectorJobResult(
             summary=(

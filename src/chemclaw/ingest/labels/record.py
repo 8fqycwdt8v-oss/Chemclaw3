@@ -34,7 +34,10 @@ def record_phase(reaction: OrdReaction, source: str) -> ReactionLabel:
         source=source,
         reaction_id=reaction.reaction_id,
         record_smiles=reaction.reaction_smiles(),
-        citation=note_id_for_reaction(reaction.reaction_id),
+        # Qualified by the source, which this row already carries: "a precedent the chemist
+        # cannot follow back is not a precedent", and a bare id two sites both used follows back
+        # to a refusal (`D-2026-09-13-a-citation-names-the-source-it-was-found-in`).
+        citation=note_id_for_reaction(reaction.reaction_id, source),
         performed_on=reaction.performed_at,
         temperature_c=reaction.temperature_c,
         time_h=reaction.time_h,

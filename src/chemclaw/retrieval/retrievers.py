@@ -469,6 +469,10 @@ class ReactionMetadata(Protocol):
         """Which of `reaction_ids` pass `filters` and are current."""
         ...
 
+    async def retracted(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
+        """Which of `refs` — `(ingest_source, reaction_id)` — the source has reported withdrawn."""
+        ...
+
 
 class FingerprintReactionRetriever:
     """Retrieve reactions structurally similar to a reaction-SMILES query. A `SourceRetriever`."""
@@ -516,7 +520,14 @@ class FingerprintReactionRetriever:
         single unwanted neighbour cost a wanted one, and a filtered search would return fewer hits
         the *better* the index got at surfacing near-duplicates.
 
-        With no filter the behaviour is byte-for-byte what it was, pending-note citation included.
+        **A withdrawn run is dropped on both paths, and the unfiltered one is why this is a second
+        question rather than the same one.** `_eligible` drops a match whose record is missing,
+        deliberately, because a record nobody can read cannot be shown to satisfy a narrowing — and
+        an unfiltered sweep must still surface every structural hit the index holds, so it cannot go
+        through that gate. `retracted` is the positive form: it asks only what a withdrawal is, over
+        this page of ids, against `066`'s partial index. Measured before this, with the producer in
+        place and the readers absent: `is_current` False, `eligible()` empty, and the retracted
+        reaction still returned by the ordinary `gather_evidence` sweep, which is unfiltered.
         """
         wanted = {key: filters[key] for key in _NOTE_FILTERS if filters.get(key) is not None}
         page = settings.fingerprint_top_k
@@ -534,10 +545,17 @@ class FingerprintReactionRetriever:
             return []
         if wanted:
             matches = await self._eligible(matches, wanted, page)
+        else:
+            asked = [(match.source, match.id) for match in matches]
+            withdrawn = await self._records.retracted(asked)
+            matches = [match for match in matches if (match.source, match.id) not in withdrawn]
         return [
             EvidenceChunk(
                 content=f"Similar reaction {match.label} (Tanimoto {match.similarity:.2f})",
-                source_note_id=note_id_for_reaction(match.id),
+                # Qualified by the source the index matched in, because two sites behind one
+                # entry id are two hits and a bare id names both and neither
+                # (`D-2026-09-13-a-citation-names-the-source-it-was-found-in`).
+                source_note_id=note_id_for_reaction(match.id, match.source),
                 retriever=self.name,
                 # Structural hits score by their Tanimoto similarity — a closer precedent survives
                 # truncation first (KM-5). Clamped to [0, 1] to stay a valid chunk score.

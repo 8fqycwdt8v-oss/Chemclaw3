@@ -134,7 +134,9 @@ async def read_corpus() -> CorpusRead:
                     continue
             if not fetch_was_truncated(adapter):
                 break
-            since = max(entry_window(raw.created_at, raw.modified_at) for raw in fresh)
+            since = max(
+                entry_window(raw.created_at, raw.modified_at, raw.retracted_at) for raw in fresh
+            )
     if skipped:
         logger.warning(
             "memory corpus read is incomplete: %d entr(y/ies) could not be mapped, so this pass "

@@ -118,6 +118,19 @@ class EntryBinding(BaseModel):
             "alone silently drops every correction a chemist ever makes to a recorded run."
         ),
     )
+    retracted_at: str = Field(
+        default="",
+        description=(
+            "The column the site stamps when it withdraws an entry. Declare it whenever the "
+            "source has one: it is the only thing that may set `reaction_records.retracted_at`, "
+            "which is what stops a withdrawn run answering as current evidence. Never inferred "
+            "from a row's disappearance — a fetch is a delta and an absent row is what every "
+            "already-ingested entry looks like. It joins the cursor's watermark for the same "
+            "reason `modified_at` does: a site that stamps this without touching its amendment "
+            "column would leave the withdrawn row behind the cursor forever, so the tombstone "
+            "would be written at the site and fetched by nobody."
+        ),
+    )
     where: str = Field(
         default="",
         description=(
@@ -159,6 +172,8 @@ class EntryBinding(BaseModel):
         _check_identifier(self.created_at, "entry created_at")
         if self.modified_at:
             _check_identifier(self.modified_at, "entry modified_at")
+        if self.retracted_at:
+            _check_identifier(self.retracted_at, "entry retracted_at")
         return self
 
 

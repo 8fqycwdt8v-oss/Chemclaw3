@@ -96,6 +96,10 @@ Run `make kg-validate` after any edit: it checks schema validity, duplicate ids,
 directory against id and type, dangling links, malformed link targets, unknown note types, unknown
 relations, relation direction against `RELATION_SIGNATURES` — and, when a database is reachable
 (`python -m chemclaw.cli.validate_kg`), that every `[[reaction-…]]` citation names a record the
-transcription store holds. The hazard gate it once ran was retired with
+transcription store holds — **by id**, so a `[[reaction-<source>.<id>]]` whose source does not hold
+that id passes here and is refused, loudly, at read time
+(`D-2026-09-13-a-citation-names-the-source-it-was-found-in`). Both spellings resolve: the bare form
+is what every citation committed so far uses, and the qualified one is what a search now writes,
+because two sites may legitimately use one entry id and a bare citation then names neither run. The hazard gate it once ran was retired with
 `D-2026-08-15-safety-is-a-tool-not-a-gate`; procedure safety is the reviewing human's judgment,
 assisted by the `safety` MCP server as a tool.
