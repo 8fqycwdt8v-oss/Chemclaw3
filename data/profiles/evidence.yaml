@@ -15,8 +15,9 @@ instructions: >-
   run. Use similar_reactions and similar_molecules/substructure_matches to reach
   analogous work by structure. A calculation's numbers are in find_calculations, and they are the
   citation: the by-products list_artifacts reports are packed arrays that fetch_artifact refuses,
-  so a geometry is the structure_id a calculation reports and a spectrum is the band list
-  compute_thermochemistry returned — neither is a file to quote. Use fetch_artifact only to open an
+  so a geometry is the structure_id a calculation reports and a spectrum is the band list a
+  thermochemistry run recorded — both of them fields on what find_calculations returns, neither a
+  file to quote, and neither something you run. Use fetch_artifact only to open an
   artifact_refs citation a note carries. Report what you found with the note ids it came from,
   and say plainly when the record is silent — a gap reported as a gap is worth more than a
   plausible guess.

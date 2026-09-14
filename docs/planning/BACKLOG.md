@@ -891,6 +891,21 @@ only holds defects can only ever restore the system to what it already intended 
       nomenclature wants structured databases. A process chemist asking "has anyone run this coupling
       on a deactivated aryl chloride" currently gets whatever those 39 notes happen to say.
 
+- [ ] **A profile should be able to supply prompt *blocks*, not only a string** — [M], and this is
+      the general form of `D-2026-09-14-a-profiles-prose-is-text-this-repository-wrote`. The default
+      prompt is 31 `PromptBlock`s, each declaring `requires`/`absent_unless`, so a sentence naming a
+      tool this deployment lacks is dropped before the model reads it. A profile's `instructions:`
+      is one opaque string and gets none of that — the exemption `instructions_for` states is for a
+      *site's* manifest, which this repository cannot cut into blocks, and it is right about that.
+      What it leaves open is that a site narrowing a profile's tools has no way to narrow its own
+      prose either: the field would have to accept a list of `{text, requires, absent_unless}` with
+      the same ten rules, and the reason it is a row rather than a commit is that it has **no
+      caller** — all six shipped profiles are strings, the repository-owned half is now guarded by a
+      test, and a second-domain deployment is hypothetical. Build it with the first site profile
+      that narrows tools, not before. This is also the honest remainder of Wave 7's "the prompt into
+      profile data": the prose is already data (`data/profiles/*.yaml`), what is not is its
+      *structure*.
+
 - [ ] **A cut tool result is unrecoverable, and the store that would hold it is downstream of the
       cut** — [M], the last open Wave 1 item ("make a cleared tool result retrievable by address").
       Measured 2026-09-14, and the two halves are not the same problem.
