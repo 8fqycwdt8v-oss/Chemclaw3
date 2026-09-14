@@ -569,8 +569,13 @@ What decides whether the system is affordable and whether it survives a real cor
       mapped reaction plus 14.4 kB per adapter entry, so ~500k entries is ~20 GB in one activity.
       `memory_corpus_max_reactions` bounds the miner's half (396.8 → **204.4 MB** at a cap of 2,500)
       and marks the pass incomplete; it cannot bound the adapter's page, and that is said out loud.
-- [ ] W28.3 `Chemclaw3` — the `stated`-quote ambient reads the whole table's tail on every turn once
-      a database has history.
+- [x] W28.3 `Chemclaw3` — the `stated`-quote ambient reads the whole table's tail on every turn.
+      **Done** (`D-2026-09-14-two-of-three-bets-are-no-ops-and-the-index-is-free`): reproduced —
+      120,020 rows discarded to return 20, 14.8 ms, once per turn. Of the three fixes the row named,
+      **two are measured no-ops** (`CREATE STATISTICS` on the expression; hoisting the type test into
+      Python) and so is a rewritten inner-window statement. The partial index is the fix: **0 rows
+      discarded, 0.036 ms**, and the row's objection about write cost does not hold either — 162
+      µs/row without it, **161 with** (migration `098`).
 - [ ] W28.4 `Chemclaw3` — the checkpointer's write volume is quadratic in a thread's length [L].
       Decide: fix, or `DEFERRED.md` with a measured trigger.
 - [ ] W28.5 `Chemclaw3` — a note write costs ~1.8 s and a backfill is one write per record; a real

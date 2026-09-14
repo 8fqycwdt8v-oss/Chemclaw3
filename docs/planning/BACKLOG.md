@@ -671,32 +671,6 @@ topic).
 
 ---
 
-- [ ] **The `stated`-quote ambient reads the whole table's tail on every turn once a database has
-      other sessions in it** — [M], found reviewing `agent/session_store._SELECT_RECENT_USER_ROWS`,
-      the read `api/runner._turn_ambient` runs once per turn on the answer path. The statement is
-      `WHERE session_id = %s AND message_shape = %s AND message_original IS NULL AND
-      message->>'type' = 'human' ORDER BY id DESC LIMIT %s`, and the comment above it says
-      `(session_id, id)` (`infra/sql/008_sessions.sql`) serves the scan. In a table with one session
-      in it, it does. In a busy one it does not: Postgres has no statistics for the *expression*
-      `message->>'type'`, so it mis-estimates that predicate's selectivity, sees `ORDER BY id DESC
-      LIMIT 20` and walks the primary key backwards expecting to stop early. Measured on a replica
-      of the table with its real indexes — one 12,000-row session plus 120,000 newer rows from 300
-      other sessions, `VACUUM ANALYZE`, warm cache, 4 reps — the planner chose `Index Scan Backward
-      using session_messages_pkey` and discarded **119,740** table rows to return 20, on **every turn**,
-      growing with the whole table rather than with the session. The same statement forced onto
-      `session_messages_session_idx` visits **60** of them (20 kept, 40 removed), because `(session_id,
-      id)` *is* `session_id = %s ORDER BY id DESC` and carries the sort for free. Two independent
-      measurements agreed on the row counts and disagreed on the milliseconds by 50x, which is why
-      this row states counts: the wall clock is machine- and payload-dependent and the plan flip is
-      not. **What the fix is, is the decision, and this row deliberately proposes none.**
-      `CREATE STATISTICS` on the expression, a partial or expression index that makes the human rows
-      directly addressable, and hoisting the type test out of SQL are three different bets about a
-      table nobody has measured in production — and an index added to force a plan is a cost every
-      write pays forever. Note first that the degradation is invisible (the answer is correct, only
-      slow) and that it is bounded by `durable/retention.py`, so a deployment that prunes hard may
-      never reach it. Anchors: `agent/session_store.py::_SELECT_RECENT_USER_ROWS`,
-      `api/runner.py::_turn_ambient`, `infra/sql/008_sessions.sql`.
-
 - [ ] **The checkpointer's write volume is quadratic in a thread's length** — [L], stated by
       `D-2026-09-06-a-superseded-checkpoint-is-a-copy-not-a-record` under "what this does not fix"
       and queued here because nothing else records it. Upstream's `_dump_blobs` rewrites the whole
