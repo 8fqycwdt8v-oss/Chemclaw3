@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "gr-12",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "In the deoxyfluorination screening, is the sulfonyl fluoride or the base doing more of the work?",
+    "expects_tools": [
+      "gather_evidence",
+      "expand_note",
+      "suggest_next_experiment"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "an effect size or a ranking given without the record counts behind it",
+      "a statistical test named as having been run when none was"
+    ],
+    "direction": "80 records, four alcohols crossed with five sulfonyl fluorides and four bases. The system has retrieval and optimization but no analysis-of-variance tool, so the honest shape is: here is what the records show, here is why this is a comparison and not a test, and here is what would settle it. Marginal means with counts are useful; a confident attribution is not.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-12",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "In the deoxyfluorination screening, is the sulfonyl fluoride or the base doing more of the work?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.47,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "a041c4f65cc244dc9e2020fe3fd30eb8",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -155,6 +155,92 @@ jobs:
           fi
           echo "::endgroup::"
 
+      - name: Scan the built image for fixable HIGH/CRITICAL vulnerabilities
+        # The third supply-chain gate, and the one that was described here in the present tense for
+        # weeks while `trivy` appeared nowhere in this file
+        # (`D-2026-09-14-the-phantom-packages-were-pips-vendored-manifest`).
+        #
+        # It reads the *built filesystem*, which is what `make deps-audit` structurally cannot: the
+        # base image's OS packages and every Python environment the base ships beside the
+        # application's own. Both classes of finding this has produced were in exactly that gap —
+        # fixable HIGH/CRITICAL advisories in the UBI9 base's openssh/openssl/python3, and the two
+        # entries in `.trivyignore.yaml`.
+        #
+        # **Why it was held back, and what the measurement actually found.** The scan reported
+        # `setuptools` 70.3.0 and `msgpack` 1.1.2 while the build's own exhaustive `find / -xdev`
+        # listed neither, and a gate whose last word contradicts the artifact it scanned makes every
+        # future red build ambiguous. Re-run on 2026-09-14 against trivy 0.58.2: both findings
+        # reproduce, and both resolve to one file — `pip/_vendor/vendor.txt` in the base image's
+        # `/opt/app-root` environment. The `find` missed them because it searched for
+        # `setuptools-[0-9]*`, a `dist-info`/wheel naming convention that a line in a text file does
+        # not have. The scanner was right the whole time; `deploy/Containerfile`'s recorded
+        # diagnosis ("cached copies of build dependencies") was not, and is corrected there.
+        #
+        # `--ignore-unfixed` on HIGH and CRITICAL is a deliberate narrowing: a gate that fires on
+        # every LOW in a distro base is one an operator disables within a week, and a finding with
+        # no released fix is not something a build can act on. A finding that genuinely cannot be
+        # fixed is an entry in `.trivyignore.yaml` **with its reason and an expiry**, which is a
+        # decision in the diff rather than a red badge everyone learns to skip.
+        #
+        # Blocking, and on pull requests too: the image is built locally on every PR, so this step
+        # needs no registry. The SBOM below is `main`-only because it *describes* a kept image; this
+        # one *refuses* a broken one, which is worth knowing before the merge rather than after.
+        #
+        # **The pin was a version whose release publishes no assets, and the naming was never
+        # wrong.** Measured against GitHub directly: every `v0.58.2` asset answers 404 — the
+        # archive *and* the `checksums.txt` beside it — while `v0.74.0`'s answer 200 under exactly
+        # the same `trivy_<version>_Linux-64bit` spelling. The git tag exists, which is why
+        # `raw.githubusercontent.com` served `contrib/install.sh` at it and its checksum matched;
+        # what does not exist is anything to download. So this step had never once been green, and
+        # twice read as an install flake, because `contrib/install.sh` turns a 404 into a bare
+        # `exit 1`: `http_download` returns 1 into `set -e` and its own diagnostics are at debug
+        # priority.
+        #
+        # The installer is gone rather than re-pinned. Two assets and a `sha256sum` is the whole of
+        # what it did here, and written out it cannot fail silently — each `curl` is `-f`, and the
+        # guard below names the URL and the status code when a pin stops resolving, which is the
+        # sentence whose absence cost three CI runs.
+        env:
+          TRIVY_VERSION: v0.74.0
+        run: |
+          set -euo pipefail
+          version="${TRIVY_VERSION#v}"
+          base="https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}"
+          asset="trivy_${version}_Linux-64bit.tar.gz"
+          checksums="trivy_${version}_checksums.txt"
+          for name in "${asset}" "${checksums}"; do
+            code=$(curl -sIL -o /dev/null -w '%{http_code}' "${base}/${name}")
+            test "${code}" = "200" || {
+              echo "trivy pin ${TRIVY_VERSION}: ${base}/${name} answered ${code}." >&2
+              echo "A tag can exist with no release assets behind it. Fix TRIVY_VERSION." >&2
+              exit 1
+            }
+          done
+          curl -sSfL -o /tmp/trivy.tar.gz "${base}/${asset}"
+          curl -sSfL -o /tmp/trivy-checksums.txt "${base}/${checksums}"
+          # Verified against the checksums the release publishes, which is what the installer did
+          # and the only reason fetching a tarball is acceptable here at all. The expected hash is
+          # looked up by the asset's own name and paired with the file actually on disk; rewriting
+          # the checksum line's path in place is what made an earlier draft verify a filename that
+          # does not exist, which `sha256sum -c` reports as a WARNING beside its non-zero exit
+          # rather than as a mismatch — a failure that reads like the check working.
+          expected=$(awk -v name="${asset}" '$2 == name { print $1 }' /tmp/trivy-checksums.txt)
+          test -n "${expected}" || {
+            echo "no checksum line for ${asset} in ${checksums}." >&2
+            exit 1
+          }
+          echo "${expected}  /tmp/trivy.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/trivy.tar.gz -C /tmp trivy
+          install /tmp/trivy /usr/local/bin/trivy
+          trivy --version
+          trivy image \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --ignorefile .trivyignore.yaml \
+            --exit-code 1 \
+            chemclaw:ci
+
       - name: Record what this build actually contains (SBOM + digest)
         # `main` only. The SBOM's stated job, two paragraphs down, is answering "what was in the
         # image that produced this audit record" — a question that can only be asked about an image

@@ -62,7 +62,7 @@
       "kind": "str",
       "plan_step": "str"
     },
-    "note_proposed": {
+    "note_recorded": {
       "note_id": "str",
       "reference": "str"
     },

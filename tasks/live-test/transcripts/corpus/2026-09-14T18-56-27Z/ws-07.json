@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "ws-07",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Stop telling me about the biaryl scope campaign. It finished, and the updates are just noise now.",
+    "expects_tools": [
+      "stop_watching",
+      "list_watches"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "that other watches were removed",
+      "that the campaign itself was closed, archived or altered"
+    ],
+    "direction": "Unsubscribing is the whole ask, and the failure mode is a silent no-op that reads as success. A good answer removes that one watch, names it back, and confirms the others are untouched. The second thing it must not do is act on the campaign: \"stop telling me about it\" is about the subscription, not the work, and an answer that closes or archives the campaign has done something the asker did not authorise. If no such watch exists, say so rather than confirming a removal.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-07",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Stop telling me about the biaryl scope campaign. It finished, and the updates are just noise now.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.67,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "e34ef0bbdbe04d72baeae2f5fa394dc8",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -28,20 +28,18 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 from starlette.responses import Response
 
-from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
-from chemclaw.connectors.identity import (
+from chemclaw.connectors.identity import MissingConnectorCredential, auth_for
+from chemclaw.connectors.manifest import BearerAuth, HttpEndpoint, NoAuth
+from chemclaw.core.call_identity import (
     HEADER_ACTOR,
     HEADER_CORRELATION,
     HEADER_DRY_RUN,
     HEADER_SESSION,
     STAMPED_HEADERS,
-    MissingConnectorCredential,
     _strippable_headers,
-    auth_for,
     turn_headers,
     turn_identity_hook,
 )
-from chemclaw.connectors.manifest import BearerAuth, HttpEndpoint, NoAuth
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import (
     reset_current_correlation_id,
@@ -51,6 +49,7 @@ from chemclaw.core.identity_context import (
 )
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from chemclaw.core.tracing import trace_headers
+from chemclaw.core.turn_flags import reset_dry_run, set_dry_run
 
 # A syntactically valid W3C `traceparent`, so the assertions are about a real header value
 # rather than a placeholder that a stricter client would reject.
@@ -131,7 +130,7 @@ def test_the_strip_list_covers_every_header_the_stamp_produces() -> None:
     assert stamped <= _strippable_headers()
     # And the W3C names are covered whether or not a span is live at the moment of the strip, which
     # is the case `turn_headers()` alone cannot answer for.
-    with mock.patch("chemclaw.connectors.identity.trace_header_names", lambda: frozenset({"b3"})):
+    with mock.patch("chemclaw.core.call_identity.trace_header_names", lambda: frozenset({"b3"})):
         assert "b3" in _strippable_headers()
 
 
@@ -173,9 +172,9 @@ def test_the_hook_strips_the_identity_when_a_request_leaves_the_connector_origin
     stub = {"traceparent": _TRACEPARENT, "baggage": "tenant=acme"}
     try:
         with (
-            mock.patch("chemclaw.connectors.identity.trace_headers", lambda: stub),
+            mock.patch("chemclaw.core.call_identity.trace_headers", lambda: stub),
             mock.patch(
-                "chemclaw.connectors.identity.trace_header_names",
+                "chemclaw.core.call_identity.trace_header_names",
                 lambda: frozenset({"traceparent", "tracestate", "baggage"}),
             ),
         ):

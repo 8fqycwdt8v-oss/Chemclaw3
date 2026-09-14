@@ -1,0 +1,93 @@
+{
+  "probe": {
+    "id": "an-15",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "New impurity structure Oc1ccc(-c2ccccc2C(=O)O)cc1 turned up in this campaign. Have we seen this one before, or anything close to it? I do not want to re-characterise something we already know.",
+    "expects_tools": [
+      "similar_molecules",
+      "substructure_matches",
+      "find_notes",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "an invented prior characterisation record, batch number or report reference",
+      "a retention time or analytical result attributed to a past observation",
+      "stating 'we have not seen it' without having actually searched"
+    ],
+    "direction": "Searches — fingerprint similarity and substructure over the compound set plus the knowledge graph — and reports what it found with the actual similarity/match evidence, or reports a clean miss. A miss is a good answer here; a miss stated without a search is not, and a fabricated prior record is the failure. If precedent exists, it cites the notes rather than paraphrasing from memory.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-15",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "New impurity structure Oc1ccc(-c2ccccc2C(=O)O)cc1 turned up in this campaign. Have we seen this one before, or anything close to it? I do not want to re-characterise something we already know.",
+    "profile": "",
+    "answer": "**This is a new impurity — you have not seen this exact structure or anything close to it before.**\n\nThe molecular fingerprint search found **no matches** at all above 0.7 Tanimoto similarity, and the exact substructure search also returned nothing. The knowledge graph search turned up some related chemistry (biaryl couplings, carboxylic acids) but no reference to this specific impurity structure.\n\nThe structure you've identified is **4-(4-hydroxyphenyl)benzoic acid** — a biaryl with a carboxylic acid on one ring and a phenol on the other. This appears to be genuinely novel to your records, so you'll need to proceed with full characterization.\n\nWould you like me to help with:\n1. Proposing how this impurity might be forming (based on your campaign chemistry)?\n2. Setting up analytical characterization methods?\n3. Searching for literature precedent on this structure class?",
+    "answered": true,
+    "tools_called": [
+      "similar_molecules",
+      "substructure_matches",
+      "find_notes",
+      "gather_evidence"
+    ],
+    "tool_results": [
+      {
+        "tool": "substructure_matches",
+        "preview": "<retrieved-note-802678ad5c37acd3 id=\"molfp:substructure_matches\">\n{\n  \"subject\": \"molecule\",\n  \"hits\": [],\n  \"approximate\": false,\n  \"index_empty\": false,\n  \"index_partial\": false,\n  \"scan_truncated\":"
+      },
+      {
+        "tool": "similar_molecules",
+        "preview": "<retrieved-note-802678ad5c37acd3 id=\"molfp:similar_molecules\">\n{\n  \"subject\": \"molecule\",\n  \"hits\": [],\n  \"approximate\": false,\n  \"index_empty\": false,\n  \"index_partial\": false,\n  \"scan_truncated\": fa"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "matches=[NoteRef(id='compound-4-bromoanisole', type='compound', compound_smiles='COc1ccc(Br)cc1', tags=['aryl-halide'], created_by='human', source='seed-corpus', confidence=0.9, valid_from=None, valid"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[EvidenceChunk(content='<retrieved-note-802678ad5c37acd3 id=\"compound-dipea\">\\nN,N-diisopropylethylamine. A hindered tertiary amine base — basic enough to deprotonate a\\ncarboxylic acid, too hi"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "0.7",
+      "4",
+      "1",
+      "2",
+      "3"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 18.12,
+    "event_counts": {
+      "token": 60,
+      "tool_call": 4,
+      "tool_result": 4,
+      "evidence_source": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "733205efbd3b47768b5e80ee00377472",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

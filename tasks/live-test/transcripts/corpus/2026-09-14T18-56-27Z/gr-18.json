@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "gr-18",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "c1ccccc1CCC(O)C deoxyfluorinates at 40% with one sulfonyl fluoride and 99% with another. Is that sterics or is that electronics?",
+    "expects_tools": [
+      "predict_pka",
+      "predict_site_reactivity",
+      "compute_electronic_properties",
+      "sample_conformers",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a mechanistic verdict given with no computed or retrieved quantity behind it",
+      "the two reagents' properties described without saying where the numbers came from"
+    ],
+    "direction": "Both yields are real and in the corpus. A good answer computes something that discriminates the two hypotheses rather than arguing from plausibility, and says plainly if the computation cannot separate them.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-18",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "c1ccccc1CCC(O)C deoxyfluorinates at 40% with one sulfonyl fluoride and 99% with another. Is that sterics or is that electronics?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.36,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "e9d42745364043ab93ac90ac1cf2780a",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

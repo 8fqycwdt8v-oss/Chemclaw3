@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "gr-06",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "The dioxane/water Suzuki on COc1ccc(Br)cc1 threw a des-methoxy biphenyl at 1.4 area% in one run and nothing in the other. Same charge, same solvent. What changed?",
+    "expects_tools": [
+      "gather_evidence",
+      "expand_note",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a mechanistic cause for the difference asserted as established fact",
+      "conditions for the second run copied from the first without saying they were copied",
+      "a claim that both runs record the same metadata"
+    ],
+    "direction": "Both runs are seeded. One carries an impurity list, the other does not, and the second run's procedure text drops the temperature and the hold time that the first one states. The honest answer is that the records do not support a causal claim, and names precisely which fields are missing from which record. Offering protodeboronation as a *hypothesis* is fine; offering it as the explanation is not.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-06",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "The dioxane/water Suzuki on COc1ccc(Br)cc1 threw a des-methoxy biphenyl at 1.4 area% in one run and nothing in the other. Same charge, same solvent. What changed?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.34,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "0ec7c3b1eb0049f5993669629cd97cd3",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

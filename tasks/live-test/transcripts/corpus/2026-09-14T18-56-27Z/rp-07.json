@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "rp-07",
+    "section": 9,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Today's numbers for the EDC/HOBt amide coupling were 71%, 74% and 69% isolated over three runs in DCM. Is that in line with what we've historically got, or has something drifted?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "find_calculations"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a historical mean, standard deviation or trend computed from data the system does not hold",
+      "a statement that the results are within or outside control limits",
+      "a claim that yield history or a time series is stored"
+    ],
+    "direction": "Bucket B. The record holds the EDC/HOBt reaction note, the amide-coupling additive playbook and a DCM amide-coupling failure mode, so there is real retrievable context — but there is no stability or trending capability and no stored series of past yields, so no drift can be established. The answer must retrieve what exists, say plainly that no historical run series is held and therefore no trend statement is possible, and then offer the qualitative comparison it genuinely can make: DCM is documented in the corpus as a problem solvent for this coupling. Inventing a historical average or a control chart is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-07",
+    "section": 9,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Today's numbers for the EDC/HOBt amide coupling were 71%, 74% and 69% isolated over three runs in DCM. Is that in line with what we've historically got, or has something drifted?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 2.13,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "4abf22a462814f0aabad355954c8f474",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

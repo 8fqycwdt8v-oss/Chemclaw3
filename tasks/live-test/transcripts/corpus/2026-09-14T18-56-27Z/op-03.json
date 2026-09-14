@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "op-03",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "I need a study plan that establishes the design space for the Buchwald step before we hand it to tech transfer. Give me the factors, the ranges, the runs, and the proven acceptable ranges that come out the other end.",
+    "expects_tools": [
+      "generate_screening_design",
+      "suggest_next_experiment",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "here is the proven acceptable range (PAR) for each parameter",
+      "this constitutes a tech-transfer package",
+      "a scale-up heat- or mass-transfer assessment was performed",
+      "the critical process parameters have been established"
+    ],
+    "direction": "Splits the ask honestly and visibly. The half it can do: name the decision variables the lab can actually set with physically sane ranges, grounded in the recorded Buchwald conditions, and produce a concrete run list — a categorical screen up front or an adaptive batch, whichever it argues for. The half it cannot: there is no scale-up, heat/mass-transfer or CPP model and no tech-transfer package anywhere in the system, and a proven acceptable range is a statistical claim over data that does not exist yet. It must say so plainly rather than producing a PAR table that looks authoritative. Naming what would have to be measured to get one is a good answer; producing one is a failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-03",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "I need a study plan that establishes the design space for the Buchwald step before we hand it to tech transfer. Give me the factors, the ranges, the runs, and the proven acceptable ranges that come out the other end.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.31,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "be15168d15f24edc890927feb5f7855e",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

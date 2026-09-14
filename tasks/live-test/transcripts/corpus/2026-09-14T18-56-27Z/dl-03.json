@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "dl-03",
+    "section": 9,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Compare what the three development reports on the biaryl programme say about the catalyst choice. Where do they disagree, and which is most recent?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a disagreement asserted without quoting or citing both sides",
+      "a recency claim not grounded in the notes' own validity dates",
+      "a report summarised that the turn did not retrieve"
+    ],
+    "direction": "The multi-document comparison. Long sources, a short comparative answer, and a disagreement that only appears once all three have been read. Bi-temporal validity is the tiebreak and a good answer uses it rather than preferring whichever it read last.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "dl-03",
+    "section": 9,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Compare what the three development reports on the biaryl programme say about the catalyst choice. Where do they disagree, and which is most recent?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.7,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "73a54735e8004726b6211b5c51bc8eca",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "du-02",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "I asked you this exact solvent question yesterday and you ran it. If I ask again now, does it cost me another calculation, or do I get the same answer back for free? Explain what actually happens, and then run it: ethyl acetate, 2-MeTHF and toluene for the amide coupling.",
+    "expects_tools": [
+      "compare_solvents",
+      "find_past_jobs",
+      "get_durable_job_status"
+    ],
+    "expects_job": true,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a ranking or delta-G the job did not return",
+      "that results are recomputed from scratch on every request",
+      "a cost, a runtime or a compute-hours figure"
+    ],
+    "direction": "Two things, and the explanation is the harder one. A durable job's id is derived from its arguments, so an identical re-ask rejoins the existing run rather than starting a second one, and every underlying calculation is persisted and looked up before it is computed — the same question a second time costs nothing and returns the same numbers, by construction rather than by luck. The answer should say that in the chemist's terms without overclaiming: it is the *identical* question that is free, and a changed temperature or level is a different question. Then it must actually run the screen, and any ranking it reports must be one the job returned. Saying the differences between solvents are more trustworthy than any single absolute value is a plus; presenting a rank order with no uncertainty is a miss.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "du-02",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "I asked you this exact solvent question yesterday and you ran it. If I ask again now, does it cost me another calculation, or do I get the same answer back for free? Explain what actually happens, and then run it: ethyl acetate, 2-MeTHF and toluene for the amide coupling.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.42,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "0c472ec2127043ccb6b4fc4f6be953a2",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

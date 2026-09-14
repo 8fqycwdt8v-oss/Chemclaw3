@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "pc-19",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Give me the PMI and E-factor for this step as written, and tell me where the mass is going.",
+    "expects_tools": [
+      "green_metrics",
+      "stoichiometry_table"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a PMI or E-factor given without the basis it was computed on",
+      "a metric compared against an industry figure whose basis is unstated",
+      "a charge table figure the stoichiometry tool did not return"
+    ],
+    "direction": "Real capability, exercised directly. Returns the metrics with the charge table behind them so the chemist can see which input dominates — usually solvent — and states the basis (whether water and workup solvents are counted), because PMI figures are not comparable across different bases and a bare number invites exactly that comparison.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pc-19",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Give me the PMI and E-factor for this step as written, and tell me where the mass is going.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.98,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "92597acfba1f4cc08f965ae8e693ec90",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

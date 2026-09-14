@@ -9,6 +9,7 @@ graph traversal (D-004), so this indexer is the substrate the query skill walks
 import contextlib
 import logging
 import os
+import subprocess
 import threading
 import time
 from collections import defaultdict
@@ -24,6 +25,10 @@ from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.kg.note import Note, NoteError, Relation, read_note, resolves_outside_graph
 
 log = logging.getLogger(__name__)
+
+# One `git log -1` on a local checkout. A bound rather than a setting: this is not a knob anybody
+# would tune, and a hung `git` on the scheduled reindex path must not hold the pass open.
+_GIT_REVISION_TIMEOUT_SECONDS = 10
 
 # A directory's stat fingerprint: (path, mtime_ns, size) per note file. Cheap *per file* (stat only,
 # no read/parse) and busts on any add, edit, or delete — so the cache below skips the expensive
@@ -224,6 +229,52 @@ def note_file_fingerprints(notes_dir: Path) -> dict[str, str]:
     for path, stat in scan_notes_dir(notes_dir):
         fingerprints.setdefault(path.stem, f"{stat.st_mtime_ns}:{stat.st_size}")
     return fingerprints
+
+
+def corpus_revision(notes_dir: Path) -> int | None:
+    """How many commits this corpus's checkout has behind it, or `None` if unknowable.
+
+    **The one comparable fact two pods holding differently-aged clones of one corpus share.**
+    `note_index` is shared; the checkout under it is an `emptyDir` each pod's own sidecar
+    refreshes, so a pod cannot tell "this note was deleted" from "my sidecar has not run yet" by
+    looking at its own disk — and `reindex_notes` retiring on the second reading is
+    `D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`.
+
+    `git rev-list --count HEAD`, not a commit timestamp and not a commit id. A timestamp was the
+    first attempt and it does not work: `%cI` has second resolution, so two commits made in the
+    same second compare equal and the lagging pod retires the newer note anyway — a guard that
+    passes its own probe while doing nothing. A commit *id* is not orderable by a pod that has not
+    fetched the other side. A commit **count** is monotone under ancestry (a descendant reaches
+    strictly more commits than its ancestor), is one number, and involves no clock.
+
+    What it cannot order is two genuinely divergent branches with equal counts. That is not this
+    deployment — every pod's sidecar fetches one remote — and the failure there is the one the
+    prune already had, not a new one.
+
+    `None` is returned for every case where the answer is not knowable, and each is ordinary rather
+    than exceptional: a corpus that is not a git work tree (a tarball deploy, a developer's scratch
+    directory, every offline test), no `git` on PATH, or a repository with no commits. Callers must
+    read `None` as "no constraint" and behave as they did before this existed — a prune that
+    refuses without evidence would make a fresh deployment unable to ever remove a note.
+
+    One `git rev-list` per reindex pass, not per note.
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(notes_dir), "rev-list", "--count", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_REVISION_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        return int(completed.stdout.strip())
+    except ValueError:
+        return None
 
 
 def note_in(graph: "nx.DiGraph[str]", note_id: str) -> Note | None:

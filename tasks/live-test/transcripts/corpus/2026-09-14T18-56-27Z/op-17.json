@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "op-17",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Constrain it: total volume under 5 mL, and Pd never above 2 mol% whenever the temperature is over 90 C. Then give me three points.",
+    "expects_tools": [
+      "suggest_next_experiment"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "the coupled Pd/temperature limit was applied inside the optimizer",
+      "all of your constraints shaped the candidates",
+      "a conditional constraint was added to the problem"
+    ],
+    "direction": "Two limits are asked for and they are no longer the same case, which is the whole point of this probe since W4. The **volume** limit is linear across the parameters that make it up, so it belongs in `problem.constraints` and the optimizer honours it — every candidate returned satisfies it, seed points included. The **Pd/temperature** limit is conditional (Pd bounded only when T > 90) and remains unrepresentable; the linear family cannot say \"whenever\". The answer must draw that line rather than treating both alike in either direction: refusing the volume constraint is now as wrong as claiming the conditional one was enforced. For the conditional half the honest workarounds, offered explicitly as workarounds: tighten the Pd bound so the box is always feasible (accepting that this also removes feasible high-Pd/low-temperature points), or filter the returned candidates outside the optimizer — saying that the filtering happened after the fact, so the retained points are not the constrained optimum. Returning three points while implying every stated limit shaped them is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-17",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Constrain it: total volume under 5 mL, and Pd never above 2 mol% whenever the temperature is over 90 C. Then give me three points.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.15,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "59ca99eabb5342f3980fda5a8e3e4f91",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

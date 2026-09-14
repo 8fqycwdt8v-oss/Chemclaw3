@@ -44,6 +44,7 @@ from chemclaw.agent.session_events import SessionEvent, claim_unconsumed
 from chemclaw.api import app as front_door
 from chemclaw.api.deps import CurrentUser, resolve_session
 from chemclaw.api.events import (
+    TURN_EVENT_REF,
     AwaitingAnswerEvent,
     ErrorEvent,
     JobCompletedEvent,
@@ -520,9 +521,20 @@ def register(app: FastAPI) -> None:
     Registering on the app keeps both exactly as they were when these handlers lived in
     `create_app`.
     """
-    app.get("/sessions/{session_id}/events", dependencies=[Depends(resolve_session)])(
-        session_events
-    )
+    app.get(
+        "/sessions/{session_id}/events",
+        dependencies=[Depends(resolve_session)],
+        # The same reason as `api/routes/turns.py`: a `text/event-stream` body is one FastAPI
+        # cannot infer, so the document `Chemclaw3_ui` reads said nothing about what this route
+        # streams — see
+        # `D-2026-09-14-a-contract-the-client-cannot-read-is-a-contract-one-side-remembers`.
+        responses={
+            200: {
+                "description": "One SSE frame per pushed-back session event.",
+                "content": {"text/event-stream": {"schema": {"$ref": TURN_EVENT_REF}}},
+            }
+        },
+    )(session_events)
     # No `dependencies=[Depends(resolve_session)]`, and that absence is the authorization model
     # rather than a gap in it: this route accepts no session id to resolve. See `read_digests`.
     app.get("/digests")(read_digests)

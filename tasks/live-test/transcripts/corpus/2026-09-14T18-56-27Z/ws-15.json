@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "ws-15",
+    "section": 17,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Keep the notes from this conversation somewhere I can pick up tomorrow morning, I am going to run out of time today.",
+    "expects_tools": [
+      "write_file",
+      "remember_preference"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "that a document was created somewhere the asker can open outside this system",
+      "that the scratchpad persists between sessions"
+    ],
+    "direction": "There is a durable place and a per-turn place, and the answer turns on knowing which is which. Durable memory under the asker's own namespace survives; the scratchpad does not. A good answer writes the summary somewhere that will actually be there tomorrow, says where it lives and that it is scoped to this asker, and does not imply a file in a shared drive or an exported document. If it judges the content better suited to the knowledge graph it should say so and offer to record a note — which is readable by everyone at once and machine-written, and worth naming as both rather than presenting as checked.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-15",
+    "section": 17,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Keep the notes from this conversation somewhere I can pick up tomorrow morning, I am going to run out of time today.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.15,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "5ad3d4680fdc498e95734e541ede733b",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

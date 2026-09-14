@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "ws-01",
+    "section": 17,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I have four Suzuki runs to compare and I keep losing track. Work through them one at a time and keep a running table as you go, then give me the summary at the end: 2 mol% Pd(PPh3)4 in dioxane/water 80 C gave 71%, 1.5 mol% Pd(OAc)2/SPhos same solvent gave 88%, 1.5 mol% Pd(OAc)2/SPhos in 2-MeTHF/water gave 84%, and 0.5 mol% Pd(OAc)2/SPhos in 2-MeTHF/water gave 52%.",
+    "expects_tools": [
+      "write_file",
+      "read_file",
+      "edit_file"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a yield, loading or solvent that was not in the question",
+      "that the table was saved anywhere the asker can open later"
+    ],
+    "direction": "The four runs are given, so nothing has to be looked up; what is being tested is whether the model uses the scratchpad it has instead of holding four rows in prose and dropping one. A good answer builds the table as it goes and then reports it whole, with all four rows and their numbers intact. The chemistry conclusion is the easy part and should be there too — SPhos is worth more than the extra palladium, 2-MeTHF costs about four points against dioxane, and 0.5 mol% is below whatever this substrate needs. What it must not do is imply the table persists: the scratchpad is this turn's, and an answer promising the asker can \"open it later\" has invented a filing cabinet.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-01",
+    "section": 17,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I have four Suzuki runs to compare and I keep losing track. Work through them one at a time and keep a running table as you go, then give me the summary at the end: 2 mol% Pd(PPh3)4 in dioxane/water 80 C gave 71%, 1.5 mol% Pd(OAc)2/SPhos same solvent gave 88%, 1.5 mol% Pd(OAc)2/SPhos in 2-MeTHF/water gave 84%, and 0.5 mol% Pd(OAc)2/SPhos in 2-MeTHF/water gave 52%.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 2.13,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "cd718a052120417e9a4fc93f511058c6",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

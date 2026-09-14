@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "kn-09",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Here's my reaction — COc1ccc(Br)cc1.OB(O)c1ccccc1>>COc1ccc(cc1)-c1ccccc1 — is there anything close to it in the HTE data we have indexed?",
+    "expects_tools": [
+      "similar_reactions",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a reaction id the search did not return",
+      "a similarity score the tool did not return",
+      "a literature citation",
+      "conditions attributed to a hit that the hit does not carry"
+    ],
+    "direction": "Runs the reaction-fingerprint search and reports what came back, with the returned similarity values and which dataset family the hits belong to (Doyle Buchwald–Hartwig amination, Perera Suzuki–Miyaura flow, Santanilla amidation/sulfonamidation, Nielsen deoxyfluorination). If the nearest neighbours are a different transformation, it must say so plainly instead of dressing them up as precedent for this coupling.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-09",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Here's my reaction — COc1ccc(Br)cc1.OB(O)c1ccccc1>>COc1ccc(cc1)-c1ccccc1 — is there anything close to it in the HTE data we have indexed?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.23,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "ff591e6d3a9a478c9b8cf205ec5e7813",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

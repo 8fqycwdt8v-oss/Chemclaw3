@@ -30,8 +30,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from chemclaw.connectors.identity import HEADER_CORRELATION
 from chemclaw.core.asgi import BodySizeLimit
+from chemclaw.core.call_identity import HEADER_CORRELATION
 from chemclaw.core.config import settings
 from chemclaw.core.http import is_loopback_host
 from chemclaw.core.identity_context import (

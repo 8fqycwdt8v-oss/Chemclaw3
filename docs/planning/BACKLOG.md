@@ -222,15 +222,6 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
-- [ ] **The `note_proposed` SSE event is not a proposal, and the name is a two-repo contract** —
-      [S], found 2026-09-05 in the gate-deletion review. Nothing reviews a note, so the accurate
-      name is `note_recorded`; the literal is switched on by `Chemclaw3_ui`
-      (`state/types.ts`, `chatStore.ts`, `TracePanel.tsx`, `chem/entities.ts`, `turnActivity.ts`)
-      and by `evals/live.py`, so renaming it is a coordinated deploy with a skew window in which
-      one side drops the event silently. The internal names and the text a chemist reads are
-      already fixed; only the wire literal is left. Needs a rollout order (accept both, then emit
-      the new one, then drop the old), which is why it is a row rather than part of that fix.
-
 - [ ] **A `pending_requests` row whose run was terminated, or lost with its worker, has no
       collector** — [M]. What is left of the row above after
       `D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-the-row-waiting`, which closed
@@ -259,17 +250,6 @@ topic).
       never pays), or both — and it wants a measurement of the Temporal worker too, which now
       starts one as well (`ingest/documents/sync.py`). Anchor: `isolate.parse_context`,
       `deploy/chemclaw/values.yaml`.
-
-- [ ] **Nothing checks the client half of a wire contract, and it has drifted twice** — [L], the
-      row `D-2026-09-04-a-contract-has-two-halves-and-a-server-test-sees-one` says it is queuing
-      and which was never written. `tests/fixtures/turn_events_contract.json` pins what this
-      repository *sends*; nothing pins what a client accepts, so the `at_capacity` error code and
-      `PendingPlansResponse.truncated` both shipped here and reached `Chemclaw3_ui` as an
-      unhandled default — the second without anyone recording that it had not. The hand-written
-      case in `tests/test_protocol_routes.py` is the only cross-repo assertion in the tree, and
-      that ADR says plainly it does not scale to four repos. What it needs is one artefact both
-      sides read: a published fixture, a generated types package, or a job in `make ci` that
-      fetches the client's own declaration and diffs it against the fixture.
 
 - [ ] **`JsonCommitmentExport` cannot run a destructive sweep, and the grant for one already
       exists** — [S], the row `ingest/commitments/json_export.py`'s `snapshot` attribute says is
@@ -506,28 +486,6 @@ topic).
       One probe, not a measurement pass: what is owed first is the threshold, whether it is
       configurable, and whether it fires on any real turn.
 
-- [ ] **Two of the four deployables have no chart, so a release changes their bytes and nothing
-      else** — [M]. `D-2026-08-26-a-release-is-a-descriptor-and-a-target` deploys `Chemclaw3_ui`
-      and each `Chemclaw3-mcp` server with `oc set image` against a Deployment an operator created
-      by hand, because neither repository describes itself deployably: the fleet has seven
-      `Containerfile`s and a per-server `networkpolicy.yaml`, the UI has a `Dockerfile` and a
-      compose file for local work. That is the honest minimum — it changes the image and claims
-      nothing else — and it means a release cannot move a port, a probe, a resource limit or an
-      env var for either, and cannot create either from nothing. A chart per repository (or one
-      chart for the fleet, whose seven servers differ only in name, port and token env) closes it.
-      Not written from here, because doing so would be inventing somebody's Service, Route and
-      limits; it wants one real namespace to be written against.
-
-- [ ] **Turn the image scan back on, with its contradiction resolved** — [M].
-      Carried forward unchanged from the SBOM work and re-confirmed by the 2026-08-26 CI review:
-      `image.yml` now emits an SBOM and pins/verifies both binaries it downloads, but there is
-      still no scan of the built image. It ran once, found three real classes of problem now fixed
-      in `deploy/Containerfile`, and then reported two packages the build's own exhaustive
-      filesystem listing says are not present. A gate whose last word contradicts the artifact it
-      scanned makes every future red build ambiguous, so it goes back on with its own change rather
-      than riding along on someone else's. The SBOM is now `main`-only, so a scan reading it is
-      `main`-only too.
-
 - [ ] **A corpus read is ~40 kB of memory per entry, and only 25 kB of it is boundable** — [M],
       measured 2026-09-14
       (`D-2026-09-14-the-memory-corpus-is-a-memory-bound-not-a-time-bound`), and it replaces the
@@ -633,41 +591,42 @@ topic).
       a store this repo does not own. (The former separate "no backup tooling" row is folded in
       here; it was downstream of this one and overcounted the stores.)
 
-- [ ] **The image vulnerability scan is not merged as a gate** — [M]. The runbook's false claim that
-      it runs is corrected (2026-08-17) and
-      `tests/test_deploy_chart.py::test_every_supply_chain_gate_the_runbook_names_actually_runs`
-      keeps it corrected. **State the guarantee, not the implementation:** no supply-chain tool the
-      runbook's §(xiv) claims — in the gate table *or* in the prose beside it — may be one that
-      `image.yml` does not actually execute. It does not prove the named gate is *blocking*, only
-      that something runs it. This row said it "fails if the runbook names a gate nothing runs",
-      which was one degree stronger than the assertion then in the tree: the check was a substring
-      over the workflow, so a comment naming the tool satisfied it, and only backticked table rows
-      were read at all. Both holes were found and closed the same day — which is the argument for
-      naming the guarantee rather than the mechanism, since the mechanism changed under this row
-      within hours of it being written. The gate itself is still absent: `trivy`
-      appears nowhere in
-      `.github/workflows/image.yml`, which already builds `chemclaw:ci` locally on every PR, so the
-      step needs no registry. Held for a stated reason — per D-2026-08-01 the candidate scan
-      reported `setuptools` 70.3.0 and `msgpack` 1.1.2 while an exhaustive `find / -xdev` in the
-      same build listed neither, and a gate whose last word contradicts the artifact it scanned
-      makes every red build ambiguous. Re-check that against a current trivy before merging.
+- [ ] **Nothing audits the `github-actions` closure for advisories** — [S], the accepted risk
+      `.github/dependabot.yml` now names out loud
+      (`D-2026-09-14-a-gate-for-one-ecosystem-is-not-a-gate-for-the-file`). Actions are pinned by
+      commit, which bounds *what runs* and says nothing about whether it is vulnerable, and
+      `make ci` reads that ecosystem nowhere.
+      **Not built yet because the set is empty, and that is the argument rather than the excuse**:
+      measured 2026-09-14 against OSV's `GitHub Actions` ecosystem, all four actions this
+      repository uses carry zero advisories at any version, so a gate merged today would be a
+      control that ships green forever with nothing behind it —
+      `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability`.
+      The data source is named so the next person does not have to find it: OSV's
+      `/v1/querybatch` takes `{"package": {"name": "owner/repo", "ecosystem": "GitHub Actions"},
+      "version": ...}`, and the version is the `# vX.Y.Z` comment
+      `test_every_action_is_pinned_to_a_commit_not_a_tag` already requires beside every pin — which
+      is a *claim* about the SHA rather than a resolution of it, and any gate built on it should
+      say so. Trigger: the first advisory that lands on an action in `.github/workflows/`.
+      Anchors: `Makefile::ci`, `.github/dependabot.yml`,
+      `tests/test_deploy_chart.py::test_every_declared_ecosystem_is_audited_or_accepted`.
 
-- [ ] **The note reindex prunes a shared index against one pod's disk** — [M], and it is what the
-      singleton row became once the audit ran
-      (`D-2026-08-27-what-a-second-background-worker-would-race-on`). The two suspects that row
-      named are both safe — every Schedule carries SKIP overlap, which Temporal enforces
-      server-side, and a lost ELN-cursor update was measured to move the mark *backwards*, so the
-      corpus is re-ingested rather than skipped. One worker was never single either: the worker
-      runs eight activities at once by default, so `replicas: 1` only ever excluded pod-local
-      state.
-      The real blocker is `retrieval/vector_index.py::reindex_notes`, which calls `retire_absent`
-      over the notes on *this pod's* disk while `note_index` is shared — and that disk is an
-      emptyDir each pod's sidecar refreshes on its own schedule. So a merged note reaches pod A,
-      a run there indexes it, the next run lands on B and retires it, alternating; the existing
-      guards refuse an *empty* scan, not a *lagging* one. Closing it means keying the prune on the
-      commit the index was built from, so a pod whose checkout predates it declines to prune — or
-      pinning the reindex to one pod. That is the single change gating `replicas > 1`.
-
+- [ ] **Two pods sharing one note index re-embed the whole corpus on every alternating pass** —
+      [M], measured 2026-09-14 while closing the prune half
+      (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`), and it is the *larger* of
+      the two defects that row described as one. `note_file_fingerprints` is `mtime_ns:size`, and
+      two clones of one commit carry different mtimes — git sets a file's mtime when it writes it —
+      so a note that has not changed reads as changed to whichever pod did not index it last.
+      Driven over two real clones against one index: pod B's pass re-embedded 2 of 2 notes it had
+      already seen, and pod A's next pass re-embedded 3 of 3. That is one endpoint call per note per
+      pass, for ever, which is precisely what `D-2026-08-02-embed-only-what-changed` exists to
+      prevent — it prevents it for one pod and for no more than one.
+      The fix is a content-derived fingerprint (a hash of the file's bytes), and it supersedes that
+      ADR's stat-only argument rather than extending it: a hash costs one read per note per scan
+      where a `stat` costs none, which is the trade D-2026-08-02 declined when the alternative was
+      an embedding call. It is now the cheaper side of the same trade. Anchors:
+      `kg/graph.py::note_file_fingerprints`, `retrieval/vector_index.py::_needs_embedding`.
+      Until it lands, `workers.background.replicas` stays 1 — the retirement half no longer gates
+      it, this half does.
 - [ ] **The background worker is a singleton with no PDB, and the PDB is not the fix** — [M].
       `poddisruptionbudget.yaml` covers the front door alone and argues that correctly in the
       template: `minAvailable: 1` over a one-replica Deployment makes the pod un-evictable and
@@ -1175,25 +1134,6 @@ Both change what a `Component` is, so this wants its own ADR and its own measure
 partially-structured reaction does to retrieval — not a patch to `_smiles`. Measured and declared
 by `make live-data`; see `D-2026-08-18-a-corpus-is-not-reachable-because-it-is-on-disk`.
 
-## The labelling client is the one MCP leg with no identity or trace on the wire
-
-`core/mcp_session.open_session` grew a `request_hook` seam so a caller can stamp the outbound
-request, and `connectors/calc/remote.py` uses it: that leg now carries the W3C `traceparent`, the
-correlation id, the actor and the session, plus the origin-strip guard that removes them again if a
-redirect leaves the endpoint's origin. `ingest/labels/labeller.py:216` is the only other
-`open_session` caller and still sends `Authorization` alone, so a labelling drain — hours long,
-inside a durable activity — is invisible to the trace and unjoinable to the audit trail.
-
-It is not one line. `turn_identity_hook` lives in `connectors/identity.py` and sits on top of both
-`agent.turn_flags` (for the dry-run flag) and `connectors.manifest`, and neither
-`ingest -> connectors` nor `ingest -> agent` is an edge `tests/test_layering.py` permits. So closing
-it means deciding where identity stamping for a **non-connector** MCP client belongs: the labelling
-server is an endpoint this system dials, not a connector bundle, and the hook it needs is a strict
-subset of the connector one (no `ConnectorAuth`, no dry-run flag). The likely shape is a
-core-level `trace_and_identity_headers()` that `connectors/identity.py` composes rather than owns —
-which is a small change once the question is answered and a layering exception if it is not.
-Found by the 2026-08-27 logging and monitoring review.
-
 ## Template step roles cross the durable boundary on an unsigned payload
 
 `durable/template_activities.py::_acting_as` binds `StepIdentity.roles` — the requester's real role
@@ -1228,27 +1168,6 @@ Replaces "two producers bind a template step's ambient identity, and only one of
 whose title was its premise: the two producers disagree about `roles`, on purpose, and collapsing
 them would refuse entitled work rather than weaken a refusal
 (`D-2026-09-12-two-producers-of-one-identity-are-not-redundant-when-they-disagree`).
-
-## `propose_report` proposes nothing, and its name is a registered activity name
-
-`durable/report_workflow.py::propose_report` calls `record_note`. There is nothing to propose to:
-`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the gate and the proposal queue
-behind it, and wave 15 corrected every *docstring* on that path — this is the one thing it did not
-touch, because the name is not prose.
-
-Renaming it is a Temporal concern rather than a refactor. The string is the registered activity
-name, so an in-flight history that has scheduled `propose_report` and not yet completed it resolves
-against a worker that no longer offers it; the safe shape is to register both names for one
-deployment cycle and drop the old one after the queue has drained, which is a release procedure and
-not a commit. Its callers also span `tests/test_report_workflow.py`,
-`tests/test_durable_observability.py` and a merged ADR (`D-2026-08-27-…`), and a merged ADR is never
-edited — so the citation outlives the rename either way and the new ADR has to say what it now
-names.
-
-Worth doing because a symbol name is read far more often than the docstring under it, and this one
-says a control exists. Not worth doing as part of a prose sweep.
-
-Found by wave 15's PR-gate claim audit.
 
 ## A truncated argument document is completed by upstream and the tool runs on the guess
 

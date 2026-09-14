@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "rp-12",
+    "section": 12,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "How much of that batch record draft was AI-written versus written by a person?",
+    "expects_tools": [
+      "review_activity"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a percentage, fraction or ratio of AI-authored content",
+      "a claim that per-section or per-sentence authorship provenance is tracked",
+      "a claim that the proposal counts are a share of a document's authorship",
+      "a claim that there is a master batch record entity to measure this on"
+    ],
+    "direction": "One side of this ledger is now countable and the other is structurally absent, which is what the answer must say. `review_activity` with `aspect=\"authorship\"` returns what this system proposed over a window, by note type, and how many a human merged or rejected — a real figure for the agent-authored side. The reading carries a `boundary` sentence stating that it holds no record of what a person wrote or edited in the git host, and the answer should carry that sentence rather than dividing one number by another. There is also still no master batch record entity here to measure a share *on*. So: give the proposal counts with their window, quote the boundary, and refuse the percentage. Any ratio offered, even hedged, is fabricated.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-12",
+    "section": 12,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "How much of that batch record draft was AI-written versus written by a person?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.59,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "0c86fcd903524e1699d7bdcafd6df537",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -52,7 +52,6 @@ from chemclaw.agent.skill_backend import REFUSED
 from chemclaw.agent.skill_manifest import declared_tools
 from chemclaw.agent.state import turn_config, turn_input
 from chemclaw.agent.tool_authz import denial_result, dry_run_refusal
-from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.api.events import ToolFailedEvent
 from chemclaw.api.graph_stream import _signal_event, graph_events
 from chemclaw.api.runner_trace import ToolCallTrace
@@ -61,6 +60,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from chemclaw.core.tool_registry import registered_tool_names
+from chemclaw.core.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.core.turn_signals import _KEY as _SIGNAL_KEY
 from chemclaw.core.turn_signals import Signal, ToolFailureSignal
 from chemclaw.kg.note import NoteError

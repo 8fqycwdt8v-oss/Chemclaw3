@@ -297,3 +297,57 @@ def test_a_release_patches_a_fleet_workload_that_exists() -> None:
                     f"runs {sorted(workloads[rendered])}"
                 )
     assert not wrong, "\n".join(dict.fromkeys(wrong))
+
+
+def test_a_chartless_component_says_what_a_release_could_not_do(tmp_path: Path) -> None:
+    """`oc set image` failing on a missing Deployment reads as a broken cluster. It is not.
+
+    Two of the four repositories this release descriptor deploys — `Chemclaw3_ui` and every
+    `Chemclaw3-mcp` server — describe themselves with an image and a NetworkPolicy and no chart, so
+    the honest maximum a release can do to them is change their bytes. What that means in practice
+    is invisible at the moment it bites: an operator sees `Error from server (NotFound)` and reads
+    it as somebody having deleted the Deployment, rather than as the shape of this kind of
+    component, which cannot be *created* from a release at all.
+
+    Driven rather than grepped, with a `oc` on PATH that refuses exactly the way a real one does,
+    because the property under test is what an operator sees on the failing path — and the shipped
+    function reached that path with nothing of its own to say.
+    """
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "oc").write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$1" = "set" ]; then\n'
+        "  echo 'Error from server (NotFound): deployments.apps \"x\" not found' >&2\n"
+        "  exit 1\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    (fake_bin / "oc").chmod(0o755)
+    (fake_bin / "helm").write_text("#!/usr/bin/env bash\nexit 0\n")
+    (fake_bin / "helm").chmod(0o755)
+
+    descriptor = tmp_path / "release.json"
+    descriptor.write_text(
+        '{"environment": "probe", "components": {"ui": {"kind": "deployment", '
+        '"deployment": "chemclaw-ui", "image": "reg/ui", "digest": "sha256:abc"}}}'
+    )
+
+    target = _JENKINS_DIR / "targets" / "openshift.sh"
+    result = subprocess.run(
+        ["bash", str(target), str(descriptor)],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "NAMESPACE": "probe-ns",
+            "DRY_RUN": "false",
+        },
+    )
+
+    assert result.returncode != 0, "a failed `oc set image` must fail the release"
+    assert "ships no chart" in result.stderr, (
+        "the release left the operator with only `oc`'s NotFound, which names the symptom and not "
+        f"the shape of a chartless component:\n{result.stderr}"
+    )
+    assert "cannot create the Deployment" in result.stderr

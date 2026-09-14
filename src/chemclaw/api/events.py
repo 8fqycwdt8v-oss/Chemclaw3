@@ -167,23 +167,27 @@ class QuestionEvent(BaseModel):
     options: list[str] = []
 
 
-class NoteProposedEvent(BaseModel):
+class NoteRecordedEvent(BaseModel):
     """A note was written into the knowledge graph (gap RCH-4).
 
     A note write returns its reference into the *model's* context, so without this the chemist
     never learns their contribution landed. This carries the reference back to the surface that
     produced it.
 
-    **The wire name is `note_proposed` and the event is not a proposal.** Nothing reviews a note
-    any more (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), so the accurate name is
-    `note_recorded` — but the literal is an SSE contract that `Chemclaw3_ui` and `evals/live.py`
-    both switch on, and renaming it is a coordinated two-repo deploy with a skew window in which
-    one side silently drops the event. Kept as-is deliberately, with the rename tracked in
-    `docs/planning/BACKLOG.md`; what a chemist actually *reads* says "recorded", which is the half
-    that was making a false claim to a person.
+    **The wire name was `note_proposed` and the event was never a proposal**
+    (`D-2026-09-14-the-reader-lands-first-and-the-name-follows`). Nothing reviews a note any more
+    (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), so the accurate name is
+    `note_recorded`, and what a chemist reads has said "recorded" the whole time. The literal is an
+    SSE discriminator two repositories switch on, so the rename is a three-step deploy and **the
+    only ordering with no broken state is reader first**: `Chemclaw3_ui` shipped a reader that
+    accepts both names (its `shared/events.ts` carries the argument), this is the second step, and
+    the third — dropping the old name from that reader — is theirs and happens after this ships.
+    The reverse order silently drops the event in every browser not yet redeployed.
+
+    `evals/live.py` is this repository's own reader and accepts both for the same window.
     """
 
-    type: Literal["note_proposed"] = "note_proposed"
+    type: Literal["note_recorded"] = "note_recorded"
     note_id: str
     reference: str
 
@@ -597,7 +601,7 @@ Event = (
     | JobFailedEvent
     | AwaitingAnswerEvent
     | CapabilityDegradedEvent
-    | NoteProposedEvent
+    | NoteRecordedEvent
     | ApprovalRequestEvent
     | QuestionEvent
     | AnswerEvent
@@ -623,3 +627,36 @@ def sse_frame(event: Event) -> dict[str, str]:
     and neither is the owner — `api/routes/streams.py` already imports four members from here.
     """
     return {"event": event.type, "data": event.model_dump_json()}
+
+
+#: The name the union is published under in the OpenAPI document's `components.schemas`.
+TURN_EVENT_SCHEMA = "TurnEvent"
+TURN_EVENT_REF = f"#/components/schemas/{TURN_EVENT_SCHEMA}"
+
+
+def event_schemas() -> dict[str, object]:
+    """Every OpenAPI component this union needs, keyed by component name.
+
+    **Why the SSE contract has to reach the document at all**
+    (`D-2026-09-14-a-contract-the-client-cannot-read-is-a-contract-one-side-remembers`). The
+    fixture in `tests/fixtures/turn_events_contract.json` holds this union against the *models*,
+    which makes a change here loud on this side. What it cannot do is give the other side anything
+    to read: `Chemclaw3_ui`'s `shared/events.ts` is hand-mirrored and has been wrong nine times,
+    and `scripts/check-openapi.mjs` fetches the one artefact this service publishes. Measured
+    2026-09-14, that artefact declared **2 of 17** members and **0 of 10** error codes, because a
+    `text/event-stream` response is a body FastAPI cannot infer.
+
+    `TypeAdapter` rather than a hand-built `oneOf`: the union is already discriminated on `type`,
+    and pydantic emits the `discriminator` mapping an OpenAPI client generator needs. The
+    `ref_template` points at `components/schemas`, which is where these are merged, so every
+    `$ref` pydantic writes resolves in the merged document rather than at `#/$defs`.
+
+    Returns:
+        The union's own component plus every member component it references.
+    """
+    from pydantic import TypeAdapter
+
+    schema = TypeAdapter(Event).json_schema(ref_template="#/components/schemas/{model}")
+    components: dict[str, object] = dict(schema.pop("$defs", {}))
+    components[TURN_EVENT_SCHEMA] = schema
+    return components

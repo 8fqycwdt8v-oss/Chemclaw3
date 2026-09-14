@@ -20,10 +20,13 @@ spec:
          `terminationGracePeriodSeconds` (150) to finish. Two background workers poll
          `background-jobs` for that window, which is precisely the race
          `D-2026-08-27-what-a-second-background-worker-would-race-on` pins the count to prevent:
-         `NoteReindexWorkflow` retires `note_index` rows for notes missing from *this pod's*
-         knowledge checkout, the two pods hold two differently-aged clones of the corpus, and a
-         merge-webhook reindex landing on the older one deletes the freshly merged notes' rows while
-         logging that it retired notes that exist.
+         the two pods hold two differently-aged clones of the corpus. The *retirement* that used to
+         be named here is closed — a prune is bounded by the corpus revision the row was built from
+         (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`), so the older pod no
+         longer deletes the freshly merged notes' rows. What still pins the count is the other half
+         the same measurement found: `note_file_fingerprints` is `mtime_ns:size` and two clones of
+         one commit carry different mtimes, so two pods sharing one index re-embed the whole corpus
+         on every alternating pass — one endpoint call per note, per pass. `BACKLOG.md` has it.
 
          `Recreate` rather than `maxSurge: 0`: a singleton worker has no availability to protect —
          Temporal redelivers an activity whose worker went away — so the honest statement is that

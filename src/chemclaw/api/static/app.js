@@ -152,8 +152,17 @@ function applyEvent(evt, answerEl) {
     case "question":
       add("trace", `❓ ${evt.question}` + ((evt.options || []).length ? `\n   options: ${evt.options.join(" | ")}` : ""));
       return answerEl;
-    case "note_proposed":
-      // "recorded", not "proposed for review": nobody reviews it, and it is readable now.
+    case "note_recorded":
+      // **One name here, not two**, and that is not the treatment `Chemclaw3_ui` gets
+      // (`D-2026-09-14-the-reader-lands-first-and-the-name-follows`). That client accepts
+      // `note_proposed` as well, because a browser holding a bundle from before the rename is a
+      // real state there. This page is *served by this process*: it cannot be older than the
+      // service sending the event, so a second name would be a tolerance for a skew that cannot
+      // happen — and `tests/test_dev_page_events.py` asserts the set both ways, so it would fail
+      // as an event no turn can emit.
+      //
+      // The line a person reads already said "recorded" before the wire name did; that half was
+      // never the false one.
       add("trace", `📝 recorded ${evt.note_id} — ${evt.reference}`);
       return answerEl;
     case "approval_request":

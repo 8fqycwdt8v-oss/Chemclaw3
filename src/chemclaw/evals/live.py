@@ -508,7 +508,14 @@ async def run_turn(
                         outcome.first_degraded_index = index
                 elif kind == "job_started":
                     outcome.jobs_started.append(str(event.get("job_id", event.get("job", ""))))
-                elif kind == "note_proposed":
+                elif kind in {"note_recorded", "note_proposed"}:
+                    # **Both names, for the length of one deployment cycle**
+                    # (`D-2026-09-14-the-reader-lands-first-and-the-name-follows`). `note_proposed`
+                    # is what this service sent until the rename and the event was never a
+                    # proposal; a probe run against a service one deploy behind would otherwise
+                    # score a knowledge write as not having happened, which reads as a retrieval
+                    # regression rather than as a skew. The old name goes when `Chemclaw3_ui`
+                    # drops it, which is the third step of the same rename.
                     outcome.notes_proposed.append(str(event.get("note_id", "")))
                 elif kind == "question":
                     outcome.asked_clarifying = True

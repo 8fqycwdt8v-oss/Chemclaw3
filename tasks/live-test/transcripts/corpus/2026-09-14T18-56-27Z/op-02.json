@@ -1,0 +1,62 @@
+{
+  "probe": {
+    "id": "op-02",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I've got to plan a week on the EDC/HOBt coupling for a new acid. One experiment a day, I'm the only one on it. What should the week actually be, and in what order?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "similar_reactions",
+      "record_knowledge_note"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "I have scheduled or booked anything",
+      "instrument or bench time has been reserved",
+      "these results are what you will get"
+    ],
+    "direction": "Recognises this as the day-by-day progression question rather than a surrogate-model optimization, and says which it chose and why. Reads the in-house record first — the amide-coupling additive playbook and the DCM amide-coupling failure mode — and proposes an ordered sequence where each day tests one thing, with a falsifiable expectation stated for each, so a result either way tells the technician something. Later days are explicitly contingent on earlier outcomes rather than fixed. Offers the plan as a proposal a human approves, not as plan-of-record, and never implies anything was booked or scheduled.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-02",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I've got to plan a week on the EDC/HOBt coupling for a new acid. One experiment a day, I'm the only one on it. What should the week actually be, and in what order?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.27,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "2044b513299a41f38ce7963311c0c40b",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -39,7 +39,6 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
 from chemclaw.agent.session import TurnSession
-from chemclaw.agent.turn_flags import is_dry_run
 from chemclaw.agent.turn_usage import _prompt_estimate
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import Event
@@ -51,6 +50,7 @@ from chemclaw.core.identity_context import (
 )
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.session_context import get_current_session_id
+from chemclaw.core.turn_flags import is_dry_run
 from tests.fakes_turn import Chunk, Piece, ScriptedTurn
 
 

@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "gr-16",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Will COc1ccc(-c2ccccc2)cc1 come out of ethanol cleanly, or do I need a different antisolvent?",
+    "expects_tools": [
+      "predict_solubility",
+      "compare_solvents",
+      "gather_evidence",
+      "resolve_compound"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a predicted solubility given as a measured value",
+      "a solubility number quoted with no uncertainty or method caveat",
+      "a crystallisation protocol (cooling profile, seeding point) presented as validated"
+    ],
+    "direction": "Computes rather than guesses, carries the uncertainty into the answer, and separates what the prediction supports (relative solvent ranking) from what it does not (whether the crystals come out clean). Any recrystallisation guidance already in the corpus is worth citing.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-16",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Will COc1ccc(-c2ccccc2)cc1 come out of ethanol cleanly, or do I need a different antisolvent?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.07,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "e2232a4a7fef49dfb7748548b5a73767",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

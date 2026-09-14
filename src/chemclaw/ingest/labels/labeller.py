@@ -38,6 +38,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from chemclaw.core.call_identity import turn_identity_hook
 from chemclaw.core.chem import STANDARDIZATION_VERSION
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
@@ -256,16 +257,15 @@ class RxnLabelServer:
                 settings.rxnlabel_server_url,
                 token_env=settings.rxnlabel_server_token_env,
                 timeout_seconds=settings.rxnlabel_server_timeout_seconds,
-                # **No `request_hook` here, and the reason is a layering boundary rather than an
-                # oversight.** `connectors/calc/remote.py` passes `turn_identity_hook`, so its leg
-                # carries `traceparent`, the correlation id, the actor and the session; this one
-                # sends `Authorization` alone and is therefore untraceable, which matters because a
-                # labelling drain runs for hours inside a durable activity. The hook cannot simply
-                # be imported: it lives in `connectors/identity.py` on top of both
-                # `agent.turn_flags` and `connectors.manifest`, and `ingest -> connectors` is not an
-                # edge `tests/test_layering.py` permits. Closing it means deciding where a
-                # *non-connector* MCP client's identity stamping belongs — a real design question,
-                # not a line to add here. `docs/planning/BACKLOG.md` carries it.
+                # **The same stamp `connectors/calc/remote.py` puts on its leg**, since
+                # `D-2026-09-14-identity-stamping-is-cores-not-a-connectors` moved it to `core`.
+                # This used to be the one MCP leg in the system that went out anonymous: no actor,
+                # no session, no correlation id and no `traceparent`, for hours at a time inside a
+                # durable activity, because the hook lived in `connectors/identity.py` and
+                # `ingest -> connectors` is not an edge `tests/test_layering.py` permits. The hook
+                # is bound to this server's own origin and strips on a cross-origin redirect, so a
+                # labelling server answering `302` cannot harvest the trail.
+                request_hook=turn_identity_hook(settings.rxnlabel_server_url),
             ) as session:
                 payload = await invoke(session, tool, arguments)
         except McpCredentialRefused as exc:

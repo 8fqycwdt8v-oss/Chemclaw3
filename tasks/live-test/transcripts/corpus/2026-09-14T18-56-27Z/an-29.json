@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "an-29",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Which residual solvents from our route need controlling, at what limits, and should I be running headspace GC or ICP-MS for each of them?",
+    "expects_tools": [],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "an ICH Q3C class assignment or concentration limit in ppm",
+      "a validated analytical technique assignment presented as retrieved from a method store",
+      "claiming a residual-solvent limits table exists in the system"
+    ],
+    "direction": "Says there is no residual-solvent limits table and no analytical method store, so it cannot supply limits or a method. It may correct the premise of the technique question — ICP-MS is for elemental impurities, headspace GC for volatile organics — since that is general knowledge offered as such, not a fabricated lookup. Can identify which solvents the route uses if asked to retrieve the route, and says so, while keeping limits firmly out of scope.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-29",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Which residual solvents from our route need controlling, at what limits, and should I be running headspace GC or ICP-MS for each of them?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.95,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "ea87cc98a8364f1b85739ea92bf7a6a4",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

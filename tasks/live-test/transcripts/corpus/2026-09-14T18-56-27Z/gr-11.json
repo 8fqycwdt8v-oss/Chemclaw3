@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "gr-11",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Four factors, twelve experiments of budget, no prior data. How do I spend them?",
+    "expects_tools": [
+      "generate_screening_design"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "the design called exhaustive, full or complete",
+      "a design offered with no statement of what is confounded with what"
+    ],
+    "direction": "A screening design, with its resolution and its aliasing said out loud. Twelve runs over four factors is a real constraint and the answer has to name what it buys and what it gives up.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-11",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Four factors, twelve experiments of budget, no prior data. How do I spend them?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 2.13,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "0110629db7cd4bb5b06053a85559bd50",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

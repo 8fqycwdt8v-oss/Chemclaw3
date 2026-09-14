@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "ws-05",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Forget what I told you about DMF — the filing team came back and it is fine after all, and I do not want that constraint sitting there shaping your suggestions.",
+    "expects_tools": [
+      "forget_preference",
+      "recall_preferences"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "that the preference had never been recorded, if it had",
+      "that anything beyond the named preference was removed"
+    ],
+    "direction": "A retraction, and it has to actually take effect rather than be agreed to. A good answer removes the DMF entry, confirms specifically what was removed, and leaves everything else alone — over-deleting is as bad as not deleting, because the asker cannot see the store. If no such preference is on file the answer says that instead of confirming a deletion that did not happen. Offering to re-check what remains is the natural close.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-05",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Forget what I told you about DMF — the filing team came back and it is fine after all, and I do not want that constraint sitting there shaping your suggestions.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.37,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "bc4af8cb6eb644ed82b6d04d33338123",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

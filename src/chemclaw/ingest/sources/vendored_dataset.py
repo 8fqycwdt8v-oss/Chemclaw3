@@ -31,7 +31,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
@@ -56,6 +56,14 @@ class DatasetManifest(BaseModel):
 
     `retrieved_from` is documentation of where a human obtained the file, recorded so provenance
     survives. Nothing reads it as an address and nothing here can fetch it.
+
+    **`mirrored` is the question a manifest must answer before it can go stale**
+    (`D-2026-09-14-a-mirror-with-no-owner-goes-stale-in-silence`). A corpus copied from somewhere
+    else has an upstream that moves; the copy does not, and nothing in this system can tell. So a
+    mirrored corpus must also name `refresh_owner` and `refresh_cadence`, and the field is required
+    rather than defaulted because a default answers the question on the author's behalf — which is
+    the one thing a provenance model must never do. First-party content (`mirrored: false`) has no
+    upstream and needs neither.
     """
 
     name: str = Field(min_length=1)
@@ -63,12 +71,49 @@ class DatasetManifest(BaseModel):
     licence: str = Field(min_length=1)
     retrieved_from: str = Field(min_length=1)
     description: str = Field(min_length=1)
+    # Is this a copy of a corpus maintained somewhere else? Required, never defaulted — see above.
+    mirrored: bool
+    # Who re-takes the snapshot, and how often. Required exactly when `mirrored` is true.
+    refresh_owner: str | None = None
+    refresh_cadence: str | None = None
     # SHA-256 of `records.csv`, so the file the deployment ships is provably the file that was
     # reviewed. Verified on load when `vendored_dataset_verify` is on.
     sha256: str = Field(min_length=64, max_length=64)
     # Column holding the text a query matches against, and the one holding the structure.
     text_column: str = Field(min_length=1)
     smiles_column: str | None = None
+
+    @model_validator(mode="after")
+    def _a_mirror_names_who_refreshes_it(self) -> "DatasetManifest":
+        """A mirrored corpus without an owner and a cadence is a stale corpus waiting to happen.
+
+        The fleet's `MODULES.md` states the rule and nothing enforced it on either side: "a stale
+        patent index that nobody knows is stale is worse than no patent index". Enforced at load
+        rather than in a review checklist, because a review that has to remember a rule is the
+        control this repository keeps finding gone.
+
+        Refused in the other direction too: naming a refresh owner for first-party content is a
+        claim about an upstream that does not exist, and the next reader would go looking for it.
+        """
+        named = [
+            field
+            for field in ("refresh_owner", "refresh_cadence")
+            if (getattr(self, field) or "").strip()
+        ]
+        if self.mirrored and len(named) < 2:
+            missing = sorted({"refresh_owner", "refresh_cadence"} - set(named))
+            raise ValueError(
+                f"dataset {self.name!r} is mirrored from somewhere else and does not say "
+                f"{' or '.join(missing)}. A snapshot with no named owner and no cadence goes "
+                "stale with nobody knowing it has."
+            )
+        if not self.mirrored and named:
+            raise ValueError(
+                f"dataset {self.name!r} is not mirrored and names {', '.join(sorted(named))}. "
+                "First-party content has no upstream to refresh from, and saying otherwise sends "
+                "the next reader looking for one."
+            )
+        return self
 
 
 class VendoredRecord(BaseModel):
