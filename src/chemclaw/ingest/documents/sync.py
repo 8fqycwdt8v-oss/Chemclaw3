@@ -59,10 +59,10 @@ from chemclaw.ingest.documents.index import (
     FileRecord,
     StaleChunk,
 )
+from chemclaw.ingest.documents.isolate import ParseWorkerLost, parse_document_isolated
 from chemclaw.ingest.documents.parse import (
     DocumentParseError,
     ScannedDocumentError,
-    parse_document,
 )
 
 logger = logging.getLogger(__name__)
@@ -184,7 +184,14 @@ def _read_and_parse(ref: FileRef, max_bytes: int) -> _Parsed:
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-    parsed = parse_document(ref.path, raw)
+    # **In a killable child, not on this thread.** Python cannot interrupt a running parser, so a
+    # hostile document used to hold a thread of the *shared* default executor for as long as it
+    # liked — in the Temporal worker, where N such documents on a share permanently consume N
+    # executor threads and the crawl's `wait_for` frees only the pass. `parse_document_isolated`
+    # gives the parse its own process and kills it on the deadline, which is what makes the thread
+    # end. The deadline is `attachment_parse_timeout_seconds` for the reason the caller's docstring
+    # gives: an upload and a share document are the same work, so the number is decided once.
+    parsed = parse_document_isolated(ref.path, raw, None, settings.attachment_parse_timeout_seconds)
     # **Refused here, where the pass can absorb it.** A NUL byte is valid UTF-8, so
     # `_parse_text`'s `errors="replace"` decode keeps it and `chunk_document`'s `.strip()` does not
     # remove it — and Postgres refuses one in a `text` column outright. Left to the write it was a
@@ -270,14 +277,22 @@ async def _parse_changed(
     stopped answering) held this activity for as long as it liked, and with it the share's whole
     crawl: `document_sync_timeout_seconds` bounds the activity attempt, not any file within it.
 
-    **What the bound frees is this pass, not the thread.** Python cannot interrupt a running
-    parser, and none of the libraries behind `parse_document` — pypdf, python-docx, openpyxl,
-    python-pptx — offers an interruption hook, so the worker thread runs the hostile document to
-    completion in the background while the crawl moves on, exactly as `parse_attachment_off_loop`
-    does on the front door. The honest claim is therefore narrow: the
-    activity finishes, its remaining files are indexed, the pass is reported, and one thread of the
-    default executor stays busy until the parse ends by itself. Killing it needs a subprocess, and
-    that is a `docs/planning/BACKLOG.md` row rather than something this bound quietly delivers.
+    **The bound now frees the thread as well as the pass, and it did not.** Python cannot interrupt
+    a running parser and none of the libraries behind `parse_document` — pypdf, python-docx,
+    openpyxl, python-pptx — offers an interruption hook, so a `wait_for` over `to_thread` moved the
+    crawl on while the worker thread ran the hostile document to completion. That thread belongs to
+    the Temporal worker's *shared* default executor, so N pathological documents on a share consumed
+    N executor threads permanently — the same wedge `agent/attachments.py` had, on a pool nothing
+    caps. `_read_and_parse` now parses in the killable child
+    `ingest/documents/isolate.py` already provided for the upload path, so the parse is killed on
+    its deadline and the thread ends with it.
+
+    The `wait_for` here stays, and what it covers is now narrow and stated: the *read* off the
+    mount, which happens on this thread before any child exists and which a share that stopped
+    answering can hang. It is the parse budget plus `attachment_parse_reap_grace_seconds` for the
+    reason `agent/attachments.py` gives — the forkserver's own first start is 0.86 s and happens
+    before the child's clock begins — so it fires only when the read, not the parse, is the thing
+    that did not come back.
 
     Returns the parsed documents, their refs by path, and the paths that were **refused but are
     still on the share** — the caller restamps those, because a file that failed to open did not
@@ -294,7 +309,10 @@ async def _parse_changed(
         try:
             result = await asyncio.wait_for(
                 asyncio.to_thread(_read_and_parse, ref, max_bytes),
-                timeout=settings.attachment_parse_timeout_seconds,
+                timeout=(
+                    settings.attachment_parse_timeout_seconds
+                    + settings.attachment_parse_reap_grace_seconds
+                ),
             )
         # A refused file gets **no index row**, so its fingerprint is not stored and the next crawl
         # opens it again. That is a deliberate trade, not an oversight: recording it would make the
@@ -320,6 +338,21 @@ async def _parse_changed(
                 settings.attachment_parse_timeout_seconds,
             )
             timed_out[TimeoutError.__name__] += 1
+            first_timed_out = first_timed_out or ref.path
+            report.skipped_timeout += 1
+            refused.append(ref.path)
+            continue
+        # A parse the child was killed for is the same event as the `wait_for` above firing, and
+        # must not be filed as an unreadable document: `skipped_timeout` is the number that says a
+        # bound fired, and `ParseWorkerLost` is a `DocumentParseError` subclass, so without this
+        # arm every killed parse would land in `skipped_unreadable` beside a corrupt PDF.
+        except ParseWorkerLost:
+            logger.debug(
+                "%s was still being read after %ss; its reader process was killed",
+                ref.path,
+                settings.attachment_parse_timeout_seconds,
+            )
+            timed_out[ParseWorkerLost.__name__] += 1
             first_timed_out = first_timed_out or ref.path
             report.skipped_timeout += 1
             refused.append(ref.path)

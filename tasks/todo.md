@@ -441,17 +441,48 @@ kill a weight file; scale the front door to zero and render the chart.
 
 The answers a chemist acts on. Each row here is a way the record can be right and the answer wrong.
 
-- [ ] W26.1 `Chemclaw3` — a retracted ELN entry stays current evidence; closing it is a five-part
-      change [M]. The highest-consequence correctness row on the queue.
-- [ ] W26.2 `Chemclaw3` — the fingerprint index is keyed by source and the citation is not, so two
-      sources collapse.
-- [ ] W26.3 `Chemclaw3` — structure identity is canonical SMILES and nothing else: no InChI, no
-      InChIKey [M].
-- [ ] W26.4 `Chemclaw3` — a published calculation names no reaction, note or compound context [M].
-- [ ] W26.5 `Chemclaw3` — `_quote_supports` cannot tell whether the figure a quote carries is about
-      *this* slot.
-- [ ] W26.6 `Chemclaw3` — knowledge writes serialise cluster-wide on one advisory lock [M] (a
-      correctness-adjacent throughput bound on the one write path, `kg/record.py`).
+- [x] W26.1 `Chemclaw3` — a retracted ELN entry stays current evidence; closing it is a five-part
+      change [M]. The highest-consequence correctness row on the queue. Closed by
+      `D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`, and the row was wrong in one place:
+      (b) demanded `_BoundedIngest` expose a public `inner` for a capability walk, and a *field* on
+      `RawEntry` passes that wrapper untouched, so there is no walk. Three defects the row did not
+      name were found by driving it — a withdrawal is byte-identical prose, so the sync's
+      unchanged-check skipped it; `EntryBinding` could not name a site's withdrawal column, so the
+      producer was unwritable for the one connector with a tenant; and the cursor watermark would
+      never have re-fetched the row.
+- [x] W26.2 `Chemclaw3` — the fingerprint index is keyed by source and the citation is not, so two
+      sources collapse. Closed by `D-2026-09-13-a-citation-names-the-source-it-was-found-in`, from
+      the readers as both prior ADRs required. Two things the row did not name: `record_phase`
+      wrote a bare `reaction_labels.citation` from a row that already carried its source, and
+      W26.1's own `retracted()` was keyed on the bare id, so one site's withdrawal dropped another
+      site's run out of the sweep.
+- [x] W26.3 `Chemclaw3` — structure identity is canonical SMILES and nothing else: no InChI, no
+      InChIKey [M]. Closed by
+      `D-2026-09-13-a-second-identity-scheme-inherits-the-first-ones-instability`, which found the
+      row's own justification false: an InChIKey taken after standardization moves exactly when
+      `compound_id` moves (measured across the solvate fix), and one taken before it fragments the
+      join. The row's ordering constraint pointed at a §2 solvate row that is closed and gone.
+- [x] W26.4 `Chemclaw3` — a published calculation names no reaction, note or compound context [M].
+      Closed by `D-2026-09-13-a-publication-carries-the-link-the-system-already-holds`. The row is
+      three claims with three answers: the compound context already exists, the note→calculation
+      direction already exists, the note a run *produced* was held by `job_records.note_id` and
+      dropped by both publish paths (carried now), and the reaction context is not dropped but
+      never recorded anywhere — deferred with its trigger. Also found: `tests/test_publish_sql.py`
+      says it runs the shipped DDL and applied the first of its three files.
+- [x] W26.5 `Chemclaw3` — `_quote_supports` cannot tell whether the figure a quote carries is about
+      *this* slot. The row asked for a count first and
+      `D-2026-09-13-a-digit-inside-a-word-is-not-a-figure-somebody-stated` took it: 537 quotable
+      figures over 295 chemist asks, of which **166 were never quantities** — a pasted SMILES's
+      ring closures made `max_runs='1'` a stated value. That third is closed; the attribution half
+      is in `DEFERRED.md` with the count and a trigger the row did not have.
+- [x] W26.6 `Chemclaw3` — knowledge writes serialise cluster-wide on one advisory lock [M] (a
+      correctness-adjacent throughput bound on the one write path, `kg/record.py`). Closed by
+      `D-2026-09-13-the-lock-is-not-the-bound-the-commit-is`: the row named the wrong thing. The
+      lock is **14.4 ms, flat**, against **298.8 ms** of git at 10,000 notes — 4.8% — and the
+      ceiling is one commit-and-push per note (31.6 ms/note at ten per commit, 8.5 at fifty).
+      Batching is deferred on the product argument, not the cost. The correctness half the row
+      named in passing is closed: the chart refuses to render on the memory session store, where
+      `_cluster_lock` is skipped and every note write is unguarded across pods.
 - [ ] W26.7 `Chemclaw3-mcp` — `rxnpredict/engine/cache.py:48,56` falls back to **raw caller text** as
       a cache key when RDKit refuses canonicalisation: two spellings of one molecule, two rows, and
       an unvalidated key.

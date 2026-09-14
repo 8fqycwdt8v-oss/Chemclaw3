@@ -369,3 +369,108 @@ def test_the_replay_note_names_every_recipe() -> None:
             f"{name}'s replay recipe is not in infra/sql/README.md verbatim: {recipe!r}. A recipe "
             "an operator has to reconstruct is a recipe nobody runs under pressure"
         )
+
+
+# The notations a second structure-identity scheme would arrive as. Names, not prose: `051`'s own
+# comment lists three of these while declining them, and a test that matched the comment would
+# pass on a migration that adds the column beside it
+# (`D-2026-09-13-a-second-identity-scheme-inherits-the-first-ones-instability`).
+_SECOND_IDENTITY = re.compile(
+    r"^(std_)?(inchi|inchi_key|inchikey|cas|cas_number|cas_rn|formula|molecular_formula"
+    r"|molecular_weight|mol_weight|registry_number|corporate_id)$"
+)
+
+_ADD_COLUMN = re.compile(rf"ADD COLUMN(?: IF NOT EXISTS)?\s+({_NAME})", re.I)
+_CREATE_BODY = re.compile(rf"CREATE TABLE IF NOT EXISTS\s+{_NAME}\s*\((.*)\)", re.I)
+
+
+def _top_level_parts(body: str) -> list[str]:
+    """Split a `CREATE TABLE` body on the commas that separate its definitions.
+
+    Depth-aware, because `VARCHAR(64)` and a `CHECK (a IN ('x', 'y'))` both carry commas that do
+    not separate anything.
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for char in body:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        if char == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    parts.append("".join(current))
+    return parts
+
+
+def _declared_columns() -> list[tuple[str, str]]:
+    """Every `(file, column)` this family's schemas declare — both databases.
+
+    `schema/result-store/` is included because it is the *other* place a compound is named, and the
+    argument being held is about structure identity across both: the result store's `compound` row
+    reuses `compound_id` deliberately, and a second scheme added there would be exactly as dead as
+    one added here.
+    """
+    out: list[tuple[str, str]] = []
+    files = sorted(_SQL.glob("*.sql")) + sorted((_ROOT / "schema").rglob("*.sql"))
+    for path in files:
+        body = _LINE_COMMENT.sub(" ", path.read_text(encoding="utf-8"))
+        for raw in _split_on_statement_ends(body):
+            statement = " ".join(raw.split())
+            if (match := _CREATE_BODY.search(statement)) is not None:
+                for part in _top_level_parts(match.group(1)):
+                    words = part.split()
+                    if words and words[0].upper() not in {
+                        "PRIMARY",
+                        "FOREIGN",
+                        "UNIQUE",
+                        "CHECK",
+                        "CONSTRAINT",
+                        "EXCLUDE",
+                    }:
+                        out.append((path.name, _bare(words[0])))
+            for added in _ADD_COLUMN.findall(statement):
+                out.append((path.name, _bare(added)))
+    return out
+
+
+def test_the_schemas_declare_columns_at_all() -> None:
+    """The positive control: a scan that found nothing would pass the guard below forever."""
+    columns = _declared_columns()
+    assert len(columns) > 100, f"only {len(columns)} column(s) parsed; the scan stopped working"
+    assert ("052_reaction_records.sql", "reaction_id") in columns
+    assert ("001_core.sql", "canonical_smiles") in columns
+
+
+def test_no_schema_mints_a_second_structure_identity() -> None:
+    """Structure identity is the standardized SMILES and nothing else.
+
+    `051_reaction_labels.sql` declined an InChIKey, a formula and a molecular weight because
+    nothing asked and this tree deletes dead columns, and
+    `D-2026-09-13-a-second-identity-scheme-inherits-the-first-ones-instability` measured the
+    argument that was supposed to reopen it — that an InChIKey survives a `STANDARDIZATION_VERSION`
+    bump — and found it false: an InChIKey taken after standardization moves exactly when
+    `compound_id` moves, and one taken before it fragments the join `standard_smiles` exists to
+    make. So a column here is dead on the day it is added, in both databases.
+
+    This is a column-name check over comment-stripped SQL, which is the whole reason it can fail:
+    the three notations it forbids are named in `051`'s own prose, so a test reading the file as
+    text would pass on a migration that adds the column directly beneath that sentence.
+    """
+    minted = sorted(
+        {
+            f"{path}:{column}"
+            for path, column in _declared_columns()
+            if _SECOND_IDENTITY.match(column)
+        }
+    )
+    assert not minted, (
+        f"{minted} declares a second structure identity. The honest form of that change is to "
+        "name the reader first (D-2026-09-13-a-second-identity-scheme-inherits-the-first-ones-"
+        "instability), and a site's own registry number rides `Component.attributes` today with "
+        "no schema change at all"
+    )

@@ -32,7 +32,7 @@ structural hits, `agent.graph_tools.expand_note` serves the recipe behind one hi
 import logging
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Protocol, runtime_checkable
 
 import psycopg
@@ -157,12 +157,14 @@ def _one_of(reaction_id: str, found: Sequence[tuple[str, "ReactionRecord"]]) -> 
 
 
 # The columns an ingest writes, which is also everything a read selects.
-_COLUMNS = "reaction_id, body, compound_smiles, project, performed_at, conditions, source"
+_COLUMNS = (
+    "reaction_id, body, compound_smiles, project, performed_at, conditions, source, retracted_at"
+)
 
 _UPSERT = f"""
 INSERT INTO reaction_records (ingest_source, {_COLUMNS})
 VALUES (%(ingest_source)s, %(reaction_id)s, %(body)s, %(compound_smiles)s, %(project)s,
-        %(performed_at)s, %(conditions)s, %(source)s)
+        %(performed_at)s, %(conditions)s, %(source)s, %(retracted_at)s)
 ON CONFLICT (ingest_source, reaction_id) DO UPDATE SET
     -- Every field is refreshed, because an ELN amends an entry *in place*: a yield corrected after
     -- assay, an impurity added, a retraction. The old note path compared bodies to notice that and
@@ -173,6 +175,12 @@ ON CONFLICT (ingest_source, reaction_id) DO UPDATE SET
     performed_at = EXCLUDED.performed_at,
     conditions = EXCLUDED.conditions,
     source = EXCLUDED.source,
+    -- A withdrawal is refreshed like everything else, and so is its *reversal*: a source that
+    -- re-publishes a withdrawn entry sends it without a tombstone, and the row must go back to
+    -- answering as current. Writing `COALESCE(reaction_records.retracted_at, EXCLUDED.…)` here
+    -- would make a retraction permanent on a tier whose whole rule is that the row is what the
+    -- source last said.
+    retracted_at = EXCLUDED.retracted_at,
     last_seen = now()
 """
 
@@ -180,7 +188,22 @@ ON CONFLICT (ingest_source, reaction_id) DO UPDATE SET
 # the citation's, and refuses when nothing here can.
 _SELECT_ONE = f"SELECT ingest_source, {_COLUMNS} FROM reaction_records WHERE reaction_id = %s"
 
+# The qualified read: one source's row, which the primary key makes unique.
+_SELECT_ONE_FOR_SOURCE = (
+    f"SELECT ingest_source, {_COLUMNS} FROM reaction_records "
+    "WHERE reaction_id = %s AND ingest_source = %s"
+)
+
 _SELECT_KNOWN = "SELECT reaction_id FROM reaction_records WHERE reaction_id = ANY(%s)"
+
+# Which of a page of candidate ids the source has withdrawn. Asked in this direction — "which of
+# these are retracted?" — because that is what `066`'s partial index answers
+# (`reaction_records_retracted_idx`), and because the complement is the far larger set an
+# unfiltered sweep would otherwise have to enumerate on every query.
+_SELECT_RETRACTED = (
+    "SELECT ingest_source, reaction_id FROM reaction_records "
+    "WHERE reaction_id = ANY(%s) AND retracted_at IS NOT NULL"
+)
 
 _SELECT_BODIES = (
     "SELECT reaction_id, body FROM reaction_records "
@@ -207,6 +230,12 @@ class ReactionRecord(BaseModel):
     # same claim as an empty block.
     conditions: ProcessConditions | None = None
     source: str = Field(min_length=1)
+    # When the *source* reported this entry withdrawn. `None` is "not retracted", and it is the
+    # only honest value for a row whose source says nothing: an ELN fetch is a delta, so "not seen
+    # this run" is the normal state of every entry ever ingested and can never mean withdrawal.
+    # Set from `RawEntry.retracted_at`, never inferred from absence
+    # (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`, and `infra/sql/066`).
+    retracted_at: datetime | None = None
 
     @field_validator("reaction_id")
     @classmethod
@@ -240,12 +269,19 @@ class ReactionRecord(BaseModel):
         reachable — `eln_sync_future_tolerance_seconds` deliberately admits an entry stamped
         slightly ahead of the wall clock rather than rejecting a real experiment over a clock skew.
 
-        There is no upper bound and no tombstone. A *result* does not expire on its own, it is
-        superseded, which is a claim a human makes in a note. A source **withdrawing** an entry is
-        a different fact and would deserve its own bound — one was built here and removed, because
-        nothing could set it and three of the four readers of this tier ignored it; see
-        `D-2026-08-27-a-withdrawn-entry-is-a-fact-the-sync-must-carry` for what a working one costs.
+        The other way is **withdrawal**, which is a different fact from expiry and is why it took
+        its own column rather than a `valid_to`. A *result* does not expire on its own; it is
+        superseded, which is a claim a human makes in a note. A source retracting an entry is the
+        source saying the run did not happen as recorded, and `retracted_at` is the only thing that
+        may set it — never an entry's absence from an export, which is the normal state of every
+        entry ever ingested (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`).
+
+        `read()` still serves a retracted row and this still says False, and that asymmetry is the
+        design: a row is the only readable form of an ELN run, so a citation to a withdrawn one
+        must resolve *and say so* rather than become a dangling link.
         """
+        if self.retracted_at is not None:
+            return False
         return self.performed_at is None or as_of >= self.performed_at
 
     def passes(self, filters: dict[str, Any], as_of: date) -> bool:
@@ -298,15 +334,19 @@ class ReactionRecordStore(Protocol):
         """
         ...
 
-    async def read(self, reaction_id: str) -> ReactionRecord | None:
+    async def read(self, reaction_id: str, source: str = "") -> ReactionRecord | None:
         """One record by its bare ELN id, or `None` when the corpus does not hold it.
 
         Never the `reaction-` note id: that prefix is a citation spelling
         (`kg.note.note_id_for_reaction`), and accepting both is how a store ends up holding two
         names for one row.
 
-        Raises `AmbiguousReactionRecord` when two ingest sources have transcribed the id — see
-        `_one_of` for why that is a refusal rather than a pick.
+        **`source` is what a qualified citation carries, and it is what removes the ambiguity
+        rather than merely reporting it.** With it, exactly one row can answer, because
+        `(ingest_source, reaction_id)` is the primary key. Without it — every citation committed
+        before the qualified spelling existed — the read is across sources and
+        `AmbiguousReactionRecord` is raised when two have transcribed the id; see `_one_of` for why
+        that is a refusal rather than a pick.
         """
         ...
 
@@ -331,6 +371,25 @@ class ReactionRecordStore(Protocol):
 
     async def eligible(self, reaction_ids: Sequence[str], filters: dict[str, Any]) -> set[str]:
         """Which of `reaction_ids` pass `filters` and are current (`ReactionRecord.passes`)."""
+        ...
+
+    async def retracted(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
+        """Which of `refs` — `(ingest_source, reaction_id)` — the source has reported withdrawn.
+
+        **Separate from `eligible`, and the separation is the point.** `eligible` answers "which of
+        these pass a filter", and it drops a match with no stored record because a record nobody
+        can read cannot be shown to satisfy a narrowing. An *unfiltered* sweep asks a different
+        question — it must still surface every structural hit the index holds — so it cannot go
+        through that gate without silently losing every hit whose record is missing. This asks only
+        what a withdrawal is: a positive set, over the page of candidates, answered by `066`'s
+        partial index.
+
+        **Asked per source, because a hit names one.** `reaction_fingerprints` is keyed by
+        `(source, id)` since `063`, so two sites behind one entry id are two hits — and asking by
+        bare id would let one site's withdrawal drop the other site's run, which is the same
+        collapse `D-2026-09-13-a-citation-names-the-source-it-was-found-in` fixes in the citation.
+        An empty source means "any source withdrew it", which is what a bare citation can ask.
+        """
         ...
 
     async def known(self, reaction_ids: Sequence[str]) -> set[str]:
@@ -368,12 +427,12 @@ class InMemoryReactionRecordStore:
             self._records[(source, item.reaction_id)] = item
         return len(records)
 
-    async def read(self, reaction_id: str) -> ReactionRecord | None:
-        """One record by its bare ELN id, or `None`; refuses an id two sources both hold."""
+    async def read(self, reaction_id: str, source: str = "") -> ReactionRecord | None:
+        """One record by its bare ELN id, or `None`; refuses an unqualified id two sources hold."""
         found = [
-            (source, record)
-            for (source, stored_id), record in sorted(self._records.items())
-            if stored_id == reaction_id
+            (stored_source, record)
+            for (stored_source, stored_id), record in sorted(self._records.items())
+            if stored_id == reaction_id and (not source or stored_source == source)
         ]
         return _one_of(reaction_id, found) if found else None
 
@@ -396,6 +455,20 @@ class InMemoryReactionRecordStore:
                 for (_, stored_id), record in self._records.items()
                 if stored_id == reaction_id
             )
+        }
+
+    async def retracted(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
+        """Which of `refs` this store holds a withdrawal for; an empty source matches any."""
+        withdrawn = {
+            (stored_source, stored_id)
+            for (stored_source, stored_id), record in self._records.items()
+            if record.retracted_at is not None
+        }
+        return {
+            (source, reaction_id)
+            for source, reaction_id in refs
+            if (source, reaction_id) in withdrawn
+            or (not source and any(stored == reaction_id for _, stored in withdrawn))
         }
 
     async def known(self, reaction_ids: Sequence[str]) -> set[str]:
@@ -441,6 +514,7 @@ class PostgresReactionRecordStore:
                             if item.conditions
                             else None,
                             "source": item.source,
+                            "retracted_at": item.retracted_at,
                         }
                         for item in records
                     ],
@@ -448,16 +522,25 @@ class PostgresReactionRecordStore:
             await conn.commit()
         return len(records)
 
-    async def read(self, reaction_id: str) -> ReactionRecord | None:
+    async def read(self, reaction_id: str, source: str = "") -> ReactionRecord | None:
         """One record by its bare ELN id, or `None` when the corpus does not hold it.
 
         Every row answering to the id comes back, not the first one the plan happened to return:
         `_one_of` is what decides between them, and it refuses rather than picking when two ingest
-        sources have both transcribed the id.
+        sources have both transcribed the id and the citation did not say which.
+
+        A qualified citation does say, and then the primary key answers exactly — so the narrowed
+        statement is a different one rather than the same one filtered in Python, which would move
+        the whole ambiguous set across the wire to discard most of it.
         """
+        statement, params = (
+            (_SELECT_ONE_FOR_SOURCE, (reaction_id, source))
+            if source
+            else (_SELECT_ONE, (reaction_id,))
+        )
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(_SELECT_ONE, (reaction_id,))
+                await cur.execute(statement, params)
                 rows = await cur.fetchall()
         if not rows:
             return None
@@ -493,6 +576,8 @@ class PostgresReactionRecordStore:
         clauses = [
             "reaction_id = ANY(%(ids)s)",
             "(performed_at IS NULL OR performed_at <= %(today)s)",
+            # `ReactionRecord.is_current`'s second bound, expressed against the column.
+            "retracted_at IS NULL",
         ]
         params: dict[str, Any] = {"ids": list(reaction_ids), "today": date.today()}
         if (want_tag := filters.get("tag")) is not None:
@@ -510,6 +595,29 @@ class PostgresReactionRecordStore:
                 await cur.execute(statement, params)
                 rows = await cur.fetchall()
         return {row[0] for row in rows}
+
+    async def retracted(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
+        """Which of `refs` the source has reported withdrawn; an empty source matches any.
+
+        One statement over the ids, narrowed to the asked-for source in Python rather than in SQL.
+        The predicate that matters — `retracted_at IS NOT NULL` over a page of ids — is what `066`'s
+        partial index answers, and a withdrawal is rare, so what comes back is a handful of rows to
+        pair off. A per-ref `(source, id)` `IN` list would be a bind parameter per hit for a
+        narrowing that costs nothing here.
+        """
+        if not refs:
+            return set()
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_SELECT_RETRACTED, ([reaction_id for _, reaction_id in refs],))
+                rows = await cur.fetchall()
+        withdrawn = {(row[0], row[1]) for row in rows}
+        return {
+            (source, reaction_id)
+            for source, reaction_id in refs
+            if (source, reaction_id) in withdrawn
+            or (not source and any(stored == reaction_id for _, stored in withdrawn))
+        }
 
     async def known(self, reaction_ids: Sequence[str]) -> set[str]:
         """Which of `reaction_ids` the corpus holds at all."""
@@ -585,6 +693,7 @@ def _record(row: tuple[Any, ...]) -> ReactionRecord:
         performed_at=row[4],
         conditions=_stored_conditions(row[0], row[5]),
         source=row[6],
+        retracted_at=row[7],
     )
 
 

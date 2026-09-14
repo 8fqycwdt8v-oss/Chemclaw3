@@ -274,6 +274,13 @@ _CYCLE_EDGES: dict[Edge, str] = {
     ("chemclaw.connectors", "chemclaw.agent"): (
         "connector jobs and identity plumbing authorize against agent's authz/identity context"
     ),
+    ("chemclaw.connectors", "chemclaw.ingest"): (
+        "a bundle serving structural hits asks the transcription store whether the source has "
+        "withdrawn the run a hit stands for — the one question a fingerprint index cannot answer "
+        "about its own contents (`connectors/rxnfp/server/tools.py::similar_reactions`, "
+        "D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports). The reverse edge stays undeclared: "
+        "ingestion must not reach into a bundle"
+    ),
 }
 
 # The full declared graph: every module-scope edge the codebase is allowed to have. `core` has no

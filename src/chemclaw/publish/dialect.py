@@ -263,6 +263,7 @@ def rows_for(
                 "actor": publication.actor,
                 "correlation_id": publication.correlation_id,
                 "rationale": publication.rationale,
+                "note_id": publication.note_id,
                 "published_at": now,
             }
             for publication in (record.publications or [Publication()])

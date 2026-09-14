@@ -113,7 +113,10 @@ def test_a_composite_reaches_an_external_database_and_answers_a_question(
             payload_kind="SolventComparisonResult",
             payload=_screen().model_dump(mode="json"),
             publication=Publication(
-                actor="chemist@example.com", job_id="job-e2e-1", rationale="which solvent"
+                actor="chemist@example.com",
+                job_id="job-e2e-1",
+                rationale="which solvent",
+                note_id="job-result-e2e",
             ),
         )
         assert queued == 3, "the comparison and both of its parts must be queued"
@@ -165,11 +168,14 @@ def test_a_composite_reaches_an_external_database_and_answers_a_question(
             )
 
             publication = await _rows(
-                conn, "SELECT actor, tenant_id FROM calculation_publication LIMIT 1"
+                conn, "SELECT actor, tenant_id, note_id FROM calculation_publication LIMIT 1"
             )
-            assert publication[0] == ("chemist@example.com", "site-a"), (
-                "who ran it and under which deployment belongs on the publication row, not the "
-                "calculation — two chemists running one calculation share its calc_ref"
+            assert publication[0] == ("chemist@example.com", "site-a", "job-result-e2e"), (
+                "who ran it, under which deployment, and what note it produced belong on the "
+                "publication row rather than on the calculation — two chemists running one "
+                "calculation share its calc_ref. The note is the one *structured* link back to "
+                "the work, and the seam carried four weaker ones without it "
+                "(D-2026-09-13-a-publication-carries-the-link-the-system-already-holds)"
             )
 
         # Redelivery converges: every key is a content hash, so a second drain writes nothing new.
@@ -330,3 +336,72 @@ def test_the_seeded_no_conditions_row_is_the_one_the_writer_points_at() -> None:
         )
 
     asyncio.run(_run())
+
+
+def test_a_finished_job_publishes_the_note_it_produced(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`calculation_publication` recorded four weak links to a run and dropped the structured one.
+
+    That table exists to answer "what question was this meant to answer" — it carries the session,
+    the job, the actor, the correlation id and the rationale. `job_records.note_id` holds the note a
+    finished connector job's envelope produced, written by `finished_job_record` from the same
+    `ConnectorJobResult` that `_publish_result` is handed, and both publish paths had it in hand and
+    did not carry it (`D-2026-09-13-a-publication-carries-the-link-the-system-already-holds`).
+
+    Driven through the **real workflow**, on a real broker, because the producer is the thing under
+    test: a test that built a `Publication` itself would assert that a field it filled arrives,
+    which is true of a field nothing fills. The fixture job returns a note with a known id, so what
+    the outbox holds afterwards is either that id or the empty string the seam shipped with.
+    """
+    from temporalio.worker import UnsandboxedWorkflowRunner, Worker
+
+    from chemclaw.durable.connector_job import ConnectorJobWorkflow
+    from chemclaw.durable.job_record import record_job
+    from chemclaw.durable.publish_results import publish_job_result
+    from tests.temporal_env import pydantic_client, start_local_env_or_skip
+    from tests.test_durable_observability import _JOB, _until_not_running
+
+    published: list[Any] = []
+
+    async def _capture(**kwargs: Any) -> int:
+        published.append(kwargs["publication"])
+        return 1
+
+    async def _run() -> None:
+        from tests.fixtures.connectors.fixture.workflows import FixtureJobWorkflow
+
+        await migrated_db_or_skip()
+        monkeypatch.setattr(outbox, "enqueue_payload", _capture)
+        async with await start_local_env_or_skip() as env:
+            client = pydantic_client(env)
+            wrapper = Worker(
+                client,
+                task_queue=settings.background_task_queue,
+                workflows=[ConnectorJobWorkflow],
+                activities=[record_job, publish_job_result],
+                workflow_runner=UnsandboxedWorkflowRunner(),
+            )
+            bundle = Worker(client, task_queue="connector-fixture", workflows=[FixtureJobWorkflow])
+            async with wrapper, bundle:
+                handle = await client.start_workflow(
+                    ConnectorJobWorkflow.run,
+                    _JOB.model_copy(
+                        update={
+                            "workflow": "FixtureJobWorkflow",
+                            "task_queue": "connector-fixture",
+                            "payload": {"subject": "benzene"},
+                            "publish_to_graph": False,
+                            "session_id": "",
+                        }
+                    ),
+                    id="publish-note-probe",
+                    task_queue=settings.background_task_queue,
+                )
+                await _until_not_running(handle, timeout=60.0)
+
+    asyncio.run(_run())
+
+    assert published, "the job published nothing at all, so the assertion below proves nothing"
+    assert published[0].note_id == "fixture-benzene", (
+        "the publication row names the session, the job, the actor and the rationale, and drops "
+        "the one structured link to what the run produced"
+    )

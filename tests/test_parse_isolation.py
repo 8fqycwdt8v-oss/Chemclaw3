@@ -21,8 +21,9 @@ local IPC. Nothing asserted it in either direction, and the C half of the same c
 
 import asyncio
 import socket
+import subprocess
+import sys
 import time
-from multiprocessing.connection import Connection
 from pathlib import Path
 
 import pytest
@@ -43,39 +44,13 @@ from chemclaw.ingest.documents.isolate import (
     parse_document_isolated,
 )
 from chemclaw.ingest.documents.parse import ScannedDocumentError
+from tests.egress_probe import egress_posture
 from tests.test_document_formats import _blank_pdf_bytes  # type: ignore[attr-defined]
 
 # A CSV big enough that parsing it is unmistakably longer than the deadline the wedge test sets,
 # and small enough that building it costs nothing. Measured on this tree: 6 MB parses in 0.694 s,
 # so 20 MB is ~2.3 s against a 0.2 s deadline — a factor of ten, not a race.
 _SLOW_CSV = b"aaaa,bbbb,cccc,dddd\n" * 1_000_000
-
-
-def _egress_posture(connection: "Connection[object]", *_ignored: object) -> None:
-    """Child entry point: report what the egress guard does to a non-loopback connect.
-
-    Module level because `forkserver` pickles a target by reference, which is the same constraint
-    `isolate._parse_into` is written under — and it is why this probe lives in the test module
-    rather than in a script.
-
-    Args:
-        connection: The write end of the pipe the parent reads.
-    """
-    import socket
-
-    from chemclaw.core import netguard
-
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-            probe.settimeout(1.0)
-            probe.connect(("198.51.100.1", 80))  # TEST-NET-2, routed nowhere
-        connection.send(("reached", netguard._armed))
-    except netguard.EgressForbidden:
-        connection.send(("refused", netguard._armed))
-    except OSError as exc:
-        connection.send((f"other:{type(exc).__name__}", netguard._armed))
-    finally:
-        connection.close()
 
 
 def test_a_parse_child_is_still_inside_the_no_egress_posture() -> None:
@@ -91,10 +66,17 @@ def test_a_parse_child_is_still_inside_the_no_egress_posture() -> None:
     `chemclaw.ingest.documents.parse`, which imports `chemclaw.core.config`, whose module body ends
     in `arm_egress_guard(settings)`. So the guard is armed in the forkserver before it forks
     anything, and every parse child inherits an armed one.
+
+    **The probe is in `tests/egress_probe.py` because the chain is what is under test.** A target
+    `forkserver` pickles by reference is imported in the child along with its whole module, so
+    while this probe lived here the child imported this file — and with it `chemclaw.core.config`,
+    which armed the guard on the spot. Driven: with `_PRELOAD` emptied the test still passed. Its
+    own module imports `socket` and `sys`, and `tests/__init__.py` imports nothing, so the only
+    way the guard can be armed in that child is the chain this docstring names.
     """
     context = parse_context()
     reader, writer = context.Pipe(duplex=False)
-    child = context.Process(target=_egress_posture, args=(writer,))
+    child = context.Process(target=egress_posture, args=(writer,))
     child.start()
     writer.close()
     try:
@@ -269,3 +251,57 @@ def test_local_ipc_is_not_refused_as_egress(tmp_path: Path) -> None:
             client.connect(path)  # refused with EgressForbidden before the fix
             accepted, _ = server.accept()
             accepted.close()
+
+
+def test_a_child_that_stalls_after_its_first_byte_still_frees_the_worker_thread() -> None:
+    """The wedge this module exists to close, re-measured one stage later than it was fixed.
+
+    **The regression.** `reader.poll(timeout)` was the only deadline, and `poll` returning True
+    *consumes* it: `recv` then blocks until the whole pickled message arrives or the pipe reaches
+    EOF, and `join()` had no timeout at all. Nothing killed the child on either path. Driven
+    against the shipped `parse_document_isolated` before this commit, with a 1 s deadline and 15 s
+    of patience:
+
+    | child behaviour                        | worker thread |
+    | writes a truncated message, then stops | **still alive** |
+    | answers correctly, then does not exit  | **still alive** |
+
+    A thread that never ends never releases its parse slot, so at the shipped cap of two such
+    uploads the replica's upload path is down for the life of the process — the exact failure
+    `ingest/documents/isolate.py` was written for, reappearing after the byte that satisfied the
+    only bound. `agent/attachments.py`'s `wait_for` backstop cannot see it, because that wait is
+    `shield`ed: it frees the caller while the thread it stands for runs on.
+
+    **A subprocess, and `tests/parse_stalls.py` says why at length**: the only channel into a
+    `forkserver` child is the server's preload list, and that server is a process-wide singleton
+    another test in this file has already warmed. The probe drives the *shipped* parent code —
+    same function, same worker-thread arrangement `agent/attachments.py` uses — and substitutes
+    only what the child does.
+
+    The third case is the grandchild: `Process.kill()` signals one pid, so a parse that shells out
+    used to leave the grandchild burning CPU after the slot came back.
+    """
+    probe = subprocess.run(
+        [sys.executable, "-c", "from tests.parse_stalls import main; main()"],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert probe.returncode == 0, probe.stderr
+    reported = {
+        line.split("|")[0]: line.split("|")[1:] for line in probe.stdout.splitlines() if "|" in line
+    }
+    assert set(reported) == {"truncate.txt", "linger.txt", "grandchild.txt", "orphans"}, reported
+    for case in ("truncate.txt", "linger.txt", "grandchild.txt"):
+        assert reported[case][0] == "ended", (
+            f"the worker thread for a child that {case} was still alive after 15 s, so its parse "
+            f"slot is held for the life of the process: {reported[case]}"
+        )
+    # The one that answered correctly must still have been answered — a fix that turned every
+    # lingering child into a refusal would pass the liveness assertion above and lose a parse.
+    assert reported["linger.txt"][2] == "ParsedDocument", reported["linger.txt"]
+    assert reported["orphans"][0] == "0", (
+        f"{reported['orphans'][0]} grandchild process(es) outlived the kill that freed the slot"
+    )

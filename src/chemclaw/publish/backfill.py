@@ -121,7 +121,7 @@ _CACHED = """
 # `_CACHED` states — the 388.7 ms page-400 measurement above is this table's.
 _JOBS = """
     SELECT job_id, connector, job, result, calc_refs, requested_by, session_id, correlation_id,
-           rationale, completed_at, payload_kind
+           rationale, completed_at, payload_kind, note_id
     FROM job_records
     WHERE result <> '{}'::jsonb
       AND (completed_at, job_id) > (%s, %s)
@@ -208,6 +208,7 @@ async def backfill_jobs(*, dry_run: bool, batch: int) -> WalkCounts:
             job_id, connector, job, result, calc_refs = row[0], row[1], row[2], row[3], row[4]
             requested_by, session_id, correlation_id, rationale, completed_at = row[5:10]
             payload_kind = row[10] or ""
+            note_id = row[11] or ""
             # `<connector>.<job>` is a *route*, and no projector prefix matches one — so before
             # `payload_kind` existed this skipped every composite in the table. It is still passed
             # as the `calc_type` because that is what the row is addressed by; `payload_kind` is
@@ -230,6 +231,7 @@ async def backfill_jobs(*, dry_run: bool, batch: int) -> WalkCounts:
                     correlation_id=correlation_id,
                     job_id=job_id,
                     rationale=rationale,
+                    note_id=note_id,
                 ),
             )
             if projected is None:

@@ -20,6 +20,7 @@ upsert, so re-ingesting is safe and an amended entry simply overwrites its recor
 """
 
 import logging
+from datetime import datetime
 
 from chemclaw.core.chem import standard_smiles
 from chemclaw.core.errors import ChemclawError
@@ -48,6 +49,7 @@ async def ingest_reaction(
     *,
     label_index: LabelIndex,
     source: str,
+    retracted_at: datetime | None = None,
 ) -> ReactionRecord:
     """Validate, index (reaction + compounds + impurities + labels), store the record; return it.
 
@@ -104,7 +106,14 @@ async def ingest_reaction(
     # other.
     await label_index.record(record_phase(reaction, source))
 
+    # The withdrawal is stamped here rather than inside `record_from_ord_reaction`, because that
+    # function maps an `OrdReaction` and a retraction is not in the reaction — it is something the
+    # *source* said about the entry, and `RawEntry` is where the source speaks. Keeping the mapping
+    # pure is also what keeps it the deterministic transcription
+    # `D-2026-08-25-an-eln-transcription-is-data-not-a-claim` argues it is.
     record = record_from_ord_reaction(reaction)
+    if retracted_at is not None:
+        record = record.model_copy(update={"retracted_at": retracted_at})
     await record_store.record([record], source)
     return record
 

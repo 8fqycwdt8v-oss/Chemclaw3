@@ -518,3 +518,134 @@ def test_a_remaining_budget_that_cannot_fund_an_attempt_answers_none() -> None:
     )
     assert remaining_queue_wait_timeout(timedelta(seconds=300 + overhead), 300.0) is None
     assert remaining_queue_wait_timeout(timedelta(seconds=0), 300.0) is None
+
+
+@pytest.mark.parametrize("n_rounds", [25, 100, settings.bo_max_rounds])
+def test_a_long_campaign_dispatches_its_seed_instead_of_refusing_it(
+    monkeypatch: pytest.MonkeyPatch, n_rounds: int
+) -> None:
+    """A campaign with a large round count must run, not fail before doing any work.
+
+    **The regression this pins.** `_queue_wait` divided what was left of the execution ceiling by
+    the campaign's *worst-case total* dispatch count (`3n + 3`) and then asked whether that share
+    could fund a wait plus an attempt. At the shipped 25,200 s ceiling and a 300 s activity budget
+    the share falls under 330 s at 25 rounds, so `propose_initial` — the first activity of the
+    campaign, with the whole ceiling untouched in front of it — raised `CampaignBudgetSpent`
+    instead of running. The seed's dispatches are neither guarded nor wrapped, and with
+    `failure_exception_types=[Exception]` that is a workflow FAILURE whose message is the empty
+    string: every `n_rounds >= 25` campaign, `bo_max_rounds` itself included, died on arrival.
+
+    `dispatches_left`'s own docstring says why that can never be right — "being wrong here is a
+    fairness bug, never a safety one", because each dispatch is measured against what is *left* and
+    so the sum fits whatever the divisor. The share may therefore narrow a wait and must never
+    refuse one.
+
+    Driven on the real method rather than on the arithmetic beside it, and asserted as a *bound the
+    campaign could plainly afford* rather than as a transcribed number: the ceiling is the whole
+    remaining budget, and one attempt plus its overhead is a rounding error against it.
+    """
+    run = _StubbedRun(monkeypatch, settings.connector_job_timeout_seconds, n_rounds=n_rounds)
+
+    wait = run.campaign._queue_wait()
+
+    assert wait > timedelta(0)
+    # The counterfactual that makes the assertion mean something: the budget this dispatch was
+    # refused out of funds it many times over.
+    affordable = settings.connector_job_timeout_seconds - (
+        settings.bo_activity_timeout_seconds + settings.activity_timeout_seconds
+    )
+    assert affordable > 0
+    assert 3 * n_rounds + 3 > affordable / (
+        settings.bo_activity_timeout_seconds + settings.activity_timeout_seconds
+    ), "this round count no longer produces a share below one attempt, so the test is vacuous"
+
+
+def test_a_shared_queue_wait_never_falls_below_the_configured_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sharing must not hand out a wait too short to survive a worker that is merely slow.
+
+    The share is `C/n - w - a`, which shrinks with the round count while the thing it is waiting
+    for — a `bo` worker rolling, scaled to zero, or slow to pull — does not. Measured at the
+    default ten-round spec the share is 433.6 s against the 10,170 s queue-wide bound every
+    dispatch had before, so a seven-minute worker gap expires `schedule_to_start` and produces
+    exactly the misdiagnosis `connector_queue_wait_timeout`'s docstring warns about.
+
+    The floor is `bo_queue_wait_floor_seconds` and both real bounds still apply above it, which is
+    the second half of the claim: the floor may lengthen a share, never a dispatch past what the
+    remaining budget or the queue can fund.
+    """
+    run = _StubbedRun(monkeypatch, settings.connector_job_timeout_seconds, n_rounds=10)
+    share = remaining_queue_wait_timeout(
+        timedelta(seconds=settings.connector_job_timeout_seconds / dispatches_left(10, True)),
+        settings.bo_activity_timeout_seconds,
+    )
+    assert share is not None and share < timedelta(seconds=settings.bo_queue_wait_floor_seconds), (
+        "the default spec's share is no longer under the floor, so this test is vacuous"
+    )
+
+    assert run.campaign._queue_wait() == timedelta(seconds=settings.bo_queue_wait_floor_seconds)
+
+    # And the floor is a floor, not an override: a campaign down to its last few minutes is still
+    # bounded by what it can afford.
+    run.now = run.started + timedelta(
+        seconds=settings.connector_job_timeout_seconds
+        - settings.bo_activity_timeout_seconds
+        - settings.activity_timeout_seconds
+        - 60
+    )
+    run.campaign._dispatches_left = dispatches_left(10, seeding=False)
+    assert run.campaign._queue_wait() == timedelta(seconds=60)
+
+
+def test_the_floored_share_still_fits_the_ceiling_every_dispatch_shares(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The floor may not buy a usable wait at the cost of the bound it sits inside.
+
+    Worst case, on the longest campaign this deployment accepts: every dispatch waits its whole
+    allowance and then takes its whole start-to-close budget, until the campaign refuses to
+    dispatch again. The total must still land inside the execution ceiling less one activity's
+    overhead — the same property `test_a_campaigns_sequence_of_dispatches_fits_the_ceiling_they
+    _share` asserts for a short campaign, restated for the case the floor actually binds.
+    """
+    ceiling = settings.connector_job_timeout_seconds
+    run = _StubbedRun(monkeypatch, ceiling, n_rounds=settings.bo_max_rounds)
+
+    dispatched = 0
+    while True:
+        try:
+            run.dispatch()
+        except CampaignBudgetSpent:
+            break
+        dispatched += 1
+        run.campaign._dispatches_left = max(run.campaign._dispatches_left, 1)
+        assert dispatched < 10_000, "the recurrence never ends"
+
+    assert dispatched > 1, "the campaign refused before it had run anything"
+    assert run.spent <= ceiling - settings.activity_timeout_seconds, run.spent
+
+
+def test_a_campaign_that_stops_for_budget_can_still_write_its_terminal_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one write `resume_campaign` keys on must not be refused by a divisor.
+
+    `_cannot_afford_another_dispatch` deliberately does not consume a share, so a campaign that
+    breaks out of its round loop for budget arrives at the terminal `record_campaign_run` with
+    `_dispatches_left` still at `3R + 1`. While affordability was read off that share the terminal
+    write was unaffordable *by construction* — every budget-stopped campaign threw away its
+    `campaign_id`, and with it the `bo_campaigns` row the report and `resume_campaign` both key on.
+
+    Driven at the review's own figures: 1,000 s left funds a 670 s wait plus a 300 s attempt, and
+    the divisor must not be able to take that away.
+    """
+    ceiling = settings.connector_job_timeout_seconds
+    run = _StubbedRun(monkeypatch, ceiling, n_rounds=1)
+    monkeypatch.setattr(settings, "bo_activity_timeout_seconds", 300.0)
+    monkeypatch.setattr(settings, "activity_timeout_seconds", 30.0)
+    run.now = run.started + timedelta(seconds=ceiling - 1000)
+    # As `run` leaves the loop: re-synced for a round that then did not happen.
+    run.campaign._dispatches_left = dispatches_left(40, seeding=False)
+
+    assert run.campaign._queue_wait() == timedelta(seconds=670)

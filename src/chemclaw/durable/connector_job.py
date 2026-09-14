@@ -999,6 +999,10 @@ class ConnectorJobWorkflow:
                     correlation_id=job.correlation_id,
                     job_id=job_id,
                     rationale=job.rationale,
+                    # The same expression `finished_job_record` writes into `job_records.note_id`,
+                    # from the same envelope: the publication row records what this run produced,
+                    # not only that somebody asked for it.
+                    note_id=result.note.id if result.note is not None else "",
                 )
             ],
             label=f"{job.connector}:{job.job}",

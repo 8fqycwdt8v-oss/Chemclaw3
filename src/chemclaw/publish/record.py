@@ -518,6 +518,10 @@ class Publication(BaseModel):
     `rationale` is the field `job_records` added for the same reason (D-157): notes record what a
     run produced and the audit trail records that a tool was called, and neither says what question
     the run was meant to answer.
+
+    `note_id` is the other half of that, and it is the one *structured* link: the note a finished
+    connector job's envelope produced, which `job_records.note_id` already holds and both publish
+    paths used to drop (`D-2026-09-13-a-publication-carries-the-link-the-system-already-holds`).
     """
 
     model_config = _STORABLE
@@ -534,6 +538,11 @@ class Publication(BaseModel):
     correlation_id: str = ""
     job_id: str = ""
     rationale: str = ""
+    # The knowledge-graph note this run produced, or empty when it produced none — the same value
+    # and the same meaning as `job_records.note_id`, which is where it comes from. **Not** the ELN
+    # run that motivated the calculation: nothing in this system records that, so a field for it
+    # would be one nobody can fill.
+    note_id: str = ""
 
 
 class ResultRecord(BaseModel):

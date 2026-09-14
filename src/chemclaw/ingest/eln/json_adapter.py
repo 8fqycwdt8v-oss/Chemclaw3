@@ -19,10 +19,14 @@ Linking a SMILES to a step from prose alone would be a guess, so free-text steps
 `components` — that (like any genuinely unstructured field) is the LLM skill's job.
 
 Expected entry shape (this ELN's format — known only here):
-    {"id": "...", "timestamp": "ISO-8601",
+    {"id": "...", "timestamp": "ISO-8601", "modified": "ISO-8601", "retracted": "ISO-8601",
      "reactants": [{"smiles": "...", "role": "reactant", "mass_mg": 460}, ...],
      "products":  [{"smiles": "...", "yield_percent": 85}, ...],
      "procedure": "free text", "operator": "..."}
+
+`retracted` is the source saying it withdrew the entry, and the file keeps being exported with it
+on — a withdrawal is an amendment, not a deletion. Removing the file instead says nothing: a fetch
+is a delta and an absence is what every already-ingested entry looks like.
 """
 
 import asyncio
@@ -246,19 +250,28 @@ class JsonExportAdapter:
                 # An in-place amendment keeps `timestamp` and moves this one, so filtering on
                 # creation alone would never re-fetch a corrected entry.
                 modified = _optional_timestamp(payload.get("modified"), path)
+                # The source's own withdrawal, when it reports one. An *explicit* field, never a
+                # file's disappearance: a fetch is a delta, so "not exported this run" is the
+                # normal state of every entry ever ingested and can never mean a retraction
+                # (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`). It joins the fetch
+                # window below for the reason `entry_window` gives — an export that stamps this
+                # without touching `modified` would otherwise never be fetched again, so the
+                # tombstone would be written at the source and read by nobody.
+                retracted = _optional_timestamp(payload.get("retracted"), path)
             except (OSError, json.JSONDecodeError, ElnFormatError) as exc:
                 logger.warning(
                     "%s: skipping unreadable ELN export %s: %s", self._source, path.name, exc
                 )
                 refused[path.stem] = f"unreadable ELN export {path.name}: {exc}"
                 continue
-            if entry_window(created, modified) >= since:
+            if entry_window(created, modified, retracted) >= since:
                 entries.append(
                     RawEntry(
                         entry_id=str(payload.get("id") or path.stem),
                         created_at=created,
                         modified_at=modified,
                         payload=payload,
+                        retracted_at=retracted,
                     )
                 )
             elif report_late_arrivals and is_late_arrival(path, since):

@@ -238,53 +238,6 @@ topic).
       the same three lines as `live.py:499-500`. Plus a cheap **offline** validator that every
       `expects_notes` id exists in `knowledge/`, which is the half CI can run. Its own PR: it needs
       a running front door to verify green.
-- [ ] **Knowledge writes serialise cluster-wide on one advisory lock** — [M], re-measured
-      2026-09-07 against real bare remotes (best of 3): **141.5 ms** per write at 100 notes,
-      152.2 ms at 1,000, **252.0 ms at 10,000**. The O(corpus) half of this row is closed and its
-      figures are deleted rather than corrected: the 2,916 ms it quoted was `git worktree add -B`
-      inside `git_submitter.py`, and `D-2026-09-05-the-gate-is-deleted-not-dormant` deleted that
-      module with the other 2,232 lines of the gate — `kg/git_writer.py` commits to the base branch
-      and no worktree is created anywhere in `src/`. What survives is the serialisation:
-      `git_writer.py:562-567` takes `_WRITE_LOCK` and then a Postgres advisory lock keyed on the
-      remote, so every pod's every note write queues behind every other one. At 252 ms that is a
-      ceiling near **14,000 writes/hour** for the whole fleet, which is not pressing — the row
-      exists because the ceiling is fleet-wide rather than per-pod, so it does not improve by
-      adding pods, and because `_cluster_lock`'s own docstring points here for the case it does
-      *not* cover (several writer pods with a memory session store take no lock at all).
-
-- [ ] **The fingerprint index is keyed by source and the citation is not, so two sources collapse
-      to one note id** — [M], and it is the half `D-2026-08-27-a-fingerprint-is-keyed-by-its-source`
-      deliberately left. Migration 063 made the write side `(source, id)`, which is what stops one
-      site's chemistry being overwritten by another's. The read side still spells the bare form:
-      `retrieval/retrievers.py` and `connectors/rxnfp/server/tools.py` both call
-      `note_id_for_reaction(match.id)`, so a two-source deployment now returns **two hits that cite
-      one id**, and `records._one_of` raises `AmbiguousReactionRecord` when a reader expands it.
-      Better than silently citing the wrong run, which is what 063 fixed, and still not an answer.
-      The qualified form and its separator were written and then deleted rather than left as a dead
-      parameter no caller passed
-      (`D-2026-08-27-a-withdrawn-entry-is-a-fact-the-sync-must-carry`), so this starts from the six
-      readers rather than from the spelling: they move together or the id means two things at once.
-      Not urgent while one ELN is enabled anywhere; the ambiguity is loud when it happens, which is
-      the one improvement 063 already bought.
-
-- [ ] **A retracted ELN entry stays current evidence, and closing it is a five-part change** — [M].
-      A withdrawn entry that simply disappears from an export is invisible to a cursor-based sync,
-      so the run it produced keeps answering as current. This was built and then deleted on review
-      (`D-2026-08-27-a-withdrawn-entry-is-a-fact-the-sync-must-carry`), and the deletion is what
-      makes the real cost visible — the sweep was the easy part. Whoever rebuilds it needs all five:
-      (a) a producer — an *explicit* tombstone field, never absence, because an ELN fetch is a delta
-      and "not seen this run" is the normal state of every entry ever ingested; (b)
-      `durable/eln_sync.py::_BoundedIngest` must expose a public `inner`, or the capability walk
-      stops at the production wrapper and the sweep silently cannot fire; (c) the unfiltered path in
-      `retrieval/retrievers.py::FingerprintReactionRetriever.retrieve`, which consults the record
-      store only when a filter is given — the ordinary `gather_evidence` sweep is unfiltered; (d)
-      `connectors/rxnfp/server/tools.py::similar_reactions`, which never asks the store at all; and
-      (e) `expand_note`, so a reader sees the withdrawal rather than a normal-looking record.
-      Measured with (a) and (b) in place and the rest absent: `is_current` False, `eligible()` empty,
-      and the retracted reaction still returned by the unfiltered sweep. Migration 066's column is
-      reserved for this and 068 says so; `tests/test_eln.py` fails a re-add that does not bring the
-      readers.
-
 ## 3 — Work that is lost, dropped or invisible
 
 - [ ] **The two eval gates score literals written in their own case files** — [M], same review.
@@ -322,15 +275,18 @@ topic).
       table that is in `retention._NOT_PRUNED` on purpose. `durable/awaiting.py`,
       `durable/pending_store.py`.
 
-- [ ] **A timed-out parse still runs to completion on the worker thread** — [L]. **The cheap half
-      is closed**: `ingest/documents/sync.py::_parse_changed` now bounds its `asyncio.to_thread`
-      with the front door's own `attachment_parse_timeout_seconds` and counts the outcome as
-      `skipped_timeout` through every rendering a run is read through. What remains is the half
-      that was always [L]: `agent/attachments.py:284` shields the future deliberately, so on both
-      paths the timeout frees the caller and the slot and never the thread — no parser behind
-      `parse_document` offers an interruption hook, so a hostile document still burns a worker to
-      completion in the background. The only real fix is a killable subprocess, with pickling and a
-      new child-OOM failure mode to classify (~150-250 lines).
+- [ ] **A warm parse forkserver is ~109 MB the front door's pod was not sized for** — [S],
+      measured 2026-09-13. `ingest/documents/isolate.py` starts its server by fork **and exec**, so
+      its pages are not copy-on-write with the front door's: driven on this tree, RSS was
+      111,140 kB in the front door and 111,188 kB in the forkserver — a second, full resident copy of pypdf,
+      python-docx, openpyxl and python-pptx. `deploy/chemclaw/values.yaml`'s `resources.service` is
+      unchanged at `requests: 512Mi / limits: 1Gi`, so that is 21% of the request arriving the
+      first time anybody uploads a document, and it is *per replica*. Nothing is wrong today; what
+      is missing is that the chart was sized before this process existed. The decision is whether
+      to raise the request, keep the forkserver cold (it is lazy, so a replica that never parses
+      never pays), or both — and it wants a measurement of the Temporal worker too, which now
+      starts one as well (`ingest/documents/sync.py`). Anchor: `isolate.parse_context`,
+      `deploy/chemclaw/values.yaml`.
 
 - [ ] **Nothing checks the client half of a wire contract, and it has drifted twice** — [L], the
       row `D-2026-09-04-a-contract-has-two-halves-and-a-server-test-sees-one` says it is queuing
@@ -650,32 +606,6 @@ topic).
       trigger on the `DEFERRED.md` row for reagent/solvent set diffs in the turn-time comparison —
       one change answers both.
 
-- [ ] **A published calculation names no reaction, note or compound context** — [M]. `grep -n
-      "reaction_id\|note_id\|citation" src/chemclaw/publish/` returns nothing:
-      `schema/result-store/001_core.sql` models a `subject` of kind `reaction` and
-      `subject_member` rows with roles, and neither carries the id of the `reaction_records` or
-      `reaction_labels` row the calculation was about. So a result computed for the product of ELN
-      entry `EXP-1001` cannot be joined back to the run that motivated it, in either direction. The
-      two stores are also separate databases (`sink.yaml` targets `chemclaw-results`;
-      `corpus_molecules.id` is a bare standardized SMILES against `compound.canonical_smiles`), so
-      the join has to be designed rather than discovered. **Needs an ADR.** Deliberately not taken
-      while the row below is open: `D-2026-08-26-a-route-is-not-a-shape` records the composite half
-      of that path being inert for a release with no test noticing, because every test started at a
-      projector rather than at a hook — deciding a cross-reference against a store nobody has run
-      repeats exactly that. **Trigger:** the results store gets a live target.
-
-- [ ] **Structure identity is canonical SMILES and nothing else** — [M]. No InChI, InChIKey,
-      formula, molecular weight, CAS or external registry number exists anywhere in `infra/sql/` or
-      `schema/`; `051_reaction_labels.sql:72` states the omission as a decision ("nothing asks, and
-      this tree deletes dead columns") and it was right when written. What now asks is a
-      cross-system join — an identifier a site's other systems can match on, and one that survives a
-      `STANDARDIZATION_VERSION` bump, which a `standard_smiles` string by construction does not.
-      **Needs an ADR, and the honest form of it is "name the reader", not "add a column"**: an
-      InChIKey nothing queries is precisely the dead column that comment refuses. Candidate readers
-      to argue in it: `schema/result-store/001_core.sql`'s `compound` row, and a lookup that stays
-      valid across a re-standardization. Note the ordering constraint with the solvate row in §2 —
-      any identifier minted before that fix inherits the collapse.
-
 - [ ] **A stalled append-only feed has no first-party signal** — [S]. `corpus_cursors`
       (`infra/sql/072`) records where each feed's drain stopped, and nothing reads `updated_at`:
       `ingest/labels/cursor.py::load_corpus_cursor` selects `after` only. The module declines a lag gauge for a
@@ -893,31 +823,6 @@ only holds defects can only ever restore the system to what it already intended 
       near-miss the audit already named, which is a free energy from `compute_thermochemistry`
       being turned into a process heat load. Write it *before* the servers, not after, or the first
       one to land re-baselines its own exam.
-
-- [ ] **`_quote_supports` cannot tell whether the figure a quote carries is about *this* slot** —
-      [S], and it is the honest limit of a rule that is otherwise doing its job. A `stated` slot
-      attests a value, and the check now relates value to quote for every quote: the value's figures
-      have to be the quote's, compared as numbers; a figure written in words satisfies that; a value
-      carrying no figures needs the quote's own tokens. That refuses every fabrication measured so
-      far, on quotes of any length.
-
-      What it cannot do is *attribution*. A chemist who wrote "24 wells" has stated a figure, and
-      nothing in the string says whether that 24 is the plate format, the run cap or a coincidence —
-      so `max_runs='24'` quoting "24 wells" passes, and it should not.
-      **The exposure grew on 2026-09-04** and the rule did not change:
-      `D-2026-09-04-a-quote-is-evidence-about-a-person-not-about-a-turn` widened the haystack from
-      this turn's message to the thread's user turns, so there is more of the chemist's own text for
-      a figure to coincidentally match. That strengthens the case for the count this row already
-      asks for rather than altering what it asks. Closing that needs the slot's
-      identity to be part of the judgment, which means either a per-slot unit vocabulary (a *well*
-      is not a *run*, an *hour* is not a *gram*) or asking the model to point at the span and
-      checking the *span's* neighbourhood rather than its digits.
-
-      **Deliberately not built yet**, because the first form is a table of units that will be wrong
-      for the first ask nobody anticipated and the second is a second model call inside a check that
-      currently costs a regex. What is owed first is a count: over real turns, how often a `stated`
-      slot's quote carries a figure that belongs to a different slot. The anchor when it does:
-      `agent/protocol_design_tools.py::_quote_supports` and its test file's case table.
 
 - [ ] **Nothing mines the edit a chemist makes to a generated protocol** — [M], and the data for it
       starts accumulating now. `experiment_protocol_revisions` is append-only and carries

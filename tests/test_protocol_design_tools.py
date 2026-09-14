@@ -198,6 +198,58 @@ def test_every_quoted_slot_is_checked_and_not_just_the_first() -> None:
         tools.require_quotes_are_verbatim(request, (_SOURCE,))
 
 
+def test_a_ring_closure_digit_in_a_structure_is_not_a_figure_the_chemist_stated() -> None:
+    r"""A SMILES a chemist pasted offered every limit slot a figure, and the rule took it.
+
+    `_DIGITS` was `\d+` over the whole quote, so `COc1ccc(-c2ccccc2C(=O)O)cc1` stated `1` and `2`
+    and `max_runs='1'` quoting a *structure* passed — the chemist wrote a molecule and the record
+    said they capped the run count. Measured over the 295 chemist asks in `data/evals/probes/`,
+    **166 of 537** quotable figures were of this kind: ring closures, a `C18` column, and the
+    halves of a decimal, where `3.87 min` offered `87`
+    (`D-2026-09-13-a-digit-inside-a-word-is-not-a-figure-somebody-stated`).
+
+    Both directions, because narrowing what counts as a figure is where a check quietly starts
+    refusing honest work: the structure must stop supporting a limit, and the ordinary spellings a
+    chemist uses for one must still state it.
+    """
+    smiles = "COc1ccc(-c2ccccc2C(=O)O)cc1"
+    source = f"Assay the impurity in {smiles} on a C18 column, RRT 3.87. 96-well plate, 2 g."
+
+    for quote, value in ((smiles, "1"), ("a C18 column", "18"), ("RRT 3.87", "87")):
+        request = _request(max_runs=RequestField(value=value, basis="stated", quote=quote))
+        with pytest.raises(ChemclawError, match="max_runs"):
+            tools.require_quotes_are_verbatim(request, (source,))
+
+    tools.require_quotes_are_verbatim(
+        _request(
+            plate_format=RequestField(value="96", basis="stated", quote="96-well plate"),
+            scale=RequestField(value="2 g", basis="stated", quote="2 g"),
+        ),
+        (source,),
+    )
+
+
+def test_a_decimal_is_one_figure_and_not_the_two_either_side_of_its_point() -> None:
+    """`3.87` states 3.87. It does not state 3, and it does not state 87.
+
+    Separate from the case above because it is a different mechanism — nothing here is welded to a
+    letter — and because it runs in both directions: the whole number must still be quotable.
+    """
+    source = "Hold it at 3.87 equivalents and give me 48 runs."
+
+    with pytest.raises(ChemclawError, match="max_runs"):
+        tools.require_quotes_are_verbatim(
+            _request(
+                max_runs=RequestField(value="87", basis="stated", quote="at 3.87 equivalents")
+            ),
+            (source,),
+        )
+    tools.require_quotes_are_verbatim(
+        _request(max_runs=RequestField(value="48", basis="stated", quote="48 runs")),
+        (source,),
+    )
+
+
 # --- structure_experiment_request ---------------------------------------------------------------
 
 
