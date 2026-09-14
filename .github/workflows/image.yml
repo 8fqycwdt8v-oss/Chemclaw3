@@ -186,39 +186,66 @@ jobs:
         # needs no registry. The SBOM below is `main`-only because it *describes* a kept image; this
         # one *refuses* a broken one, which is worth knowing before the merge rather than after.
         #
-        # Fetched to a file and checksummed before it runs, for the same reason as `syft` below: a
-        # tag is mutable and this script runs as root on the runner that just built the shipped
-        # image. Update TRIVY_INSTALL_SHA256 with the installer, and TRIVY_VERSION on its own — the
-        # installer is version-agnostic and resolves the tag at run time.
+        # The asset name is **asked for, not constructed**, and that is the whole point of this
+        # block. `contrib/install.sh` builds `trivy_<version>_Linux-64bit.tar.gz` from `uname`, and
+        # measured on a GitHub runner that URL answers **404** for this pin — so the installer
+        # resolved the tag, failed the download, and exited 1 with nothing printed, because
+        # `http_download` returns 1 into `set -e` and its own diagnostics are at debug priority.
+        # It had never once been green, on any run, and read as an install flake twice.
+        #
+        # Reading the release's own asset list removes the entire class: a naming scheme this
+        # repository does not control cannot silently stop matching. If nothing matches, every
+        # asset name the release carries is printed, so one run says what the next pin should be.
         env:
           TRIVY_VERSION: v0.58.2
-          TRIVY_INSTALL_SHA256: 2304dcc0c1883e802d376eae1b514c923b7427a7d88091dfcaf83967e6f55a7c
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/trivy-install.sh \
-            "https://raw.githubusercontent.com/aquasecurity/trivy/${TRIVY_VERSION}/contrib/install.sh"
-          echo "${TRIVY_INSTALL_SHA256}  /tmp/trivy-install.sh" | sha256sum -c -
-          # The installer resolves the tag and then downloads two release assets, and a non-200 on
-          # either is a bare `exit 1` with nothing printed: `http_download` returns 1, `set -e` ends
-          # the script, and its own diagnostics are at debug priority. Measured on two runners, this
-          # step reached "found version: 0.58.2 for v0.58.2/Linux/64bit" and exited 1 in under a
-          # second, twice, with no line naming a URL — which reads as a flake and is not one.
-          #
-          # So the assets are probed before the installer runs, and the installer runs with `-d`.
-          # The syft step below guards its *script* URL, which is the check that would not have
-          # caught this: that download succeeded here and its checksum matched. What a pin has to
-          # resolve to is the bytes being installed.
-          version="${TRIVY_VERSION#v}"
-          base="https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}"
-          for asset in "trivy_${version}_Linux-64bit.tar.gz" "trivy_${version}_checksums.txt"; do
-            code=$(curl -sIL -o /dev/null -w '%{http_code}' "${base}/${asset}")
-            test "${code}" = "200" || {
-              echo "trivy pin ${TRIVY_VERSION}: ${base}/${asset} answered ${code}." >&2
-              echo "The tag resolves; this asset does not. Fix TRIVY_VERSION." >&2
-              exit 1
-            }
-          done
-          sh /tmp/trivy-install.sh -d -b /usr/local/bin "${TRIVY_VERSION}"
+          release="https://api.github.com/repos/aquasecurity/trivy/releases/tags/${TRIVY_VERSION}"
+          curl -sSfL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+               -H "Accept: application/vnd.github+json" -o /tmp/trivy-release.json "${release}"
+          # One reader, two answers: the linux/amd64 archive and the checksums file beside it. The
+          # match is on the parts that identify the build rather than on a full name, since the
+          # separator and the casing are exactly what moved.
+          python3 - <<'PY' > /tmp/trivy-assets
+          import json, re, sys
+
+          release = json.load(open("/tmp/trivy-release.json"))
+          assets = {a["name"]: a["browser_download_url"] for a in release.get("assets", [])}
+
+          def one(pattern: str, what: str) -> str:
+              hits = [n for n in assets if re.fullmatch(pattern, n, re.IGNORECASE)]
+              if len(hits) != 1:
+                  print(f"no single {what} asset (matched {hits}) in {release['tag_name']}.", file=sys.stderr)
+                  print("the release carries:", file=sys.stderr)
+                  for name in sorted(assets):
+                      print(f"  {name}", file=sys.stderr)
+                  raise SystemExit(1)
+              return assets[hits[0]]
+
+          print(one(r"trivy_.+_(linux)[-_](64bit|amd64)\.tar\.gz", "linux/amd64 archive"))
+          print(one(r"trivy_.+_checksums\.txt", "checksums"))
+          PY
+          read -r tarball_url < /tmp/trivy-assets
+          checksums_url=$(sed -n 2p /tmp/trivy-assets)
+          curl -sSfL -o /tmp/trivy.tar.gz "${tarball_url}"
+          curl -sSfL -o /tmp/trivy-checksums.txt "${checksums_url}"
+          # The archive is verified against the checksums the release publishes, which is what the
+          # installer did and the only reason fetching a tarball is acceptable here at all. The
+          # expected hash is looked up by the asset's own name and re-pointed at the file actually
+          # on disk; rewriting the line's path in place is what made the first draft of this check
+          # verify a filename that does not exist, which `sha256sum -c` reports as a WARNING beside
+          # its non-zero exit rather than as a mismatch.
+          asset=$(basename "${tarball_url}")
+          expected=$(awk -v name="${asset}" '$2 == name { print $1 }' /tmp/trivy-checksums.txt)
+          test -n "${expected}" || {
+            echo "no checksum line for ${asset} in the release's checksums file." >&2
+            exit 1
+          }
+          echo "${expected}  /tmp/trivy.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/trivy.tar.gz -C /tmp trivy
+          install /tmp/trivy /usr/local/bin/trivy
+          trivy --version
           trivy image \
             --scanners vuln \
             --severity HIGH,CRITICAL \
