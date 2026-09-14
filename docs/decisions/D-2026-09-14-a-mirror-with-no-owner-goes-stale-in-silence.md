@@ -40,6 +40,18 @@ vendored corpus goes through, so the refusal is at load rather than in a review 
 - `data/vendored/dataset.json` carries `mirrored: false` and names neither, which is the posture
   W29.9 asked for — recorded as a field a test can read rather than as a sentence.
 
+**Scope, stated because it is narrower than the sentence above sounds.** The rule reaches
+`DatasetManifest`, which is `chemclaw.ingest.sources.vendored_dataset`'s. There is a **second**
+vendoring seam in this tree it does not reach: `data/evals/benchmarks/chembench/dataset.json`, read
+by an ad-hoc field check in `tests/test_live_benchmark.py` rather than by that model. That corpus
+*is* a mirror — `retrieved_from` names a HuggingFace dataset — and it names no owner and no cadence.
+It is left alone deliberately: it is a **frozen, seed-reproducible sample** whose whole value is
+that it does not move (`chembench-subset-2026-09-14`, sampled with a fixed seed from a contiguous
+page per category), so "who re-takes it" is a question about producing a *different* benchmark
+rather than about staleness. A corpus that is meant never to be refreshed is the one case where the
+question has a good answer that is not an owner's name — and saying that here is better than letting
+a reader infer the rule covers a file it does not.
+
 **Not done here:** the fleet's own READMEs. Those corpora are real mirrors (SureChEMBL, MassBank,
 nmrshiftdb2) and their owners are that repository's to assign; the rule above is stated in a form
 the fleet can adopt, and `MODULES.md`'s open question stays open until it does.
