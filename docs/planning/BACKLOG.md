@@ -891,6 +891,19 @@ only holds defects can only ever restore the system to what it already intended 
       nomenclature wants structured databases. A process chemist asking "has anyone run this coupling
       on a deactivated aryl chloride" currently gets whatever those 39 notes happen to say.
 
+- [ ] **Three subsystems want one missing column: who wrote this** — [M]. `Note.created_by` is
+      `Literal["human", "agent"]` and `Note.source` is the ingest source, so **a note names no
+      person** — found while scoping the conflict notice
+      (`D-2026-09-14-a-contradiction-only-a-querier-sees-is-not-a-warning`, which addressed the
+      subscriber instead and needs no column). `audit_events.agent` is the same shape one layer
+      over (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` deleted the claim
+      rather than the column), and `session_messages` is the third, in the row below. Each is a
+      schema change plus a backfill question over rows already written, and taking it three times
+      in the corner each subsystem noticed it is how three subtly different answers to one question
+      get shipped. Decide the shape once — what an author *is* when the writer is an agent acting
+      for a person — then migrate each. Nothing is blocked on it today: every consumer that wanted
+      it has an addressee it can reach without one.
+
 - [ ] **Several humans in one session is five pieces, and the policy one has to be settled first**
       — [L], scoped in `docs/archive/PLAN-2026-09-14-multiplayer-and-the-open-delegation-questions.md`.
       Not the owner gate relaxed: measured, `session_messages` has **no actor column** so a shared
