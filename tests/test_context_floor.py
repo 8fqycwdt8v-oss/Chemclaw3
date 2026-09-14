@@ -532,6 +532,15 @@ KNOWN_OVERSIZED: dict[str, int] = {
     # 71% of it is somebody else's prose, arriving through a middleware
     # `_apply_excluded_middleware` refuses to let a profile strip, and the first-party half is 404.
     #
+    # **Those three sum to 1,377 against a whole of 1,372, and the +5 is the counter rather than
+    # the arithmetic.** `_count` wraps its argument in a `HumanMessage`, and
+    # `count_tokens_approximately` charges 4 tokens of per-message envelope — measured on the empty
+    # string — so three fragments counted separately pay it three times where the whole pays once.
+    # Named because the paragraph below closes on "a decomposition whose parts do not sum to its
+    # whole is arithmetic nobody checked", and leaving a 5-token residual under that sentence is
+    # the same defect at a smaller scale: the parts are each exact, and what does not sum is the
+    # measurement, not the schema.
+    #
     # **That split shipped wrong and the error is worth naming.** It read "1,115 of upstream's own
     # tool description, 206 of parameters and 147 of `_SCOPE_GUIDANCE`" against a whole it called
     # 1,367 — three mistakes in one sentence. 1,115 is the *scoped* description,

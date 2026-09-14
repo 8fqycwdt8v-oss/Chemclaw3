@@ -1079,14 +1079,20 @@ def test_a_helper_has_no_durable_memory_route_and_no_store_is_passed_to_one() ->
 
     What makes it safe is one step over, and it is a property of the *wiring* rather than of the
     tool set: a helper is compiled with no `store`, so `scratchpad_backend` adds a `/memories/`
-    route only `if store is not None and actor` and a helper satisfies neither. The durable write
-    the gate exists to refuse cannot happen; it is not merely refused when it does.
+    route only `if store is not None and actor` — and the **store** is what a helper lacks. Not
+    both: the actor is read from a contextvar the front door bound before this graph was compiled,
+    so a helper inherits its caller's, measured. Saying "neither" hands the next reader a second
+    reason that does not exist, which is the shape of the false premise this test exists to
+    replace. The durable write the gate exists to refuse cannot happen; it is not merely refused
+    when it does.
 
     Both halves are asserted because either one alone fails open. The mechanism without the wiring
     would pass while somebody threaded a store into the helper; the wiring without the mechanism
     would pass if `scratchpad_backend` ever started routing `/memories/` unconditionally.
     """
+    import ast
     import inspect
+    import textwrap
 
     from chemclaw.agent.langgraph_agent import _subagents
     from chemclaw.agent.scratchpad import MEMORY_ROOT, scratchpad_backend
@@ -1106,9 +1112,27 @@ def test_a_helper_has_no_durable_memory_route_and_no_store_is_passed_to_one() ->
 
     # The wiring: the helper's own compile passes no store. Read off the source because the backend
     # is built inside `build_langgraph_agent` and never returned, so there is nothing else to ask.
-    source = inspect.getsource(_subagents)
-    call = source[source.index("build_langgraph_agent(") :]
-    assert "store=" not in call[: call.index(")")], (
+    #
+    # **Over the AST, because the first version of this read the text and asserted nothing.** It
+    # took `source[source.index("build_langgraph_agent(") :]` up to the first `)` — and `_subagents`
+    # names that function twice, the first time in its own docstring, so the slice under assertion
+    # was the literal `build_langgraph_agent(helper=True`. `"store=" not in` that is true whatever
+    # the call does: inserting `store=store` into the real call left the inspected bytes identical
+    # and the test green. A guard that cannot fail is the `map_to_hpc_identity` shape this
+    # repository has an ADR about — a claim that a control exists — and it was written *by* the
+    # review that was correcting exactly that shape somewhere else.
+    #
+    # The tree cannot make either mistake: a docstring is a `Constant`, not a `Call`, and the
+    # count is asserted so a second compile cannot hide behind the first.
+    calls = [
+        node
+        for node in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(_subagents))))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "build_langgraph_agent"
+    ]
+    assert len(calls) == 1, f"_subagents compiles {len(calls)} graphs; this guard reads one"
+    assert not [kw for kw in calls[0].keywords if kw.arg == "store"], (
         "the helper compile passes a store; `/memories/` becomes durable for a helper and "
         "`helper_profile(harness_enabled=False)` then removes the only gate over it"
     )

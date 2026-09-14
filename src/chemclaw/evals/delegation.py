@@ -155,8 +155,16 @@ class NoComparableTask(ValueError):
 def aggregate_runs(runs: Iterable[ArmRun]) -> list[ArmAggregate]:
     """Collapse repeats of each `(task, arm)` pair to its median on every axis.
 
-    Median rather than mean on all three axes, including quality: a five-point verdict scale is
-    ordinal, and averaging `fabricated` with `served` produces a number that names no verdict.
+    Median rather than mean on all three axes, including quality: `VERDICT_SCORES` is a **four**-
+    point ordinal scale (`served` 1.0, `partial` 0.5, `unserved` 0.0, `fabricated` -1.0), and a
+    mean over it is not a verdict.
+
+    **The example this used to give was the one case that undercuts the argument.** It said
+    averaging `fabricated` with `served` "produces a number that names no verdict"; measured, it
+    produces exactly **0.0**, which is `unserved` — so the failure is not an unnameable number, it
+    is a *nameable and wrong* one, reporting an honest non-answer where one run invented data. The
+    case that really names nothing is `served` with `partial` at 0.75. Both are reasons to refuse
+    the mean, and the second is the weaker one.
 
     **Quality takes `median_low`, and the difference is not pedantry.** `statistics.median` returns
     the *mean of the two middle values* on an even-sized group, so at 4 or 6 repeats it reproduces
