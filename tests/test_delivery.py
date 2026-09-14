@@ -793,7 +793,7 @@ def _post_and_capture(message: Message) -> tuple[dict[str, str], dict[str, objec
 def test_the_webhook_carries_a_dedup_handle_the_file_channel_already_had() -> None:
     """Both shipped channels must answer "is this the same message" the same way.
 
-    `deliver_digest_activity` runs under `BAD_DATA_RETRY`, so a worker death after the POST landed
+    `deliver_message_activity` runs under `BAD_DATA_RETRY`, so a worker death after the POST landed
     re-runs the activity and re-POSTs — at-least-once, which is the correct contract for delivery
     and is precisely why the receiver needs a key. Measured before this: three `deliver()` calls of
     one message left **one** file on the share and put **three** POSTs on the wire, with no field a

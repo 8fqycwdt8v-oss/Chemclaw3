@@ -334,6 +334,12 @@ _NOT_A_TOPIC: dict[str, str] = {
     "D-2026-09-05-a-reader-with-no-caller-passes-its-own-tests": (
         "review sweep over the gate deletion, not a subject"
     ),
+    # A plan correction: two audit findings retracted because the code had already argued each of
+    # them shut. Its subject is a wave of work that will not happen, so there is nothing for a
+    # reader of any topic to be sent to it for.
+    "D-2026-09-14-two-gaps-the-code-had-already-argued-shut": (
+        "retracts two planned items, not a subject"
+    ),
 }
 
 

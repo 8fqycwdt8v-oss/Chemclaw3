@@ -377,8 +377,13 @@ def test_a_dropped_fan_out_child_still_appears_in_the_draft(
         drafted.append(args[1][0])
         return "commit://1"
 
+    async def _no_delivery(_message: Any) -> list[str]:
+        """Outbound delivery is not this test's subject; the workflow calls it unconditionally."""
+        return []
+
     monkeypatch.setattr(report_workflow, "fan_out", _short_fan_out)
     monkeypatch.setattr(report_workflow, "publish_note", _capture_publish)
+    monkeypatch.setattr(report_workflow, "deliver_best_effort", _no_delivery)
 
     result = asyncio.run(
         report_workflow.DevelopmentReportWorkflow().run(
@@ -444,6 +449,11 @@ def test_a_report_run_carries_the_turn_that_asked_for_it(monkeypatch: pytest.Mon
     Asserted through `activity_context` rather than by reading the fields, because the field being
     present is not the property — the property is that the worker's ambient context ends up holding
     it, and that is the function the interceptor uses to decide.
+
+    The outbound copy is the third boundary and is asserted here rather than in a test of its own,
+    because it is the same claim about the same run: a `report` message that reached a chemist's
+    channel without the id would be joinable to the person and not to the question, which is the
+    defect this test was written for.
     """
     launched: list[SectionRequest] = []
 
@@ -460,8 +470,15 @@ def test_a_report_run_carries_the_turn_that_asked_for_it(monkeypatch: pytest.Mon
         published.append(list(args[1]))
         return "commit://1"
 
+    sent: list[Any] = []
+
+    async def _capture_delivery(message: Any) -> list[str]:
+        sent.append(message)
+        return []
+
     monkeypatch.setattr(report_workflow, "fan_out", _capture_fan_out)
     monkeypatch.setattr(report_workflow, "publish_note", _capture_publish)
+    monkeypatch.setattr(report_workflow, "deliver_best_effort", _capture_delivery)
 
     asyncio.run(
         report_workflow.DevelopmentReportWorkflow().run(
@@ -482,6 +499,10 @@ def test_a_report_run_carries_the_turn_that_asked_for_it(monkeypatch: pytest.Mon
     # it by parameter name off the signature. Positional, which is how Temporal invokes it.
     assert activity_context(published[0], fn=propose_report).correlation_id == "corr-42"
     assert activity_context(published[0], fn=propose_report).actor == "chemist@corp"
+    # And the copy that leaves the building, addressed to the chemist who asked.
+    assert [(m.kind, m.recipient, m.correlation_id) for m in sent] == [
+        ("report", "chemist@corp", "corr-42")
+    ]
 
 
 def test_a_report_launched_outside_a_turn_stays_unjoined() -> None:

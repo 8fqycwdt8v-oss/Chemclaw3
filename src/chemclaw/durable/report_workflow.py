@@ -35,6 +35,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
     from chemclaw.science.fingerprints.store import default_reaction_store
 
+from chemclaw.durable.deliver_message import OutboundMessage, deliver_best_effort
 from chemclaw.durable.orchestrator import fan_out
 from chemclaw.durable.publish import (
     BAD_DATA_RETRY,
@@ -260,6 +261,24 @@ class DevelopmentReportWorkflow:
         # best-effort — but it shares the bounded-attempts discipline (G4).
         note_ref = await publish_note(
             propose_report, [report, request.requested_by, request.correlation_id]
+        )
+        # **Out of the building too, when a deployment has said where.** A report is the one
+        # durable job whose product is a document a chemist asked for by name, and until this
+        # line the `report` kind `deliver/message.py` declares had no producer at all: the
+        # finished draft reached `session_events` and stopped there, so a chemist who closed
+        # the tab while the fan-out ran learned about it by asking. Best-effort and last,
+        # because the note is the durable handover and this is the courtesy copy.
+        await deliver_best_effort(
+            OutboundMessage(
+                recipient=request.requested_by,
+                subject=f"Report drafted: {request.title}",
+                body=(
+                    f"{len(report.sections)} section(s), recorded as {note_ref}.\n"
+                    "Open it beside its citations in the knowledge graph."
+                ),
+                kind="report",
+                correlation_id=request.correlation_id,
+            )
         )
         return ConnectorJobResult(
             summary=(
