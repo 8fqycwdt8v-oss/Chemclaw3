@@ -47,8 +47,10 @@ could, at every value this ceiling has ever held.**
 A ratchet ceiling is deliberately a *bound* rather than today's measurement — it is set above the
 prefix so that an unrelated tool-schema merge does not redden the gate, which
 `D-2026-09-04-a-budget-that-excludes-the-prefix-is-not-a-budget` states as the reason it uses the
-ceiling and not the measurement. The headroom has been 593, 731, 602 and is now 740. **Every one of
-those exceeds 309.** So no 309-token restoration has ever been catchable by it, and the sentence was
+ceiling and not the measurement. Every headroom this repository can still read is larger than 309:
+**731** when the harness default raised it (67,500 against the 66,769 that ADR measured), **602** in
+W28's own commit (65,200 against its measured 64,598), and **740** now (67,200 against 66,460,
+measured here). So no 309-token restoration has ever been catchable by it, and the sentence was
 false in the commit that wrote it.
 
 Driven here, both arms:
