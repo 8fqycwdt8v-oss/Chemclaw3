@@ -186,60 +186,47 @@ jobs:
         # needs no registry. The SBOM below is `main`-only because it *describes* a kept image; this
         # one *refuses* a broken one, which is worth knowing before the merge rather than after.
         #
-        # The asset name is **asked for, not constructed**, and that is the whole point of this
-        # block. `contrib/install.sh` builds `trivy_<version>_Linux-64bit.tar.gz` from `uname`, and
-        # measured on a GitHub runner that URL answers **404** for this pin — so the installer
-        # resolved the tag, failed the download, and exited 1 with nothing printed, because
-        # `http_download` returns 1 into `set -e` and its own diagnostics are at debug priority.
-        # It had never once been green, on any run, and read as an install flake twice.
+        # **The pin was a version whose release publishes no assets, and the naming was never
+        # wrong.** Measured against GitHub directly: every `v0.58.2` asset answers 404 — the
+        # archive *and* the `checksums.txt` beside it — while `v0.74.0`'s answer 200 under exactly
+        # the same `trivy_<version>_Linux-64bit` spelling. The git tag exists, which is why
+        # `raw.githubusercontent.com` served `contrib/install.sh` at it and its checksum matched;
+        # what does not exist is anything to download. So this step had never once been green, and
+        # twice read as an install flake, because `contrib/install.sh` turns a 404 into a bare
+        # `exit 1`: `http_download` returns 1 into `set -e` and its own diagnostics are at debug
+        # priority.
         #
-        # Reading the release's own asset list removes the entire class: a naming scheme this
-        # repository does not control cannot silently stop matching. If nothing matches, every
-        # asset name the release carries is printed, so one run says what the next pin should be.
+        # The installer is gone rather than re-pinned. Two assets and a `sha256sum` is the whole of
+        # what it did here, and written out it cannot fail silently — each `curl` is `-f`, and the
+        # guard below names the URL and the status code when a pin stops resolving, which is the
+        # sentence whose absence cost three CI runs.
         env:
-          TRIVY_VERSION: v0.58.2
-          GITHUB_TOKEN: ${{ github.token }}
+          TRIVY_VERSION: v0.74.0
         run: |
           set -euo pipefail
-          release="https://api.github.com/repos/aquasecurity/trivy/releases/tags/${TRIVY_VERSION}"
-          curl -sSfL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-               -H "Accept: application/vnd.github+json" -o /tmp/trivy-release.json "${release}"
-          # One reader, two answers: the linux/amd64 archive and the checksums file beside it. The
-          # match is on the parts that identify the build rather than on a full name, since the
-          # separator and the casing are exactly what moved.
-          python3 - <<'PY' > /tmp/trivy-assets
-          import json, re, sys
-
-          release = json.load(open("/tmp/trivy-release.json"))
-          assets = {a["name"]: a["browser_download_url"] for a in release.get("assets", [])}
-
-          def one(pattern: str, what: str) -> str:
-              hits = [n for n in assets if re.fullmatch(pattern, n, re.IGNORECASE)]
-              if len(hits) != 1:
-                  print(f"no single {what} asset (matched {hits}) in {release['tag_name']}.", file=sys.stderr)
-                  print("the release carries:", file=sys.stderr)
-                  for name in sorted(assets):
-                      print(f"  {name}", file=sys.stderr)
-                  raise SystemExit(1)
-              return assets[hits[0]]
-
-          print(one(r"trivy_.+_(linux)[-_](64bit|amd64)\.tar\.gz", "linux/amd64 archive"))
-          print(one(r"trivy_.+_checksums\.txt", "checksums"))
-          PY
-          read -r tarball_url < /tmp/trivy-assets
-          checksums_url=$(sed -n 2p /tmp/trivy-assets)
-          curl -sSfL -o /tmp/trivy.tar.gz "${tarball_url}"
-          curl -sSfL -o /tmp/trivy-checksums.txt "${checksums_url}"
-          # The archive is verified against the checksums the release publishes, which is what the
-          # installer did and the only reason fetching a tarball is acceptable here at all. The
-          # expected hash is looked up by the asset's own name and re-pointed at the file actually
-          # on disk; rewriting the line's path in place is what made the first draft of this check
-          # verify a filename that does not exist, which `sha256sum -c` reports as a WARNING beside
-          # its non-zero exit rather than as a mismatch.
-          asset=$(basename "${tarball_url}")
+          version="${TRIVY_VERSION#v}"
+          base="https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}"
+          asset="trivy_${version}_Linux-64bit.tar.gz"
+          checksums="trivy_${version}_checksums.txt"
+          for name in "${asset}" "${checksums}"; do
+            code=$(curl -sIL -o /dev/null -w '%{http_code}' "${base}/${name}")
+            test "${code}" = "200" || {
+              echo "trivy pin ${TRIVY_VERSION}: ${base}/${name} answered ${code}." >&2
+              echo "A tag can exist with no release assets behind it. Fix TRIVY_VERSION." >&2
+              exit 1
+            }
+          done
+          curl -sSfL -o /tmp/trivy.tar.gz "${base}/${asset}"
+          curl -sSfL -o /tmp/trivy-checksums.txt "${base}/${checksums}"
+          # Verified against the checksums the release publishes, which is what the installer did
+          # and the only reason fetching a tarball is acceptable here at all. The expected hash is
+          # looked up by the asset's own name and paired with the file actually on disk; rewriting
+          # the checksum line's path in place is what made an earlier draft verify a filename that
+          # does not exist, which `sha256sum -c` reports as a WARNING beside its non-zero exit
+          # rather than as a mismatch — a failure that reads like the check working.
           expected=$(awk -v name="${asset}" '$2 == name { print $1 }' /tmp/trivy-checksums.txt)
           test -n "${expected}" || {
-            echo "no checksum line for ${asset} in the release's checksums file." >&2
+            echo "no checksum line for ${asset} in ${checksums}." >&2
             exit 1
           }
           echo "${expected}  /tmp/trivy.tar.gz" | sha256sum -c -
