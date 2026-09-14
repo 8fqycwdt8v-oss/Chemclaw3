@@ -57,6 +57,7 @@ def _dataset(directory: Path, rows: str = _ROWS, sha: str | None = None) -> Path
                 "licence": "CC0-1.0",
                 "retrieved_from": "hand-authored for this test",
                 "description": "a two-row reagent table",
+                "mirrored": False,
                 "sha256": sha or hashlib.sha256(rows.encode()).hexdigest(),
                 "text_column": "name",
                 "smiles_column": "smiles",
@@ -215,3 +216,51 @@ def test_the_source_is_retrieve_only() -> None:
 def test_it_is_not_enabled_by_default() -> None:
     """A deployment that ships no dataset is unaffected by the mechanism existing."""
     assert "vendored" not in settings.data_sources
+
+
+def test_a_mirrored_corpus_must_name_who_refreshes_it_and_how_often(tmp_path: Path) -> None:
+    """A snapshot with no owner and no cadence goes stale with nobody knowing it has.
+
+    The rule is the fleet's — `Chemclaw3-mcp`'s `MODULES.md` states it as an open question and
+    neither repository enforced it: "a stale patent index that nobody knows is stale is worse than
+    no patent index". Enforced at *load*, because a review that has to remember a rule is exactly
+    the control this repository keeps finding gone
+    (`D-2026-09-14-a-mirror-with-no-owner-goes-stale-in-silence`).
+
+    Driven through `_read_manifest`, which is the function every path into a vendored corpus goes
+    through, rather than through the model — a validator nothing calls on the loading path would
+    pass this test and refuse nothing.
+    """
+    directory = _dataset(tmp_path / "d")
+    manifest = json.loads((directory / "dataset.json").read_text(encoding="utf-8"))
+    manifest["mirrored"] = True
+    (directory / "dataset.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(VendoredDatasetError) as refusal:
+        _read_manifest(directory)
+    assert "refresh_owner" in str(refusal.value)
+    assert "refresh_cadence" in str(refusal.value)
+
+    manifest["refresh_owner"] = "the process-chemistry data team"
+    manifest["refresh_cadence"] = "quarterly, against the upstream release feed"
+    (directory / "dataset.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert _read_manifest(directory).refresh_owner == "the process-chemistry data team"
+
+
+def test_first_party_content_may_not_claim_an_upstream_it_does_not_have(tmp_path: Path) -> None:
+    """The other direction, and it is not symmetry for its own sake.
+
+    A refresh owner on a corpus with no upstream sends the next reader looking for a feed that does
+    not exist — which is the same failure as a missing one, costing somebody an afternoon instead of
+    shipping a stale answer. The shipped `data/vendored` corpus is first-party and names neither.
+    """
+    directory = _dataset(tmp_path / "d")
+    manifest = json.loads((directory / "dataset.json").read_text(encoding="utf-8"))
+    manifest["refresh_owner"] = "somebody"
+    (directory / "dataset.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(VendoredDatasetError) as refusal:
+        _read_manifest(directory)
+    assert "no upstream" in str(refusal.value)
+
+    assert _read_manifest(_SHIPPED).mirrored is False

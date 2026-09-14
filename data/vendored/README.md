@@ -24,13 +24,22 @@ review, and both belong to whoever adds one — see below.
 1. Put `records.csv` and `dataset.json` in a directory under this one, or wherever the build
    installs it (`CHEMCLAW_VENDORED_DATASET_DIR`).
 2. `dataset.json` must carry `name`, `version`, `licence`, `retrieved_from`, `description`,
-   `sha256` and `text_column`. Every field is required: a corpus with no recorded licence is a
-   legal question nobody can answer later, and one with no checksum cannot be shown to be what the
-   review approved. `retrieved_from` is documentation of where a human obtained the file —
-   nothing reads it as an address and nothing can fetch it.
-3. Compute the checksum over the exact bytes that ship:
+   `mirrored`, `sha256` and `text_column`. Every field is required: a corpus with no recorded
+   licence is a legal question nobody can answer later, and one with no checksum cannot be shown to
+   be what the review approved. `retrieved_from` is documentation of where a human obtained the
+   file — nothing reads it as an address and nothing can fetch it.
+3. **If `mirrored` is `true`, add `refresh_owner` and `refresh_cadence`**, and the load refuses
+   without them. A copy of somebody else's corpus has an upstream that moves while the copy does
+   not, and nothing in this system can tell — the fleet's `MODULES.md` states the rule as an open
+   question and enforcement is what was missing on both sides: *"a stale patent index that nobody
+   knows is stale is worse than no patent index"*
+   (`D-2026-09-14-a-mirror-with-no-owner-goes-stale-in-silence`). The refusal runs the other way
+   too: first-party content naming a refresh owner is a claim about an upstream that does not
+   exist, and the next reader goes looking for it. The corpus shipped here is `mirrored: false` and
+   names neither, which is why this repository has no snapshot to keep fresh today.
+4. Compute the checksum over the exact bytes that ship:
    `python -c "import hashlib,pathlib;print(hashlib.sha256(pathlib.Path('records.csv').read_bytes()).hexdigest())"`
-4. Enable it by adding `vendored` to `CHEMCLAW_DATA_SOURCES`. Off by default — a deployment that
+5. Enable it by adding `vendored` to `CHEMCLAW_DATA_SOURCES`. Off by default — a deployment that
    ships no dataset is unaffected.
 
 If the shipped file ever stops matching its manifest, loading fails with both hashes named. The fix
