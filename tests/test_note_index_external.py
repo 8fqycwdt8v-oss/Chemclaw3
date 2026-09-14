@@ -290,6 +290,31 @@ async def _embed(text: str) -> list[float]:
 # --- the prune against a corpus two pods disagree about -----------------------------------------
 
 
+def _git(directory: Path, *args: str) -> None:
+    """Run one git command in `directory`, carrying its own identity rather than the machine's.
+
+    The identity is passed with `-c` on every invocation instead of being written once into the
+    origin's config, because `git clone` copies no identity: a commit made in a *clone* falls back
+    to the ambient `user.name`/`user.email`, which a developer's machine has and a CI runner does
+    not. That is exactly how this file failed — green locally for as long as it existed, and
+    `Author identity unknown`, exit 128, the first time `_delete_and_commit` ran on a runner.
+    """
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=probe@example.invalid",
+            "-c",
+            "user.name=probe",
+            "-C",
+            str(directory),
+            *args,
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
 def _corpus_at_two_revisions(root: Path) -> tuple[Path, Path]:
     """One note corpus in git, cloned twice: the current checkout, and one commit behind it.
 
@@ -299,43 +324,31 @@ def _corpus_at_two_revisions(root: Path) -> tuple[Path, Path]:
     test reads `git rev-list` and a directory that is not a work tree has no revision at all — the
     first version of this probe used copies, measured no change, and was measuring nothing.
     """
-
-    def git(directory: Path, *args: str) -> None:
-        subprocess.run(["git", "-C", str(directory), *args], check=True, capture_output=True)
-
     origin = root / "origin"
     origin.mkdir()
-    git(origin, "init", "-q", "-b", "main")
-    git(origin, "config", "user.email", "probe@example.invalid")
-    git(origin, "config", "user.name", "probe")
+    _git(origin, "init", "-q", "-b", "main")
     _write_note(origin, "reaction-a", "Ester A")
     _write_note(origin, "reaction-b", "Ester B")
-    git(origin, "add", "-A")
-    git(origin, "commit", "-q", "-m", "two notes")
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-q", "-m", "two notes")
     behind = subprocess.run(
         ["git", "-C", str(origin), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
     ).stdout.strip()
     _write_note(origin, "reaction-c", "Ester C")
-    git(origin, "add", "-A")
-    git(origin, "commit", "-q", "-m", "a third note")
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-q", "-m", "a third note")
 
     current, lagging = root / "current", root / "lagging"
-    git(root, "clone", "-q", str(origin), str(current))
-    git(root, "clone", "-q", str(origin), str(lagging))
-    git(lagging, "checkout", "-q", behind)
+    _git(root, "clone", "-q", str(origin), str(current))
+    _git(root, "clone", "-q", str(origin), str(lagging))
+    _git(lagging, "checkout", "-q", behind)
     return current, lagging
 
 
 def _delete_and_commit(checkout: Path, relative: str) -> None:
     """Remove a note from a checkout and commit it — a deletion the prune is *meant* to act on."""
-    subprocess.run(
-        ["git", "-C", str(checkout), "rm", "-q", relative], check=True, capture_output=True
-    )
-    subprocess.run(
-        ["git", "-C", str(checkout), "commit", "-q", "-m", f"delete {relative}"],
-        check=True,
-        capture_output=True,
-    )
+    _git(checkout, "rm", "-q", relative)
+    _git(checkout, "commit", "-q", "-m", f"delete {relative}")
 
 
 def test_a_corpus_outside_a_work_tree_has_no_revision(tmp_path: Path) -> None:
