@@ -32,7 +32,7 @@ in the fourth section, and a verdict here would let them skip reading it.
 | `require_actor` rejects an absent user rather than running the call as nobody | `tests/test_authz.py::test_require_actor_rejects_absent_user`, `tests/test_tool_authz.py` |
 | An expensive job is refused for a requester without the entitlement, including a template step launched by another step | `tests/test_authz.py`, `tests/test_template_job_step.py` |
 | A plan-gated tool cannot be called under an unapproved plan | `tests/test_plan_gate.py` |
-| No agent path writes a `SKILL.md`, and a role-refused skill is absent from the listing, unreadable by path, and unreachable by glob or grep | `tests/test_skill_backend.py`, `tests/test_skill_access.py` |
+| The skills tree is read-only to the agent, and a role-refused skill is absent from the listing, unreadable by path, unreachable by glob or grep, and refuses without saying whether it exists | `tests/test_skill_backend.py::test_the_skills_tree_is_read_only`, `tests/test_skill_access.py` |
 | `audit_events` is INSERT-only by grant, and the migration ledger is never granted a write verb | `tests/test_database_privileges.py` |
 | The grants the runtime role really holds are the matrix the grant file declares, materialised and read back | `tests/test_runtime_ddl_privilege.py` |
 | The chart refuses to render until a release states its egress posture, its retention posture and its Temporal namespace | `tests/test_deploy_chart.py` |
