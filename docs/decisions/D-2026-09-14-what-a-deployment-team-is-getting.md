@@ -77,7 +77,7 @@ in the fourth section, and a verdict here would let them skip reading it.
 | Retrieval recall over the labelled (query, note) pairs the probe set declares — how many there are is what `tests/test_probe_coverage.py` counts, not a figure here | `make live-probes`, `tests/test_probe_coverage.py` |
 | A turn's cost ratio, over turns the system really ran | `make live-turn-cost` |
 | The request prefix, observed off the wire rather than re-derived | `tests/test_context_floor.py` |
-| Mutation scores for the seven invariant-bearing modules, on a schedule | `.github/workflows/mutants.yml`, `make mutant-results` |
+| Mutation scores for the invariant-bearing modules the mutation job selects, on a schedule — which modules and how many is that job's own list | `.github/workflows/mutants.yml`, `make mutant-results` |
 | **The four-tier stack starts and serves, against a real model gateway.** 2026-09-14: `make live-infra`, `make live-up` with `CHEMCLAW_LLM_BASE_URL` naming a gateway, then 331 probes — Postgres, Temporal, four workers, the connector fleet and the front door up; 27 distinct tools exercised across the fleet and core | `make live-probes`, transcripts in `tasks/live-test/transcripts/corpus/` |
 | **All four repositories run together.** 2026-09-14: fifteen processes up and answering readiness — `Chemclaw3_mock`'s two, `Chemclaw3-mcp`'s six, this repository's six, `Chemclaw3_ui`'s two. Read back: front door `/readyz` 200, UI SPA 200, `reaction_records` 2103, `session_messages` 1245. Each fleet credential is *enforced* rather than declared, which is what every "credential accepted" line in that lane is | `infra/live/e2e-full-stack/up.sh` |
 
@@ -93,8 +93,12 @@ cannot.**
 
 ## 4. Accepted — unbounded, unproven, or out of reach
 
-Each of these is a real gap. None is mitigated by anything in this repository; each is either a
-`DEFERRED.md` row with a trigger or a `BACKLOG.md` row with an anchor, and nothing is left implied.
+Each of these is a real gap and none is mitigated by anything in this repository. **Three different
+kinds of answer appear in the right-hand column and the difference matters**: a `DEFERRED.md` row
+with a trigger (work a *condition* unblocks), a `BACKLOG.md` row with an anchor (work somebody can
+start), or — for four of them — neither, because the answer is a setting, a credential or a tenant
+rather than work in this tree. A row whose answer is "set it" is not tracked in a register and
+saying so is the point: nothing here is left implied, including which gaps have no ticket.
 
 | Accepted | Why it is accepted, and what would close it |
 | --- | --- |
