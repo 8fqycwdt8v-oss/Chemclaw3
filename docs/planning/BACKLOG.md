@@ -891,6 +891,26 @@ only holds defects can only ever restore the system to what it already intended 
       nomenclature wants structured databases. A process chemist asking "has anyone run this coupling
       on a deactivated aryl chloride" currently gets whatever those 39 notes happen to say.
 
+- [ ] **A cut tool result is unrecoverable, and the store that would hold it is downstream of the
+      cut** — [M], the last open Wave 1 item ("make a cleared tool result retrievable by address").
+      Measured 2026-09-14, and the two halves are not the same problem.
+      `D-2026-09-14-the-lossy-step-is-the-cut-and-upstream-already-offloads` already established
+      that the *clear* loses nothing — it runs over a deep copy inside `wrap_model_call` and the
+      next turn re-derives the same reduction from the full thread. The **cut** in
+      `agent/tool_result_size.py` is the lossy one, and driven through the real middleware a 65,000
+      character result comes out at 59,999 with the middle replaced by a notice.
+      `api/tool_results.py` is exactly the address that should hold it — content-addressed on the
+      SHA-256 of the text, already served by `GET /sessions/{id}/tool-results/{ref}` — but
+      `api/graph_stream.py` calls `trace.returned(...)` on the `ToolMessage` the graph *emits*,
+      which is post-middleware, so `tool_result_blobs` stores the cut text and the removed middle
+      reaches no store at all.
+      The fix is not a layer move: `tests/test_layering.py` forbids `agent -> api`, so
+      `bound_tool_results` takes a sink through the seam this tree uses everywhere — a one-method
+      Protocol defined in `agent/`, implemented by `api/tool_results.ResultSink`, handed in by the
+      builder that already holds one. That makes the middleware a factory rather than a module-level
+      object, which is what the `len(tool_call_middleware(...))` assertions will notice. Then the
+      cut notice names the ref and a chemist (or a narrower re-ask) can fetch what was removed.
+
 - [ ] **Three subsystems want one missing column: who wrote this** — [M]. `Note.created_by` is
       `Literal["human", "agent"]` and `Note.source` is the ingest source, so **a note names no
       person** — found while scoping the conflict notice
