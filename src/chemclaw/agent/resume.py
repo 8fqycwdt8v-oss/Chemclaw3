@@ -29,10 +29,12 @@ inspectable and testable without driving a model.
 """
 
 import logging
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
 from chemclaw.agent.state import turn_config
+from chemclaw.core.logging import log_event
 
 logger = logging.getLogger(__name__)
 
@@ -76,3 +78,82 @@ async def resumability(graph: Any, session_id: str) -> Resumability:
     if snapshot is None or not getattr(snapshot, "created_at", None):
         return Resumability.UNKNOWN
     return Resumability.RESUMABLE if snapshot.next else Resumability.FINISHED
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeOutcome:
+    """What a resume attempt did, which is not the same as what the graph returned.
+
+    `ainvoke(None, ...)` answers "here is the state" for a thread it resumed, a thread it found
+    finished and a thread it had nothing to do with, so the graph's return value cannot carry this.
+    A supervisor reads `resumed` to decide whether anything happened and `state` to decide whether
+    to try again later.
+    """
+
+    state: Resumability
+    #: Whether the graph was actually driven. False for every state but `RESUMABLE`.
+    resumed: bool
+
+
+async def resume_turn(
+    graph: Any,
+    session_id: str,
+    *,
+    claims: Any,
+    holder: str,
+    lease_seconds: float,
+) -> ResumeOutcome:
+    """Continue a turn whose pod died, under the same lease a chat turn holds.
+
+    **The claim is taken *before* the state is read, and the order is the whole correctness
+    argument.** Reading first and claiming second leaves a window in which the thread's state
+    changes between the two — another process finishing it, or starting a fresh turn on it — and
+    the resume then drives a graph it has an out-of-date opinion about. Claiming first makes the
+    read happen under exclusion, which is what `SessionTurnClaims` is for: one short statement, no
+    pinned connection, and a lease that lapses if this process dies mid-resume.
+
+    Without it, a second writer does not conflict — it **forks**. Measured in Wave 2: two writers on
+    one thread produced 26 checkpoint rows with duplicate step numbers under different parents, no
+    error, last writer winning, and one pod's answer returned to its caller and absent from the
+    session. The checkpointer offers no optimistic concurrency here, so the lease is not a nicety.
+
+    The lease is released in a `finally`, because a resume that raises must not leave the session
+    unusable until the lease lapses — the failure a chemist sees would be "your session is busy"
+    for a turn nobody is running.
+
+    Args:
+        graph: A compiled graph over the checkpointer holding the thread.
+        session_id: The session, which is the thread id.
+        claims: A `SessionTurnClaims`, or anything with its three-method shape.
+        holder: This process's claim identity, as `api/state.claim_holder` builds one.
+        lease_seconds: How long the claim is good for before it lapses.
+
+    Returns:
+        What happened, which the graph's own return value cannot say.
+    """
+    if not await claims.claim(session_id, holder, lease_seconds):
+        return ResumeOutcome(state=Resumability.HELD, resumed=False)
+    try:
+        state = await resumability(graph, session_id)
+        if state is not Resumability.RESUMABLE:
+            log_event(
+                logger,
+                "turn.resume_skipped",
+                "session %s was not resumable (%s)",
+                session_id,
+                state,
+                session_id=session_id,
+                resumability=str(state),
+            )
+            return ResumeOutcome(state=state, resumed=False)
+        await graph.ainvoke(None, turn_config(session_id))
+        log_event(
+            logger,
+            "turn.resumed",
+            "session %s was resumed after its previous run ended without finishing",
+            session_id,
+            session_id=session_id,
+        )
+        return ResumeOutcome(state=Resumability.RESUMABLE, resumed=True)
+    finally:
+        await claims.release(session_id, holder)
