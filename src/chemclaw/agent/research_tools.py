@@ -28,7 +28,7 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tool_registry import tool
 from chemclaw.ingest.eln.records import default_record_store
 from chemclaw.ingest.rejections import IngestRejection, refusals_matching
-from chemclaw.ingest.sources.registry import active_retrieve_sources
+from chemclaw.ingest.sources.registry import active_retrieve_corpora, active_retrieve_sources
 from chemclaw.retrieval.evidence import EvidenceChunk, EvidenceSweep, Hits, SourceRetriever
 from chemclaw.retrieval.fanout import record_kept_chunks, sweep_sources
 from chemclaw.retrieval.hybrid import reciprocal_rank_fusion, restated_as_position
@@ -424,10 +424,17 @@ async def gather_evidence(
     if settings.retrieval_mode == "hybrid":
         # RRF already produces the cross-source ranking (best first), so it *is* the order the cap
         # keeps — re-sorting by a single source's raw score would discard the fusion.
+        # `corpora` is what makes the fusion one-corpus-one-vote. `graph`, `lexical` and `vector`
+        # are three rankers over one note tree, and RRF's premise is independent ones — measured,
+        # their pairwise agreement on the shipped corpus is 47/55, 44/55 and 41/53, so the
+        # agreement term decides the order and the rank term barely participates. A source that
+        # declares no corpus is its own, so a deployment running one note leg fuses as before.
+        corpus_of = active_retrieve_corpora()
         merged = reciprocal_rank_fusion(
             ranked_lists,
             k=settings.retrieval_fusion_k,
             weights=settings.retrieval_source_weights_map,
+            corpora=[corpus_of.get(name, name) for name, _ in sources],
         )
     else:
         # Round-robin, not a flat union re-sorted by score: the cap below has to be survivable by

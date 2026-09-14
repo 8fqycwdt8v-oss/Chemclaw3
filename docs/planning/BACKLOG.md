@@ -183,72 +183,30 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
-- [ ] **RRF's premise is independent rankers and this system has correlated ones;
-      `retrieval_fusion_k` is not the dial that fixes it** — [M], re-measured 2026-09-05 against
-      current `HEAD`, and **both remedies this row used to propose are measured no-ops**. Keep the
-      numbers here so nobody re-litigates them.
+- [ ] **`hybrid` retrieval is measurably worse than the `graph` default, and the fix is not a
+      fusion change** — [M], measured 2026-09-14 on the new gold set
+      (`D-2026-09-14-one-corpus-one-vote-is-the-right-fix-for-a-different-problem`). Over 20 real
+      probe questions and 46 labelled (query, note) pairs against the shipped `knowledge/` corpus
+      with all three legs live: round-robin mean gold rank **4.38**, top-5 **27**; RRF **4.54**,
+      top-5 **25**. 12 gold notes rank worse and 17 better, and the losses are the notes the
+      question is about — `playbook-degassing` 1 → 7, `opt-suzuki-conditions` 3 → 9,
+      `report-biaryl-development` 2 → 7.
 
-      The arithmetic stands: at `retrieval_fusion_k` 60 over lists of `retrieval_top_k` 8, the
-      within-source spread is **1.11x** (rank 1 = 1/61, rank 8 = 1/68) against **2.00x** for being
-      found twice, so a two-source note at rank *r* beats a one-source rank-1 note while `r < 62`.
-      End to end on a 35-note corpus with three real legs, the note answering the query sits at
-      position 2 in `graph` mode and **position 9 of 9** in `hybrid`.
+      **Three remedies are now measured no-ops** and the numbers are here so nobody re-litigates
+      them: `retrieval_fusion_k` (0 of 7 queries reordered, at any `k` down to the minimum),
+      `retrieval_source_weights` (tiering `graph`+`lexical` at 0.5 is inert), and one-corpus-one-vote
+      (**0 of 46** gold ranks, structurally — grouping the three legs leaves the cross-corpus stage
+      a single list, so the final order is the within-corpus fusion). The mechanism shipped anyway,
+      for the different case it does fix.
 
-      **Neither `k` nor `retrieval_source_weights` can close it, and that is arithmetic rather than
-      tuning**: the agreement term contains no `k`, so a note found at rank 1 by two legs scores
-      `2/(k + 1/w)` against a dense-only rank-1 note's `1/(k+1)` — the first wins for *every*
-      positive `k` and `w`. Measured: lowering `k` to 20 or 10 changes the order on **0 of 7** real
-      queries; at the minimum `k=1` the answer note reaches position 6, still below every two-source
-      note. Tiering `graph`+`lexical` at weight 0.5 leaves it at position 9, inert.
+      What is left is the cause rather than the fusion: the shipped `embedding_provider` is `hash`,
+      token-count hashing, so all three legs are term-overlap rankers — pairwise agreement 47/55,
+      44/55 and 41/53. The two honest options are an `openai_compatible` embedding provider, which
+      makes the dense leg genuinely orthogonal and is the thing to measure next, or not running
+      three legs over one corpus. `retrieval_mode` stays `graph` until one of them is taken, which
+      is now a decision with a number behind it rather than caution.
 
-      **The correlation is worse than "two of the three"**: on the real `knowledge/` corpus,
-      `graph ∩ lexical` = 47/55, `graph ∩ vector` = 44/55, `lexical ∩ vector` = 41/53 — because the
-      shipped `embedding_provider` is `hash`, which is token-count hashing, so *all three* legs are
-      term-overlap rankers. The dense leg only becomes orthogonal under `openai_compatible`.
-
-      **What was fixed instead**, because it was a defect rather than a tuning question: the fused
-      list carried each chunk's *finder's* score, monotone with the fused order on **0 of 7**
-      queries. `hybrid.restated_as_position` now reports the rank the fusion actually produced.
-
-      **What would work is "one corpus, one vote"** — `ingest/documents/retriever.py` already fuses
-      its own two legs internally so the share votes once, while the note corpus runs three legs as
-      three votes over one corpus. Expressing that means the data-source manifest saying which
-      sources are one corpus, which is an ADR rather than a setting. Scope note: with three note
-      legs the merge cap never engages (24 chunks against 40), so today the cost is prompt *order*,
-      not recall; it becomes recall at five or more legs. And `retrieval_mode` defaults to `graph`
-      with `CHEMCLAW_DATA_SOURCES=graph,eln-json`, so **no shipped configuration runs RRF over note
-      sources at all** — hybrid staying opt-in is the mitigation until the ADR is taken.
-
-- [ ] **The 44 labelled (query, note) pairs in `knowledge.yaml` are unreadable as data** — [M],
-      measured 2026-09-05. `data/evals/probes/knowledge.yaml` has **19 probes naming
-      real `knowledge/` note ids inside their `direction:` prose, 44 pairs in total** — a labelled
-      gold set against the *product* corpus that no gate can read, because `Probe` is
-      `extra="forbid"` (`evals/probe.py`). `DEFERRED.md`'s claim that "the shipped graph has none"
-      was corrected in the same commit as this row.
-
-      **Score it in the live lane, not offline, and that is the finding.** Measured offline by
-      running `GraphRetriever` on each probe's raw question: mean recall **0.636**, two probes at
-      0.00 — below the gate's floor on day one, because probe questions are conversational chemist
-      prose (10-27 terms) while the live agent reformulates before calling `gather_evidence`.
-      Gating that offline would restate the `retrieval-cross-coupling-literal-miss` case 19 times
-      without the `expect_pass: false` that makes it honest.
-
-      The shape: add `expects_notes: list[str]` to `Probe`, transcribe the 44 pairs, and score it in
-      `evals/live.py` beside `expects_tools` — `returned_ids` is already accumulated there, so it is
-      the same three lines as `live.py:499-500`. Plus a cheap **offline** validator that every
-      `expects_notes` id exists in `knowledge/`, which is the half CI can run. Its own PR: it needs
-      a running front door to verify green.
 ## 3 — Work that is lost, dropped or invisible
-
-- [ ] **The two eval gates score literals written in their own case files** — [M], same review.
-      11 of 13 baseline metrics are read from the case file rather than computed, so a metric that
-      stops measuring and answers "perfect" passes both `make eval-strict` and
-      `make eval-baseline-check`. These run in `make ci`, so this is a gate that cannot fail in the
-      way it exists to fail.
-
-- [ ] **`make kg-validate`'s two store-backed arms have no input in the shipped corpus** — [S], same
-      review. 0 reaction citations and 0 `calc_refs` in the committed knowledge corpus, so the half
-      of the validator its own docstring says CI runs is dead on every CI run.
 
 - [ ] **The `note_proposed` SSE event is not a proposal, and the name is a two-repo contract** —
       [S], found 2026-09-05 in the gate-deletion review. Nothing reviews a note, so the accurate
@@ -556,28 +514,32 @@ topic).
       than riding along on someone else's. The SBOM is now `main`-only, so a scan reading it is
       `main`-only too.
 
-- [ ] **A memory run reads every source whole, three times** — [M]. `durable/memory_jobs.py::
-      read_corpus` walks each active ingest source from `datetime.min` on every ingest half, so
-      each of the three memory jobs (`build_campaign_notes_activity`, `build_playbook_notes_
-      activity`, `build_optimization_notes_activity`) reads the whole record once per activity per
-      scheduled run.
-      **This row used to say the walk was a full table scan and that was false for the one shipped
-      source that pages** (`D-2026-09-07-a-corpus-read-that-stops-at-one-page-is-not-a-corpus`):
-      measured against the warehouse adapter over a 12-row corpus at `fetch_limit: 5`, `read_corpus`
-      returned **5 of 12** reactions and called the read `complete` — the oldest 500 entries of an ELN
-      at the shipped binding default, distilled into notes as what the deployment knows. That is
-      fixed: the read pages, and a source still reporting rows waiting makes the read incomplete.
-      The cost is what is left, and it is now real rather than hypothetical — the scan happens
-      because the read became correct. `ElnAdapter` (`ingest/eln/adapter.py`) has exactly two
-      methods and neither is a fetch-by-id, so there is still no cheaper read to reach for: closing
-      this means either a fetch-by-id on the adapter protocol (every source pays) or a derived
-      store of mapped `OrdReaction`s.
-      **Found while building the protocol condenser and deliberately not fixed there**
-      (`D-2026-08-25-the-structure-is-discarded-at-the-note-boundary` records the reasoning): a
-      derived store would have answered it as a side effect, and answering a scaling problem as a
-      side effect of a retrieval change is how a store nobody decided on gets built. It is also the
-      trigger on the `DEFERRED.md` row for reagent/solvent set diffs in the turn-time comparison —
-      one change answers both.
+- [ ] **A corpus read is ~40 kB of memory per entry, and only 25 kB of it is boundable** — [M],
+      measured 2026-09-14
+      (`D-2026-09-14-the-memory-corpus-is-a-memory-bound-not-a-time-bound`), and it replaces the
+      "three times per scheduled run" row rather than continuing it. **Two of that row's three
+      clauses were stale**: `D-2026-08-25` removed the timer, so there is no scheduled run, and
+      `synthesize_memory(kind)` starts one workflow per call.
+
+      What is real, over a 10,000-record ORD drop directory: **396.8 MB** traced peak and 6.9 s
+      unbounded, **144.2 MB** at a cap of 1. So a mapped `OrdReaction` is **25.3 kB** resident and
+      the adapter's own page of `RawEntry` is **14.4 kB** per entry. At a real deployment's ~500,000
+      entries that is **~20 GB in one activity's process**, of which **~7.2 GB** is the page. The
+      read does not get slow; the worker is killed.
+
+      `memory_corpus_max_reactions` now bounds the miner's half and marks a capped pass incomplete.
+      **It cannot bound the adapter's page**: `OrdJsonAdapter.fetch_new_entries` accepts `limit` and
+      ignores it deliberately (an unsorted scan would return an arbitrary subset and advance the
+      cursor past what it skipped), so for a drop directory the page *is* the corpus and no argument
+      `read_corpus` can pass changes that.
+
+      **What is left is the streaming protocol**, which is what the old row already identified
+      without a number: either `ElnAdapter` gains a fetch-by-id or a bounded iterator (every source
+      pays), or the three miners stop taking a `list` — they are whole-corpus algorithms today (DRFP
+      fingerprinting, O(n²) Tanimoto, NetworkX components), so this is a reformulation rather than a
+      refactor. **Trigger**: a deployment whose corpus exceeds `memory_corpus_max_reactions`, which
+      the WARNING now names by number. It is still the trigger on the `DEFERRED.md` row for
+      reagent/solvent set diffs — one change answers both.
 
 - [ ] **A stalled append-only feed has no first-party signal** — [S]. `corpus_cursors`
       (`infra/sql/072`) records where each feed's drain stopped, and nothing reads `updated_at`:
@@ -648,13 +610,6 @@ topic).
       and `predictions`/`measurements` are the calibration ledger nothing has yet filled. What is
       owed is five decisions, not five `DELETE`s, and the register is where each belongs.
 
-- [ ] **Nothing has measured how many rows a real corpus produces** — [M]. The volume risk named in
-      `D-2026-08-25`: `cached_compute` publishes on every miss, and a conformer search projects one
-      record with ~47 conformer rows plus their structures. Before publishing is enabled by default
-      anywhere, run `python -m chemclaw.cli.backfill_publications --dry-run` against a populated
-      deployment and count rows-per-calculation per `calc_type`. That growth curve is also what
-      decides the deliberately open question of whether `property_value` needs partitioning, and on
-      what — a partition key chosen before the row count is known would be a guess.
 - [ ] **Postgres and Temporal are neither deployed nor owned** — [L]. The chart dials
       `chemclaw-temporal-frontend.temporal.svc:7233` and namespace `chemclaw`; there is no subchart
       and no statement of who runs either. `docs/guides/runbook.md:972-997` (§ xiii, "Restore a
@@ -726,43 +681,6 @@ topic).
 
 ---
 
-- [ ] **The `stated`-quote ambient reads the whole table's tail on every turn once a database has
-      other sessions in it** — [M], found reviewing `agent/session_store._SELECT_RECENT_USER_ROWS`,
-      the read `api/runner._turn_ambient` runs once per turn on the answer path. The statement is
-      `WHERE session_id = %s AND message_shape = %s AND message_original IS NULL AND
-      message->>'type' = 'human' ORDER BY id DESC LIMIT %s`, and the comment above it says
-      `(session_id, id)` (`infra/sql/008_sessions.sql`) serves the scan. In a table with one session
-      in it, it does. In a busy one it does not: Postgres has no statistics for the *expression*
-      `message->>'type'`, so it mis-estimates that predicate's selectivity, sees `ORDER BY id DESC
-      LIMIT 20` and walks the primary key backwards expecting to stop early. Measured on a replica
-      of the table with its real indexes — one 12,000-row session plus 120,000 newer rows from 300
-      other sessions, `VACUUM ANALYZE`, warm cache, 4 reps — the planner chose `Index Scan Backward
-      using session_messages_pkey` and discarded **119,740** table rows to return 20, on **every turn**,
-      growing with the whole table rather than with the session. The same statement forced onto
-      `session_messages_session_idx` visits **60** of them (20 kept, 40 removed), because `(session_id,
-      id)` *is* `session_id = %s ORDER BY id DESC` and carries the sort for free. Two independent
-      measurements agreed on the row counts and disagreed on the milliseconds by 50x, which is why
-      this row states counts: the wall clock is machine- and payload-dependent and the plan flip is
-      not. **What the fix is, is the decision, and this row deliberately proposes none.**
-      `CREATE STATISTICS` on the expression, a partial or expression index that makes the human rows
-      directly addressable, and hoisting the type test out of SQL are three different bets about a
-      table nobody has measured in production — and an index added to force a plan is a cost every
-      write pays forever. Note first that the degradation is invisible (the answer is correct, only
-      slow) and that it is bounded by `durable/retention.py`, so a deployment that prunes hard may
-      never reach it. Anchors: `agent/session_store.py::_SELECT_RECENT_USER_ROWS`,
-      `api/runner.py::_turn_ambient`, `infra/sql/008_sessions.sql`.
-
-- [ ] **The checkpointer's write volume is quadratic in a thread's length** — [L], stated by
-      `D-2026-09-06-a-superseded-checkpoint-is-a-copy-not-a-record` under "what this does not fix"
-      and queued here because nothing else records it. Upstream's `_dump_blobs` rewrites the whole
-      `messages` channel on every superstep, so a 139.6 kB conversation cost **16.7 MB of WAL**, and
-      the per-thread prune that ADR shipped does not reach it — measured, the prune *adds* ~4%
-      (3.51 → 3.64 MB over 20 turns, reproduced twice). The only mechanism that would is a
-      destructive trim of thread state, which contradicts
-      `D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has` — so this is a decision about
-      that trade, not a patch. Anchors: `agent/checkpointer.py::_PRUNE_SUPERSEDED`,
-      `core/config/memory.py::checkpoint_retain_per_thread`.
-
 ## 5 — Where the field moved past us
 
 Filed by the 2026-08-25 field benchmark — see
@@ -826,59 +744,50 @@ only holds defects can only ever restore the system to what it already intended 
       blocked: the saving is still partly in endpoint tools no offline floor can see, and it still
       needs the skill gate beside the allow-list.
 
-- [ ] **A tool schema is 38% developer rationale, and it ships on every turn** — [M], and it is
-      what `§ 5`'s deferral row turned into once measured. `science/bo/problem.py`'s nested models
-      carry design arguments in their class docstrings — *"One `objectives` field rather than a lead
-      objective plus a sidecar list (W3)"* — and Pydantic turns a class docstring into the schema
-      `description`, so `convert_to_openai_tool` ships them. Measured 2026-08-25 on the `default`
-      profile: `start_optimization_campaign` is 8,063 chars of schema, 4,392 of it description and
-      **3,047 of that elaboration past the first paragraph**; `record_knowledge_note` 4,259/2,262/663.
-      Those two are 25% of the profile's 12,536-token tool budget between them, and both are already
-      in `tests/test_context_floor.py::KNOWN_OVERSIZED`.
+- [ ] **A tool schema is 72% description, and the rationale vein the old row named is already
+      closed** — [M], re-measured 2026-09-14 on the bound surface
+      (`D-2026-09-14-a-docstring-is-a-prompt-and-a-comment-is-not`).
 
-      **Not a blanket cut.** Some elaboration is genuinely the caller's — when to supply categorical
-      descriptors changes what the model should send — so this is per-paragraph judgment: rationale
-      moves to a `#` comment, guidance stays in the docstring. **And it does not ship until the live
-      lane can show every probe still reaching its tool**, because a cheaper prompt that stops
-      finding tools is a regression with a good-looking metric. **The before-figure now exists**:
-      `make live-ab`'s 2026-09-04 run reached the expected tool on **133 of the 171** probes that
-      name one, per-probe in `tasks/live-test/transcripts/ab/evidence.json`, so the comparison this
-      was blocked on is a re-run rather than a new instrument.
+      The row this replaces said the cost was Pydantic *class docstrings* carrying design
+      arguments — "One `objectives` field rather than a lead objective plus a sidecar list (W3)" —
+      published as JSON-schema descriptions. **That was fixed before this row was worked**:
+      `science/bo/problem.py` carries a comment beside class after class saying the rationale is
+      deliberately in a `#` comment rather than in the docstring, and `start_optimization_campaign`,
+      quoted at 8,063
+      chars of schema with 4,392 of description, now measures **1,565 tokens in total**.
 
-- [ ] **Half the probe corpus tests one tool** — [S], and only the *concentration* half is still
-      open. `gather_evidence` is in `expects_tools` for **125 of 292** probes (re-counted
-      2026-09-05 — the numerator is unchanged and the **denominator was stale**, 292 top-level
-      probes today rather than 288, so the concentration is 43%; 124/261 on 2026-08-27, 116/232 on
-      2026-08-25, and the corpus keeps growing while the concentration does not shrink with it);
-      `find_notes` 96; `expand_note` 60; bucket C is **48** probes against bucket A's **173** — 169
-      was this row's own figure and is the *paired* count from the A/B run below, four short of the
-      corpus, which is a different quantity wearing the same sentence. The tail is thin. So the
-      corpus still mostly measures one retrieval path, and widening it is what remains here.
+      What the re-measurement found: 92 bound tools, **57,036 tokens of schema**, of which **41,070
+      (72%) is description text** — and it is overwhelmingly caller guidance. By docstring section:
+      `Args:` **8,482** over 72 tools, `Returns:` **4,747** over 76, `Raises:` **723** over 8. A
+      scan for developer-rationale tells flags 28 paragraphs and most are `Args:` false positives.
 
-      **The second consequence is closed and it was the one blocked on a credential.**
-      `D-2026-09-04-tools-help-a-third-of-the-time-and-hurt-a-quarter` builds the arm
-      (`make live-ab`, a control profile with `tool_names: []`) and runs it over all 221 bucket-A
-      and bucket-C probes: ChemToolAgent's finding reproduces — on bucket A tools **helped 31% and
-      hurt 23%**, with 19 questions the toolless model correctly declined turned into fabricated
-      ones — and bucket C came out the *other* way, falsifying the hypothesis it was built on. The
-      record is `docs/archive/tool-utility-2026-09-04.md`. What that run is not evidence about is a
-      deployment's own model: it measured `claude-haiku-4-5-20251001`, and re-running on a site's
-      model is one command.
+      So there is no blanket cut here, and the per-paragraph judgment the old row asked for is worth
+      about **309 tokens** — which is what it was worth, measured, once taken (64,907 → 64,598,
+      ceiling 65,500 → 65,200). What is left open is the part a test cannot decide: `Args:` and
+      `Returns:` together are 13,229 tokens of every model call, and whether a shorter
+      argument contract still reaches the right tool is a `make live-ab` question, not a reading
+      question.
 
-- [ ] **No external benchmark has ever been run** — [M] (issue #360). `make eval` gates 23 metric values over 15
-      case files (re-counted 2026-08-27; one has been added since the 2026-08-25 figure of 14), a
-      **7-document** retrieval corpus and a **39-note** knowledge graph, with the science half
-      resting on one solubility value, one BO regret replay and two mass balances. It is honest and
-      it is not comparable to anything. ChemRAG-Bench (1,932 expert-curated chemistry QA pairs) is the
-      best first target because it scores the retrieval half — where this system's science actually
-      lives — and it runs against an OpenAI-compatible endpoint, which is exactly the seam
-      `agent/llm_provider.py` already has. ChemBench and AstaBench are the follow-ups. A number
-      somebody else can also produce is the only kind that survives an argument with a chemist.
+- [ ] **The probed surface has a long thin tail: 45 of 114 tools rest on one probe** — [S],
+      measured 2026-09-14, and it replaces the concentration row rather than continuing it.
 
-      **Blocked on a working model credential** — see "This environment's `API-KEY` comes and goes"
-      below in this section, not §4 — and the mock cannot stand in: `cli.mock_llm` emits scripted
-      tool calls without *choosing* them in response to a question, so both arms of any comparison
-      would measure the script. Measured 2026-08-25 through the real lane: expected-tool-reached 0/3.
+      **The concentration is gone and the row's headline was stale.** `gather_evidence` is in
+      **126 of 297** probes — **42%**, against the 50% (116/232) the headline was written from and
+      the 60% bound `tests/test_probe_coverage.py` already holds. Widened: 55% of tool-naming probes
+      touch any retrieval tool and only **14%** touch nothing but retrieval, so "the corpus mostly
+      measures one retrieval path" does not reproduce.
+
+      What the same measurement found instead: **45 of 114 agent-callable tools are named by
+      exactly one probe** — 39% of the surface resting on a single phrasing, where a probe the model
+      happens to answer reads as coverage. It is thin and it is **not hollow**: zero of those 45
+      rest on a bucket-C probe, which `test_no_tools_only_coverage_is_a_question_the_surface_cannot_
+      answer` now holds, so a tool cannot arrive with coverage that never calls it.
+
+      Deliberately **not** a ratchet on the count. A bound on "how many tools have one probe" blocks
+      every new tool until somebody writes it a second question, which taxes adding capability
+      rather than bounding risk. What is open is ordinary corpus work: second questions for the
+      tools that matter most, chosen by what a deployment actually calls rather than by the list's
+      order.
 
 - [ ] **`deep-research` has no index behind it** — [M]. `agent/research_tools.py::gather_evidence`
       sweeps the knowledge graph, the ELN, the mounted document share and the fingerprint store —
@@ -1197,16 +1106,26 @@ cluster, a real Databricks workspace — are in
 [`DEFERRED.md`](DEFERRED.md), each with the trigger that would revisit it, which is the register
 those belong in.
 
-## `turn_cost_ratio` scores a fixture, not the system
+## The same three questions cost 2.1x more on one boot than on another
 
-`data/evals/cases/autonomy-turn-cost.md` carries literal turn records, so the metric returns
-0.9845458333333333 whatever changes in the agent — the 32% static-prefix growth that
-`tests/test_context_floor.py` caught would leave its `baseline.json` row untouched. The metric's
-arithmetic is right and tested; what is missing is a case fed from real recorded `TurnCost` rows.
+Found by `make live-turn-cost`, the lane
+`D-2026-09-14-a-cost-metric-that-reads-a-file-measures-the-file` built. Across two boots of the
+**same commit**, the same scripted three-turn workload cost **900,198** and **429,076** billed
+token-equivalents — stable and byte-identical within each boot across repeated runs, so this is a
+property of the process rather than of the run.
 
-Blocked on the same thing the memory-distillation row is: a deployment with turns in it. This
-system has 12 session messages and 0 recorded turns, so there is nothing to build the case from
-yet. Trigger: the first live lane run that persists a session's worth of turns.
+What the ledger already says about the difference: `context_unreducible` true on 3 of 3 turns of the
+expensive boot and false on 3 of 3 of the cheap one, the model calling a tool on 3 of 3 turns
+against 1 of 3, and a per-model-call request of 299,826 characters against 214,206. The ~21,000
+estimated tokens between them is the size of two or three connectors' tool schemas against a
+measured total of 31,208 (`chemclaw_connector_tool_schema_tokens`), so **a bundle whose tools were
+not bound on one boot is the leading candidate and is not evidence** — nothing was observed binding
+a different set, and the inventory line was identical in both.
+
+Why it matters beyond the lane: if it is a binding race, a deployment can serve a *narrower tool
+surface* than it advertises, silently, and the only trace is a cost half what the other pod's is.
+The next step is to record the bound tool names and the schema gauge at each boot and compare, which
+`make live-turn-cost`'s regime line now makes visible from outside.
 
 ## Recover the flow-Suzuki screen, or decide it stays out
 
@@ -1227,20 +1146,6 @@ and (b) a separate lower-tier record type that retrieval can cite but similarity
 Both change what a `Component` is, so this wants its own ADR and its own measurement of what a
 partially-structured reaction does to retrieval — not a patch to `_smiles`. Measured and declared
 by `make live-data`; see `D-2026-08-18-a-corpus-is-not-reachable-because-it-is-on-disk`.
-
-## A note write costs ~1.8 s, and a backfill is one write per record
-
-Measured over the ORD backfill: 103 records per 3.1 minutes, steady, with the cost in the
-commit-and-push cycle rather than in mapping (the whole 10,011-record corpus maps in 0.3 s). That is
-a little over two hours for the mock's 4,251 ingestible records. A real deployment's first sync is a
-decade of records, where this is days.
-
-**Half of this closed itself and half did not.**
-`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted the branch per note, so the
-"4,251 branches in a repository nobody can list" half is gone. What remains is the serialized
-commit-and-push, which is the same 1.8 s: a backfill and an incremental sync still want different
-write shapes (one commit per batch for the first, one per note for the second). Found by the
-2026-08-18 corpus-fidelity pass, re-scoped 2026-09-05.
 
 ## The labelling client is the one MCP leg with no identity or trace on the wire
 

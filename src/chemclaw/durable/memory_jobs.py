@@ -107,6 +107,10 @@ async def read_corpus() -> CorpusRead:
     reactions: list[OrdReaction] = []
     skipped = 0
     unfinished: list[str] = []
+    # The bound is on what this activity *holds*, not on what it reads, because that is where the
+    # cost measured: `settings.memory_corpus_max_reactions` and the comment beside it.
+    cap = settings.memory_corpus_max_reactions
+    capped = False
     for adapter in active_ingest_sources():
         # Per source, because entry ids are only unique within one.
         seen: set[str] = set()
@@ -122,6 +126,13 @@ async def read_corpus() -> CorpusRead:
                 break
             seen.update(raw.entry_id for raw in fresh)
             for raw in fresh:
+                # **Inside the per-entry loop, not around the page**, because a drop directory
+                # returns its whole corpus as one page: measured, a cap of 2,500 checked between
+                # pages let 10,000 reactions through and marked the read incomplete about a corpus
+                # it had already materialised — a bound that reports itself and bounds nothing.
+                if cap and len(reactions) >= cap:
+                    capped = True
+                    break
                 try:
                     reactions.append(adapter.map_to_ord(raw))
                 except ChemclawError as exc:
@@ -132,16 +143,32 @@ async def read_corpus() -> CorpusRead:
                     logger.info("memory job skipped an unmappable ELN entry: %s", exc)
                     skipped += 1
                     continue
+            if capped:
+                # Stop here and say so. Raising would lose the pass entirely; continuing would
+                # exchange a partial note for a killed worker, which is the trade
+                # `memory_corpus_max_reactions` exists to refuse.
+                break
             if not fetch_was_truncated(adapter):
                 break
             since = max(
                 entry_window(raw.created_at, raw.modified_at, raw.retracted_at) for raw in fresh
             )
+        if capped:
+            break
     if skipped:
         logger.warning(
             "memory corpus read is incomplete: %d entr(y/ies) could not be mapped, so this pass "
             "saw %d reaction(s) and not the whole record",
             skipped,
+            len(reactions),
+        )
+    if capped:
+        logger.warning(
+            "memory corpus read is incomplete: it stopped at memory_corpus_max_reactions=%d, so "
+            "this pass saw %d reaction(s) and not the whole record. Raise the bound if the worker "
+            "has the memory for it (~40 kB resident per reaction, measured) or narrow "
+            "CHEMCLAW_DATA_SOURCES; the notes this pass writes are marked partial either way.",
+            cap,
             len(reactions),
         )
     if unfinished:
@@ -151,7 +178,7 @@ async def read_corpus() -> CorpusRead:
             ", ".join(unfinished),
             len(reactions),
         )
-    return CorpusRead(reactions=reactions, complete=not skipped and not unfinished)
+    return CorpusRead(reactions=reactions, complete=not skipped and not unfinished and not capped)
 
 
 # The builders run in a worker thread, not on the activity's event loop. Each one does full DRFP

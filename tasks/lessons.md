@@ -2489,3 +2489,33 @@ and say in the test's docstring that the pinning is why the duplication is safe.
 pass, indistinguishable from a survivor; an unquoted bash heredoc mangled one of mine and produced
 exactly that. A mutation that applies can never produce a false red. So every RED is evidence and
 every SURVIVED is a hypothesis — re-apply a survivor by hand before concluding the test is weak.
+
+## I destroyed uncommitted work with `git checkout` one hour after reading the rule against it (2026-09-14)
+
+**What happened.** Mutation-testing W27.4 I mutated `src/chemclaw/ingest/sources/registry.py`,
+confirmed the test went red, and reverted with `git checkout src/chemclaw/ingest/sources/registry.py
+2>/dev/null || true`. The index held the *pre-change* file, so the checkout took the mutation **and**
+the `active_retrieve_corpora` function the whole row rested on. The 2026-09-12 lesson says exactly
+this, in this file, and I had read it at session start.
+
+Two things made it happen that the earlier lesson does not name:
+
+- **The `|| true` made it feel like a no-op.** A guarded revert reads as defensive. It is not the
+  guard that is dangerous, it is the verb.
+- **I had used `cp file file.bak` for the four mutations before it**, and switched to `git checkout`
+  for the fifth because that file's mutation was a one-line `sed` and felt too small to back up.
+  The size of the mutation has nothing to do with the size of what the revert throws away.
+
+What caught it was luck of habit: I ran `git diff --stat` afterwards, saw *no* diff on a file I had
+been editing all row, and recognised the silence. Had the file also carried a committed change the
+stat would have been non-empty and I would have read it as fine.
+
+**Rule: never type `git checkout`, `git restore`, `git stash` or `git reset` on a path at all while
+any part of the working tree is uncommitted — not as a revert, not "just this one line", not with a
+`|| true`.** `cp f $SCRATCH/b.f` before, `cp $SCRATCH/b.f f` after, every time, whatever the size of
+the edit. And the check that a revert restored rather than erased is `grep` for something the file
+should still contain, not `git diff --stat` — an empty diff is the *symptom* of the erasure, not
+evidence against it.
+
+The deeper rule, which is the one that would have removed the hazard entirely: **commit the row's
+work before mutation-testing it.** A commit costs nothing and makes every revert verb safe.

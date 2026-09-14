@@ -144,6 +144,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"OK: {notes_dir} is a valid knowledge graph "
         f"({len(citations)} reaction citation(s) and {len(calc_refs)} calc_ref(s) verified)"
     )
+    if not citations and not calc_refs:
+        # **Said out loud, because the two zeros above are easy to read past.** This is the shipped
+        # tree's state on every CI run, and it is not a corpus defect to be fixed here: a seed
+        # `calc_ref` is a fabricated key and would fail this gate on every fresh database, which
+        # `tests/test_seed_corpus.py` requires for that reason. What the reader needs is to know
+        # that the half of this gate needing a database did not run — a success line that reads
+        # like a whole gate is the shape `map_to_hpc_identity` is remembered for. Not an error:
+        # a corpus with no external citations is a legitimate corpus.
+        print(
+            "NOTE: this corpus cites no reaction record and no calculation, so the two "
+            "store-backed halves of this gate had nothing to check. "
+            "tests/test_kg_validate_store_arms.py is what drives them."
+        )
     return 0
 
 

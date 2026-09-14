@@ -88,6 +88,20 @@ class Probe(BaseModel):
     # would grade the model's routing taste, which is the same argument `expects_tools` settles by
     # being any-of.
     expects_job: bool = False
+    # The `knowledge/` note ids a correct answer's *retrieval* should have returned — a gold set
+    # against the product corpus, scored as recall rather than any-of.
+    #
+    # **All-of, unlike `expects_tools`, and the difference is the question each asks.** Several
+    # tools can legitimately serve one question, so demanding a specific one would grade the
+    # model's routing taste. A note is not interchangeable with another note: kn-05 expects both
+    # the current degassing playbook *and* the retired one, because the probe is about telling
+    # them apart, and an any-of that was satisfied by either would score its failure as a pass.
+    #
+    # These pairs already existed — 46 of them across 20 probes — written into `direction:` prose
+    # where only a human grader could read them. Transcribing them into a field is the whole
+    # change: `DEFERRED.md` recorded "the shipped graph has none", corrected itself to "unreadable
+    # as data because `Probe` is `extra='forbid'`", and this is that sentence being made false.
+    expects_notes: list[str] = Field(default_factory=list)
     forbids_claims: list[str] = Field(default_factory=list)
     direction: str = Field(min_length=1)
     # Later turns of the *same* session, in order, each naming the human act that precedes it.

@@ -497,21 +497,56 @@ the evidence set; ingest one structure under two spellings and show one row.
 Three of these gates currently score literals written in their own fixtures, which means they cannot
 fail. That is worse than no gate, because it reports green.
 
-- [ ] W27.1 `Chemclaw3` — the two eval gates score literals written in their own case files [M].
-- [ ] W27.2 `Chemclaw3` — `turn_cost_ratio` scores a fixture, not the system: the 32% prefix growth
-      `tests/test_context_floor.py` caught would leave its `baseline.json` row untouched. **Unblocked
-      now**: `API-KEY` is present in this environment, so a live lane can persist real `TurnCost`
-      rows and the case can be fed from them. Run it while the credential exists.
-- [ ] W27.3 `Chemclaw3` — the 44 labelled (query, note) pairs in `knowledge.yaml` are unreadable as
-      data because `Probe` is `extra="forbid"` [M]. Closing this also closes the `DEFERRED.md` row
-      whose parenthetical rested on them.
-- [ ] W27.4 `Chemclaw3` — RRF's premise is independent rankers and this system has correlated ones.
-- [ ] W27.5 `Chemclaw3` — `make kg-validate`'s two store-backed arms have no input in the shipped
-      corpus: two arms of a validator that cannot fail.
-- [ ] W27.6 `Chemclaw3` — half the probe corpus tests one tool [S] (the concentration half).
-- [ ] W27.7 `Chemclaw3` — no external benchmark has ever been run [M]. `make eval` gates 23 metric
-      values over 15 cases, all first-party. Decide: run one, or record in `DEFERRED.md` with its
-      trigger. Do not leave it implied.
+- [x] W27.1 `Chemclaw3` — the two eval gates score literals written in their own case files [M].
+      **Done** (`D-2026-09-14-a-gate-nothing-has-failed-is-a-gate-that-cannot-fail`): the sharper
+      finding is that 2 of 6 *gated* metrics had no failing case at all, so replacing either with a
+      constant `0.0` left `make eval-strict` at exit 0. `gates_no_demonstration_can_fire` + two
+      demonstration cases; both mutations now exit 1.
+- [x] W27.2 `Chemclaw3` — `turn_cost_ratio` scores a fixture, not the system.
+      **Done** (`D-2026-09-14-a-cost-metric-that-reads-a-file-measures-the-file`): `make
+      live-turn-cost` drives a fixed three-turn workload through a running front door and scores the
+      `turn_costs` rows it produced. No credential was needed — the lane's own mock gateway bills by
+      request size, which is what puts the prefix in the number; a real gateway was reachable and is
+      the better instrument for the same measurement. Driven with ~10k characters added to the
+      default prompt: `make eval-baseline-check` exit 0 in both arms, `live-turn-cost` 0.900198 ->
+      0.950454, exit 1. Found a 2.1x cost swing between boots of one commit — `BACKLOG.md` row.
+- [x] W27.3 `Chemclaw3` — the labelled (query, note) pairs in `knowledge.yaml` are unreadable as data.
+      **Done** (`D-2026-09-14-a-label-only-a-human-can-read-is-not-a-label`): **46** pairs across 20
+      probes, not 44 across 19. `Probe.expects_notes`, all-of, scored off `returned_ids` in
+      `evals/live.py` and reported by `make live-probes`; offline validator in
+      `tests/test_probe_coverage.py`. Driven: kn-01 recall 1.0 shipped, 0.667 with one note removed,
+      0.0 against an empty graph. It closes the `DEFERRED.md` row's *parenthetical*, **not the row**
+      — a fixture corpus is not a deployment-local one and this is scored on demand, not on the
+      drift cadence.
+- [x] W27.4 `Chemclaw3` — RRF's premise is independent rankers and this system has correlated ones.
+      **Done** (`D-2026-09-14-one-corpus-one-vote-is-the-right-fix-for-a-different-problem`): the
+      row's proposed remedy is a **third** measured no-op — 0 of 46 gold ranks — and it ships anyway
+      for the case it does fix (a three-leg corpus outvoting a one-leg one). What the measurement
+      settled instead: RRF is **worse** than the shipped round-robin on labelled data, mean gold
+      rank 4.54 vs 4.38 and top-5 25 vs 27. `retrieval_mode` stays `graph` on a number now.
+- [x] W27.5 `Chemclaw3` — `make kg-validate`'s two store-backed arms have no input in the shipped
+      corpus. **Done** (`D-2026-09-14-an-arm-with-no-input-owes-the-suite-a-demonstration`): the
+      row's implied fix — put a citation in the corpus — is forbidden by a merged test, for a good
+      reason. So the arms get demonstrations instead, end to end over real Postgres in both
+      directions. Found while writing them: **nothing anywhere drove `validate_kg.main` over a note
+      carrying a `calc_ref`**, so that whole branch of the entrypoint had never executed. The gate
+      now says out loud when it had nothing to check.
+- [x] W27.6 `Chemclaw3` — half the probe corpus tests one tool [S] (the concentration half).
+      **Declined on measurement**: `gather_evidence` is **126 of 297 = 42%**, not half, against an
+      existing 60% bound; 55% of tool-naming probes touch any retrieval tool and only 14% touch
+      nothing else. What the measurement found instead: **45 of 114 tools rest on one probe**, and
+      **zero** of them on a bucket-C probe — thin, not hollow. That invariant is now a test
+      (`test_no_tools_only_coverage_is_a_question_the_surface_cannot_answer`); the tail itself is a
+      rewritten `BACKLOG.md` row, deliberately not a ratchet.
+- [x] W27.7 `Chemclaw3` — no external benchmark has ever been run [M].
+      **Run** (`D-2026-09-14-a-number-somebody-else-can-produce`), not deferred — the credential
+      block is gone and `api.anthropic.com/v1/chat/completions` is an OpenAI-compatible gateway.
+      100 MIT-licensed keyed ChemBench questions vendored with a licence/checksum manifest;
+      `make live-benchmark` scores them without a judge. **The full system scored 62/100 against
+      the same model with no tools at 74/100**, declining twice as often (20 vs 10 answers naming
+      no option) — its own grounding instruction, on questions where grounding buys nothing. It
+      reproduces `D-2026-09-04-tools-help-a-third-of-the-time-and-hurt-a-quarter` on data nobody
+      here chose. Not a gate, not in `ci`.
 - [ ] W27.8 `Chemclaw3-mcp` — add ruff `S` (flake8-bandit) + `ASYNC` + a coverage floor. The fleet
       selects `E,F,I,UP,B,SIM,RUF` and has **no coverage measurement anywhere**; `S` mechanically
       surfaces W22.7 and W26.7.
@@ -527,15 +562,44 @@ What decides whether the system is affordable and whether it survives a real cor
       tokens [M]; and a tool schema is 38% developer rationale, shipped on every turn.
       Both move `tests/test_context_floor.py` — re-baseline in the same commit, never raise the
       ceiling to accommodate prose (`tasks/lessons.md`).
-- [ ] W28.2 `Chemclaw3` — a memory run reads every source whole, three times [M].
-- [ ] W28.3 `Chemclaw3` — the `stated`-quote ambient reads the whole table's tail on every turn once
-      a database has history.
-- [ ] W28.4 `Chemclaw3` — the checkpointer's write volume is quadratic in a thread's length [L].
-      Decide: fix, or `DEFERRED.md` with a measured trigger.
-- [ ] W28.5 `Chemclaw3` — a note write costs ~1.8 s and a backfill is one write per record; a real
-      first sync is days. A backfill and an incremental sync want different write shapes.
-- [ ] W28.6 `Chemclaw3` — nothing has measured how many rows a real corpus produces [M]. Measure it;
-      it is the input to W23.5 and W28.4.
+- [x] W28.2 `Chemclaw3` — a memory run reads every source whole, three times [M].
+      **Done** (`D-2026-09-14-the-memory-corpus-is-a-memory-bound-not-a-time-bound`): two of the
+      row's three clauses were stale (no scheduled run since D-2026-08-25; one workflow per call),
+      and the cost is memory rather than time — 10,000 records = **396.8 MB** peak, 25.3 kB per
+      mapped reaction plus 14.4 kB per adapter entry, so ~500k entries is ~20 GB in one activity.
+      `memory_corpus_max_reactions` bounds the miner's half (396.8 → **204.4 MB** at a cap of 2,500)
+      and marks the pass incomplete; it cannot bound the adapter's page, and that is said out loud.
+- [x] W28.3 `Chemclaw3` — the `stated`-quote ambient reads the whole table's tail on every turn.
+      **Done** (`D-2026-09-14-two-of-three-bets-are-no-ops-and-the-index-is-free`): reproduced —
+      120,020 rows discarded to return 20, 14.8 ms, once per turn. Of the three fixes the row named,
+      **two are measured no-ops** (`CREATE STATISTICS` on the expression; hoisting the type test into
+      Python) and so is a rewritten inner-window statement. The partial index is the fix: **0 rows
+      discarded, 0.036 ms**, and the row's objection about write cost does not hold either — 162
+      µs/row without it, **161 with** (migration `098`).
+- [x] W28.4 `Chemclaw3` — the checkpointer's write volume is quadratic in a thread's length [L].
+      **Decided: `DEFERRED.md`, with the law measured.** Confirmed rather than inherited — driven
+      with `checkpoint_retain_per_thread=0` so every version survives to be counted, amplification is
+      **6.7x at 5 turns, 11.8x at 10, 21.9x at 20, 31.9x at 30**, i.e. `turns + ~2`. Storage is fine
+      (~2,590 B/turn under the shipped retention); the bytes *written* are what grow. The upstream
+      fix, `langgraph.channels.delta.DeltaChannel`, is **beta with an explicitly unstable on-disk
+      contract**, and adopting it changes the representation of live threads on a shape upstream has
+      not promised. Trigger and the cheaper half (a compressing serde) are in the row. **This is a
+      row the wave's standing decision said to build; I am declining it on that measurement and
+      saying so rather than quietly deferring.**
+- [x] W28.5 `Chemclaw3` — a note write costs ~1.8 s and a backfill is one write per record.
+      **Done** (`D-2026-09-14-a-backfill-is-not-a-conversation`): measured against a real bare
+      remote, 50 notes in **7.05 s** unbatched (140.9 ms/note), **0.79 s** at ten to a commit and
+      **0.24 s** at fifty — **29.4x**. `BatchingNoteWriter` adds no git code (it merges N
+      `NoteWrite`s into one and hands it to `GitNoteWriter`), `record_note` stays the one write
+      path, and only `cli/backfill_corpus` may construct one — batching the conversational path
+      stays declined, because a queued note is one a chemist cannot read yet.
+- [x] W28.6 `Chemclaw3` — nothing has measured how many rows a real corpus produces [M].
+      **Measured** (`D-2026-09-14-property-value-is-the-shallow-table`): 19 shapes, 184 rows, 9.7
+      rows per calculation at the fixtures' sizes — and the slope is the answer, not the count. At 47
+      items: `xtb.fukui` **7 rows per reactive site**, `xtb.scan` 2 per point, `xtb.conformers` 1 per
+      conformer, so a 100-atom Fukui panel is **710 rows**. The open partitioning question answers
+      itself: **`property_value` does not grow with a calculation's size at all**; the three tables
+      that do are all keyed by the calculation.
 - [ ] W28.7 `Chemclaw3_ui` — the SMILES parse blocks the main thread (~0.3 s parse + ~1.7 s draw);
       the 600-char cap bounds the unrecoverable failure, not the slow one. Move it to a worker
       (`ISSUES.md` known gap (e)).
@@ -544,6 +608,47 @@ What decides whether the system is affordable and whether it survives a real cor
       because a botched election loses notifications.
 
 **Acceptance** — a before/after number for every item, from the same script, in the PR body.
+
+### Review — W27 and W28, `Chemclaw3` rows only (2026-09-14)
+
+Twelve rows worked, `62d61c4a`..`99682541`. The Part 1 / Part 2 boundary is **`0bdda73f`** (W27.7);
+`docs/decisions/README.md`, `docs/planning/BACKLOG.md` and `tasks/todo.md` are shared by every row,
+so that commit's copies already carry W28.1's edits.
+
+**Four rows were wrong about their own subject, and the measurement is the deliverable.**
+
+- **W27.6** does not reproduce: `gather_evidence` is **126 of 297 probes (42%)**, not half, against
+  a 60% bound that already existed. What the same measurement found is the *tail* — 45 of 114 tools
+  rest on one probe, and **zero** on a bucket-C probe.
+- **W27.4**'s proposed remedy is a **third** measured no-op: one-corpus-one-vote moves **0 of 46**
+  gold ranks. What the measurement settled instead is that RRF is *worse* than the shipped
+  round-robin (mean gold rank 4.54 against 4.38).
+- **W28.1**'s named vein was already closed by an earlier wave; the schema is 72% description and
+  the description is caller guidance. −309 tokens was what per-paragraph judgment was actually worth.
+- **W28.2** was stale in two of three clauses (no scheduled run; one workflow per call) and named the
+  wrong cost — it is memory, not time, and not the 3x.
+
+**Two rows' remedies were forbidden or unavailable by something already merged**: W27.5's implied
+corpus edit is refused by `test_the_seed_corpus_cites_no_calculation_the_store_cannot_back`, and
+W28.4's fix is upstream **beta** with an explicitly unstable on-disk contract.
+
+**W28.4 is the one [L] row the pre-W21 decision said to build and I did not.** It is in `DEFERRED.md`
+with the law measured (`turns + ~2`), both candidate mechanisms named and two triggers. Recorded here
+rather than left to the register, because a standing decision overridden in silence is the thing this
+plan's own rules are about.
+
+**Three findings nobody asked for**, each visible only because something else was measured: a **2.1x
+cost swing between boots of one commit** (`BACKLOG.md`); `make live-up` without `make live-infra`
+indexes **zero** notes, so every retrieval probe in such a lane scores 0 for a reason that is not the
+system; and the first external benchmark says the full system scores **62/100 against its own model's
+74/100**, declining twice as often — its grounding instruction, on questions where grounding buys
+nothing.
+
+**Two of my own defects, caught by mutation and recorded**: the W28.2 cap checked between pages
+bounded nothing on a one-page source (10,000 through a cap of 2,500), and the first W28.3 mutation
+dropped an index from `public` while the suite migrates into its own schema — a mutation that never
+reached the subject and reported a pass. `tasks/lessons.md` also carries the `git checkout` that
+destroyed uncommitted work during W27.4.
 
 ## W29 — Supply chain and delivery: gates that actually run on the bytes that ship
 

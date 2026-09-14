@@ -1,0 +1,39 @@
+-- The `stated`-quote ambient reads one session's newest human messages on every turn, and on a
+-- busy database it walked the whole table's tail to do it.
+--
+-- `agent/session_store._SELECT_RECENT_USER_ROWS` — run once per turn on the answer path by
+-- `api/runner._turn_ambient` — is `session_id = $1 AND message_shape = $2 AND message_original IS
+-- NULL AND message->>'type' = 'human' ORDER BY id DESC LIMIT $3`. Postgres has no statistics for
+-- the *expression* `message->>'type'`, mis-estimates that predicate, sees `ORDER BY id DESC LIMIT
+-- 20` and walks the primary key backwards expecting to stop early. On a table with one session in
+-- it, it does stop early. On a busy one it does not.
+--
+-- Measured on this schema with its real indexes — one 12,000-row session plus 120,000 newer rows
+-- across 300 other sessions, VACUUM ANALYZE, warm cache, 3 warm reps then EXPLAIN ANALYZE:
+--
+--   shipped statement                     session_messages_pkey   120,020 rows removed   14.8 ms
+--   + CREATE STATISTICS on the expression session_messages_pkey   120,020 rows removed   16.1 ms
+--   type test hoisted into Python         session_messages_pkey   120,000 rows removed   16.8 ms
+--   bounded inner window, filter outside  session_messages_pkey   (same plan)            16.1 ms
+--   THIS INDEX                            (this index)                  0 rows removed    0.036 ms
+--
+-- So of the three candidates `docs/planning/BACKLOG.md` named, two are measured no-ops: extended
+-- statistics on the expression do not move the plan, and hoisting the type test out of SQL does not
+-- either, because `session_id = $1` alone still loses to the ordered primary-key walk. Only an
+-- index that makes the human rows directly addressable changes the shape of the read from
+-- O(table) to O(session).
+--
+-- The row's own objection to an index was that it is "a cost every write pays forever". Measured
+-- at 2,000 inserts: **162 us/row without it and 161 us/row with it** — no measurable cost, because
+-- it is *partial*. It indexes only the rows the ambient can quote (a human turn that was not
+-- migrated), which is a minority of the table: 3.6 MB against a 33 MB table in the same probe.
+--
+-- The column order is the statement's: `session_id` and `message_shape` are its equality
+-- predicates and `id` carries `ORDER BY id DESC` as a backward scan, so the whole read is one
+-- index range with nothing to re-check. The predicate must repeat the statement's two constant
+-- conditions verbatim or Postgres cannot prove the index covers the query.
+--
+-- `message->>'type'` is immutable, which is what makes it indexable at all.
+CREATE INDEX IF NOT EXISTS session_messages_ambient_human_idx
+    ON session_messages (session_id, message_shape, id)
+    WHERE message_original IS NULL AND message->>'type' = 'human';

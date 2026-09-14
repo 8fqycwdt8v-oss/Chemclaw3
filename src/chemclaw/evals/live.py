@@ -147,6 +147,13 @@ class ProbeOutcome(BaseModel):
     tool_results: list[ToolResult] = Field(default_factory=list)
     tools_failed: list[str] = Field(default_factory=list)
     expected_tools_met: bool | None = None
+    # The gold-set half: which of `Probe.expects_notes` this turn's retrieval actually returned.
+    # `None` where the probe declares none — distinct from `0.0`, which is a real score, the same
+    # distinction `expected_tools_met` already keeps.
+    expected_notes_recall: float | None = None
+    # Named rather than counted, because "0.67" sends a reader to the probe file and a list of ids
+    # sends them to the note. Empty with a recall of 1.0 means everything expected came back.
+    expected_notes_missing: list[str] = Field(default_factory=list)
     # Note ids the answer cites that no tool result ever returned. The highest-severity signal in
     # the run: a citation that resolves to nothing is worse than no citation, because it reads as
     # evidence.
@@ -524,6 +531,14 @@ async def run_turn(
     outcome.asked_clarifying_in_prose = _asked_in_prose(outcome)
     if probe.expects_tools:
         outcome.expected_tools_met = any(t in outcome.tools_called for t in probe.expects_tools)
+    if probe.expects_notes:
+        # `returned_ids` rather than the answer's citations: the question is whether *retrieval*
+        # reached the note, which is what a gold set grades. Whether the answer then cited what it
+        # was given is `uncited_note_ids`' question, and conflating them would score one retrieval
+        # failure and one citation failure as the same number.
+        expected = set(probe.expects_notes)
+        outcome.expected_notes_missing = sorted(expected - returned_ids)
+        outcome.expected_notes_recall = len(expected & returned_ids) / len(expected)
     if probe.expects_job:
         outcome.job_outcomes = await _job_outcomes(outcome.jobs_started)
     return outcome

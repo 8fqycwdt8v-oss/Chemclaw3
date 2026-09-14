@@ -28,14 +28,17 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 import chemclaw.agent.protocol_design_tools as tools
+from chemclaw.agent.message_migration import LANGCHAIN_SHAPE
 from chemclaw.agent.session import TurnSession
 from chemclaw.agent.session_store import (
+    _SELECT_RECENT_USER_ROWS,
     DEGRADED_RENDER,
     InMemoryHistoryProvider,
     PostgresHistoryProvider,
     chemist_words,
 )
 from chemclaw.api import runner
+from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.turn_text import (
@@ -288,6 +291,53 @@ class _CountingHistory(InMemoryHistoryProvider):
     ) -> list[str]:
         self.reads.append(limit)
         return await super().recent_user_texts(session_id, limit=limit, state=state)
+
+
+def test_the_ambient_read_is_bounded_by_the_session_and_not_by_the_table() -> None:
+    """The read on the answer path plans through the partial index, visiting no other session.
+
+    **A plan assertion, because the wall clock is not the finding.** Two independent measurements of
+    this statement agreed on the row counts and disagreed on the milliseconds by 50x; what is stable
+    is which index the planner picks and how many rows it throws away, and those are what decide
+    whether the read costs O(session) or O(table).
+
+    Measured on a replica of this table — one 12,000-row session plus 120,000 newer rows across 300
+    others — the shipped statement planned `Index Scan Backward using session_messages_pkey` and
+    discarded **120,020** rows to return 20, **on every turn**, because Postgres has no statistics
+    for the expression `message->>'type'` and takes the ordered primary-key walk expecting to stop
+    early. Migration `098` makes the human rows directly addressable: 0 rows discarded, 14.8 ms to
+    0.036 ms. Two other candidates were driven and are no-ops — `CREATE STATISTICS` on the
+    expression, and hoisting the type test into Python — so this index is the fix rather than one of
+    three bets.
+
+    Sequential scans are taken away for the reason `tests/test_reaction_records.py::_index_behind`
+    gives: a fixture table fits in one page, so the planner is right to scan it and the choice would
+    say nothing about which indexes exist.
+    """
+
+    async def _run() -> str:
+        await migrated_db_or_skip()
+        async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
+            await conn.execute("SET LOCAL enable_seqscan = off")
+            cursor = await conn.execute(
+                f"EXPLAIN (FORMAT JSON) {_SELECT_RECENT_USER_ROWS}",
+                ("any-session", LANGCHAIN_SHAPE, 20),
+            )
+            row = await cursor.fetchone()
+        plan = row[0][0]["Plan"] if row else {}
+        nodes = [plan]
+        while nodes:
+            node = nodes.pop()
+            if "Index Name" in node:
+                return str(node["Index Name"])
+            nodes.extend(node.get("Plans", []))
+        return ""
+
+    assert asyncio.run(_run()) == "session_messages_ambient_human_idx", (
+        "the ambient read no longer plans through the partial index migration 098 added, so it is "
+        "back to walking the primary key and discarding every other session's rows — O(table) on "
+        "the answer path, once per turn"
+    )
 
 
 def test_the_window_the_runner_reads_is_the_configured_one(
