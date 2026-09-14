@@ -842,12 +842,26 @@ only holds defects can only ever restore the system to what it already intended 
       `api/graph_stream.py` calls `trace.returned(...)` on the `ToolMessage` the graph *emits*,
       which is post-middleware, so `tool_result_blobs` stores the cut text and the removed middle
       reaches no store at all.
-      The fix is not a layer move: `tests/test_layering.py` forbids `agent -> api`, so
-      `bound_tool_results` takes a sink through the seam this tree uses everywhere — a one-method
-      Protocol defined in `agent/`, implemented by `api/tool_results.ResultSink`, handed in by the
-      builder that already holds one. That makes the middleware a factory rather than a module-level
-      object, which is what the `len(tool_call_middleware(...))` assertions will notice. Then the
-      cut notice names the ref and a chemist (or a narrower re-ask) can fetch what was removed.
+      **The plan this row first carried does not reach the goal, and that is checked rather than
+      argued.** It said to hand `bound_tool_results` a sink so it stores the raw text before
+      cutting. It would — and the *stream event's* `result_ref` would still address the cut text,
+      because that ref comes from `ToolCallTrace.returned`, which `api/graph_stream.py` calls on the
+      `ToolMessage` the graph emits. The store is content-addressed, so raw and cut are different
+      rows by construction (driven: two refs, not one). Storing the raw bytes therefore puts them
+      somewhere real and leaves every existing consumer pointing at the cut version — which is the
+      feature looking done while nothing a chemist clicks has changed.
+
+      So the open decision is *which consumer* is being served, and the two answers want different
+      builds. **A chemist's "show the full result"** needs the trace's ref to be the raw one, which
+      means the raw text reaching `ToolCallTrace` — and the trace sits downstream of the middleware
+      by construction, so this is a plumbing question about the stream, not about a sink.
+      **A model that can re-read what was cut** needs the notice to name a ref *and* a tool to
+      fetch it, which is a new model-facing surface that re-inflates exactly what the budget just
+      reclaimed, and wants the offload-and-pointer argument in
+      `D-2026-09-14-the-lossy-step-is-the-cut-and-upstream-already-offloads` rather than this row.
+      Pick the consumer first; `tests/test_layering.py` forbids `agent -> api` either way, so
+      whatever is chosen arrives through an injected callable (`ResultSink` is already one) rather
+      than an import.
 
 - [ ] **Three subsystems want one missing column: who wrote this** — [M]. `Note.created_by` is
       `Literal["human", "agent"]` and `Note.source` is the ingest source, so **a note names no
