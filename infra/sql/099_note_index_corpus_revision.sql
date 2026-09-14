@@ -1,0 +1,31 @@
+-- How much history the corpus a note's index row was built from had behind it
+-- (D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about).
+--
+-- `note_index` is shared by every pod; the knowledge checkout under it is an `emptyDir` each pod's
+-- own sidecar refreshes on its own schedule. `reindex_notes` retires every indexed note that is
+-- absent from *this pod's* disk, so a note merged while pod A's sidecar has run and pod B's has
+-- not is retired by B's next scheduled pass and re-embedded by A's, alternating forever. Driven
+-- over two real clones of one corpus against one index:
+--
+--     A (3 notes): 3   index: [reaction-1, reaction-2, reaction-3]
+--     B (lagging): 2   index: [reaction-1, reaction-2]
+--     A again:     3   index: [reaction-1, reaction-2, reaction-3]
+--
+-- Two defects, not one. The retirement is what this column closes. The re-embedding counts (2,
+-- then 3) are the second and larger one: `note_file_fingerprints` is `mtime_ns:size`, and two
+-- clones of one commit carry different mtimes, so alternating passes re-embed the *whole corpus* —
+-- one endpoint call per note per pass, which is what D-2026-08-02 exists to prevent. That one is a
+-- content-derived fingerprint and its own decision; it has a `BACKLOG.md` row.
+--
+-- **A count of commits rather than a timestamp**, and that is the whole reason this column is an
+-- integer. The first attempt stored the HEAD commit's committer time, and `%cI` has second
+-- resolution: driven, two commits made in the same second compared equal, so the lagging pod
+-- retired the newer note anyway and the guard passed its own probe while doing nothing. A
+-- timestamp also mixes clocks — the indexing pod's against whatever machine wrote the commit.
+-- `git rev-list --count HEAD` is monotone under ancestry (a descendant reaches strictly more
+-- commits than its ancestor), is one number, and needs no clock at all.
+--
+-- Nullable, and NULL means "not known" on either side, which prunes exactly as before. A corpus
+-- that is not a git work tree (every offline test, a tarball deploy, a developer's scratch
+-- directory) has no revision to compare and must keep working.
+ALTER TABLE note_index ADD COLUMN IF NOT EXISTS corpus_commit_count INTEGER;

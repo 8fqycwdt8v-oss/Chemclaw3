@@ -16,8 +16,13 @@
        **Deliberately not the workers.** `workers.background.replicas: 1` is a hard singleton, and
        the reason is the one `values.yaml` gives rather than the D-069 checkout lock this comment
        used to name — that lock is a Postgres advisory lock across pods now, and what still pins the
-       count is `NoteReindexWorkflow` retiring `note_index` rows against *this pod's* knowledge
-       checkout (`D-2026-08-27-what-a-second-background-worker-would-race-on`). A PDB over a
+       count is `NoteReindexWorkflow`'s relationship to *this pod's* knowledge checkout
+       (`D-2026-08-27-what-a-second-background-worker-would-race-on`). **The half of that which was
+       a retirement is closed** — a prune is now bounded by the corpus revision the row was built
+       from (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`) — and the half that
+       still pins the count is the re-embedding: `note_file_fingerprints` is `mtime_ns:size`, two
+       clones of one commit carry different mtimes, so two pods sharing one index re-embed the
+       whole corpus on every alternating pass. That is the open `BACKLOG.md` row. A PDB over a
        singleton is the classic footgun either way: `minAvailable: 1` makes it un-evictable and
        blocks every node drain in the cluster forever, while `maxUnavailable: 1` permits exactly
        what no PDB permits. Neither is worth rendering. The singleton itself is the real

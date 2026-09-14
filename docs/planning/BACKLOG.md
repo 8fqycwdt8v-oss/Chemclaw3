@@ -626,22 +626,23 @@ topic).
       same build listed neither, and a gate whose last word contradicts the artifact it scanned
       makes every red build ambiguous. Re-check that against a current trivy before merging.
 
-- [ ] **The note reindex prunes a shared index against one pod's disk** — [M], and it is what the
-      singleton row became once the audit ran
-      (`D-2026-08-27-what-a-second-background-worker-would-race-on`). The two suspects that row
-      named are both safe — every Schedule carries SKIP overlap, which Temporal enforces
-      server-side, and a lost ELN-cursor update was measured to move the mark *backwards*, so the
-      corpus is re-ingested rather than skipped. One worker was never single either: the worker
-      runs eight activities at once by default, so `replicas: 1` only ever excluded pod-local
-      state.
-      The real blocker is `retrieval/vector_index.py::reindex_notes`, which calls `retire_absent`
-      over the notes on *this pod's* disk while `note_index` is shared — and that disk is an
-      emptyDir each pod's sidecar refreshes on its own schedule. So a merged note reaches pod A,
-      a run there indexes it, the next run lands on B and retires it, alternating; the existing
-      guards refuse an *empty* scan, not a *lagging* one. Closing it means keying the prune on the
-      commit the index was built from, so a pod whose checkout predates it declines to prune — or
-      pinning the reindex to one pod. That is the single change gating `replicas > 1`.
-
+- [ ] **Two pods sharing one note index re-embed the whole corpus on every alternating pass** —
+      [M], measured 2026-09-14 while closing the prune half
+      (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`), and it is the *larger* of
+      the two defects that row described as one. `note_file_fingerprints` is `mtime_ns:size`, and
+      two clones of one commit carry different mtimes — git sets a file's mtime when it writes it —
+      so a note that has not changed reads as changed to whichever pod did not index it last.
+      Driven over two real clones against one index: pod B's pass re-embedded 2 of 2 notes it had
+      already seen, and pod A's next pass re-embedded 3 of 3. That is one endpoint call per note per
+      pass, for ever, which is precisely what `D-2026-08-02-embed-only-what-changed` exists to
+      prevent — it prevents it for one pod and for no more than one.
+      The fix is a content-derived fingerprint (a hash of the file's bytes), and it supersedes that
+      ADR's stat-only argument rather than extending it: a hash costs one read per note per scan
+      where a `stat` costs none, which is the trade D-2026-08-02 declined when the alternative was
+      an embedding call. It is now the cheaper side of the same trade. Anchors:
+      `kg/graph.py::note_file_fingerprints`, `retrieval/vector_index.py::_needs_embedding`.
+      Until it lands, `workers.background.replicas` stays 1 — the retirement half no longer gates
+      it, this half does.
 - [ ] **The background worker is a singleton with no PDB, and the PDB is not the fix** — [M].
       `poddisruptionbudget.yaml` covers the front door alone and argues that correctly in the
       template: `minAvailable: 1` over a one-replica Deployment makes the pod un-evictable and

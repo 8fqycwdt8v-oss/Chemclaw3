@@ -103,7 +103,13 @@ class ExternalVectorNoteIndex(PostgresNoteIndex):
         """Fingerprints of rows this store actually holds vectors for."""
         return await super().fingerprints(self._stored_key(embedding_key))
 
-    async def upsert(self, records: list[NoteRecord], embedding_key: str) -> None:
+    async def upsert(
+        self,
+        records: list[NoteRecord],
+        embedding_key: str,
+        *,
+        corpus_revision: int | None = None,
+    ) -> None:
         """Send the vectors, then commit the catalogue rows. That order is load-bearing."""
         if not records:
             return
@@ -111,16 +117,18 @@ class ExternalVectorNoteIndex(PostgresNoteIndex):
             self._collection,
             [VectorPoint(id=record.note_id, vector=record.embedding) for record in records],
         )
-        await super().upsert(records, self._stored_key(embedding_key))
+        await super().upsert(
+            records, self._stored_key(embedding_key), corpus_revision=corpus_revision
+        )
 
-    async def retire_absent(self, keep: set[str]) -> int:
+    async def retire_absent(self, keep: set[str], *, built_before: int | None = None) -> int:
         """Delete the catalogue rows first, then the points they addressed.
 
         The reverse of the write order, and for the same reason: a point whose row is already gone
         is invisible and will be deleted by this call or the next one, while a row whose point is
         gone would rank nothing and still claim a fingerprint, so it would never be re-embedded.
         """
-        gone = await self._retire_absent_ids(keep)
+        gone = await self._retire_absent_ids(keep, built_before=built_before)
         if gone:
             await self._store.delete(self._collection, gone)
         return len(gone)
