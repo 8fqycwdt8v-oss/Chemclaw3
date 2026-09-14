@@ -15,10 +15,13 @@ every row it had never once carried, and the runbook described a `trivy` gate th
 This is the document most likely to be believed without checking, so it is the one that may claim
 least.
 
-Three things it deliberately does **not** do. It states no counts that live in a test — a ceiling,
-a skip count, a prefix size — because a number in prose is a claim about one commit
+Three things it deliberately does **not** do. It states no counts that live in a test — a ceiling, a
+skip count, a prefix size, how many labelled pairs a probe set holds — because a number in prose is
+a claim about one commit
 (`D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`), and every one of those has gone stale
-inside a day at least once here. It makes no claim about `Chemclaw3-mcp`, `Chemclaw3_ui` or
+inside a day at least once here. The measured figures in §3 are the exception and are *not* that
+shape: a benchmark score and a live run's readings describe one execution somebody can repeat, and
+each names the ADR or the target that produced it. It makes no claim about `Chemclaw3-mcp`, `Chemclaw3_ui` or
 `Chemclaw3_mock` beyond what a test in *this* tree reads out of them. And it does not grade: there
 is no "ready / not ready" verdict, because that judgement belongs to whoever is accepting the risks
 in the fourth section, and a verdict here would let them skip reading it.
@@ -63,7 +66,7 @@ in the fourth section, and a verdict here would let them skip reading it.
 | A published SSE contract cannot change without the fixture and the OpenAPI document changing with it | `tests/test_event_contract.py` |
 | A workflow history written by the previous release still replays | `tests/test_workflow_replay.py` |
 | A state channel a hook writes is one the graph declares | `tests/test_state_channels.py` |
-| Six shapes upstream never promised are asserted in one file, each naming the module that breaks | `tests/test_upstream_surface.py` |
+| Every shape upstream never promised is asserted in one file, each naming the module that would break — and two of them assert an *absence*, so upstream fixing something turns the workaround red | `tests/test_upstream_surface.py` |
 
 ## 3. Measured — a number somebody can reproduce
 
@@ -71,7 +74,7 @@ in the fourth section, and a verdict here would let them skip reading it.
 | --- | --- |
 | **ChemBench: the full system scores 62/100; the same model with no tools scores 74/100** — 12 points worse, with 20 answers naming no option against 10 | `D-2026-09-14-a-number-somebody-else-can-produce`, `make live-benchmark` |
 | Tool use helps about a third of the time and hurts about a quarter, on this repository's own probes | `D-2026-09-04-tools-help-a-third-of-the-time-and-hurt-a-quarter` |
-| Retrieval recall over 46 labelled (query, note) pairs across 20 probes | `make live-probes`, `tests/test_probe_coverage.py` |
+| Retrieval recall over the labelled (query, note) pairs the probe set declares — how many there are is what `tests/test_probe_coverage.py` counts, not a figure here | `make live-probes`, `tests/test_probe_coverage.py` |
 | A turn's cost ratio, over turns the system really ran | `make live-turn-cost` |
 | The request prefix, observed off the wire rather than re-derived | `tests/test_context_floor.py` |
 | Mutation scores for the seven invariant-bearing modules, on a schedule | `.github/workflows/mutants.yml`, `make mutant-results` |
