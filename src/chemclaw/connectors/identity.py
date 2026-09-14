@@ -11,8 +11,9 @@ One concern, since `D-2026-09-14-identity-stamping-is-cores-not-a-connectors` mo
 - **Our credential** (who *we* are) is an `httpx.Auth` on the connector's client, because it must
   also be present on the MCP `session.initialize()` that happens when the connection opens — and
   because *which* credential is a fact declared in a bundle's `connector.yaml`, which is what makes
-  it this module's and not core's. It is the `connectors.manifest` import below that draws the
-  line, and it is the only first-party import here outside `core`.
+  it this module's and not core's. `connectors.manifest` is now this module's **only** first-party
+  import, which is the line drawn as plainly as it can be: what is left here is exactly what needs
+  to know what a bundle declared.
 
 Read `chemclaw.core.call_identity` for the header contract, the redirect strip, and why a request
 hook rather than a per-call header callback.
