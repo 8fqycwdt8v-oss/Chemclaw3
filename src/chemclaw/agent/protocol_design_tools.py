@@ -44,6 +44,7 @@ from chemclaw.protocols.checks import (
     run_checks,
 )
 from chemclaw.protocols.diff import diff_designs
+from chemclaw.protocols.export import run_sheet_path
 from chemclaw.protocols.layout import LayoutError, place, smallest_plate_for
 from chemclaw.protocols.models import (
     DesignStatus,
@@ -650,8 +651,10 @@ async def read_experiment_protocol(design_id: str, revision: int = 0) -> str:
         revision: A specific revision, or 0 for the current head.
 
     Returns:
-        JSON with `receipt` (the summary and the checks), `design` (the whole document) and
-        `markdown` (the protocol as a chemist reads it — quote from this rather than rebuilding it).
+        JSON with `receipt` (the summary and the checks), `design` (the whole document),
+        `markdown` (the protocol as a chemist reads it — quote from this rather than rebuilding
+        it) and `run_sheet` (the path a chemist downloads the plate from as a CSV — give them this
+        link rather than retyping the table, and never edit the path you are handed).
 
     Raises:
         ChemclawError: no design or no such revision.
@@ -674,6 +677,7 @@ async def read_experiment_protocol(design_id: str, revision: int = 0) -> str:
         ),
         design=stored.design,
         markdown=render_markdown(stored.design, stored.checks),
+        run_sheet=run_sheet_path(design_id, stored.revision),
     )
     return _readable(body)
 

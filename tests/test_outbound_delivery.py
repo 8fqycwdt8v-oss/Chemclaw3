@@ -340,3 +340,67 @@ def test_two_runs_of_one_job_are_two_messages_and_a_retry_is_one(
     assert len(list(outbox.iterdir())) == 2, (
         "a second run of the same job is a second result and must not be deduped away"
     )
+
+
+def test_the_report_message_carries_the_draft_and_not_only_its_reference() -> None:
+    """The one reader this message has is by construction not looking at the graph.
+
+    It went out saying "recorded as `report-…`" to a chemist who closed the tab while the fan-out
+    ran — a note id, openable only by somebody who can already reach the knowledge graph. Asserted
+    against the workflow's source, because driving `DevelopmentReportWorkflow` needs a broker and
+    what is claimed here is about the message it builds.
+
+    The filename is asserted too, and it is the interesting half: `note_ref` is the *writer's*
+    reference — a commit sha, or the unchanged tree — so naming the file after it would tell a
+    chemist nothing and could carry characters `Attachment`'s pattern rejects, failing the whole
+    message inside the activity rather than just the file.
+    """
+    source = (SRC / "durable" / "report_workflow.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    sends = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _constructor_name(node.func) == "deliver_best_effort"
+    ]
+    assert len(sends) == 1, "the report has one delivery site; this test reads that one"
+    built = sends[0].args[0]
+    assert isinstance(built, ast.Call)
+    attachments = [keyword.value for keyword in built.keywords if keyword.arg == "attachments"]
+    assert attachments, "the report delivery carries no attachment; a note id is not a deliverable"
+    named = ast.unparse(attachments[0])
+    assert "drafted.id" in named and "note_ref" not in named
+    assert "drafted.body" in named
+
+
+def test_an_attachment_a_workflow_builds_is_checked_where_it_can_be_caught(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`OutboundAttachment` is loose for the same reason `OutboundMessage` is.
+
+    A workflow constructing an `Attachment` with a rejected filename raises `ValidationError` in
+    *workflow* code, which no best-effort wrapper can catch — so the notice that must never fail
+    the job becomes the thing that fails it. Driven: the loose model accepts what the strict one
+    refuses, and the activity is where the refusal lands.
+    """
+    from pydantic import ValidationError
+
+    from chemclaw.deliver.message import Attachment
+    from chemclaw.durable.deliver_message import OutboundAttachment, OutboundMessage
+
+    hostile = OutboundAttachment(filename="../../etc/x", content=b"x")
+    with pytest.raises(ValidationError):
+        Attachment(filename=hostile.filename, content=hostile.content)
+
+    # ...and the activity swallows it. **With a channel actually enabled**, because the activity's
+    # first line returns `[]` when delivery is off — asserting an empty list against the shipped
+    # default would pass whether or not the refusal exists, which is the vacuous-guard shape this
+    # file was rewritten once to remove.
+    outbox = _local_channel(monkeypatch, tmp_path)
+    took = asyncio.run(
+        deliver_message_activity(
+            OutboundMessage(recipient="u-1", subject="s", attachments=[hostile])
+        )
+    )
+
+    assert took == []
+    assert not list(outbox.iterdir()) if outbox.exists() else True

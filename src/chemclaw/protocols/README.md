@@ -37,6 +37,7 @@ written once. A second "HTE campaign" type would have duplicated all five.
 | `layout.py` | Plate arithmetic: formats, well labels, placement, run order. No chemistry. |
 | `diff.py` | What changed between two revisions, as dotted paths. |
 | `render.py` | The receipt a tool returns, the run sheet, and the Markdown a chemist reads. |
+| `export.py` | The run sheet as CSV, plus the one spelling of its filename and its address. **The sentence above listed this among the five things written once for two months while nothing produced it** — `grep -rn "csv" src/chemclaw/protocols/` returned three prose hits and no executable line. It is written through `csv.writer` rather than by joining commas, because a reagent called "toluene, anhydrous" otherwise shifts every column after it. |
 | `store.py` | `experiment_protocols` + its two append-only tables: the revision history, and the sign-offs that name the revision each was made on. |
 
 ## What is deliberately not here

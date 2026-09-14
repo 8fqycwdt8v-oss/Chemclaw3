@@ -117,6 +117,12 @@ class ProtocolReadout(BaseModel):
     receipt: ProtocolReceipt
     design: ExperimentDesign
     markdown: str
+    # Where the run sheet is fetched from, as `export.run_sheet_path` spells it. A *path* and not
+    # the CSV itself: a read would otherwise carry the plate twice, once as prose and once as a
+    # table, and the second copy is the one a model is most likely to retype with a digit changed.
+    # Declared here and filled by the caller because `export` imports this module for the run
+    # order, so this module cannot import it back.
+    run_sheet: str = ""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 

@@ -24,7 +24,7 @@ import httpx
 from chemclaw.core.config import PG_LOOPBACK_HOSTS, settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import register_secret_env
-from chemclaw.deliver.message import Message
+from chemclaw.deliver.message import Attachment, Message
 
 
 @runtime_checkable
@@ -135,11 +135,17 @@ def message_id(message: Message) -> str:
             "body": message.body,
             "kind": message.kind,
             "correlation": message.correlation_id,
+            # **The attachment's identity, not its bytes.** A key that hashed the content would
+            # make a re-delivery of the same report a *different* message the moment the draft was
+            # regenerated with one word changed, which is the opposite of what an idempotency key
+            # is for; a key that ignored attachments entirely would give a message and the same
+            # message carrying a run sheet one id, so a receiver drops the one that has the file.
+            "attachments": [(one.filename, one.media_type) for one in message.attachments],
         }
     )
 
 
-def _write_atomically(path: Path, content: str) -> None:
+def _write_atomically(path: Path, content: str | bytes) -> None:
     """Put `content` at `path` in one step, so a concurrent reader never sees half of it.
 
     `Path.write_text` truncates and *then* writes, and readers of a delivery share hold no lock —
@@ -159,8 +165,13 @@ def _write_atomically(path: Path, content: str) -> None:
     a four-line stdlib idiom, not an abstraction. If a third caller appears, the idiom belongs in
     `core/`.
     """
+    binary = isinstance(content, bytes)
     with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
+        "wb" if binary else "w",
+        encoding=None if binary else "utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        delete=False,
     ) as handle:
         handle.write(content)
         handle.flush()
@@ -204,12 +215,35 @@ class FileDeliveryDriver:
         *verdict* — a path that can never be a directory — not the creation.
         """
         self.directory.mkdir(parents=True, exist_ok=True)
-        path = self.directory / f"{message.kind}-{message_id(message)}{self.suffix}"
+        identity = message_id(message)
         stamp = datetime.now(UTC).isoformat()
+        attached = [
+            _attachment_path(self.directory, message.kind, identity, one)
+            for one in message.attachments
+        ]
+        # **The attachments land before the message names them.** A chemist watching the share
+        # opens the `.md` the moment it appears; a message listing a file that is not there yet
+        # reads as a delivery that lost it. Same ordering rule, and the same reason, as
+        # `kg/record.py` writing a note's dependencies before the note that cites them.
+        for path, attachment in zip(attached, message.attachments, strict=True):
+            _write_atomically(path, attachment.content)
+        listing = "".join(f"File: {path.name}\n" for path in attached)
         _write_atomically(
-            path,
-            f"# {message.subject}\n\nTo: {message.recipient}\nWhen: {stamp}\n\n{message.body}\n",
+            self.directory / f"{message.kind}-{identity}{self.suffix}",
+            f"# {message.subject}\n\nTo: {message.recipient}\nWhen: {stamp}\n{listing}\n"
+            f"{message.body}\n",
         )
+
+
+def _attachment_path(directory: Path, kind: str, identity: str, attachment: Attachment) -> Path:
+    """Where one attachment sits beside its message on the share.
+
+    Prefixed with the message's own id so two deliveries carrying `run-sheet.csv` do not overwrite
+    each other — the message file is content-addressed for exactly that reason, and an attachment
+    named only by its filename would undo it for the half a chemist actually opens. `Attachment`'s
+    pattern is what makes joining these two safe: no separator can reach here.
+    """
+    return directory / f"{kind}-{identity}-{attachment.filename}"
 
 
 def plaintext_channel_refusal(name: str, url: str, token_env: str = "", *, enforced: bool) -> str:
@@ -314,7 +348,11 @@ class WebhookDeliveryDriver:
         token = os.environ.get(self.token_env, "")
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        payload = message.model_dump(include={"recipient", "subject", "body", "kind"})
+        # Attachments included, base64 as `AttachmentBytes` serialises them — this seam's whole
+        # point is that a receiver gets the artefact and not a pointer to it.
+        payload = message.model_dump(
+            include={"recipient", "subject", "body", "kind", "attachments"}
+        )
         # **At-least-once is the right contract, and this is the handle that makes it survivable.**
         # See `message_id` for the measurement. Sent as a field *and* as `Idempotency-Key`, because
         # a chat or ticketing host reads the header and a site's own receiver reads the body, and

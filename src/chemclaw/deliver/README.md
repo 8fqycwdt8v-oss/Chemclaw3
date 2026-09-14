@@ -47,6 +47,26 @@ deliver/
    message, because "delivered" and "swallowed" are different facts and the digest's watermark
    depends on the difference.
 
+## A message may carry files
+
+`Message.attachments` is how an artefact travels — the share writes each one as its own file beside
+the message, the webhook POSTs it base64 in the payload. The rule that decides what goes where:
+**`body` is the message and an attachment is the artefact.** A report reached a chemist who had
+closed the tab as "recorded as `report-…`, open it beside its citations" — a note id, deliverable
+only to somebody who can already reach the graph — and the document they asked for now rides with
+it.
+
+Three properties, each asserted in `tests/test_delivery.py`: a filename is bounded by a pattern
+rather than by a docstring (the share joins it onto a directory, so `kind`'s argument applies one
+field over); an attachment goes through the same redaction a body does, because typing a field
+`bytes` is not a reason to put the half that leaves the cluster outside the guarantee; and the
+idempotency key reads an attachment's *identity* and not its bytes, so a message and the same
+message carrying a file are two deliveries while a redraft of one report stays one.
+
+The encoding is base64 in both directions because `OutboundMessage` crosses a Temporal activity
+boundary — pydantic's default for `bytes` is a utf-8 decode that raises on the first byte outside
+it, so a text-only seam widened later would be changing a durable payload under open histories.
+
 ## What a channel is not
 
 Read-only in the other direction: nothing here reads *from* a channel. A driver that offered to
