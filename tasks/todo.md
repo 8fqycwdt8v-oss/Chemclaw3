@@ -538,9 +538,15 @@ fail. That is worse than no gate, because it reports green.
       **zero** of them on a bucket-C probe — thin, not hollow. That invariant is now a test
       (`test_no_tools_only_coverage_is_a_question_the_surface_cannot_answer`); the tail itself is a
       rewritten `BACKLOG.md` row, deliberately not a ratchet.
-- [ ] W27.7 `Chemclaw3` — no external benchmark has ever been run [M]. `make eval` gates 23 metric
-      values over 15 cases, all first-party. Decide: run one, or record in `DEFERRED.md` with its
-      trigger. Do not leave it implied.
+- [x] W27.7 `Chemclaw3` — no external benchmark has ever been run [M].
+      **Run** (`D-2026-09-14-a-number-somebody-else-can-produce`), not deferred — the credential
+      block is gone and `api.anthropic.com/v1/chat/completions` is an OpenAI-compatible gateway.
+      100 MIT-licensed keyed ChemBench questions vendored with a licence/checksum manifest;
+      `make live-benchmark` scores them without a judge. **The full system scored 62/100 against
+      the same model with no tools at 74/100**, declining twice as often (20 vs 10 answers naming
+      no option) — its own grounding instruction, on questions where grounding buys nothing. It
+      reproduces `D-2026-09-04-tools-help-a-third-of-the-time-and-hurt-a-quarter` on data nobody
+      here chose. Not a gate, not in `ci`.
 - [ ] W27.8 `Chemclaw3-mcp` — add ruff `S` (flake8-bandit) + `ASYNC` + a coverage floor. The fleet
       selects `E,F,I,UP,B,SIM,RUF` and has **no coverage measurement anywhere**; `S` mechanically
       surfaces W22.7 and W26.7.

@@ -767,24 +767,28 @@ only holds defects can only ever restore the system to what it already intended 
       blocked: the saving is still partly in endpoint tools no offline floor can see, and it still
       needs the skill gate beside the allow-list.
 
-- [ ] **A tool schema is 38% developer rationale, and it ships on every turn** — [M], and it is
-      what `§ 5`'s deferral row turned into once measured. `science/bo/problem.py`'s nested models
-      carry design arguments in their class docstrings — *"One `objectives` field rather than a lead
-      objective plus a sidecar list (W3)"* — and Pydantic turns a class docstring into the schema
-      `description`, so `convert_to_openai_tool` ships them. Measured 2026-08-25 on the `default`
-      profile: `start_optimization_campaign` is 8,063 chars of schema, 4,392 of it description and
-      **3,047 of that elaboration past the first paragraph**; `record_knowledge_note` 4,259/2,262/663.
-      Those two are 25% of the profile's 12,536-token tool budget between them, and both are already
-      in `tests/test_context_floor.py::KNOWN_OVERSIZED`.
+- [ ] **A tool schema is 72% description, and the rationale vein the old row named is already
+      closed** — [M], re-measured 2026-09-14 on the bound surface
+      (`D-2026-09-14-a-docstring-is-a-prompt-and-a-comment-is-not`).
 
-      **Not a blanket cut.** Some elaboration is genuinely the caller's — when to supply categorical
-      descriptors changes what the model should send — so this is per-paragraph judgment: rationale
-      moves to a `#` comment, guidance stays in the docstring. **And it does not ship until the live
-      lane can show every probe still reaching its tool**, because a cheaper prompt that stops
-      finding tools is a regression with a good-looking metric. **The before-figure now exists**:
-      `make live-ab`'s 2026-09-04 run reached the expected tool on **133 of the 171** probes that
-      name one, per-probe in `tasks/live-test/transcripts/ab/evidence.json`, so the comparison this
-      was blocked on is a re-run rather than a new instrument.
+      The row this replaces said the cost was Pydantic *class docstrings* carrying design
+      arguments — "One `objectives` field rather than a lead objective plus a sidecar list (W3)" —
+      published as JSON-schema descriptions. **That was fixed before this row was worked**:
+      `science/bo/problem.py` carries five comments saying the rationale is deliberately in a `#`
+      comment rather than in the docstring, and `start_optimization_campaign`, quoted at 8,063
+      chars of schema with 4,392 of description, now measures **1,565 tokens in total**.
+
+      What the re-measurement found: 92 bound tools, **57,036 tokens of schema**, of which **41,070
+      (72%) is description text** — and it is overwhelmingly caller guidance. By docstring section:
+      `Args:` **8,482** over 72 tools, `Returns:` **4,747** over 76, `Raises:` **723** over 8. A
+      scan for developer-rationale tells flags 28 paragraphs and most are `Args:` false positives.
+
+      So there is no blanket cut here, and the per-paragraph judgment the old row asked for is worth
+      about **309 tokens** — which is what it was worth, measured, once taken (64,907 → 64,598,
+      ceiling 65,500 → 65,200). What is left open is the part a test cannot decide: `Args:` and
+      `Returns:` together are 13,229 tokens of every model call, and whether a shorter
+      argument contract still reaches the right tool is a `make live-ab` question, not a reading
+      question.
 
 - [ ] **The probed surface has a long thin tail: 45 of 114 tools rest on one probe** — [S],
       measured 2026-09-14, and it replaces the concentration row rather than continuing it.
@@ -806,21 +810,6 @@ only holds defects can only ever restore the system to what it already intended 
       rather than bounding risk. What is open is ordinary corpus work: second questions for the
       tools that matter most, chosen by what a deployment actually calls rather than by the list's
       order.
-
-- [ ] **No external benchmark has ever been run** — [M]. `make eval` gates 23 metric values over 15
-      case files (re-counted 2026-08-27; one has been added since the 2026-08-25 figure of 14), a
-      **7-document** retrieval corpus and a **39-note** knowledge graph, with the science half
-      resting on one solubility value, one BO regret replay and two mass balances. It is honest and
-      it is not comparable to anything. ChemRAG-Bench (1,932 expert-curated chemistry QA pairs) is the
-      best first target because it scores the retrieval half — where this system's science actually
-      lives — and it runs against an OpenAI-compatible endpoint, which is exactly the seam
-      `agent/llm_provider.py` already has. ChemBench and AstaBench are the follow-ups. A number
-      somebody else can also produce is the only kind that survives an argument with a chemist.
-
-      **Blocked on a working model credential** — see "This environment's `API-KEY` comes and goes"
-      below in this section, not §4 — and the mock cannot stand in: `cli.mock_llm` emits scripted
-      tool calls without *choosing* them in response to a question, so both arms of any comparison
-      would measure the script. Measured 2026-08-25 through the real lane: expected-tool-reached 0/3.
 
 - [ ] **`deep-research` has no index behind it** — [M]. `agent/research_tools.py::gather_evidence`
       sweeps the knowledge graph, the ELN, the mounted document share and the fingerprint store —
