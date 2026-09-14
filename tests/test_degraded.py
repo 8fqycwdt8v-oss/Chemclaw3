@@ -123,6 +123,13 @@ _EXPECTED_SUBSYSTEMS = {
     # counter, so from outside they were the same silence as a genuinely empty portfolio.
     "commitment_export",
     "plan_approval",
+    # `agent/protocol_design_tools._uncited_precedent`, on a reaction index that cannot be reached.
+    # The same shape as `failure_memory` one function over and counted for the same reason, with
+    # one addition: this search reaches Postgres, so "cannot be reached" is the ordinary condition
+    # of a laptop rather than a rare fault — and `precedent_consulted`'s passing text therefore
+    # says nothing was *offered* rather than that no precedent exists. A silent version of this
+    # would leave every draft looking like a corpus that had been consulted and found nothing.
+    "precedent_lookup",
     "preferences",
     # `publish/outbox`, on a row wave 6 found had no name: the claim spends its attempt and commits
     # before delivery, so an interruption mid-delivery leaves the row `pending` at the attempt
