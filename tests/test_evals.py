@@ -430,6 +430,37 @@ def test_an_ungated_metric_owes_the_set_no_demonstration() -> None:
     assert not (ungated & set(report.gates_no_demonstration_can_fire()))
 
 
+def test_strict_mode_reads_the_unfireable_check_and_not_only_the_inert_one(
+    tmp_path: Path,
+) -> None:
+    """`--strict` exits 1 for an unfireable gate *alone*, with the other two clauses empty.
+
+    Written because the mutation that removes ``or report.gates_no_demonstration_can_fire()``
+    from `main` survived every other test in this file. The reason is worth stating: the
+    registry-substitution test above drives `main(["--strict"])` through a monkeypatched metric,
+    which *also* stops `solubility-out-of-domain` failing — so `inert_demonstrations` is non-empty
+    and the exit code it asserts is produced by a clause the test is not about.
+
+    Here the case-set is the shipped one with every `expect_pass: false` case removed, which is a
+    case-set nothing declares a demonstration in. `regressions()` and `inert_demonstrations()` are
+    therefore both empty by construction (asserted, not assumed), every gated metric is unfireable,
+    and the only clause that can produce a 1 is the one under test.
+    """
+    for case in Path(settings.eval_case_dir).glob("*.md"):
+        if "expect_pass: false" not in case.read_text(encoding="utf-8"):
+            (tmp_path / case.name).write_text(case.read_text(encoding="utf-8"), encoding="utf-8")
+
+    report = run_eval(load_eval_cases(str(tmp_path)), "v1")
+    assert report.regressions() == []
+    assert report.inert_demonstrations() == []
+    assert report.gates_no_demonstration_can_fire(), "no gate is unfireable; this proves nothing"
+
+    assert main([str(tmp_path), "--strict"]) == 1
+    # And the same case-set without `--strict` is a 0, so the 1 above is the flag reading the
+    # check rather than the run being broken.
+    assert main([str(tmp_path)]) == 0
+
+
 def test_a_real_regression_fails_strict_mode() -> None:
     """The behaviour the CI step's name promises: a science regression is a non-zero exit."""
     solvent_heavy = next(

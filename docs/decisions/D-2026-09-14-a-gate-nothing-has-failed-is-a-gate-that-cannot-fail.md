@@ -73,3 +73,10 @@ for them would be demanding a failure of something that cannot fail.
   constant-"perfect" metric into the registry and requires exit 1.
 - `tests/test_evals.py::test_an_ungated_metric_owes_the_set_no_demonstration` — the other
   direction, so the check cannot be satisfied by gating nothing.
+- `tests/test_evals.py::test_strict_mode_reads_the_unfireable_check_and_not_only_the_inert_one` —
+  added when the check above was mutation-tested and **survived**: deleting
+  `or report.gates_no_demonstration_can_fire()` from `main` left all 33 tests green, because the
+  registry substitution also stops the demonstration case failing, so the exit code that test reads
+  is `inert_demonstrations`'. This one drives `--strict` over a case-set with no demonstration in it
+  at all, asserts the other two clauses are empty, and is the only test that goes red on that
+  deletion.
