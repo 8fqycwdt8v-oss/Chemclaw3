@@ -305,10 +305,20 @@ async def _repl(agent: Any, actor: str, saver: Any) -> None:
     the plan gate is now enforced rather than merely recorded (D-167). Under `harness_enabled` with
     `plan_only` autonomy a state-changing tool needs a human approval for the plan it belongs to,
     and the front door's approval is an HTTP route — deliberately not an agent tool, so the model
-    cannot approve its own candidate (D-005). A terminal with no way to answer would have left the
-    CLI unable to write anything at all under the shipped Helm configuration, so it gets the same
-    two operations the route pair offers, and for the same reason they are typed by the person
-    rather than callable by the model.
+    cannot approve its own candidate (D-005). So it gets the same two operations the route pair
+    offers, and for the same reason they are typed by the person rather than callable by the model.
+
+    **What this used to claim, and does not now.** The sentence here said a terminal with no way to
+    answer "would have left the CLI unable to write anything at all under the shipped Helm
+    configuration". That is false, and measurably so: `enforce_plan_approval` returns early when
+    `get_current_session_id()` is empty, and nothing in this module sets one — the only setters are
+    the front door's middleware and runner, a template activity, and the durable interceptor. So
+    the gate has never applied to this REPL, `/plan` and `/approve` write `plan_approvals` rows no
+    execution path here reads, and a state-changing tool typed at this prompt runs without them.
+    That is not a hole — `plan_gate` argues the session-less skip deliberately, and these calls
+    still cross `enforce_tool_authz` and `authorize_trigger`, which is what governs them — but it
+    is not what this docstring said, and D-2026-09-13 making the harness the default turned a
+    harmless overstatement into one a reader would act on.
     """
     print(
         "Chemclaw CLI — type a question, '/plan', '/approve', or 'exit' to quit.",

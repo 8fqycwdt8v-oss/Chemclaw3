@@ -268,3 +268,58 @@ def test_a_third_arm_is_ignored_rather_than_refused() -> None:
     assert against_helper.compared == against_routed.compared == 1
     assert against_helper.median_token_ratio == pytest.approx(0.5)
     assert against_routed.median_token_ratio == pytest.approx(0.3)
+
+
+def test_quality_stays_an_observation_on_an_even_number_of_repeats() -> None:
+    """The averaging the module forbids, reproduced at the repeat count that produces it.
+
+    `MINIMUM_REPEATS` is documented as a floor rather than a target, so four repeats is ordinary —
+    and `statistics.median` returns the *mean of the two middle values* on an even-sized group. On
+    the five-point verdict scale that is exactly the "number that names no verdict" the module's own
+    docstring rejects: `served` (1.0) beside `unserved` (0.0) would aggregate to 0.5, which is
+    `partial`'s score, asserted about a pair of runs where neither arm was ever partial.
+
+    Every other case in this file uses three *identical* runs, so none of them can tell `median`
+    from `median_low` — which is why this one varies the values and takes an even count.
+    """
+    runs = [
+        ArmRun(
+            task_id="t",
+            arm=ARM,
+            quality=quality,
+            billed_tokens=100,
+            wall_clock_seconds=1.0,
+            delegated=True,
+        )
+        for quality in (0.0, 0.0, 1.0, 1.0)
+    ]
+
+    [aggregate] = aggregate_runs(runs)
+
+    assert aggregate.repeats == 4
+    assert aggregate.quality in {0.0, 1.0}, "quality must name a verdict, not the midpoint of two"
+    assert aggregate.quality == 0.0, "median_low takes the lower of the two middles"
+
+
+def test_the_cost_axes_keep_the_midpoint_on_an_even_number_of_repeats() -> None:
+    """The other half: tokens and seconds are continuous, so a midpoint is a real figure.
+
+    Stated as its own case so that someone switching the cost axes to `median_low` for symmetry has
+    to change a test that says why the asymmetry is deliberate.
+    """
+    runs = [
+        ArmRun(
+            task_id="t",
+            arm=ARM,
+            quality=1.0,
+            billed_tokens=tokens,
+            wall_clock_seconds=seconds,
+            delegated=True,
+        )
+        for tokens, seconds in ((100, 1.0), (200, 3.0))
+    ]
+
+    [aggregate] = aggregate_runs(runs)
+
+    assert aggregate.billed_tokens == 150.0
+    assert aggregate.wall_clock_seconds == 2.0

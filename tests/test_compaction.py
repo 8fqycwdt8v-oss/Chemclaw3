@@ -1142,7 +1142,8 @@ CLEAR_TRIGGER_THREAD_ALLOWANCE = 30_000
 #: **40,500 since D-2026-09-13, and the 2,000 is the ceiling's price rather than a re-derivation.**
 #: `CEILINGS["__default__"]` rose 65,500 → 67,500 to seat `write_todos` and the todo prompt in every
 #: profile's prefix once `harness_enabled` became the default — measured at 1,862 tokens on every
-#: profile but `computation`, which already set the flag itself. The trigger rose with it and kept
+#: profile but `computation` (which already set the flag itself and moved 0) and `safety` (1,863).
+#: The trigger rose with it and kept
 #: its allowance whole, because nothing bounds it from above; this one cannot, because the budget is
 #: derived *downwards* from the 128k window. So the thread loses 2,000 tokens — **4.7%** — and it is
 #: recorded here, at the assertion, rather than left as a claim in prose.

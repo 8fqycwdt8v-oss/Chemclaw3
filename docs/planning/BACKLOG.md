@@ -373,33 +373,6 @@ topic).
 
 ## 4 — Operating it
 
-- [ ] **The shipped default and the chart disagree about the harness, so the whole offline suite
-      measures a graph shape production does not run** — [M] (issue #357), found 2026-09-13 by the capability
-      audit in [`docs/archive/REVIEW-2026-09-13-capability-audit-and-plan.md`](../archive/REVIEW-2026-09-13-capability-audit-and-plan.md).
-      `core/config/agent.py:525` ships `harness_enabled: bool = False` and `.env.example:1057`
-      repeats it, while `deploy/helm/chemclaw/values.yaml:786-787` sets
-      `CHEMCLAW_HARNESS_ENABLED: "true"` with `CHEMCLAW_HARNESS_AUTONOMY: "plan_only"`. So
-      OpenShift runs the todo list and the plan gate, and every test that builds a graph under
-      default settings does not — including `tests/test_context_floor.py`, whose whole job is to
-      bound the prefix the model is actually sent.
-
-      **The audit's first version of this finding was wrong in the direction that reads worse**, and
-      the correction is the row: it reported the harness as off "in every shipped deployment" on the
-      strength of the Python default alone. Production is supervised. What is open is that the
-      default and the chart are two postures, and the one the suite measures is the one nobody
-      deploys.
-
-      **What it costs to close.** Flipping the default adds `ScopedWriteTodosInput`/`ScopedTodo`
-      (`agent/plan_scope.py:66-88`), upstream's todo prompt and `_SCOPE_GUIDANCE` to the observed
-      prefix, which will go red against `CEILINGS["__default__"]` for every registered profile —
-      and that file's rule is never to just raise the number. The funding source is §5's
-      `default`-profile allow-list, measured at **-5,787 tokens**. Also inverted by the flip:
-      `core/config/__init__.py:615`'s `plan_only`-with-disabled warning, and the off-state
-      assertions at `tests/test_langgraph_agent.py:719-752`, `tests/test_plan_gate.py:287-296`
-      and `tests/test_config.py:768`. Headless callers other than templates gain a gate with no
-      approval path — `durable/template_activities.step_profile` already hard-sets the flag off for
-      exactly that reason.
-
 - [ ] **Nothing bounds what a helper writes into its caller's checkpointed state** — [M], opened
       by `D-2026-09-04-a-helpers-file-crosses-back-and-stays` while closing the *reading* half.
       A helper's `files` cross into the caller's state, and that crossing is deliberate — but the
@@ -799,30 +772,6 @@ sections above: none of them names broken code. Each names a place where somethi
 repository now has a **measured** better answer to a problem this repository solved earlier and has
 not revisited. That is a different kind of debt and it needs its own section, because a queue that
 only holds defects can only ever restore the system to what it already intended to be.
-
-- [ ] **Process chemistry is probed incidentally and nowhere systematically, so the fleet's largest
-      capability gap has no exit criterion** — [M] (issue #358), found 2026-09-13 by the capability audit.
-      `data/evals/probes/analytical.yaml` is the pattern: a section-scoped set that names what the
-      system does *not* have in its header, buckets every question A/B/C, and grades a bucket-C
-      probe on whether the refusal is honest rather than on content
-      (`evals/live_judge.py:67`). Nothing equivalent exists for process chemistry. The coverage
-      that does exist is scattered and incidental — `reaction.yaml:383` asks for a heat output and
-      an adiabatic temperature rise and correctly demands a refusal, and its `direction` is a model
-      of the genre, but it sits among general reaction probes rather than in a set anybody can
-      re-bucket as a capability lands.
-
-      **Why that blocks rather than merely annoys.** `thermalsafety` (8851) and `kinetics` (8852)
-      are `next` in `Chemclaw3-mcp/MODULES.md`, and `unitops`, `solidform`, `rxnsearch`, `blocks`
-      and `reactivity` are catalogued behind them. When one ships, the question "did this move
-      anything" has no answer here: there is no set to reclassify C→A and re-run. The analytical
-      side can answer it today, which is the whole difference.
-
-      **What is owed**: a section-scoped file on `analytical.yaml`'s discipline covering thermal
-      safety and runaway, kinetics and reactor behaviour, unit-operation sizing, route scouting and
-      building-block availability, and solid form — each probe carrying `forbids_claims` for the
-      near-miss the audit already named, which is a free energy from `compute_thermochemistry`
-      being turned into a process heat load. Write it *before* the servers, not after, or the first
-      one to land re-baselines its own exam.
 
 - [ ] **Nothing mines the edit a chemist makes to a generated protocol** — [M], and the data for it
       starts accumulating now. `experiment_protocol_revisions` is append-only and carries
