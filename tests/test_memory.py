@@ -21,7 +21,12 @@ from chemclaw.memory.campaign import campaign_note_from_chain
 from chemclaw.memory.chains import detect_chains
 from chemclaw.memory.ids import stable_id
 from chemclaw.memory.interaction import note_from_confirmed_answer
-from chemclaw.memory.jobs import SynthesisUnit, build_campaign_notes, build_playbook_notes
+from chemclaw.memory.jobs import (
+    PARTIAL_READ_CAVEAT,
+    SynthesisUnit,
+    build_campaign_notes,
+    build_playbook_notes,
+)
 from chemclaw.memory.observations import Observation
 from chemclaw.memory.playbook import (
     SOURCE_DISTILLATION,
@@ -328,6 +333,50 @@ def test_playbook_candidate_needs_two_projects() -> None:
     assert len(candidates) == 1
     assert candidates[0].projects == ["proj-x", "proj-y"]
     assert set(candidates[0].reaction_ids) >= {"x", "y"}
+
+
+def test_a_note_from_an_incomplete_read_says_so_in_the_body_a_chemist_reads() -> None:
+    """`memory_corpus_max_reactions` is justified by "partial knowledge that says it is partial".
+
+    It did not. `corpus_complete=False` skipped the retirement pass and logged a WARNING into a
+    worker's log, and the note landing in `knowledge/` was byte-identical to one distilled from
+    the whole record — so the only statement that the evidence might be a subset was in a place
+    nobody reading the note would look.
+
+    Both halves are asserted in one test on purpose: skipping the retirement pass without marking
+    the note, or marking it without skipping, each looks like the fix and is half of it.
+    """
+    ester_x = _reaction("x", ["CCO", "CC(=O)O"], ["CCOC(C)=O"], project="proj-x")
+    ester_y = _reaction("y", ["CCCO", "CC(=O)O"], ["CCCOC(C)=O"], project="proj-y")
+
+    partial = build_playbook_notes([ester_x, ester_y], corpus_complete=False)
+    whole = build_playbook_notes([ester_x, ester_y])
+
+    assert partial, "the fixture distilled nothing; this test proves nothing"
+    assert all(PARTIAL_READ_CAVEAT in unit.note.body for unit in partial)
+    assert all(not unit.retirements for unit in partial)
+    assert all(PARTIAL_READ_CAVEAT not in unit.note.body for unit in whole), (
+        "a complete read must not caveat its own notes, or the mark says nothing"
+    )
+
+
+def test_the_caveat_names_the_id_risk_the_skipped_retirement_pass_leaves_open() -> None:
+    """The second-order consequence, which the flag's other half is what exposes.
+
+    `stable_id` anchors on the cluster's *smallest* member, so a truncated read that drops that
+    member mints a **different id for the same cluster** — the case
+    `test_shrunk_cluster_retires_the_pre_shrink_note` exists for, and which the retirement pass
+    normally resolves by superseding the predecessor. An incomplete read is precisely the run whose
+    retirement pass is skipped, so the two notes coexist with nothing linking them, and the caveat
+    is the only thing a reader has. Asserted on the id derivation as well as on the words, because
+    the sentence is only worth having while the mechanism behind it is real.
+    """
+    whole = stable_id("playbook", ["r-001", "r-002", "r-003"])
+    truncated = stable_id("playbook", ["r-002", "r-003"])
+
+    assert whole != truncated, "dropping the anchor no longer changes the id; re-read the caveat"
+    assert "id may differ" in PARTIAL_READ_CAVEAT
+    assert "No note was retired" in PARTIAL_READ_CAVEAT
 
 
 def test_single_project_repetition_is_not_a_playbook() -> None:
