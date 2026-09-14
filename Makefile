@@ -13,8 +13,9 @@ KUBE_VERSION ?= 1.29.0
 # whenever the case-set itself changes — the mismatch is the tripwire that says you forgot.
 # Bumped when the case set itself changes, because a baseline is only comparable to the set it was
 # recorded on — `eval-baseline-check` refuses to compare two versions rather than reporting a drift
-# between different quantities. 2026-08-25 added `autonomy-turn-cost`.
-EVAL_CASE_SET_VERSION ?= retrieval-2026-09-05
+# between different quantities. 2026-09-14 added the two demonstration cases that make `runaway_rate`
+# and `prediction_error` gates that can fire (`EvalReport.gates_no_demonstration_can_fire`).
+EVAL_CASE_SET_VERSION ?= gates-2026-09-14
 
 # How many pytest worker processes `test` and `cov` run across
 # (`D-2026-09-13-a-stable-failure-set-is-not-two-green-runs`).

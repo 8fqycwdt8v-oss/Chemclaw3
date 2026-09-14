@@ -66,6 +66,38 @@ class EvalReport(BaseModel):
         """
         return [r for r in self.failed() if r.case_id not in self._demonstrations()]
 
+    def gates_no_demonstration_can_fire(self) -> list[str]:
+        """Gated metrics that no demonstration case actually fails — gates that cannot go red.
+
+        **The hole `expect_pass` left open, read from the metric's side instead of the case's.**
+        `inert_demonstrations` asks, per *case*, whether a case declared `expect_pass: false` still
+        fails something. That catches a threshold loosened until one particular case stops firing,
+        and it structurally cannot catch the thing this whole layer exists to prevent: a **metric**
+        with no demonstration behind it at all. Such a metric is scored only over cases written to
+        pass, so a version of it that stopped measuring and answered "perfect" would move nothing —
+        `make eval-strict` stays green, and `make eval-baseline-check` compares one constant
+        against the same constant.
+
+        Measured on the shipped case-set the day this was written: six metrics are gated and two of
+        them — `runaway_rate` and `prediction_error` — had no case anywhere in `data/evals/cases/`
+        that made them report a failure. Both had been green since the day they were written, and
+        neither had ever been observed to fail.
+
+        So a gated metric owes the set one case that fails it, the same way a fix owes the suite a
+        test that goes red without it. An ungated metric (`passed is None`) owes nothing: it reports
+        a number rather than a verdict, and there is no gate to demonstrate.
+
+        Name-sorted, so the list reads the same on every run.
+        """
+        demonstrations = self._demonstrations()
+        fired = {
+            r.result_metric
+            for r in self.results
+            if r.passed is False and r.case_id in demonstrations
+        }
+        gated = {r.result_metric for r in self.results if r.passed is not None}
+        return sorted(gated - fired)
+
     def inert_demonstrations(self) -> list[str]:
         """Demonstration cases that no longer fail anything — the other half of `expect_pass`.
 
@@ -191,6 +223,16 @@ def render_report(report: EvalReport) -> str:
         # know which of them are the case-set demonstrating that a gate can fire at all.
         summary += f" — {demonstrated} of them by design, {len(regressions)} regression(s)"
     lines += ["", summary + "."]
+    unfireable = report.gates_no_demonstration_can_fire()
+    if unfireable:
+        # Beside the failure table rather than only in the exit code, for the same reason the
+        # inert list is: nothing appears in a report to point at a gate that was never exercised.
+        lines += [
+            "",
+            f"**{len(unfireable)} gated metric(s) have no demonstration case**: "
+            f"{', '.join(unfireable)}. Each is scored only over cases written to pass, so a "
+            "version of it that stopped measuring and answered perfectly would move nothing here.",
+        ]
     inert = report.inert_demonstrations()
     if inert:
         # In the report, not only in the exit code: a gate that stopped firing is invisible by
@@ -239,6 +281,12 @@ def main(argv: list[str] | None = None) -> int:
     `EvalReport.inert_demonstrations`. Without that half, loosening a threshold silently removes
     coverage and the command stays green, which is the failure the strict mode exists to prevent
     read from the other direction.
+
+    **And so is a gate that never fired at all**, which is the same argument one level up:
+    `inert_demonstrations` asks whether a *case* still fails, and therefore cannot see a **metric**
+    that no case has ever failed. `--strict` fails on that too — see
+    `EvalReport.gates_no_demonstration_can_fire`, and the two metrics the shipped set was missing
+    when it was written.
 
     **`--baseline` answers a third question: "did anything get *worse* than last time?"** The gates
     `--strict` reads are absolute lines — they cannot see an `f1` sliding from 0.95 to 0.70 as long
@@ -289,7 +337,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(render_report(report), end="")
     baseline_code = _baseline_check(report) if args.baseline else 0
-    if args.strict and (report.regressions() or report.inert_demonstrations()):
+    if args.strict and (
+        report.regressions()
+        or report.inert_demonstrations()
+        or report.gates_no_demonstration_can_fire()
+    ):
         return 1
     return baseline_code
 

@@ -497,7 +497,11 @@ the evidence set; ingest one structure under two spellings and show one row.
 Three of these gates currently score literals written in their own fixtures, which means they cannot
 fail. That is worse than no gate, because it reports green.
 
-- [ ] W27.1 `Chemclaw3` — the two eval gates score literals written in their own case files [M].
+- [x] W27.1 `Chemclaw3` — the two eval gates score literals written in their own case files [M].
+      **Done** (`D-2026-09-14-a-gate-nothing-has-failed-is-a-gate-that-cannot-fail`): the sharper
+      finding is that 2 of 6 *gated* metrics had no failing case at all, so replacing either with a
+      constant `0.0` left `make eval-strict` at exit 0. `gates_no_demonstration_can_fire` + two
+      demonstration cases; both mutations now exit 1.
 - [ ] W27.2 `Chemclaw3` — `turn_cost_ratio` scores a fixture, not the system: the 32% prefix growth
       `tests/test_context_floor.py` caught would leave its `baseline.json` row untouched. **Unblocked
       now**: `API-KEY` is present in this environment, so a live lane can persist real `TurnCost`

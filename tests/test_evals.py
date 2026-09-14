@@ -29,6 +29,7 @@ from chemclaw.evals.harness import (
 from chemclaw.evals.metric import (
     EvalCase,
     MetricError,
+    MetricResult,
     get_metric,
     registered_names,
 )
@@ -358,6 +359,75 @@ def test_strict_mode_fails_when_a_declared_demonstration_stops_demonstrating(
     assert report.inert_demonstrations() == ["pharma-solvent-heavy"]
     assert main(["--strict"]) == 1
     assert "no longer fails" in render_report(report)
+
+
+def test_every_gated_metric_has_a_case_that_makes_it_fail() -> None:
+    """A gate nothing has ever been observed to fail is a gate that cannot fail.
+
+    `inert_demonstrations` asks the question per *case*, so it structurally cannot see a **metric**
+    with no demonstration behind it at all — such a metric is scored only over cases written to
+    pass. Measured on the shipped set the day this was written, two of six gated metrics were in
+    that position: `runaway_rate` and `prediction_error` had never once reported a failure, and a
+    version of either that returned a constant "perfect" left `make eval-strict` green and
+    `baseline.json` untouched. Both mutations were run; both exited 0 before this check and 1 after.
+
+    The assertion is over the shipped case-set rather than a fixture, because the claim is about
+    what CI actually scores.
+    """
+    cases = load_eval_cases(settings.eval_case_dir)
+    report = run_eval(cases, "v1")
+    gated = {r.result_metric for r in report.results if r.passed is not None}
+    assert gated, "no metric in the shipped set is gated; this test proves nothing"
+    assert report.gates_no_demonstration_can_fire() == []
+
+    # The positive control, without which this assertion is satisfied by the subject returning an
+    # empty list unconditionally: drop every demonstration and *every* gated metric must be named.
+    without = run_eval([c for c in cases if c.expect_pass], "v1")
+    assert set(without.gates_no_demonstration_can_fire()) == gated
+
+
+def test_strict_mode_fails_when_a_gated_metric_stops_measuring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mutation the check exists for: a metric that answers "perfect" whatever it is given.
+
+    Driven through the registry rather than by editing a case, so what is broken is the *metric* —
+    the case-set is untouched and every input it carries is still the shipped one. Before this
+    check, the shipped `--strict` returned 0 here: the demonstration case simply left the failure
+    set and nothing reported the loss. Both halves fire now, and the report names the metric as
+    well as the case, because a reader seeing only "this case stopped failing" would look at the
+    case.
+    """
+    from chemclaw.evals import metric as metric_module
+    from chemclaw.evals.harness import main
+
+    perfect = MetricResult(
+        metric="prediction_error", value=0.0, passed=True, provenance="stopped measuring"
+    )
+    # Substituting the registry entry is the mutation: what breaks is the *metric*, and the
+    # case-set stays untouched.
+    registry = metric_module._REGISTRY
+    monkeypatch.setitem(registry, "prediction_error", lambda case: perfect)
+    report = run_eval(load_eval_cases(settings.eval_case_dir), "v1")
+
+    assert report.regressions() == []  # nothing *failed* that should not have
+    assert report.gates_no_demonstration_can_fire() == ["prediction_error"]
+    assert main(["--strict"]) == 1
+    assert "no demonstration case" in render_report(report)
+
+
+def test_an_ungated_metric_owes_the_set_no_demonstration() -> None:
+    """The other direction, so the check cannot be satisfied by gating nothing.
+
+    `turn_cost_ratio`, `bo_regret` and the three set metrics report a number rather than a verdict
+    (`passed is None`); there is no threshold to demonstrate and demanding a failing case for them
+    would be demanding a failure of something that cannot fail.
+    """
+    report = run_eval(load_eval_cases(settings.eval_case_dir), "v1")
+    ungated = {r.result_metric for r in report.results if r.passed is None}
+
+    assert "turn_cost_ratio" in ungated
+    assert not (ungated & set(report.gates_no_demonstration_can_fire()))
 
 
 def test_a_real_regression_fails_strict_mode() -> None:

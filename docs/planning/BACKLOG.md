@@ -240,12 +240,6 @@ topic).
       a running front door to verify green.
 ## 3 — Work that is lost, dropped or invisible
 
-- [ ] **The two eval gates score literals written in their own case files** — [M], same review.
-      11 of 13 baseline metrics are read from the case file rather than computed, so a metric that
-      stops measuring and answers "perfect" passes both `make eval-strict` and
-      `make eval-baseline-check`. These run in `make ci`, so this is a gate that cannot fail in the
-      way it exists to fail.
-
 - [ ] **`make kg-validate`'s two store-backed arms have no input in the shipped corpus** — [S], same
       review. 0 reaction citations and 0 `calc_refs` in the committed knowledge corpus, so the half
       of the validator its own docstring says CI runs is dead on every CI run.
