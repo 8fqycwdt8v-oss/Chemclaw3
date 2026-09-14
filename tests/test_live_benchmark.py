@@ -88,9 +88,67 @@ def test_the_scorer_reads_the_answer_and_not_the_reasoning(answer: str, expected
 
 
 def test_a_longer_option_wins_over_the_shorter_one_it_contains() -> None:
-    """One option is routinely a prefix of another, and shortest-first credits the wrong one."""
-    options = ["Only Ag+ is present", "Ag+ is present, and Pb2+ may be present"]
-    assert _chosen("Ag+ is present, and Pb2+ may be present", options) == options[1]
+    r"""One option routinely *contains* another, and shortest-first credits the wrong one.
+
+    **The fixture this replaces had no containment in it.** `"Only Ag+ is present"` is not a
+    substring of `"Ag+ is present, and Pb2+ may be present"` — it carries a leading `Only` — so
+    neither order could match it and deleting `sorted(..., reverse=True)` left this test green. A
+    test named for a property its fixture does not exhibit is worse than none: it reads as the
+    guard's coverage.
+
+    So the cases come from the shipped corpus, where the containment is real and the consequence is
+    the opposite answer. Driven over all 100 questions, four option-answers across three questions
+    score differently without the sort.
+    """
+    questions = {q.id: q for q in load_questions(BENCHMARK_DIR)}
+
+    # The key *is* the longer option, and the shorter one inside it reverses the physics.
+    mass = questions["analytical_chemistry:molecular_structure#3"]
+    assert _chosen(mass.answer, mass.options) == mass.answer
+    assert "proportional to the square root of its mass" in mass.options, (
+        "the corpus no longer carries the option contained in the key; pick another pair"
+    )
+
+    # A reactive-hazard item, where the contained option is the opposite hazard call.
+    hazard = questions["toxicity_and_safety:ChemComp#1"]
+    innocuous = "Innocuous and non-flammable gas generation"
+    assert innocuous in hazard.options and "Flammable gas generation" in hazard.options
+    assert _chosen(innocuous, hazard.options) == innocuous
+
+
+@pytest.mark.parametrize(
+    ("answer", "options", "expected", "guard"),
+    [
+        # `(?<!\w)` — an option must not match inside a longer word. Both of these are options of
+        # one shipped question (`materials_science:reactive_groups_53`).
+        ("The gas evolved is methane.", ["Ethane"], "", "no word character before"),
+        # `(?!\w)` — nor with a longer word growing out of its end.
+        ("The product is ethanolamine.", ["ethanol"], "", "no word character after"),
+        # `(?<!\.)` — a digit after a decimal point is part of a number, not an option.
+        ("The measured ratio was 0.5 throughout.", ["5"], "", "not the tail of a decimal"),
+        # `(?!\.\d)` — nor is one before it. This is the case measured against a real gateway:
+        # the option "1" was credited from "approximately 1.07%".
+        ("Roughly 1.07% per carbon, so neither.", ["1"], "", "not the head of a decimal"),
+        # And the guards must not refuse a legitimate match: a full stop is a boundary, a decimal
+        # point is not, and that difference is the whole of why they are written this way.
+        ("The answer is 5.", ["5"], "5", "a full stop still ends an option"),
+    ],
+)
+def test_each_word_boundary_guard_refuses_a_match_it_alone_blocks(
+    answer: str, options: list[str], expected: str, guard: str
+) -> None:
+    r"""One case per guard in `_chosen`'s pattern, because all four were deletable individually.
+
+    Driven before this test existed: removing `(?<!\w)`, `(?<!\.)`, `(?!\w)` or `(?!\.\d)` from
+    the pattern — one at a time — left the whole file green, including the corpus-wide scorability
+    tests above. Those bound the scorer from one side only: every option must be *findable*, and a
+    guard's job is to stop it being found where it is not.
+
+    The last case is the other direction, and it is why the guards are lookarounds rather than
+    `\b`: a full stop ends an option and a decimal point does not, so a rule that blocked both
+    would score "The answer is 5." as an abstention.
+    """
+    assert _chosen(answer, options) == expected, f"the {guard} guard is not holding"
 
 
 def test_the_prompt_carries_every_option_and_asks_for_one() -> None:
