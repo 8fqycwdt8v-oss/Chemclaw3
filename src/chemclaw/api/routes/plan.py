@@ -99,9 +99,17 @@ def _plan_gated(profile_name: str | None) -> bool:
     `harness_autonomy="execute"` there is a plan but no gate — the agent acts without asking, so
     nothing about that plan is anyone's decision.
 
-    This is also the filter that keeps `GET /plans/pending` free in the default deployment, where
-    `harness_enabled` is off: a skipped session costs no checkpointer statement, and every
-    checkpointer statement is serialized against every concurrent turn on the pod.
+    This is also the filter that keeps `GET /plans/pending` cheap for every session the gate does
+    not govern: a skipped session costs no checkpointer statement, and every checkpointer statement
+    is serialized against every concurrent turn on the pod.
+
+    **It is not free in the *default* deployment, and this sentence said it was twice.** It first
+    said "where `harness_enabled` is off", which `D-2026-09-13-the-default-is-the-posture-every-
+    deployment-already-runs` falsified; the correction swapped the mechanism name to `gate_applies`
+    and left the premise standing. Measured at the shipped settings — `harness_enabled=True`,
+    `harness_autonomy="plan_only"` — `gate_applies(DEFAULT_PROFILE)` is **True**, so the default
+    deployment reads a checkpoint per session here. What the filter still saves is a session on a
+    profile that turns the harness off or sets `autonomy="execute"`.
 
     A profile the registry no longer knows is treated as gated rather than skipped: the deployment
     dropped a profile out from under an existing session, and guessing *away* from a plan that may
@@ -132,7 +140,8 @@ async def _owned_sessions(
     ceiling, and `unread` already says the answer is partial; a short page ends it too, which is
     the listing running out and the only case where the inbox can honestly claim to have seen
     everything. Neither of those can fire when *nothing* is gated — `_plan_gated` is False for
-    every session with `harness_enabled` off, which is the code's own default — so the walk used
+    every session where the gate does not apply — which, until D-2026-09-13 made the harness the
+    default, was every session under the shipped configuration — so the walk used
     to page through the caller's whole history on every request and return `plans: []`: measured
     at 5,000 sessions and the shipped page of 100, **51** keyset statements where the route before
     paging issued one, repeatable by the caller at will.
@@ -273,8 +282,11 @@ async def pending_plans(request: Request, principal: CurrentUser) -> PendingPlan
     Paging costs one indexed keyset statement per page and is bounded by the same
     `service_max_plan_scans` the reads are, counted in pages — a sentence that used to say the
     loop was "bounded by the work the route was already allowed to do" and was true only where
-    something is gated. With `harness_enabled` off nothing ever is, so the only remaining exit was
-    a short page and the walk ran the caller's whole history on every request; see
+    something is gated. Under the old `harness_enabled=False` default nothing ever was, so the only
+    remaining exit was a short page and the walk ran the caller's whole history on every request.
+    D-2026-09-13 inverted that: with the gate on by default the budget now binds on an ordinary
+    request, so the ceiling this paragraph describes is doing work it never used to do rather than
+    standing in for an exit that could not be reached. See
     `_owned_sessions` for the measurement and for why a page ceiling is the same budget rather
     than a second one. `truncated` is what that ceiling costs the answer, and it is a fourth
     reading of an empty `plans` rather than a fifth kind of `unread`. The expensive half is

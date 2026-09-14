@@ -81,14 +81,16 @@ _EXPECTED_SUBSYSTEMS = {
     # moving, which reads as "no durable work" rather than as "nobody asked".
     "jobs_in_flight",
     "log_redaction",
-    # `durable/digest.deliver_digest_activity`. Outbound delivery shipped with no signal of any
-    # kind: `deliver()` swallows a per-channel failure so one broken webhook is not everyone's
-    # outage, the caller discarded the return value, and nothing in `chemclaw.deliver.registry` held
-    # a logger
-    # or a metric — so every digest being dropped and every digest being delivered produced
-    # identical observations. Swallowed deliberately (the mailbox is the durable handover and the
-    # watermark turns on it), which is exactly why it has to be counted.
-    "digest_delivery",
+    # `durable/deliver_message.deliver_message_activity`. Outbound delivery shipped with no signal
+    # of any kind: `deliver()` swallows a per-channel failure so one broken webhook is not
+    # everyone's outage, the caller discarded the return value, and nothing in
+    # `chemclaw.deliver.registry` held a logger or a metric — so every digest being dropped and
+    # every digest being delivered produced identical observations. Swallowed deliberately (the
+    # mailbox is the durable handover and the watermark turns on it), which is exactly why it has
+    # to be counted. Named for the seam rather than for the digest since
+    # `D-2026-09-14-a-declared-kind-with-no-producer-is-not-a-channel` gave the report, the
+    # finished job and the open question the same path.
+    "message_delivery",
     # `deliver/message._connector_secret_envs`. The half of the redaction inventory that leaves the
     # cluster: if the connector bearer-token names cannot be resolved, tokens quoted inside a tool
     # error stop being scrubbed from outbound webhook bodies for the life of the process. Its

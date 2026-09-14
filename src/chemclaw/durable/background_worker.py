@@ -53,6 +53,7 @@ from chemclaw.durable import awaiting as _awaiting  # noqa: F401
 from chemclaw.durable import commitment_sync as _commitment_sync  # noqa: F401
 from chemclaw.durable import connector_job as _connector_job  # noqa: F401
 from chemclaw.durable import corpus_sync as _corpus_sync  # noqa: F401
+from chemclaw.durable import deliver_message as _deliver_message  # noqa: F401
 from chemclaw.durable import digest as _digest  # noqa: F401
 from chemclaw.durable import document_sync as _document_sync  # noqa: F401
 from chemclaw.durable import eln_sync as _eln_sync  # noqa: F401

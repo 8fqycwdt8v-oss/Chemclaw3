@@ -525,7 +525,8 @@ def test_the_guard_sits_below_every_gate_that_decides_including_the_plan_gate() 
         "the entries below the guard changed; the plan gate not seeing a promoted call is a "
         "property this test exists to keep deliberate"
     )
-    assert names(AgentProfile(name="default"))[-1] == "refuse_unparsed_arguments", (
+    ungated = AgentProfile(name="ungated", harness_enabled=False)
+    assert names(ungated)[-1] == "refuse_unparsed_arguments", (
         "without the harness it *is* last, which is why the false claim survived review"
     )
 

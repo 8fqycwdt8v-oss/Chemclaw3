@@ -80,6 +80,13 @@ _EXPECTED_ORDER = (
     "SubAgentMiddleware",
     "SummarizationMiddleware",
     "PatchToolCallsMiddleware",
+    # **Here since D-2026-09-13 made the harness the default**, and this list now records the
+    # shipped shape rather than the one no deployment ran. It is a capability middleware, not a
+    # gate: it owns the `todos` channel and contributes `write_todos`, so it belongs in this block
+    # above the governance chain — and the plan gate at the bottom of that chain *must* nest inside
+    # it, because `enforce_plan_approval` reads `request.state["todos"]`, which is this
+    # middleware's own view of the plan as it stands at that instant.
+    "ScopedTodoListMiddleware",
     "enforce_loop_cap",
     "enforce_spend_cap",
     "MeterTurnSpend",
@@ -102,13 +109,30 @@ _EXPECTED_ORDER = (
     "enforce_tool_authz",
     "refuse_writes_on_dry_run",
     "refuse_repeated_calls",
-    # Innermost of the governance chain, and the position is the mechanism rather than a
+    # Innermost of the *deciding* gates, and the position is the mechanism rather than a
     # preference: a call whose arguments the model mis-serialised is promoted onto `tool_calls` by
-    # `PromoteInvalidToolCalls` precisely so it reaches this chain, and being last here means the
-    # announcer, the trail, the authorization gate and both guards have all seen it before it is
-    # refused. It still raises before the tool body, so the in-process tools with no required
+    # `PromoteInvalidToolCalls` precisely so it reaches this chain, and sitting below all of them
+    # means the announcer, the trail, the authorization gate and both guards have seen it before it
+    # is refused. It still raises before the tool body, so the in-process tools with no required
     # argument cannot be executed by a promotion that carries no usable arguments.
+    #
+    # **"Innermost of everything" is what this comment used to say, and it was false** — the two
+    # harness entries below nest inside it. That went unnoticed because every test that pinned this
+    # chain built a profile attaching neither, which is the configuration the default now *is*.
+    # `tests/test_invalid_tool_calls.py`'s
+    # `test_the_guard_sits_below_every_gate_that_decides_including_the_plan_gate`
+    # states the property as a relation rather than an index and pins both arrangements.
     "refuse_unparsed_arguments",
+    # Inside the guard, deliberately: this raises before calling its handler, so a promoted call
+    # never reaches the plan gate. That is right — arguments that did not parse are not a
+    # well-formed request for a gate to decide about — and it is the one consequence of this
+    # ordering that a reader would otherwise have to derive.
+    #
+    # Below every other gate for a second reason of its own: `side_effecting_call(name, args)`
+    # reads the arguments, so the gate cannot decide about a call whose arguments have not been
+    # settled by everything above it.
+    "enforce_plan_approval",
+    "stamp_plan_link",
     # Outermost of the compaction group: a `ContextEdit` sees a message list and a counter, never
     # the request, so the prefix it must budget against can only be published by a middleware above
     # the editor (`agent/context_budget.py`).

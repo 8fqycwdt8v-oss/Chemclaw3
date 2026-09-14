@@ -57,6 +57,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.metrics_bridge import degraded
     from chemclaw.durable.awaiting import AwaitAnswerWorkflow, AwaitOutcome, AwaitRequest
+    from chemclaw.durable.deliver_message import OutboundMessage, deliver_best_effort
     from chemclaw.durable.effect_ledger import EffectRecord, begin_effect, settle_effect
     from chemclaw.durable.job_record import JobRecord, note_with_run_provenance, record_job
     from chemclaw.durable.memory_jobs import publish_memory_note_activity
@@ -438,10 +439,24 @@ def failed_job_record(
 def finish_headroom() -> timedelta:
     """What the wrapper may still spend *after* its child returns, from the steps' own budgets.
 
-    Five things happen after `_run_child`, and they are why this wrapper is not a pass-through:
+    **Six** things happen after `_run_child`, and they are why this wrapper is not a pass-through:
     settle the effect ledger, write the durable record (D-157), offer the composite to the results
-    store, write the note, push back to the launching session. Anyone giving the wrapper an
-    execution timeout has to leave room for all of them.
+    store, write the note, push back to the launching session, and send the `job-result` copy out
+    of the building. Anyone giving the wrapper an execution timeout has to leave room for all of
+    them.
+
+    **It said five, and the sixth was added without touching this.**
+    `D-2026-09-14-a-declared-kind-with-no-producer-is-not-a-channel` put `deliver_best_effort` at
+    the end of `_finish` and left the reservation at the five it already summed, so 930 s of
+    permitted spend — `light_write_queue_wait_timeout()` plus one activity — sat outside the
+    ceiling: 6.7% of the real post-child budget, unreserved. The failure it re-opens is the one
+    this docstring's next paragraph measured, a job reaped `TIMED_OUT` before it could write its
+    `job_records` row or tell the chemist.
+
+    Nothing caught it because `tests/test_template_job_step.py` asserts `finish_headroom()` is
+    **at least** the sum of the steps it transcribes. A `>=` against a transcribed list catches a
+    step whose bound *moves*, which is the invariant the paragraph below claims, and is blind to a
+    step being *added* — so the guard held while the thing it guards went stale.
 
     **The room used to be counted rather than measured, and one activity is not what any of these
     costs.** The reservation was `activity_timeout_seconds * 4` — 120 s at the shipped defaults,
@@ -493,6 +508,15 @@ def finish_headroom() -> timedelta:
         # The session push-back, on either ending.
         + light
         + activity_budget
+        # The outbound `job-result` copy, on either ending: the same light queue wait as the
+        # push-back beside it, and
+        # its own work budget rather than an activity's, because `deliver_message_activity` walks
+        # the enabled channels serially and carries `delivery_timeout_seconds` for that reason.
+        # Reserved even though delivery is off in every shipped deployment, because what the
+        # ceiling has to cover is what the step may *spend*, and a deployment that names a channel
+        # does not also widen this.
+        + light
+        + timedelta(seconds=settings.delivery_timeout_seconds)
     )
 
 
@@ -1024,18 +1048,39 @@ class ConnectorJobWorkflow:
         `BaseException` is deliberate: a cancelled teardown is the case `Exception` misses, and the
         caller's `raise` is what puts the original failure back on the wire.
         """
-        if not job.session_id:
-            return
+        reason = failure_reason(exc)
+        if job.session_id:
+            with contextlib.suppress(BaseException):
+                await notify_session_best_effort(
+                    job.session_id,
+                    "job_failed",
+                    {
+                        "job_id": workflow.info().workflow_id,
+                        "connector": job.connector,
+                        "job": job.job,
+                        "reason": reason,
+                    },
+                )
+        # **And out of the building, which the success path did and this one did not.** The
+        # `job-result` copy was added to `_finish` alone, so a job that *finished* travelled and a
+        # job that *failed* did not — while this function's own guard returns early when there is
+        # no session, which is exactly the Schedule- or inbox-started run the outbound copy exists
+        # for. So the half that mattered stayed silent: `_run_child`'s own comment argues the case
+        # in as many words, "an outcome that says nothing is not neutral, it is an invitation to
+        # assume the good one", with a measured incident behind it.
+        #
+        # Not caught by `test_every_declared_delivery_kind_has_a_producer` and could not be:
+        # `Message.kind` has no failure value, so the declared↔produced equality is satisfied by
+        # the success path alone.
         with contextlib.suppress(BaseException):
-            await notify_session_best_effort(
-                job.session_id,
-                "job_failed",
-                {
-                    "job_id": workflow.info().workflow_id,
-                    "connector": job.connector,
-                    "job": job.job,
-                    "reason": failure_reason(exc),
-                },
+            await deliver_best_effort(
+                OutboundMessage(
+                    recipient=job.requested_by,
+                    subject=f"{job.connector}:{job.job} failed",
+                    body=reason,
+                    kind="job-result",
+                    correlation_id=job.correlation_id,
+                )
             )
 
     async def _finish(
@@ -1104,6 +1149,25 @@ class ConnectorJobWorkflow:
                     "summary": result.summary,
                 },
             )
+        # **And out of the building, addressed to whoever launched it** — which is always
+        # somebody, because `ConnectorJobInput.requested_by` is `min_length=1`, so the
+        # `recipient`-empty short circuit in `deliver_best_effort` never fires here. The push-back
+        # above
+        # reaches a *session*, and a durable job is precisely the thing that outlives one: a
+        # CREST search or a BO round finishes hours after the chemist stopped watching, and
+        # `job.session_id` is empty altogether for a run a Schedule or an inbox started. The
+        # `job-result` kind was declared for this and had no producer. Last and best-effort,
+        # after the record, the results store and the note: everything durable is already
+        # written, and a channel outage must not cost an expensive campaign its retry budget.
+        await deliver_best_effort(
+            OutboundMessage(
+                recipient=job.requested_by,
+                subject=f"{job.connector}:{job.job} finished",
+                body=result.summary,
+                kind="job-result",
+                correlation_id=job.correlation_id,
+            )
+        )
         return result
 
     async def _record_run(self, record: JobRecord) -> bool:

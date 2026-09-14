@@ -30,6 +30,7 @@ from chemclaw.agent.plan_gate import (
     gate_applies,
     plan_identity,
 )
+from chemclaw.agent.profiles import get_profile
 from chemclaw.core.config import settings
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from tests.middleware import run_middleware, tool_request
@@ -351,10 +352,22 @@ def test_a_refusal_is_announced_because_the_announcer_wraps_the_gate(
         )
 
 
-def test_the_default_deployment_has_no_plan_gate() -> None:
-    """Stated as a fact rather than assumed: the gate ships off, with the harness."""
-    assert settings.harness_enabled is False
+def test_the_default_deployment_has_the_plan_gate() -> None:
+    """Stated as a fact rather than assumed: the gate ships on, with the harness.
+
+    **This asserted the opposite until D-2026-09-13, and the inversion is the point.** The gate
+    shipped off in code while `deploy/helm/chemclaw/values.yaml` turned it on, so the posture every
+    supported deployment ran was the one no test here measured — and
+    `D-2026-09-06-the-write-gate-is-three-names-and-the-plan-gate-carries-the-rest` had already made
+    that gate the only cover over the 29 write tools outside `DEFAULT_WRITE_TOOL_GATES`. A default
+    that is less safe than every deployment of it is not a safe fallback.
+
+    Both halves are asserted because the gate is their conjunction: `gate_applies` is
+    `harness_enabled and autonomy == 'plan_only'`, so either one drifting silently removes it.
+    """
+    assert settings.harness_enabled is True
     assert settings.harness_autonomy == "plan_only"
+    assert gate_applies(get_profile("default")) is True
 
 
 # --- an approval authorizes one request, not a standing session (the live finding) -------------

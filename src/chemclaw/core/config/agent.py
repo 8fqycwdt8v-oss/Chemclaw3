@@ -202,20 +202,24 @@ class AgentSettings(BaseSettings):
     # see its own comment below.
     #
     # **What it costs, stated because it is a behavioural change**: the thread allowance falls from
-    # the 57,000 the paragraph above held fixed to **42,500** at the prefix bound (more at today's
-    # measured prefix, which sits below the bound — `tests/test_compaction.py` measures it, and this
-    # line does not, because the figure it carried moved by 507 tokens between two measurements a
-    # day apart), and the band between this and the lossless edit's trigger falls
-    # from 27,000 to 12,500. That band is squeezed by the prefix, not by this number: at a
-    # 76,500-token prefix bound and a 128k window the whole policy has 42,500 tokens of thread to
-    # divide between two edits. The instrument for wanting more is a narrower prefix.
+    # the 57,000 the paragraph above held fixed, and the band between this default and the lossless
+    # edit's trigger falls with it. That band is squeezed by the *prefix* rather than by this
+    # number: at a 128k window the whole policy has only the window minus the prefix bound to divide
+    # between two edits, so the instrument for wanting more is a narrower prefix.
     #
-    # **Those three are arithmetic, not measurements, and they shipped stale anyway** — 43,000,
-    # 13,000 and 76,000, each falsified by wave 13 raising the ratchet ceiling 500 without touching
-    # this comment. They are `BUDGET_THREAD_ALLOWANCE`, this default minus
-    # `agent_tool_result_clear_trigger`, and `tests/test_context_floor.PREFIX_BOUND`; all three are
-    # asserted there, so read them there and treat the digits here as an illustration of the
-    # squeeze rather than as the authority on it.
+    # **This paragraph no longer states those three figures, and that is the fix rather than an
+    # omission.** It carried them three times and shipped stale all three: 43,000/13,000/76,000,
+    # falsified by wave 13 raising the ratchet ceiling 500 without touching this comment; then
+    # 42,500/12,500/76,500, falsified the same way by D-2026-09-13 raising it 2,000. The second
+    # correction was written *in the commit that staled it*, which is the argument in
+    # `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` happening to the sentence making
+    # it. A digit here is a claim about somebody else's ceiling, and the ceiling is a thing other
+    # branches move.
+    #
+    # The three are `tests/test_compaction.BUDGET_THREAD_ALLOWANCE`, this default minus
+    # `agent_tool_result_clear_trigger`, and `tests/test_context_floor.PREFIX_BOUND`. All three are
+    # asserted there, against the prefix the model is actually sent — so read them there, where a
+    # change moves the number and the assertion together.
     #
     # **And the second bound is now real.** `llm_context_window_tokens` stays 0 in code — this
     # repository cannot know an endpoint's window — but `deploy/helm/chemclaw/values.yaml` states
@@ -298,11 +302,13 @@ class AgentSettings(BaseSettings):
     # moved is the size of the thing being translated. The 11,000 is a *bound* and belongs beside
     # the ceiling it extends, so it lives in `tests/test_context_floor.SERVED_ELSEWHERE_ALLOWANCE`
     # where the assertion can read it, not as a second number here that would drift away from it.
-    # 106,500 since wave 13: `tests/test_context_floor.py`'s ceiling rose by 500 and this is
+    # 108,500 since D-2026-09-13: `tests/test_context_floor.py`'s ceiling rose 2,000 to seat
+    # `write_todos` in every profile's prefix once the harness became the default, and this is
     # derived *upwards* from it, so it moves with it and keeps the whole thread allowance it was
     # derived to have. The budget below cannot follow, because it is derived downwards from the
-    # window — which is why the ceiling's cost lands there and not here.
-    agent_tool_result_clear_trigger: int = Field(default=106_500, ge=1)
+    # window — which is why the ceiling's cost lands there and not here, and why that cost is
+    # 4.7% of the thread this time rather than wave 13's 1.16%.
+    agent_tool_result_clear_trigger: int = Field(default=108_500, ge=1)
     # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
     # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
     # dependent in one direction. Re-measured 2026-09-06 against real BPE encodings, on the observed
@@ -523,14 +529,39 @@ class AgentSettings(BaseSettings):
     # `TodoListMiddleware` and the plan gate (a todo list + plan/execute approval + a counted
     # completion cap) over the *same* tools/skills/audit/compaction as the single-turn agent, with
     # every generic battery (file memory/access, web search, shell) OFF — capability comes from our
-    # MCP servers and tools, not from the harness. Off by default so the single-turn agent stays
-    # the safe fallback.
+    # MCP servers and tools, not from the harness.
     # `harness_autonomy` picks the starting mode: `plan_only` (default, the pharma-safe one)
     # starts in plan mode and presents a plan for human approval before any execution — the
     # pre-execution approval gate — and only loops once approval switches it to execute; `execute`
     # starts looping through the todo list immediately. `harness_max_loop_iterations` caps the
     # loop so a stuck plan aborts instead of spinning (the runaway guard).
-    harness_enabled: bool = False
+    #
+    # **On by default since D-2026-09-13, and the sentence above used to say the opposite** — "off
+    # by default so the single-turn agent stays the safe fallback". That framing had the safety
+    # backwards on the axis that turned out to matter, and three merged positions already said so
+    # while the default went on shipping `False`:
+    #
+    #   - `D-2026-09-06-the-write-gate-is-three-names-and-the-plan-gate-carries-the-rest` names this
+    #     gate as what covers the 29 write tools that are *not* in `DEFAULT_WRITE_TOOL_GATES`, and
+    #     names the shipped chart as what turns it on. Off, that cover is absent.
+    #   - `Settings._check` below refuses `entra_required` with this flag off under `plan_only`,
+    #     in as many words: the gate "is not attached at all and a turn can start state-changing
+    #     work with nothing to approve it".
+    #   - D-152 §3 found the consequence empirically — the chart ships `true` while "the code
+    #     default and every test run `false`", so the production agent-construction path had never
+    #     met a live model, and the first turn under the shipped configuration crashed.
+    #
+    # So the unsupervised posture was the one every test measured and the supervised one was the
+    # one every deployment ran. The default is now the chart's, and the chart's line is no longer
+    # load-bearing for it. What a deployment that wants the old behaviour sets is
+    # `CHEMCLAW_HARNESS_AUTONOMY=execute`, which keeps the todo list and drops the gate — stated
+    # that way round because dropping the *harness* also drops the plan, and a deployment asking
+    # for less supervision is not asking for less planning.
+    #
+    # A profile still overrides in both directions (`plan_gate.harness_enabled_for`), which is why
+    # `data/profiles/computation.yaml` needed no global flag to get the harness it argues for, and
+    # measured +0 tokens across this change while every other profile moved by 1,862.
+    harness_enabled: bool = True
     harness_autonomy: HarnessAutonomy = "plan_only"
     harness_max_loop_iterations: int = Field(default=25, ge=1)
 
@@ -780,7 +811,16 @@ class AgentSettings(BaseSettings):
 
         At the shipped defaults this is `25 * 6 + 8 = 158` against the 132 a 25-iteration harness
         turn actually needs — so the cap fires first, which is the intent. The ceiling should never
-        be what stops a harness turn; it is what stops a turn that has no cap, because the loop cap
-        is attached only when the harness is on.
+        be what stops a turn at all; it is the backstop under the cap, sized so the cap always
+        fires first.
+
+        **This said "it is what stops a turn that has no cap, because the loop cap is attached only
+        when the harness is on", and that was the opposite of the code.** `_harness_middleware`
+        builds `[enforce_loop_cap, enforce_spend_cap, MeterTurnSpend()]` and returns them *before*
+        the harness branch, so every profile carries the cap — its own docstring says "the cap is
+        unconditional and the todo list is not, and they used to travel together", and this file
+        says it correctly 230 lines up ("the iteration cap stays on regardless"). There is no turn
+        with no cap, so a reader sizing this margin was being told to leave room for a case that
+        cannot arise.
         """
         return self.harness_max_loop_iterations * self.agent_supersteps_per_model_call + 8

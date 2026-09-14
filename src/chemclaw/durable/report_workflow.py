@@ -35,6 +35,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
     from chemclaw.science.fingerprints.store import default_reaction_store
 
+from chemclaw.durable.deliver_message import OutboundMessage, deliver_best_effort
 from chemclaw.durable.orchestrator import fan_out
 from chemclaw.durable.publish import (
     BAD_DATA_RETRY,
@@ -261,14 +262,39 @@ class DevelopmentReportWorkflow:
         note_ref = await publish_note(
             propose_report, [report, request.requested_by, request.correlation_id]
         )
+        # **Out of the building too, when a deployment has said where.** A report is the one
+        # durable job whose product is a document a chemist asked for by name, and until this
+        # line the `report` kind `deliver/message.py` declares had no producer at all: the
+        # finished draft reached `session_events` and stopped there, so a chemist who closed
+        # the tab while the fan-out ran learned about it by asking. Best-effort and last,
+        # because the note is the durable handover and this is the courtesy copy.
+        await deliver_best_effort(
+            OutboundMessage(
+                recipient=request.requested_by,
+                subject=f"Report drafted: {request.title}",
+                body=(
+                    f"{len(report.sections)} section(s), recorded as {note_ref}.\n"
+                    "Open it beside its citations in the knowledge graph."
+                ),
+                kind="report",
+                correlation_id=request.correlation_id,
+            )
+        )
         return ConnectorJobResult(
             summary=(
                 # `report.sections`, not the fan-out's return: after reconciliation that is one
                 # per requested section, so the count the chemist is told is the count they asked
                 # for. Reading the short list is how "Drafted 'X' with 2 section(s)" came to be a
                 # true sentence about a report that was missing one.
+                # **"opened for review" until D-2026-09-05 deleted the gate it named.** This is
+                # the one place that claim survived wave 15's sweep, because it is neither a
+                # docstring nor the `propose_report` symbol name the queue already tracks — it is
+                # the sentence the chemist reads in the job result, telling them a person would
+                # look before the report counted. Nobody does: `record_note` writes it, and it is
+                # readable beside its own citations the moment this returns. A control a chemist
+                # believes in is worse than one they know they do not have.
                 f"Drafted {request.title!r} with {len(report.sections)} section(s); "
-                f"opened for review as {note_ref}."
+                f"recorded as {note_ref}."
             ),
             data={"note_ref": note_ref, "title": request.title, "sections": len(report.sections)},
         )

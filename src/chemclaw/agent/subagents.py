@@ -259,12 +259,45 @@ def helper_profile(caller: AgentProfile, held: frozenset[str]) -> AgentProfile:
     """
     # `model_copy` rather than a fresh `AgentProfile(...)`: a field added to the model later is
     # carried into the helper automatically, where an explicit constructor call would drop it in
-    # silence and read as deliberate. The three values below are typed as the model declares them,
+    # silence and read as deliberate. The four values below are typed as the model declares them,
     # which is what makes skipping validation safe here.
+    #
+    # **`harness_enabled=False` is the one of the four that is a narrowing rather than a rename**,
+    # and it became necessary when D-2026-09-13 made the harness the deployment default: a helper
+    # profile inherits `None`, which resolves to that default, so the helper silently acquired a
+    # todo list and a plan gate. Both are pure cost here, for two independent reasons:
+    #
+    #   - The gate has nothing to protect here, **and the first version of this comment argued
+    #     that from a false premise.** It said the gate "can never fire" because the line above
+    #     removes `side_effecting_tools()`, and that is not what the gate reads:
+    #     `authz.side_effecting_call` is `name in side_effecting_tools() or
+    #     writes_durable_memory(name, arguments)`, and the second half is *argument*-driven — it
+    #     matches `write_file`/`edit_file` under `/memories/`, which are neither in that set nor in
+    #     `held` at all, because `FilesystemMiddleware` splices them in downstream of this
+    #     narrowing. So the subtraction one line above does not reach them and the gate could
+    #     match.
+    #
+    #     What makes it safe is one line over: a helper is compiled with **no `store=`**, so
+    #     `scratchpad.scratchpad_backend` adds a `/memories/` route only `if store is not None and
+    #     actor` and a helper gets neither. `/memories/…` therefore falls to the `StateBackend`
+    #     default and dies with the helper — the durable write the gate exists to catch cannot
+    #     happen, rather than being refused when it does. `tests/test_subagents.py` pins that
+    #     absence, so passing a store to a helper turns this narrowing red instead of quietly
+    #     re-opening it.
+    #   - The plan is written where nobody reads it. A helper's state is discarded when its report
+    #     crosses back (`agent/tool_result_shape.py` keeps the spend keys and not the rest), so
+    #     `write_todos` would cost 1,372 tokens of the helper's own prefix to write a plan that
+    #     never reaches the chemist, the caller, or the gate.
+    #
+    # Measured: the helper's namespace wrote an eighth checkpoint per turn with the harness
+    # inherited, which `tests/test_checkpointer_prune.py` bounds at one turn's own writes. That is
+    # the assertion that caught this, and it is the cheaper statement of the same argument
+    # `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller` makes throughout.
     return caller.model_copy(
         update={
             "name": f"{caller.name}-helper",
             "tool_names": held - side_effecting_tools() - SPEAKS_TO_THE_CHEMIST,
             "model_route": "helper",
+            "harness_enabled": False,
         }
     )

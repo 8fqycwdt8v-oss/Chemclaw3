@@ -41,14 +41,16 @@ from temporalio import activity, workflow
 with workflow.unsafe.imports_passed_through():
     from chemclaw.agent.subscriptions import Subscription, all_subscriptions, mark_reported
     from chemclaw.core.config import settings
-    from chemclaw.core.metrics_bridge import degraded
-    from chemclaw.deliver.message import Message
-    from chemclaw.deliver.registry import deliver, delivery_enabled
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.kg.graph import load_notes
     from chemclaw.kg.note import Note
     from chemclaw.kg.search import query_terms, term_coverage
 
+from chemclaw.durable.deliver_message import (
+    OutboundMessage,
+    deliver_best_effort,
+    deliver_message_activity,
+)
 from chemclaw.durable.notify import notify_session_best_effort
 from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
@@ -182,7 +184,10 @@ async def acknowledge_digest(subscription_id: int, note_ids: list[str]) -> None:
 
 
 class DeliveryInput(BaseModel):
-    """The typed argument for `deliver_digest_activity`."""
+    """The typed argument for `deliver_digest_activity` — kept only for replay.
+
+    See that function. Nothing constructs one on the current path.
+    """
 
     owner: str
     query: str
@@ -192,63 +197,32 @@ class DeliveryInput(BaseModel):
 @durable_activity("background")
 @activity.defn
 async def deliver_digest_activity(payload: DeliveryInput) -> list[str]:
-    """Send one subscriber's digest on every enabled outbound channel, and say which took it.
+    """Deprecated: here only so a run opened on the previous release can replay.
 
-    An activity because it is I/O, and **the enablement check belongs here rather than in the
-    workflow**: `delivery_enabled()` reads `settings`, and a workflow that branched on it decided
-    whether to emit a command at all — so enabling a channel and restarting a worker made an
-    in-flight digest replay a command its history does not contain.
+    `D-2026-09-14-a-declared-kind-with-no-producer-is-not-a-channel` generalised this into
+    `durable/deliver_message.deliver_message_activity`, and deleting it outright was the defect:
+    an in-flight `DigestWorkflow` has `ActivityTaskScheduled(deliver_digest_activity)` at this
+    position, and the new code emitted `deliver_message_activity` there. Replayed, that is
+    `[TMPRL1100] Nondeterminism error: Activity type of scheduled event 'deliver_digest_activity'
+    does not match activity type of activity command 'deliver_message_activity'`. This workflow
+    declares no `failure_exception_types`, so it does not fail — it **parks** its workflow task in
+    an unbounded retry; and because the digest is a Schedule under `ScheduleOverlapPolicy.SKIP`,
+    one wedged run then skips every subsequent nightly digest silently. The ADR's "nothing changes
+    in a shipped deployment" was true of a fresh deployment and false of every live one.
 
-    It never raises. The registry's `deliver` already swallows a single channel's failure so one
-    broken webhook is not everyone's outage; a misconfigured seam — a channel named in
-    `CHEMCLAW_DELIVERY_CHANNELS` with no folder — raises `DeliveryChannelError`, which is in
-    `_BAD_DATA_TYPES` and would therefore fail this activity **non-retryably**. That mattered
-    because the caller is ordered before `acknowledge_digest`: one misspelled channel name meant the
-    watermark never advanced, so subscriber #1 received the identical digest every night and
-    everyone after them received nothing, indefinitely. The failure is caught and reported instead,
-    and the caller now runs after the acknowledgement regardless.
-
-    Returns:
-        The channels that took the message. Empty means either that delivery is off or that every
-        channel refused — which the log line distinguishes and a caller cannot.
+    So the body is gone and the *name* stays. It is scheduled only on the `workflow.patched` off
+    branch below, which no new run takes, and it delegates rather than duplicating: whatever a
+    replayed run does here, it does through the one seam. Removable once no run opened before this
+    release can still be replayed — for a nightly Schedule, the day after it ships.
     """
-    if not delivery_enabled():
-        return []
-    try:
-        # **Inside the `try`, and this is not tidiness.** `Message.recipient` is `min_length=1`, so
-        # an empty `Subscription.owner` raises `ValidationError` — which is in `_BAD_DATA_TYPES` and
-        # would therefore fail this activity *non-retryably*, aborting the run and every subscriber
-        # after it. The docstring said "it never raises" while two lines sat outside the guard that
-        # makes that true.
-        message = Message(
+    return await deliver_message_activity(
+        OutboundMessage(
             recipient=payload.owner,
             subject=f"New for your standing query: {payload.query}",
             body="\n".join(f"- {note_id}" for note_id in payload.note_ids),
             kind="digest",
         )
-        taken = await deliver(message)
-    except Exception as exc:
-        # **Never silently.** Before this, a total delivery failure moved no counter and wrote no
-        # log line anywhere in `chemclaw.deliver.registry`, and the workflow discarded the return
-        # value — so
-        # "every digest was dropped" and "every digest was delivered" were the same observation.
-        degraded(
-            logger,
-            "digest_delivery",
-            "digest delivery failed for %s: %s",
-            payload.owner,
-            exc,
-        )
-        return []
-    if not taken:
-        degraded(
-            logger,
-            "digest_delivery",
-            "no channel took the digest for %s; %d channel(s) are enabled",
-            payload.owner,
-            len(settings.delivery_channel_list),
-        )
-    return taken
+    )
 
 
 @durable_workflow("background")
@@ -302,13 +276,30 @@ class DigestWorkflow:
             # unacknowledge a delivered digest. Its result is deliberately not part of the
             # acknowledging condition: outbound delivery is a courtesy on top of a delivered digest,
             # not a second delivery the watermark waits on.
-            await workflow.execute_activity(
-                deliver_digest_activity,
-                DeliveryInput(owner=item.owner, query=item.query, note_ids=list(item.note_ids)),
-                start_to_close_timeout=timeout,
-                schedule_to_start_timeout=queue_wait_timeout(),
-                retry_policy=BAD_DATA_RETRY,
-            )
+            #
+            # **Behind a patch**, because this position already holds an
+            # `ActivityTaskScheduled(deliver_digest_activity)` in every run opened on the previous
+            # release, and emitting a different activity type there parks the workflow task
+            # forever — see `deliver_digest_activity` above for the measured error and why a
+            # parked digest is silent rather than loud. The off branch emits exactly what those
+            # histories record; no new run takes it.
+            if workflow.patched("digest-outbound-delivery-seam"):
+                await deliver_best_effort(
+                    OutboundMessage(
+                        recipient=item.owner,
+                        subject=f"New for your standing query: {item.query}",
+                        body="\n".join(f"- {note_id}" for note_id in item.note_ids),
+                        kind="digest",
+                    )
+                )
+            else:
+                await workflow.execute_activity(
+                    deliver_digest_activity,
+                    DeliveryInput(owner=item.owner, query=item.query, note_ids=list(item.note_ids)),
+                    start_to_close_timeout=timeout,
+                    schedule_to_start_timeout=queue_wait_timeout(),
+                    retry_policy=BAD_DATA_RETRY,
+                )
             delivered += 1
         return delivered
 

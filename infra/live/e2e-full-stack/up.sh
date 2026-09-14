@@ -308,6 +308,9 @@ up() {
   export CHEMCLAW_CHEM_TOKEN="${CHEMCLAW_CHEM_TOKEN:-dev-token}"
   export CHEMCLAW_SAFETY_TOKEN="${CHEMCLAW_SAFETY_TOKEN:-dev-token}"
   export CHEMCLAW_CALC_TOKEN="${CHEMCLAW_CALC_TOKEN:-dev-token}"
+  # `pyexec` was missing from this block while `start_pyexec` set the server half four lines
+  # further up — the exact asymmetry the paragraph above describes, sitting directly under it.
+  export CHEMCLAW_PYEXEC_TOKEN="${CHEMCLAW_PYEXEC_TOKEN:-dev-token}"
 
   log "connectors dir: $CHEMCLAW_CONNECTORS_DIR"
 
@@ -317,10 +320,17 @@ up() {
   # answer, whatever the two shells were started with.
   export CHEMCLAW_MCP_REPO="$MCP_REPO"
 
-  log "starting the Chemclaw3-mcp fleet (props, rxnpredict; chem, safety and calc via processes.sh)"
+  # **Only the bundles this repository does *not* declare.** `processes.sh::start_fleet_bundles`
+  # derives its set from `fleet_bundle_names` — the intersection of core's endpoint-declaring
+  # bundles with the fleet's manifests — which is `chem`, `rxnpredict` and `safety`. This lane
+  # started `rxnpredict` as well, and the two scripts keep their pidfiles in different run dirs
+  # (`.live/e2e/run` here, `.live/run` there), so `running rxnpredict` was false while the port was
+  # already served and the collision guard killed the lane outright:
+  # `rxnpredict: 127.0.0.1:8857 is already served, and not by a process this lane started`.
+  # Reproduced verbatim. `start_rxnpredict` stays for `restart rxnpredict`; what goes is the call.
+  log "starting the Chemclaw3-mcp fleet (props, pyexec; chem, rxnpredict, safety, calc via processes.sh)"
   local mcp_python; mcp_python="$(mcp_python_bin)"
   start_props "$mcp_python"
-  start_rxnpredict "$mcp_python"
   start_pyexec "$mcp_python"
 
   log "starting Chemclaw3_mock (ELN mock + mock-vendor MCP tool)"

@@ -369,7 +369,7 @@ topic).
 
 
 - [ ] **Measure whether delegation pays, with an instrument the deleted one could not be**
-      — [M], opened by `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller`. The corpus
+      — [M] (issue #359), opened by `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller`. The corpus
       that was supposed to settle this (`data/evals/probes/m12/routing.yaml`, deleted with the
       specialist team) measured **delegation rate** over fifteen one-tool probes. Rate is a mediator
       rather than an outcome, and a one-tool question gives context isolation no mechanism by which
@@ -384,8 +384,25 @@ topic).
       the moment the unit is a task rather than a delegation.
       **The arms exist as of that ADR**: no helper (the model simply not calling `task`), helper on
       the caller's model, and helper on its own via `CHEMCLAW_MODEL_ROUTES='{"helper": "…"}'`.
-      Nothing here needs new code; it needs a corpus and a run. Until it exists, no claim that
-      helpers do or do not pay is evidence about this deployment.
+
+      **The instrument and the corpus exist as of 2026-09-13, and "nothing here needs new code" was
+      wrong.** That sentence stood here until the work was attempted: `evals/ab.py` is pairwise and
+      dimensionless, and this comparison is three-armed and has two cost axes, so
+      `chemclaw.evals.delegation.compare_arms` is genuinely new — quality through `ab.py`'s own
+      noise floor, billed tokens and wall clock reported beside it rather than folded in, because
+      "cheaper but worse" and "better but slower" are different answers that one number hides.
+      `data/evals/probes/delegation.yaml` is the corpus, eight reading-heavy multi-source tasks
+      chosen so that isolation has a mechanism by which it could appear at all.
+      One design fact worth carrying: the `no-helper` arm is **behavioural**, because `task` cannot
+      be removed — `SubAgentMiddleware` is required and an empty roster makes upstream re-insert its
+      own. So compliance is observed per run, and a baseline that delegated anyway is reported as
+      contaminated rather than averaged in.
+
+      **What is left is the run, and it needs a gateway.** Nothing in `src/` dials a vendor
+      (`D-2026-09-04-a-gateway-is-the-only-provider`), so the environment's `API-KEY` is a
+      credential *for* a gateway rather than one this stack can use — probed 2026-09-13, the key
+      answers 200 against the vendor and no gateway is configured. Until the run exists, no claim
+      that helpers do or do not pay is evidence about this deployment.
 
 - [ ] **A helper reaches no connector, and only the behavioural half of this row is still open**
       — [L], and it is gated on the row above rather than on an argument. The prose half is
@@ -783,38 +800,38 @@ only holds defects can only ever restore the system to what it already intended 
       nomenclature wants structured databases. A process chemist asking "has anyone run this coupling
       on a deactivated aryl chloride" currently gets whatever those 39 notes happen to say.
 
-- [ ] **`pyexec` is merged in the fleet and unreachable from any deployment here** — **[M], not
-      [S], and the sizing changed when somebody looked.** `Chemclaw3-mcp` #12 shipped
-      `servers/pyexec` and `D-2026-08-25-a-sandbox-is-a-server-not-a-verb` records the decision, but
-      `grep -rn pyexec` in this tree finds only that ADR and `tasks/todo.md`: no entry under
-      `connectors:` in `deploy/helm/chemclaw/values.yaml:161`, so no `url`, no
-      `networkPolicy.egressDestinations` host, and nothing telling an operator to provide
-      `CHEMCLAW_PYEXEC_TOKEN`. The seam working as designed is why it is easy to miss — **zero core
-      edits also means zero core changes to remind anybody.**
+- [ ] **A bundle declared only in the fleet reaches an agent surface with no probe covering it** —
+      [M], and it is a cross-repository gap rather than a missing file.
+      `D-2026-09-14-a-bundle-this-tree-does-not-declare-is-still-reachable` decided that `pyexec`
+      is enabled by an operator's values file and ships no manifest stub here, which is right and
+      leaves this residual: `tests/test_probe_coverage.py` computes
+      `available_tool_names() - _expected_tools() - EXEMPT`, and `available_tool_names()` reads the
+      bundles on *this* checkout's `connectors_dir`.
 
-      **The obvious fix is wrong, and this is the part worth reading before starting.** Copying
-      `chem`/`safety` means adding a manifest stub under `src/chemclaw/connectors/pyexec/`. But
-      `registry.enabled()` is *"discovery is enablement until you say otherwise"* — an empty
-      `connectors_enabled` loads every discovered bundle — so shipping that stub would:
+      **The gate is blind in the default environment rather than blind by construction, and that
+      distinction is the work.** On a bare checkout a bundle declared only in `Chemclaw3-mcp` is
+      outside it in both directions — no probe is demanded, and a probe naming `run_python` would
+      name a tool this repository cannot resolve. But `connectors_dir` is
+      `CHEMCLAW_CONNECTORS_DIR`, which is exactly what a deployment mounting `pyexec` sets and what
+      `infra/live/e2e-full-stack/up.sh` sets. Measured with the fleet's `manifests/` on the path:
+      121 agent-callable tools instead of 114, and
+      `test_every_agent_callable_tool_is_probed_or_exempt` **fails**, naming seven —
+      `run_python` plus the six `props` serves. So a developer who runs the four-repo lane's
+      environment and then runs the suite gets a red test for a corpus gap, which teaches people to
+      unset the variable.
 
-      1. put `run_python` on the agent surface of **every fresh checkout**, by default;
-      2. make the front door dial `127.0.0.1:8899` — a hard boot failure only for a deployment that
-         has separately set `connectors_required`/`CHEMCLAW_CONNECTORS_REQUIRED=true`, since the
-         chart itself sets neither and the setting's own default is `False` (corrected 2026-08-27:
-         the row previously claimed the chart ships `connectors_required=true`, which is not true of
-         `deploy/helm/` or `deploy/jenkins/` today — an operator has to opt into fail-fast
-         separately for this consequence to bite);
-      3. trip `tests/test_probe_coverage.py` (no probe names `run_python`) and raise the context
-         floor.
+      So a deployment that mounts `pyexec` gets arbitrary Python execution on the agent surface
+      with nothing measuring whether the model uses it well, refuses it when it should, or
+      substitutes it for a tool that exists. The same is true of `props`, and will be true of every
+      bundle the fleet adds that this tree does not declare.
 
-      Turning a code-execution tool on by default is still a decision, not a wiring change, and (1)
-      and (3) alone are enough to make it one. **So this needs an ADR about the default
-      before it needs a diff**, and the branch point is whether `CHEMCLAW_CONNECTORS_ENABLED` stops
-      meaning "empty loads everything" — which is a chart-wide behavioural change with its own
-      blast radius. Whichever way it goes, the change also owes a `run_python` probe, an
-      `egressPorts` entry for 8899 (the egress rule restricts by port independently of the peer
-      list, so a destination with no matching port still drops), and the token obligation in the
-      comment `chem` already models.
+      **The shape of the fix is already in the tree, one problem over.** `SERVED_ELSEWHERE` and
+      `tests/test_sibling_manifest_agreement.py` are how the context floor and the manifest
+      agreement handle "a fact about a repository this one cannot watch": resolve the sibling
+      checkout through `tests/siblings.py`, run against it when it is there, and skip with the
+      reason counted by `tests/conftest.py::_report_sibling_skips` when it is not. A probe corpus
+      that may name a fleet-served tool wants exactly that treatment, and wants it once rather than
+      per bundle. Not started; it belongs beside those two rather than beside the connector seam.
 
 - [ ] **This environment's `API-KEY` comes and goes, and one row is blocked exactly while it is
       down** — [S], and it is operational rather than code. It was three until 2026-09-04, when the

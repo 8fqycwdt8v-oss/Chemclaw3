@@ -128,9 +128,14 @@ PG_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
 #
 # `ConnectorJobWorkflow` is bounded by `wrapper_execution_timeout()` — its child's whole ceiling
 # plus what the wrapper still owes after that child returns: settle the effect ledger, write the
-# durable record, offer the result, write the note, push back to the session. Each is a queue wait
-# plus a work budget, and the budgets differ — two of the writes are light enough to pass
-# `light_write_queue_wait_timeout()` while the others carry core's hour.
+# durable record, offer the result, write the note, push back to the session, and send the
+# `job-result` copy out of the building. Each is a queue wait plus a work budget, and the budgets
+# differ — **three** of the writes are light enough to pass `light_write_queue_wait_timeout()`
+# while the others carry core's hour.
+#
+# It said five steps and two light writes until 2026-09-14, when a sixth was added in `_finish`
+# and neither side of the restatement moved: 930 s of permitted spend outside a ceiling whose
+# whole job is to cover it.
 #
 # **This used to restate that as a count**, `activity_timeout_seconds * 4`, which bounds none of
 # them: it made every post-child step cost one activity's wall clock, and the validator below
@@ -1069,9 +1074,11 @@ class Settings(
         `agent` or a `tool` step, both of which are activities. A `job` step is not an activity: it
         starts `ConnectorJobWorkflow` as a child under `wrapper_execution_timeout()`
         (`durable/template_job.py`), which is `connector_job_timeout_seconds` plus what the
-        wrapper's five post-child steps may spend — 18,120 s against a run ceiling of 7,200 s when
-        this was first measured, and more since, because that headroom was then found to be counted
-        rather than summed.
+        wrapper's post-child steps may spend — 18,120 s against a run ceiling of 7,200 s when this
+        was first measured, and more since, because that headroom was then found to be counted
+        rather than summed, and more again when a sixth step was added to it. The count is not
+        written here for that reason; `finish_headroom` sums it and this validator restates the
+        sum.
         So a CREST search well inside its own budget ended the whole run as a silent `TIMED_OUT`:
         an execution timeout is not delivered to workflow code, so `TemplateWorkflow`'s `except
         BaseException -> _notify_failure` never ran, the chemist was told nothing on the session
@@ -1093,18 +1100,19 @@ class Settings(
         # step kind with its own ceiling gets covered by being added here.
         job_step = self.connector_job_timeout_seconds + (
             self.activity_queue_wait_seconds * 3
-            + self.template_step_timeout_seconds * 2
+            + self.template_step_timeout_seconds * 3
             + self.activity_timeout_seconds * 2
             + self.job_record_timeout_seconds
             + self.result_publish_timeout_seconds
             + self.note_write_timeout_seconds
+            + self.delivery_timeout_seconds
         )
         longest, budget = max(
             (
                 (self.template_step_timeout_seconds, "template_step_timeout_seconds"),
                 (
                     job_step,
-                    "connector_job_timeout_seconds plus what the wrapper's five post-child "
+                    "connector_job_timeout_seconds plus what the wrapper's six post-child "
                     "steps may spend, the ceiling a `job` step carries",
                 ),
             )

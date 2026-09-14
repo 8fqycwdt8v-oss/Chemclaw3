@@ -420,7 +420,28 @@ load_profiles()
 #: bound tool's schema *shrank*. That is why the figure is dated here rather than stated: a
 #: headroom transcribed as current is a claim about a commit, which is the defect the paragraph
 #: above spends fifteen lines on.
-CEILINGS: dict[str, int] = {"__default__": 65_200}
+#:
+#: **67,500 since D-2026-09-13, and this one was bought outright.** Turning `harness_enabled` on by
+#: default puts `write_todos` and upstream's todo prompt into every profile's prefix: measured both
+#: ways in one process, +1,372 for `tool:write_todos` and +490 for `prompt:middleware-sections`,
+#: **1,862 on every profile except two**: `computation`, which already sets the flag itself and so
+#: moved by 0, and `safety`, which moved 1,863. The odd token is in the ADR's own table and was
+#: rounded away by every prose statement of it, this one included, until a review read the table.
+#: Only `default` was near enough to matter — 64,907 → 66,769, over the old ceiling by 1,269.
+#:
+#: Nothing was narrowed to pay for it, and that is deliberate rather than lazy: the narrowing this
+#: wants is §5's `default`-profile allow-list, worth a measured -5,787, and it is blocked on a live
+#: lane that can show every probe still reaching its tool. Buying the ceiling now and narrowing
+#: later is the right order; narrowing blind to buy a ceiling is how a cheaper prompt stops finding
+#: tools.
+#:
+#: The price, by the rule stated above: `agent_tool_result_clear_trigger` rises 2,000 with it and
+#: costs nothing, while `agent_context_token_budget` cannot follow, so the thread allowance falls
+#: 42,500 → 40,500 — **4.7% of the thread**, an order of magnitude more than wave 13's 500 paid.
+#: What it buys is the plan gate attached in the posture every supported deployment already runs,
+#: which `D-2026-09-06-the-write-gate-is-three-names-and-the-plan-gate-carries-the-rest` names as
+#: the only cover over 29 write tools.
+CEILINGS: dict[str, int] = {"__default__": 67_500}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.
@@ -503,6 +524,43 @@ MAX_SINGLE_TOOL_TOKENS = 900
 #: cross-tool sharing at any price. What multiplies is the model, so what pays back five times is
 #: narrowing the model.
 KNOWN_OVERSIZED: dict[str, int] = {
+    # **The one entry here whose cost is not ours to narrow, recorded on 2026-09-13 when
+    # `harness_enabled` became the default and bound it on every profile.** The rule above says
+    # narrow the arguments or paginate the result, and neither is available: decomposed on the
+    # bound object with this file's own counter, the 1,372 below is **973 of upstream's own tool
+    # description**, 152 of `plan_scope._SCOPE_GUIDANCE`, and 252 of parameters and envelope. So
+    # 71% of it is somebody else's prose, arriving through a middleware
+    # `_apply_excluded_middleware` refuses to let a profile strip, and the first-party half is 404.
+    #
+    # **Those three sum to 1,377 against a whole of 1,372, and the +5 is the counter rather than
+    # the arithmetic.** `_count` wraps its argument in a `HumanMessage`, and
+    # `count_tokens_approximately` charges 4 tokens of per-message envelope — measured on the empty
+    # string — so three fragments counted separately pay it three times where the whole pays once.
+    # Named because the paragraph below closes on "a decomposition whose parts do not sum to its
+    # whole is arithmetic nobody checked", and leaving a 5-token residual under that sentence is
+    # the same defect at a smaller scale: the parts are each exact, and what does not sum is the
+    # measurement, not the schema.
+    #
+    # **That split shipped wrong and the error is worth naming.** It read "1,115 of upstream's own
+    # tool description, 206 of parameters and 147 of `_SCOPE_GUIDANCE`" against a whole it called
+    # 1,367 — three mistakes in one sentence. 1,115 is the *scoped* description,
+    # `self.tool_description` after `__init__` has appended the guidance to upstream's, so the
+    # guidance was counted twice and the parts summed to 1,468 against a whole of 1,367. And 1,367
+    # was chars/4 where the dict value beside it is this file's counter, which the `_count`
+    # docstring argues at length must be the basis. A decomposition whose parts do not sum to its
+    # whole is arithmetic nobody checked.
+    #
+    # **Forking that description to trim it was considered and rejected, and the argument is
+    # already in the tree**: `_SCOPE_GUIDANCE` is appended to upstream's text rather than replacing
+    # it because "everything upstream says about when to plan and how to keep the list current is
+    # as true here as there, and a fork of that text is a paragraph that goes stale on the next
+    # bump with nothing to notice". Trimming is the same fork with a smaller diff.
+    #
+    # This is therefore the case this dict's warning did not anticipate — debt taken on knowingly,
+    # by adopting a required upstream middleware, rather than first-party bloat being hidden. The
+    # lever that *is* available is the profile allow-list in § 5: `write_todos` is bound on every
+    # profile that runs the harness, so a narrowed surface pays this back on each of them.
+    "write_todos": 1_372,
     "suggest_next_experiment": 2_951,
     "generate_screening_design": 2_309,
     "predict_outcome": 2_201,

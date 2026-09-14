@@ -97,14 +97,28 @@ def message_id(message: Message) -> str:
     and left the payload with no field a receiver could key on. Measured: three `deliver()` calls of
     one message put one file on the share and **three** POSTs on the wire.
 
-    `deliver_digest_activity` runs under `BAD_DATA_RETRY`, so a worker death after the POST landed
-    re-runs the activity and re-POSTs — at-least-once by construction, which is correct for
-    delivery and is exactly why the receiver needs a key. A duplicated digest is a nuisance; the
-    same driver is the declared seam for the `job-result` and `report` kinds, where a duplicate is
-    a duplicated ticket.
+    `deliver_message_activity` runs under `BAD_DATA_RETRY`, so a worker death after the POST
+    landed re-runs the activity and re-POSTs — at-least-once by construction, which is correct
+    for delivery and is exactly why the receiver needs a key. A duplicated digest is a nuisance;
+    the same driver now really does carry the `job-result`, `report` and `awaiting` kinds, where
+    a duplicate is a duplicated ticket — this paragraph said "declared seam" while those three
+    had no producer at all.
 
-    Content only, so it carries no correlation id and no identity: the same four fields the payload
-    already contains, so the two channels answer "is this the same message" identically.
+    **`correlation_id` is in the *key* and stays out of the *payload*, and conflating those two
+    questions cost a real message.** The paragraph above is right that the id must not be rendered
+    to a recipient; it does not follow that an idempotency key may not be derived from it. Keyed on
+    content alone, two genuinely distinct runs with identical content collapse: measured, two
+    `job-result` messages from different runs of the same job for the same chemist produced the
+    identical id `d1b783a371b64708`, so a compliant receiver drops the second **by design** and the
+    share overwrites it. `subject` is `f"{connector}:{job} finished"` and `body` is a summary
+    derived from the inputs, so a re-run of one job is byte-identical by construction — and
+    `job-result` is the one kind with no natural discriminator in its body, where digest, report
+    and awaiting carry note ids, a `note_ref` and a deadline.
+
+    Folding it in preserves the property the key exists for, because a *retry* of one delivery
+    carries the same correlation id by construction: the workflow builds the message once and
+    Temporal re-runs the activity with that same input. Same delivery, same key; different run,
+    different key. A producer that passes no correlation id is unchanged.
 
     **`kind` is in the hash, and the file driver's hash did not have it** — the file driver spelled
     the kind as the filename's *prefix* instead. Folding it in changes every share filename once,
@@ -120,6 +134,7 @@ def message_id(message: Message) -> str:
             "subject": message.subject,
             "body": message.body,
             "kind": message.kind,
+            "correlation": message.correlation_id,
         }
     )
 
