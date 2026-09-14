@@ -41,6 +41,15 @@ with the reason at the call site: a probe run against a service one deploy behin
 score a knowledge write as not having happened, which reads as a retrieval regression rather than
 as a skew.
 
+**There is a third consumer and this ADR's first draft did not count it.** `api/static/app.js`, the
+bundled dev page, switches on the same discriminator, and `tests/test_dev_page_events.py` caught it
+in both directions the moment the rename landed — `note_recorded` unrendered, and `note_proposed`
+handled by a page no turn can reach. It takes the new name **outright rather than both**, and the
+difference from `Chemclaw3_ui` is the whole argument in miniature: that page is served by this
+process, so it cannot be older than the service sending the event. A second name there would be
+tolerance for a skew that cannot happen, and the same test would refuse it as an event no turn
+emits. So "reader first" is a claim about *independently deployed* readers, not about every reader.
+
 **Step three is not this repository's**, and nothing here can check it. Removing `note_proposed`
 from the UI's reader, and then from `evals/live.py`, is the third release; the UI's `ISSUES.md`
 carries who does the first half and `docs/planning/DEFERRED.md` carries the second.
