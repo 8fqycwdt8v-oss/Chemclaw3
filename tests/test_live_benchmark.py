@@ -8,6 +8,7 @@ were 4/5 — because those digits appear inside sentences like "approximately 1.
 """
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -177,3 +178,110 @@ def test_the_prompt_swapping_arm_cannot_be_read_as_a_tools_contrast() -> None:
         "the two arms no longer differ by a large block of prompt; if the default prose shrank to "
         "meet the control, the published pair's attribution may be worth re-measuring"
     )
+
+
+# How a chemist — or a model — writes an option that the corpus stores as ChemBench's raw markup.
+# **Written the other way round from `_normalised` on purpose**: this spells the symbols out as
+# Unicode where the scorer folds them onto words, so the two meet in the middle rather than
+# agreeing by construction. An oracle derived from the implementation would pass whatever the
+# implementation does, which is the failure `servers/props/tests/test_dataset.py` one repository
+# over is built to avoid.
+_PLAIN_SPELLING = {
+    "\\circ": "°",
+    "\\Delta": "Δ",
+    "\\times": "×",
+    "\\propto": "∝",
+    "\\alpha": "α",
+    "\\beta": "β",
+    "\\log": "log",
+}
+
+
+def _as_a_chemist_writes_it(option: str) -> str:
+    """The option with its typography removed and its symbols spelled the way a model types them."""
+    for command, char in _PLAIN_SPELLING.items():
+        option = option.replace(command, char)
+    option = re.sub(r"\\(?:ce|pu|text|mathrm)\s*", "", option)
+    return re.sub(r"[{}$^_]", "", option).strip()
+
+
+def test_every_option_is_scorable_in_the_spelling_a_model_would_use() -> None:
+    r"""The scorer must not be measuring typography, and on a fifth of this corpus it was.
+
+    21 of the 100 keys carry `\\ce{}`, `\\pu{}` or math mode. Answered in the plain spelling above,
+    **88 of the corpus's 418 options** scored as something other than themselves before the
+    normaliser — most as an abstention, and at least one as a different option outright. The
+    measurement is the whole corpus rather than a sample, because the defect is per-item and a
+    sample would hide the arm-asymmetry: the two arms do not write markup equally often, so a
+    markup-blind scorer is not neutral between them.
+    """
+    questions = load_questions(BENCHMARK_DIR)
+    misscored = [
+        (question.id, option)
+        for question in questions
+        for option in question.options
+        if _chosen(_as_a_chemist_writes_it(option), question.options) != option
+    ]
+
+    assert not misscored, (
+        f"{len(misscored)} of {sum(len(q.options) for q in questions)} options are unscorable in "
+        f"the spelling a model uses; the scorer is measuring markup. First: {misscored[:3]}"
+    )
+
+
+def test_an_option_answered_verbatim_still_scores_as_itself() -> None:
+    r"""The other direction: normalising must not lose a match that already worked.
+
+    A normaliser is a lossy transform applied to both sides, so it can break a comparison it was
+    supposed to leave alone — two options that differ only by a symbol command are the pair at
+    risk, which is why `_normalised` maps `\\Delta` to a word instead of deleting it.
+    """
+    questions = load_questions(BENCHMARK_DIR)
+    misscored = [
+        (question.id, option)
+        for question in questions
+        for option in question.options
+        if _chosen(option, question.options) != option
+    ]
+
+    assert not misscored, f"an option no longer scores as itself: {misscored[:3]}"
+
+
+def test_the_markup_defect_credited_a_wrong_option_for_a_right_answer() -> None:
+    r"""The worked example, from the run that found it, because the failure is not an abstention.
+
+    `materials_science:polymer_chemistry_19`'s key is `\\ce{FeSO4} + t-butyl hydroperoxide`. The
+    model's last line was `FeSO4 + t-butyl hydroperoxide` — correct — the exact matcher missed the
+    mhchem spelling, fell through to the whole-answer fallback, and credited the initiator the
+    model had named only to rule it out. A wrong answer recorded for a right one moves the score,
+    where an abstention only widens the gap.
+    """
+    question = next(
+        q for q in load_questions(BENCHMARK_DIR) if q.id == "materials_science:polymer_chemistry_19"
+    )
+    answer = (
+        "Azobisisobutyronitrile and benzoyl peroxide are thermal initiators, not redox pairs.\n\n"
+        "FeSO4 + t-butyl hydroperoxide"
+    )
+
+    assert _chosen(answer, question.options) == question.answer
+
+
+def test_a_turn_that_failed_is_not_a_turn_that_declined() -> None:
+    """Three outcomes, not two — and the third is the one only one arm can produce.
+
+    `api/runner.py` turns every failure into an `ErrorEvent`: a loop cap, a spend cap, a connector
+    outage, a degraded capability. Each left `answer=""`, and an empty answer books as "named no
+    option" — the column this benchmark's central finding is read off. The tool-bearing arm binds
+    every connector and can fail all of those ways; the toolless control binds none and
+    structurally cannot, so the two were not being measured on the same scale.
+    """
+    results = [
+        Answered(question_id="a", category="x", chosen="alpha", correct=True),
+        Answered(question_id="b", category="x", chosen="", unparsed=True),
+        Answered(question_id="c", category="x", chosen="", error_code="loop_cap_reached"),
+    ]
+    report = render(results, None)
+
+    assert "1 answer(s) named no option" in report, "an errored turn was counted as an abstention"
+    assert "1 turn(s) failed and answered nothing (loop_cap_reached x1)" in report
