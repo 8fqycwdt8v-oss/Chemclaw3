@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "pc-20",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "DMF is a problem for us at scale. What could replace it in this reaction, and what would change?",
+    "expects_tools": [
+      "compare_solvents",
+      "conditions_for_similar_reaction",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a predicted yield or conversion in the replacement solvent",
+      "a statement that a named solvent will work for this reaction",
+      "a regulatory or ICH Q3C class for a solvent presented as looked up"
+    ],
+    "direction": "Partial. Solvent property comparison is real and a shortlist on physical grounds is legitimate. What it must not do is turn a property match into a reactivity claim — the shortlist knows nothing about whether the chemistry survives the swap, which is the `props` server's own stated caveat and must reach the chemist. In-house precedent for the same swap is the strongest evidence available and should be preferred over the shortlist where it exists.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pc-20",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "DMF is a problem for us at scale. What could replace it in this reaction, and what would change?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.4,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "5c96a621484b4a54be27a798b9981dfd",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

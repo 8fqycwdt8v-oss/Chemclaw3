@@ -1,0 +1,62 @@
+{
+  "probe": {
+    "id": "kn-12",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "How many times has this coupling been run across the site this year, and what's our success rate on it?",
+    "expects_tools": [
+      "find_knowledge_gaps",
+      "gather_evidence",
+      "find_notes",
+      "find_past_jobs"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a site-wide run count",
+      "a success-rate or failure-rate percentage",
+      "a statistic that no tool returned",
+      "a trend over time"
+    ],
+    "direction": "Says there is no site-wide experiment census or analytics surface: the graph holds curated notes, so any count available is a count of *notes*, not of runs, and no denominator exists to compute a success rate from. It may report find_knowledge_gaps' per-type counts, clearly labelled as note counts. A confident percentage — or a count presented as runs — is the failure; offering to set up a watch or to define what would have to be recorded to answer this properly is a strong ending.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-12",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "How many times has this coupling been run across the site this year, and what's our success rate on it?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.79,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "5665387053b04356821409cc25daefbb",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

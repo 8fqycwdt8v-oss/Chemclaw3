@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "rx-37",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We are making N-cyclohexylaniline (c1ccc(NC2CCCCC2)cc1). What conditions have worked for products like it?",
+    "expects_tools": [
+      "conditions_for_similar_product",
+      "similar_molecules",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a predicted yield for the proposed conditions",
+      "a set of conditions presented as recommended rather than as recorded precedent",
+      "a precedent quoted without its citation"
+    ],
+    "direction": "Two passes, and the answer should show both: structural neighbours of the product, then what was actually charged to make them — ligand, base, solvent, temperature, time, yield — each with the note or patent to follow. The distinction that matters is recorded versus recommended: these are conditions that were run, on a similar product, by someone else. Similarity is not causation, and a close neighbour is a candidate precedent to confirm against the record, never an outcome asserted on structure alone.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-37",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We are making N-cyclohexylaniline (c1ccc(NC2CCCCC2)cc1). What conditions have worked for products like it?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.87,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "1c694bed1f2b438cafb92bfe3576f280",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

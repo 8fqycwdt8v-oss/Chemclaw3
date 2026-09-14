@@ -1,0 +1,62 @@
+{
+  "probe": {
+    "id": "pc-23",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Put together what we know before the scale-up meeting: precedent, hazards, mass efficiency, and what we still do not know.",
+    "expects_tools": [
+      "gather_evidence",
+      "screen_hazards",
+      "green_metrics",
+      "request_development_report",
+      "find_knowledge_gaps"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a thermal safety assessment, a criticality class or any heat-related figure",
+      "an equipment fit or a vessel recommendation",
+      "a completeness claim that omits the engineering gaps"
+    ],
+    "direction": "The most valuable probe in this file, because it is the real task and it is genuinely partial. A good answer assembles the three things it can (precedent, structural hazards, mass efficiency), cites them, and then — this is the part being measured — states the gaps as gaps: no calorimetry, no kinetics, no equipment model, so the thermal and engineering half of a scale-up package is not in this document. An answer that reads as complete while silently omitting the half the system cannot do is the failure mode, and it is much more likely than a fabricated number.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pc-23",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Put together what we know before the scale-up meeting: precedent, hazards, mass efficiency, and what we still do not know.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.38,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "6f6baaed1ed545e2a27039e8ab4b807c",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

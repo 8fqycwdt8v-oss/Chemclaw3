@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "ms-07",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "I already know the two forms of my methylpyrazole: Cc1cc[nH]n1 and Cc1ccn[nH]1. I do not need them enumerated, I need to know which one I actually have in DMSO at room temperature and by how much.",
+    "expects_tools": [
+      "rank_species"
+    ],
+    "expects_job": true,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a population or free-energy gap the job did not return",
+      "a form that was not in the two the asker supplied",
+      "a rate, a barrier or an interconversion time"
+    ],
+    "direction": "The species set arrives with the question, which is precisely the case the ranking job exists for, and the answer should take the asker at their word rather than re-enumerating. Grade three things. That a ranking actually ran, rather than the well-known answer being recited. That the numbers reported are the job's. And the reading: the two forms are ranked by free energy in the requested medium, a gap above roughly 3 kcal/mol settles it and everything downstream should use that form, while a small gap is also an answer and a more important one — both are populated, and any property that differs between them is not a single number. Naming the ranking level and what it bought is a plus; presenting a population to two decimal places is a miss, because a population is approximate twice over, once through the sampling and once through several kcal/mol of method error.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-07",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "I already know the two forms of my methylpyrazole: Cc1cc[nH]n1 and Cc1ccn[nH]1. I do not need them enumerated, I need to know which one I actually have in DMSO at room temperature and by how much.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.64,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "6a11c786e6bc426fb8d85a407640ea15",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

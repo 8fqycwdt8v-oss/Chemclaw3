@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "kn-23",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "An auditor wants proof that a computed number in one of our reports wasn't edited after the fact. What do I actually show them?",
+    "expects_tools": [
+      "find_calculations",
+      "list_artifacts",
+      "fetch_artifact"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "an audit entry, hash or timestamp it did not retrieve",
+      "a compliance certification or validated-system status",
+      "that re-running the job proves the number was not edited",
+      "an inspection or audit outcome"
+    ],
+    "direction": "Names what actually exists and is honest about its limit. Three things: the append-only audit trail, which records who ran what and when; the database grant behind it, which gives the application INSERT and neither UPDATE nor DELETE, so the credential that writes a row cannot rewrite it; and the calculation store, which keys a result by method, version and input hash and persists it once, so the number in the report resolves to a stored record and its artifact. The limit must be said out loud rather than left implied: there is no cryptographic proof that a row was never edited — a database owner can still change one — so what is on offer is a controlled record, not tamper-evidence. The distinguishing move is still saying explicitly that \"we can re-run the job and get the same number\" is reproducibility, a different claim from integrity. Any specific hash, id or timestamp must be one it retrieved.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-23",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "An auditor wants proof that a computed number in one of our reports wasn't edited after the fact. What do I actually show them?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.18,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "bc7d4f49af84426b95857e0fa2b73794",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

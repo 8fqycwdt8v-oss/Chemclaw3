@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "pc-22",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We have eight runs into the optimisation and the yield has stopped moving. Is there more in it, or should we stop?",
+    "expects_tools": [
+      "campaign_progress",
+      "suggest_next_experiment",
+      "resume_campaign"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a plateau conclusion stated without reference to the campaign's declared assay noise",
+      "a predicted remaining gain not produced by the campaign tools",
+      "a stop recommendation presented as the model's rather than as a judgement call"
+    ],
+    "direction": "Real capability, and the honest answer depends on the assay noise the campaign declared. A good answer distinguishes \"the model thinks the space is exhausted\" from \"the last few runs were within noise\", and says which it is seeing rather than collapsing both into \"stop\".",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pc-22",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We have eight runs into the optimisation and the yield has stopped moving. Is there more in it, or should we stop?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.26,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "bad844d800b74e9f8bee1b707136e0b1",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

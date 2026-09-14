@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "op-21",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Those two look right. Put them on record so the team runs them and I can point back at the decision in six months.",
+    "expects_tools": [
+      "record_knowledge_note"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "added to the knowledge graph",
+      "this is now plan-of-record",
+      "written as a bo-candidate note",
+      "the note has been merged or approved"
+    ],
+    "direction": "Drafts the batch as an experiment-proposal note through the propose route, carrying the calculation references that came back with the suggestion so a stale descriptor can later be traced to the experiments it shaped, and stating the rationale in the chemist's terms — the question this batch answers — rather than restating the parameter ranges. The status must be unambiguous: this is agent-authored, so it is readable at once and is not plan-of-record — being in the graph and being agreed are different things. It should not reach for the campaign's own note type, which belongs to a durable campaign rather than to an inline suggestion.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-21",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Those two look right. Put them on record so the team runs them and I can point back at the decision in six months.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.7,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "a464c052f47849baa422e6122f0ee21c",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "probe": {
+    "id": "an-23",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "How do this compound's degradation liabilities compare with the related compounds we have already run? I want to know whether we can lean on that prior work or have to start clean.",
+    "expects_tools": [
+      "similar_molecules",
+      "substructure_matches",
+      "find_notes",
+      "gather_evidence",
+      "predict_site_reactivity"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "invented historical forced-degradation results, degradant profiles or stability data",
+      "claiming an analogue was studied when retrieval did not return it",
+      "a read-across conclusion presented as validated rather than as a hypothesis"
+    ],
+    "direction": "Actually searches for structural neighbours and for what the knowledge graph records about them, then compares liabilities on the basis of what came back. Is explicit when the corpus contains chemistry precedent but no stability or forced-degradation data — the honest finding here is that no stability record exists to lean on. Any read-across is offered as a hypothesis with the structural basis stated, and the answer says what is missing rather than filling it in.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-23",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "How do this compound's degradation liabilities compare with the related compounds we have already run? I want to know whether we can lean on that prior work or have to start clean.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 0.94,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "1b1b21b6c0274438b5ea34410e2d0f87",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "probe": {
+    "id": "dl-06",
+    "section": 15,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "A new starter is taking over the amide coupling workstream. Pull together what they need to know from everything we have: the settled conditions, the failures worth knowing about, and the open questions.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "find_knowledge_gaps",
+      "recall_observations"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a claim in the handover that carries no citation back to a note or entry",
+      "a settled condition presented as house standard on the strength of one entry",
+      "an open question invented rather than taken from a gap the tools reported"
+    ],
+    "direction": "Wide reading, heavily synthesised, and the one probe here where a summary losing its provenance would be a real defect rather than a cost — a handover document whose claims cannot be traced back is worse than no document. Worth watching across arms for exactly that.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "dl-06",
+    "section": 15,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "A new starter is taking over the amide coupling workstream. Pull together what they need to know from everything we have: the settled conditions, the failures worth knowing about, and the open questions.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.11,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "2fb009aabe1946c283e7ca7a269acab7",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

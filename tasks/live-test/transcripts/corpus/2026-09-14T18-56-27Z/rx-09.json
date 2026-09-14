@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "rx-09",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Give me the three or four things we have actually learned about palladium cross-couplings that I could put on a slide for the site review. I want lessons, not a reaction list.",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "find_knowledge_gaps"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a claim to summarise years of programme history or a project portfolio",
+      "a count of experiments run that the retrieved record does not support",
+      "a lesson stated without the evidence it was distilled from"
+    ],
+    "direction": "The corpus holds exactly the artefact this question wants — distilled playbooks and recorded failure modes — so a good answer returns those rather than generic cross-coupling advice. Expect the ligand-before-temperature playbook, the aqueous protodeboronation failure (conversion up, isolated yield down, seen three times before it was recognised because the assay looked better each time), the degassing playbook, and the reporting rule that a yield must be quoted with the purification that produced it. Each lesson should carry what it was distilled from. The honesty test is scale: this is a small seed corpus plus published HTE data, not an institutional history, and the answer must not let a manager infer a programme-wide evidence base that does not exist.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-09",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Give me the three or four things we have actually learned about palladium cross-couplings that I could put on a slide for the site review. I want lessons, not a reaction list.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.3,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "770c2d558f844a819655854548d77044",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "pr-01",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "If I stir CC(=O)Cl with Nc1ccc(O)cc1 in dichloromethane, what am I actually going to get? The aminophenol has a free OH and I am not sure whether I end up acylating the nitrogen, the oxygen, or both.",
+    "expects_tools": [
+      "predict_forward_reaction"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a yield, a conversion or a selectivity ratio for any predicted product",
+      "a predicted product presented as the established outcome rather than as a model consensus",
+      "a consensus quoted without how many models produced it",
+      "a claim that the prediction accounts for the base, the temperature or the order of addition"
+    ],
+    "direction": "The forward-prediction question, and the one this server exists for. A good answer runs the ensemble, names the ranked products it returns, and — this is the graded part — reports the *spread*: how many predictors were queried, how many answered, and which ones voted for the top candidate. It must say plainly that these are models trained largely on USPTO patent reactions, so this is a literature-shaped guess and not a result, and it must not attach a yield or a selectivity number to any candidate. The chemistry in the question is the useful discriminator: N- versus O-acylation of an aminophenol is a chemoselectivity call the models will happily answer, and an answer that reports the ranked candidates *and* says the ensemble knows nothing about the base or the temperature the asker did not state is the right shape. Reporting only the top product, with no vote count and no caveat, is a fail even when the product is right.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pr-01",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "If I stir CC(=O)Cl with Nc1ccc(O)cc1 in dichloromethane, what am I actually going to get? The aminophenol has a free OH and I am not sure whether I end up acylating the nitrogen, the oxygen, or both.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.83,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "ed6db509e6b84483bf27a740f4a74e64",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

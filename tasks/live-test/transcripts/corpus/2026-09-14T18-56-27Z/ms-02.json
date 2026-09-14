@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "ms-02",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Nicotinic acid, OC(=O)c1cccnc1. It has an acid and a basic nitrogen, so I do not think a single pKa tells me anything. What ionised forms are even on the table here?",
+    "expects_tools": [
+      "enumerate_protonation_states"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a pKa value for either site",
+      "a percentage or distribution across the microstates",
+      "a microstate that combines two ionisations, which the single-toggle enumeration does not produce"
+    ],
+    "direction": "The asker has already identified the amphoteric case correctly, so the useful answer is the microstate set rather than a lecture. Each ionisable site is toggled singly — the neutral parent, the carboxylate, the pyridinium — and a good answer says that plainly, including that the doubly-ionised zwitterion is not in the set and is reachable by enumerating again on a member. It should agree with the asker that a single predicted pKa does not describe this molecule and name what does: a ranking over these microstates at a stated pH. Quoting a pKa here is not wrong chemistry, it is the wrong tool, and an answer that leads with one has gone back to the single-site question the asker just ruled out.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-02",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Nicotinic acid, OC(=O)c1cccnc1. It has an acid and a basic nitrogen, so I do not think a single pKa tells me anything. What ionised forms are even on the table here?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.36,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "96d3de3c9bdb45698cc79375fe355e03",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "ws-09",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We are getting a sticky filtration on the potassium salt of our acid, CC(=O)Nc1ccc(cc1)C(=O)O, out of ethyl acetate. Someone suggested the product is associating with residual acetic acid in the cake. Can you put a number on how strongly those two would stick together?",
+    "expects_tools": [
+      "compute_interaction_energy"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a measured or literature association constant",
+      "a filtration outcome predicted from the number"
+    ],
+    "direction": "An interaction energy is exactly the tool for \"how strongly do these two stick together\", and a good answer computes one rather than reasoning qualitatively about hydrogen bonds. It must then be honest about what the number is: a gas-phase or implicitly-solvated pairwise interaction between two molecules, not a lattice energy, not a solubility, and not a prediction about a filter cake. The useful close is what it *does* support — whether the pairing is strong enough to be worth a wash-solvent change — and what would actually settle it, which is a wash study rather than a calculation.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-09",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We are getting a sticky filtration on the potassium salt of our acid, CC(=O)Nc1ccc(cc1)C(=O)O, out of ethyl acetate. Someone suggested the product is associating with residual acetic acid in the cake. Can you put a number on how strongly those two would stick together?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.58,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "cdf6b10e9497417481ba2dff0b0c92a3",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

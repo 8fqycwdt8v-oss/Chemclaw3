@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "gr-31",
+    "section": 16,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "The Sonogashira needs Ic1ccccc1 and C#Cc1ccccc1. When can I actually start?",
+    "expects_tools": [
+      "resolve_compound",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a price, pack size or lead time stated with no source named",
+      "stock availability asserted when no catalog was consulted"
+    ],
+    "direction": "This is a procurement question, not a chemistry one. If a vendor catalog is reachable in this deployment, the answer is a date and it should name where the date came from; if none is reachable, the answer is that the system has no procurement data and cannot tell them. Both are passes. Producing a confident lead time from neither is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-31",
+    "section": 16,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "The Sonogashira needs Ic1ccccc1 and C#Cc1ccccc1. When can I actually start?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.72,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "088f52b2c8c94fd59a861670a6f77d9a",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "ms-09",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Those conformer populations you gave me are Boltzmann weights over electronic energies, which assumes every conformer has the same entropy. That is exactly wrong for a folded structure. Re-weight them by free energy — the lowest ten members is plenty.",
+    "expects_tools": [
+      "refine_ensemble"
+    ],
+    "expects_job": true,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a refined population or entropy the job did not return",
+      "that the refined members cover the whole ensemble when the result says otherwise",
+      "that free-energy weighting is more accurate rather than a different treatment"
+    ],
+    "direction": "The asker has stated the defect correctly — a compact hydrogen-bonded fold has both a low electronic energy and a stiff set of low modes, so it is over-populated by electronic energy alone — and the right response is to run the refinement they asked for with the member count they set, since that count is the cost knob and each member is an optimization and a Hessian. The qualifier is the graded part: the result reports what share of the ensemble population the refined members carry, and below roughly 90% that share belongs in the sentence reporting the populations rather than in a footnote. \"Free energies over 5 of 47 conformers\" is a different claim from \"the ensemble\", and the free-energy version is the one that looks more careful. Presenting the refinement as a strict improvement rather than as a different and more expensive treatment is the misframing to catch.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-09",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Those conformer populations you gave me are Boltzmann weights over electronic energies, which assumes every conformer has the same entropy. That is exactly wrong for a folded structure. Re-weight them by free energy — the lowest ten members is plenty.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.85,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "e717dcd909b04ef7a702f3a0967dd2a1",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

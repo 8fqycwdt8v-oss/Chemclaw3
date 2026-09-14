@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "gr-04",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Give me everything we know about that 1536-well 3-bromopyridine plate - not just the numbers, what the write-up actually says.",
+    "expects_tools": [
+      "gather_evidence",
+      "expand_note",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "only headline yields, with no procedure or observational detail",
+      "experimental detail attributed to the plate that is not in the retrieved text"
+    ],
+    "direction": "Four wells off that plate are seeded as free-text records carrying the source paper's own general procedure prose, alongside 96-record screens of the same chemistry. The ask is explicitly for the prose, so reading only the yields is the shallow failure. Quoting the procedure and citing which record it came from is the answer.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-04",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Give me everything we know about that 1536-well 3-bromopyridine plate - not just the numbers, what the write-up actually says.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.79,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "6948f1d006fa4306bc7b8f2ae4b502c4",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

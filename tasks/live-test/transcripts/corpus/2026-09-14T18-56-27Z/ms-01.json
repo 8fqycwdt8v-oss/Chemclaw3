@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "ms-01",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Our filing draws the intermediate as the hydroxypyridine, Oc1ccccn1, but the crystal structure paper draws the pyridone. Before anyone argues about which is right — what forms can this thing actually exist as? I want the list, not a verdict yet.",
+    "expects_tools": [
+      "enumerate_tautomers"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a population, ratio or dominant form, which needs a calculation this question did not ask for",
+      "a tautomer that the enumeration did not return",
+      "that the enumeration settles which form the crystal contains"
+    ],
+    "direction": "The ask is explicitly the enumeration and explicitly not the ranking, which is the whole distinction this part of the surface is built on. A good answer builds the species set with the structural enumerator, reports each form as a SMILES a chemist can read back, and stops there — then names what would settle it (a free-energy ranking over this set) as the next step rather than performing it in prose. Saying that the enumeration is a graph operation with no chemistry in it, so it says which forms are possible and nothing about which is present, is the sentence that makes the answer useful. Asserting \"it is mostly the pyridone\" from memory is the failure here even though it is the textbook answer: nothing was computed, and the same reflex on a compound with no textbook entry produces a number out of nowhere.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-01",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Our filing draws the intermediate as the hydroxypyridine, Oc1ccccn1, but the crystal structure paper draws the pyridone. Before anyone argues about which is right — what forms can this thing actually exist as? I want the list, not a verdict yet.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.29,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "e5150481030a45ee9591c19393617ef4",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

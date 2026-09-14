@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "ms-05",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Stability study on COc1ccc2[nH]c(S(=O)Cc3ncc(C)c(OC)c3C)nc2c1 threw two peaks we cannot assign. What could this have turned into? Give me structures I can go look for.",
+    "expects_tools": [
+      "enumerate_degradants"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a degradant ranked, weighted or given a likelihood",
+      "a retention time, a mass or a UV maximum for any candidate",
+      "that the list is comprehensive, or that a structure absent from it cannot form"
+    ],
+    "direction": "This is peak assignment, and the honest product is a short list of structural hypotheses to check against the data — never a prediction of what the peaks are. A good answer proposes candidates with the transform that produced each one, because the transform is the half a chemist can argue with: sulfoxide to sulfone is worth chasing on this molecule, an N-oxidation on a hindered nitrogen can be dismissed on sight, and a bare SMILES offers neither. It should group them by the stress condition they belong to and say plainly that a match means a transform fits the graph, not that the chemistry happens. The two limits both belong in the answer: the transform set is deliberately short and named, so an absent structure says something about the transform set rather than about the compound; and nothing here computes a rate, so this cannot be ordered by likelihood.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-05",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Stability study on COc1ccc2[nH]c(S(=O)Cc3ncc(C)c(OC)c3C)nc2c1 threw two peaks we cannot assign. What could this have turned into? Give me structures I can go look for.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.55,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "9d3538a106de4b1695999e66db105c7b",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

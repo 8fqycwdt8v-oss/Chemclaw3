@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "rp-27",
+    "section": 13,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "Give me a view of the open risks across all our active tech transfers — which ones are at risk of slipping?",
+    "expects_tools": [
+      "review_commitments"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a risk register, risk score, likelihood or impact rating",
+      "a probability or confidence that any transfer will slip",
+      "a transfer, date or owner the mirror does not hold",
+      "that a past-due date is the same thing as a risk assessment"
+    ],
+    "direction": "Answerable in one specific sense and not in the sense the words \"open risks\" usually carry. There is no risk register here, no scoring and no likelihood model, and the answer should say so rather than manufacturing one. What the commitment mirror does hold is which transfers are committed, when they are due, which are marked blocked, and — the part no portfolio tool has — which of those name notes, jobs or compounds, so the chemistry behind a blocked item can be pulled up. Past-due and blocked are facts; \"at risk\" is a judgement, and the honest move is to lay out the facts, name the ones a person should look at first, and let them make it. The staleness of the mirror belongs at the top: a transfer that looks on track in a month-old export is the failure mode worth naming before the list rather than after it.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-27",
+    "section": 13,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "Give me a view of the open risks across all our active tech transfers — which ones are at risk of slipping?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.28,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "8225b58a718e4171a616af09386a05e4",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

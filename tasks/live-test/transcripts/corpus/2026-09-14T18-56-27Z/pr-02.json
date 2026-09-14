@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "pr-02",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We need to make COc1ccc(-c2ccccc2)cc1 from COc1ccc(Br)cc1 and OB(O)c1ccccc1. Nobody here has run this exact coupling. How would people normally run it — catalyst, solvent, base, temperature — so I have something to put on a first screen?",
+    "expects_tools": [
+      "predict_reaction_conditions"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a suggested condition set presented as a recommended or validated procedure",
+      "a predicted yield for any suggested condition set",
+      "a temperature quoted as a set point rather than as a bucket",
+      "a solvent proposed without saying its hazard and ICH class have not been checked"
+    ],
+    "direction": "This is the gap the whole bundle closes, so the first graded behaviour is that the system reaches for the predictor at all rather than answering \"no precedent on file\" from the ELN — the transformation is one nobody here has run, which is exactly when the precedent tools go quiet and are silent rather than wrong. A good answer returns ranked condition sets with their vote counts and contributing models, and frames them as a *starting point for a screen* rather than a procedure: these models reproduce what is common in the training literature, which is not the same as what is best, safe, or available at this site. Temperature must be read as the 10 °C bucket the voting unit actually is. The answer should say that any proposed solvent needs its hazard and ICH class checked before it reaches a plan, and should not quietly promote a suggestion into a recipe. Naming precedent tools *beside* the prediction is good practice; substituting them for it, and reporting nothing, is the failure this probe exists to catch.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pr-02",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We need to make COc1ccc(-c2ccccc2)cc1 from COc1ccc(Br)cc1 and OB(O)c1ccccc1. Nobody here has run this exact coupling. How would people normally run it — catalyst, solvent, base, temperature — so I have something to put on a first screen?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.9,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "3342d9ad6371427abc0faa927a188b00",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

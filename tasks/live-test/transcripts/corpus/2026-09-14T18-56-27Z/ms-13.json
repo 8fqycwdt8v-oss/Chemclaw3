@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "ms-13",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The route can give either diastereomer of CC(O)C(C)c1ccccc1. Which one is thermodynamically favoured, and by enough to matter?",
+    "expects_tools": [
+      "run_stereoisomer_ranking",
+      "rank_species"
+    ],
+    "expects_job": true,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a diastereomer ratio the calculation did not return",
+      "a claim about which isomer the reaction produces",
+      "a distinction drawn between enantiomers"
+    ],
+    "direction": "Expand the unassigned centres, rank the isomers by free energy, report which is favoured and by how much — and then draw the line the question walks up to. This answers the thermodynamic question and not the kinetic one: there are no transition states here, so what a kinetically controlled reduction actually delivers is outside what was computed, and an answer that slides from \"favoured at equilibrium\" to \"what the route gives you\" has answered a different question than the one asked. The \"by enough to matter\" half should be answered against the method's own error: a gap inside several kcal/mol of semiempirical uncertainty does not separate two diastereomers, and saying so is better than reporting the gap alone. Enantiomers are isoenergetic and must not appear as distinguished.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-13",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The route can give either diastereomer of CC(O)C(C)c1ccccc1. Which one is thermodynamically favoured, and by enough to matter?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.4,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "5bfdb333078849e58fd0930c152715ff",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

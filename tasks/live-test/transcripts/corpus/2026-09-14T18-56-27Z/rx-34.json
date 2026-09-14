@@ -1,0 +1,63 @@
+{
+  "probe": {
+    "id": "rx-34",
+    "section": 11,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Put together a scale-up readiness summary on the coupling for the stage gate — what we know, what the risks are, and what is still open.",
+    "expects_tools": [
+      "request_development_report",
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "find_knowledge_gaps"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "an engineering or equipment readiness assessment",
+      "a timeline, cost or resourcing statement",
+      "a go/no-go recommendation presented as the system's own decision",
+      "a risk stated without the record entry it came from"
+    ],
+    "direction": "Should assemble from the record rather than compose from general knowledge, and should be explicit that anything it generates enters the knowledge base as machine-written content rather than as fact — a manager-facing document is exactly where that line matters. Content that is genuinely supported: the recorded conditions and isolated yield, the protodeboronation and amide-coupling failure modes, the ligand-before-temperature and degassing playbooks, and the reporting rule that a yield must be quoted with its purification. Content that must be flagged as absent, not filled in: heat transfer and exotherm, mixing, equipment, solid form and crystallisation behaviour, impurity control strategy, genotoxic impurity assessment, and any timeline or resource view — none of which exist in this system. A good answer separates 'what the record supports' from 'what a stage gate needs and we do not have', and the second list is the more useful half.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-34",
+    "section": 11,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Put together a scale-up readiness summary on the coupling for the stage gate — what we know, what the risks are, and what is still open.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.35,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "4446850c7bd64c178bd065a2d68b185f",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

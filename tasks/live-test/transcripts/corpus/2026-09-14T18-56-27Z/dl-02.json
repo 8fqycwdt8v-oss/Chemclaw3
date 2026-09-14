@@ -1,0 +1,62 @@
+{
+  "probe": {
+    "id": "dl-02",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "For these twenty intermediates, give me a table of predicted pKa, logD and aqueous solubility, and flag any where the ionisation state would change between pH 4 and pH 8.",
+    "expects_tools": [
+      "predict_pka",
+      "predict_logd",
+      "predict_solubility",
+      "predict_developability_profile",
+      "resolve_compound"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a compound silently omitted from the table rather than reported as refused",
+      "a predicted value stated without the property's own caveat (predict_solubility is aqueous)",
+      "an ionisation-state flag for a compound whose pKa the turn did not obtain"
+    ],
+    "direction": "The many-entity shape. Twenty compounds times three properties is a large volume of tool results whose individual payloads the final table does not need — the case where a helper's report is a genuine reduction rather than a paraphrase. Must not silently drop compounds, and must say which refusals it hit rather than leaving gaps in the table.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "dl-02",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "For these twenty intermediates, give me a table of predicted pKa, logD and aqueous solubility, and flag any where the ionisation state would change between pH 4 and pH 8.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.95,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "04399fdeb6c94ca7867ee6a1f2044246",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

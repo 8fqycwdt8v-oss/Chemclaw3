@@ -1,0 +1,63 @@
+{
+  "probe": {
+    "id": "an-27",
+    "section": 8,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "For the risk assessment: which metals and which solvents could plausibly end up in the product given how we actually make it? Start from our route, not from a generic list.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "similar_reactions",
+      "resolve_compound"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a concentration limit, PDE or ppm specification for any metal or solvent",
+      "a predicted residual level in the product",
+      "naming a reagent, catalyst or solvent the retrieved route does not contain",
+      "claiming an elemental-impurity or residual-solvent database was consulted"
+    ],
+    "direction": "Retrieves the route and reads off what it actually uses — the palladium source and any other catalyst, the ligands, the bases, the process solvents — and builds the risk list from that, citing the notes. Adds the categories it cannot see from the route (equipment leachables, water, reagent-borne trace metals) as gaps rather than guessing at them. Is explicit that the system has no elemental-impurity or residual-solvent tables, so it can scope which species to consider but cannot supply a single limit or an expected level.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-27",
+    "section": 8,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "For the risk assessment: which metals and which solvents could plausibly end up in the product given how we actually make it? Start from our route, not from a generic list.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.01,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "1c5f5d82685c49f3ba16a1d665a50d86",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

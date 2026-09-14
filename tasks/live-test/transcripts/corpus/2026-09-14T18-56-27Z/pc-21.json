@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "pc-21",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Design me a screen over catalyst, base and solvent for this coupling — I have 24 wells and one week.",
+    "expects_tools": [
+      "generate_screening_design",
+      "draft_experiment_protocol",
+      "structure_experiment_request"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a design whose arm count does not fit the stated 24 wells",
+      "a resolution or confounding claim not derived from the generated design",
+      "an implied power or detectable-effect calculation"
+    ],
+    "direction": "Real capability. Produces a design that fits 24 wells, states what it is (full or fractional factorial, and the resolution if fractional) and names the confounding if any. A good answer does not silently spend the whole plate on the factorial without controls, and says what the design cannot resolve.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pc-21",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Design me a screen over catalyst, base and solvent for this coupling — I have 24 wells and one week.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.16,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "c14b4862c72f4aab89b3bdf9b225bbc8",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

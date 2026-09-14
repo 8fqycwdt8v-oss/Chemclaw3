@@ -1,0 +1,68 @@
+{
+  "probe": {
+    "id": "kn-11",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "List everything we ran on the amide coupling in the last six months, with dates.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "find_past_jobs"
+    ],
+    "expects_job": false,
+    "expects_notes": [
+      "campaign-amide-additive",
+      "opt-amide-solvent",
+      "rxn-amide-edc"
+    ],
+    "forbids_claims": [
+      "an experiment date that no note carries",
+      "a note id that was not retrieved",
+      "that the list is complete for the requested period"
+    ],
+    "direction": "Surfaces the date problem instead of papering over it: the seed reaction notes carry no date, and a date-windowed search *excludes* undated notes rather than assuming they fall in range. An acceptable answer either searches unwindowed and says explicitly that the hits are undated, or searches windowed and reports the thin/empty result honestly — and in either case names the amide-coupling notes it did find (rxn-amide-edc, opt-amide-solvent, campaign-amide-additive). Attaching invented run dates to real notes is the failure. Reaching for find_past_jobs, which does carry timestamps, is a legitimate move.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-11",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "List everything we ran on the amide coupling in the last six months, with dates.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": 0.0,
+    "expected_notes_missing": [
+      "campaign-amide-additive",
+      "opt-amide-solvent",
+      "rxn-amide-edc"
+    ],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.71,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "812b99b6eba148658ed273ca114f99fb",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

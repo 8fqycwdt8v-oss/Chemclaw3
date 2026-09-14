@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "rx-14",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I recrystallised my product and got 88%. My colleague got 88% on the same step but took it through a silica plug. Are those the same number? How should I write it up?",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "record_knowledge_note"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a purity value for either sample",
+      "a claim that the two yields are comparable"
+    ],
+    "direction": "There is a distilled rule in the record for exactly this — an 88% after recrystallisation and an 88% after a plug are not the same number, and comparing them across notebooks is the most common way a scale-up target turns out to be unreachable — and a good answer retrieves it rather than reasoning from first principles. Should say why the two differ (a recrystallisation rejects impurities and costs yield; a plug removes baseline and keeps close-running impurities), that the yield is meaningless without the purity and the assay method that produced it, and that every reaction note in this corpus states the purification alongside the yield. Concrete write-up guidance: yield, purification, purity and how purity was measured, in one line.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-14",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I recrystallised my product and got 88%. My colleague got 88% on the same step but took it through a silica plug. Are those the same number? How should I write it up?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 2.13,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "5bde3bd758774e91ac5bb129dee6d3e8",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

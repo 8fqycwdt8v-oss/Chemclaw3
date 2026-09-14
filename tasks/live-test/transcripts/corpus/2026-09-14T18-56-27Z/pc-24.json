@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "pc-24",
+    "section": 11,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "Which of our three active programmes has the most scale-up risk sitting in the chemistry?",
+    "expects_tools": [
+      "review_commitments",
+      "gather_evidence",
+      "find_notes",
+      "review_activity"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a risk score or ranking presented as computed",
+      "a thermal or engineering risk assessment for any programme",
+      "a claim about a programme with no evidence retrieved for it"
+    ],
+    "direction": "Partial. The commitments mirror and the knowledge graph can say what is recorded — failure modes, contested results, thin evidence — and that is a legitimate answer to \"where is the recorded risk\". It is not an engineering risk assessment and must not read as one. A good answer is explicit that it is reporting what has been written down, which is a different thing from what is true, and names programmes it found nothing for rather than omitting them.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pc-24",
+    "section": 11,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "Which of our three active programmes has the most scale-up risk sitting in the chemistry?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.87,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "c08cc7c181e049378df6abeeb78ae16e",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

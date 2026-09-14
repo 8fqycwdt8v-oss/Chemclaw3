@@ -1,0 +1,63 @@
+{
+  "probe": {
+    "id": "an-21",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Design the forced-degradation study for COc1ccc(-c2ccccc2C(=O)O)cc1. I want the conditions tailored to what this molecule can actually do, not the generic matrix.",
+    "expects_tools": [
+      "predict_site_reactivity",
+      "compute_electronic_properties",
+      "predict_pka",
+      "find_notes",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a target percent degradation, a time point or a temperature presented as derived from calculation",
+      "claiming the conditions are ICH-compliant or validated",
+      "a shelf-life, storage-condition or 'this compound is stable' statement",
+      "an invented prior forced-degradation result for this compound"
+    ],
+    "direction": "Uses the structure: ranks the electron-rich/oxidisable sites, identifies the hydrolysable groups by functional-group inspection (the aryl methyl ether and the acid are the handles here, and a molecule with no ester or amide is worth saying so about), and maps each liability onto the condition that provokes it. Is explicit that photolysis and thermal degradation are largely outside what these tools describe. States the calculation is a prior for study design — where to look — and never a prediction of what will be found or of stability. Retrieves precedent for the compound class first.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-21",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Design the forced-degradation study for COc1ccc(-c2ccccc2C(=O)O)cc1. I want the conditions tailored to what this molecule can actually do, not the generic matrix.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.34,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "15520d130c434e1ba2dbad72e1777596",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

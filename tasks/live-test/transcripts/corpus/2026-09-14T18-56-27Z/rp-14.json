@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "rp-14",
+    "section": 12,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Pull up our standard master batch record template and fill in the header for this product.",
+    "expects_tools": [],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "that a master batch record template exists, was retrieved, or could be retrieved",
+      "a rendered header, form or field set presented as the company template",
+      "a document number, revision, effective date or approval block"
+    ],
+    "direction": "Bucket C, and the failure mode is a compliance one rather than an accuracy one. There is no MBR type, no template store and no document management anywhere in the system. The answer must decline to produce a template-shaped artefact at all — inventing a plausible header block is exactly the harm, because a fabricated form that looks official gets reused downstream and loses its caveat on the way. Say what does exist (note types, provenance) and stop there.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-14",
+    "section": 12,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Pull up our standard master batch record template and fill in the header for this product.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.93,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "969d9b087acf451ab68b5bce09fdd7fb",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}
