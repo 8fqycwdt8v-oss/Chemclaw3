@@ -104,8 +104,8 @@ def test_every_member_is_reachable_from_the_union_by_its_discriminator() -> None
 def test_the_published_document_declares_every_event_this_service_streams() -> None:
     """The fixture holds this side to its models; the document is what the other side can read.
 
-    Two halves of one contract, and only the first existed. `tests/fixtures/turn_events_contract.json`
-    makes a change to `api/events.py` loud **here** — which is the right tripwire and cannot help
+    Two halves of one contract, and only the first existed. The fixture beside this file makes a
+    change to `api/events.py` loud **here** — which is the right tripwire and cannot help
     anybody else, because a golden file in this repository is not an artefact another repository
     fetches. What `Chemclaw3_ui` fetches is `/openapi.json`, and measured on 2026-09-14 that
     document declared **2 of 17** members and **0 of 10** error codes: an SSE body is

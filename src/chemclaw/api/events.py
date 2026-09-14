@@ -167,23 +167,27 @@ class QuestionEvent(BaseModel):
     options: list[str] = []
 
 
-class NoteProposedEvent(BaseModel):
+class NoteRecordedEvent(BaseModel):
     """A note was written into the knowledge graph (gap RCH-4).
 
     A note write returns its reference into the *model's* context, so without this the chemist
     never learns their contribution landed. This carries the reference back to the surface that
     produced it.
 
-    **The wire name is `note_proposed` and the event is not a proposal.** Nothing reviews a note
-    any more (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), so the accurate name is
-    `note_recorded` — but the literal is an SSE contract that `Chemclaw3_ui` and `evals/live.py`
-    both switch on, and renaming it is a coordinated two-repo deploy with a skew window in which
-    one side silently drops the event. Kept as-is deliberately, with the rename tracked in
-    `docs/planning/BACKLOG.md`; what a chemist actually *reads* says "recorded", which is the half
-    that was making a false claim to a person.
+    **The wire name was `note_proposed` and the event was never a proposal**
+    (`D-2026-09-14-the-reader-lands-first-and-the-name-follows`). Nothing reviews a note any more
+    (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), so the accurate name is
+    `note_recorded`, and what a chemist reads has said "recorded" the whole time. The literal is an
+    SSE discriminator two repositories switch on, so the rename is a three-step deploy and **the
+    only ordering with no broken state is reader first**: `Chemclaw3_ui` shipped a reader that
+    accepts both names (its `shared/events.ts` carries the argument), this is the second step, and
+    the third — dropping the old name from that reader — is theirs and happens after this ships.
+    The reverse order silently drops the event in every browser not yet redeployed.
+
+    `evals/live.py` is this repository's own reader and accepts both for the same window.
     """
 
-    type: Literal["note_proposed"] = "note_proposed"
+    type: Literal["note_recorded"] = "note_recorded"
     note_id: str
     reference: str
 
@@ -597,7 +601,7 @@ Event = (
     | JobFailedEvent
     | AwaitingAnswerEvent
     | CapabilityDegradedEvent
-    | NoteProposedEvent
+    | NoteRecordedEvent
     | ApprovalRequestEvent
     | QuestionEvent
     | AnswerEvent
