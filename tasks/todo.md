@@ -562,7 +562,13 @@ What decides whether the system is affordable and whether it survives a real cor
       tokens [M]; and a tool schema is 38% developer rationale, shipped on every turn.
       Both move `tests/test_context_floor.py` — re-baseline in the same commit, never raise the
       ceiling to accommodate prose (`tasks/lessons.md`).
-- [ ] W28.2 `Chemclaw3` — a memory run reads every source whole, three times [M].
+- [x] W28.2 `Chemclaw3` — a memory run reads every source whole, three times [M].
+      **Done** (`D-2026-09-14-the-memory-corpus-is-a-memory-bound-not-a-time-bound`): two of the
+      row's three clauses were stale (no scheduled run since D-2026-08-25; one workflow per call),
+      and the cost is memory rather than time — 10,000 records = **396.8 MB** peak, 25.3 kB per
+      mapped reaction plus 14.4 kB per adapter entry, so ~500k entries is ~20 GB in one activity.
+      `memory_corpus_max_reactions` bounds the miner's half (396.8 → **204.4 MB** at a cap of 2,500)
+      and marks the pass incomplete; it cannot bound the adapter's page, and that is said out loud.
 - [ ] W28.3 `Chemclaw3` — the `stated`-quote ambient reads the whole table's tail on every turn once
       a database has history.
 - [ ] W28.4 `Chemclaw3` — the checkpointer's write volume is quadratic in a thread's length [L].

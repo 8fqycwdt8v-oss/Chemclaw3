@@ -497,28 +497,32 @@ topic).
       than riding along on someone else's. The SBOM is now `main`-only, so a scan reading it is
       `main`-only too.
 
-- [ ] **A memory run reads every source whole, three times** — [M]. `durable/memory_jobs.py::
-      read_corpus` walks each active ingest source from `datetime.min` on every ingest half, so
-      each of the three memory jobs (`build_campaign_notes_activity`, `build_playbook_notes_
-      activity`, `build_optimization_notes_activity`) reads the whole record once per activity per
-      scheduled run.
-      **This row used to say the walk was a full table scan and that was false for the one shipped
-      source that pages** (`D-2026-09-07-a-corpus-read-that-stops-at-one-page-is-not-a-corpus`):
-      measured against the warehouse adapter over a 12-row corpus at `fetch_limit: 5`, `read_corpus`
-      returned **5 of 12** reactions and called the read `complete` — the oldest 500 entries of an ELN
-      at the shipped binding default, distilled into notes as what the deployment knows. That is
-      fixed: the read pages, and a source still reporting rows waiting makes the read incomplete.
-      The cost is what is left, and it is now real rather than hypothetical — the scan happens
-      because the read became correct. `ElnAdapter` (`ingest/eln/adapter.py`) has exactly two
-      methods and neither is a fetch-by-id, so there is still no cheaper read to reach for: closing
-      this means either a fetch-by-id on the adapter protocol (every source pays) or a derived
-      store of mapped `OrdReaction`s.
-      **Found while building the protocol condenser and deliberately not fixed there**
-      (`D-2026-08-25-the-structure-is-discarded-at-the-note-boundary` records the reasoning): a
-      derived store would have answered it as a side effect, and answering a scaling problem as a
-      side effect of a retrieval change is how a store nobody decided on gets built. It is also the
-      trigger on the `DEFERRED.md` row for reagent/solvent set diffs in the turn-time comparison —
-      one change answers both.
+- [ ] **A corpus read is ~40 kB of memory per entry, and only 25 kB of it is boundable** — [M],
+      measured 2026-09-14
+      (`D-2026-09-14-the-memory-corpus-is-a-memory-bound-not-a-time-bound`), and it replaces the
+      "three times per scheduled run" row rather than continuing it. **Two of that row's three
+      clauses were stale**: `D-2026-08-25` removed the timer, so there is no scheduled run, and
+      `synthesize_memory(kind)` starts one workflow per call.
+
+      What is real, over a 10,000-record ORD drop directory: **396.8 MB** traced peak and 6.9 s
+      unbounded, **144.2 MB** at a cap of 1. So a mapped `OrdReaction` is **25.3 kB** resident and
+      the adapter's own page of `RawEntry` is **14.4 kB** per entry. At a real deployment's ~500,000
+      entries that is **~20 GB in one activity's process**, of which **~7.2 GB** is the page. The
+      read does not get slow; the worker is killed.
+
+      `memory_corpus_max_reactions` now bounds the miner's half and marks a capped pass incomplete.
+      **It cannot bound the adapter's page**: `OrdJsonAdapter.fetch_new_entries` accepts `limit` and
+      ignores it deliberately (an unsorted scan would return an arbitrary subset and advance the
+      cursor past what it skipped), so for a drop directory the page *is* the corpus and no argument
+      `read_corpus` can pass changes that.
+
+      **What is left is the streaming protocol**, which is what the old row already identified
+      without a number: either `ElnAdapter` gains a fetch-by-id or a bounded iterator (every source
+      pays), or the three miners stop taking a `list` — they are whole-corpus algorithms today (DRFP
+      fingerprinting, O(n²) Tanimoto, NetworkX components), so this is a reformulation rather than a
+      refactor. **Trigger**: a deployment whose corpus exceeds `memory_corpus_max_reactions`, which
+      the WARNING now names by number. It is still the trigger on the `DEFERRED.md` row for
+      reagent/solvent set diffs — one change answers both.
 
 - [ ] **A stalled append-only feed has no first-party signal** — [S]. `corpus_cursors`
       (`infra/sql/072`) records where each feed's drain stopped, and nothing reads `updated_at`:
