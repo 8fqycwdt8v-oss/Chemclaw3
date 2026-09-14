@@ -48,6 +48,7 @@ from chemclaw.durable.connector_job import (
     child_execution_timeout,
     wrapper_execution_timeout,
 )
+from chemclaw.durable.deliver_message import deliver_message_activity
 from chemclaw.durable.job_record import JobRecord, record_job
 from chemclaw.durable.memory_jobs import publish_memory_note_activity
 from chemclaw.durable.notify import record_session_event_activity
@@ -245,6 +246,10 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
                 task_queue=_CORE_QUEUE,
                 workflows=[ConnectorJobWorkflow],
                 activities=[
+                    # Registered because `_finish` now sends the `job-result` copy out of the
+                    # building unconditionally, so the worker has to serve it even though delivery
+                    # is off and the activity therefore returns `[]` on the first line.
+                    deliver_message_activity,
                     publish_memory_note_activity,
                     record_session_event_activity,
                     record_job,
@@ -392,6 +397,10 @@ def test_a_failed_connector_job_wakes_the_session_before_the_failure_propagates(
                 task_queue=_CORE_QUEUE,
                 workflows=[ConnectorJobWorkflow],
                 activities=[
+                    # Registered because `_finish` now sends the `job-result` copy out of the
+                    # building unconditionally, so the worker has to serve it even though delivery
+                    # is off and the activity therefore returns `[]` on the first line.
+                    deliver_message_activity,
                     publish_memory_note_activity,
                     record_session_event_activity,
                     record_job,

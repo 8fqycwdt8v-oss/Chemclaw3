@@ -54,6 +54,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.ids import stable_hash
     from chemclaw.durable import pending_store
+    from chemclaw.durable.deliver_message import OutboundMessage, deliver_best_effort
     from chemclaw.durable.notify import notify_session_best_effort
     from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
     from chemclaw.durable.registry import durable_activity, durable_workflow
@@ -119,6 +120,61 @@ def request_id_for(request: AwaitRequest) -> str:
     """
     return "await-" + stable_hash(
         {"kind": request.kind, "subject": request.subject, "asked_of": request.asked_of}
+    )
+
+
+def _awaiting_message(request: AwaitRequest, payload: dict[str, Any]) -> OutboundMessage:
+    """The outbound copy of one wait notice — who it goes to, and what it says.
+
+    **Two notices, two recipients, and reading them as one is a real error rather than a wording
+    choice.** `_push` fires twice with different payloads: while the wait is open it is an ask, and
+    the person who has to act is `asked_of`; when it expires it is a report, and the person who
+    needs to hear it is the requester — which is what the expiry's own call site already says in
+    prose ("an unanswered question is exactly the thing a requester needs to hear about"). The
+    session push-back does not have to make the distinction because both land in the *requester's*
+    session; a channel does, because it addresses a person rather than a conversation.
+
+    Built here rather than in the workflow body because it is pure formatting over two replay-stable
+    inputs, and because the outbound copy has to stand alone: a session event is rendered by a
+    surface that already knows what a pending request is, and an email or a file in an outbox is
+    read by somebody with no such context. So it carries the reason, the deadline and the request id
+    — the three things needed to act — and nothing the `pending_requests` projection is the
+    authority on.
+
+    Every payload key is read with a default. The two shapes differ (`due_at` is on the waiting
+    notice and not on the expiry), and a `KeyError` here would be raised in *workflow* code, where
+    nothing can catch it: the best-effort wrapper guards the activity, not its argument. That is the
+    same inversion `_push` carries a guard for one frame down, and it is not hypothetical — it
+    failed `test_a_deadline_that_passes_is_an_outcome_and_not_a_failure` on the first draft of this
+    function.
+    """
+    request_id = str(payload.get("request_id", ""))
+    reminders = int(payload.get("reminders", 0) or 0)
+    if payload.get("state") == "expired":
+        lines = [f"Nobody answered in time, after {reminders} reminder(s)."]
+        if request.rationale:
+            lines.append(request.rationale)
+        lines.append(f"It was asked of {request.asked_of or 'anyone entitled'}.")
+        lines.append(f"The request was {request_id}.")
+        return OutboundMessage(
+            recipient=request.requested_by,
+            subject=f"No answer: {request.subject}",
+            body="\n".join(lines),
+            kind="awaiting",
+            correlation_id=request.correlation_id,
+        )
+    lines = [request.rationale] if request.rationale else []
+    if payload.get("due_at"):
+        lines.append(f"Due {payload['due_at']}.")
+    if reminders:
+        lines.append(f"Reminder {reminders} — this has been open since it was asked.")
+    lines.append(f"Answer it against request {request_id}.")
+    return OutboundMessage(
+        recipient=request.asked_of,
+        subject=f"Waiting on you: {request.subject}",
+        body="\n".join(lines),
+        kind="awaiting",
+        correlation_id=request.correlation_id,
     )
 
 
@@ -423,7 +479,7 @@ class AwaitAnswerWorkflow:
         )
 
     async def _push(self, request: AwaitRequest, payload: dict[str, Any]) -> None:
-        """Push back into the requester's mailbox, when there is one.
+        """Tell whoever should know: the requester's mailbox, and the channel out.
 
         **A wait with no session is the ordinary case, not an edge one.** A campaign resumed by a
         Schedule, an effect approved out of an inbox, a question raised by a workflow rather than by
@@ -435,10 +491,20 @@ class AwaitAnswerWorkflow:
 
         The request is still open, still in the inbox and still on its deadline; what is skipped is
         a notification with no addressee.
+
+        **The outbound copy is not the same skip, and that asymmetry is the point.** The
+        paragraph above is right that a wait usually has no session — and a person who is not in
+        a session is exactly the person a question has to travel to reach. `asked_of` is an
+        addressee where `session_id` is not: `deliver/message.py` states that resolving one to an
+        address is the driver's job, so an actor id and an entitlement both pass through here
+        unread. It goes out on the opening notice and on every reminder, because that repetition
+        *is* the escalation property 3 describes; `payload['reminders']` is what lets a reader
+        tell the fourth from the first. On the *expiry* notice it goes to the requester instead,
+        because that one is a report rather than an ask — see `_awaiting_message`.
         """
-        if not request.session_id:
-            return
-        await notify_session_best_effort(request.session_id, AWAITING_KIND, payload)
+        if request.session_id:
+            await notify_session_best_effort(request.session_id, AWAITING_KIND, payload)
+        await deliver_best_effort(_awaiting_message(request, payload))
 
     async def _settle(
         self,

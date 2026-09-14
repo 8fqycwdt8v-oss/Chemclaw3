@@ -424,8 +424,10 @@ load_profiles()
 #: **67,500 since D-2026-09-13, and this one was bought outright.** Turning `harness_enabled` on by
 #: default puts `write_todos` and upstream's todo prompt into every profile's prefix: measured both
 #: ways in one process, +1,372 for `tool:write_todos` and +490 for `prompt:middleware-sections`,
-#: **1,862 on every profile except `computation`**, which already set the flag itself and moved by
-#: 0. Only `default` was near enough to matter — 64,907 → 66,769, over the old ceiling by 1,269.
+#: **1,862 on every profile except two**: `computation`, which already sets the flag itself and so
+#: moved by 0, and `safety`, which moved 1,863. The odd token is in the ADR's own table and was
+#: rounded away by every prose statement of it, this one included, until a review read the table.
+#: Only `default` was near enough to matter — 64,907 → 66,769, over the old ceiling by 1,269.
 #:
 #: Nothing was narrowed to pay for it, and that is deliberate rather than lazy: the narrowing this
 #: wants is §5's `default`-profile allow-list, worth a measured -5,787, and it is blocked on a live
@@ -525,11 +527,19 @@ KNOWN_OVERSIZED: dict[str, int] = {
     # **The one entry here whose cost is not ours to narrow, recorded on 2026-09-13 when
     # `harness_enabled` became the default and bound it on every profile.** The rule above says
     # narrow the arguments or paginate the result, and neither is available: decomposed on the
-    # bound object, 1,367 tokens are **1,115 of upstream's own tool description**, 206 of
-    # parameters and 147 of `plan_scope._SCOPE_GUIDANCE`. So the first-party half — the schema the
-    # model is shown and the paragraph explaining the `tools` field — is 353 tokens, and the debt
-    # is somebody else's prose arriving through a middleware `_apply_excluded_middleware` refuses
-    # to let a profile strip.
+    # bound object with this file's own counter, the 1,372 below is **973 of upstream's own tool
+    # description**, 152 of `plan_scope._SCOPE_GUIDANCE`, and 252 of parameters and envelope. So
+    # 71% of it is somebody else's prose, arriving through a middleware
+    # `_apply_excluded_middleware` refuses to let a profile strip, and the first-party half is 404.
+    #
+    # **That split shipped wrong and the error is worth naming.** It read "1,115 of upstream's own
+    # tool description, 206 of parameters and 147 of `_SCOPE_GUIDANCE`" against a whole it called
+    # 1,367 — three mistakes in one sentence. 1,115 is the *scoped* description,
+    # `self.tool_description` after `__init__` has appended the guidance to upstream's, so the
+    # guidance was counted twice and the parts summed to 1,468 against a whole of 1,367. And 1,367
+    # was chars/4 where the dict value beside it is this file's counter, which the `_count`
+    # docstring argues at length must be the basis. A decomposition whose parts do not sum to its
+    # whole is arithmetic nobody checked.
     #
     # **Forking that description to trim it was considered and rejected, and the argument is
     # already in the tree**: `_SCOPE_GUIDANCE` is appended to upstream's text rather than replacing

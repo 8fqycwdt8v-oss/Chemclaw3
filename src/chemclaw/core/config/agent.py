@@ -202,20 +202,24 @@ class AgentSettings(BaseSettings):
     # see its own comment below.
     #
     # **What it costs, stated because it is a behavioural change**: the thread allowance falls from
-    # the 57,000 the paragraph above held fixed to **42,500** at the prefix bound (more at today's
-    # measured prefix, which sits below the bound — `tests/test_compaction.py` measures it, and this
-    # line does not, because the figure it carried moved by 507 tokens between two measurements a
-    # day apart), and the band between this and the lossless edit's trigger falls
-    # from 27,000 to 12,500. That band is squeezed by the prefix, not by this number: at a
-    # 76,500-token prefix bound and a 128k window the whole policy has 42,500 tokens of thread to
-    # divide between two edits. The instrument for wanting more is a narrower prefix.
+    # the 57,000 the paragraph above held fixed, and the band between this default and the lossless
+    # edit's trigger falls with it. That band is squeezed by the *prefix* rather than by this
+    # number: at a 128k window the whole policy has only the window minus the prefix bound to divide
+    # between two edits, so the instrument for wanting more is a narrower prefix.
     #
-    # **Those three are arithmetic, not measurements, and they shipped stale anyway** — 43,000,
-    # 13,000 and 76,000, each falsified by wave 13 raising the ratchet ceiling 500 without touching
-    # this comment. They are `BUDGET_THREAD_ALLOWANCE`, this default minus
-    # `agent_tool_result_clear_trigger`, and `tests/test_context_floor.PREFIX_BOUND`; all three are
-    # asserted there, so read them there and treat the digits here as an illustration of the
-    # squeeze rather than as the authority on it.
+    # **This paragraph no longer states those three figures, and that is the fix rather than an
+    # omission.** It carried them three times and shipped stale all three: 43,000/13,000/76,000,
+    # falsified by wave 13 raising the ratchet ceiling 500 without touching this comment; then
+    # 42,500/12,500/76,500, falsified the same way by D-2026-09-13 raising it 2,000. The second
+    # correction was written *in the commit that staled it*, which is the argument in
+    # `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` happening to the sentence making
+    # it. A digit here is a claim about somebody else's ceiling, and the ceiling is a thing other
+    # branches move.
+    #
+    # The three are `tests/test_compaction.BUDGET_THREAD_ALLOWANCE`, this default minus
+    # `agent_tool_result_clear_trigger`, and `tests/test_context_floor.PREFIX_BOUND`. All three are
+    # asserted there, against the prefix the model is actually sent — so read them there, where a
+    # change moves the number and the assertion together.
     #
     # **And the second bound is now real.** `llm_context_window_tokens` stays 0 in code — this
     # repository cannot know an endpoint's window — but `deploy/helm/chemclaw/values.yaml` states
@@ -525,8 +529,7 @@ class AgentSettings(BaseSettings):
     # `TodoListMiddleware` and the plan gate (a todo list + plan/execute approval + a counted
     # completion cap) over the *same* tools/skills/audit/compaction as the single-turn agent, with
     # every generic battery (file memory/access, web search, shell) OFF — capability comes from our
-    # MCP servers and tools, not from the harness. Off by default so the single-turn agent stays
-    # the safe fallback.
+    # MCP servers and tools, not from the harness.
     # `harness_autonomy` picks the starting mode: `plan_only` (default, the pharma-safe one)
     # starts in plan mode and presents a plan for human approval before any execution — the
     # pre-execution approval gate — and only loops once approval switches it to execute; `execute`

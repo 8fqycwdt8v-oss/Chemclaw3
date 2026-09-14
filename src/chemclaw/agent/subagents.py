@@ -267,9 +267,23 @@ def helper_profile(caller: AgentProfile, held: frozenset[str]) -> AgentProfile:
     # profile inherits `None`, which resolves to that default, so the helper silently acquired a
     # todo list and a plan gate. Both are pure cost here, for two independent reasons:
     #
-    #   - The gate can never fire. It refuses `side_effecting_call`, and the line above has just
-    #     removed `side_effecting_tools()` from the surface — so there is nothing left for it to
-    #     refuse, on every helper this function builds.
+    #   - The gate has nothing to protect here, **and the first version of this comment argued
+    #     that from a false premise.** It said the gate "can never fire" because the line above
+    #     removes `side_effecting_tools()`, and that is not what the gate reads:
+    #     `authz.side_effecting_call` is `name in side_effecting_tools() or
+    #     writes_durable_memory(name, arguments)`, and the second half is *argument*-driven — it
+    #     matches `write_file`/`edit_file` under `/memories/`, which are neither in that set nor in
+    #     `held` at all, because `FilesystemMiddleware` splices them in downstream of this
+    #     narrowing. So the subtraction one line above does not reach them and the gate could
+    #     match.
+    #
+    #     What makes it safe is one line over: a helper is compiled with **no `store=`**, so
+    #     `scratchpad.scratchpad_backend` adds a `/memories/` route only `if store is not None and
+    #     actor` and a helper gets neither. `/memories/…` therefore falls to the `StateBackend`
+    #     default and dies with the helper — the durable write the gate exists to catch cannot
+    #     happen, rather than being refused when it does. `tests/test_subagents.py` pins that
+    #     absence, so passing a store to a helper turns this narrowing red instead of quietly
+    #     re-opening it.
     #   - The plan is written where nobody reads it. A helper's state is discarded when its report
     #     crosses back (`agent/tool_result_shape.py` keeps the spend keys and not the rest), so
     #     `write_todos` would cost 1,372 tokens of the helper's own prefix to write a plan that

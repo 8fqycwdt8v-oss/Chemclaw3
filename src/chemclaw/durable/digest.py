@@ -35,20 +35,18 @@ import logging
 from collections.abc import Sequence
 from datetime import timedelta
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from temporalio import activity, workflow
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.agent.subscriptions import Subscription, all_subscriptions, mark_reported
     from chemclaw.core.config import settings
-    from chemclaw.core.metrics_bridge import degraded
-    from chemclaw.deliver.message import Message
-    from chemclaw.deliver.registry import deliver, delivery_enabled
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.kg.graph import load_notes
     from chemclaw.kg.note import Note
     from chemclaw.kg.search import query_terms, term_coverage
 
+from chemclaw.durable.deliver_message import OutboundMessage, deliver_best_effort
 from chemclaw.durable.notify import notify_session_best_effort
 from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
@@ -181,76 +179,6 @@ async def acknowledge_digest(subscription_id: int, note_ids: list[str]) -> None:
     await mark_reported(subscription_id, note_ids)
 
 
-class DeliveryInput(BaseModel):
-    """The typed argument for `deliver_digest_activity`."""
-
-    owner: str
-    query: str
-    note_ids: list[str] = Field(default_factory=list)
-
-
-@durable_activity("background")
-@activity.defn
-async def deliver_digest_activity(payload: DeliveryInput) -> list[str]:
-    """Send one subscriber's digest on every enabled outbound channel, and say which took it.
-
-    An activity because it is I/O, and **the enablement check belongs here rather than in the
-    workflow**: `delivery_enabled()` reads `settings`, and a workflow that branched on it decided
-    whether to emit a command at all — so enabling a channel and restarting a worker made an
-    in-flight digest replay a command its history does not contain.
-
-    It never raises. The registry's `deliver` already swallows a single channel's failure so one
-    broken webhook is not everyone's outage; a misconfigured seam — a channel named in
-    `CHEMCLAW_DELIVERY_CHANNELS` with no folder — raises `DeliveryChannelError`, which is in
-    `_BAD_DATA_TYPES` and would therefore fail this activity **non-retryably**. That mattered
-    because the caller is ordered before `acknowledge_digest`: one misspelled channel name meant the
-    watermark never advanced, so subscriber #1 received the identical digest every night and
-    everyone after them received nothing, indefinitely. The failure is caught and reported instead,
-    and the caller now runs after the acknowledgement regardless.
-
-    Returns:
-        The channels that took the message. Empty means either that delivery is off or that every
-        channel refused — which the log line distinguishes and a caller cannot.
-    """
-    if not delivery_enabled():
-        return []
-    try:
-        # **Inside the `try`, and this is not tidiness.** `Message.recipient` is `min_length=1`, so
-        # an empty `Subscription.owner` raises `ValidationError` — which is in `_BAD_DATA_TYPES` and
-        # would therefore fail this activity *non-retryably*, aborting the run and every subscriber
-        # after it. The docstring said "it never raises" while two lines sat outside the guard that
-        # makes that true.
-        message = Message(
-            recipient=payload.owner,
-            subject=f"New for your standing query: {payload.query}",
-            body="\n".join(f"- {note_id}" for note_id in payload.note_ids),
-            kind="digest",
-        )
-        taken = await deliver(message)
-    except Exception as exc:
-        # **Never silently.** Before this, a total delivery failure moved no counter and wrote no
-        # log line anywhere in `chemclaw.deliver.registry`, and the workflow discarded the return
-        # value — so
-        # "every digest was dropped" and "every digest was delivered" were the same observation.
-        degraded(
-            logger,
-            "digest_delivery",
-            "digest delivery failed for %s: %s",
-            payload.owner,
-            exc,
-        )
-        return []
-    if not taken:
-        degraded(
-            logger,
-            "digest_delivery",
-            "no channel took the digest for %s; %d channel(s) are enabled",
-            payload.owner,
-            len(settings.delivery_channel_list),
-        )
-    return taken
-
-
 @durable_workflow("background")
 @workflow.defn
 class DigestWorkflow:
@@ -302,12 +230,13 @@ class DigestWorkflow:
             # unacknowledge a delivered digest. Its result is deliberately not part of the
             # acknowledging condition: outbound delivery is a courtesy on top of a delivered digest,
             # not a second delivery the watermark waits on.
-            await workflow.execute_activity(
-                deliver_digest_activity,
-                DeliveryInput(owner=item.owner, query=item.query, note_ids=list(item.note_ids)),
-                start_to_close_timeout=timeout,
-                schedule_to_start_timeout=queue_wait_timeout(),
-                retry_policy=BAD_DATA_RETRY,
+            await deliver_best_effort(
+                OutboundMessage(
+                    recipient=item.owner,
+                    subject=f"New for your standing query: {item.query}",
+                    body="\n".join(f"- {note_id}" for note_id in item.note_ids),
+                    kind="digest",
+                )
             )
             delivered += 1
         return delivered

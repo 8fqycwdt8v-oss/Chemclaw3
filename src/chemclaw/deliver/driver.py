@@ -97,11 +97,12 @@ def message_id(message: Message) -> str:
     and left the payload with no field a receiver could key on. Measured: three `deliver()` calls of
     one message put one file on the share and **three** POSTs on the wire.
 
-    `deliver_digest_activity` runs under `BAD_DATA_RETRY`, so a worker death after the POST landed
-    re-runs the activity and re-POSTs — at-least-once by construction, which is correct for
-    delivery and is exactly why the receiver needs a key. A duplicated digest is a nuisance; the
-    same driver is the declared seam for the `job-result` and `report` kinds, where a duplicate is
-    a duplicated ticket.
+    `deliver_message_activity` runs under `BAD_DATA_RETRY`, so a worker death after the POST
+    landed re-runs the activity and re-POSTs — at-least-once by construction, which is correct
+    for delivery and is exactly why the receiver needs a key. A duplicated digest is a nuisance;
+    the same driver now really does carry the `job-result`, `report` and `awaiting` kinds, where
+    a duplicate is a duplicated ticket — this paragraph said "declared seam" while those three
+    had no producer at all.
 
     Content only, so it carries no correlation id and no identity: the same four fields the payload
     already contains, so the two channels answer "is this the same message" identically.

@@ -1065,3 +1065,50 @@ def test_a_second_delegation_shares_the_budget_the_first_one_spent() -> None:
         f"a second delegation added {landed} characters to a channel already holding {held}, so "
         f"the {budget}-character bound is per `task` call rather than per channel"
     )
+
+
+def test_a_helper_has_no_durable_memory_route_and_no_store_is_passed_to_one() -> None:
+    """What actually makes `helper_profile`'s `harness_enabled=False` safe, pinned in both halves.
+
+    The narrowing's first comment argued that the plan gate "can never fire" on a helper because
+    `helper_profile` subtracts `side_effecting_tools()`. That premise is false:
+    `authz.side_effecting_call` is `name in side_effecting_tools() or writes_durable_memory(...)`,
+    and the second half is *argument*-driven — it matches `write_file`/`edit_file` under
+    `/memories/`, verbs `FilesystemMiddleware` splices in downstream of the subtraction, so the
+    subtraction never touches them.
+
+    What makes it safe is one step over, and it is a property of the *wiring* rather than of the
+    tool set: a helper is compiled with no `store`, so `scratchpad_backend` adds a `/memories/`
+    route only `if store is not None and actor` and a helper satisfies neither. The durable write
+    the gate exists to refuse cannot happen; it is not merely refused when it does.
+
+    Both halves are asserted because either one alone fails open. The mechanism without the wiring
+    would pass while somebody threaded a store into the helper; the wiring without the mechanism
+    would pass if `scratchpad_backend` ever started routing `/memories/` unconditionally.
+    """
+    import inspect
+
+    from chemclaw.agent.langgraph_agent import _subagents
+    from chemclaw.agent.scratchpad import MEMORY_ROOT, scratchpad_backend
+
+    class _Skills:
+        """The one attribute `scratchpad_backend` reads off a skills backend."""
+
+        routes: dict[str, object] = {}
+
+    # The mechanism: with no store there is no durable route, so `/memories/…` falls to the
+    # `StateBackend` default and dies with the helper's own graph state.
+    backend = scratchpad_backend(_Skills(), None)  # type: ignore[arg-type]
+    assert MEMORY_ROOT not in backend.routes, (
+        f"a store-less backend routes {MEMORY_ROOT}, so a helper's write would outlive it and the "
+        "plan gate is the only thing that would have refused it — which `helper_profile` removed"
+    )
+
+    # The wiring: the helper's own compile passes no store. Read off the source because the backend
+    # is built inside `build_langgraph_agent` and never returned, so there is nothing else to ask.
+    source = inspect.getsource(_subagents)
+    call = source[source.index("build_langgraph_agent(") :]
+    assert "store=" not in call[: call.index(")")], (
+        "the helper compile passes a store; `/memories/` becomes durable for a helper and "
+        "`helper_profile(harness_enabled=False)` then removes the only gate over it"
+    )

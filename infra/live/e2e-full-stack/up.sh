@@ -308,6 +308,9 @@ up() {
   export CHEMCLAW_CHEM_TOKEN="${CHEMCLAW_CHEM_TOKEN:-dev-token}"
   export CHEMCLAW_SAFETY_TOKEN="${CHEMCLAW_SAFETY_TOKEN:-dev-token}"
   export CHEMCLAW_CALC_TOKEN="${CHEMCLAW_CALC_TOKEN:-dev-token}"
+  # `pyexec` was missing from this block while `start_pyexec` set the server half four lines
+  # further up — the exact asymmetry the paragraph above describes, sitting directly under it.
+  export CHEMCLAW_PYEXEC_TOKEN="${CHEMCLAW_PYEXEC_TOKEN:-dev-token}"
 
   log "connectors dir: $CHEMCLAW_CONNECTORS_DIR"
 

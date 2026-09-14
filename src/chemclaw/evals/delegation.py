@@ -136,8 +136,9 @@ class DelegationReport(BaseModel):
     #: Tasks where the *arm* never delegated, so the pair compares the baseline with itself.
     undelegated: list[str]
     #: Median across compared tasks of `arm / baseline`. Below 1.0 means delegation was cheaper.
-    #: `None` when no task could be compared, which is different from a ratio of 1.0 and must not
-    #: be rendered as one.
+    #: `None` means this axis had no usable ratio, which is different from a ratio of 1.0 and must
+    #: not be rendered as one. It cannot mean "no task was compared" — `NoComparableTask` raises
+    #: before a report exists — so it means every compared task had a zero baseline on this axis.
     median_token_ratio: float | None
     median_wall_clock_ratio: float | None
 
@@ -155,8 +156,14 @@ def aggregate_runs(runs: Iterable[ArmRun]) -> list[ArmAggregate]:
     """Collapse repeats of each `(task, arm)` pair to its median on every axis.
 
     Median rather than mean on all three axes, including quality: a five-point verdict scale is
-    ordinal, and averaging `fabricated` with `served` produces a number that names no verdict. The
-    middle observation always does.
+    ordinal, and averaging `fabricated` with `served` produces a number that names no verdict.
+
+    **Quality takes `median_low`, and the difference is not pedantry.** `statistics.median` returns
+    the *mean of the two middle values* on an even-sized group, so at 4 or 6 repeats it reproduces
+    exactly the averaging this paragraph forbids — `MINIMUM_REPEATS` is a floor rather than a
+    target, so even counts are ordinary. `median_low` returns an observation, which is the property
+    the sentence above claims. The two cost axes keep `median`: tokens and seconds are continuous,
+    and the midpoint of two runs is a meaningful figure there.
     """
     grouped: dict[tuple[str, str], list[ArmRun]] = defaultdict(list)
     for run in runs:
@@ -166,7 +173,7 @@ def aggregate_runs(runs: Iterable[ArmRun]) -> list[ArmAggregate]:
             task_id=task_id,
             arm=arm,
             repeats=len(group),
-            quality=statistics.median(r.quality for r in group),
+            quality=statistics.median_low(r.quality for r in group),
             billed_tokens=statistics.median(float(r.billed_tokens) for r in group),
             wall_clock_seconds=statistics.median(r.wall_clock_seconds for r in group),
             delegated_in=sum(1 for r in group if r.delegated),

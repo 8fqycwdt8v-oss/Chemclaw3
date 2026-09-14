@@ -57,6 +57,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.metrics_bridge import degraded
     from chemclaw.durable.awaiting import AwaitAnswerWorkflow, AwaitOutcome, AwaitRequest
+    from chemclaw.durable.deliver_message import OutboundMessage, deliver_best_effort
     from chemclaw.durable.effect_ledger import EffectRecord, begin_effect, settle_effect
     from chemclaw.durable.job_record import JobRecord, note_with_run_provenance, record_job
     from chemclaw.durable.memory_jobs import publish_memory_note_activity
@@ -1104,6 +1105,22 @@ class ConnectorJobWorkflow:
                     "summary": result.summary,
                 },
             )
+        # **And out of the building, addressed to whoever launched it.** The push-back above
+        # reaches a *session*, and a durable job is precisely the thing that outlives one: a
+        # CREST search or a BO round finishes hours after the chemist stopped watching, and
+        # `job.session_id` is empty altogether for a run a Schedule or an inbox started. The
+        # `job-result` kind was declared for this and had no producer. Last and best-effort,
+        # after the record, the results store and the note: everything durable is already
+        # written, and a channel outage must not cost an expensive campaign its retry budget.
+        await deliver_best_effort(
+            OutboundMessage(
+                recipient=job.requested_by,
+                subject=f"{job.connector}:{job.job} finished",
+                body=result.summary,
+                kind="job-result",
+                correlation_id=job.correlation_id,
+            )
+        )
         return result
 
     async def _record_run(self, record: JobRecord) -> bool:

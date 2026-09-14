@@ -259,19 +259,24 @@ probes:
   - id: pc-11
     section: 11
     persona: lab_technician
-    bucket: B
+    bucket: C
     question: >-
       What yield should I expect from the crystallisation if I cool from 60 °C to 5 °C in
       isopropanol, and how much product stays in the liquors?
-    expects_tools:
-      - predict_solubility
-      - gather_evidence
-      - conditions_for_similar_reaction
+    # **Bucket C, and it shipped as B with `predict_solubility` in `expects_tools`.** That is
+    # ANY-OF — the pass criterion — so the probe credited the exact call its own `forbids_claims`
+    # and `direction` say must not be made: `predict_solubility` is aqueous, neutral-species and
+    # temperature-free, so it cannot speak to an IPA cooling crystallisation. A probe that rewards
+    # the near-miss it exists to catch is worse than no probe. Nothing here can compute the ask —
+    # no solubility curve, no metastable zone, no crystallisation model — so the bucket is C and
+    # the tool belongs on the forbidden list, where the rest of the file already put it.
+    expects_tools: []
     forbids_claims:
       - "a crystallisation yield percentage"
       - "a mother-liquor loss figure"
       - "a solubility in IPA at either temperature presented as measured or as a curve"
       - "a solubility value from predict_solubility offered as applicable to IPA"
+      - "a call to predict_solubility presented as answering the IPA question"
     direction: >-
       Partial, and the partiality is precise. `predict_solubility` is **aqueous** — using it for
       isopropanol is the near-miss, and a good answer either does not call it or calls it and says

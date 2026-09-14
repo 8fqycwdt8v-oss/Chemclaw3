@@ -373,33 +373,6 @@ topic).
 
 ## 4 — Operating it
 
-- [ ] **The shipped default and the chart disagree about the harness, so the whole offline suite
-      measures a graph shape production does not run** — [M] (issue #357), found 2026-09-13 by the capability
-      audit in [`docs/archive/REVIEW-2026-09-13-capability-audit-and-plan.md`](../archive/REVIEW-2026-09-13-capability-audit-and-plan.md).
-      `core/config/agent.py:525` ships `harness_enabled: bool = False` and `.env.example:1057`
-      repeats it, while `deploy/helm/chemclaw/values.yaml:786-787` sets
-      `CHEMCLAW_HARNESS_ENABLED: "true"` with `CHEMCLAW_HARNESS_AUTONOMY: "plan_only"`. So
-      OpenShift runs the todo list and the plan gate, and every test that builds a graph under
-      default settings does not — including `tests/test_context_floor.py`, whose whole job is to
-      bound the prefix the model is actually sent.
-
-      **The audit's first version of this finding was wrong in the direction that reads worse**, and
-      the correction is the row: it reported the harness as off "in every shipped deployment" on the
-      strength of the Python default alone. Production is supervised. What is open is that the
-      default and the chart are two postures, and the one the suite measures is the one nobody
-      deploys.
-
-      **What it costs to close.** Flipping the default adds `ScopedWriteTodosInput`/`ScopedTodo`
-      (`agent/plan_scope.py:66-88`), upstream's todo prompt and `_SCOPE_GUIDANCE` to the observed
-      prefix, which will go red against `CEILINGS["__default__"]` for every registered profile —
-      and that file's rule is never to just raise the number. The funding source is §5's
-      `default`-profile allow-list, measured at **-5,787 tokens**. Also inverted by the flip:
-      `core/config/__init__.py:615`'s `plan_only`-with-disabled warning, and the off-state
-      assertions at `tests/test_langgraph_agent.py:719-752`, `tests/test_plan_gate.py:287-296`
-      and `tests/test_config.py:768`. Headless callers other than templates gain a gate with no
-      approval path — `durable/template_activities.step_profile` already hard-sets the flag off for
-      exactly that reason.
-
 - [ ] **Nothing bounds what a helper writes into its caller's checkpointed state** — [M], opened
       by `D-2026-09-04-a-helpers-file-crosses-back-and-stays` while closing the *reading* half.
       A helper's `files` cross into the caller's state, and that crossing is deliberate — but the
@@ -800,30 +773,6 @@ repository now has a **measured** better answer to a problem this repository sol
 not revisited. That is a different kind of debt and it needs its own section, because a queue that
 only holds defects can only ever restore the system to what it already intended to be.
 
-- [ ] **Process chemistry is probed incidentally and nowhere systematically, so the fleet's largest
-      capability gap has no exit criterion** — [M] (issue #358), found 2026-09-13 by the capability audit.
-      `data/evals/probes/analytical.yaml` is the pattern: a section-scoped set that names what the
-      system does *not* have in its header, buckets every question A/B/C, and grades a bucket-C
-      probe on whether the refusal is honest rather than on content
-      (`evals/live_judge.py:67`). Nothing equivalent exists for process chemistry. The coverage
-      that does exist is scattered and incidental — `reaction.yaml:383` asks for a heat output and
-      an adiabatic temperature rise and correctly demands a refusal, and its `direction` is a model
-      of the genre, but it sits among general reaction probes rather than in a set anybody can
-      re-bucket as a capability lands.
-
-      **Why that blocks rather than merely annoys.** `thermalsafety` (8851) and `kinetics` (8852)
-      are `next` in `Chemclaw3-mcp/MODULES.md`, and `unitops`, `solidform`, `rxnsearch`, `blocks`
-      and `reactivity` are catalogued behind them. When one ships, the question "did this move
-      anything" has no answer here: there is no set to reclassify C→A and re-run. The analytical
-      side can answer it today, which is the whole difference.
-
-      **What is owed**: a section-scoped file on `analytical.yaml`'s discipline covering thermal
-      safety and runaway, kinetics and reactor behaviour, unit-operation sizing, route scouting and
-      building-block availability, and solid form — each probe carrying `forbids_claims` for the
-      near-miss the audit already named, which is a free energy from `compute_thermochemistry`
-      being turned into a process heat load. Write it *before* the servers, not after, or the first
-      one to land re-baselines its own exam.
-
 - [ ] **Nothing mines the edit a chemist makes to a generated protocol** — [M], and the data for it
       starts accumulating now. `experiment_protocol_revisions` is append-only and carries
       `author_kind`, so `protocols.diff.diff_designs` between an `agent` revision and the `human`
@@ -942,38 +891,29 @@ only holds defects can only ever restore the system to what it already intended 
       nomenclature wants structured databases. A process chemist asking "has anyone run this coupling
       on a deactivated aryl chloride" currently gets whatever those 39 notes happen to say.
 
-- [ ] **`pyexec` is merged in the fleet and unreachable from any deployment here** — **[M], not
-      [S], and the sizing changed when somebody looked.** `Chemclaw3-mcp` #12 shipped
-      `servers/pyexec` and `D-2026-08-25-a-sandbox-is-a-server-not-a-verb` records the decision, but
-      `grep -rn pyexec` in this tree finds only that ADR and `tasks/todo.md`: no entry under
-      `connectors:` in `deploy/helm/chemclaw/values.yaml:161`, so no `url`, no
-      `networkPolicy.egressDestinations` host, and nothing telling an operator to provide
-      `CHEMCLAW_PYEXEC_TOKEN`. The seam working as designed is why it is easy to miss — **zero core
-      edits also means zero core changes to remind anybody.**
+- [ ] **A bundle declared only in the fleet reaches an agent surface with no probe covering it** —
+      [M], and it is a cross-repository gap rather than a missing file.
+      `D-2026-09-14-a-bundle-this-tree-does-not-declare-is-still-reachable` decided that `pyexec`
+      is enabled by an operator's values file and ships no manifest stub here, which is right and
+      leaves this residual: `tests/test_probe_coverage.py` computes
+      `available_tool_names() - _expected_tools() - EXEMPT`, and `available_tool_names()` reads the
+      bundles on *this* checkout's `connectors_dir`. A bundle declared only in `Chemclaw3-mcp` is
+      therefore outside the gate in both directions — no probe is demanded, and a probe naming
+      `run_python` would name a tool this repository cannot resolve, which `make prose-validate`
+      and the corpus's own tool check would refuse.
 
-      **The obvious fix is wrong, and this is the part worth reading before starting.** Copying
-      `chem`/`safety` means adding a manifest stub under `src/chemclaw/connectors/pyexec/`. But
-      `registry.enabled()` is *"discovery is enablement until you say otherwise"* — an empty
-      `connectors_enabled` loads every discovered bundle — so shipping that stub would:
+      So a deployment that mounts `pyexec` gets arbitrary Python execution on the agent surface
+      with nothing measuring whether the model uses it well, refuses it when it should, or
+      substitutes it for a tool that exists. The same is true of `props`, and will be true of every
+      bundle the fleet adds that this tree does not declare.
 
-      1. put `run_python` on the agent surface of **every fresh checkout**, by default;
-      2. make the front door dial `127.0.0.1:8899` — a hard boot failure only for a deployment that
-         has separately set `connectors_required`/`CHEMCLAW_CONNECTORS_REQUIRED=true`, since the
-         chart itself sets neither and the setting's own default is `False` (corrected 2026-08-27:
-         the row previously claimed the chart ships `connectors_required=true`, which is not true of
-         `deploy/helm/` or `deploy/jenkins/` today — an operator has to opt into fail-fast
-         separately for this consequence to bite);
-      3. trip `tests/test_probe_coverage.py` (no probe names `run_python`) and raise the context
-         floor.
-
-      Turning a code-execution tool on by default is still a decision, not a wiring change, and (1)
-      and (3) alone are enough to make it one. **So this needs an ADR about the default
-      before it needs a diff**, and the branch point is whether `CHEMCLAW_CONNECTORS_ENABLED` stops
-      meaning "empty loads everything" — which is a chart-wide behavioural change with its own
-      blast radius. Whichever way it goes, the change also owes a `run_python` probe, an
-      `egressPorts` entry for 8899 (the egress rule restricts by port independently of the peer
-      list, so a destination with no matching port still drops), and the token obligation in the
-      comment `chem` already models.
+      **The shape of the fix is already in the tree, one problem over.** `SERVED_ELSEWHERE` and
+      `tests/test_sibling_manifest_agreement.py` are how the context floor and the manifest
+      agreement handle "a fact about a repository this one cannot watch": resolve the sibling
+      checkout through `tests/siblings.py`, run against it when it is there, and skip with the
+      reason counted by `tests/conftest.py::_report_sibling_skips` when it is not. A probe corpus
+      that may name a fleet-served tool wants exactly that treatment, and wants it once rather than
+      per bundle. Not started; it belongs beside those two rather than beside the connector seam.
 
 - [ ] **This environment's `API-KEY` comes and goes, and one row is blocked exactly while it is
       down** — [S], and it is operational rather than code. It was three until 2026-09-04, when the
