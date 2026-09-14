@@ -7,9 +7,15 @@ primitives; what happens here is the three things that stayed:
 - **The D-011 cache.** Every compute tool goes through `connectors/calc/remote.py::cached_remote` —
   ask the server for the key, look it up, cross the wire only on a miss. A persisted result is still
   never recomputed; the miss path just got longer.
-- **Composition.** `compute_thermochemistry` and `predict_logd` are not shipped by the server at
-  all, because their keys would name an output. They are assembled here from parts that *are* keyed
-  (`connectors/calc/compose.py`), which is what keeps their warm path warm.
+- **Composition.** Both `compute_thermochemistry` and `predict_logd` are assembled here from parts
+  that *are* keyed (`connectors/calc/compose.py`), which is what keeps their warm path warm — but
+  for two different reasons, and this paragraph used to give only the first.
+  `compute_thermochemistry` is **not shipped by the server at all**, because its key would name the
+  geometry its own refinement loop settles on. `predict_logd` **is** served — the fleet's
+  `servers/calc/tool-surface.json` records it — and is the one tool there that answers
+  `calculation_key` with nothing, because its expensive half is a *cached* pKa and the rest is a
+  Crippen sum. This repository never calls it, for that reason and not for the other one
+  (`connectors/calc/remote.py::remote_key`, which has said so all along).
 - **The calibration ledger and the store's read side.** `report_measurement`, `calculator_trust`,
   `calculator_outliers`, `find_calculations`, `list_artifacts`, `fetch_artifact` — none of which the
   server can answer, because it holds no state at all.
