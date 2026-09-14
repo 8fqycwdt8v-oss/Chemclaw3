@@ -13,8 +13,9 @@ KUBE_VERSION ?= 1.29.0
 # whenever the case-set itself changes — the mismatch is the tripwire that says you forgot.
 # Bumped when the case set itself changes, because a baseline is only comparable to the set it was
 # recorded on — `eval-baseline-check` refuses to compare two versions rather than reporting a drift
-# between different quantities. 2026-08-25 added `autonomy-turn-cost`.
-EVAL_CASE_SET_VERSION ?= retrieval-2026-09-05
+# between different quantities. 2026-09-14 added the two demonstration cases that make `runaway_rate`
+# and `prediction_error` gates that can fire (`EvalReport.gates_no_demonstration_can_fire`).
+EVAL_CASE_SET_VERSION ?= live-cost-2026-09-14
 
 # How many pytest worker processes `test` and `cov` run across
 # (`D-2026-09-13-a-stable-failure-set-is-not-two-green-runs`).
@@ -102,7 +103,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-template-args live-verifier-margin trajectory-census live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats upstream-check share-estimate share-sync live-ab live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status
+.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-turn-cost live-benchmark live-template-args live-verifier-margin trajectory-census live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats upstream-check share-estimate share-sync live-ab live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -508,6 +509,22 @@ live-jobs:  ## Run a real durable job end to end (Temporal + connector worker + 
 
 live-probes:  ## Ask the running front door the live probe set (exit 3 unreached, 2 ungraded).
 	uv run python -m chemclaw.cli.live_probes $(ARGS)
+
+# The cost half of what `live-probes` asks. `make eval` scores `turn_cost_ratio` over committed
+# literals, so no change to the agent can move it; this drives a fixed three-turn workload through
+# the running front door, scores the `turn_costs` rows it actually produced with the same metric,
+# and fails on a worsening drift against the recorded case. Live-lane, never `ci`: it needs a front
+# door and a database. `ARGS="--emit"` re-records the case, deliberately, like `make eval-baseline`.
+live-turn-cost:  ## Score `turn_cost_ratio` over turns this system really ran (exit 3 unreached).
+	uv run python -m chemclaw.cli.live_turn_cost $(ARGS)
+
+# The first number in this repository somebody else can also produce. Everything `make eval` gates
+# is first-party; this asks 100 expert-written, keyed ChemBench questions of a running front door
+# and scores them by comparison rather than by a judge. `ARGS="--profile no-tools"` is the control
+# arm. Live-lane, never `ci`: it needs a front door and a model gateway, and it is not a gate —
+# a closed-book chemistry score is a property of the deployment's model, not of a commit.
+live-benchmark:  ## Score this system on the vendored ChemBench subset (exit 3 unreached).
+	uv run python -m chemclaw.cli.live_benchmark $(ARGS)
 
 # The half of `template-validate` that needs a session. `make template-validate` reads a tool's
 # parameters out of this tree and cannot answer for a bundle we declare and do not run — seven

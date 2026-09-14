@@ -41,6 +41,42 @@ def test_shipped_prose_names_only_real_tools() -> None:
     assert check_prose_contract() == []
 
 
+def test_no_tool_description_tells_the_model_about_a_tier_that_is_gone() -> None:
+    """A tool's docstring is its schema description, and it is re-sent on every model call.
+
+    `D-2026-08-26-semiempirical-is-the-whole-tier` deleted the DFT tier, the HPC launcher and every
+    tool that reached them. What it could not delete is prose *about* them sitting in a docstring
+    that is still shipped: `get_durable_job_status` carried 184 tokens explaining that a case "used
+    to degrade to a bare status, because the DFT job returned its own typed result and had its own
+    status tool (`agents/job_status.py`)" — on every turn, describing a system the model cannot
+    reach, at the model's expense.
+
+    This is the narrow, checkable half of the wider rule. The wider one — rationale belongs in a
+    `#` comment and guidance in the docstring — is judgment and stays a review rule; naming a
+    removed tier is not judgment.
+
+    The registry rather than the compiled graph, so this needs no Postgres and runs in every lane:
+    a description reaches the model through `convert_to_openai_tool` either way, and what is
+    asserted is the text, not the binding.
+    """
+    import inspect
+    import re
+
+    from chemclaw.core.tool_registry import registered_tools
+
+    gone = re.compile(r"\bDFT\b|\bHPC\b|Nextflow|Seqera|compute_dft_energy|agents/job_status")
+    offenders = {
+        getattr(fn, "__name__", str(fn)): match.group(0)
+        for fn in registered_tools()
+        if (match := gone.search(inspect.getdoc(fn) or ""))
+    }
+    assert not offenders, (
+        f"{offenders} name a removed tier in text the model is sent on every turn. Move the "
+        "history to a `#` comment in the function body: the model cannot act on it and pays for "
+        "it, and `D-2026-08-26-semiempirical-is-the-whole-tier` deleted what it describes."
+    )
+
+
 def test_mcp_tools_count_as_real() -> None:
     """MCP capability tools have no Python symbol, so they must come from the config allowlist."""
     names = available_tool_names()

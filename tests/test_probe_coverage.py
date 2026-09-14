@@ -31,6 +31,7 @@ moved. An exemption that names nothing is a hole with a note on it, so this file
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -109,6 +110,60 @@ def test_no_probe_expects_a_tool_that_does_not_exist() -> None:
     )
 
 
+def _knowledge_note_ids() -> set[str]:
+    """Every note id in the shipped corpus, by filename stem."""
+    root = Path(__file__).resolve().parents[1] / "knowledge"
+    return {path.stem for path in root.rglob("*.md") if path.stem != "README"}
+
+
+def test_no_probe_expects_a_note_that_does_not_exist() -> None:
+    """The offline half of the gold set: a label pointing at a note that is gone grades nothing.
+
+    It fails for the wrong reason — the retriever was never going to return an id the corpus does
+    not hold — so the pair stops measuring retrieval and starts measuring the label, while still
+    counting toward the run's recall. This is the half CI can run; the recall itself needs a front
+    door and is scored by `make live-probes`.
+    """
+    expected = {name for probe in _probes() for name in probe.expects_notes}
+    assert expected, "no probe declares `expects_notes`; this test proves nothing"
+    phantom = sorted(expected - _knowledge_note_ids())
+    assert not phantom, (
+        f"these probes expect notes the corpus does not hold: {phantom}. Either the note was "
+        "renamed and the probe was not, or the label outlived its note."
+    )
+
+
+def test_every_note_a_direction_names_is_declared_as_data() -> None:
+    """The pairs stay readable as data rather than sliding back into prose.
+
+    46 labelled (query, note) pairs across 20 probes existed for months inside `direction:`, where
+    only a human grader could read them — `DEFERRED.md` recorded the consequence as "the shipped
+    graph has none", then corrected itself to "unreadable as data because `Probe` is
+    `extra='forbid'`". Transcribing them once fixes that instant and nothing keeps it fixed: the
+    next probe written in the same style re-opens the same hole, silently, because a direction
+    naming a note still reads like a complete probe.
+
+    So this asserts the direction and the field agree. A note id a direction names and the field
+    omits is the hole coming back; the converse is allowed, because a label may be more precise
+    than the prose that motivated it.
+    """
+    corpus = _knowledge_note_ids()
+    missing: dict[str, list[str]] = {}
+    for probe in _probes():
+        named = sorted(
+            note
+            for note in corpus
+            if re.search(rf"(?<![\w-]){re.escape(note)}(?![\w-])", probe.direction)
+        )
+        gap = sorted(set(named) - set(probe.expects_notes))
+        if gap:
+            missing[probe.id] = gap
+    assert not missing, (
+        f"{len(missing)} probe(s) name a corpus note in `direction:` and not in `expects_notes`: "
+        f"{missing}. A pair only a human grader can read is the hole this field closed."
+    )
+
+
 def test_every_exemption_names_what_covers_it() -> None:
     """An exemption is a claim that the coverage moved. This is the claim being checked."""
     empty = sorted(name for name, reason in EXEMPT.items() if len(reason.strip()) < 40)
@@ -137,6 +192,41 @@ def test_no_exemption_names_a_tool_that_does_not_exist() -> None:
     assert not gone, f"{gone} are exempt but are not on the agent surface at all. Delete them."
 
 
+def test_no_tools_only_coverage_is_a_question_the_surface_cannot_answer() -> None:
+    """A tool covered solely by a bucket-C probe is a tool the corpus does not exercise.
+
+    The corpus is deliberately mixed: bucket A the surface should answer, B partly, **C not at
+    all**. That mix is right for measuring honesty, and it means "this tool appears in a probe" and
+    "this tool is exercised" are different statements — a C probe is satisfied by the system
+    *declining*, so a tool whose only probe is a C is covered on paper and never called.
+
+    This is the thin half of the concentration question, and it is the half that turned out to
+    matter. Measured 2026-09-14: 45 of 114 agent-callable tools are named by exactly **one** probe —
+    39% of the surface resting on a single phrasing — and **zero** of them rest on a C. So the tail
+    is thin and not hollow, and this assertion is what keeps it that way.
+
+    A count is not asserted, deliberately. A ratchet on "how many tools have one probe" would block
+    every new tool until somebody wrote it a second question, which is a toll on adding capability
+    rather than a bound on risk. What must not happen is a tool arriving with coverage that cannot
+    call it.
+    """
+    by_tool: dict[str, list[Probe]] = {}
+    for probe in _probes():
+        for name in probe.expects_tools:
+            by_tool.setdefault(name, []).append(probe)
+    live = available_tool_names()
+    hollow = sorted(
+        name
+        for name, probes in by_tool.items()
+        if name in live and all(probe.bucket == "C" for probe in probes)
+    )
+    assert by_tool, "no probe names a tool; this test proves nothing"
+    assert not hollow, (
+        f"{hollow} are named only by bucket-C probes, which the surface is not expected to answer. "
+        "Such a tool is covered on paper and never called. Give each one a bucket A or B question."
+    )
+
+
 def test_the_corpus_is_not_concentrated_on_one_tool() -> None:
     """No single tool may be what most of the corpus measures.
 
@@ -148,6 +238,13 @@ def test_the_corpus_is_not_concentrated_on_one_tool() -> None:
     The bound is deliberately loose. This is not asking for a flat distribution — a retrieval tool
     *should* be the most common thing an agent reaches for — it is asking that no one tool be a
     majority of what the suite knows how to check.
+
+    **Re-measured 2026-09-14 and the concentration has gone**: `gather_evidence` is in 126 of 297
+    probes, **42%**, with 55% of tool-naming probes touching any retrieval tool and only 14%
+    touching *nothing but* retrieval. The 2026-08-25 figure above is kept because it is why the
+    bound exists, not because it is current — a paragraph that reads as a live measurement is the
+    thing `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` is about, and the live number
+    is whatever this assertion computes.
     """
     probes = _probes()
     counts: dict[str, int] = {}

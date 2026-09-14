@@ -1,0 +1,156 @@
+"""A backfill lands many notes in one commit; the conversational path still lands one at a time.
+
+**The two paths want different write shapes, and until now they had one.** One commit and one push
+per note is what bounds a backfill — measured here against a real bare remote: **140.9 ms per note**
+unbatched against **15.8 ms** at ten to a commit and **4.8 ms** at fifty, a 29.4x difference at the
+shipped default. `D-2026-09-13-the-lock-is-not-the-bound-the-commit-is` measured the same curve at a
+10,000-note corpus (327.3 / 31.6 / 8.5 ms) and declined batching for the *conversational* path on
+the product rather than the cost: a queued note is one a chemist cannot read yet, which is what
+deleting the PR-gate bought. That argument does not reach an operator command over a directory of
+existing documents, and this file is where the split is held.
+
+Real git against a real bare remote, because what is being asserted is a commit count, and a fake
+writer that counted calls would assert the wrapper's arithmetic rather than git's.
+"""
+
+import asyncio
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from chemclaw.core.config import settings
+from chemclaw.kg.git_writer import BatchingNoteWriter, GitNoteWriter
+from chemclaw.kg.note import Note
+from chemclaw.kg.record import record_note
+
+
+def _run(*args: str, cwd: Path | None = None) -> str:
+    """One git command, failing loudly — a fixture that half-built would fail as a finding."""
+    done = subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=True)
+    return done.stdout.strip()
+
+
+def _notes_repo(root: Path) -> Path:
+    """A bare remote and a clone of it with an empty `knowledge/`, on `main`."""
+    remote, clone = root / "remote.git", root / "clone"
+    _run("git", "init", "--bare", "-q", "-b", "main", str(remote))
+    _run("git", "clone", "-q", str(remote), str(clone))
+    _run("git", "-C", str(clone), "config", "user.email", "backfill@example.test")
+    _run("git", "-C", str(clone), "config", "user.name", "backfill")
+    (clone / "knowledge").mkdir()
+    (clone / "knowledge" / ".keep").write_text("", encoding="utf-8")
+    _run("git", "-C", str(clone), "add", "-A")
+    _run("git", "-C", str(clone), "commit", "-q", "-m", "seed")
+    _run("git", "-C", str(clone), "branch", "-M", "main")
+    _run("git", "-C", str(clone), "push", "-q", "origin", "HEAD:refs/heads/main")
+    return clone
+
+
+def _note(index: int) -> Note:
+    """One backfilled document's note."""
+    return Note(
+        id=f"playbook-batch-{index:03d}",
+        type="playbook",
+        created_by="agent",
+        body=f"Backfilled document {index}.",
+    )
+
+
+def _commits(clone: Path) -> int:
+    """Commits on `main`, so a batch's saving is counted in the thing it actually saves."""
+    return int(_run("git", "-C", str(clone), "rev-list", "--count", "HEAD"))
+
+
+def test_a_batch_of_notes_lands_in_one_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Six notes at a batch size of three are two commits, not six — and every note is on disk.
+
+    Both halves matter. The commit count is the saving; the files are the thing that must not be
+    traded for it, and a batching writer that dropped one would look exactly like a fast one.
+    """
+    clone = _notes_repo(tmp_path)
+    monkeypatch.setattr(settings, "note_repo_dir", str(clone))
+    inner = GitNoteWriter(repo_dir=str(clone), base_branch="main", remote="origin")
+    before = _commits(clone)
+
+    async def _run_backfill() -> None:
+        writer = BatchingNoteWriter(inner, batch_size=3)
+        for index in range(6):
+            await record_note(_note(index), writer)
+        await writer.flush()
+
+    asyncio.run(_run_backfill())
+
+    assert _commits(clone) - before == 2, "six notes at three to a commit must be two commits"
+    written = sorted(p.stem for p in (clone / settings.knowledge_dir).rglob("*.md"))
+    assert written == [f"playbook-batch-{i:03d}" for i in range(6)]
+
+
+def test_an_unflushed_batch_is_not_on_the_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A partial batch is pending, which is why `flush()` is the caller's responsibility.
+
+    This is the property that makes batching wrong for the conversational path even leaving the
+    product argument aside: a note the model just wrote would not be there to read.
+    """
+    clone = _notes_repo(tmp_path)
+    monkeypatch.setattr(settings, "note_repo_dir", str(clone))
+    inner = GitNoteWriter(repo_dir=str(clone), base_branch="main", remote="origin")
+    before = _commits(clone)
+
+    async def _partial() -> str:
+        writer = BatchingNoteWriter(inner, batch_size=10)
+        reference = await record_note(_note(0), writer)
+        return reference
+
+    reference = asyncio.run(_partial())
+
+    assert reference == "", "a pending note has no commit to name yet"
+    assert _commits(clone) == before
+    assert not list((clone / settings.knowledge_dir).rglob("playbook-batch-*.md"))
+
+
+def test_flushing_nothing_commits_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty backfill must not mint an empty commit — the idempotent no-op, at batch scale."""
+    clone = _notes_repo(tmp_path)
+    monkeypatch.setattr(settings, "note_repo_dir", str(clone))
+    inner = GitNoteWriter(repo_dir=str(clone), base_branch="main", remote="origin")
+    before = _commits(clone)
+
+    outcome = asyncio.run(BatchingNoteWriter(inner, batch_size=5).flush())
+
+    assert outcome.written is False and _commits(clone) == before
+
+
+def test_a_batch_size_that_batches_nothing_is_refused() -> None:
+    """`batch_size=1` is the unbatched writer wearing a wrapper, and reads as a configured mode.
+
+    Refused rather than allowed-and-equivalent: a deployment that set it to 1 would be paying the
+    pending-reference cost — `record_note` returning `""` — for no saving at all.
+    """
+    inner = GitNoteWriter(repo_dir=".", base_branch="main", remote="origin")
+    for size in (0, 1):
+        with pytest.raises(ValueError, match="does not batch anything"):
+            BatchingNoteWriter(inner, batch_size=size)
+
+
+def test_the_shipped_backfill_batches_and_nothing_else_does() -> None:
+    """The split, asserted where it can be: exactly one module wraps the writer this way.
+
+    A `BatchingNoteWriter` on the conversational path would be the thing
+    `D-2026-09-13-the-lock-is-not-the-bound-the-commit-is` declined, arriving by import rather than
+    by decision — and it would be invisible, because every test of that path injects its own writer.
+    """
+    root = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
+    users = sorted(
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*.py")
+        if "BatchingNoteWriter(" in path.read_text(encoding="utf-8")
+    )
+    assert users == ["cli/backfill_corpus.py"], (
+        f"{users} construct a BatchingNoteWriter. Only the backfill command may: a batch is a "
+        "queue, and a queued note is one a chemist cannot read yet."
+    )

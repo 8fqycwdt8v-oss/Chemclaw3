@@ -133,6 +133,39 @@ def test_default_preserves_single_graph_retriever(monkeypatch: pytest.MonkeyPatc
     assert [r.name for r in retrievers] == ["graph"]
 
 
+def test_the_three_note_legs_declare_one_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`graph`, `lexical` and `vector` read one note tree, and the manifests have to say so.
+
+    Without the declaration they are three independent votes in `reciprocal_rank_fusion`, which is
+    the correlated-ranker defect: measured on the shipped corpus their pairwise agreement is 47/55,
+    44/55 and 41/53, because the shipped `embedding_provider` is `hash` and all three are therefore
+    term-overlap rankers.
+
+    Asserted here rather than left to the fusion's own unit tests, because those construct their
+    corpus list by hand — deleting `corpus: knowledge-notes` from all three manifests left every
+    one of them green while restoring the defect in every deployment.
+    """
+    monkeypatch.setattr(settings, "data_sources", "graph,lexical,vector")
+    corpora = registry.active_retrieve_corpora()
+    assert set(corpora) == {"graph", "lexical", "vector"}
+    assert len(set(corpora.values())) == 1, (
+        f"{corpora} — the three legs over the note tree must name one corpus, or RRF counts their "
+        "agreement three times"
+    )
+
+
+def test_a_source_that_declares_no_corpus_is_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default, and what keeps every existing deployment's fusion unchanged.
+
+    The other direction of the test above: if `active_retrieve_corpora` answered one corpus for
+    everything, the assertion there would pass while collapsing unrelated sources into one vote.
+    """
+    monkeypatch.setattr(settings, "data_sources", "graph,vendored")
+    corpora = registry.active_retrieve_corpora()
+    assert corpora["vendored"] == "vendored"
+    assert corpora["graph"] != "vendored"
+
+
 def test_a_new_source_is_a_folder_and_a_config_token(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
