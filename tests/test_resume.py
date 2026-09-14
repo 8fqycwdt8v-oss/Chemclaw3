@@ -333,12 +333,12 @@ def test_the_cap_itself_reads_the_floor_and_not_only_the_channel() -> None:
         "model_calls": 0,  # the channel, reset by the new run
         "messages": [HumanMessage("this turn"), *[AIMessage(f"call {n}") for n in range(cap)]],
     }
-    decision = enforce_loop_cap.before_model(resumed, None)
+    decision = enforce_loop_cap.before_model(cast(Any, resumed), cast(Any, None))
     assert decision == {"jump_to": "end", "loop_capped": True}, (
         "a resumed turn that already spent the whole budget must stop, not start again at zero"
     )
 
     fresh = {"model_calls": 0, "messages": [HumanMessage("this turn")]}
-    assert enforce_loop_cap.before_model(fresh, None) == {"model_calls": 1}, (
+    assert enforce_loop_cap.before_model(cast(Any, fresh), cast(Any, None)) == {"model_calls": 1}, (
         "a turn with nothing behind it is unaffected — the floor must not cap a healthy turn"
     )

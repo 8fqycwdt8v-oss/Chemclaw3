@@ -413,6 +413,28 @@ class PlateLayout(BaseModel):
         return self
 
 
+class RecordedFailure(BaseModel):
+    """One `failure-mode` note from the corpus, reduced to what a check decides with.
+
+    **Here rather than in `memory/failure.py`, because `protocols` may import only `core` and
+    `science`** (`tests/test_layering.py`), and that restriction is right: a deterministic check
+    must not depend on a corpus being loadable. So the knowledge graph answers in its own
+    vocabulary, `agent/` reduces what it found into this, and the check stays pure over its
+    arguments — the same division `forbidden_absent` already has with `request.forbidden`.
+
+    Two fields and no more: what a refusal has to name is the note to go and read and the sentence
+    saying what happened. The refuted id and the molecule are how the *lookup* found it, not what a
+    chemist needs told.
+    """
+
+    #: The failure note's id, so a chemist can open what the check is pointing at.
+    id: str = Field(min_length=1)
+    #: The observation itself — the value of a negative result is entirely in this text.
+    summary: str = ""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
 class ProtocolCheck(BaseModel):
     """One deterministic verdict about the design."""
 

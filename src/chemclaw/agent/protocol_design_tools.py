@@ -19,6 +19,7 @@ where the model has an answer it likes and no reason to go looking.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Sequence
@@ -28,12 +29,20 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 from chemclaw.agent.authz import require_actor
 from chemclaw.agent.framing import defang
 from chemclaw.agent.session_store import owner_permits
+from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import get_current_correlation_id
+from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_text import get_current_user_texts
-from chemclaw.protocols.checks import blockers, run_checks
+from chemclaw.kg.graph import load_notes
+from chemclaw.memory.failure import failures_against, observation_of
+from chemclaw.protocols.checks import (
+    _used_structures,
+    blockers,
+    run_checks,
+)
 from chemclaw.protocols.diff import diff_designs
 from chemclaw.protocols.layout import LayoutError, place, smallest_plate_for
 from chemclaw.protocols.models import (
@@ -46,6 +55,7 @@ from chemclaw.protocols.models import (
     PlateLayout,
     ProtocolArm,
     ProtocolBody,
+    RecordedFailure,
     design_id_for,
 )
 from chemclaw.protocols.render import (
@@ -326,6 +336,48 @@ async def _stored_status(store: DesignStore, design_id: str) -> DesignStatus:
     return header.status
 
 
+async def _recorded_failures(design: ExperimentDesign) -> list[RecordedFailure]:
+    """What the corpus already records as having failed, for the citations and reagents in `design`.
+
+    **The seam between a pure check and a corpus, and it lives here because this is the layer that
+    may reach both.** `tests/test_layering.py` allows `protocols -> core` and `protocols -> science`
+    and nothing else, which is right: a deterministic check must not depend on a corpus being
+    loadable, and fifteen checks that are arithmetic today must not acquire I/O because a sixteenth
+    wanted it. So `memory/failure.failures_against` answers in the knowledge graph's vocabulary,
+    this reduces what it found, and `no_documented_failure` decides.
+
+    Offloaded, because `load_notes` parses the corpus off disk - measured elsewhere in this tree at
+    151 ms for one scan of 10k notes - while `run_checks` itself is budgeted at 47 ms inline. A
+    synchronous read here would put the corpus on the event loop at every draft.
+
+    **It never raises.** A corpus that cannot be read is a reason to say less, not to refuse a
+    design. The cost is that the check then reports "no recorded failure bears on this design",
+    which is indistinguishable from having looked and found none - so the failure is counted
+    through `degraded()` rather than swallowed, because a lookup that has silently stopped working
+    returns every draft clean.
+    """
+    cited = [ref.ref for ref in design.evidence if ref.ref]
+    structures = [smiles for _, smiles in _used_structures(design)]
+    if not cited and not structures:
+        return []
+    try:
+        notes = await asyncio.to_thread(
+            lambda: failures_against(
+                load_notes(settings.knowledge_path), cited=cited, structures=structures
+            )
+        )
+    except Exception as exc:
+        degraded(
+            logger,
+            "failure_memory",
+            "could not read the corpus for recorded failures, so this design was checked "
+            "without them: %s",
+            exc,
+        )
+        return []
+    return [RecordedFailure(id=note.id, summary=observation_of(note)) for note in notes]
+
+
 @tool
 async def structure_experiment_request(request: ExperimentRequest, salt: str = "") -> str:
     """Turn a chemist's free-text ask into the structured request a protocol is drafted from.
@@ -394,7 +446,11 @@ async def structure_experiment_request(request: ExperimentRequest, salt: str = "
             )
         )
 
-    checks = run_checks(design, stage="protocol" if design.has_protocol else "request")
+    checks = run_checks(
+        design,
+        stage="protocol" if design.has_protocol else "request",
+        failures=await _recorded_failures(design),
+    )
     revision = await store.append(
         design_id,
         design,
@@ -516,7 +572,7 @@ async def draft_experiment_protocol(
             }
         )
 
-    checks = run_checks(design)
+    checks = run_checks(design, failures=await _recorded_failures(design))
     if failed := blockers(checks):
         raise ChemclawError(
             "this design is not storable yet — "

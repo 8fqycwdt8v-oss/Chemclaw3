@@ -80,6 +80,12 @@ _EXPECTED_SUBSYSTEMS = {
     # probe surface — down with it. Counted because the alternative is a gauge that quietly stops
     # moving, which reads as "no durable work" rather than as "nobody asked".
     "jobs_in_flight",
+    # `agent/protocol_design_tools._recorded_failures`, on a corpus that cannot be read. The check
+    # it feeds reports "no recorded failure bears on this design" either way, so a lookup that has
+    # silently stopped working returns every draft clean — which is the one state a chemist would
+    # read as reassurance. Swallowed deliberately (a corpus outage must not refuse a design), and
+    # counted for exactly that reason.
+    "failure_memory",
     "log_redaction",
     # `durable/deliver_message.deliver_message_activity`. Outbound delivery shipped with no signal
     # of any kind: `deliver()` swallows a per-channel failure so one broken webhook is not

@@ -25,7 +25,7 @@ band a unit mistake leaves.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 from chemclaw.core.chem import InvalidSmilesError, element_counts
@@ -38,6 +38,7 @@ from chemclaw.protocols.models import (
     EvidenceRef,
     ExperimentDesign,
     ProtocolCheck,
+    RecordedFailure,
     Setpoints,
 )
 from chemclaw.science.labels.vocabulary import SpeciesRole
@@ -902,7 +903,67 @@ def is_a_protocol(design: ExperimentDesign) -> ProtocolCheck:
 
 #: The checks, in the order a reader wants them. Order is deliberate: what is unreadable, then what
 #: is arithmetically wrong, then what is missing, then what is merely worth knowing.
-_CHECKS: tuple[Callable[[ExperimentDesign], ProtocolCheck], ...] = (
+def no_documented_failure(
+    design: ExperimentDesign, failures: Sequence[RecordedFailure] = ()
+) -> ProtocolCheck:
+    """Nothing this design rests on has already been recorded as having failed.
+
+    **The gap this closes is the one the 2026-09-13 audit called the most concrete in the system**:
+    `forbidden_absent` tests what the chemist *typed* into `request.forbidden`, and nothing tested
+    what the corpus *knows*. So a design could cite a playbook and repeat a documented
+    `failure-mode` note sitting in the same graph — the memory was written, indexed, retrievable,
+    and consulted by nobody at the moment it would have mattered.
+
+    A `note` rather than a `blocker`, deliberately. A recorded failure is evidence and not a
+    verdict: `failure_note` carries a `confidence` precisely because a single failed run is not a
+    refutation of a general rule, the same reagent appears in routes that have nothing to do with
+    each other, and a chemist deliberately re-running something that failed — to characterise it,
+    or because a condition changed — is ordinary work rather than a mistake. Blocking that would
+    teach people to stop citing their evidence, which costs more than it saves.
+
+    **Pure over what the caller supplies, because the harness is synchronous and the corpus is
+    not.** Reading the graph is `async`, every check here is `(design) -> ProtocolCheck`, and making
+    the harness async to reach one corpus would put I/O behind fifteen functions that are all
+    arithmetic today. So the caller does the lookup (`memory/failure.failures_against`) and this
+    decides — the same division `forbidden_absent` already has, where the request supplies the
+    exclusions and the check applies them.
+
+    Args:
+        design: The design being checked.
+        failures: What `failures_against` found for this design's citations and structures. Empty
+            means either that nothing was found or that nobody looked, which this cannot tell apart
+            and does not try to: see `run_checks` for why that is the caller's honesty to keep.
+
+    Returns:
+        A passing `note` when nothing bears on it, and a failing one naming what to read.
+    """
+    if not failures:
+        return _ok("no_documented_failure", "note", "no recorded failure bears on this design")
+    named = "; ".join(
+        f"{failure.id} ({failure.summary})" if failure.summary else failure.id
+        for failure in failures[:_MAX_NAMED_FAILURES]
+    )
+    more = len(failures) - _MAX_NAMED_FAILURES
+    tail = f", and {more} more" if more > 0 else ""
+    return _fail(
+        "no_documented_failure",
+        "note",
+        f"the corpus records {len(failures)} failure(s) bearing on this design: {named}{tail}",
+    )
+
+
+#: How many failures to name before the detail is itself the problem. A design citing more than a
+#: handful of refuted notes has one thing wrong with it, not five, and the count still reports the
+#: rest.
+_MAX_NAMED_FAILURES = 3
+
+
+# **`no_documented_failure` is in here and is the one entry `run_checks` calls differently**,
+# because it is the only check whose input is not the design. Registered rather than appended so
+# `tests/test_protocol_checks.py::test_check_ids_matches_what_run_checks_actually_produces` still
+# holds the registry to what is produced, in both directions — a check outside `_CHECKS` would be a
+# verdict the id test cannot see.
+_CHECKS: tuple[Callable[..., ProtocolCheck], ...] = (
     is_a_protocol,
     components_resolve,
     charge_is_consistent,
@@ -917,6 +978,7 @@ _CHECKS: tuple[Callable[[ExperimentDesign], ProtocolCheck], ...] = (
     controls_present,
     objectives_are_measured,
     quantities_are_plausible,
+    no_documented_failure,
     coverage_is_stated,
 )
 
@@ -938,21 +1000,40 @@ _CHECKS: tuple[Callable[[ExperimentDesign], ProtocolCheck], ...] = (
 #: design running in 2-MeTHF. The exclusion is still a blocker where it means something — on a
 #: design that actually *uses* the species, at the protocol stage, which is the only place a chemist
 #: can be harmed by it.
-_REQUEST_STAGE: frozenset[str] = frozenset({"components_resolve"})
+_REQUEST_STAGE: frozenset[str] = frozenset({"components_resolve", "no_documented_failure"})
 
 
-def run_checks(design: ExperimentDesign, *, stage: CheckStage = "protocol") -> list[ProtocolCheck]:
+def run_checks(
+    design: ExperimentDesign,
+    *,
+    stage: CheckStage = "protocol",
+    failures: Sequence[RecordedFailure] = (),
+) -> list[ProtocolCheck]:
     """Every check that means something at this stage, in reading order.
 
     At the `request` stage the protocol-only checks are reported as passing `note`s naming what
     they are waiting for, rather than being omitted: a UI that showed every check on a draft and two
     on a request would look like the checks had been skipped.
+
+    **`failures` is the one input that does not come from the design**, and it is a parameter rather
+    than a lookup because this function is synchronous and reading the corpus is not. The caller
+    asks `memory/failure.failures_against` and passes what it found.
+
+    That leaves an honesty problem this cannot solve and should not hide: an empty `failures` means
+    *either* that nothing bears on the design *or* that nobody looked, and the check reports the
+    same passing note for both. A caller that skips the lookup therefore publishes a clean bill the
+    corpus never gave — so the lookup belongs with the caller that has the corpus, and
+    `no_documented_failure` says so in as many words rather than implying a guarantee.
+
+    It runs at **both** stages, unlike every other protocol-only check: a structured ask already
+    names reagents and can already cite evidence, so a failure bearing on it is knowable before
+    there is a procedure — which is the moment it is cheapest to act on.
     """
-    if stage == "protocol":
-        return [check(design) for check in _CHECKS]
     return [
-        check(design)
-        if check.__name__ in _REQUEST_STAGE
+        no_documented_failure(design, failures)
+        if check is no_documented_failure
+        else check(design)
+        if stage == "protocol" or check.__name__ in _REQUEST_STAGE
         else _ok(check.__name__, "note", "not checked yet — this design holds only the ask")
         for check in _CHECKS
     ]
