@@ -47,29 +47,91 @@ def _declared_kinds() -> set[str]:
     return {str(value) for value in get_args(annotation)}
 
 
-def _produced_kinds() -> dict[str, set[str]]:
-    """Every `kind=` literal passed to an `OutboundMessage(...)` in `src/`, by module.
+def _constructor_name(node: ast.AST) -> str | None:
+    """The callee's name, qualified or bare: `OutboundMessage` and `x.OutboundMessage` alike.
 
-    AST rather than grep for the reason `no_egress.py` gives one repository over: `kind="report"`
-    and `kind = "report"` read differently as text and identically as a tree. A non-literal `kind=`
-    is deliberately not collected — it would be a value derived from a payload, which is the
-    arbitrary-file-write shape `Message.kind`'s `Literal` exists to refuse, and this scan must not
-    quietly credit it as a producer.
+    Both spellings, because reading only `ast.Name` is how the first version of this scan went red
+    on an ordinary qualified import while staying green on a deleted producer.
+    `tests/test_activity_queue_bound.py::_dispatch_calls` records fixing exactly this in its own
+    walk — "three ordinary spellings walked straight past it" — and this test was written after it
+    and did not carry the lesson across.
+    """
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _kind_of(call: ast.Call) -> str | None:
+    """The literal `kind=` on an `OutboundMessage(...)`, or `None`.
+
+    A non-literal `kind=` is deliberately not collected — it would be a value derived from a
+    payload, which is the arbitrary-file-write shape `Message.kind`'s `Literal` exists to refuse,
+    and this scan must not quietly credit it as a producer.
+    """
+    if _constructor_name(call.func) != "OutboundMessage":
+        return None
+    for keyword in call.keywords:
+        if keyword.arg == "kind" and isinstance(keyword.value, ast.Constant):
+            return str(keyword.value.value)
+    return None
+
+
+def _sent_kinds() -> dict[str, set[str]]:
+    """Every kind that actually reaches `deliver_best_effort`, by module.
+
+    **Constructing an `OutboundMessage` is not producing a message, and the first version of this
+    scan could not tell the difference.** It collected every `OutboundMessage(kind=...)` in `src/`
+    and never asked whether anything sent it — so deleting the `await deliver_best_effort(...)` in
+    `AwaitingWorkflow._push`, or binding the report's message to an unused local, left a declared
+    kind that nothing on earth delivers *and the test green*. Both mutations were driven; both
+    passed. That is the regression this file exists to prevent, reintroduced in the only form that
+    matters.
+
+    So the walk starts at the send site and works inwards, one hop:
+
+    - `deliver_best_effort(OutboundMessage(kind="digest"))` — the argument is the construction.
+    - `deliver_best_effort(_awaiting_message(...))` — the argument is a call to a function in the
+      same module, whose body constructs it. One hop, because that is the shape the tree has; a
+      second would want a call graph, and a scan that silently followed further would be claiming
+      a guarantee it cannot check.
+
+    A producer that hides behind two hops is therefore *not* counted, which fails closed: the kind
+    reads as unproduced and the test goes red, rather than being credited on a chain nobody
+    verified.
     """
     found: dict[str, set[str]] = {}
     for path in sorted(SRC.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        builders = {
+            node.name: node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        }
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
-            name = node.func.id if isinstance(node.func, ast.Name) else None
-            if name != "OutboundMessage":
+            if _constructor_name(node.func) != "deliver_best_effort":
                 continue
-            for keyword in node.keywords:
-                if keyword.arg == "kind" and isinstance(keyword.value, ast.Constant):
-                    found.setdefault(str(keyword.value.value), set()).add(
-                        str(path.relative_to(SRC))
-                    )
+            for argument in node.args:
+                reached: list[ast.Call] = []
+                if isinstance(argument, ast.Call):
+                    if _kind_of(argument) is not None:
+                        reached.append(argument)
+                    else:
+                        name = _constructor_name(argument.func)
+                        body = builders.get(name or "")
+                        if body is not None:
+                            reached.extend(
+                                inner
+                                for inner in ast.walk(body)
+                                if isinstance(inner, ast.Call) and _kind_of(inner) is not None
+                            )
+                for call in reached:
+                    kind = _kind_of(call)
+                    if kind is not None:
+                        found.setdefault(kind, set()).add(str(path.relative_to(SRC)))
     return found
 
 
@@ -81,7 +143,7 @@ def test_every_declared_delivery_kind_has_a_producer() -> None:
     cannot be built at all, so the second direction is what tells whoever adds one that the model is
     where to add it.
     """
-    produced = _produced_kinds()
+    produced = _sent_kinds()
     assert set(produced) == _declared_kinds(), (
         "every value of Message.kind needs a producer in src/ and vice versa; "
         f"produced={ {k: sorted(v) for k, v in produced.items()} }"
@@ -95,7 +157,7 @@ def test_each_kind_is_produced_by_the_workflow_that_owns_that_event() -> None:
     workflow can send, so a `job-result` constructed anywhere but the connector-job wrapper means
     either a second answer to one question or a finished job that still tells nobody.
     """
-    produced = _produced_kinds()
+    produced = _sent_kinds()
     assert produced["digest"] == {"durable/digest.py"}
     assert produced["report"] == {"durable/report_workflow.py"}
     assert produced["job-result"] == {"durable/connector_job.py"}
@@ -212,3 +274,69 @@ def test_a_message_with_no_addressee_never_schedules_the_activity() -> None:
     a value this test asserts about its own mock.
     """
     assert asyncio.run(deliver_best_effort(OutboundMessage(recipient="", subject="s"))) == []
+
+
+def test_one_misspelled_channel_does_not_cost_the_healthy_ones_their_message(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`deliver`'s headline promise was true of a delivery failure and false of a typo.
+
+    "A failing channel does not stop the others" is what that function's docstring leads with, and
+    it held for a destination having a bad afternoon because the `build`/`deliver` calls are inside
+    a per-channel `try`. `enabled()` ran *before* the loop and raised on an unresolvable name, so
+    one mistyped fourth channel took every working one down with it — measured before this:
+    `took == []` and zero files on a share that was perfectly fine.
+
+    Still loud, and that is the other half: the bad name is reported through `degraded()`, which is
+    alerted rather than skimmed, and `enabled()` keeps raising for `make channel-validate` and for
+    startup, where refusing is right.
+    """
+    outbox = _local_channel(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "delivery_channels", "local,typo")
+    before = _degraded_series("delivery_channel_config")
+
+    took = asyncio.run(
+        deliver_message_activity(
+            OutboundMessage(recipient="u-1", subject="a report", body="body", kind="report")
+        )
+    )
+
+    assert took == ["local"], "the channel that resolves must still receive the message"
+    assert len(list(outbox.iterdir())) == 1
+    assert _degraded_series("delivery_channel_config") != before, (
+        "an unresolvable channel name is a configuration fault and must be counted, not silent"
+    )
+
+
+def test_two_runs_of_one_job_are_two_messages_and_a_retry_is_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The idempotency key has to separate a re-run from a redelivery, and it did not.
+
+    `job-result` is the one kind whose body carries no natural discriminator — `subject` is
+    `f"{connector}:{job} finished"` and `body` is a summary derived from the inputs — so two
+    genuinely distinct runs of one job for one chemist are byte-identical. Keyed on content alone
+    they shared an id, which means a compliant webhook receiver drops the second real result by
+    design and the share overwrites it. Both directions are asserted here because fixing one at the
+    other's expense is the easy mistake: a key that separates re-runs must still collapse a retry,
+    which is what `BAD_DATA_RETRY` makes at-least-once.
+    """
+    outbox = _local_channel(monkeypatch, tmp_path)
+
+    def _result(correlation_id: str) -> OutboundMessage:
+        return OutboundMessage(
+            recipient="chemist@corp",
+            subject="calc:run_conformer_search finished",
+            body="Found 12 conformers.",
+            kind="job-result",
+            correlation_id=correlation_id,
+        )
+
+    asyncio.run(deliver_message_activity(_result("corr-A")))
+    asyncio.run(deliver_message_activity(_result("corr-A")))
+    assert len(list(outbox.iterdir())) == 1, "a retry of one delivery is one message"
+
+    asyncio.run(deliver_message_activity(_result("corr-B")))
+    assert len(list(outbox.iterdir())) == 2, (
+        "a second run of the same job is a second result and must not be deduped away"
+    )

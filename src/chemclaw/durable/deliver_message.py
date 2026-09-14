@@ -103,8 +103,11 @@ async def deliver_message_activity(payload: OutboundMessage) -> list[str]:
     already durable by the time this runs, so the failure is reported and counted instead.
 
     Returns:
-        The channels that took the message. Empty means either that delivery is off or that every
-        channel refused — which the log line distinguishes and a caller cannot.
+        The channels that took the message. Empty has **three** causes and this said two: delivery
+        is off (silent, and not a fault), the message could not be built or the seam is
+        misconfigured (the `except` below, counted), or every channel refused (counted). The log
+        lines distinguish them and a caller cannot — which is the point, since no caller may act
+        differently.
     """
     if not delivery_enabled():
         return []
@@ -146,6 +149,14 @@ async def deliver_best_effort(message: OutboundMessage) -> list[str]:
     could not be sent must not undo it. The activity itself never raises; what this guards is the
     *scheduling* of it — an unserved `background-jobs` queue, a worker rolling, a broker hiccup.
 
+    **It bounds the failure and not the delay, which is a different promise than "best effort"
+    sounds like.** The caller does not *fail*; it can still be held open for the whole
+    `light_write_queue_wait_timeout()` on the schedule-to-start, plus the retry budget on a failing
+    activity. Measured against an unserved queue, an `AwaitAnswerWorkflow` whose answer signal
+    arrived at 3 s was still `RUNNING` at 75 s, because `_push` is awaited before `_wait_until`.
+    `durable/notify.py` measured the same 75 s for the same reason and wrote it down; this seam
+    inherited its shape and, at first, only the half of its docstring that was reassuring.
+
     **A cancellation is re-raised rather than swallowed**, exactly as
     `D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-the-row-waiting` required of the
     session push-back: a workflow cancelled while this is in flight gets
@@ -165,7 +176,11 @@ async def deliver_best_effort(message: OutboundMessage) -> list[str]:
             deliver_message_activity,
             message,
             task_queue=settings.background_task_queue,
-            start_to_close_timeout=timedelta(seconds=settings.activity_timeout_seconds),
+            # `delivery_timeout_seconds`, not `activity_timeout_seconds`: the walk over channels is
+            # serial and each one carries its own network timeout. See that setting for the
+            # measurement — at 30 s, three webhook channels spend the budget and the retry re-POSTs
+            # to the ones that already took it.
+            start_to_close_timeout=timedelta(seconds=settings.delivery_timeout_seconds),
             # The wait and the work are bounded separately for the reason `durable/notify.py`
             # measures at length: `start_to_close` begins only once a worker has picked the task up,
             # so on its own it is not a bound on this call at all.
