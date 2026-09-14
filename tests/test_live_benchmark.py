@@ -257,8 +257,9 @@ def test_the_prompt_swapping_arm_cannot_be_read_as_a_tools_contrast() -> None:
 # **Written the other way round from `_normalised` on purpose**: this spells the symbols out as
 # Unicode where the scorer folds them onto words, so the two meet in the middle rather than
 # agreeing by construction. An oracle derived from the implementation would pass whatever the
-# implementation does, which is the failure `servers/props/tests/test_dataset.py` one repository
-# over is built to avoid.
+# implementation does, which is the failure the sibling fleet's own corpus tests are built to
+# avoid — they check a vendored table against independently written numbers rather than against
+# the loader that reads it.
 _PLAIN_SPELLING = {
     "\\circ": "°",
     "\\Delta": "Δ",
