@@ -1045,20 +1045,6 @@ Both change what a `Component` is, so this wants its own ADR and its own measure
 partially-structured reaction does to retrieval — not a patch to `_smiles`. Measured and declared
 by `make live-data`; see `D-2026-08-18-a-corpus-is-not-reachable-because-it-is-on-disk`.
 
-## A note write costs ~1.8 s, and a backfill is one write per record
-
-Measured over the ORD backfill: 103 records per 3.1 minutes, steady, with the cost in the
-commit-and-push cycle rather than in mapping (the whole 10,011-record corpus maps in 0.3 s). That is
-a little over two hours for the mock's 4,251 ingestible records. A real deployment's first sync is a
-decade of records, where this is days.
-
-**Half of this closed itself and half did not.**
-`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted the branch per note, so the
-"4,251 branches in a repository nobody can list" half is gone. What remains is the serialized
-commit-and-push, which is the same 1.8 s: a backfill and an incremental sync still want different
-write shapes (one commit per batch for the first, one per note for the second). Found by the
-2026-08-18 corpus-fidelity pass, re-scoped 2026-09-05.
-
 ## The labelling client is the one MCP leg with no identity or trace on the wire
 
 `core/mcp_session.open_session` grew a `request_hook` seam so a caller can stamp the outbound

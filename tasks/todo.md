@@ -586,8 +586,13 @@ What decides whether the system is affordable and whether it survives a real cor
       not promised. Trigger and the cheaper half (a compressing serde) are in the row. **This is a
       row the wave's standing decision said to build; I am declining it on that measurement and
       saying so rather than quietly deferring.**
-- [ ] W28.5 `Chemclaw3` — a note write costs ~1.8 s and a backfill is one write per record; a real
-      first sync is days. A backfill and an incremental sync want different write shapes.
+- [x] W28.5 `Chemclaw3` — a note write costs ~1.8 s and a backfill is one write per record.
+      **Done** (`D-2026-09-14-a-backfill-is-not-a-conversation`): measured against a real bare
+      remote, 50 notes in **7.05 s** unbatched (140.9 ms/note), **0.79 s** at ten to a commit and
+      **0.24 s** at fifty — **29.4x**. `BatchingNoteWriter` adds no git code (it merges N
+      `NoteWrite`s into one and hands it to `GitNoteWriter`), `record_note` stays the one write
+      path, and only `cli/backfill_corpus` may construct one — batching the conversational path
+      stays declined, because a queued note is one a chemist cannot read yet.
 - [x] W28.6 `Chemclaw3` — nothing has measured how many rows a real corpus produces [M].
       **Measured** (`D-2026-09-14-property-value-is-the-shallow-table`): 19 shapes, 184 rows, 9.7
       rows per calculation at the fixtures' sizes — and the slope is the answer, not the count. At 47

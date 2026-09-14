@@ -1056,6 +1056,74 @@ class GitNoteWriter:
             )
 
 
+class BatchingNoteWriter:
+    """A `NoteWriter` that lands many notes in one commit — for a backfill, and only a backfill.
+
+    **One commit and one push per note is what bounds a backfill, and it is not a tuning
+    question.** Measured against a local bare remote on an empty corpus, `record_note` through
+    `GitNoteWriter` costs **140.8 ms** per note; measured at a 10,000-note corpus against a real
+    remote (`D-2026-09-13-the-lock-is-not-the-bound-the-commit-is`) it is **327.3 ms**, of which the
+    cluster-wide advisory lock is 14.4 ms — the git cycle is the whole of it. The same measurement
+    put batching at **31.6 ms** per note at ten to a commit and **8.5 ms** at fifty.
+
+    **That ADR declined batching, and this is not a reversal of it.** What it declined was batching
+    the *conversational* path, on the product rather than the cost: "a batch is a queue and a queued
+    note is one a chemist cannot read yet", which is exactly what deleting the PR-gate bought. A
+    backfill is the case that argument does not reach — `cli/backfill_corpus` is an operator command
+    over a directory of existing documents, nobody is mid-turn waiting for one of them to appear,
+    and the person running it is waiting for the *whole* thing to finish. The two paths want
+    different write shapes, which is what `docs/planning/BACKLOG.md` said and what this splits.
+
+    **It adds no git code, and that is the design.** `GitNoteWriter` carries the fetch, the
+    fast-forward, the rebase of unpushed commits, the dead-writer residue recovery and the cluster
+    lock; a second implementation of any of that is a second chance to get it wrong on the one path
+    every note in the system takes. So this merges N `NoteWrite`s into one and hands it to the
+    writer it wraps — the batch is one ordinary write.
+
+    **Files are concatenated and never deduplicated by path.** Two notes may name the same
+    dependency, and `NoteFile` carries `overwrite=False` for a dependency and `True` for a subject:
+    applying them in order is exactly the sequence the unbatched path would apply, and deduplicating
+    on the first entry would let a dependency's do-not-clobber copy win over the subject note's own
+    content.
+
+    A caller **must** `flush()`; `record_note`'s reference for a still-pending note is the empty
+    string, which is why this is not a drop-in for the conversational path even leaving the product
+    argument aside.
+    """
+
+    def __init__(self, inner: NoteWriter, batch_size: int) -> None:
+        """Wrap `inner`, committing every `batch_size` notes. Below 2 is a bug, not a mode."""
+        if batch_size < 2:
+            raise ValueError(
+                f"batch_size {batch_size} does not batch anything; use the wrapped writer directly"
+            )
+        self._inner = inner
+        self._batch_size = batch_size
+        self._pending: list[NoteWrite] = []
+        self._notes = 0
+
+    async def write(self, write: NoteWrite) -> WriteOutcome:
+        """Hold this note; commit the batch when it is full. Returns an empty pending reference."""
+        self._pending.append(write)
+        self._notes += 1
+        if len(self._pending) >= self._batch_size:
+            return await self.flush()
+        return WriteOutcome(reference="", written=False)
+
+    async def flush(self) -> WriteOutcome:
+        """Commit and push everything held, as one write. A no-op when nothing is pending."""
+        if not self._pending:
+            return WriteOutcome(reference="", written=False)
+        batch, self._pending = self._pending, []
+        files = [file for write in batch for file in write.files]
+        # The subject of a batch names the count rather than the notes: `NoteWrite` refuses a
+        # message over its own length bound, and fifty note ids do not fit in one.
+        outcome = await self._inner.write(
+            NoteWrite(files=files, message=f"Add {len(batch)} backfilled note(s)")
+        )
+        return outcome
+
+
 def default_writer() -> NoteWriter:
     """The production note writer: a commit on the notes repo's base branch. Overridden in tests."""
     return GitNoteWriter()

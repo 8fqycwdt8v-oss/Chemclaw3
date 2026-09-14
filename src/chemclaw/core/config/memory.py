@@ -49,6 +49,16 @@ class MemorySettings(BaseSettings):
     # than an impossible one. Lower it to fit the pod; the honest fix is streaming miners, and
     # `docs/planning/BACKLOG.md` carries that with this measurement as its trigger.
     memory_corpus_max_reactions: int = Field(default=100_000, ge=0)
+    # How many backfilled notes share one commit (`cli/backfill_corpus`, never the conversational
+    # path). One commit and one push per note is what bounds a backfill: measured 140.8 ms/note
+    # against a local remote on an empty corpus and 327.3 ms at a 10,000-note corpus against a real
+    # one, against 31.6 ms at ten to a commit and 8.5 at fifty. Batching the *conversational* path
+    # is declined and stays declined (`D-2026-09-13-the-lock-is-not-the-bound-the-commit-is`): a
+    # queued note is one a chemist cannot read yet. Nobody is mid-turn during a backfill.
+    #
+    # Fifty is where the measured curve flattens; lower it if a single commit touching that many
+    # files is awkward for the notes repository's reviewers.
+    backfill_commit_batch_size: int = Field(default=50, ge=2)
     # The observations tier (D-161). Off by default and deliberately, though not for the reason
     # this comment gave: "the first knowledge surface no human signs off before the agent can read
     # it" stopped being a distinction when
