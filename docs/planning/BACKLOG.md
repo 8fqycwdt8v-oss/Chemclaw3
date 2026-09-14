@@ -1042,25 +1042,6 @@ Both change what a `Component` is, so this wants its own ADR and its own measure
 partially-structured reaction does to retrieval — not a patch to `_smiles`. Measured and declared
 by `make live-data`; see `D-2026-08-18-a-corpus-is-not-reachable-because-it-is-on-disk`.
 
-## The labelling client is the one MCP leg with no identity or trace on the wire
-
-`core/mcp_session.open_session` grew a `request_hook` seam so a caller can stamp the outbound
-request, and `connectors/calc/remote.py` uses it: that leg now carries the W3C `traceparent`, the
-correlation id, the actor and the session, plus the origin-strip guard that removes them again if a
-redirect leaves the endpoint's origin. `ingest/labels/labeller.py:216` is the only other
-`open_session` caller and still sends `Authorization` alone, so a labelling drain — hours long,
-inside a durable activity — is invisible to the trace and unjoinable to the audit trail.
-
-It is not one line. `turn_identity_hook` lives in `connectors/identity.py` and sits on top of both
-`agent.turn_flags` (for the dry-run flag) and `connectors.manifest`, and neither
-`ingest -> connectors` nor `ingest -> agent` is an edge `tests/test_layering.py` permits. So closing
-it means deciding where identity stamping for a **non-connector** MCP client belongs: the labelling
-server is an endpoint this system dials, not a connector bundle, and the hook it needs is a strict
-subset of the connector one (no `ConnectorAuth`, no dry-run flag). The likely shape is a
-core-level `trace_and_identity_headers()` that `connectors/identity.py` composes rather than owns —
-which is a small change once the question is answered and a layering exception if it is not.
-Found by the 2026-08-27 logging and monitoring review.
-
 ## Template step roles cross the durable boundary on an unsigned payload
 
 `durable/template_activities.py::_acting_as` binds `StepIdentity.roles` — the requester's real role

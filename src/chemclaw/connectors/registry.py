@@ -40,7 +40,7 @@ from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.sessions import StdioConnection, StreamableHttpConnection
 from pydantic import ValidationError
 
-from chemclaw.connectors.identity import auth_for, turn_identity_hook
+from chemclaw.connectors.identity import auth_for
 from chemclaw.connectors.jobs import build_job_tool
 from chemclaw.connectors.manifest import (
     ConnectorManifest,
@@ -50,6 +50,7 @@ from chemclaw.connectors.manifest import (
     StdioEndpoint,
 )
 from chemclaw.connectors.transport import ConnectorSpec, HeldConnectorSession
+from chemclaw.core.call_identity import turn_identity_hook
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.http import default_ssl_context

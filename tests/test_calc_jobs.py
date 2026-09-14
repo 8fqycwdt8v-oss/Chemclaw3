@@ -43,12 +43,12 @@ from chemclaw.connectors.calc.specs import (
     XtbJobSpec,
 )
 from chemclaw.connectors.calc.workflows import CalcJobWorkflow
-from chemclaw.connectors.identity import (
+from chemclaw.connectors.queues import bundle_queue
+from chemclaw.core.call_identity import (
     HEADER_ACTOR,
     HEADER_CORRELATION,
     turn_headers,
 )
-from chemclaw.connectors.queues import bundle_queue
 from chemclaw.core.chem import torsion_handle
 from chemclaw.core.config import settings
 from chemclaw.science.calc.store import InMemoryStore

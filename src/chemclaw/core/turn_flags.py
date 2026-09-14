@@ -18,6 +18,15 @@ stamp a header) — therefore had to import a *tool* module just to read a turn 
 imported `dialogue_tools` for its side effect of registering that tool, a connector having no
 business anywhere near the model's tool surface. Moving the flag here — a plain ambient with no
 tool of its own — lets both read it without that side effect.
+
+**And why it is in `core` rather than in `agent`, where it first landed**
+(`D-2026-09-14-identity-stamping-is-cores-not-a-connectors`). The two ambients this module's own
+docstring compares itself to have always been `core.session_context` and `core.identity_context`;
+this one sat one package up for no reason but the order things were written in. That cost something
+real: the header stamp that reads all three lived in `connectors/identity.py` because *this* import
+pinned it there, so `ingest/labels/labeller.py` — an MCP client that is not a connector — could not
+reach it, and its leg to the labelling server went out with no actor, no session, no correlation id
+and no `traceparent` for as long as it has existed.
 """
 
 from contextvars import ContextVar

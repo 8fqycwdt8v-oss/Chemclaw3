@@ -30,9 +30,9 @@ from chemclaw.agent.authz import (
 )
 from chemclaw.agent.framing import SYSTEM_SPEECH_MARK, defang
 from chemclaw.agent.tool_result_size import bounded_for_batch
-from chemclaw.agent.turn_flags import is_dry_run
 from chemclaw.connectors.transport import transport_failure
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
+from chemclaw.core.turn_flags import is_dry_run
 from chemclaw.core.turn_signals import record_tool_failure
 
 logger = logging.getLogger(__name__)

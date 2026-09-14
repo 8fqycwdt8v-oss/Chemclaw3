@@ -35,8 +35,8 @@ from mcp.server.fastmcp import FastMCP
 from chemclaw.agent.audit import AuditEvent
 from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
-from chemclaw.connectors.identity import HEADER_ACTOR
 from chemclaw.connectors.registry import open_connector_specs
+from chemclaw.core.call_identity import HEADER_ACTOR
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.turn_signals import _KEY, Signal, ToolFailureSignal

@@ -38,7 +38,7 @@ from typing import Any
 from mcp import ClientSession
 from pydantic import BaseModel, ConfigDict
 
-from chemclaw.connectors.identity import turn_identity_hook
+from chemclaw.core.call_identity import turn_identity_hook
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.core.ids import stable_hash

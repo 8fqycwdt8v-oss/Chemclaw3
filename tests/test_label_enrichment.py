@@ -13,10 +13,14 @@ chosen to exercise it.
 """
 
 import asyncio
+import socket
+import threading
 from datetime import date
+from typing import Any
 
 import pytest
 
+from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.ingest.labels.enrich import label_stale
 from chemclaw.ingest.labels.labeller import (
@@ -555,3 +559,103 @@ def test_a_partly_degraded_pass_reports_the_share_it_actually_derived() -> None:
         assert await index.current_version() == _VERSION
 
     asyncio.run(_run())
+
+
+# --- the labelling leg's identity on the wire ----------------------------------------------------
+
+
+class _UvicornServer:
+    """A uvicorn server on a background thread, started and stopped around one test.
+
+    Copied in shape from `tests/test_connector_transport.py::_Server` rather than imported: that
+    module is a heavyweight import (it discovers and builds every local bundle at module scope)
+    and this file needs nine lines of it.
+    """
+
+    def __init__(self, app: Any, port: int) -> None:
+        import uvicorn
+
+        self._server = uvicorn.Server(
+            uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+        )
+        self._thread = threading.Thread(target=self._server.run, daemon=True)
+
+    def __enter__(self) -> "_UvicornServer":
+        """Start it and wait until it is actually accepting connections."""
+        self._thread.start()
+        for _ in range(200):  # ~10s worst case; a real start is tens of milliseconds
+            if self._server.started:
+                return self
+            threading.Event().wait(0.05)
+        raise RuntimeError("the labelling test server did not start")
+
+    def __exit__(self, *_exc: object) -> None:
+        """Ask uvicorn to exit and wait for the thread, so no server outlives its test."""
+        self._server.should_exit = True
+        self._thread.join(timeout=10)
+
+
+def _free_port() -> int:
+    """A port the OS has just confirmed is free."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def test_the_labelling_leg_carries_the_turn_that_asked_for_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one MCP leg in this system that went out anonymous, driven against a real listener.
+
+    `connectors/calc/remote.py` has always passed `turn_identity_hook`, so its calls carry the
+    actor, the session, the correlation id and a `traceparent`. This one passed no hook and could
+    not: the hook lived in `connectors/identity.py`, and `ingest -> connectors` is not an edge
+    `tests/test_layering.py` permits. So a labelling drain — which runs for *hours* inside a durable
+    activity — reached the server with `Authorization` and nothing else, and the trail stopped at
+    this process boundary
+    (`D-2026-09-14-identity-stamping-is-cores-not-a-connectors`).
+
+    Driven over HTTP against a real `FastMCP` on loopback rather than asserted about the source,
+    because the property is what arrives on the wire — and the module docstring of what is now
+    `core/call_identity.py` records a header mechanism that *is* invoked, with the right values,
+    and delivers nothing. Only a listener can tell those apart.
+    """
+    import asyncio
+
+    from mcp.server.fastmcp import FastMCP
+
+    from chemclaw.connectors.server import connector_app
+    from chemclaw.core.identity_context import set_current_correlation_id, set_current_identity
+    from chemclaw.core.session_context import set_current_session_id
+    from chemclaw.ingest.labels.labeller import RxnLabelServer
+
+    seen: list[dict[str, str]] = []
+    server = FastMCP("rxnlabel-probe")
+
+    @server.tool()
+    def labeller_version() -> dict[str, str]:
+        """Record what the caller sent, and answer the shape the service expects."""
+        from chemclaw.connectors.caller import caller_provenance
+
+        actor, session, correlation = caller_provenance()
+        seen.append({"actor": actor, "session": session, "correlation": correlation})
+        return {"version": "probe-1"}
+
+    port = _free_port()
+    monkeypatch.setenv("CHEMCLAW_RXNLABEL_TOKEN", "probe-secret")
+    monkeypatch.setattr(settings, "rxnlabel_server_url", f"http://127.0.0.1:{port}/mcp")
+    monkeypatch.setattr(settings, "rxnlabel_server_token_env", "CHEMCLAW_RXNLABEL_TOKEN")
+
+    async def drive() -> None:
+        set_current_identity("alice-oid", frozenset())
+        set_current_session_id("sess-42")
+        set_current_correlation_id("corr-7")
+        await RxnLabelServer().version()
+
+    with _UvicornServer(connector_app(server, name="rxnlabel-probe"), port):
+        asyncio.run(drive())
+
+    assert seen == [{"actor": "alice-oid", "session": "sess-42", "correlation": "corr-7"}], (
+        f"the labelling server saw {seen}; this leg is anonymous again and a drain that runs for "
+        "hours cannot be joined to the turn that started it"
+    )
