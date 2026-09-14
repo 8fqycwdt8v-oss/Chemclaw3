@@ -734,8 +734,9 @@ only holds defects can only ever restore the system to what it already intended 
       The row this replaces said the cost was Pydantic *class docstrings* carrying design
       arguments — "One `objectives` field rather than a lead objective plus a sidecar list (W3)" —
       published as JSON-schema descriptions. **That was fixed before this row was worked**:
-      `science/bo/problem.py` carries five comments saying the rationale is deliberately in a `#`
-      comment rather than in the docstring, and `start_optimization_campaign`, quoted at 8,063
+      `science/bo/problem.py` carries a comment beside class after class saying the rationale is
+      deliberately in a `#` comment rather than in the docstring, and `start_optimization_campaign`,
+      quoted at 8,063
       chars of schema with 4,392 of description, now measures **1,565 tokens in total**.
 
       What the re-measurement found: 92 bound tools, **57,036 tokens of schema**, of which **41,070

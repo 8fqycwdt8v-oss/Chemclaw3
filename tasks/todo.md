@@ -609,6 +609,47 @@ What decides whether the system is affordable and whether it survives a real cor
 
 **Acceptance** — a before/after number for every item, from the same script, in the PR body.
 
+### Review — W27 and W28, `Chemclaw3` rows only (2026-09-14)
+
+Twelve rows worked, `62d61c4a`..`99682541`. The Part 1 / Part 2 boundary is **`0bdda73f`** (W27.7);
+`docs/decisions/README.md`, `docs/planning/BACKLOG.md` and `tasks/todo.md` are shared by every row,
+so that commit's copies already carry W28.1's edits.
+
+**Four rows were wrong about their own subject, and the measurement is the deliverable.**
+
+- **W27.6** does not reproduce: `gather_evidence` is **126 of 297 probes (42%)**, not half, against
+  a 60% bound that already existed. What the same measurement found is the *tail* — 45 of 114 tools
+  rest on one probe, and **zero** on a bucket-C probe.
+- **W27.4**'s proposed remedy is a **third** measured no-op: one-corpus-one-vote moves **0 of 46**
+  gold ranks. What the measurement settled instead is that RRF is *worse* than the shipped
+  round-robin (mean gold rank 4.54 against 4.38).
+- **W28.1**'s named vein was already closed by an earlier wave; the schema is 72% description and
+  the description is caller guidance. −309 tokens was what per-paragraph judgment was actually worth.
+- **W28.2** was stale in two of three clauses (no scheduled run; one workflow per call) and named the
+  wrong cost — it is memory, not time, and not the 3x.
+
+**Two rows' remedies were forbidden or unavailable by something already merged**: W27.5's implied
+corpus edit is refused by `test_the_seed_corpus_cites_no_calculation_the_store_cannot_back`, and
+W28.4's fix is upstream **beta** with an explicitly unstable on-disk contract.
+
+**W28.4 is the one [L] row the pre-W21 decision said to build and I did not.** It is in `DEFERRED.md`
+with the law measured (`turns + ~2`), both candidate mechanisms named and two triggers. Recorded here
+rather than left to the register, because a standing decision overridden in silence is the thing this
+plan's own rules are about.
+
+**Three findings nobody asked for**, each visible only because something else was measured: a **2.1x
+cost swing between boots of one commit** (`BACKLOG.md`); `make live-up` without `make live-infra`
+indexes **zero** notes, so every retrieval probe in such a lane scores 0 for a reason that is not the
+system; and the first external benchmark says the full system scores **62/100 against its own model's
+74/100**, declining twice as often — its grounding instruction, on questions where grounding buys
+nothing.
+
+**Two of my own defects, caught by mutation and recorded**: the W28.2 cap checked between pages
+bounded nothing on a one-page source (10,000 through a cap of 2,500), and the first W28.3 mutation
+dropped an index from `public` while the suite migrates into its own schema — a mutation that never
+reached the subject and reported a pass. `tasks/lessons.md` also carries the `git checkout` that
+destroyed uncommitted work during W27.4.
+
 ## W29 — Supply chain and delivery: gates that actually run on the bytes that ship
 
 The fleet's supply-chain gate proves a property of `uv.lock` and **not** of any shipped image. Two

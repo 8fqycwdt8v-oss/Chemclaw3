@@ -12,10 +12,13 @@ a lead objective plus a sidecar list (W3)"* — were re-sent to the model on eve
 ## What was measured
 
 **The named vein is already closed, and was closed before this row was worked.**
-`science/bo/problem.py` carries five comments saying in as many words that the rationale is
-deliberately in a `#` comment rather than in the docstring, each pointing at the next. The row's own
-example, `start_optimization_campaign`, was quoted at 8,063 characters of schema with 4,392 of
-description; it now measures **1,565 tokens in total**.
+`science/bo/problem.py` carries a comment beside class after class saying in as many words that
+the rationale is deliberately in a `#` comment rather than in the docstring, each pointing at the
+next. (This paragraph shipped saying "five", and there are six — a count in prose, about a file, in
+an ADR whose whole subject is prose that outlives its measurement. The count decides nothing, so it
+is gone rather than corrected: `grep -n docstring src/chemclaw/science/bo/problem.py` answers.) The
+row's own example, `start_optimization_campaign`, was quoted at 8,063 characters of schema with
+4,392 of description; it now measures **1,565 tokens in total**.
 
 **Where the tokens actually are**, over the 92 tools a `default` turn binds:
 
