@@ -198,7 +198,27 @@ jobs:
           curl -sSfL -o /tmp/trivy-install.sh \
             "https://raw.githubusercontent.com/aquasecurity/trivy/${TRIVY_VERSION}/contrib/install.sh"
           echo "${TRIVY_INSTALL_SHA256}  /tmp/trivy-install.sh" | sha256sum -c -
-          sh /tmp/trivy-install.sh -b /usr/local/bin "${TRIVY_VERSION}"
+          # The installer resolves the tag and then downloads two release assets, and a non-200 on
+          # either is a bare `exit 1` with nothing printed: `http_download` returns 1, `set -e` ends
+          # the script, and its own diagnostics are at debug priority. Measured on two runners, this
+          # step reached "found version: 0.58.2 for v0.58.2/Linux/64bit" and exited 1 in under a
+          # second, twice, with no line naming a URL — which reads as a flake and is not one.
+          #
+          # So the assets are probed before the installer runs, and the installer runs with `-d`.
+          # The syft step below guards its *script* URL, which is the check that would not have
+          # caught this: that download succeeded here and its checksum matched. What a pin has to
+          # resolve to is the bytes being installed.
+          version="${TRIVY_VERSION#v}"
+          base="https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}"
+          for asset in "trivy_${version}_Linux-64bit.tar.gz" "trivy_${version}_checksums.txt"; do
+            code=$(curl -sIL -o /dev/null -w '%{http_code}' "${base}/${asset}")
+            test "${code}" = "200" || {
+              echo "trivy pin ${TRIVY_VERSION}: ${base}/${asset} answered ${code}." >&2
+              echo "The tag resolves; this asset does not. Fix TRIVY_VERSION." >&2
+              exit 1
+            }
+          done
+          sh /tmp/trivy-install.sh -d -b /usr/local/bin "${TRIVY_VERSION}"
           trivy image \
             --scanners vuln \
             --severity HIGH,CRITICAL \
