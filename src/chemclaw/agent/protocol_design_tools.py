@@ -19,6 +19,7 @@ where the model has an answer it likes and no reason to go looking.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Sequence
@@ -28,13 +29,23 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 from chemclaw.agent.authz import require_actor
 from chemclaw.agent.framing import defang
 from chemclaw.agent.session_store import owner_permits
+from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import get_current_correlation_id
+from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_text import get_current_user_texts
-from chemclaw.protocols.checks import blockers, run_checks
+from chemclaw.kg.graph import load_notes
+from chemclaw.kg.note import external_record_ref
+from chemclaw.memory.failure import failures_against, observation_of
+from chemclaw.protocols.checks import (
+    _used_structures,
+    blockers,
+    run_checks,
+)
 from chemclaw.protocols.diff import diff_designs
+from chemclaw.protocols.export import run_sheet_path
 from chemclaw.protocols.layout import LayoutError, place, smallest_plate_for
 from chemclaw.protocols.models import (
     DesignStatus,
@@ -46,6 +57,8 @@ from chemclaw.protocols.models import (
     PlateLayout,
     ProtocolArm,
     ProtocolBody,
+    RecordedFailure,
+    UncitedPrecedent,
     design_id_for,
 )
 from chemclaw.protocols.render import (
@@ -54,6 +67,8 @@ from chemclaw.protocols.render import (
     render_markdown,
 )
 from chemclaw.protocols.store import DesignStore, RevisionConflict, default_design_store
+from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions
+from chemclaw.science.fingerprints.store import default_reaction_store
 
 logger = logging.getLogger(__name__)
 
@@ -326,6 +341,96 @@ async def _stored_status(store: DesignStore, design_id: str) -> DesignStatus:
     return header.status
 
 
+async def _recorded_failures(design: ExperimentDesign) -> list[RecordedFailure]:
+    """What the corpus already records as having failed, for the citations and reagents in `design`.
+
+    **The seam between a pure check and a corpus, and it lives here because this is the layer that
+    may reach both.** `tests/test_layering.py` allows `protocols -> core` and `protocols -> science`
+    and nothing else, which is right: a deterministic check must not depend on a corpus being
+    loadable, and fifteen checks that are arithmetic today must not acquire I/O because a sixteenth
+    wanted it. So `memory/failure.failures_against` answers in the knowledge graph's vocabulary,
+    this reduces what it found, and `no_documented_failure` decides.
+
+    Offloaded, because `load_notes` parses the corpus off disk - measured elsewhere in this tree at
+    151 ms for one scan of 10k notes - while `run_checks` itself is budgeted at 47 ms inline. A
+    synchronous read here would put the corpus on the event loop at every draft.
+
+    **It never raises.** A corpus that cannot be read is a reason to say less, not to refuse a
+    design. The cost is that the check then reports "no recorded failure bears on this design",
+    which is indistinguishable from having looked and found none - so the failure is counted
+    through `degraded()` rather than swallowed, because a lookup that has silently stopped working
+    returns every draft clean.
+    """
+    cited = [ref.ref for ref in design.evidence if ref.ref]
+    structures = [smiles for _, smiles in _used_structures(design)]
+    if not cited and not structures:
+        return []
+    try:
+        notes = await asyncio.to_thread(
+            lambda: failures_against(
+                load_notes(settings.knowledge_path), cited=cited, structures=structures
+            )
+        )
+    except Exception as exc:
+        degraded(
+            logger,
+            "failure_memory",
+            "could not read the corpus for recorded failures, so this design was checked "
+            "without them: %s",
+            exc,
+        )
+        return []
+    return [RecordedFailure(id=note.id, summary=observation_of(note)) for note in notes]
+
+
+async def _uncited_precedent(design: ExperimentDesign) -> list[UncitedPrecedent]:
+    """Runs the record already holds that resemble this design and that it does not cite.
+
+    **The second caller of the seam `_recorded_failures` opened**, and deliberately the same shape:
+    a check must stay pure over its arguments, `protocols` may import only `core` and `science`, so
+    the lookup lives here and `precedent_consulted` decides. Two instances is what makes that a
+    pattern rather than one function's arrangement — and it is why `run_checks` now dispatches
+    through a mapping instead of a chain of identity tests.
+
+    **It offers, it never cites.** A hit is a thing that exists; a citation is a claim the chemist
+    makes about what a decision rests on. Writing a hit into `design.evidence` would forge the
+    first out of the second and leave `evidence_present` passing on a design nobody grounded, which
+    is a check satisfying itself.
+
+    **Already-cited hits are dropped, and the comparison is the citation's own spelling.**
+    `EvidenceRef.ref` carries `reaction-<source>.<id>` or the bare `reaction-<id>` that
+    `note_id_for_reaction` mints, while a `Match.id` is the record id alone — so comparing the two
+    raw would report every citation the design *does* carry as uncited, which is the noisiest
+    possible way to be wrong. `external_record_ref` is the inverse that already exists.
+
+    It never raises, for `_recorded_failures`' reason and one more: this search reaches Postgres,
+    so an unreachable index is an ordinary condition of a laptop rather than a fault of the design.
+    The cost of that is the same — a silent "nothing to offer" is indistinguishable from having
+    looked — which is why the failure is counted through `degraded()` and why
+    `precedent_consulted`'s passing text says nothing was *offered* rather than that nothing exists.
+    """
+    reaction = design.request.reaction_smiles.strip()
+    if not reaction:
+        return []
+    cited = {external_record_ref(ref.ref)[1] for ref in design.evidence if ref.ref}
+    try:
+        search = await find_similar_reactions(default_reaction_store(), reaction)
+    except Exception as exc:
+        degraded(
+            logger,
+            "precedent_lookup",
+            "could not search the reaction index for precedent, so this design was checked "
+            "without it: %s",
+            exc,
+        )
+        return []
+    return [
+        UncitedPrecedent(id=hit.id, similarity=hit.similarity, label=hit.label)
+        for hit in search.hits
+        if hit.id not in cited
+    ]
+
+
 @tool
 async def structure_experiment_request(request: ExperimentRequest, salt: str = "") -> str:
     """Turn a chemist's free-text ask into the structured request a protocol is drafted from.
@@ -394,7 +499,12 @@ async def structure_experiment_request(request: ExperimentRequest, salt: str = "
             )
         )
 
-    checks = run_checks(design, stage="protocol" if design.has_protocol else "request")
+    checks = run_checks(
+        design,
+        stage="protocol" if design.has_protocol else "request",
+        failures=await _recorded_failures(design),
+        precedent=await _uncited_precedent(design),
+    )
     revision = await store.append(
         design_id,
         design,
@@ -516,7 +626,11 @@ async def draft_experiment_protocol(
             }
         )
 
-    checks = run_checks(design)
+    checks = run_checks(
+        design,
+        failures=await _recorded_failures(design),
+        precedent=await _uncited_precedent(design),
+    )
     if failed := blockers(checks):
         raise ChemclawError(
             "this design is not storable yet — "
@@ -594,8 +708,10 @@ async def read_experiment_protocol(design_id: str, revision: int = 0) -> str:
         revision: A specific revision, or 0 for the current head.
 
     Returns:
-        JSON with `receipt` (the summary and the checks), `design` (the whole document) and
-        `markdown` (the protocol as a chemist reads it — quote from this rather than rebuilding it).
+        JSON with `receipt` (the summary and the checks), `design` (the whole document),
+        `markdown` (the protocol as a chemist reads it — quote from this rather than rebuilding
+        it) and `run_sheet` (the path a chemist downloads the plate from as a CSV — give them this
+        link rather than retyping the table, and never edit the path you are handed).
 
     Raises:
         ChemclawError: no design or no such revision.
@@ -618,6 +734,7 @@ async def read_experiment_protocol(design_id: str, revision: int = 0) -> str:
         ),
         design=stored.design,
         markdown=render_markdown(stored.design, stored.checks),
+        run_sheet=run_sheet_path(design_id, stored.revision),
     )
     return _readable(body)
 

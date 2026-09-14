@@ -17,6 +17,7 @@ What is single is the decode, and the last test here is the one that keeps it th
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -71,6 +72,17 @@ def _with_result(monkeypatch: pytest.MonkeyPatch, result: Any) -> None:
         return _Client(_Handle(WorkflowExecutionStatus.COMPLETED, result))
 
     monkeypatch.setattr(durable_tools, "connect", _connect)
+
+
+def _runtime(tool_call_id: str = "call-probe") -> Any:
+    """A stand-in for LangChain's injected `ToolRuntime`, carrying only what the tool reads.
+
+    `synthesize_memory` takes the runtime for one reason — its `tool_call_id` is what makes a
+    `fresh` run's workflow id a function of the ask rather than of the clock, so a tool re-run on
+    resume rejoins instead of starting a second full-corpus mine. Direct callers here have to
+    supply it because LangChain injects it only through the tool wrapper.
+    """
+    return SimpleNamespace(tool_call_id=tool_call_id)
 
 
 def test_a_completed_job_hands_over_its_result_in_one_call(
@@ -505,7 +517,7 @@ def test_every_memory_job_kind_can_actually_be_started(
     monkeypatch.setattr(durable_tools, "connect", _connect)
 
     for kind in durable_tools._MEMORY_JOBS:
-        job_id = asyncio.run(durable_tools.synthesize_memory(kind))
+        job_id = asyncio.run(durable_tools.synthesize_memory(kind, _runtime()))
         assert job_id.startswith(f"memory-{kind}-")
 
     launched = [run for run, _, _ in client.started]
@@ -599,7 +611,7 @@ def test_asking_twice_in_a_day_rejoins_rather_than_re_scanning(
         return _Rejecting()
 
     monkeypatch.setattr(durable_tools, "connect", _connect)
-    job_id = asyncio.run(durable_tools.synthesize_memory("campaign"))
+    job_id = asyncio.run(durable_tools.synthesize_memory("campaign", _runtime()))
     assert job_id == durable_tools._memory_job_id("campaign"), (
         "a same-day repeat must hand back the existing run's id, so the caller sees a job rather "
         "than silence"
@@ -696,3 +708,45 @@ def test_find_past_jobs_says_when_its_answer_is_only_the_newest_page(
     assert "verdict" in found.model_dump()
     # Framing still applies to the free text of each hit, unchanged by the wrapper.
     assert found.hits[0].rationale.startswith("<")
+
+
+def test_a_fresh_mine_is_keyed_on_the_ask_rather_than_on_the_clock() -> None:
+    """The one launcher whose id was not a function of its inputs, which a replay duplicates.
+
+    Every other durable launcher in this tree derives its workflow id with `stable_hash` over its
+    arguments, so a tool re-run on resume — which
+    `D-2026-09-14-a-turn-outlives-its-request-already-and-nothing-can-pick-it-up` measured happens
+    with the original arguments — rejoins instead of starting a second run. `fresh` suffixed the id
+    with `strftime('%H%M%S')`, so a replay a second later minted a different id and started a
+    second full-corpus mine.
+
+    Three arms, because the fix has to preserve what `fresh` is *for*. A replay of one ask rejoins;
+    two genuine asks do not; and a same-day repeat without `fresh` still rejoins, which is the
+    daily-unit behaviour the flag exists to escape.
+    """
+    replayed = durable_tools._memory_job_id("campaign", fresh=True, discriminator="call-1")
+    again = durable_tools._memory_job_id("campaign", fresh=True, discriminator="call-1")
+    other = durable_tools._memory_job_id("campaign", fresh=True, discriminator="call-2")
+
+    assert replayed == again, "a replay of one ask must rejoin rather than mine the corpus twice"
+    assert replayed != other, "two genuine asks must still each get a run — that is what fresh is"
+    assert durable_tools._memory_job_id("campaign") == durable_tools._memory_job_id("campaign"), (
+        "the daily unit is unchanged for the default path"
+    )
+    assert durable_tools._memory_job_id("campaign") != replayed
+
+
+def test_the_injected_runtime_is_not_part_of_the_tool_surface() -> None:
+    """A parameter the model can see is a parameter the request prefix pays for, every call.
+
+    `runtime` is taken for one internal reason and must not reach the schema — LangChain excludes a
+    `ToolRuntime` annotation from the model-facing args, and this asserts that rather than trusting
+    it, because the cost of being wrong is silent: `tests/test_context_floor.py` would move and the
+    model would be offered an argument it cannot supply.
+    """
+    from langchain_core.tools import StructuredTool
+
+    bound = StructuredTool.from_function(
+        coroutine=durable_tools.synthesize_memory, name="synthesize_memory", description="probe"
+    )
+    assert sorted(bound.args) == ["fresh", "kind"]

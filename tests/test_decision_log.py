@@ -356,6 +356,33 @@ def _topic_cited_ids() -> set[str]:
     return set(re.findall(rf"{_DATED}|{_NUMBERED}", _topic_section()))
 
 
+def test_no_subject_has_two_topic_rows() -> None:
+    """One subject, one row — because a reader takes the first row they find as *the* answer.
+
+    `test_the_index_has_no_duplicate_reservations` covers the record table, where a repeated id is
+    a collision. Nothing covered the navigational half, and a duplicate there is worse in a quieter
+    way: both rows parse, both cite real ADRs, every other assertion in this file passes, and the
+    two copies then drift — one gains a citation the other does not, so which decision a reader is
+    told is current depends on which line they stopped at.
+
+    Found by merging: `main` carried two "Publishing & delivery" rows, one of them missing a
+    citation the other had, and the conflict that surfaced it was a side effect rather than a
+    check. A guard is what makes the next one loud.
+    """
+    subjects = [
+        line.split("|")[1].strip()
+        for line in _topic_section().splitlines()
+        if line.startswith("| ") and line.count("|") >= 3
+    ]
+    named = [s for s in subjects if s and not set(s) <= set("- ") and s != "Topic"]
+    duplicates = sorted(topic for topic, count in Counter(named).items() if count > 1)
+
+    assert not duplicates, (
+        "the By topic table carries two rows for the same subject, so which decision a reader is "
+        f"told is current depends on which line they stop at: {duplicates}"
+    )
+
+
 def test_no_recent_adr_lands_unfiled_by_the_topic_table() -> None:
     """Every ADR on or after `_TOPIC_CURSOR` is either a topic row's subject or declared not one.
 
@@ -431,6 +458,14 @@ def test_the_topic_cursor_is_not_ahead_of_the_record() -> None:
 # different claim — "this guarantee is enforced right now, here" — which is why it is checked here
 # and there rather than exempted with the paths.
 _RETIRED_TEST_CITATIONS: dict[str, str] = {
+    # Renamed because the name asserted the opposite of what the test pinned. It said "once" and
+    # drove a single call, over a branch that returned `True` unconditionally — so what it actually
+    # held was "every time, forever", which is the DARK-7 failure it was written to prevent
+    # (`D-2026-09-14-an-undated-note-is-not-news-every-hour`, measured at 32 of 39 shipped notes).
+    "test_a_note_with_no_date_is_reported_once_rather_than_never": (
+        "replaced by `test_an_undated_note_is_told_once_and_then_not_again` "
+        "(tests/test_digest.py), which drives both calls and so can tell the two apart"
+    ),
     # Deleted by the implementation it existed to demand. `D-2026-08-27` wrote it to fail whoever
     # re-added a retraction's storage half without the readers that honour it, and said so in its
     # own docstring; `D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports` brought the readers, so

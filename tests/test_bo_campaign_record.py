@@ -1084,3 +1084,61 @@ def test_a_failed_write_reports_no_fork_rather_than_guessing_one(
     recorded = _run(record_suggestion(_problem(), [], [], [], ("a", "s", "c")))
     assert recorded.campaign_id == campaign_id_for(_problem())
     assert recorded.opened_new_campaign is False
+
+
+def test_an_inline_suggestion_replayed_with_the_same_ask_records_one_row(
+    store: InMemoryCampaignStore,
+) -> None:
+    """The inline tool passed no `job_id`, so the dedupe index did not cover its row.
+
+    `record_suggestion`'s own parameter docstring said what the absence costs — "empty for the
+    inline tool. Makes the write idempotent — a Temporal activity is retried by design" — and the
+    index is partial on exactly that column, `ON CONFLICT (campaign_id, job_id) WHERE job_id <> ''`.
+    Since `D-2026-09-14-a-turn-outlives-its-request-already-and-nothing-can-pick-it-up` a tool
+    killed mid-call is re-run with its original arguments, so the inline path had to supply a key
+    too. It derives one from the ask, the way every other idempotency key in this tree is derived.
+
+    Both arms: the same ask twice is one row, and a *different* ask is still a second one — because
+    a key that collapsed every suggestion into one would lose the campaign history this entity
+    exists to keep.
+    """
+    problem = _problem()
+    history = [Observation(params={"temperature": 40.0, "ligand": "PPh3"}, value=55.0)]
+
+    first = _run(
+        record_suggestion(
+            problem=problem,
+            candidates=[],
+            observations=history,
+            calc_refs=["xtb@v1:aaa:bbb"],
+            provenance=("chemist-a", "session-1", "corr-1"),
+            job_id="inline-same",
+        )
+    )
+    _run(
+        record_suggestion(
+            problem=problem,
+            candidates=[],
+            observations=history,
+            calc_refs=["xtb@v1:aaa:bbb"],
+            provenance=("chemist-a", "session-1", "corr-1"),
+            job_id="inline-same",
+        )
+    )
+    assert len(_run(store.suggestions_for(first.campaign_id, 10))) == 1, (
+        "a replay of one ask must not add a second suggestion to the campaign's history"
+    )
+
+    _run(
+        record_suggestion(
+            problem=problem,
+            candidates=[],
+            observations=[Observation(params={"temperature": 41.0, "ligand": "PPh3"}, value=57.0)],
+            calc_refs=["xtb@v1:aaa:bbb"],
+            provenance=("chemist-a", "session-1", "corr-1"),
+            job_id="inline-different",
+        )
+    )
+    assert len(_run(store.suggestions_for(first.campaign_id, 10))) == 2, (
+        "a genuinely different ask is a second suggestion and must still be recorded"
+    )

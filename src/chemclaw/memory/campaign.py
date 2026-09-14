@@ -13,19 +13,28 @@ narrative is the `campaign-narrative-synthesis` skill's judgment (per plan 5.3),
 not invented here.
 """
 
+from datetime import date
+
 from chemclaw.ingest.eln.ord import OrdReaction
 from chemclaw.kg.note import Note
 from chemclaw.memory.chains import Chain
 from chemclaw.memory.ids import stable_id
 
 
-def campaign_note_from_chain(chain: Chain, reactions: dict[str, OrdReaction]) -> Note:
+def campaign_note_from_chain(
+    chain: Chain, reactions: dict[str, OrdReaction], *, minted_on: date | None = None
+) -> Note:
     """Map a chain to an agent `campaign` note that links to each member reaction.
 
     `reactions` maps reaction id → the `OrdReaction`, for the per-step SMILES. The body
     lists the chain in order, each step wikilinking its reaction note (the evidence), then
     the product→reactant handoffs that make it a campaign. The project (if the members share
     one) is carried so the semantic layer can group campaigns across projects.
+
+    `minted_on` becomes `valid_from` — the day the corpus first supported the chain, which
+    `jobs.supported_from` derives from the same member ids this note's id is keyed on. Without it
+    the note is open-ended, which `durable/digest._is_new` correctly reads as "not news" and which
+    is therefore silence rather than a default.
     """
     steps = []
     for position, reaction_id in enumerate(chain.reaction_ids, start=1):
@@ -57,4 +66,5 @@ def campaign_note_from_chain(chain: Chain, reactions: dict[str, OrdReaction]) ->
         source="memory:chain-detection",
         tags=sorted(projects),
         body=body,
+        valid_from=minted_on,
     )

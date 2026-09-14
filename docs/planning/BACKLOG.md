@@ -88,18 +88,32 @@ topic).
   The fix is one more arm over the argument-driven cases rather than a change to the partition, and
   it should derive them from `authz` rather than listing `write_file` by name.
 
-- [ ] **A helper's own subgraph checkpoints are 91% of what a spawn costs, and nothing bounds
-  them** — [M]. `D-2026-09-12-a-helpers-scratch-file-crosses-into-its-callers-state` bounded what
-  crosses into the *caller's* `files` channel, which is what W23.6 named. Measured on a real
-  `AsyncPostgresSaver` with incompressible text, one helper writing 2 MB costs **20,712 kB** of
-  checkpoint rows above a 296 kB baseline — 10.4x — and that cap reclaims **1,824 kB**, 8.8%. The
-  rest is the helper's own `files` and `messages` channels in `checkpoint_blobs`, re-serialised per
-  version, which a `wrap_tool_call` middleware cannot reach: it runs when `task` returns, after
-  those checkpoints are written. Two levers exist and both are decisions rather than edits — a
-  bound on `write_file`'s *content argument*, which would also silently truncate a chemist's own
-  scratchpad, or compiling a helper with no checkpointer at all, which changes what a mid-turn
-  interrupt can resume. Measure which before choosing; the probe is
-  `/tmp`-free and is the one in that ADR's table.
+- [ ] **A helper spawn costs 20,712 kB of checkpoint rows and nothing yet explains where they
+  go** — [M]. The cost is real and measured on a real `AsyncPostgresSaver` with incompressible
+  text: one helper writing 2 MB costs **20,712 kB** above a 296 kB baseline (10.4x), and
+  `D-2026-09-12-a-helpers-scratch-file-crosses-into-its-callers-state`'s cap reclaims **1,824 kB**,
+  8.8%.
+
+  **The explanation this row used to carry is false in both halves, checked rather than argued.**
+  It said the rest was "the helper's own `files` and `messages` channels in `checkpoint_blobs`".
+  The helper graph is compiled with **no checkpointer** — `agent/langgraph_agent.py` passes none
+  and says why, and `tests/test_subagents.py::test_the_helper_graph_is_compiled_without_a_checkpointer`
+  now holds it — so there are no helper checkpoints to account for anything. And `messages` is in
+  upstream's `_EXCLUDED_STATE_KEYS`, so a helper's thread never crosses into the caller's state at
+  all. The consequence for whoever picks this up: **one of the two levers this row used to offer is
+  already spent.** "Compiling a helper with no checkpointer" is the shipped configuration, not a
+  choice remaining, and looking for that object is a dead end.
+
+  What is left to do is attribute the 91% before bounding it, because the obvious candidate is also
+  bounded already: `agent_subagent_files_max_chars` caps the caller's whole `files` channel at
+  200,000 characters (`held` makes it a channel bound, not a per-call one), so a 2 MB helper write
+  cannot be 2 MB of crossed file. The remaining suspect is the caller's own channels re-serialised
+  per checkpoint version — `files` is a `DeltaChannel(snapshot_frequency=50)` — which is a property
+  of the caller's thread rather than of delegation, and would mean this row belongs beside the
+  checkpointer's write-volume row rather than beside the helper ones. Measure that attribution
+  first; the probe is `/tmp`-free and is the one in that ADR's table. The surviving lever, if the
+  attribution holds, is a bound on `write_file`'s *content argument* — which would also silently
+  truncate a chemist's own scratchpad, and is therefore still a decision rather than an edit.
 
 - [ ] **`max_concurrent_workflow_tasks` is set nowhere, so nothing this repository chose bounds
   workflow-task concurrency** — [M]. `durable/background_worker.py` sets `max_concurrent_activities`
@@ -799,6 +813,104 @@ only holds defects can only ever restore the system to what it already intended 
       that matters — that corpus choice is task-dependent: reaction prediction wants literature,
       nomenclature wants structured databases. A process chemist asking "has anyone run this coupling
       on a deactivated aryl chloride" currently gets whatever those 39 notes happen to say.
+
+- [ ] **A profile should be able to supply prompt *blocks*, not only a string** — [M], and this is
+      the general form of `D-2026-09-14-a-profiles-prose-is-text-this-repository-wrote`. The default
+      prompt is 31 `PromptBlock`s, each declaring `requires`/`absent_unless`, so a sentence naming a
+      tool this deployment lacks is dropped before the model reads it. A profile's `instructions:`
+      is one opaque string and gets none of that — the exemption `instructions_for` states is for a
+      *site's* manifest, which this repository cannot cut into blocks, and it is right about that.
+      What it leaves open is that a site narrowing a profile's tools has no way to narrow its own
+      prose either: the field would have to accept a list of `{text, requires, absent_unless}` with
+      the same ten rules, and the reason it is a row rather than a commit is that it has **no
+      caller** — all six shipped profiles are strings, the repository-owned half is now guarded by a
+      test, and a second-domain deployment is hypothetical. Build it with the first site profile
+      that narrows tools, not before. This is also the honest remainder of Wave 7's "the prompt into
+      profile data": the prose is already data (`data/profiles/*.yaml`), what is not is its
+      *structure*.
+
+- [ ] **A cut tool result is unrecoverable, and the store that would hold it is downstream of the
+      cut** — [M], the last open Wave 1 item ("make a cleared tool result retrievable by address").
+      Measured 2026-09-14, and the two halves are not the same problem.
+      `D-2026-09-14-the-lossy-step-is-the-cut-and-upstream-already-offloads` already established
+      that the *clear* loses nothing — it runs over a deep copy inside `wrap_model_call` and the
+      next turn re-derives the same reduction from the full thread. The **cut** in
+      `agent/tool_result_size.py` is the lossy one, and driven through the real middleware a 65,000
+      character result comes out at 59,999 with the middle replaced by a notice.
+      `api/tool_results.py` is exactly the address that should hold it — content-addressed on the
+      SHA-256 of the text, already served by `GET /sessions/{id}/tool-results/{ref}` — but
+      `api/graph_stream.py` calls `trace.returned(...)` on the `ToolMessage` the graph *emits*,
+      which is post-middleware, so `tool_result_blobs` stores the cut text and the removed middle
+      reaches no store at all.
+      **The plan this row first carried does not reach the goal, and that is checked rather than
+      argued.** It said to hand `bound_tool_results` a sink so it stores the raw text before
+      cutting. It would — and the *stream event's* `result_ref` would still address the cut text,
+      because that ref comes from `ToolCallTrace.returned`, which `api/graph_stream.py` calls on the
+      `ToolMessage` the graph emits. The store is content-addressed, so raw and cut are different
+      rows by construction (driven: two refs, not one). Storing the raw bytes therefore puts them
+      somewhere real and leaves every existing consumer pointing at the cut version — which is the
+      feature looking done while nothing a chemist clicks has changed.
+
+      So the open decision is *which consumer* is being served, and the two answers want different
+      builds. **A chemist's "show the full result"** needs the trace's ref to be the raw one, which
+      means the raw text reaching `ToolCallTrace` — and the trace sits downstream of the middleware
+      by construction, so this is a plumbing question about the stream, not about a sink.
+      **A model that can re-read what was cut** needs the notice to name a ref *and* a tool to
+      fetch it, which is a new model-facing surface that re-inflates exactly what the budget just
+      reclaimed, and wants the offload-and-pointer argument in
+      `D-2026-09-14-the-lossy-step-is-the-cut-and-upstream-already-offloads` rather than this row.
+      Pick the consumer first; `tests/test_layering.py` forbids `agent -> api` either way, so
+      whatever is chosen arrives through an injected callable (`ResultSink` is already one) rather
+      than an import.
+
+- [ ] **Three subsystems want one missing column: who wrote this** — [M]. `Note.created_by` is
+      `Literal["human", "agent"]` and `Note.source` is the ingest source, so **a note names no
+      person** — found while scoping the conflict notice
+      (`D-2026-09-14-a-contradiction-only-a-querier-sees-is-not-a-warning`, which addressed the
+      subscriber instead and needs no column). `audit_events.agent` is the same shape one layer
+      over (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` deleted the claim
+      rather than the column), and `session_messages` is the third, in the row below. Each is a
+      schema change plus a backfill question over rows already written, and taking it three times
+      in the corner each subsystem noticed it is how three subtly different answers to one question
+      get shipped. Decide the shape once — what an author *is* when the writer is an agent acting
+      for a person — then migrate each. Nothing is blocked on it today: every consumer that wanted
+      it has an addressee it can reach without one.
+
+- [ ] **Several humans in one session is five pieces, and the policy one has to be settled first**
+      — [L], scoped in `docs/archive/PLAN-2026-09-14-multiplayer-and-the-open-delegation-questions.md`.
+      Not the owner gate relaxed: measured, `session_messages` has **no actor column** so a shared
+      transcript cannot say who wrote what; ownership is checked in 46 places under
+      `src/chemclaw/api/`; `api/detach.py` holds one queue and one `_attached` flag, so a second
+      reader *steals* events rather than seeing a copy; and two writers on one thread fork the DAG
+      silently (Wave 2's measurement), which is what `SessionTurnClaims` prevents by refusing.
+
+      The serialisation is already correct and only its *answer* is wrong — one turn at a time is
+      the right semantic for a shared thread, so the 409 becomes a bounded queue rather than the
+      claim being relaxed. Order: participants, attribution, queued turn, reader fan-out. **Settle
+      the authority questions before the schema**: whose roles govern a tool call, whether B may
+      approve a plan A's message produced, and whose `/memories/` load (they are namespaced per
+      actor digest, so a shared session loads none, the sender's, or a session tier that does not
+      exist). Cheap to decide now, a migration to decide later. A chat-room connector is separate
+      work on top and wants 1–4 finished first.
+
+- [ ] **Run the delegation comparison against a real gateway, and accept a negative result**
+      — [M], and it is the gate on Wave 3's roster. `evals/delegation.py` and
+      `data/evals/probes/delegation.yaml` exist and have never been run against a model; the blocker
+      is an OpenAI-compatible endpoint, the same one #359/#360 wait on. **A negative result closes
+      the question as legitimately as a positive one** — written down because the retired specialist
+      team was added to be ready and stayed off, and because a disappointing answer is not a reason
+      to re-open a measurement. What would *not* close it is another delegation-*rate* number:
+      `D-2026-08-12` measured 2 of 15, `D-2026-08-13` measured 14/15 against 14/15 with the old arm
+      at ceiling, and two of those probes span two specialists, so that figure had an unpassable
+      floor before any model was involved.
+
+- [ ] **A routing corpus where the right profile is not inferable from the question's surface**
+      — [M]. Seven profiles ship and genuinely narrow (`evidence` reaches zero side-effecting tools,
+      `safety` one, `default` all 49); what `D-2026-08-15` deleted is automatic routing between
+      them. Re-opening it needs a corpus the retired one did not contain: cases where the profile a
+      question *needs* differs from the profile its wording suggests, compared on **answers** rather
+      than on which specialist was picked. Until that corpus exists a router is a guess with a
+      metric attached, and this row is the corpus rather than the router.
 
 - [ ] **A bundle declared only in the fleet reaches an agent surface with no probe covering it** —
       [M], and it is a cross-repository gap rather than a missing file.

@@ -626,3 +626,35 @@ def test_a_partial_pass_may_re_record_an_observation_with_no_evidence_yet() -> N
                 await conn.commit()
 
     asyncio.run(_run())
+
+
+def test_a_promoted_observation_is_dated_so_it_reaches_a_subscriber() -> None:
+    """A promotion wrote a note into the graph and told nobody, and the reason was one absent date.
+
+    `playbook_note` set no `valid_from`, which `Note.is_current` and `durable/digest._is_new` both
+    read as *open-ended* — true for as long as anyone has known. So a distilled rule the corpus had
+    just started supporting looked, to the one mechanism that notifies anybody, exactly like
+    something that had always been there.
+
+    Asserted against the activity's source rather than by driving Temporal: what is claimed is that
+    the promotion passes the day it ran, and `workflow_safe_today` is the only clock an activity may
+    read.
+    """
+    import ast
+    from pathlib import Path
+
+    import chemclaw.durable.observation_jobs as jobs
+
+    tree = ast.parse(Path(jobs.__file__).read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "playbook_note"
+    ]
+
+    assert len(calls) == 1, "the promotion mints one playbook; this test reads that one"
+    minted = [kw for kw in calls[0].keywords if kw.arg == "minted_on"]
+    assert minted, "a promoted playbook with no date reaches no subscriber who has a watermark"
+    assert ast.unparse(minted[0].value) == "workflow_safe_today()"
