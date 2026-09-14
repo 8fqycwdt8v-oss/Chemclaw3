@@ -1136,3 +1136,39 @@ def test_a_helper_has_no_durable_memory_route_and_no_store_is_passed_to_one() ->
         "the helper compile passes a store; `/memories/` becomes durable for a helper and "
         "`helper_profile(harness_enabled=False)` then removes the only gate over it"
     )
+
+
+def test_the_helper_graph_is_compiled_without_a_checkpointer() -> None:
+    """Upstream's contract is one prompt in, one report out — a thread to resume is not that.
+
+    Asserted because the fact is load-bearing outside this file and was already misread once: a
+    `BACKLOG.md` row costing a helper spawn at 20,712 kB attributed it to "the helper's own subgraph
+    checkpoints" and offered "compiling a helper with no checkpointer at all" as one of two levers
+    to choose between. There is no such checkpointer to remove — this is already the shipped
+    configuration, so that lever was spent before the row was written, and whoever picked it up
+    would have gone looking for an object that does not exist.
+
+    Read off the source rather than the compiled object, because a `CompiledStateGraph` exposes no
+    "was I given a saver" that is public API, and pinning a private attribute would be a second
+    upstream coupling for a fact the call site states outright.
+    """
+    import ast
+    from pathlib import Path
+
+    import chemclaw.agent.langgraph_agent as la
+
+    tree = ast.parse(Path(la.__file__).read_text(encoding="utf-8"))
+    builds = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "build_langgraph_agent"
+    ]
+
+    assert len(builds) == 1, "this module builds the helper graph once; this test reads that one"
+    passed = {keyword.arg for keyword in builds[0].keywords}
+    assert "helper" in passed, "the one build here should be the helper's; this test is stale"
+    assert "checkpointer" not in passed, (
+        "the helper graph was given a checkpointer: it would then hold a thread nobody addresses, "
+        "and its state would be persisted twice — once under its own thread and again through the "
+        "keys upstream copies into the caller's"
+    )

@@ -88,18 +88,32 @@ topic).
   The fix is one more arm over the argument-driven cases rather than a change to the partition, and
   it should derive them from `authz` rather than listing `write_file` by name.
 
-- [ ] **A helper's own subgraph checkpoints are 91% of what a spawn costs, and nothing bounds
-  them** — [M]. `D-2026-09-12-a-helpers-scratch-file-crosses-into-its-callers-state` bounded what
-  crosses into the *caller's* `files` channel, which is what W23.6 named. Measured on a real
-  `AsyncPostgresSaver` with incompressible text, one helper writing 2 MB costs **20,712 kB** of
-  checkpoint rows above a 296 kB baseline — 10.4x — and that cap reclaims **1,824 kB**, 8.8%. The
-  rest is the helper's own `files` and `messages` channels in `checkpoint_blobs`, re-serialised per
-  version, which a `wrap_tool_call` middleware cannot reach: it runs when `task` returns, after
-  those checkpoints are written. Two levers exist and both are decisions rather than edits — a
-  bound on `write_file`'s *content argument*, which would also silently truncate a chemist's own
-  scratchpad, or compiling a helper with no checkpointer at all, which changes what a mid-turn
-  interrupt can resume. Measure which before choosing; the probe is
-  `/tmp`-free and is the one in that ADR's table.
+- [ ] **A helper spawn costs 20,712 kB of checkpoint rows and nothing yet explains where they
+  go** — [M]. The cost is real and measured on a real `AsyncPostgresSaver` with incompressible
+  text: one helper writing 2 MB costs **20,712 kB** above a 296 kB baseline (10.4x), and
+  `D-2026-09-12-a-helpers-scratch-file-crosses-into-its-callers-state`'s cap reclaims **1,824 kB**,
+  8.8%.
+
+  **The explanation this row used to carry is false in both halves, checked rather than argued.**
+  It said the rest was "the helper's own `files` and `messages` channels in `checkpoint_blobs`".
+  The helper graph is compiled with **no checkpointer** — `agent/langgraph_agent.py` passes none
+  and says why, and `tests/test_subagents.py::test_the_helper_graph_is_compiled_without_a_checkpointer`
+  now holds it — so there are no helper checkpoints to account for anything. And `messages` is in
+  upstream's `_EXCLUDED_STATE_KEYS`, so a helper's thread never crosses into the caller's state at
+  all. The consequence for whoever picks this up: **one of the two levers this row used to offer is
+  already spent.** "Compiling a helper with no checkpointer" is the shipped configuration, not a
+  choice remaining, and looking for that object is a dead end.
+
+  What is left to do is attribute the 91% before bounding it, because the obvious candidate is also
+  bounded already: `agent_subagent_files_max_chars` caps the caller's whole `files` channel at
+  200,000 characters (`held` makes it a channel bound, not a per-call one), so a 2 MB helper write
+  cannot be 2 MB of crossed file. The remaining suspect is the caller's own channels re-serialised
+  per checkpoint version — `files` is a `DeltaChannel(snapshot_frequency=50)` — which is a property
+  of the caller's thread rather than of delegation, and would mean this row belongs beside the
+  checkpointer's write-volume row rather than beside the helper ones. Measure that attribution
+  first; the probe is `/tmp`-free and is the one in that ADR's table. The surviving lever, if the
+  attribution holds, is a bound on `write_file`'s *content argument* — which would also silently
+  truncate a chemist's own scratchpad, and is therefore still a decision rather than an edit.
 
 - [ ] **`max_concurrent_workflow_tasks` is set nowhere, so nothing this repository chose bounds
   workflow-task concurrency** — [M]. `durable/background_worker.py` sets `max_concurrent_activities`
