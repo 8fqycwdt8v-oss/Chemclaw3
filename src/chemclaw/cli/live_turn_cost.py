@@ -40,12 +40,9 @@ counted as a pass, the posture `live_probes` and `validate_template_args_live` a
 import argparse
 import asyncio
 import json
-from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 
 import httpx
-import psycopg
-from psycopg.rows import TupleRow
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -113,11 +110,6 @@ _READ = """
 """
 
 
-def _connect() -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:
-    """The configured connection, the same one `operations.activity` reads the ledger through."""
-    return db.connection(settings.session_store_dsn or settings.postgres_dsn)
-
-
 async def _recorded(session_id: str) -> list[TurnCost]:
     """The ledger rows this run's own session produced, oldest first.
 
@@ -125,7 +117,7 @@ async def _recorded(session_id: str) -> list[TurnCost]:
     differ on every run for a reason that is not a cost. `TurnCost` mints a fresh one, which is
     correct — the case is a record of what a turn cost, not of which row said so.
     """
-    async with _connect() as conn:
+    async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
             await cur.execute(_READ, (session_id,))
             rows = await cur.fetchall()
@@ -257,7 +249,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         session_id = asyncio.run(_drive(args.base_url))
         turns = asyncio.run(_recorded(session_id))
-    except (httpx.HTTPError, psycopg.Error, OSError) as exc:
+    except (httpx.HTTPError, OSError) as exc:
+        # `httpx.HTTPError` is the front door and `OSError` is the database — `core/db` maps an
+        # unreachable or saturated one onto `ConnectionError`, which is an `OSError`. A driver
+        # error that is *not* one of those is deliberately not caught: `chemclaw.cli` may not
+        # import `psycopg` (`tests/test_third_party_layering.py`, and `cli/explain.py`'s
+        # `_is_database_refusal` is the workaround where one is genuinely needed), and a
+        # malformed query reported as "could not reach the live lane" would be a measurement
+        # failure wearing an outage's message.
         print(f"could not reach the live lane ({exc}); nothing was measured")
         return 3
     if not turns:
