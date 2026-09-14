@@ -420,7 +420,7 @@ load_profiles()
 #: bound tool's schema *shrank*. That is why the figure is dated here rather than stated: a
 #: headroom transcribed as current is a claim about a commit, which is the defect the paragraph
 #: above spends fifteen lines on.
-CEILINGS: dict[str, int] = {"__default__": 65_500}
+CEILINGS: dict[str, int] = {"__default__": 65_200}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.

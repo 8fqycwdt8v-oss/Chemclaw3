@@ -458,11 +458,14 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
         to this note.
 
     Raises:
-        ChemclawError: When `note_id` names no current note. A `ChemclawError` is chemclaw's
-            own always-safe "bad input" contract (`chemclaw.core.errors`), so
-            `chemclaw.agent.tool_authz` surfaces this message to the model verbatim instead of an
-            opaque generic failure.
+        ChemclawError: When `note_id` names no current note.
     """
+    # The exception *type*'s rationale is here rather than in the docstring above, because that
+    # docstring is the tool's schema description and is re-sent on every model call: a
+    # `ChemclawError` is this repository's always-safe "bad input" contract
+    # (`chemclaw.core.errors`), so `chemclaw.agent.tool_authz` surfaces the message to the model
+    # verbatim instead of an opaque generic failure. The model cannot act on any of that — it sees
+    # the message either way — and a Python reader of this file needs it.
     graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
     # The graph first, the store second, and in that order deliberately: `reaction-` is a *prefix*,
     # not a reservation, so a human-authored note under that name must still win. Store-first made

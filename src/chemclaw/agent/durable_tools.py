@@ -378,15 +378,18 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
         instead of starting again from the molecule.
 
     Raises:
-        ValueError: When the id is unknown to both Temporal and the durable record, or names a
-            completed workflow whose result is not the connector envelope. That second case used to
-            degrade to a bare status, because the DFT job returned its own typed result and had
-            its own status tool (`agents/job_status.py`). D-118 made it a connector job, so
-            every durable job this system hands an id for returns the envelope — a result that is
-            not one means the id belongs to a workflow no tool advertises, and reporting
-            "completed" with an empty result would tell a chemist their calculation is done while
-            silently withholding it.
+        ValueError: When the id is unknown, or names a completed workflow whose result is not the
+            connector envelope — the id belongs to a workflow no tool advertises, and reporting it
+            as completed with an empty result would say a calculation is done while withholding it.
     """
+    # **Why the second case exists, in a comment rather than in the docstring**: Pydantic and
+    # `convert_to_openai_tool` publish this docstring as the tool's schema description, so every
+    # word of it is re-sent on every model call. The history below is for a reader of this file:
+    # the case used to degrade to a bare status, because the DFT job returned its own typed result
+    # and had its own status tool (`agents/job_status.py`). D-118 made it a connector job, so every
+    # durable job this system hands an id for returns the envelope. That tier is gone entirely now
+    # (`D-2026-08-26-semiempirical-is-the-whole-tier`), which is the sharper reason this paragraph
+    # does not belong in the model's context: it was describing a system the model cannot reach.
     status = await job_status(job_id, wait_seconds=settings.job_status_wait_seconds)
     # Framed **here**, in the `@tool`, and not in `job_status` below — which is the same mistake in
     # the same shape as the one this fixes. `job_status` is also the whole body of the front door's

@@ -188,13 +188,7 @@ async def report_measurement(
 
             The parameter keeps its empty default so the *uncalibrated* properties this tool also
             accepts are unaffected; omitting it for a **calibrated** one is refused at call time
-            rather than silently filled in. It used to mean
-            the value was stamped with the ledger's own unit regardless, so a chemist saying
-            "0.5 mg/mL" had `0.5` recorded as **log S** — for MW 300 the truth is −2.78, and the
-            trust ledger then reported that calculator as biased by 3.3 log units, a factor of
-            ~2000, on the strength of one row. That is worse than the empty string it replaced,
-            because an empty unit at least marked the row as unstated; asserting the wrong one
-            removes the only signal anybody could find it by.
+            rather than silently filled in.
         source: Who measured it — a lab, a site, an instrument — half the row's identity. A **new**
             source joins the values on file and predictions are scored against their mean; a repeat
             under a source already present **replaces** that source's number. Name it for a
@@ -208,6 +202,13 @@ async def report_measurement(
         the mean. If it says the measurement was **not** recorded, report exactly that: it was not
         kept, and repeating the call will not help.
     """
+    # **Why `unit` is refused rather than defaulted, kept out of the docstring above deliberately.**
+    # That docstring is this tool's schema description and is re-sent on every model call, so a
+    # paragraph the model cannot act on is paid for on every turn. Omitting the unit used to stamp
+    # the value with the ledger's own unit regardless, so a chemist saying "0.5 mg/mL" had `0.5`
+    # recorded as **log S** — for MW 300 the truth is -2.78, and the trust ledger then reported
+    # that calculator as biased by 3.3 log units, a factor of ~2000, on one row. Worse than the
+    # empty string it replaced, because an empty unit at least marked the row as unstated.
     canonical = canonical_smiles(smiles)
     # **The name this measurement is filed under, normalised once and used for every later use of
     # it.** `property_name` is a model-supplied string, and normalising it for the lookup while
