@@ -197,6 +197,19 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
+- [ ] **Both published tool-utility results were measured against a control arm that also swaps
+      the prompt** — [M], `data/evals/profiles/no-tools.yaml` (`instructions:`),
+      `D-2026-09-14-tools-were-never-the-variable`. The benchmark half is corrected: the arms differ
+      by 13,895 characters of system prompt, `data/evals/profiles/tools-removed.yaml` is the arm
+      that varies only the tools, and with the prompt held fixed the benchmark moves 62 → 58 rather
+      than 62 → 74. The *probe* half is not, because it needs a run: `cli/live_probes.py`'s
+      `_AB_BASELINE_PROFILE` is that same profile, so
+      `D-2026-09-04-tools-help-a-third-of-the-time-and-hurt-a-quarter`'s 221-probe result is about
+      prompt-and-tools together too. What closes it is `make live-ab` and `make live-benchmark`
+      re-run with `tools-removed` as the baseline, on a gateway with a balance — this environment's
+      credential answers HTTP 400, "credit balance is too low". Nothing in the tree changes to start
+      it; the arm is already registered by `infra/live/processes.sh`.
+
 - [ ] **`hybrid` retrieval is measurably worse than the `graph` default, and the fix is not a
       fusion change** — [M], measured 2026-09-14 on the new gold set
       (`D-2026-09-14-one-corpus-one-vote-is-the-right-fix-for-a-different-problem`). Over 20 real
@@ -735,8 +748,11 @@ only holds defects can only ever restore the system to what it already intended 
       scan for developer-rationale tells flags 28 paragraphs and most are `Args:` false positives.
 
       So there is no blanket cut here, and the per-paragraph judgment the old row asked for is worth
-      about **309 tokens** — which is what it was worth, measured, once taken (64,907 → 64,598,
-      ceiling 65,500 → 65,200). What is left open is the part a test cannot decide: `Args:` and
+      about **309 tokens** — which is what it was worth, measured, once taken (64,907 → 64,598).
+      The ceiling that lowering bought was dropped by the merge that resolved it against the
+      harness-default raise and is restored by
+      `D-2026-09-14-a-lowering-that-loses-a-merge-is-a-raising`; the shipped value is
+      `CEILINGS["__default__"]` and not a figure here. What is left open is the part a test cannot decide: `Args:` and
       `Returns:` together are 13,229 tokens of every model call, and whether a shorter
       argument contract still reaches the right tool is a `make live-ab` question, not a reading
       question.

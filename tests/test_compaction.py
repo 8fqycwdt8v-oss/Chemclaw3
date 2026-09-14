@@ -1633,7 +1633,11 @@ def test_a_maximal_request_at_the_shipped_budget_fits_the_smallest_window_it_tar
         f"a budget 10% above {budget} would still fit {input_ceiling}, so this test has so much "
         "headroom that it is not the bound it claims to be; tighten it or say why."
     )
-    assert input_ceiling - budget == 4_904, (
+    # 5,204 since `D-2026-09-14-a-lowering-that-loses-a-merge-is-a-raising`: the budget fell 300
+    # with the ratchet ceiling it is derived from, and the window it is measured against did not
+    # move. The margin widening is the safe direction — this arm exists so that a *narrowing* one
+    # has to be stated rather than discovered.
+    assert input_ceiling - budget == 5_204, (
         "the margin under the smallest window this stack targets moved; say which of the two "
         "numbers changed and why"
     )

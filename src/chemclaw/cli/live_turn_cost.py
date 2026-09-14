@@ -73,8 +73,10 @@ WORKLOAD: tuple[str, ...] = (
 BASELINE_TOKENS = 1_000_000
 
 #: The fields the emitted case carries: what the turn cost, and the correlation id that joins it
-#: back to the trail. Nothing else. `TurnCost` has eighteen fields and `model_dump()` writes them
-#: all, so the first emitted case published `model: ""` and `outcome: "unknown"` beside real
+#: back to the trail. Nothing else. `TurnCost` carries **more fields than this set** — how many is
+#: `len(TurnCost.model_fields)` and is deliberately not written here, because the figure that was
+#: written said "eighteen" against a model that had grown to 28 — and `model_dump()` writes every
+#: one, so the first emitted case published `model: ""` and `outcome: "unknown"` beside real
 #: numbers — defaults wearing the appearance of measurements, in a file whose whole claim is that
 #: every number in it was measured. `actor` and `session_id` are dropped for a second reason: they
 #: identify a person and a conversation, and neither is part of what a turn cost.

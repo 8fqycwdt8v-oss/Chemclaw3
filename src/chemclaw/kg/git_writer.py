@@ -901,7 +901,7 @@ class GitNoteWriter:
             self._refuse_to_clobber_a_person(note_path, file.path)
             planned.append((note_path, file))
         if not planned:
-            return WriteOutcome(reference=self._base, written=False)
+            return WriteOutcome(reference=self._base, notes=0)
 
         # What each target held before this write, so a failure before the commit can put the tree
         # back. `None` means the file did not exist.
@@ -989,7 +989,7 @@ class GitNoteWriter:
         """
         ahead = await self._read("rev-list", "--count", f"{self._remote}/{self._base}..HEAD")
         if ahead == "0":
-            return WriteOutcome(reference=commit or self._base, written=False)
+            return WriteOutcome(reference=commit or self._base, notes=0)
         try:
             # Through `_git`, so a push reaches the classifier written for it. Every wording in
             # `_AUTH_FAILURE_MARKERS` is a *push*-side refusal, and this raised its own
@@ -1108,12 +1108,15 @@ class BatchingNoteWriter:
         self._notes += 1
         if len(self._pending) >= self._batch_size:
             return await self.flush()
-        return WriteOutcome(reference="", written=False)
+        # `notes=0`: nothing has reached the graph yet. The batch's notes are counted by the write
+        # that commits them, which is what keeps `chemclaw_notes_recorded_total` a count of notes
+        # rather than of commits (`D-2026-09-14-a-counter-of-commits-is-not-a-counter-of-notes`).
+        return WriteOutcome(reference="", notes=0)
 
     async def flush(self) -> WriteOutcome:
         """Commit and push everything held, as one write. A no-op when nothing is pending."""
         if not self._pending:
-            return WriteOutcome(reference="", written=False)
+            return WriteOutcome(reference="", notes=0)
         batch, self._pending = self._pending, []
         files = [file for write in batch for file in write.files]
         # The subject of a batch names the count rather than the notes: `NoteWrite` refuses a
@@ -1121,7 +1124,10 @@ class BatchingNoteWriter:
         outcome = await self._inner.write(
             NoteWrite(files=files, message=f"Add {len(batch)} backfilled note(s)")
         )
-        return outcome
+        # The one place a write carries more than one note, and therefore the one place that has to
+        # say so. An inner no-op (every file byte-identical) stays 0: nothing reached the graph,
+        # however many notes were in the batch.
+        return WriteOutcome(reference=outcome.reference, notes=len(batch) if outcome.written else 0)
 
 
 def default_writer() -> NoteWriter:

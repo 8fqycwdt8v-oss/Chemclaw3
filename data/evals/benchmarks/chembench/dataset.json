@@ -4,5 +4,15 @@
   "licence": "MIT",
   "retrieved_from": "https://huggingface.co/datasets/jablonkagroup/ChemBench (config <category>, split train, via datasets-server.huggingface.co/rows)",
   "description": "100 expert-written single-answer multiple-choice chemistry questions, 13 from each of eight ChemBench categories (9 from toxicity_and_safety, which the 100-question trim cut). Only items whose target_scores name exactly one correct option are kept, because every other item type needs a different scorer. Sampled with a fixed seed (20260914) from a contiguous page per category, so the subset is reproducible from the fetch script. Ids that ChemBench repeats within a category are disambiguated with a `#n` suffix here, because the id is this corpus's key.",
+  "categories": {
+    "analytical_chemistry": 13,
+    "general_chemistry": 13,
+    "inorganic_chemistry": 13,
+    "materials_science": 13,
+    "organic_chemistry": 13,
+    "physical_chemistry": 13,
+    "technical_chemistry": 13,
+    "toxicity_and_safety": 9
+  },
   "sha256": "e38eb2641be2d39e3f0ef0f403e30cd4a08226bd93e4130fa09644421e772190"
 }

@@ -72,8 +72,8 @@ in the fourth section, and a verdict here would let them skip reading it.
 
 | Measurement | Where |
 | --- | --- |
-| **ChemBench: the full system scores 62/100; the same model with no tools scores 74/100** — 12 points worse, with 20 answers naming no option against 10 | `D-2026-09-14-a-number-somebody-else-can-produce`, `make live-benchmark` |
-| Tool use helps about a third of the time and hurts about a quarter, on this repository's own probes | `D-2026-09-04-tools-help-a-third-of-the-time-and-hurt-a-quarter` |
+| **ChemBench: the full system scores 62/100; the same model under the toolless control arm scores 74/100** — 12 points worse, with 20 answers naming no option against 10. **The variable is the system prompt, not the tools**: that control arm replaces the default prose wholesale, and with the prompt held fixed removing every tool moves 62 → 58 while holding the tools at zero and swapping the prompt moves 58 → 76 (paired, p = 0.00012) | `D-2026-09-14-a-number-somebody-else-can-produce` as corrected by `D-2026-09-14-tools-were-never-the-variable`, `make live-benchmark` |
+| Tool use helps about a third of the time and hurts about a quarter, on this repository's own probes — measured against the same control arm, so it carries the same confound and is queued for a re-run | `D-2026-09-04-tools-help-a-third-of-the-time-and-hurt-a-quarter`, `D-2026-09-14-tools-were-never-the-variable` |
 | Retrieval recall over the labelled (query, note) pairs the probe set declares — how many there are is what `tests/test_probe_coverage.py` counts, not a figure here | `make live-probes`, `tests/test_probe_coverage.py` |
 | A turn's cost ratio, over turns the system really ran | `make live-turn-cost` |
 | The request prefix, observed off the wire rather than re-derived | `tests/test_context_floor.py` |
@@ -90,6 +90,15 @@ because a readiness record that omits the one external number is exactly the fai
 programme has spent ten waves correcting. What it means for a deployment: **this system is worth
 deploying for the work it can cite, and it is measurably worse than the bare model at work it
 cannot.**
+
+**What that 12-point gap is the price of has been corrected, and the correction is the reason this
+row names two ADRs.** The control arm does not only drop the tools, it replaces the whole system
+prompt, so the published pair attributed a prompt effect to the tool surface — the same defect the
+benchmark's own ADR opens with, one level up. `data/evals/profiles/tools-removed.yaml` is the arm
+that varies only the tools, and it is unmeasured here because re-running the benchmark needs a
+gateway balance this environment does not have. The sentence above survives the correction: the gap
+is the price of grounding. What changes is that grounding is an *instruction*, and a deployment
+that wants the model's closed-book score back changes the prompt rather than the tool surface.
 
 ## 4. Accepted — unbounded, unproven, or out of reach
 

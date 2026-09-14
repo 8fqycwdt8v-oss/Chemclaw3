@@ -45,6 +45,13 @@ class MemorySettings(BaseSettings):
     # must not be written down as the whole record. So a deployment over the bound gets partial
     # knowledge that says it is partial, instead of a worker that dies with no note at all.
     #
+    # **"Says it is partial" is `memory.jobs.PARTIAL_READ_CAVEAT`, and it is in the note's body
+    # rather than in a log**, which it was not when this sentence was first written: the flag
+    # skipped the retirement pass and logged a WARNING, while the note reaching `knowledge/` was
+    # byte-identical to one distilled from the whole record. The caveat names the id risk too — a
+    # truncation that drops a cluster's smallest member mints a different id, on the one run whose
+    # retirement pass is skipped.
+    #
     # 100,000 is a bound, not a target: ~4 GB at the measured rate, which is a large worker rather
     # than an impossible one. Lower it to fit the pod; the honest fix is streaming miners, and
     # `docs/planning/BACKLOG.md` carries that with this measurement as its trigger.
