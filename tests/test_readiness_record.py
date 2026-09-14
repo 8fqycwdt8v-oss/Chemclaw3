@@ -23,6 +23,7 @@ at a control that is not there.
 """
 
 import ast
+import json
 import re
 from pathlib import Path
 
@@ -141,4 +142,51 @@ def test_the_external_benchmark_number_is_still_in_it() -> None:
         "the ChemBench row carries the three-arm figures without saying that run's record is not "
         "in this tree. Section 3's heading promises a number somebody can reproduce, and the row "
         "below it ships 331 transcripts for exactly that reason."
+    )
+
+
+#: Where the live run the record cites left its per-probe transcripts. The record names this
+#: directory, so the two figures in that row are the one pair in §3 a reader can re-derive here.
+_CORPUS_TRANSCRIPTS = REPO_ROOT / "tasks" / "live-test" / "transcripts" / "corpus"
+
+
+def test_the_live_run_row_counts_what_its_transcripts_hold() -> None:
+    """The one row in §3 whose figures this tree can re-derive, derived rather than believed.
+
+    It shipped saying **27** distinct tools where the cited transcripts hold **26** across
+    `tools_called ∪ tools_failed ∪ tool_results` — a figure nothing could check, in the row that
+    exists precisely because its evidence is committed. Section 3's other rows either name a target
+    that reproduces them or now say their run's record is elsewhere
+    (`D-2026-09-14-a-pinned-figure-is-a-control-only-if-it-can-go-stale`); this one's evidence is
+    right here, so the digits are held against it.
+
+    **A second committed run fails this rather than being averaged in.** The row describes one
+    execution on one date. If another lands, that row has to be rewritten, and a check that quietly
+    unioned two runs would let it go on describing the first.
+    """
+    runs = sorted(path for path in _CORPUS_TRANSCRIPTS.iterdir() if path.is_dir())
+    assert len(runs) == 1, (
+        f"{len(runs)} live-probe runs are committed under {_CORPUS_TRANSCRIPTS}. The readiness "
+        "record's live-run row describes one execution on one date; rewrite it for the run it "
+        "should now cite rather than leaving it pointing at a directory holding several."
+    )
+    transcripts = sorted(runs[0].glob("*.json"))
+    tools: set[str] = set()
+    for path in transcripts:
+        outcome = json.loads(path.read_text(encoding="utf-8"))["outcome"]
+        for field in ("tools_called", "tools_failed"):
+            tools |= {str(name) for name in outcome.get(field) or []}
+        for result in outcome.get("tool_results") or []:
+            name = result.get("name") if isinstance(result, dict) else result
+            if name:
+                tools.add(str(name))
+
+    row = next(line for line in _record_text().splitlines() if "distinct tools exercised" in line)
+    assert f"then {len(transcripts)} probes" in row, (
+        f"the live-run row does not say {len(transcripts)} probes, which is how many transcripts "
+        f"{runs[0].name} holds."
+    )
+    assert f"{len(tools)} distinct tools exercised" in row, (
+        f"the live-run row's tool count disagrees with its own transcripts, which name "
+        f"{len(tools)}: {sorted(tools)}"
     )

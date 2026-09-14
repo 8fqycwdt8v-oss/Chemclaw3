@@ -55,11 +55,24 @@ cite the ADR, to name the system prompt as the variable, and to say the three-ar
 not in this tree. `62/100` and `74/100` stay pinned, because those two are what `make
 live-benchmark` produces from a corpus this repository vendors with a checksum.
 
+## The same rule, applied the other way, one row down
+
+The live-run row *is* backed by its evidence, and it shipped saying **27 distinct tools exercised**
+where the 331 committed transcripts hold **26** across `tools_called ∪ tools_failed ∪ tool_results`.
+Nothing counted them. That is the case where digits belong in a test, because the test can fail as
+they go stale: `test_the_live_run_row_counts_what_its_transcripts_hold` derives both the probe count
+and the tool count from the transcripts and reads them off the row.
+
+It also refuses a **second** committed run rather than unioning it in. The row describes one
+execution on one date; a check that quietly averaged two would let it go on describing the first,
+which is the failure one row up in a different costume.
+
 ## Consequences
 
 - A figure belongs in a test when the test fails as the figure goes stale. Where the underlying run
   cannot be repeated in the tree, what the test can hold is the *claim* — which ADR, which variable,
-  and that the run's record is elsewhere.
+  and that the run's record is elsewhere. Where it can, the test holds the digits, and the two rows
+  of §3 this record touches are one example of each.
 - Nothing about the ChemBench result's substance changes. It is still the only external number here,
   it is still the one that does not flatter the system, and it is still stated first.
 
@@ -68,5 +81,8 @@ live-benchmark` produces from a corpus this repository vendors with a checksum.
 - `tests/test_readiness_record.py::test_the_external_benchmark_number_is_still_in_it` — the pair,
   the ADR, the variable and the provenance caveat, all read off the ChemBench row rather than off
   the whole document.
+- `tests/test_readiness_record.py::test_the_live_run_row_counts_what_its_transcripts_hold` — the
+  other direction: the live-run row's probe count and tool count derived from the committed
+  transcripts, and a second committed run refused rather than absorbed.
 - `tests/test_readiness_record.py::test_every_test_the_readiness_record_names_exists` — the
   record's own rule, unchanged: a clause may only name a control that is there.
