@@ -27,9 +27,9 @@ in the fourth section, and a verdict here would let them skip reading it.
 
 | Claim | Held by |
 | --- | --- |
-| Under `entra_required`, a request with no valid token is refused at the front door, against a real JWKS with nothing patched | `tests/test_entra_end_to_end.py` |
-| Every route is behind the authentication dependency, or declared as one of the named exceptions | `tests/test_route_auth_coverage.py` |
-| A tool call with no ambient actor is refused rather than run as nobody (`require_actor`) | `tests/test_authz.py`, `tests/test_tool_authz.py` |
+| Under `entra_required`, the production app runs against a **real HTTP JWKS with nothing patched**: a token failing any one check, one signed by an unpublished key, and one naming an unpublished `kid` are each refused, and one chemist's session is invisible to another | `tests/test_entra_end_to_end.py` |
+| Every route requires a principal except a named allowlist, the allowlist is exactly the open routes, and an enforced app has **no** ungatable surface at all | `tests/test_route_auth_coverage.py` |
+| `require_actor` rejects an absent user rather than running the call as nobody | `tests/test_authz.py::test_require_actor_rejects_absent_user`, `tests/test_tool_authz.py` |
 | An expensive job is refused for a requester without the entitlement, including a template step launched by another step | `tests/test_authz.py`, `tests/test_template_job_step.py` |
 | A plan-gated tool cannot be called under an unapproved plan | `tests/test_plan_gate.py` |
 | No agent path writes a `SKILL.md`, and a role-refused skill is absent from the listing, unreadable by path, and unreachable by glob or grep | `tests/test_skill_backend.py`, `tests/test_skill_access.py` |
