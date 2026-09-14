@@ -12,6 +12,7 @@ projection that quietly drops the newest half of a calculator's output.
 """
 
 import ast
+import copy
 from pathlib import Path
 from typing import Any
 
@@ -598,6 +599,89 @@ def test_every_result_shape_projects(kind: str, calc_type: str, payload: dict[st
     # The payload rides along untouched, which is what makes a projector bug a re-projection
     # rather than lost science.
     assert record.payload == payload
+
+
+def _grown(kind: str, calc_type: str, key: str, count: int) -> dict[str, int]:
+    """Project one shape with `count` items under `key`, and count the rows per result-store table.
+
+    The items are copies of the fixture's own, re-identified so nothing dedupes them — the question
+    is the *shape* of the growth, and a fixture with one conformer cannot answer it.
+    """
+    payload = next(p for k, c, _m, p in _cases() if k == kind and c == calc_type)
+    items = payload[key]
+    grown = [copy.deepcopy(items[index % len(items)]) for index in range(count)]
+    for index, item in enumerate(grown):
+        if isinstance(item, dict):
+            for field in ("structure_id", "conformer_id", "id", "atom_index"):
+                if field in item:
+                    item[field] = (
+                        f"{item[field]}-{index}" if isinstance(item[field], str) else index
+                    )
+    scaled = copy.deepcopy(payload) | {key: grown}
+    record = project(
+        calc_ref=f"{calc_type}@v1:a:b", calc_type=calc_type, payload=scaled, payload_kind=kind
+    )
+    return {
+        "property_value": len(record.properties),
+        "calculation_site_value": len(record.sites),
+        "calculation_point_value": len(record.points),
+        "conformer": len(record.conformers),
+    }
+
+
+@pytest.mark.parametrize(
+    ("kind", "calc_type", "key", "table", "per_item"),
+    [
+        ("SiteReactivityResult", "xtb.fukui", "sites", "calculation_site_value", 7),
+        ("ScanResult", "xtb.scan", "points", "calculation_point_value", 2),
+        ("ConformerEnsemble", "xtb.conformers", "conformers", "conformer", 1),
+    ],
+)
+def test_a_result_projects_a_fixed_number_of_rows_per_item(
+    kind: str, calc_type: str, key: str, table: str, per_item: int
+) -> None:
+    """How many rows one calculation becomes, as a law rather than as a fixture's count.
+
+    **This is the number that decides whether the result store needs partitioning, and nothing had
+    measured it** (`D-2026-09-14-property-value-is-the-shallow-table`). A conformer search is ~47
+    conformers and a reactive-site panel is one entry per heavy atom, so the per-*item* slope is the
+    whole cost: measured, `xtb.fukui` is **7 rows per site** — 47 sites is 329 rows in one table —
+    `xtb.scan` is 2 per point and `xtb.conformers` is 1 per conformer.
+
+    A projector that starts emitting one more fact per item multiplies the store by the item count,
+    which is exactly the change that looks like one line and is not.
+    """
+    one = _grown(kind, calc_type, key, 1)
+    many = _grown(kind, calc_type, key, 47)
+    assert (many[table] - one[table]) / 46 == per_item, (
+        f"{calc_type} now projects {(many[table] - one[table]) / 46} rows per item into {table}, "
+        f"not {per_item}. A corpus of these grows by that factor."
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "calc_type", "key"),
+    [
+        ("SiteReactivityResult", "xtb.fukui", "sites"),
+        ("ScanResult", "xtb.scan", "points"),
+        ("ConformerEnsemble", "xtb.conformers", "conformers"),
+    ],
+)
+def test_property_value_does_not_grow_with_the_size_of_a_calculation(
+    kind: str, calc_type: str, key: str
+) -> None:
+    """`property_value` is per *result*, not per item — so it is not the table to partition.
+
+    The open question `BACKLOG.md` carried was whether `property_value` needs partitioning "and on
+    what". Measured, it does not grow with a calculation's size at all: a 1-site and a 47-site Fukui
+    panel write the same number of `property_value` rows, and the 329-row difference is entirely
+    `calculation_site_value`. A partition key chosen for `property_value` would have been chosen for
+    the shallow table.
+    """
+    assert (
+        _grown(kind, calc_type, key, 1)["property_value"]
+        == (_grown(kind, calc_type, key, 47)["property_value"])
+    )
 
 
 def test_a_reaction_attaches_each_species_energy_to_the_right_member() -> None:

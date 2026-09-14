@@ -588,8 +588,13 @@ What decides whether the system is affordable and whether it survives a real cor
       saying so rather than quietly deferring.**
 - [ ] W28.5 `Chemclaw3` — a note write costs ~1.8 s and a backfill is one write per record; a real
       first sync is days. A backfill and an incremental sync want different write shapes.
-- [ ] W28.6 `Chemclaw3` — nothing has measured how many rows a real corpus produces [M]. Measure it;
-      it is the input to W23.5 and W28.4.
+- [x] W28.6 `Chemclaw3` — nothing has measured how many rows a real corpus produces [M].
+      **Measured** (`D-2026-09-14-property-value-is-the-shallow-table`): 19 shapes, 184 rows, 9.7
+      rows per calculation at the fixtures' sizes — and the slope is the answer, not the count. At 47
+      items: `xtb.fukui` **7 rows per reactive site**, `xtb.scan` 2 per point, `xtb.conformers` 1 per
+      conformer, so a 100-atom Fukui panel is **710 rows**. The open partitioning question answers
+      itself: **`property_value` does not grow with a calculation's size at all**; the three tables
+      that do are all keyed by the calculation.
 - [ ] W28.7 `Chemclaw3_ui` — the SMILES parse blocks the main thread (~0.3 s parse + ~1.7 s draw);
       the 600-char cap bounds the unrecoverable failure, not the slow one. Move it to a worker
       (`ISSUES.md` known gap (e)).

@@ -593,13 +593,6 @@ topic).
       and `predictions`/`measurements` are the calibration ledger nothing has yet filled. What is
       owed is five decisions, not five `DELETE`s, and the register is where each belongs.
 
-- [ ] **Nothing has measured how many rows a real corpus produces** — [M]. The volume risk named in
-      `D-2026-08-25`: `cached_compute` publishes on every miss, and a conformer search projects one
-      record with ~47 conformer rows plus their structures. Before publishing is enabled by default
-      anywhere, run `python -m chemclaw.cli.backfill_publications --dry-run` against a populated
-      deployment and count rows-per-calculation per `calc_type`. That growth curve is also what
-      decides the deliberately open question of whether `property_value` needs partitioning, and on
-      what — a partition key chosen before the row count is known would be a guess.
 - [ ] **Postgres and Temporal are neither deployed nor owned** — [L]. The chart dials
       `chemclaw-temporal-frontend.temporal.svc:7233` and namespace `chemclaw`; there is no subchart
       and no statement of who runs either. `docs/guides/runbook.md:972-997` (§ xiii, "Restore a
