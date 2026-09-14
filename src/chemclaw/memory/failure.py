@@ -26,6 +26,7 @@ loop close.
 something narrower than "this note is wrong" — see its docstring for the measurement.
 """
 
+from collections.abc import Collection, Iterable
 from datetime import date
 
 from chemclaw.core.errors import ChemclawError
@@ -150,3 +151,74 @@ def close_refuted_note(note: Note, failure_id: str, held_until: date) -> Note:
         "does. Kept for the record; excluded from current-evidence retrieval.\n"
     )
     return note.model_copy(update={"valid_to": held_until, "body": body})
+
+
+def failures_against(
+    notes: Iterable[Note],
+    *,
+    cited: Collection[str] = (),
+    structures: Collection[str] = (),
+) -> list[Note]:
+    """Every recorded failure that bears on a set of citations or a set of molecules.
+
+    **`memory/failure.py` was a builder with no query side, and that is most of why the failure
+    memory did not work.** A `failure-mode` note could be written, indexed and retrieved by anyone
+    who went looking — and nothing went looking. The 2026-09-13 audit put it plainly: a design can
+    cite a playbook and repeat a documented failure sitting in the same graph, because
+    `protocols/checks.py::forbidden_absent` tests only what the chemist typed into
+    `request.forbidden`, never what the corpus records as having already failed.
+
+    Two joins, and the first is the exact one:
+
+    - **`cited`** — note ids the design rests on. A failure's `contradicts` edge names the note it
+      refutes, so this is an equality rather than a resemblance. It is the case the audit named and
+      it needs no fuzzy matching to be right.
+    - **`structures`** — canonical SMILES the design uses. A failure recorded against a molecule
+      bears on a design that charges it even when the design cites nothing. Weaker, because a
+      molecule appearing in two routes is not the same claim twice, which is why what comes back is
+      offered as a warning rather than a blocker.
+
+    Both are read off notes the caller already loaded, so this makes no I/O and holds no opinion
+    about where the corpus lives — the same shape `kg/conflicts.py` has for the same reason.
+
+    Args:
+        notes: The corpus, or any subset of it. Non-`failure-mode` notes are ignored.
+        cited: Note ids the design cites.
+        structures: Canonical SMILES the design uses.
+
+    **Notes rather than a reduced model, because `protocols` may not import `memory`.**
+    `tests/test_layering.py` allows `protocols -> core` and `protocols -> science` and nothing else,
+    which is right: a deterministic check must not depend on a corpus being loadable. So this
+    answers in the knowledge graph's own vocabulary and the caller that has both — `agent/`, which
+    may import either — reduces what it finds into the check's input.
+
+    Returns:
+        The failure notes that bear on either, deduplicated by id, in corpus order.
+    """
+    wanted_ids = {ref for ref in cited if ref}
+    wanted_structures = {smiles for smiles in structures if smiles}
+    found: dict[str, Note] = {}
+    for note in notes:
+        if note.type != "failure-mode":
+            continue
+        refuted = [rel.to for rel in note.outgoing_relations() if rel.rel == "contradicts"]
+        by_citation = any(target in wanted_ids for target in refuted)
+        by_structure = bool(note.compound_smiles) and note.compound_smiles in wanted_structures
+        if by_citation or by_structure:
+            found.setdefault(note.id, note)
+    return list(found.values())
+
+
+def observation_of(note: Note) -> str:
+    """The observation out of a failure note's body, without the provenance line above it.
+
+    `failure_note` writes "Reported by … on …: [[contradicts:…]] did not hold." and then the
+    observation, so the first non-empty line after that is what a chemist needs to read. Falls back
+    to the whole first line for a note somebody wrote by hand in another shape — this is a message,
+    not a parser, and a failure worth surfacing must not be dropped for being formatted unusually.
+    """
+    lines = [line.strip() for line in note.body.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    observation = next((line for line in lines[1:] if not line.startswith("[[")), "")
+    return observation or lines[0]

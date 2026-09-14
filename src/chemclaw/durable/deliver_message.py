@@ -48,7 +48,7 @@ from temporalio.exceptions import CancelledError as TemporalCancelledError
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.metrics_bridge import degraded
-    from chemclaw.deliver.message import Message
+    from chemclaw.deliver.message import Attachment, AttachmentBytes, Message
     from chemclaw.deliver.registry import deliver, delivery_enabled
     from chemclaw.durable.publish import (
         BAD_DATA_RETRY,
@@ -58,6 +58,25 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.registry import durable_activity
 
 logger = logging.getLogger(__name__)
+
+
+class OutboundAttachment(BaseModel):
+    """One file a workflow asks to have delivered — loose for the same reason `OutboundMessage` is.
+
+    `Attachment.filename` carries a pattern that keeps a file inside its outbox, and that bound has
+    to fail *inside* the activity: a workflow constructing an `Attachment` with a rejected filename
+    would raise `ValidationError` in workflow code, where no best-effort wrapper can catch it, and
+    the courtesy copy would fail the job whose real result is already durable.
+
+    `content` keeps `AttachmentBytes` rather than a bare `bytes`, because that annotation is about
+    the *wire* rather than about validation — a workflow passes real bytes and its validator returns
+    them unchanged, while the serialiser is what stops Temporal's JSON converter from utf-8-decoding
+    a payload it cannot decode.
+    """
+
+    filename: str = ""
+    media_type: str = "text/plain"
+    content: AttachmentBytes = b""
 
 
 class OutboundMessage(BaseModel):
@@ -83,6 +102,7 @@ class OutboundMessage(BaseModel):
     body: str = ""
     kind: str = "digest"
     correlation_id: str = ""
+    attachments: list[OutboundAttachment] = []
 
 
 @durable_activity("background")
@@ -118,6 +138,14 @@ async def deliver_message_activity(payload: OutboundMessage) -> list[str]:
             body=payload.body,
             kind=payload.kind,  # type: ignore[arg-type]
             correlation_id=payload.correlation_id,
+            attachments=[
+                Attachment(
+                    filename=one.filename,
+                    media_type=one.media_type,
+                    content=one.content,
+                )
+                for one in payload.attachments
+            ],
         )
         taken = await deliver(message)
     except Exception as exc:

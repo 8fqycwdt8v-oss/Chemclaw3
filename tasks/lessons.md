@@ -2550,3 +2550,48 @@ measure a scorer against HEAD while the tree carried uncommitted work, and `git 
 undo several mutations. The 2026-09-12 lesson above forbids every one of those verbs on a path
 while anything is uncommitted, and the reason it forbids them is exactly that they work until they
 do not. `cp` to the scratchpad and back, or commit first — which is the version that costs nothing.
+
+## Four guards I wrote could not fail, and each failure mode was different (2026-09-14)
+
+**What happened.** Working the Wave 2/4/7 branch I wrote a guard for every behaviour I added and
+mutation-tested each one. Four passed the mutation *by accident* on their first form, and only
+driving the mutation found it. The four are worth listing because the causes do not generalise to
+one rule:
+
+1. **The assertion was about an outcome the test harness cannot produce.** A
+   `Content-Disposition` injection test asserted `"x-injected" not in response.headers`. ASGI
+   carries headers as a list of pairs, so a CRLF never splits in-process — the assertion passes
+   whether or not the sanitiser exists. What a real server splits on is the *character*, and that
+   is what the test now asserts.
+2. **The assertion named a word the code does not use.** A digest test asserted the word
+   `"disputed"` was absent from an un-disputed body, while the notice it was guarding against says
+   "disagree with something already in the graph". The mutation that appends the notice
+   unconditionally left it green. A guard against an *extra line* has to be about the line.
+3. **The test iterated a collection that was empty.** A profile-prose guard looped
+   `load_profiles()`, which returns what it newly *registered* — idempotent by skipping names
+   already in the registry, so the second call in a process returns `[]`. It looped over nothing
+   and passed green over a defect I had measured minutes earlier in a plain interpreter.
+4. **The test drove one call where the defect needs two.** A digest test named
+   `..._is_reported_once_rather_than_never` asserted a single `_is_new` call. The branch returned
+   `True` unconditionally, so what it actually pinned was "every time, forever" — its own name said
+   "once" and nothing checked the second call.
+
+**The common shape is not carelessness.** Each assertion was *true*; each was true for a reason
+other than the behaviour it was supposed to hold. Reading them back would not have found any of the
+four — I wrote them, I believed them, and three of them I had just finished arguing for in a
+docstring.
+
+**Rule: a guard is not written until its mutation has been watched failing, and "the suite is green
+after I mutate" is a finding about the guard, never about the code.** I already knew that and did
+it every time, which is why all four were caught. What is new is the follow-on rule:
+
+**When a mutation survives, do not reach for a bigger mutation — ask which of these four the
+assertion is.** Is it about an outcome this harness can produce (1)? Does it name a literal the
+code actually emits (2)? Is the collection it iterates non-empty *in this process* (3)? Does the
+defect need N calls and the test makes N (4)? Each has a different repair, and "assert something
+stronger" fixes only the second.
+
+**And a corollary about docstrings.** Three of the four sat under a paragraph explaining exactly
+what the guard was for. A confident docstring above an assertion is evidence that the author
+understood the defect — it is not evidence the assertion reaches it, and it made me slower to
+suspect the test.

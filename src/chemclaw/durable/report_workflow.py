@@ -35,7 +35,11 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
     from chemclaw.science.fingerprints.store import default_reaction_store
 
-from chemclaw.durable.deliver_message import OutboundMessage, deliver_best_effort
+from chemclaw.durable.deliver_message import (
+    OutboundAttachment,
+    OutboundMessage,
+    deliver_best_effort,
+)
 from chemclaw.durable.orchestrator import fan_out
 from chemclaw.durable.publish import (
     BAD_DATA_RETRY,
@@ -290,6 +294,10 @@ class DevelopmentReportWorkflow:
             id_prefix="section",
         )
         report = Report(title=request.title, sections=_reconcile(request.sections, sections))
+        # Rendered once, and read for both halves: the activity records it as a note, and the
+        # delivery below attaches the same bytes. `report_note` is pure rendering over a value this
+        # workflow already holds, so calling it in workflow code emits no command.
+        drafted = report_note(report)
         # The note reference *is* this workflow's result, so the publish is not
         # best-effort — but it shares the bounded-attempts discipline (G4).
         note_ref = await publish_note(
@@ -307,10 +315,34 @@ class DevelopmentReportWorkflow:
                 subject=f"Report drafted: {request.title}",
                 body=(
                     f"{len(report.sections)} section(s), recorded as {note_ref}.\n"
-                    "Open it beside its citations in the knowledge graph."
+                    "The draft is attached; open it beside its citations in the knowledge graph."
                 ),
                 kind="report",
                 correlation_id=request.correlation_id,
+                # **The draft itself, because a note id is not a deliverable.** This message went
+                # out saying "recorded as `report-…`" to the one reader who by construction is not
+                # looking at the graph — a chemist who closed the tab while the fan-out ran. The
+                # note stays the durable handover and the citation trail; the attachment is the
+                # document they asked for, in a form they can open.
+                #
+                # Rendered above rather than returned by `propose_report`: the activity's contract
+                # is the note *reference*, and widening its return to carry the body would change
+                # a durable payload for a courtesy copy. This adds a field to an activity argument
+                # and not a new `await`, so no patch is needed (contrast
+                # `D-2026-09-14-the-seam-shipped-a-replay-break-and-the-adr-said-nothing-changes`).
+                attachments=[
+                    OutboundAttachment(
+                        # The note's **id**, not `note_ref`. That reference is the writer's — a
+                        # commit sha, or the unchanged tree — so a file named after it tells a
+                        # chemist nothing and is not this artefact's identity. `_report_id` slugs
+                        # to `[a-z0-9-]` plus a hash, which is inside `Attachment`'s pattern by
+                        # construction; a name that was not would raise inside the activity, where
+                        # it is caught, and cost the whole message rather than the file.
+                        filename=f"{drafted.id}.md",
+                        media_type="text/markdown",
+                        content=drafted.body.encode("utf-8"),
+                    )
+                ],
             )
         )
         return ConnectorJobResult(

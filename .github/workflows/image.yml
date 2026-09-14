@@ -186,19 +186,53 @@ jobs:
         # needs no registry. The SBOM below is `main`-only because it *describes* a kept image; this
         # one *refuses* a broken one, which is worth knowing before the merge rather than after.
         #
-        # Fetched to a file and checksummed before it runs, for the same reason as `syft` below: a
-        # tag is mutable and this script runs as root on the runner that just built the shipped
-        # image. Update TRIVY_INSTALL_SHA256 with the installer, and TRIVY_VERSION on its own — the
-        # installer is version-agnostic and resolves the tag at run time.
+        # **The pin was a version whose release publishes no assets, and the naming was never
+        # wrong.** Measured against GitHub directly: every `v0.58.2` asset answers 404 — the
+        # archive *and* the `checksums.txt` beside it — while `v0.74.0`'s answer 200 under exactly
+        # the same `trivy_<version>_Linux-64bit` spelling. The git tag exists, which is why
+        # `raw.githubusercontent.com` served `contrib/install.sh` at it and its checksum matched;
+        # what does not exist is anything to download. So this step had never once been green, and
+        # twice read as an install flake, because `contrib/install.sh` turns a 404 into a bare
+        # `exit 1`: `http_download` returns 1 into `set -e` and its own diagnostics are at debug
+        # priority.
+        #
+        # The installer is gone rather than re-pinned. Two assets and a `sha256sum` is the whole of
+        # what it did here, and written out it cannot fail silently — each `curl` is `-f`, and the
+        # guard below names the URL and the status code when a pin stops resolving, which is the
+        # sentence whose absence cost three CI runs.
         env:
-          TRIVY_VERSION: v0.58.2
-          TRIVY_INSTALL_SHA256: 2304dcc0c1883e802d376eae1b514c923b7427a7d88091dfcaf83967e6f55a7c
+          TRIVY_VERSION: v0.74.0
         run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/trivy-install.sh \
-            "https://raw.githubusercontent.com/aquasecurity/trivy/${TRIVY_VERSION}/contrib/install.sh"
-          echo "${TRIVY_INSTALL_SHA256}  /tmp/trivy-install.sh" | sha256sum -c -
-          sh /tmp/trivy-install.sh -b /usr/local/bin "${TRIVY_VERSION}"
+          version="${TRIVY_VERSION#v}"
+          base="https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}"
+          asset="trivy_${version}_Linux-64bit.tar.gz"
+          checksums="trivy_${version}_checksums.txt"
+          for name in "${asset}" "${checksums}"; do
+            code=$(curl -sIL -o /dev/null -w '%{http_code}' "${base}/${name}")
+            test "${code}" = "200" || {
+              echo "trivy pin ${TRIVY_VERSION}: ${base}/${name} answered ${code}." >&2
+              echo "A tag can exist with no release assets behind it. Fix TRIVY_VERSION." >&2
+              exit 1
+            }
+          done
+          curl -sSfL -o /tmp/trivy.tar.gz "${base}/${asset}"
+          curl -sSfL -o /tmp/trivy-checksums.txt "${base}/${checksums}"
+          # Verified against the checksums the release publishes, which is what the installer did
+          # and the only reason fetching a tarball is acceptable here at all. The expected hash is
+          # looked up by the asset's own name and paired with the file actually on disk; rewriting
+          # the checksum line's path in place is what made an earlier draft verify a filename that
+          # does not exist, which `sha256sum -c` reports as a WARNING beside its non-zero exit
+          # rather than as a mismatch — a failure that reads like the check working.
+          expected=$(awk -v name="${asset}" '$2 == name { print $1 }' /tmp/trivy-checksums.txt)
+          test -n "${expected}" || {
+            echo "no checksum line for ${asset} in ${checksums}." >&2
+            exit 1
+          }
+          echo "${expected}  /tmp/trivy.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/trivy.tar.gz -C /tmp trivy
+          install /tmp/trivy /usr/local/bin/trivy
+          trivy --version
           trivy image \
             --scanners vuln \
             --severity HIGH,CRITICAL \

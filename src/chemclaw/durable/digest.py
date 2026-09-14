@@ -33,7 +33,7 @@ skipped — the same reject-and-continue discipline the ELN sync uses.
 import asyncio
 import logging
 from collections.abc import Sequence
-from datetime import timedelta
+from datetime import date, timedelta
 
 from pydantic import BaseModel, Field
 from temporalio import activity, workflow
@@ -42,6 +42,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.agent.subscriptions import Subscription, all_subscriptions, mark_reported
     from chemclaw.core.config import settings
     from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.kg.conflicts import conflict_index
     from chemclaw.kg.graph import load_notes
     from chemclaw.kg.note import Note
     from chemclaw.kg.search import query_terms, term_coverage
@@ -64,12 +65,26 @@ DIGEST_KIND = "digest"
 
 
 class DigestItem(BaseModel):
-    """One subscriber's new matches since they were last told."""
+    """One subscriber's new matches since they were last told, and which of them are disputed.
+
+    **A digest that lists a contradiction as an ordinary find is the failure this field exists
+    for.** `kg/conflicts.py` has always known which notes disagree, and
+    `retrieval.retrievers._conflict_index` flags every chunk of a disputed note at *retrieval*
+    time — so a chemist who happens to ask is told, and a chemist watching the subject is not. The
+    corpus starting to disagree with itself on somebody's standing query is the one thing in a
+    digest that changes what they should do next.
+
+    `disputed` is a subset of `note_ids`, carried as its own list rather than as a flag per id,
+    because that is the shape the body renders and the shape a client can count. It defaults to
+    empty for the reason every added field here must: this model is an activity's *return*, and a
+    run opened on the previous release replays a recorded result that has no such key.
+    """
 
     subscription_id: int
     owner: str
     query: str
     note_ids: list[str]
+    disputed: list[str] = Field(default_factory=list)
 
 
 @durable_activity("background")
@@ -110,6 +125,11 @@ def _match_corpus(subscriptions: Sequence[Subscription]) -> list[DigestItem]:
     Split out purely so `collect_digests` has one thing to offload; the body is unchanged.
     """
     notes = load_notes(settings.knowledge_path)
+    # One scan for every subscription, cached behind the corpus fingerprint that retrieval already
+    # warms — see `conflict_index`. Scoped `as_of` today, matching the retrieval-time caller: a
+    # superseded note is out of the current-evidence sweep, and reporting it as disagreeing with
+    # its own replacement is noise rather than news.
+    disputes = conflict_index(settings.knowledge_path, date.today())
     digests: list[DigestItem] = []
     for subscription in subscriptions:
         # Tokenized once per subscription, not once per note: the query does not vary across the
@@ -129,9 +149,32 @@ def _match_corpus(subscriptions: Sequence[Subscription]) -> list[DigestItem]:
                     owner=subscription.owner,
                     query=subscription.query,
                     note_ids=sorted(matches),
+                    disputed=sorted(one for one in matches if one in disputes),
                 )
             )
     return digests
+
+
+def _digest_body(note_ids: Sequence[str], disputed: Sequence[str]) -> str:
+    """The lines a subscriber reads: every new note, and which of them the corpus disputes.
+
+    One function because three call sites render this — the session mailbox's sibling, the current
+    delivery, and the deprecated replay shim — and a digest that said different things on two of
+    them would be two answers to one question.
+
+    A disputed note is *marked in place* rather than listed separately, because the reader's
+    question is "what is new" and the dispute is a property of an entry in that list. The trailing
+    count is what a reader acts on: `kg/conflicts.py`'s own rule is that a silent truncation reads
+    as completeness, and a list in which two of nine entries are marked says so out loud.
+    """
+    marked = set(disputed)
+    lines = [f"- {note_id}{' (disputed)' if note_id in marked else ''}" for note_id in note_ids]
+    if marked:
+        lines.append(
+            f"\n{len(marked)} of {len(note_ids)} disagree with something already in the graph. "
+            "Read those beside what they contradict before acting on them."
+        )
+    return "\n".join(lines)
 
 
 def _matches(note: Note, subscription: Subscription, terms: Sequence[str]) -> bool:
@@ -163,12 +206,28 @@ def _is_new(note: Note, subscription: Subscription) -> bool:
     subscription therefore also remembers which ids it sent *at that date*, which separates
     "dated today and already sent" from "dated today and new" without having to choose between
     the two failures.
+
+    **A note with no date was DARK-7 again, and the comment that used to sit below said it had
+    been handled.** It read "report it once"; the branch returned `True` unconditionally, so a
+    dateless note re-qualified on *every* run forever — the id memory could not help, since it is
+    scoped to the watermark's date and resets when that rolls over. Measured on the shipped corpus:
+    **32 of 39 notes carry no `valid_from`**, so a subscriber's hourly digest was mostly the same
+    notes over and over, which is the failure the feature's own promise names.
+
+    What `None` means is not a gap to be patched around: `Note.is_current` reads it as
+    *open-ended* — true for as long as anyone has known — so a note carrying it is by definition
+    not something that became knowledge after a subscriber was last told. The branch now says
+    that, and the honest consequence is stated rather than hidden: a genuinely new note that omits
+    its date reaches only a subscriber who has never been told anything. That is why
+    `memory.playbook.playbook_note` takes `minted_on` — a distilled rule is the one note type
+    nobody writes on a day, and it was the note type this silence actually cost.
     """
     valid_from = note.valid_from
-    if valid_from is None or subscription.last_seen_at is None:
-        # No date on either side: report it once. Being told about something already seen is a
-        # nuisance; never being told is the failure this feature exists to prevent.
+    if subscription.last_seen_at is None:
+        # Nobody has been told anything yet, so everything matching is news.
         return True
+    if valid_from is None:
+        return False
     if valid_from > subscription.last_seen_at.date():
         return True
     if valid_from < subscription.last_seen_at.date():
@@ -219,7 +278,10 @@ async def deliver_digest_activity(payload: DeliveryInput) -> list[str]:
         OutboundMessage(
             recipient=payload.owner,
             subject=f"New for your standing query: {payload.query}",
-            body="\n".join(f"- {note_id}" for note_id in payload.note_ids),
+            # The shim has no `disputed` to render: a replayed run's recorded `DigestItem` predates
+            # the field, so an empty list is the truth about that payload rather than a default
+            # standing in for one.
+            body=_digest_body(payload.note_ids, ()),
             kind="digest",
         )
     )
@@ -246,7 +308,7 @@ class DigestWorkflow:
             sent = await notify_session_best_effort(
                 digest_channel(item.owner),
                 DIGEST_KIND,
-                {"query": item.query, "note_ids": item.note_ids},
+                {"query": item.query, "note_ids": item.note_ids, "disputed": item.disputed},
             )
             # Only after delivery — see the module docstring on why this ordering matters. The
             # acknowledgement used to run unconditionally, which made a swallowed delivery failure
@@ -288,7 +350,7 @@ class DigestWorkflow:
                     OutboundMessage(
                         recipient=item.owner,
                         subject=f"New for your standing query: {item.query}",
-                        body="\n".join(f"- {note_id}" for note_id in item.note_ids),
+                        body=_digest_body(item.note_ids, item.disputed),
                         kind="digest",
                     )
                 )

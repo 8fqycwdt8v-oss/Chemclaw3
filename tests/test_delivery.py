@@ -13,13 +13,14 @@ one channel's failure is not everyone's, and nothing reads *from* a channel.
 import asyncio
 import logging
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from chemclaw.core.config import settings
 from chemclaw.deliver.driver import FileDeliveryDriver
 from chemclaw.deliver.manifest import DeliveryChannelManifest
-from chemclaw.deliver.message import Message
+from chemclaw.deliver.message import Attachment, Message
 from chemclaw.deliver.registry import (
     DeliveryChannelError,
     build,
@@ -218,7 +219,7 @@ def test_the_webhook_sends_the_recipients_view_and_not_the_join_key() -> None:
     )
     payload = _post_and_capture(message)[1]
     assert "correlation_id" not in payload
-    assert set(payload) == {"recipient", "subject", "body", "kind", "message_id"}
+    assert set(payload) == {"recipient", "subject", "body", "kind", "message_id", "attachments"}
 
 
 def test_the_webhook_never_follows_an_ambient_proxy() -> None:
@@ -819,7 +820,10 @@ def test_two_messages_differing_only_in_kind_are_not_the_same_message() -> None:
     """
     from chemclaw.deliver.driver import message_id
 
-    common = {"recipient": "u-1", "subject": "s", "body": "b"}
+    # Annotated because `Message` is no longer all-`str`: `attachments` makes an inferred
+    # `dict[str, str]` unassignable to `**kwargs`, which is mypy telling the truth about a
+    # widened model rather than a defect here.
+    common: dict[str, Any] = {"recipient": "u-1", "subject": "s", "body": "b"}
     assert message_id(Message(**common, kind="digest")) != message_id(
         Message(**common, kind="job-result")
     )
@@ -872,3 +876,144 @@ def test_the_file_channel_is_never_observed_half_written(tmp_path: Path) -> None
         f"{len(short)} read(s) saw a partial digest (sizes {sorted(set(short))[:3]}); the share is "
         "read without a lock, so a rewrite must be an atomic replace"
     )
+
+
+# --- attachments --------------------------------------------------------------------------------
+
+
+def test_an_attachment_reaches_the_share_as_its_own_file(tmp_path: Path) -> None:
+    """A pointer is not a deliverable, and a CSV pasted into a Markdown body is not a file.
+
+    The whole point of the seam is that the artefact arrives with its own name and type, which a
+    chemist's spreadsheet or ELN can open — so what is asserted is a second file on the share
+    carrying the exact bytes, not a mention of one in the message.
+    """
+    message = Message(
+        recipient="u-1",
+        subject="Report drafted",
+        body="see attached",
+        kind="report",
+        attachments=[
+            Attachment(filename="run-sheet.csv", media_type="text/csv", content=b"a,b\r\n1,2\r\n")
+        ],
+    )
+
+    asyncio.run(FileDeliveryDriver("share", str(tmp_path)).deliver(message))
+
+    sheet = next(path for path in tmp_path.iterdir() if path.name.endswith("run-sheet.csv"))
+    assert sheet.read_bytes() == b"a,b\r\n1,2\r\n"
+    note = next(path for path in tmp_path.iterdir() if path.suffix == ".md")
+    # ...and the message names it, because a reader opening the `.md` must know the file exists.
+    assert f"File: {sheet.name}" in note.read_text(encoding="utf-8")
+
+
+def test_two_messages_carrying_one_filename_do_not_overwrite_each_other(tmp_path: Path) -> None:
+    """Two designs both exporting `run-sheet.csv` is the ordinary case, not the edge one.
+
+    The message file is content-addressed for exactly this reason, and the attachment is the half a
+    chemist actually opens.
+    """
+    driver = FileDeliveryDriver("share", str(tmp_path))
+    for body in (b"first", b"second"):
+        asyncio.run(
+            driver.deliver(
+                Message(
+                    recipient="u-1",
+                    subject=f"sheet {body.decode()}",
+                    kind="report",
+                    attachments=[Attachment(filename="run-sheet.csv", content=body)],
+                )
+            )
+        )
+
+    sheets = sorted(path for path in tmp_path.iterdir() if path.name.endswith("run-sheet.csv"))
+    assert len(sheets) == 2
+    assert {path.read_bytes() for path in sheets} == {b"first", b"second"}
+
+
+def test_an_attachment_filename_cannot_escape_the_outbox() -> None:
+    """Exactly `kind`'s argument, one field over: the driver joins this onto a directory."""
+    from pydantic import ValidationError
+
+    for hostile in ("/etc/cron.d/x", "../../../etc/x", "a/b", ".hidden", ""):
+        with pytest.raises(ValidationError):
+            Attachment(filename=hostile, content=b"x")
+
+
+def test_an_attachment_is_redacted_like_a_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scrub exists because a delivery leaves the cluster, and an attachment is what leaves.
+
+    Typing the field `bytes` is not a reason to skip it: the artefacts this seam carries are text
+    assembled from tool results, exactly as a body is.
+    """
+    monkeypatch.setenv("CHEMCLAW_TEST_DELIVERY_SECRET", "hunter2-abcdefghijklmnop")
+    monkeypatch.setattr(
+        "chemclaw.deliver.message._connector_secret_envs",
+        lambda: ("CHEMCLAW_TEST_DELIVERY_SECRET",),
+    )
+    message = Message(
+        recipient="u-1",
+        subject="s",
+        attachments=[
+            Attachment(filename="log.txt", content=b"Authorization: hunter2-abcdefghijklmnop")
+        ],
+    )
+
+    scrubbed = message.redacted().attachments[0].content
+
+    assert b"hunter2-abcdefghijklmnop" not in scrubbed
+
+
+def test_a_binary_attachment_survives_the_redaction_rather_than_failing_the_delivery() -> None:
+    """A stated limit, not a silent one.
+
+    `redact_secrets` works on text. Bytes that do not decode have no text to scrub, and a redaction
+    that *raised* would turn the courtesy copy into the thing that fails the job whose real result
+    is already durable.
+    """
+    payload = bytes(range(256))
+    message = Message(
+        recipient="u-1", subject="s", attachments=[Attachment(filename="x.bin", content=payload)]
+    )
+
+    assert message.redacted().attachments[0].content == payload
+
+
+def test_an_attachment_crosses_the_wire_as_base64_and_comes_back_whole() -> None:
+    """`OutboundMessage` crosses a Temporal activity boundary, so the encoding is a durable payload.
+
+    pydantic's default for `bytes` is a utf-8 *decode*, which raises on the first byte outside it —
+    so a seam that shipped text-only and widened later would be changing the wire under open
+    histories. Driven over the JSON a converter would actually send.
+    """
+    import json
+
+    payload = bytes(range(256))
+    message = Message(
+        recipient="u-1", subject="s", attachments=[Attachment(filename="x.bin", content=payload)]
+    )
+
+    wire = json.loads(message.model_dump_json())
+
+    assert isinstance(wire["attachments"][0]["content"], str)
+    assert Message.model_validate(wire).attachments[0].content == payload
+
+
+def test_the_same_message_with_and_without_a_file_are_not_the_same_delivery() -> None:
+    """A receiver deduping on the key must not drop the copy that carries the artefact.
+
+    The other direction matters as much: the key reads the attachment's *identity* and not its
+    bytes, so a redraft of one report stays one delivery rather than becoming a second.
+    """
+    from chemclaw.deliver.driver import message_id
+
+    bare = Message(recipient="u-1", subject="s", body="b", kind="report")
+    with_file = bare.model_copy(
+        update={"attachments": [Attachment(filename="r.md", content=b"first")]}
+    )
+    redrafted = bare.model_copy(
+        update={"attachments": [Attachment(filename="r.md", content=b"second")]}
+    )
+
+    assert message_id(bare) != message_id(with_file)
+    assert message_id(with_file) == message_id(redrafted)
