@@ -348,8 +348,12 @@ def test_a_dropped_fan_out_child_still_appears_in_the_draft(
     a cancellation, a failure raised outside the `execute_activity` call — is dropped by `fan_out`,
     which is its documented contract ("a child that fails after its retries is logged and
     omitted") and returns a *shorter* list. The assembled draft then omitted the section entirely
-    while the summary said "Drafted 'X' with N section(s)" for the smaller N — so a reviewer at the
-    PR-gate reads a report whose missing section is indistinguishable from one nobody asked for.
+    while the summary said "Drafted 'X' with N section(s)" for the smaller N — so a chemist reads a
+    report whose missing section is indistinguishable from one nobody asked for.
+
+    (That sentence named "a reviewer at the PR-gate" until D-2026-09-05 deleted the gate, which
+    makes the defect *worse* rather than milder: the report is readable the moment it is written,
+    so there is no review step between the omission and the person acting on it.)
 
     Driven by handing the workflow exactly what `fan_out` hands it — a short list — because that is
     the whole input the reconciliation has to work from.

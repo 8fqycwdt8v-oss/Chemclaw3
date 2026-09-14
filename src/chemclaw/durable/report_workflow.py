@@ -267,8 +267,15 @@ class DevelopmentReportWorkflow:
                 # per requested section, so the count the chemist is told is the count they asked
                 # for. Reading the short list is how "Drafted 'X' with 2 section(s)" came to be a
                 # true sentence about a report that was missing one.
+                # **"opened for review" until D-2026-09-05 deleted the gate it named.** This is
+                # the one place that claim survived wave 15's sweep, because it is neither a
+                # docstring nor the `propose_report` symbol name the queue already tracks — it is
+                # the sentence the chemist reads in the job result, telling them a person would
+                # look before the report counted. Nobody does: `record_note` writes it, and it is
+                # readable beside its own citations the moment this returns. A control a chemist
+                # believes in is worse than one they know they do not have.
                 f"Drafted {request.title!r} with {len(report.sections)} section(s); "
-                f"opened for review as {note_ref}."
+                f"recorded as {note_ref}."
             ),
             data={"note_ref": note_ref, "title": request.title, "sections": len(report.sections)},
         )
