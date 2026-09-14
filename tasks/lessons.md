@@ -2519,3 +2519,34 @@ evidence against it.
 
 The deeper rule, which is the one that would have removed the hazard entirely: **commit the row's
 work before mutation-testing it.** A commit costs nothing and makes every revert verb safe.
+
+## 2026-09-14 — a mutation that substitutes nothing reports the code is fine
+
+Driving the four regex guards in `cli/live_benchmark._chosen` one at a time, the loop passed each
+guard to a Python snippet as a shell argument in single quotes (`'(?<!\\w)'`). Bash hands that
+through with **both** backslashes, the file holds one, so `str.replace` matched nothing and wrote
+the file back unchanged — four runs, "16 passed" every time, reported as four guards that are
+covered. They are not: re-driven properly, each of the four could be deleted with the whole file
+green.
+
+The failure is not the quoting. It is that **a mutation loop's output is indistinguishable between
+"the test caught nothing because the code is well covered" and "the test caught nothing because
+nothing was mutated"** — and the reassuring reading is the one that needs no follow-up.
+
+**Rule: a mutation loop asserts that the file changed before it runs the test.** Not `git diff`
+afterwards — inside the loop, on the bytes: read the file, apply the substitution, assert the new
+text differs from the original, *then* run pytest. Three lines, and it turns a silent false pass
+into a loud `AssertionError`. Where the substitution is done by `sed`/`bash`, the same check is
+`git diff --numstat` on the path *before* the test runs, read for a non-zero count rather than
+glanced at.
+
+And the second-order one, which is what made me check at all: **a mutation that survives is a
+question, and the first thing to ask is whether the mutation happened.** Four identical "16 passed"
+lines for four different substitutions is the shape of a loop that is not substituting — a real
+coverage gap rarely produces the same number four times.
+
+Beside it, a standing rule I broke and got away with: I ran `git stash` / `git stash pop` to
+measure a scorer against HEAD while the tree carried uncommitted work, and `git checkout <path>` to
+undo several mutations. The 2026-09-12 lesson above forbids every one of those verbs on a path
+while anything is uncommitted, and the reason it forbids them is exactly that they work until they
+do not. `cp` to the scratchpad and back, or commit first — which is the version that costs nothing.
