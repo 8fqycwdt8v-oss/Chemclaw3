@@ -261,6 +261,72 @@ def test_rrf_is_decided_by_rank_and_not_by_the_legs_score_scales() -> None:
     assert fused == ["a", "b", "c"]
 
 
+def test_three_legs_over_one_corpus_vote_once() -> None:
+    """The correlated-ranker fix: a corpus read by three legs does not outvote a one-leg corpus.
+
+    RRF's premise is *independent* rankers, and `graph`, `lexical` and `vector` are three rankers
+    over one note tree — measured on the shipped corpus, their pairwise agreement is 47/55, 44/55
+    and 41/53, because the shipped `embedding_provider` is `hash` and all three are therefore
+    term-overlap rankers. Single-stage, that corpus casts three votes for the same note and a
+    second corpus's best hit cannot reach it: the agreement term carries no `k`, so `3/(k+1)` beats
+    `1/(k+1)` for every positive `k` and every weight.
+
+    Here `shared` is ranked first by all three legs of one corpus and `other` first by the only leg
+    of another. Single-stage puts `shared` first on the strength of its corpus having three legs.
+    Two-stage fuses each corpus first, so both arrive as one rank-1 vote and the tie breaks by note
+    id — which is the correct answer for two corpora that each put their best foot forward.
+    """
+    legs = [
+        _chunks("graph", ["shared", "filler-a"], score=1.0),
+        _chunks("lexical", ["shared", "filler-b"], score=1.0),
+        _chunks("vector", ["shared", "filler-c"], score=1.0),
+        _chunks("sharedrive", ["other"], score=1.0),
+    ]
+    corpora = ["knowledge-notes", "knowledge-notes", "knowledge-notes", "sharedrive"]
+
+    single = [chunk.source_note_id for chunk in reciprocal_rank_fusion(legs, k=60)]
+    assert single[0] == "shared", "the premise: three correlated legs win on agreement alone"
+
+    two_stage = [
+        chunk.source_note_id for chunk in reciprocal_rank_fusion(legs, k=60, corpora=corpora)
+    ]
+    assert two_stage.index("other") < two_stage.index("shared"), (
+        f"one corpus, one vote: {two_stage} still lets the three-leg corpus outrank the one-leg "
+        "corpus's best hit"
+    )
+    # And a chunk still names the leg that found it — the relabelling is internal to the fusion,
+    # because a citation and `sources_truncated` are read against `retriever`.
+    assert {c.retriever for c in reciprocal_rank_fusion(legs, k=60, corpora=corpora)} <= {
+        "graph",
+        "lexical",
+        "vector",
+        "sharedrive",
+    }
+
+
+def test_all_distinct_corpora_fuse_exactly_as_before() -> None:
+    """The other direction: naming every list its own corpus is the single-stage fusion.
+
+    Without this the two-stage path could be satisfied by changing every ordering, and a
+    deployment running one leg per corpus — which is every shipped configuration — would have had
+    its retrieval silently re-ranked by a change that was supposed to leave it alone.
+    """
+    legs = [
+        _chunks("graph", ["a", "b", "c"], score=1.0),
+        _chunks("vector", ["b", "c", "a"], score=1.0),
+    ]
+    assert [c.source_note_id for c in reciprocal_rank_fusion(legs, k=60)] == [
+        c.source_note_id for c in reciprocal_rank_fusion(legs, k=60, corpora=["graph", "vector"])
+    ]
+
+
+def test_a_corpus_list_that_does_not_match_the_ranked_lists_is_refused() -> None:
+    """The mapping is positional, so a length mismatch would fuse a list under another's corpus."""
+    legs = [_chunks("graph", ["a"], score=1.0), _chunks("vector", ["b"], score=1.0)]
+    with pytest.raises(ValueError, match="positional"):
+        reciprocal_rank_fusion(legs, k=60, corpora=["knowledge-notes"])
+
+
 def test_a_leg_that_returns_nothing_cannot_be_rescued_by_the_fusion() -> None:
     """An empty lexical list leaves the dense ranking untouched — the one-legged sweep, exactly.
 

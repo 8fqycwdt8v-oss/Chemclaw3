@@ -311,6 +311,21 @@ def active_retrieve_sources() -> list[RetrieveHalf]:
     ]
 
 
+def active_retrieve_corpora() -> dict[str, str]:
+    """Each enabled retrieve source's name mapped to the corpus it reads.
+
+    Names rather than halves, so the fusion can be told which of its lists read one body of
+    evidence without every retriever growing a field it would not otherwise have. A source that
+    declares no `corpus:` is its own corpus — the ordinary case, and the one that leaves the
+    single-stage fusion exactly as it was.
+    """
+    return {
+        manifest.name: manifest.corpus or manifest.name
+        for manifest in active_manifests()
+        if manifest.retrieve is not None
+    }
+
+
 def active_commitment_sources() -> list[str]:
     """The names of enabled sources holding committed work, importing nothing.
 

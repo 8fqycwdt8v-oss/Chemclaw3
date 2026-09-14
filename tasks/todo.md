@@ -518,7 +518,12 @@ fail. That is worse than no gate, because it reports green.
       0.0 against an empty graph. It closes the `DEFERRED.md` row's *parenthetical*, **not the row**
       — a fixture corpus is not a deployment-local one and this is scored on demand, not on the
       drift cadence.
-- [ ] W27.4 `Chemclaw3` — RRF's premise is independent rankers and this system has correlated ones.
+- [x] W27.4 `Chemclaw3` — RRF's premise is independent rankers and this system has correlated ones.
+      **Done** (`D-2026-09-14-one-corpus-one-vote-is-the-right-fix-for-a-different-problem`): the
+      row's proposed remedy is a **third** measured no-op — 0 of 46 gold ranks — and it ships anyway
+      for the case it does fix (a three-leg corpus outvoting a one-leg one). What the measurement
+      settled instead: RRF is **worse** than the shipped round-robin on labelled data, mean gold
+      rank 4.54 vs 4.38 and top-5 25 vs 27. `retrieval_mode` stays `graph` on a number now.
 - [ ] W27.5 `Chemclaw3` — `make kg-validate`'s two store-backed arms have no input in the shipped
       corpus: two arms of a validator that cannot fail.
 - [ ] W27.6 `Chemclaw3` — half the probe corpus tests one tool [S] (the concentration half).
