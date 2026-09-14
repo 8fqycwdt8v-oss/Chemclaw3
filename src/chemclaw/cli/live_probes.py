@@ -121,6 +121,19 @@ def _summary(
     lines.append("| --- | ---: |")
     lines.append(f"| answered at all | {answered} / {len(outcomes)} |")
     lines.append(f"| expected tool reached | {len(reached)} / {len(expected)} |")
+    # The gold-set line. Reported as mean recall over the probes that declare `expects_notes`, and
+    # kept beside "expected tool reached" rather than folded into it: a turn can reach
+    # `gather_evidence` and be handed none of the notes the question is about, and one number
+    # covering both would read as coverage while hiding exactly that.
+    graded_notes = [o for o in outcomes if o.expected_notes_recall is not None]
+    if graded_notes:
+        recalls = [o.expected_notes_recall or 0.0 for o in graded_notes]
+        incomplete = sum(1 for o in graded_notes if o.expected_notes_missing)
+        lines.append(
+            f"| expected notes retrieved (mean recall over {len(graded_notes)} probes) | "
+            f"{sum(recalls) / len(recalls):.2f} |"
+        )
+        lines.append(f"| …probes missing at least one expected note | {incomplete} |")
     lines.append(f"| answers using no tool at all | {len(zero_tool)} / {len(outcomes)} |")
     lines.append(
         f"| …of those, on questions the surface covers (bucket A) | {len(zero_tool_covered)} |"

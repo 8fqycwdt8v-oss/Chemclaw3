@@ -31,6 +31,7 @@ moved. An exemption that names nothing is a hole with a note on it, so this file
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -106,6 +107,60 @@ def test_no_probe_expects_a_tool_that_does_not_exist() -> None:
     assert not phantom, (
         f"these probes expect tools that no longer exist: {phantom}. Either the tool was renamed "
         "and the probe was not, or the probe outlived its capability."
+    )
+
+
+def _knowledge_note_ids() -> set[str]:
+    """Every note id in the shipped corpus, by filename stem."""
+    root = Path(__file__).resolve().parents[1] / "knowledge"
+    return {path.stem for path in root.rglob("*.md") if path.stem != "README"}
+
+
+def test_no_probe_expects_a_note_that_does_not_exist() -> None:
+    """The offline half of the gold set: a label pointing at a note that is gone grades nothing.
+
+    It fails for the wrong reason — the retriever was never going to return an id the corpus does
+    not hold — so the pair stops measuring retrieval and starts measuring the label, while still
+    counting toward the run's recall. This is the half CI can run; the recall itself needs a front
+    door and is scored by `make live-probes`.
+    """
+    expected = {name for probe in _probes() for name in probe.expects_notes}
+    assert expected, "no probe declares `expects_notes`; this test proves nothing"
+    phantom = sorted(expected - _knowledge_note_ids())
+    assert not phantom, (
+        f"these probes expect notes the corpus does not hold: {phantom}. Either the note was "
+        "renamed and the probe was not, or the label outlived its note."
+    )
+
+
+def test_every_note_a_direction_names_is_declared_as_data() -> None:
+    """The pairs stay readable as data rather than sliding back into prose.
+
+    46 labelled (query, note) pairs across 20 probes existed for months inside `direction:`, where
+    only a human grader could read them — `DEFERRED.md` recorded the consequence as "the shipped
+    graph has none", then corrected itself to "unreadable as data because `Probe` is
+    `extra='forbid'`". Transcribing them once fixes that instant and nothing keeps it fixed: the
+    next probe written in the same style re-opens the same hole, silently, because a direction
+    naming a note still reads like a complete probe.
+
+    So this asserts the direction and the field agree. A note id a direction names and the field
+    omits is the hole coming back; the converse is allowed, because a label may be more precise
+    than the prose that motivated it.
+    """
+    corpus = _knowledge_note_ids()
+    missing: dict[str, list[str]] = {}
+    for probe in _probes():
+        named = sorted(
+            note
+            for note in corpus
+            if re.search(rf"(?<![\w-]){re.escape(note)}(?![\w-])", probe.direction)
+        )
+        gap = sorted(set(named) - set(probe.expects_notes))
+        if gap:
+            missing[probe.id] = gap
+    assert not missing, (
+        f"{len(missing)} probe(s) name a corpus note in `direction:` and not in `expects_notes`: "
+        f"{missing}. A pair only a human grader can read is the hole this field closed."
     )
 
 

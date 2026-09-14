@@ -510,9 +510,14 @@ fail. That is worse than no gate, because it reports green.
       the better instrument for the same measurement. Driven with ~10k characters added to the
       default prompt: `make eval-baseline-check` exit 0 in both arms, `live-turn-cost` 0.900198 ->
       0.950454, exit 1. Found a 2.1x cost swing between boots of one commit — `BACKLOG.md` row.
-- [ ] W27.3 `Chemclaw3` — the 44 labelled (query, note) pairs in `knowledge.yaml` are unreadable as
-      data because `Probe` is `extra="forbid"` [M]. Closing this also closes the `DEFERRED.md` row
-      whose parenthetical rested on them.
+- [x] W27.3 `Chemclaw3` — the labelled (query, note) pairs in `knowledge.yaml` are unreadable as data.
+      **Done** (`D-2026-09-14-a-label-only-a-human-can-read-is-not-a-label`): **46** pairs across 20
+      probes, not 44 across 19. `Probe.expects_notes`, all-of, scored off `returned_ids` in
+      `evals/live.py` and reported by `make live-probes`; offline validator in
+      `tests/test_probe_coverage.py`. Driven: kn-01 recall 1.0 shipped, 0.667 with one note removed,
+      0.0 against an empty graph. It closes the `DEFERRED.md` row's *parenthetical*, **not the row**
+      — a fixture corpus is not a deployment-local one and this is scored on demand, not on the
+      drift cadence.
 - [ ] W27.4 `Chemclaw3` — RRF's premise is independent rankers and this system has correlated ones.
 - [ ] W27.5 `Chemclaw3` — `make kg-validate`'s two store-backed arms have no input in the shipped
       corpus: two arms of a validator that cannot fail.

@@ -219,25 +219,6 @@ topic).
       with `CHEMCLAW_DATA_SOURCES=graph,eln-json`, so **no shipped configuration runs RRF over note
       sources at all** — hybrid staying opt-in is the mitigation until the ADR is taken.
 
-- [ ] **The 44 labelled (query, note) pairs in `knowledge.yaml` are unreadable as data** — [M],
-      measured 2026-09-05. `data/evals/probes/knowledge.yaml` has **19 probes naming
-      real `knowledge/` note ids inside their `direction:` prose, 44 pairs in total** — a labelled
-      gold set against the *product* corpus that no gate can read, because `Probe` is
-      `extra="forbid"` (`evals/probe.py`). `DEFERRED.md`'s claim that "the shipped graph has none"
-      was corrected in the same commit as this row.
-
-      **Score it in the live lane, not offline, and that is the finding.** Measured offline by
-      running `GraphRetriever` on each probe's raw question: mean recall **0.636**, two probes at
-      0.00 — below the gate's floor on day one, because probe questions are conversational chemist
-      prose (10-27 terms) while the live agent reformulates before calling `gather_evidence`.
-      Gating that offline would restate the `retrieval-cross-coupling-literal-miss` case 19 times
-      without the `expect_pass: false` that makes it honest.
-
-      The shape: add `expects_notes: list[str]` to `Probe`, transcribe the 44 pairs, and score it in
-      `evals/live.py` beside `expects_tools` — `returned_ids` is already accumulated there, so it is
-      the same three lines as `live.py:499-500`. Plus a cheap **offline** validator that every
-      `expects_notes` id exists in `knowledge/`, which is the half CI can run. Its own PR: it needs
-      a running front door to verify green.
 ## 3 — Work that is lost, dropped or invisible
 
 - [ ] **`make kg-validate`'s two store-backed arms have no input in the shipped corpus** — [S], same
