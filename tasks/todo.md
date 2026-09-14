@@ -576,8 +576,16 @@ What decides whether the system is affordable and whether it survives a real cor
       Python) and so is a rewritten inner-window statement. The partial index is the fix: **0 rows
       discarded, 0.036 ms**, and the row's objection about write cost does not hold either — 162
       µs/row without it, **161 with** (migration `098`).
-- [ ] W28.4 `Chemclaw3` — the checkpointer's write volume is quadratic in a thread's length [L].
-      Decide: fix, or `DEFERRED.md` with a measured trigger.
+- [x] W28.4 `Chemclaw3` — the checkpointer's write volume is quadratic in a thread's length [L].
+      **Decided: `DEFERRED.md`, with the law measured.** Confirmed rather than inherited — driven
+      with `checkpoint_retain_per_thread=0` so every version survives to be counted, amplification is
+      **6.7x at 5 turns, 11.8x at 10, 21.9x at 20, 31.9x at 30**, i.e. `turns + ~2`. Storage is fine
+      (~2,590 B/turn under the shipped retention); the bytes *written* are what grow. The upstream
+      fix, `langgraph.channels.delta.DeltaChannel`, is **beta with an explicitly unstable on-disk
+      contract**, and adopting it changes the representation of live threads on a shape upstream has
+      not promised. Trigger and the cheaper half (a compressing serde) are in the row. **This is a
+      row the wave's standing decision said to build; I am declining it on that measurement and
+      saying so rather than quietly deferring.**
 - [ ] W28.5 `Chemclaw3` — a note write costs ~1.8 s and a backfill is one write per record; a real
       first sync is days. A backfill and an incremental sync want different write shapes.
 - [ ] W28.6 `Chemclaw3` — nothing has measured how many rows a real corpus produces [M]. Measure it;

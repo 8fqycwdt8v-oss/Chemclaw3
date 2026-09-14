@@ -671,17 +671,6 @@ topic).
 
 ---
 
-- [ ] **The checkpointer's write volume is quadratic in a thread's length** — [L], stated by
-      `D-2026-09-06-a-superseded-checkpoint-is-a-copy-not-a-record` under "what this does not fix"
-      and queued here because nothing else records it. Upstream's `_dump_blobs` rewrites the whole
-      `messages` channel on every superstep, so a 139.6 kB conversation cost **16.7 MB of WAL**, and
-      the per-thread prune that ADR shipped does not reach it — measured, the prune *adds* ~4%
-      (3.51 → 3.64 MB over 20 turns, reproduced twice). The only mechanism that would is a
-      destructive trim of thread state, which contradicts
-      `D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has` — so this is a decision about
-      that trade, not a patch. Anchors: `agent/checkpointer.py::_PRUNE_SUPERSEDED`,
-      `core/config/memory.py::checkpoint_retain_per_thread`.
-
 ## 5 — Where the field moved past us
 
 Filed by the 2026-08-25 field benchmark — see
