@@ -891,6 +891,42 @@ only holds defects can only ever restore the system to what it already intended 
       nomenclature wants structured databases. A process chemist asking "has anyone run this coupling
       on a deactivated aryl chloride" currently gets whatever those 39 notes happen to say.
 
+- [ ] **Several humans in one session is five pieces, and the policy one has to be settled first**
+      — [L], scoped in `docs/archive/PLAN-2026-09-14-multiplayer-and-the-open-delegation-questions.md`.
+      Not the owner gate relaxed: measured, `session_messages` has **no actor column** so a shared
+      transcript cannot say who wrote what; ownership is checked in 46 places under
+      `src/chemclaw/api/`; `api/detach.py` holds one queue and one `_attached` flag, so a second
+      reader *steals* events rather than seeing a copy; and two writers on one thread fork the DAG
+      silently (Wave 2's measurement), which is what `SessionTurnClaims` prevents by refusing.
+
+      The serialisation is already correct and only its *answer* is wrong — one turn at a time is
+      the right semantic for a shared thread, so the 409 becomes a bounded queue rather than the
+      claim being relaxed. Order: participants, attribution, queued turn, reader fan-out. **Settle
+      the authority questions before the schema**: whose roles govern a tool call, whether B may
+      approve a plan A's message produced, and whose `/memories/` load (they are namespaced per
+      actor digest, so a shared session loads none, the sender's, or a session tier that does not
+      exist). Cheap to decide now, a migration to decide later. A chat-room connector is separate
+      work on top and wants 1–4 finished first.
+
+- [ ] **Run the delegation comparison against a real gateway, and accept a negative result**
+      — [M], and it is the gate on Wave 3's roster. `evals/delegation.py` and
+      `data/evals/probes/delegation.yaml` exist and have never been run against a model; the blocker
+      is an OpenAI-compatible endpoint, the same one #359/#360 wait on. **A negative result closes
+      the question as legitimately as a positive one** — written down because the retired specialist
+      team was added to be ready and stayed off, and because a disappointing answer is not a reason
+      to re-open a measurement. What would *not* close it is another delegation-*rate* number:
+      `D-2026-08-12` measured 2 of 15, `D-2026-08-13` measured 14/15 against 14/15 with the old arm
+      at ceiling, and two of those probes span two specialists, so that figure had an unpassable
+      floor before any model was involved.
+
+- [ ] **A routing corpus where the right profile is not inferable from the question's surface**
+      — [M]. Seven profiles ship and genuinely narrow (`evidence` reaches zero side-effecting tools,
+      `safety` one, `default` all 49); what `D-2026-08-15` deleted is automatic routing between
+      them. Re-opening it needs a corpus the retired one did not contain: cases where the profile a
+      question *needs* differs from the profile its wording suggests, compared on **answers** rather
+      than on which specialist was picked. Until that corpus exists a router is a guess with a
+      metric attached, and this row is the corpus rather than the router.
+
 - [ ] **A bundle declared only in the fleet reaches an agent surface with no probe covering it** —
       [M], and it is a cross-repository gap rather than a missing file.
       `D-2026-09-14-a-bundle-this-tree-does-not-declare-is-still-reachable` decided that `pyexec`
