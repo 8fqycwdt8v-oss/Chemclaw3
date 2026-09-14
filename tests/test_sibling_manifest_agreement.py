@@ -152,7 +152,7 @@ def _callers() -> tuple[str, ...]:
 
     **Derived, because the hand-kept list covered half the seam while claiming all of it**
     (`D-2026-09-14-a-tripwire-over-two-named-modules-covers-the-modules-it-names`). It read
-    `compose.py` and `remote.py` — 16 call sites — and the docstring below said "every hardcoded
+    `compose.py` and `remote.py` — 13 call sites — and the docstring below said "every hardcoded
     `calc` call". Measured against the tree on 2026-09-14 there are **five** modules holding such
     calls: those two, plus `connectors/calc/server/tools.py` (11 sites) and
     `connectors/bo/calculators.py` (2), which were unread. Every tool name they put on the wire is

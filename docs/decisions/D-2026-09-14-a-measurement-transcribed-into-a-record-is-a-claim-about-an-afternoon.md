@@ -1,7 +1,9 @@
 # D-2026-09-14-a-measurement-transcribed-into-a-record-is-a-claim-about-an-afternoon — the numbers wave 27/28 recorded that do not reproduce
 
-**Status**: accepted. Supersedes three figures in
-`D-2026-09-14-a-lowering-that-loses-a-merge-is-a-raising` and nothing else in it.
+**Status**: accepted. Supersedes figures — and only figures — in
+`D-2026-09-14-a-lowering-that-loses-a-merge-is-a-raising` and
+`D-2026-09-14-a-tripwire-over-two-named-modules-covers-the-modules-it-names`. Neither ADR's
+argument or decision is touched; both were re-verified while the numbers were re-measured.
 
 ## Context
 
@@ -43,9 +45,31 @@ restoration passes the ceiling with room to spare, and the control that actually
 driven red on its own at the restored tree. A ceiling holds aggregate drift; a paragraph is held by
 a test that reads the paragraph. Nothing in that argument needed any of the three digits.
 
+## The same wave, one record over: the calc seam's tripwire
+
+`D-2026-09-14-a-tripwire-over-two-named-modules-covers-the-modules-it-names` widened
+`tests/test_sibling_manifest_agreement.py`'s calc-seam check from a hand-kept two-module list to a
+derivation, and got three figures around it wrong. Measured off `_hardcoded_calls()` and the fleet's
+own `servers/calc/tool-surface.json`:
+
+- The old basis is **13** call sites, which the ADR's title, its body and that file's own paragraph
+  all say — while `_callers()`'s docstring, twelve lines below, said *"16 call sites"*. Corrected in
+  place, because a test file is not a merged record.
+- Its `## Consequences` says *"the **10** fleet `calc` tools nothing here calls stay uncovered"*.
+  That is the figure from **before** its own change: the widened seam names 18 of the fleet's 20, so
+  what stays uncovered is **two** — `optimize_geometry` and `predict_logd`. The consequence itself
+  is unchanged and still right: a tool nobody calls cannot be called wrongly.
+- Its list of the nine names the newly covered half carries includes **`predict_logd`**, which is in
+  neither newly covered module and is one of the two the seam never names at all.
+
+The ledger row is corrected the same way as the one above: by naming the two uncovered tools rather
+than by restating a count, since a count over another repository's surface goes stale on somebody
+else's merge and the two names do not.
+
 ## Decision
 
-- **The three figures are superseded here**, and the argument they sat inside is not.
+- **The figures named above are superseded here**, and the arguments they sat inside are not:
+  neither the ceiling ADR's conclusion nor the tripwire ADR's decision turns on any of them.
 - **The ledger row is corrected by deletion rather than by restatement.** `docs/decisions/README.md`
   is a live index and may still change, so it stops carrying a headroom and a delta at all. The
   ratchet's live number is whatever `tests/test_context_floor.py` measures against
@@ -67,6 +91,9 @@ a test that reads the paragraph. Nothing in that argument needed any of the thre
   against the live ceiling, the only place either number is current.
 - `tests/test_prose_contract.py::test_no_tool_description_tells_the_model_about_a_tier_that_is_gone`
   — the control that the superseded bullet should have named, and that this review drove red again.
+- `tests/test_sibling_manifest_agreement.py::test_the_calc_seam_calls_only_tools_the_fleet_records_serving`
+  — the seam's live coverage, derived from who imports a dispatcher rather than from a list, which
+  is why the corrected figures above are readable off the tree at all.
 - `tests/test_decision_log.py::test_the_index_lists_exactly_the_decisions_on_disk` — this record
   is in the ledger beside the one it supersedes, so the correction is reachable from the row that
   carried the wrong number.
