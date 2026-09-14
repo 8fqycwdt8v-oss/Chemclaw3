@@ -9,6 +9,7 @@ were 4/5 — because those digits appear inside sentences like "approximately 1.
 
 import json
 import re
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,6 @@ from chemclaw.agent.chemclaw_agent import (
 from chemclaw.agent.profile_discovery import _load
 from chemclaw.agent.profiles import get_profile
 from chemclaw.cli.live_benchmark import (
-    BENCHMARK_DIR,
     Answered,
     BenchmarkQuestion,
     _chosen,
@@ -29,6 +29,7 @@ from chemclaw.cli.live_benchmark import (
     load_questions,
     render,
 )
+from chemclaw.core.config import settings
 
 
 def test_the_vendored_corpus_matches_its_recorded_checksum() -> None:
@@ -37,10 +38,22 @@ def test_the_vendored_corpus_matches_its_recorded_checksum() -> None:
     It is also what makes the score comparable between two runs: a benchmark whose questions
     changed under it reports a comparison between two different things.
     """
-    questions = load_questions(BENCHMARK_DIR)
+    questions = load_questions(settings.benchmark_dir)
     assert len(questions) == 100
     assert len({q.id for q in questions}) == len(questions), "ids are this corpus's key"
     assert all(q.answer in q.options for q in questions), "a key naming no option scores nothing"
+
+    # **The per-category split is recorded once, in `dataset.json`, and checked against the
+    # corpus.** The README's prose said "13 from each of eight categories" while the manifest
+    # beside it already said the 100-question trim cut `toxicity_and_safety` short — a number in
+    # prose being wrong about the file it sits next to. It is data now, so a re-sampled subset that
+    # changes the shape fails here rather than leaving a sentence describing the old one.
+    manifest = json.loads(
+        (Path(settings.benchmark_dir) / "dataset.json").read_text(encoding="utf-8")
+    )
+    assert manifest["categories"] == dict(sorted(Counter(q.category for q in questions).items())), (
+        "dataset.json's per-category split is not the corpus's"
+    )
 
 
 def test_the_corpus_records_its_licence_and_where_a_human_got_it() -> None:
@@ -50,14 +63,16 @@ def test_the_corpus_records_its_licence_and_where_a_human_got_it() -> None:
     `retrieved_from` is the only record of where a human obtained the file. Nothing reads it as an
     address.
     """
-    manifest = json.loads((Path(BENCHMARK_DIR) / "dataset.json").read_text(encoding="utf-8"))
+    manifest = json.loads(
+        (Path(settings.benchmark_dir) / "dataset.json").read_text(encoding="utf-8")
+    )
     for field in ("name", "version", "licence", "retrieved_from", "description", "sha256"):
         assert manifest.get(field), f"{field} is missing from the benchmark manifest"
 
 
 def test_a_corpus_that_does_not_hash_is_refused(tmp_path: Path) -> None:
     """The other direction, so the checksum check cannot be satisfied by not checking."""
-    source = Path(BENCHMARK_DIR)
+    source = Path(settings.benchmark_dir)
     (tmp_path / "dataset.json").write_text(
         (source / "dataset.json").read_text(encoding="utf-8"), encoding="utf-8"
     )
@@ -100,7 +115,7 @@ def test_a_longer_option_wins_over_the_shorter_one_it_contains() -> None:
     the opposite answer. Driven over all 100 questions, four option-answers across three questions
     score differently without the sort.
     """
-    questions = {q.id: q for q in load_questions(BENCHMARK_DIR)}
+    questions = {q.id: q for q in load_questions(settings.benchmark_dir)}
 
     # The key *is* the longer option, and the shorter one inside it reverses the physics.
     mass = questions["analytical_chemistry:molecular_structure#3"]
@@ -273,7 +288,7 @@ def test_every_option_is_scorable_in_the_spelling_a_model_would_use() -> None:
     sample would hide the arm-asymmetry: the two arms do not write markup equally often, so a
     markup-blind scorer is not neutral between them.
     """
-    questions = load_questions(BENCHMARK_DIR)
+    questions = load_questions(settings.benchmark_dir)
     misscored = [
         (question.id, option)
         for question in questions
@@ -294,7 +309,7 @@ def test_an_option_answered_verbatim_still_scores_as_itself() -> None:
     supposed to leave alone — two options that differ only by a symbol command are the pair at
     risk, which is why `_normalised` maps `\\Delta` to a word instead of deleting it.
     """
-    questions = load_questions(BENCHMARK_DIR)
+    questions = load_questions(settings.benchmark_dir)
     misscored = [
         (question.id, option)
         for question in questions
@@ -315,7 +330,9 @@ def test_the_markup_defect_credited_a_wrong_option_for_a_right_answer() -> None:
     where an abstention only widens the gap.
     """
     question = next(
-        q for q in load_questions(BENCHMARK_DIR) if q.id == "materials_science:polymer_chemistry_19"
+        q
+        for q in load_questions(settings.benchmark_dir)
+        if q.id == "materials_science:polymer_chemistry_19"
     )
     answer = (
         "Azobisisobutyronitrile and benzoyl peroxide are thermal initiators, not redox pairs.\n\n"

@@ -45,11 +45,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from chemclaw.core.config import settings
 from chemclaw.evals.live import open_session
 
-#: Where the vendored subset lives. A directory rather than a file so `dataset.json` — the licence,
-#: the checksum and where a human obtained it — sits beside the questions, the discipline the
-#: sibling fleet holds every corpus to.
-BENCHMARK_DIR = "data/evals/benchmarks/chembench"
-
 
 class BenchmarkQuestion(BaseModel):
     """One keyed multiple-choice item, as the vendored subset carries it."""
@@ -331,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
     """Ask the benchmark of a running front door and print the score."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--base-url", default=settings.live_probe_base_url)
-    parser.add_argument("--benchmark-dir", default=BENCHMARK_DIR)
+    parser.add_argument("--benchmark-dir", default=settings.benchmark_dir)
     parser.add_argument(
         "--profile",
         default=None,

@@ -5,9 +5,13 @@ knowledge graph. It is honest and it is not comparable to anything. This corpus 
 number — one somebody else can also produce.
 
 **What it is.** 100 questions from [ChemBench](https://huggingface.co/datasets/jablonkagroup/ChemBench)
-(MIT, expert-generated), 13 from each of eight categories. Only items whose `target_scores` name
-exactly one correct option are kept: every other item type in ChemBench needs a scorer this
-repository does not have, and a benchmark half-scored is worse than one not run.
+(MIT, expert-generated), across eight categories — the per-category split is `dataset.json`'s
+`categories`, and it is not even: the 100-question trim cut `toxicity_and_safety` short. This
+paragraph said "13 from each of eight" for as long as the manifest beside it said otherwise, which
+is why the split is recorded once, as data, where
+`tests/test_live_benchmark.py` checks it against the corpus. Only items whose `target_scores` name exactly one correct
+option are kept: every other item type in ChemBench needs a scorer this repository does not have,
+and a benchmark half-scored is worse than one not run.
 
 **How it is scored.** `make live-benchmark` asks each question of a running front door and takes the
 answer the model gives, matched against the option list. Deterministic — there is no judge, which is
