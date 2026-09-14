@@ -21,7 +21,12 @@ from chemclaw.memory.campaign import campaign_note_from_chain
 from chemclaw.memory.chains import detect_chains
 from chemclaw.memory.ids import stable_id
 from chemclaw.memory.interaction import note_from_confirmed_answer
-from chemclaw.memory.jobs import SynthesisUnit, build_campaign_notes, build_playbook_notes
+from chemclaw.memory.jobs import (
+    SynthesisUnit,
+    build_campaign_notes,
+    build_playbook_notes,
+    supported_from,
+)
 from chemclaw.memory.observations import Observation
 from chemclaw.memory.playbook import (
     SOURCE_DISTILLATION,
@@ -510,3 +515,95 @@ def test_record_confirmed_answer_tool_uses_gate(monkeypatch: pytest.MonkeyPatch)
     submitted = fake.writes[0]
     assert submitted.files[0].path.endswith("interaction/interaction-q-42.md")
     assert "reaction-eln-2026-002" in submitted.files[0].content
+
+
+# --- when a synthesized note became knowledge ----------------------------------------------------
+
+
+def test_a_synthesized_note_is_dated_by_its_evidence_and_not_by_the_clock() -> None:
+    """The date has to be a function of the members, and this is why.
+
+    Every synthesized note is keyed by `stable_id(kind, reaction_ids)`, so a miner re-run over the
+    same members mints the same id. A `date.today()` would then rewrite that note with a new
+    `valid_from` on every run — the content changes, `record_note` commits, and the digest reports
+    it as new again the next day. That is the storm
+    `D-2026-09-14-an-undated-note-is-not-news-every-hour` closed, in a new dress.
+
+    Asserted as *stability*, not as a literal: two runs over the same evidence agree, which is the
+    property that matters and the one a fixture reworded with different dates cannot fake.
+    """
+    runs = {
+        "r1": _dated("r1", date(2026, 7, 1)),
+        "r2": _dated("r2", date(2026, 7, 31)),
+    }
+
+    first = supported_from(["r1", "r2"], runs)
+    again = supported_from(["r1", "r2"], runs)
+
+    assert first == again == date(2026, 7, 31)
+
+
+def test_the_date_is_the_latest_run_rather_than_the_earliest() -> None:
+    """A pattern became knowable when the last run supporting it happened.
+
+    Dating it from the first would claim the knowledge before the evidence for it existed, which
+    `Note.is_current` would then serve as current evidence for a period it could not have been.
+    """
+    runs = {"r1": _dated("r1", date(2026, 7, 1)), "r2": _dated("r2", date(2026, 7, 31))}
+
+    assert supported_from(["r1", "r2"], runs) == date(2026, 7, 31)
+
+
+def test_evidence_that_states_no_date_leaves_the_note_open_ended() -> None:
+    """`None` is the truthful answer, not a fallback to today.
+
+    `OrdReaction.performed_at` is optional because a source may not state one, and a corpus that
+    never said when its runs happened cannot support a narrower claim than "open-ended".
+    """
+    runs = {"r1": _reaction("r1", ["CC"], ["CCO"])}
+
+    assert supported_from(["r1"], runs) is None
+
+
+def test_a_member_the_corpus_does_not_hold_is_skipped_rather_than_raising() -> None:
+    """A partial corpus read is an ordinary condition here — `_units` has a whole guard for it."""
+    runs = {"r1": _dated("r1", date(2026, 7, 1))}
+
+    assert supported_from(["r1", "missing"], runs) == date(2026, 7, 1)
+
+
+def _dated(rid: str, performed_at: date) -> OrdReaction:
+    """A reaction that says when it was run."""
+    return _reaction(rid, ["CC"], ["CCO"]).model_copy(update={"performed_at": performed_at})
+
+
+def test_every_miner_dates_the_note_it_mints() -> None:
+    """Three builders, one defect — fixing one would leave the other two silently unreachable.
+
+    `D-2026-09-14-an-undated-note-is-not-news-every-hour` named only the playbook producer and left
+    the rest "for the pass that touches it". This is that pass, and the assertion is over all three
+    rather than the one, because the argument does not distinguish them: a mined note became
+    knowledge the day the miner's evidence did.
+
+    Read off the source, because driving all three needs a chain, a cross-project candidate and an
+    optimization group — three fixtures asserting one wiring fact.
+    """
+    import ast
+    from pathlib import Path
+
+    import chemclaw.memory.jobs as jobs
+
+    tree = ast.parse(Path(jobs.__file__).read_text(encoding="utf-8"))
+    minted = {
+        node.func.id: [kw.arg for kw in node.keywords]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    builders = ["campaign_note_from_chain", "playbook_note", "optimization_campaign_note"]
+
+    for builder in builders:
+        assert builder in minted, f"{builder} is not called here any more; this test is stale"
+        assert "minted_on" in minted[builder], (
+            f"{builder} mints an undated note, which the digest reads as open-ended and never "
+            "reports to a subscriber who has a watermark"
+        )

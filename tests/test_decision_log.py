@@ -356,6 +356,33 @@ def _topic_cited_ids() -> set[str]:
     return set(re.findall(rf"{_DATED}|{_NUMBERED}", _topic_section()))
 
 
+def test_no_subject_has_two_topic_rows() -> None:
+    """One subject, one row — because a reader takes the first row they find as *the* answer.
+
+    `test_the_index_has_no_duplicate_reservations` covers the record table, where a repeated id is
+    a collision. Nothing covered the navigational half, and a duplicate there is worse in a quieter
+    way: both rows parse, both cite real ADRs, every other assertion in this file passes, and the
+    two copies then drift — one gains a citation the other does not, so which decision a reader is
+    told is current depends on which line they stopped at.
+
+    Found by merging: `main` carried two "Publishing & delivery" rows, one of them missing a
+    citation the other had, and the conflict that surfaced it was a side effect rather than a
+    check. A guard is what makes the next one loud.
+    """
+    subjects = [
+        line.split("|")[1].strip()
+        for line in _topic_section().splitlines()
+        if line.startswith("| ") and line.count("|") >= 3
+    ]
+    named = [s for s in subjects if s and not set(s) <= set("- ") and s != "Topic"]
+    duplicates = sorted(topic for topic, count in Counter(named).items() if count > 1)
+
+    assert not duplicates, (
+        "the By topic table carries two rows for the same subject, so which decision a reader is "
+        f"told is current depends on which line they stop at: {duplicates}"
+    )
+
+
 def test_no_recent_adr_lands_unfiled_by_the_topic_table() -> None:
     """Every ADR on or after `_TOPIC_CURSOR` is either a topic row's subject or declared not one.
 
