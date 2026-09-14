@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 from langchain_core.language_models import BaseChatModel, GenericFakeChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.resume import (
@@ -254,3 +254,91 @@ def test_a_finished_session_releases_the_lease_it_took_to_look() -> None:
 
     assert outcome == ResumeOutcome(state=Resumability.FINISHED, resumed=False)
     assert released == ["s-done"]
+
+
+def test_a_resumed_turn_does_not_get_a_fresh_iteration_budget() -> None:
+    """The caps are `UntrackedValue` by design, and a resume is a new run of the graph.
+
+    `agent/state.py` states the channel's guarantee — it "starts empty on every run of the graph
+    because there is nothing for the checkpoint to restore" — and per-turn-ness came from exactly
+    that, which held for as long as one turn was one run. Measured in Wave 2: a turn that dies *n*
+    times gets *n+1* full allowances.
+
+    The count is therefore re-derived from the thread rather than persisted. Four arms, because
+    each alone would pass for the wrong reason:
+
+    - a resumed turn counts the calls it already made;
+    - the count is *this turn's*, not the conversation's — the whole-thread number would bound a
+      long chat far tighter than intended, which is a different control wearing this one's name;
+    - a thread with no human message at all still answers rather than raising;
+    - an ordinary turn is unchanged, which is what makes this safe to put on every model call.
+    """
+    from chemclaw.agent.resume import calls_already_made
+
+    killed_mid_turn = [
+        HumanMessage("an earlier question"),
+        AIMessage("an earlier answer"),
+        HumanMessage("this turn"),
+        AIMessage("", tool_calls=[{"name": "t", "args": {}, "id": "1"}]),
+        ToolMessage("a result", tool_call_id="1"),
+        AIMessage("partial work"),
+    ]
+    assert calls_already_made(killed_mid_turn) == 2, (
+        "a resumed turn must start from the calls it already made, not from zero"
+    )
+    assert calls_already_made(killed_mid_turn) != 3, (
+        "the whole thread's count would bound the conversation rather than the turn"
+    )
+    assert calls_already_made([AIMessage("no human message anywhere")]) == 1
+    assert calls_already_made([]) == 0
+    assert calls_already_made(None) == 0
+
+
+def test_the_floor_never_overtakes_the_counter_on_an_ordinary_turn() -> None:
+    """The property that makes reading the thread safe on *every* model call, not just a resume.
+
+    `enforce_loop_cap` takes the `max` of the channel and this floor, so the floor being wrong in
+    the high direction would cap healthy turns early — the failure mode a chemist notices and
+    cannot diagnose. It cannot be: the counter increments in `before_model`, which runs *before* the
+    assistant message it authorises exists, so the channel leads the floor by exactly one for every
+    call a live turn has made.
+    """
+    from chemclaw.agent.resume import calls_already_made
+
+    thread: list[Any] = [HumanMessage("a question")]
+    for call in range(1, 6):
+        # `before_model` has just run for call `call`: the channel says `call`, the message the
+        # call will produce does not exist yet.
+        assert calls_already_made(thread) == call - 1 < call
+        thread.append(AIMessage(f"answer {call}"))
+        assert calls_already_made(thread) == call
+
+
+def test_the_cap_itself_reads_the_floor_and_not_only_the_channel() -> None:
+    """Driven through `enforce_loop_cap`, because the helper being right is not the property.
+
+    `calls_already_made` is unit-tested above, and a mutation that deletes the `max` from the cap
+    leaves every one of those assertions green — the helper still returns the right number, nothing
+    reads it, and a resumed turn gets its fresh budget back. That is the shape this programme has
+    already been caught by twice, so the hook is driven here with the two states that differ.
+
+    The decorator wraps the function into a middleware, so the hook is reached as
+    `.before_model`; the runtime is unused by it, which is why `None` is enough.
+    """
+    from chemclaw.agent.loop_cap import enforce_loop_cap
+    from chemclaw.core.config import settings
+
+    cap = settings.harness_max_loop_iterations
+    resumed = {
+        "model_calls": 0,  # the channel, reset by the new run
+        "messages": [HumanMessage("this turn"), *[AIMessage(f"call {n}") for n in range(cap)]],
+    }
+    decision = enforce_loop_cap.before_model(resumed, None)
+    assert decision == {"jump_to": "end", "loop_capped": True}, (
+        "a resumed turn that already spent the whole budget must stop, not start again at zero"
+    )
+
+    fresh = {"model_calls": 0, "messages": [HumanMessage("this turn")]}
+    assert enforce_loop_cap.before_model(fresh, None) == {"model_calls": 1}, (
+        "a turn with nothing behind it is unaffected — the floor must not cap a healthy turn"
+    )

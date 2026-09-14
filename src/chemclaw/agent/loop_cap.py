@@ -42,6 +42,7 @@ from typing import Any
 
 from langchain.agents.middleware import before_model
 
+from chemclaw.agent.resume import calls_already_made
 from chemclaw.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -151,7 +152,18 @@ def enforce_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] |
     a surface marks it partial (`chemclaw.api.runner` does this off `loop_hit_cap`). A raised error
     would discard work a chemist is entitled to see.
     """
-    calls = int(state.get("model_calls", 0))
+    # **The channel is `UntrackedValue`, so a resumed turn reads 0 here and gets a fresh cap.**
+    # `agent/state.py` says the channel "starts empty on every run of the graph", which was the
+    # per-turn guarantee for as long as one turn was one run. A turn can now be resumed after a pod
+    # death (`D-2026-09-14-a-turn-outlives-its-request-already-and-nothing-can-pick-it-up`), and
+    # measured, a turn that dies *n* times got *n+1* full allowances.
+    #
+    # So the thread itself is the floor: this turn's assistant messages since the last human one.
+    # The same `max` shape `enforce_spend_cap` already uses against `metered_turn_tokens`, for the
+    # same reason — the channel is the fast answer and something durable is the honest one. On an
+    # ordinary turn it changes nothing, because the counter increments in `before_model`, before the
+    # assistant message it authorises exists, so the channel leads by one and wins.
+    calls = max(int(state.get("model_calls", 0)), calls_already_made(state.get("messages")))
     if calls >= settings.harness_max_loop_iterations:
         logger.warning("the model loop hit its %d-iteration cap", calls)
         record_loop_cap()
