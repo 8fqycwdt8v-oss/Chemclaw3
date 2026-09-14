@@ -61,7 +61,12 @@ def build_campaign_notes(
     """
     by_id = {r.reaction_id: r for r in reactions}
     return _units(
-        [campaign_note_from_chain(chain, by_id) for chain in detect_chains(reactions)],
+        [
+            campaign_note_from_chain(
+                chain, by_id, minted_on=supported_from(chain.reaction_ids, by_id)
+            )
+            for chain in detect_chains(reactions)
+        ],
         corpus_complete=corpus_complete,
     )
 
@@ -77,6 +82,7 @@ def build_playbook_notes(
                 stable_id("playbook", candidate.reaction_ids),
                 _summary(candidate, by_id),
                 [f"reaction-{rid}" for rid in candidate.reaction_ids],
+                minted_on=supported_from(candidate.reaction_ids, by_id),
             )
             for candidate in find_playbook_candidates(reactions)
         ],
@@ -92,12 +98,45 @@ def build_optimization_notes(
     return _units(
         [
             optimization_campaign_note(
-                stable_id("optimization", campaign.reaction_ids), campaign, by_id
+                stable_id("optimization", campaign.reaction_ids),
+                campaign,
+                by_id,
+                minted_on=supported_from(campaign.reaction_ids, by_id),
             )
             for campaign in find_optimization_campaigns(reactions)
         ],
         corpus_complete=corpus_complete,
     )
+
+
+def supported_from(reaction_ids: list[str], reactions: dict[str, OrdReaction]) -> date | None:
+    """The day the corpus first supported a synthesis over these runs, or `None` when it cannot say.
+
+    **Derived from the same inputs as the note's id, which is the whole reason it is safe.** Every
+    synthesized note is keyed by `stable_id(kind, reaction_ids)`, so a miner re-run over the same
+    members mints the same id — and `date.today()` would then rewrite that note with a new
+    `valid_from` on every run. Under
+    `D-2026-09-14-an-undated-note-is-not-news-every-hour` that is the storm it closed, in a new
+    dress: the note's content changes, `record_note` commits, and the digest reports it as new
+    again the next day. A date that is a function of the members cannot do that — and when a member
+    joins, the id changes too, so the identity and the date move together or not at all.
+
+    The latest member's `performed_at` is the honest reading of `valid_from`: a cross-project
+    pattern became knowable when the last run supporting it happened, not when a miner got round to
+    noticing. Earlier would claim the knowledge before the evidence existed.
+
+    `None` when no member carries a date, which is the truthful answer rather than a fallback to
+    today — `Note.is_current` reads an absent `valid_from` as open-ended, and a corpus that never
+    said when its runs happened cannot support a narrower claim. `OrdReaction.performed_at` is
+    optional precisely because a source may not state one.
+    """
+    dated = [
+        reaction.performed_at
+        for reaction_id in reaction_ids
+        if (reaction := reactions.get(reaction_id)) is not None
+        and reaction.performed_at is not None
+    ]
+    return max(dated) if dated else None
 
 
 def _units(notes: list[Note], *, corpus_complete: bool) -> list[SynthesisUnit]:

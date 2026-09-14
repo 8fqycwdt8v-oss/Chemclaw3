@@ -42,6 +42,7 @@ from chemclaw.api.deps import (
 from chemclaw.core.errors import ChemclawError
 from chemclaw.protocols.checks import run_checks
 from chemclaw.protocols.diff import DesignDiff, diff_designs
+from chemclaw.protocols.export import run_sheet_csv, run_sheet_filename
 from chemclaw.protocols.models import (
     AuthorKind,
     DesignStatus,
@@ -396,6 +397,55 @@ async def get_protocol_diff(
     )
 
 
+async def get_run_sheet(
+    design_id: str,
+    principal: CurrentUser,
+    revision: int = 0,
+) -> Response:
+    """The design's arms as a CSV run sheet — one row per arm, in run order.
+
+    **The one route here that is not JSON, because its consumer is not a browser rendering a
+    document.** A run sheet goes into instrument software, a LIMS import or a chemist's own
+    workbook, and each of those reads a file. A JSON body carrying CSV as a string would make every
+    one of those callers unwrap it first, which is a format that serves the transport rather than
+    the reader.
+
+    Read-only and `CurrentUser`-gated on the same footing as `GET /protocols/{design_id}`: this
+    hands back a projection of exactly what that route already returns, so gating it more tightly
+    would guard the format rather than the content.
+
+    Args:
+        design_id: The `design-…` id.
+        principal: The authenticated caller.
+        revision: A specific revision, or 0 for the head.
+
+    Returns:
+        `text/csv` with a `Content-Disposition` naming the design and the revision it is of — see
+        `protocols.export.run_sheet_filename`, which owns that spelling because the agent quotes
+        the same artefact's address and two copies of it drift.
+    """
+    stored = await default_design_store().read(design_id, revision or None)
+    if stored is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no design {design_id!r}" + (f" at revision {revision}" if revision else ""),
+        )
+    # In a thread for the reason `get_protocol_diff` gives: this walks every arm and every factor
+    # of a document bounded at 1536 arms, and the event loop serves every other session meanwhile.
+    body = await asyncio.to_thread(run_sheet_csv, stored.design)
+    return Response(
+        content=body,
+        # `charset=utf-8` stated rather than left to the default: a solvent name, a ligand label or
+        # a chemist's note is routinely non-ASCII, and RFC 4180's own default is US-ASCII.
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{run_sheet_filename(design_id, stored.revision)}"'
+            )
+        },
+    )
+
+
 async def post_status(
     design_id: str,
     body: StatusIn,
@@ -452,4 +502,5 @@ def register(app: FastAPI) -> None:
     app.get("/protocols/{design_id}")(get_protocol)
     app.post("/protocols/{design_id}/revisions")(post_revision)
     app.get("/protocols/{design_id}/diff")(get_protocol_diff)
+    app.get("/protocols/{design_id}/run-sheet.csv")(get_run_sheet)
     app.post("/protocols/{design_id}/status", status_code=204)(post_status)

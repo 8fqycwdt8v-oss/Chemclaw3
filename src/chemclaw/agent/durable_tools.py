@@ -43,6 +43,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from langchain.tools import ToolRuntime
 from pydantic import BaseModel, ConfigDict, Field
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.common import WorkflowIDReusePolicy
@@ -256,7 +257,9 @@ _MEMORY_JOBS: dict[MemoryJobKind, MethodAsyncNoParam[Any, list[str]]] = {
 
 
 @tool
-async def synthesize_memory(kind: MemoryJobKind, fresh: bool = False) -> str:
+async def synthesize_memory(
+    kind: MemoryJobKind, runtime: ToolRuntime[Any, Any], fresh: bool = False
+) -> str:
     """Mine the reaction corpus for a class of knowledge and propose what it finds for review.
 
     Use this when someone asks what the corpus now supports — "have we accumulated enough on this
@@ -281,6 +284,8 @@ async def synthesize_memory(kind: MemoryJobKind, fresh: bool = False) -> str:
 
     Args:
         kind: Which synthesis to run.
+        runtime: Injected by LangChain; its `tool_call_id` is what makes a `fresh`
+            run's id a function of the ask rather than of the clock.
         fresh: Force a new run even when one already ran today. The default deduplicates by UTC
             day — two chemists asking the same morning share one scan — but the tool's own
             recommended use ("after a large ELN ingest") is exactly the case where rejoining the
@@ -297,7 +302,9 @@ async def synthesize_memory(kind: MemoryJobKind, fresh: bool = False) -> str:
     # gate exists to prevent.
     actor = require_actor()
     client = await connect()
-    workflow_id = _memory_job_id(kind, fresh=fresh)
+    # The tool call's own id is what is identical on a replay and different between two
+    # genuine asks — see `_memory_job_id` for why `fresh` may not read the clock.
+    workflow_id = _memory_job_id(kind, fresh=fresh, discriminator=str(runtime.tool_call_id))
     try:
         handle = await client.start_workflow(
             _MEMORY_JOBS[kind],
@@ -316,7 +323,7 @@ async def synthesize_memory(kind: MemoryJobKind, fresh: bool = False) -> str:
     return handle.id
 
 
-def _memory_job_id(kind: MemoryJobKind, *, fresh: bool = False) -> str:
+def _memory_job_id(kind: MemoryJobKind, *, fresh: bool = False, discriminator: str = "") -> str:
     """A deterministic id for one kind's synthesis, keyed on the **UTC date**.
 
     There is no request to key on: the input is the whole corpus as it stands, so two chemists
@@ -330,15 +337,30 @@ def _memory_job_id(kind: MemoryJobKind, *, fresh: bool = False) -> str:
 
     The cost of the daily unit is stated rather than hidden: a second ask on the same day
     rejoins the first run, so an ingest landing between the two is not picked up. `fresh` is the
-    escape hatch for exactly that — it suffixes the id with the current time, so the run really
-    re-mines. The caller opts in, because the default has to stay the shared scan: "mine after
-    this afternoon's import" was the tool's own recommended use, and it silently returned the
-    morning run's id.
+    escape hatch for exactly that — it makes the run really re-mine. The caller opts in, because
+    the default has to stay the shared scan: "mine after this afternoon's import" was the tool's
+    own recommended use, and it silently returned the morning run's id.
+
+    **`fresh` used to read the clock, and that made it the one launcher in this tree that a replay
+    duplicates.** The suffix was `strftime('%H%M%S')`, so a tool killed mid-call and re-run on
+    resume — which
+    `D-2026-09-14-a-turn-outlives-its-request-already-and-nothing-can-pick-it-up` measured happens
+    with the original arguments — minted a *different* workflow id and started a second
+    full-corpus mining run. Expensive rather than corrupting, because the notes both runs write
+    carry cluster-anchored ids and collide, but it is the only id here that is not a function of
+    its inputs, which is the property every other launcher has deliberately.
+
+    `discriminator` is that function instead: the caller passes something that is identical on a
+    replay of one ask and different between two genuine ones, which is what the tool call's own id
+    is. Empty falls back to the clock, preserving the old behaviour for a caller that has nothing
+    better — and `agent/durable_tools.py`'s tool passes the runtime's id, so the agent path never
+    takes that arm.
     """
     day = datetime.now(UTC).date().isoformat()
-    if fresh:
-        return f"memory-{kind}-{day}-{datetime.now(UTC).strftime('%H%M%S')}"
-    return f"memory-{kind}-{day}"
+    if not fresh:
+        return f"memory-{kind}-{day}"
+    suffix = discriminator or datetime.now(UTC).strftime("%H%M%S")
+    return f"memory-{kind}-{day}-{stable_hash(suffix, chars=10)}"
 
 
 @tool

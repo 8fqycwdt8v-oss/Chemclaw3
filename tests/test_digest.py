@@ -30,6 +30,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+import chemclaw.durable.digest
 from chemclaw.agent.session_events import claim_unconsumed, record_session_event
 from chemclaw.agent.subscriptions import Subscription, for_owner, watch_for
 from chemclaw.api.app import create_app
@@ -37,10 +38,17 @@ from chemclaw.api.auth import Principal, require_principal
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
-from chemclaw.durable.digest import DIGEST_KIND, _is_new, _matches, collect_digests, digest_channel
+from chemclaw.durable.digest import (
+    DIGEST_KIND,
+    _digest_body,
+    _is_new,
+    _matches,
+    collect_digests,
+    digest_channel,
+)
 from chemclaw.durable.retention import prune_expired_rows
 from chemclaw.kg.graph import invalidate_cache
-from chemclaw.kg.note import Note
+from chemclaw.kg.note import Note, Relation
 from chemclaw.kg.render import render_note
 from chemclaw.kg.search import query_terms
 from tests.pg import migrated_db_or_skip
@@ -100,10 +108,43 @@ def test_a_same_day_note_that_arrives_later_is_still_reported() -> None:
     assert _is_new(arrived_later, _subscription(_TODAY, ["reaction-1"])) is True
 
 
-def test_a_note_with_no_date_is_reported_once_rather_than_never() -> None:
-    """An undated note has no watermark to compare against; silence is the worse answer."""
-    assert _is_new(_note("playbook-1", None), _subscription(_TODAY)) is True
+def test_an_undated_note_is_told_once_and_then_not_again() -> None:
+    """This asserted "silence is the worse answer" and the code delivered the other failure.
+
+    The branch returned `True` unconditionally, and the id memory cannot help because it is scoped
+    to the watermark's date and resets when that rolls over — so an undated note re-qualified on
+    **every** run, forever. Measured on the shipped corpus, 32 of 39 notes carry no `valid_from`,
+    so a subscriber's hourly digest was mostly the same notes over and over, which is the exact
+    promise `agent/subscriptions.py` makes (DARK-7) being broken by the branch written to keep it.
+
+    What `None` means settles it rather than a preference between two failures: `Note.is_current`
+    reads it as *open-ended*, true for as long as anyone has known, so such a note did not become
+    knowledge after a subscriber was last told. A subscriber who has never been told anything still
+    hears it once — that is the first arm below, and it is the whole of "silence is the worse
+    answer" that survives.
+    """
+    undated = _note("playbook-1", None)
+
+    assert _is_new(undated, _subscription(None)) is True
+    assert _is_new(undated, _subscription(_TODAY)) is False
     assert _is_new(_note("playbook-1", date(2026, 7, 31)), _subscription(None)) is True
+
+
+def test_a_distilled_playbook_carries_the_day_it_was_minted() -> None:
+    """The other half of the same fix, and the reason the half above can be strict.
+
+    A playbook is the one note type nobody writes on a day — a miner concludes it — so it shipped
+    with no `valid_from` and therefore, under the rule above, would reach only a subscriber who had
+    never been told anything. `minted_on` is the honest statement that it became knowledge when the
+    corpus first supported it, which is the day the miner ran.
+    """
+    from chemclaw.memory.playbook import playbook_note
+
+    minted = playbook_note("playbook-x", "it holds", ["reaction-1"], minted_on=date(2026, 7, 31))
+
+    assert minted.valid_from == date(2026, 7, 31)
+    assert _is_new(minted, _subscription(datetime(2026, 7, 30, 9, tzinfo=UTC))) is True
+    assert _is_new(minted, _subscription(datetime(2026, 8, 1, 9, tzinfo=UTC))) is False
 
 
 def test_the_digest_reads_the_tree_the_notes_are_actually_written_to(
@@ -339,3 +380,106 @@ def test_a_watch_is_owned_by_the_oid_the_route_reads() -> None:
         )
 
     asyncio.run(_run())
+
+
+# --- the corpus disagreeing with itself ----------------------------------------------------------
+
+
+def test_a_new_note_that_contradicts_an_existing_one_is_marked_in_the_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`kg/conflicts.py` has always known this and only a reader who asked was ever told.
+
+    `retrieval.retrievers._conflict_index` flags a disputed note at *retrieval* time, so a chemist
+    who happens to query is warned and a chemist watching the subject is not — while the corpus
+    starting to disagree with itself on their standing query is the one thing in a digest that
+    changes what they should do next.
+
+    Driven over a real corpus with a real `contradicts` relation, not a stubbed index: the claim is
+    that the sweep and the digest agree about the same notes.
+    """
+    repo = tmp_path / "note-repo"
+    established = Note(
+        id="reaction-thermolysin-9", type="reaction", body="a thermolysin-catalysed coupling"
+    )
+    refutation = Note(
+        id="reaction-thermolysin-10",
+        type="reaction",
+        body="the thermolysin-catalysed coupling did not proceed",
+        relations=[Relation(rel="contradicts", to="reaction-thermolysin-9")],
+    )
+    for note in (established, refutation):
+        path = repo / "knowledge" / note.type / f"{note.id}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(render_note(note), encoding="utf-8")
+    invalidate_cache()
+
+    monkeypatch.setattr(settings, "note_repo_dir", str(repo))
+    monkeypatch.setattr(settings, "knowledge_dir", "knowledge")
+    watching = Subscription(id=1, owner="chemist-a", query="thermolysin", last_seen_at=None)
+    monkeypatch.setattr("chemclaw.durable.digest.all_subscriptions", lambda: _resolved([watching]))
+
+    item = asyncio.run(collect_digests())[0]
+
+    assert item.note_ids == ["reaction-thermolysin-10", "reaction-thermolysin-9"]
+    assert item.disputed == ["reaction-thermolysin-10", "reaction-thermolysin-9"]
+
+
+def test_an_undisputed_digest_says_nothing_about_disputes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The notice is news, so a corpus that agrees with itself must not carry it.
+
+    A line appended unconditionally would be a warning every reader learns to skip, which is the
+    same harm as not warning them.
+    """
+    repo = tmp_path / "note-repo"
+    note = Note(
+        id="reaction-thermolysin-9", type="reaction", body="a thermolysin-catalysed coupling"
+    )
+    path = repo / "knowledge" / note.type / f"{note.id}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_note(note), encoding="utf-8")
+    invalidate_cache()
+
+    monkeypatch.setattr(settings, "note_repo_dir", str(repo))
+    monkeypatch.setattr(settings, "knowledge_dir", "knowledge")
+    watching = Subscription(id=1, owner="chemist-a", query="thermolysin", last_seen_at=None)
+    monkeypatch.setattr("chemclaw.durable.digest.all_subscriptions", lambda: _resolved([watching]))
+
+    item = asyncio.run(collect_digests())[0]
+
+    assert item.disputed == []
+    # The body is *exactly* the list. Asserting the absence of the word "disputed" was the first
+    # form of this and it did not fire: the appended notice says "disagree with something already
+    # in the graph", so driving the mutation that appends unconditionally left it green. A guard
+    # against an extra line has to be about the line count, not about a word somebody chose.
+    assert _digest_body(item.note_ids, item.disputed) == "- reaction-thermolysin-9"
+
+
+def test_the_body_marks_a_dispute_in_place_and_says_how_many() -> None:
+    """A reader's question is "what is new"; a dispute is a property of an entry in that list.
+
+    The count is the half a reader acts on — `kg/conflicts.py`'s own rule is that a silent
+    truncation reads as completeness, and "two of these nine" is what makes the marks countable
+    without re-reading the list.
+    """
+    body = _digest_body(["note-a", "note-b", "note-c"], ["note-b"])
+
+    assert "- note-b (disputed)" in body
+    assert "- note-a\n" in body and "(disputed)" not in body.split("- note-a")[1].split("\n")[0]
+    assert "1 of 3 disagree" in body
+
+
+def test_every_render_of_one_digest_says_the_same_thing() -> None:
+    """Three call sites render this list and two of them disagreeing would be two answers.
+
+    Asserted against the module's source rather than by calling each: the replay shim exists only
+    to be replayed, so what is claimed is that no site builds the list itself.
+    """
+    source = Path(chemclaw.durable.digest.__file__).read_text(encoding="utf-8").split('"""', 2)[2]
+
+    assert 'f"- {note_id}"' not in source, "a second renderer of the digest list has appeared"
+    # One definition plus the two sites that render a *body*: the session mailbox carries the
+    # two lists as structured fields rather than prose, so it is not a third renderer.
+    assert source.count("_digest_body(") == 3

@@ -8,8 +8,8 @@ check does not refuse a human edit**, which is the one place this surface delibe
 intermediate states and can see the verdict, and a model cannot.
 
 Authentication is not re-asserted per route here — `tests/test_route_auth_coverage.py` walks every
-`APIRoute` the app declares and requires `require_principal` in its dependency tree, so these five
-are covered the moment they are registered. What this file pins instead is that they *are*
+`APIRoute` the app declares and requires `require_principal` in its dependency tree, so these are
+covered the moment they are registered. What this file pins instead is that they *are*
 registered as gatable routes and are not on that file's probe allowlist, which is the only way they
 could slip out of that sweep.
 """
@@ -17,6 +17,7 @@ could slip out of that sweep.
 import asyncio
 from collections.abc import Iterator
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 from fastapi.routing import APIRoute
@@ -40,7 +41,7 @@ from tests.test_route_auth_coverage import _PROBE_ALLOWLIST
 _OID = "chemist-a"
 _DESIGN_ID = "design-http"
 
-# The five routes this module registers, as the pair `test_route_auth_coverage` keys its sweep on.
+# Every route this module registers, as the pair `test_route_auth_coverage` keys its sweep on.
 _ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
         ("/protocols", "GET"),
@@ -48,6 +49,7 @@ _ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/protocols/{design_id}/revisions", "POST"),
         ("/protocols/{design_id}/diff", "GET"),
         ("/protocols/{design_id}/status", "POST"),
+        ("/protocols/{design_id}/run-sheet.csv", "GET"),
     }
 )
 
@@ -779,11 +781,11 @@ def test_the_diff_route_404s_on_a_revision_that_does_not_exist(
 # --- the authentication sweep -------------------------------------------------------------
 
 
-def test_all_five_routes_are_inside_the_apps_authentication_sweep() -> None:
+def test_every_route_here_is_inside_the_apps_authentication_sweep() -> None:
     """Not a second copy of `test_route_auth_coverage`.
 
     That file already requires `require_principal` in every `APIRoute`'s dependency tree. What is
-    asserted here is the two ways these five could fall *outside* that sweep and look gated anyway:
+    asserted here is the two ways these could fall *outside* that sweep and look gated anyway:
     being registered as something other than an `APIRoute` (a `Mount` or a bare `Route` carries no
     dependency tree to inspect), or appearing on the probe allowlist that sweep waives.
     """
@@ -795,3 +797,81 @@ def test_all_five_routes_are_inside_the_apps_authentication_sweep() -> None:
     }
     assert _ROUTES <= registered
     assert _ROUTES.isdisjoint(_PROBE_ALLOWLIST)
+
+
+# --- the run sheet ------------------------------------------------------------------------------
+
+
+def test_the_run_sheet_comes_back_as_a_downloadable_csv(
+    client: TestClient, store: InMemoryDesignStore
+) -> None:
+    """The one route here whose consumer is a file reader rather than a document renderer.
+
+    Both halves of the header matter: `text/csv` is what makes a browser hand it to a spreadsheet
+    instead of rendering it, and the filename is what makes a sheet saved to a laptop matchable
+    back to the revision it was taken from.
+    """
+    _seed(store, _design(arms=2))
+
+    response = client.get(f"/protocols/{_DESIGN_ID}/run-sheet.csv")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    assert "run-sheet.csv" in response.headers["content-disposition"]
+    assert "-r1-" in response.headers["content-disposition"]
+    rows = response.text.strip().splitlines()
+    assert rows[0].startswith("arm_id,")
+    assert len(rows) == 3
+
+
+def test_an_older_revision_sheets_that_revision_and_says_so_in_the_filename(
+    client: TestClient, store: InMemoryDesignStore
+) -> None:
+    """A sheet is printed and carried to a bench, where the design has already moved on.
+
+    A filename naming only the design would put two different plates under one name on the same
+    laptop — and the arm counts differing is exactly the case where it matters.
+    """
+    _seed(store, _design(arms=1))
+    _seed(store, _design(arms=4), parent_revision=1)
+
+    first = client.get(f"/protocols/{_DESIGN_ID}/run-sheet.csv", params={"revision": 1})
+    head = client.get(f"/protocols/{_DESIGN_ID}/run-sheet.csv")
+
+    assert len(first.text.strip().splitlines()) == 2
+    assert len(head.text.strip().splitlines()) == 5
+    assert "-r1-" in first.headers["content-disposition"]
+    assert "-r2-" in head.headers["content-disposition"]
+
+
+def test_a_design_id_cannot_write_its_own_response_headers(
+    client: TestClient, store: InMemoryDesignStore
+) -> None:
+    """The path parameter reaches a response header, and it is an arbitrary string.
+
+    `design_id_for` mints `design-<12 hex>`, but nothing between the URL and the header enforces
+    that — and "the store 404s an unknown id" bounds *which* ids resolve, not which characters a
+    resolving one holds, because `POST /protocols/{id}/revisions` files a design under whatever the
+    path said. So a stored id carrying a CRLF is reachable, and a filename built out of it verbatim
+    is a response-splitting site.
+    """
+    hostile = 'design-x"\r\nX-Injected: yes'
+    asyncio.run(store.append(hostile, _design(), [], author_kind="agent"))
+
+    # Percent-encoded, because that is the only way it travels: `httpx` refuses a raw CR in a URL,
+    # while Starlette unquotes the path before binding the parameter — so the handler sees the CRLF
+    # and the client never had to send one.
+    escaped = quote(hostile, safe="")
+    disposition = client.get(f"/protocols/{escaped}/run-sheet.csv").headers["content-disposition"]
+
+    # **The delimiters, not the injected name.** Its letters survive as filename characters, which
+    # is the point of sanitising rather than rejecting — an id is not the chemist's to get right.
+    # And `"x-injected" not in response.headers` would pass either way: ASGI carries headers as a
+    # list of pairs, so the CRLF never splits in-process and an assertion about the split outcome
+    # is vacuous here. What a real server splits on is the character, so that is what is asserted.
+    assert "\r" not in disposition and "\n" not in disposition and disposition.count('"') == 2
+
+
+def test_a_run_sheet_of_a_design_that_does_not_exist_is_a_404(client: TestClient) -> None:
+    """A 200 carrying a header row alone would read as "this design has no arms"."""
+    assert client.get("/protocols/design-nope/run-sheet.csv").status_code == 404

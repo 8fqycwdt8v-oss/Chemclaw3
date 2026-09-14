@@ -598,3 +598,80 @@ def test_eviction_takes_the_least_recently_updated_even_far_past_the_cap() -> No
         ]
     )
     assert survivors == expected, survivors
+
+
+def test_a_memory_edit_that_would_duplicate_itself_is_refused() -> None:
+    """The one write a resumed turn can silently double, driven against the real store.
+
+    `D-2026-09-14-a-turn-outlives-its-request-already-and-nothing-can-pick-it-up` measured that a
+    tool killed mid-call is re-run on resume with its original arguments: the checkpoint holds no
+    result for it, only the `__pregel_tasks` `Send`. Nearly every side-effecting tool survives that
+    — deterministic workflow ids, deterministic note ids, upserts. A `/memories/` edit survives none
+    of it, because it is a read-modify-write and its store sits **outside** the checkpoint;
+    `/scratch/` is safe for exactly the inverse reason, its backend *is* the checkpoint, so a killed
+    tool left nothing to replay over.
+
+    Both arms, because a guard that refuses everything would pass the first alone:
+
+    - the insert-under-an-anchor shape — the replacement contains its own `old_string`, so a second
+      application adds a second copy. Measured before this, three applications inserted three
+      copies and reported one replacement each time, with no error and nothing versioning it.
+    - a plain substitution, which must still work, and whose second application upstream already
+      refuses loudly with "String not found".
+    """
+
+    async def _run() -> tuple[str, str, str]:
+        await migrated_db_or_skip()
+        store = await scratchpad.memory_store()
+        namespace = scratchpad.memory_namespace("edit-replay-probe")
+        backend = scratchpad.BoundedStoreBackend(namespace=lambda _runtime: namespace, store=store)
+        path = "/memories/findings.md"
+        try:
+            await backend.awrite(path, "# Notes\n\n## Findings\n- first item\n")
+            first = await backend.aedit(path, "## Findings", "## Findings\n- added")
+            replay = await backend.aedit(path, "## Findings", "## Findings\n- added")
+            after = await backend._current_content(path)
+            return str(first.error or ""), str(replay.error or ""), str(after or "")
+        finally:
+            for item in await store.asearch(namespace, limit=100):
+                await store.adelete(namespace, item.key)
+            await ckpt.close_checkpointer()
+
+    first_error, replay_error, content = asyncio.run(_run())
+
+    assert not first_error, f"the first application must succeed; got {first_error!r}"
+    assert content.count("- added") == 1, (
+        f"the replay inserted a second copy into durable memory: {content!r}"
+    )
+    assert "already applied" in replay_error, (
+        f"the replay must be refused with a reason, not silently applied; got {replay_error!r}"
+    )
+
+
+def test_a_plain_memory_substitution_is_not_refused_by_that_guard() -> None:
+    """The negative control: a replacement that does not contain its anchor is idempotent already.
+
+    Without this the guard above could be satisfied by refusing every edit, which would be a worse
+    bug than the one it fixes — a memory nobody can correct.
+    """
+
+    async def _run() -> tuple[str, str]:
+        await migrated_db_or_skip()
+        store = await scratchpad.memory_store()
+        namespace = scratchpad.memory_namespace("edit-plain-probe")
+        backend = scratchpad.BoundedStoreBackend(namespace=lambda _runtime: namespace, store=store)
+        path = "/memories/solvent.md"
+        try:
+            await backend.awrite(path, "prefers toluene for the coupling\n")
+            result = await backend.aedit(path, "toluene", "2-MeTHF")
+            after = await backend._current_content(path)
+            return str(result.error or ""), str(after or "")
+        finally:
+            for item in await store.asearch(namespace, limit=100):
+                await store.adelete(namespace, item.key)
+            await ckpt.close_checkpointer()
+
+    error, content = asyncio.run(_run())
+
+    assert not error, f"a plain substitution must still apply; got {error!r}"
+    assert "2-MeTHF" in content and "toluene" not in content

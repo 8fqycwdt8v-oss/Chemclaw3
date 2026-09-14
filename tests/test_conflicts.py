@@ -20,7 +20,12 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.kg.conflicts import Conflict, conflicts_by_note, find_conflicts
 from chemclaw.kg.note import Note, Relation
 from chemclaw.kg.relations import KNOWN_RELATIONS
-from chemclaw.memory.failure import close_refuted_note, failure_note
+from chemclaw.memory.failure import (
+    close_refuted_note,
+    failure_note,
+    failures_against,
+    observation_of,
+)
 
 
 def _note(note_id: str, **kwargs: object) -> Note:
@@ -545,3 +550,115 @@ def test_a_self_contradiction_is_not_a_conflict() -> None:
     """`[[contradicts:itself]]` is an authoring mistake, not a disagreement a reader can act on."""
     note = _note("a", body="[[contradicts:a]]")
     assert find_conflicts([note]) == []
+
+
+def test_failures_against_finds_what_a_design_cites_and_what_it_charges() -> None:
+    """`memory/failure.py` was a builder with no query side, which is most of why it did not work.
+
+    A `failure-mode` note could be written, indexed and retrieved by anyone who went looking, and
+    nothing went looking at the moment it mattered. Two joins, and both arms matter:
+
+    - **citation** is exact: a failure's `contradicts` edge names a note id, and a design's
+      `EvidenceRef.ref` is such an id. No resemblance, no threshold.
+    - **structure** is weaker and is why the check it feeds is a note rather than a blocker: one
+      molecule appearing in two routes is not the same claim twice.
+
+    The negative arm is the one that earns its place — a corpus full of failures about other work
+    must come back empty, or the check becomes noise a chemist learns to skip.
+    """
+    cited = failure_note(
+        refutes="playbook-suzuki-a",
+        what_happened="the catalyst died above 60 C",
+        reported_by="ana",
+    )
+    structural = failure_note(
+        refutes="some-other-note",
+        what_happened="the amine oxidised on standing",
+        reported_by="ben",
+        compound_smiles="CCN",
+    )
+    unrelated = failure_note(
+        refutes="playbook-nothing-to-do-with-us",
+        what_happened="a different route entirely",
+        reported_by="cat",
+    )
+    corpus = [cited, structural, unrelated]
+
+    by_citation = failures_against(corpus, cited=["playbook-suzuki-a"])
+    assert [note.id for note in by_citation] == [cited.id]
+
+    by_structure = failures_against(corpus, structures=["CCN"])
+    assert [note.id for note in by_structure] == [structural.id]
+
+    both = failures_against(corpus, cited=["playbook-suzuki-a"], structures=["CCN"])
+    assert {note.id for note in both} == {cited.id, structural.id}
+
+    assert failures_against(corpus, cited=["playbook-unheard-of"]) == []
+    assert failures_against(corpus) == [], "asking about nothing must not return everything"
+
+
+def test_only_failure_notes_answer_a_failure_query() -> None:
+    """A playbook that happens to cite the same id is not a record of it failing.
+
+    The type filter is what keeps this a failure memory rather than a citation index — without it
+    the check would report every note that mentions the design's evidence, which is most of a
+    healthy corpus.
+    """
+    failure = failure_note(refutes="playbook-a", what_happened="it did not hold", reported_by="ana")
+    # **A `contradicts` edge on a note that is not a failure**, which is the case that actually
+    # exercises the type filter. The first version of this test used a `cites` edge, and the
+    # relation check alone refused it — so deleting the type filter left the test green, measured.
+    # A correction legitimately contradicts what it corrects, and it is not a record of a failure.
+    correction = Note(
+        id="correction-b",
+        type="correction",
+        created_by="human",
+        source="test",
+        body="The published value was wrong: [[contradicts:playbook-a]].\n",
+    )
+
+    found = failures_against([failure, correction], cited=["playbook-a"])
+    assert [note.id for note in found] == [failure.id], (
+        "a correction contradicting the same note is not a record of that note having failed"
+    )
+
+
+def test_a_failure_that_merely_cites_a_note_is_not_a_failure_of_it() -> None:
+    """The relation filter, which the type filter does not cover.
+
+    `outgoing_relations` returns every edge a note asserts, and a failure-mode note legitimately
+    carries more than one: it contradicts what failed and may cite the background it was read
+    against. Matching on any edge would report the *background* as having failed — which is the
+    opposite of what happened, and the kind of wrong that makes a chemist stop trusting the check.
+    """
+    failure = Note(
+        id="failure-multi",
+        type="failure-mode",
+        created_by="agent",
+        source="feedback:ana",
+        tags=["failure-mode"],
+        body=(
+            "[[contradicts:playbook-a]] did not hold.\n\n"
+            "Read against [[cites:review-b]], which is fine.\n"
+        ),
+    )
+
+    assert [note.id for note in failures_against([failure], cited=["playbook-a"])] == [failure.id]
+    assert failures_against([failure], cited=["review-b"]) == [], (
+        "the note this failure was read against did not fail; only what it contradicts did"
+    )
+
+
+def test_the_observation_is_what_a_chemist_reads_not_the_provenance_line() -> None:
+    """`failure_note` writes the reporter and the date first, then what was seen.
+
+    Surfacing the first line would tell a chemist who filed it and nothing about what happened,
+    which is the half with the value in it.
+    """
+    note = failure_note(
+        refutes="playbook-a",
+        what_happened="the catalyst died above 60 C",
+        reported_by="ana",
+    )
+    assert observation_of(note) == "the catalyst died above 60 C"
+    assert "Reported by" not in observation_of(note)

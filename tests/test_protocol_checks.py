@@ -30,7 +30,9 @@ from chemclaw.protocols.checks import (
     is_a_protocol,
     layout_fits,
     limiting_is_limiting,
+    no_documented_failure,
     objectives_are_measured,
+    precedent_consulted,
     quantities_are_plausible,
     run_checks,
 )
@@ -48,8 +50,10 @@ from chemclaw.protocols.models import (
     ProtocolCheck,
     ProtocolStep,
     ProtocolStepKind,
+    RecordedFailure,
     RequestedComponent,
     Setpoints,
+    UncitedPrecedent,
     Well,
 )
 from chemclaw.science.labels.vocabulary import SpeciesRole
@@ -934,6 +938,14 @@ def test_run_checks_keeps_its_declared_reading_order() -> None:
     assert _check_ids()[1] == "components_resolve"
     assert _check_ids()[-1] == "coverage_is_stated"
     assert _check_ids().index("charge_is_consistent") < _check_ids().index("evidence_present")
+    # What the corpus knows is read after what the design says, and before the coverage note that
+    # never fails: a recorded failure is worth knowing rather than arithmetically wrong, and it is
+    # the last thing with an opinion.
+    assert (
+        _check_ids().index("evidence_present")
+        < _check_ids().index("no_documented_failure")
+        < _check_ids().index("coverage_is_stated")
+    )
 
 
 def test_blockers_selects_exactly_the_failed_blocking_checks() -> None:
@@ -1279,3 +1291,157 @@ def test_limiting_is_limiting_ignores_a_sub_stoichiometric_catalyst() -> None:
         )
     )
     assert verdict.passed
+
+
+# --- no_documented_failure -------------------------------------------------------------------
+
+
+def test_no_documented_failure_passes_when_the_corpus_knows_nothing_against_the_design() -> None:
+    """The ordinary case, and the one a caller that never looked also produces.
+
+    Those two are indistinguishable here by construction, which `run_checks` states rather than
+    hides: the check decides over what it is handed, and whether anybody asked the corpus is the
+    caller's honesty to keep.
+    """
+    verdict = no_documented_failure(_protocol(), ())
+    assert verdict.passed and verdict.severity == "note"
+    assert verdict.check_id == "no_documented_failure"
+
+
+def test_no_documented_failure_names_what_the_corpus_already_recorded() -> None:
+    """The gap the audit called the most concrete in the system.
+
+    `forbidden_absent` tests what the chemist *typed*; nothing tested what the corpus *knows*, so a
+    design could cite a playbook and repeat a documented failure sitting in the same graph. The
+    refusal has to name the note, because "something failed before" a chemist cannot open is not
+    evidence.
+    """
+    failures = [RecordedFailure(id="failure-abc123", summary="the catalyst died above 60 C")]
+    verdict = no_documented_failure(_protocol(), failures)
+    assert not verdict.passed
+    assert "failure-abc123" in verdict.detail
+    assert "the catalyst died above 60 C" in verdict.detail
+
+
+def test_a_recorded_failure_is_a_note_rather_than_a_blocker() -> None:
+    """Evidence, not a verdict — and blocking would teach people to stop citing their evidence.
+
+    A single failed run is not a refutation of a general rule (`failure_note` carries a
+    `confidence` for exactly that), the same reagent appears in unrelated routes, and re-running
+    something that failed in order to characterise it is ordinary work. Asserted through
+    `blockers()` because the severity field alone would not catch a future change that kept the
+    label and raised the consequence.
+    """
+    failures = [RecordedFailure(id="failure-abc123", summary="it did not hold")]
+    checks = run_checks(_protocol(), failures=failures)
+    assert blockers(checks) == []
+    verdict = {check.check_id: check for check in checks}["no_documented_failure"]
+    assert not verdict.passed and verdict.severity == "note"
+
+
+def test_many_failures_are_summarised_rather_than_listed_entire() -> None:
+    """A design citing eight refuted notes has one thing wrong with it, not eight.
+
+    The count still reports the rest, so the detail is a summary rather than a truncation that
+    loses the scale of the problem.
+    """
+    failures = [
+        RecordedFailure(id=f"failure-{n:02d}", summary=f"observation {n}") for n in range(8)
+    ]
+    verdict = no_documented_failure(_protocol(), failures)
+    assert "8 failure(s)" in verdict.detail
+    assert "and 5 more" in verdict.detail
+    assert "failure-07" not in verdict.detail
+
+
+def test_the_failure_check_runs_at_the_request_stage_too() -> None:
+    """A structured ask already names reagents and can already cite evidence.
+
+    So a failure bearing on it is knowable before there is a procedure, which is the moment it is
+    cheapest to act on — and this is the only protocol-stage check that is not deferred, which is a
+    deliberate exception rather than an oversight.
+    """
+    failures = [RecordedFailure(id="failure-abc123", summary="it did not hold")]
+    checks = run_checks(_design(), stage="request", failures=failures)
+    verdict = {check.check_id: check for check in checks}["no_documented_failure"]
+    assert not verdict.passed, "a request-stage design must still be told what already failed"
+    assert "not checked yet" not in verdict.detail
+
+
+# --- precedent_consulted -----------------------------------------------------------------------
+
+
+def test_precedent_consulted_is_silent_when_nothing_is_offered() -> None:
+    """The passing text says nothing was *offered*, not that no precedent exists.
+
+    Three different things produce an empty list — nobody looked, the index is empty or
+    mid-rebuild, the record genuinely holds nothing like this — and `FingerprintSearch` exists
+    because a chemist told "no precedent" over an unindexed corpus is worse than one told nothing.
+    A check cannot re-derive that from a list, so it must not claim the negative.
+    """
+    verdict = precedent_consulted(_protocol(), ())
+
+    assert verdict.passed and verdict.severity == "note"
+    assert "offered" in verdict.detail
+    assert "no precedent" not in verdict.detail.lower()
+
+
+def test_precedent_consulted_names_the_runs_the_design_did_not_cite() -> None:
+    """A pointer a chemist can open, with the similarity that made it a hit.
+
+    The number is in the detail because "similar" is not a verdict: 0.91 and 0.36 are different
+    advice, and a reader shown neither has to open all of them to find out.
+    """
+    hits = [UncitedPrecedent(id="ord-9f2", similarity=0.91, label="Suzuki, XPhos")]
+
+    verdict = precedent_consulted(_protocol(), hits)
+
+    assert not verdict.passed
+    assert "ord-9f2" in verdict.detail and "0.91" in verdict.detail
+
+
+def test_uncited_precedent_is_a_note_rather_than_a_blocker() -> None:
+    """A Tanimoto neighbour can share a scaffold and nothing else.
+
+    The chemist may have read it and judged it inapplicable, and a deliberate re-run under changed
+    conditions is ordinary work — so blocking on it would teach people to cite noise. Asserted
+    through `blockers()`, because the severity field alone would not catch a future change that
+    kept the label and raised the consequence.
+    """
+    hits = [UncitedPrecedent(id="ord-9f2", similarity=0.88)]
+
+    checks = run_checks(_protocol(), precedent=hits)
+
+    assert blockers(checks) == []
+    verdict = {check.check_id: check for check in checks}["precedent_consulted"]
+    assert not verdict.passed and verdict.severity == "note"
+
+
+def test_many_precedents_are_summarised_rather_than_listed_entire() -> None:
+    """A design that ignored twenty near neighbours has one thing wrong with it, not twenty.
+
+    The count is still reported, by this repository's standing rule that a silent truncation reads
+    as completeness.
+    """
+    hits = [UncitedPrecedent(id=f"ord-{index}", similarity=0.9) for index in range(9)]
+
+    detail = precedent_consulted(_protocol(), hits).detail
+
+    assert "9 similar run(s)" in detail
+    assert "and 6 more" in detail
+
+
+def test_the_precedent_check_never_writes_into_evidence() -> None:
+    """The whole reason this is advisory: a citation is a claim, a hit is a thing that exists.
+
+    Writing a hit into `evidence` would forge the first out of the second and leave
+    `evidence_present` passing on a design nobody grounded — a check satisfying itself, which is
+    worse than the gap it closes. Asserted over the design object, because "advisory" is a property
+    of what is *not* mutated and no assertion about the returned check could see it.
+    """
+    design = _protocol()
+    before = list(design.evidence)
+
+    run_checks(design, precedent=[UncitedPrecedent(id="ord-9f2", similarity=0.99)])
+
+    assert list(design.evidence) == before

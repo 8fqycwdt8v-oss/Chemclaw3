@@ -12,6 +12,8 @@ skeleton is deterministic; the analysis (which change was the lever, what to try
 `optimization-campaign-synthesis` and `experiment-progression` skills' judgment, on top.
 """
 
+from datetime import date
+
 from pydantic import BaseModel
 
 from chemclaw.core.config import settings
@@ -55,7 +57,11 @@ def find_optimization_campaigns(
 
 
 def optimization_campaign_note(
-    note_id: str, campaign: OptimizationCampaign, reactions: dict[str, OrdReaction]
+    note_id: str,
+    campaign: OptimizationCampaign,
+    reactions: dict[str, OrdReaction],
+    *,
+    minted_on: date | None = None,
 ) -> Note:
     """Build an agent `optimization-campaign` note: the runs in time order, with their deltas.
 
@@ -123,6 +129,10 @@ def optimization_campaign_note(
         created_by="agent",
         source="memory:optimization-grouping",
         body=body,
+        # The day the corpus first supported this grouping, from the same member ids `note_id` is
+        # keyed on — see `jobs.supported_from`. Absent, the note is open-ended and
+        # `durable/digest._is_new` correctly never reports it to anyone with a watermark.
+        valid_from=minted_on,
     )
 
 

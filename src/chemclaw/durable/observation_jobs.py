@@ -175,6 +175,9 @@ async def promote_observations_activity() -> list[str]:
             new_note_id,
             _promotion_summary(observation),
             observation.evidence_note_ids,
+            # The day the corpus first supported it, which is what `valid_from` means and what
+            # makes the promotion reach a subscriber at all — see `playbook_note`.
+            minted_on=workflow_safe_today(),
         )
         references.append(
             await record_note(
