@@ -420,7 +420,26 @@ load_profiles()
 #: bound tool's schema *shrank*. That is why the figure is dated here rather than stated: a
 #: headroom transcribed as current is a claim about a commit, which is the defect the paragraph
 #: above spends fifteen lines on.
-CEILINGS: dict[str, int] = {"__default__": 65_500}
+#:
+#: **67,500 since D-2026-09-13, and this one was bought outright.** Turning `harness_enabled` on by
+#: default puts `write_todos` and upstream's todo prompt into every profile's prefix: measured both
+#: ways in one process, +1,372 for `tool:write_todos` and +490 for `prompt:middleware-sections`,
+#: **1,862 on every profile except `computation`**, which already set the flag itself and moved by
+#: 0. Only `default` was near enough to matter — 64,907 → 66,769, over the old ceiling by 1,269.
+#:
+#: Nothing was narrowed to pay for it, and that is deliberate rather than lazy: the narrowing this
+#: wants is §5's `default`-profile allow-list, worth a measured -5,787, and it is blocked on a live
+#: lane that can show every probe still reaching its tool. Buying the ceiling now and narrowing
+#: later is the right order; narrowing blind to buy a ceiling is how a cheaper prompt stops finding
+#: tools.
+#:
+#: The price, by the rule stated above: `agent_tool_result_clear_trigger` rises 2,000 with it and
+#: costs nothing, while `agent_context_token_budget` cannot follow, so the thread allowance falls
+#: 42,500 → 40,500 — **4.7% of the thread**, an order of magnitude more than wave 13's 500 paid.
+#: What it buys is the plan gate attached in the posture every supported deployment already runs,
+#: which `D-2026-09-06-the-write-gate-is-three-names-and-the-plan-gate-carries-the-rest` names as
+#: the only cover over 29 write tools.
+CEILINGS: dict[str, int] = {"__default__": 67_500}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.
@@ -503,6 +522,26 @@ MAX_SINGLE_TOOL_TOKENS = 900
 #: cross-tool sharing at any price. What multiplies is the model, so what pays back five times is
 #: narrowing the model.
 KNOWN_OVERSIZED: dict[str, int] = {
+    # **The one entry here whose cost is not ours to narrow, recorded on 2026-09-13 when
+    # `harness_enabled` became the default and bound it on every profile.** The rule above says
+    # narrow the arguments or paginate the result, and neither is available: decomposed on the
+    # bound object, 1,367 tokens are **1,115 of upstream's own tool description**, 206 of
+    # parameters and 147 of `plan_scope._SCOPE_GUIDANCE`. So the first-party half — the schema the
+    # model is shown and the paragraph explaining the `tools` field — is 353 tokens, and the debt
+    # is somebody else's prose arriving through a middleware `_apply_excluded_middleware` refuses
+    # to let a profile strip.
+    #
+    # **Forking that description to trim it was considered and rejected, and the argument is
+    # already in the tree**: `_SCOPE_GUIDANCE` is appended to upstream's text rather than replacing
+    # it because "everything upstream says about when to plan and how to keep the list current is
+    # as true here as there, and a fork of that text is a paragraph that goes stale on the next
+    # bump with nothing to notice". Trimming is the same fork with a smaller diff.
+    #
+    # This is therefore the case this dict's warning did not anticipate — debt taken on knowingly,
+    # by adopting a required upstream middleware, rather than first-party bloat being hidden. The
+    # lever that *is* available is the profile allow-list in § 5: `write_todos` is bound on every
+    # profile that runs the harness, so a narrowed surface pays this back on each of them.
+    "write_todos": 1_372,
     "suggest_next_experiment": 2_951,
     "generate_screening_design": 2_309,
     "predict_outcome": 2_201,

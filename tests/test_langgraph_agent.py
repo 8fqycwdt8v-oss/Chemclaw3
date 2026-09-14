@@ -42,7 +42,7 @@ from chemclaw.agent.chemclaw_agent import (
 from chemclaw.agent.framing import ENVELOPE_TAG, SYSTEM_SPEECH_MARK
 from chemclaw.agent.langgraph_agent import _labelled, build_langgraph_agent, skills_backend
 from chemclaw.agent.loop_cap import loop_capped
-from chemclaw.agent.plan_gate import PLAN_GATE_REASON, plan_approval_refusal
+from chemclaw.agent.plan_gate import PLAN_GATE_REASON, harness_enabled_for, plan_approval_refusal
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
@@ -153,12 +153,18 @@ def test_every_in_process_tool_reaches_the_graph_unchanged() -> None:
     graph = build_langgraph_agent(model=_scripted("ask_clarifying_question", {"question": "x"}))
 
     advertised = _advertised(graph)
-    # The registry plus the two surfaces a backend and a subagent middleware bring with them. The
-    # harness (and with it `write_todos`) is off by default, which the test below asserts separately
-    # rather than folding into this one. `task` is *not* conditional — `SubAgentMiddleware` is in
-    # `create_deep_agent`'s required set and `_apply_excluded_middleware` raises rather than let a
-    # profile strip it — so it is unioned in from the same reader the validators use.
+    # The registry plus the three surfaces a backend, a subagent middleware and the harness bring
+    # with them. `task` is *not* conditional — `SubAgentMiddleware` is in `create_deep_agent`'s
+    # required set and `_apply_excluded_middleware` raises rather than let a profile strip it — so
+    # it is unioned in from the same reader the validators use.
+    #
+    # **`write_todos` joined it in D-2026-09-13**, when `harness_enabled` became the default. It is
+    # still the conditional one of the three, so it is unioned in *through the same predicate the
+    # graph builds on* rather than named here: a deployment or a profile that turns the harness off
+    # drops the tool, and this assertion follows it instead of going stale.
     ambient = set(scratchpad_tools()) | subagent_tool_names()
+    if harness_enabled_for(get_profile("default")):
+        ambient |= harness_tool_names()
     assert advertised == {tool.__name__ for tool in _capability_tools()} | ambient
     assert advertised == set(registered_tool_names()) | ambient
 
@@ -194,7 +200,17 @@ def test_a_profile_narrows_the_graph_surface() -> None:
     # `tests/test_subagents.py`, not asserted here — which leaves `task` conferring no authority of
     # its own, exactly like `read_file`. If that ever stopped being true, narrowing would have to
     # remove it, and the test that would notice is the attenuation one over there.
-    assert _advertised(narrowed) == {kept, *scratchpad_tools(), *subagent_tool_names()}
+    # `write_todos` survives a narrowing for the same reason `read_file` and `task` do: it confers
+    # no authority of its own. What it writes is a plan, and what a plan authorizes is bounded by
+    # the scope each step declares and by the tools the profile already holds — so removing it
+    # would remove the gate's own input rather than attenuate anything.
+    harness = harness_tool_names() if harness_enabled_for(AgentProfile(name="narrow")) else set()
+    assert _advertised(narrowed) == {
+        kept,
+        *scratchpad_tools(),
+        *subagent_tool_names(),
+        *harness,
+    }
     assert _advertised(narrowed) < _advertised(full), "a profile must attenuate, never widen"
 
 

@@ -298,11 +298,13 @@ class AgentSettings(BaseSettings):
     # moved is the size of the thing being translated. The 11,000 is a *bound* and belongs beside
     # the ceiling it extends, so it lives in `tests/test_context_floor.SERVED_ELSEWHERE_ALLOWANCE`
     # where the assertion can read it, not as a second number here that would drift away from it.
-    # 106,500 since wave 13: `tests/test_context_floor.py`'s ceiling rose by 500 and this is
+    # 108,500 since D-2026-09-13: `tests/test_context_floor.py`'s ceiling rose 2,000 to seat
+    # `write_todos` in every profile's prefix once the harness became the default, and this is
     # derived *upwards* from it, so it moves with it and keeps the whole thread allowance it was
     # derived to have. The budget below cannot follow, because it is derived downwards from the
-    # window — which is why the ceiling's cost lands there and not here.
-    agent_tool_result_clear_trigger: int = Field(default=106_500, ge=1)
+    # window — which is why the ceiling's cost lands there and not here, and why that cost is
+    # 4.7% of the thread this time rather than wave 13's 1.16%.
+    agent_tool_result_clear_trigger: int = Field(default=108_500, ge=1)
     # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
     # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
     # dependent in one direction. Re-measured 2026-09-06 against real BPE encodings, on the observed
@@ -530,7 +532,33 @@ class AgentSettings(BaseSettings):
     # pre-execution approval gate — and only loops once approval switches it to execute; `execute`
     # starts looping through the todo list immediately. `harness_max_loop_iterations` caps the
     # loop so a stuck plan aborts instead of spinning (the runaway guard).
-    harness_enabled: bool = False
+    #
+    # **On by default since D-2026-09-13, and the sentence above used to say the opposite** — "off
+    # by default so the single-turn agent stays the safe fallback". That framing had the safety
+    # backwards on the axis that turned out to matter, and three merged positions already said so
+    # while the default went on shipping `False`:
+    #
+    #   - `D-2026-09-06-the-write-gate-is-three-names-and-the-plan-gate-carries-the-rest` names this
+    #     gate as what covers the 29 write tools that are *not* in `DEFAULT_WRITE_TOOL_GATES`, and
+    #     names the shipped chart as what turns it on. Off, that cover is absent.
+    #   - `Settings._check` below refuses `entra_required` with this flag off under `plan_only`,
+    #     in as many words: the gate "is not attached at all and a turn can start state-changing
+    #     work with nothing to approve it".
+    #   - D-152 §3 found the consequence empirically — the chart ships `true` while "the code
+    #     default and every test run `false`", so the production agent-construction path had never
+    #     met a live model, and the first turn under the shipped configuration crashed.
+    #
+    # So the unsupervised posture was the one every test measured and the supervised one was the
+    # one every deployment ran. The default is now the chart's, and the chart's line is no longer
+    # load-bearing for it. What a deployment that wants the old behaviour sets is
+    # `CHEMCLAW_HARNESS_AUTONOMY=execute`, which keeps the todo list and drops the gate — stated
+    # that way round because dropping the *harness* also drops the plan, and a deployment asking
+    # for less supervision is not asking for less planning.
+    #
+    # A profile still overrides in both directions (`plan_gate.harness_enabled_for`), which is why
+    # `data/profiles/computation.yaml` needed no global flag to get the harness it argues for, and
+    # measured +0 tokens across this change while every other profile moved by 1,862.
+    harness_enabled: bool = True
     harness_autonomy: HarnessAutonomy = "plan_only"
     harness_max_loop_iterations: int = Field(default=25, ge=1)
 
