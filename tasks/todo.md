@@ -524,8 +524,13 @@ fail. That is worse than no gate, because it reports green.
       for the case it does fix (a three-leg corpus outvoting a one-leg one). What the measurement
       settled instead: RRF is **worse** than the shipped round-robin on labelled data, mean gold
       rank 4.54 vs 4.38 and top-5 25 vs 27. `retrieval_mode` stays `graph` on a number now.
-- [ ] W27.5 `Chemclaw3` — `make kg-validate`'s two store-backed arms have no input in the shipped
-      corpus: two arms of a validator that cannot fail.
+- [x] W27.5 `Chemclaw3` — `make kg-validate`'s two store-backed arms have no input in the shipped
+      corpus. **Done** (`D-2026-09-14-an-arm-with-no-input-owes-the-suite-a-demonstration`): the
+      row's implied fix — put a citation in the corpus — is forbidden by a merged test, for a good
+      reason. So the arms get demonstrations instead, end to end over real Postgres in both
+      directions. Found while writing them: **nothing anywhere drove `validate_kg.main` over a note
+      carrying a `calc_ref`**, so that whole branch of the entrypoint had never executed. The gate
+      now says out loud when it had nothing to check.
 - [ ] W27.6 `Chemclaw3` — half the probe corpus tests one tool [S] (the concentration half).
 - [ ] W27.7 `Chemclaw3` — no external benchmark has ever been run [M]. `make eval` gates 23 metric
       values over 15 cases, all first-party. Decide: run one, or record in `DEFERRED.md` with its

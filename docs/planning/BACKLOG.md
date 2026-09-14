@@ -208,10 +208,6 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
-- [ ] **`make kg-validate`'s two store-backed arms have no input in the shipped corpus** — [S], same
-      review. 0 reaction citations and 0 `calc_refs` in the committed knowledge corpus, so the half
-      of the validator its own docstring says CI runs is dead on every CI run.
-
 - [ ] **The `note_proposed` SSE event is not a proposal, and the name is a two-repo contract** —
       [S], found 2026-09-05 in the gate-deletion review. Nothing reviews a note, so the accurate
       name is `note_recorded`; the literal is switched on by `Chemclaw3_ui`
