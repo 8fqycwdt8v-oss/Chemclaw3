@@ -88,7 +88,7 @@ def _billed_tokens(turn: TurnCost) -> float:
     )
 
 
-@metric("plan_quality", Direction.HIGHER_IS_BETTER)
+@metric("plan_quality", Direction.HIGHER_IS_BETTER, gated=True)
 def plan_quality(case: EvalCase) -> MetricResult:
     """F1 of the plan the turn ended with against the steps the case says it needed.
 
@@ -136,7 +136,7 @@ def plan_quality(case: EvalCase) -> MetricResult:
     )
 
 
-@metric("runaway_rate", Direction.LOWER_IS_BETTER)
+@metric("runaway_rate", Direction.LOWER_IS_BETTER, gated=True)
 def runaway_rate(case: EvalCase) -> MetricResult:
     """Share of the case's turns that a guard cut off instead of letting them finish.
 

@@ -206,7 +206,7 @@ def _retrieved_ids(case: EvalCase) -> list[str]:
     return list(ids)
 
 
-@metric("retrieval_recall", Direction.HIGHER_IS_BETTER, live=True)
+@metric("retrieval_recall", Direction.HIGHER_IS_BETTER, live=True, gated=True)
 def retrieval_recall(case: EvalCase) -> MetricResult:
     """Fraction of the gold expected sources that retrieval actually surfaced (KM-13).
 

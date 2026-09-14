@@ -30,6 +30,7 @@ from chemclaw.evals.metric import (
     EvalCase,
     MetricError,
     MetricResult,
+    gated_names,
     get_metric,
     registered_names,
 )
@@ -414,6 +415,64 @@ def test_strict_mode_fails_when_a_gated_metric_stops_measuring(
     assert report.gates_no_demonstration_can_fire() == ["prediction_error"]
     assert main(["--strict"]) == 1
     assert "no demonstration case" in render_report(report)
+
+
+def test_a_gated_metric_whose_cases_are_all_gone_is_still_owed_a_demonstration(
+    tmp_path: Path,
+) -> None:
+    """The hole the check had: a gate becomes *invisible* rather than unfireable.
+
+    `gated` used to be derived from the run's own results, so a metric no case scores contributes
+    no row and was simply not in the set — the one arrangement this check exists to catch is the
+    one that removes its input. Driven on the shipped set: moving both `runaway_rate` cases out of
+    `data/evals/cases/` left `make eval-strict` at **exit 0**, while `make eval-baseline-check`
+    said "Worsened: runaway_rate (0.25 → absent)" — and the documented response to a case-set
+    change is to re-record the baseline, which erases the only control that saw it.
+
+    A deletion is the realistic shape rather than a contrived one: a case-set change bumps
+    `EVAL_CASE_SET_VERSION`, which is exactly when the baseline is re-recorded.
+    """
+    dropped = "runaway_rate"
+    for case in Path(settings.eval_case_dir).glob("*.md"):
+        text = case.read_text(encoding="utf-8")
+        if dropped not in text:
+            (tmp_path / case.name).write_text(text, encoding="utf-8")
+
+    report = run_eval(load_eval_cases(str(tmp_path)), "v1")
+
+    assert dropped not in {r.result_metric for r in report.results}, (
+        "the fixture still scores the metric, so this test is not about a case-set that lost it"
+    )
+    assert dropped in report.gates_no_demonstration_can_fire()
+    assert report.regressions() == [] and report.inert_demonstrations() == [], (
+        "another clause is producing the finding; this test would then pass without its subject"
+    )
+    assert main([str(tmp_path), "--strict"]) == 1
+
+
+def test_every_scored_metrics_gatedness_is_the_one_it_declares() -> None:
+    """The registry flag and the verdicts must agree — otherwise it is a second declaration.
+
+    `gated=True` at registration is what makes an absent metric visible, and a flag nothing
+    reconciles against behaviour is the shape this repository keeps finding in its own prose. So
+    every metric the shipped case-set actually scores is checked both ways: one that returns a
+    verdict must be declared gated, and one that never does must not be. A metric no case scores is
+    outside what a run can say anything about, which is the whole reason the declaration exists.
+    """
+    report = run_eval(load_eval_cases(settings.eval_case_dir), "v1")
+    observed: dict[str, bool] = {}
+    for result in report.results:
+        observed[result.result_metric] = observed.get(result.result_metric, False) or (
+            result.passed is not None
+        )
+    declared = gated_names()
+
+    assert observed, "the shipped case-set scored nothing; this test proves nothing"
+    wrong = {name: seen for name, seen in observed.items() if seen != (name in declared)}
+    assert not wrong, (
+        f"these metrics' declared gatedness disagrees with what they scored: {wrong}. A metric "
+        "returning a verdict must register `gated=True`, and one that never does must not."
+    )
 
 
 def test_an_ungated_metric_owes_the_set_no_demonstration() -> None:
