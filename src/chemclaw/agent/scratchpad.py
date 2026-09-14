@@ -74,7 +74,7 @@ from typing import Any, cast
 
 from deepagents import FsToolName
 from deepagents.backends import CompositeBackend, StateBackend, StoreBackend
-from deepagents.backends.protocol import WriteResult
+from deepagents.backends.protocol import EditResult, WriteResult
 from langgraph.store.base import SearchItem
 from langgraph.store.postgres.aio import AsyncPostgresStore
 
@@ -280,6 +280,87 @@ class BoundedStoreBackend(StoreBackend):
         result = await super().awrite(file_path, content)
         await self._evict_past_the_cap()
         return result
+
+    async def aedit(
+        self, file_path: str, old_string: str, new_string: str, replace_all: bool = False
+    ) -> EditResult:
+        """Edit, unless this edit has already been applied and applying it again would duplicate.
+
+        **The one write in this system that a resumed turn can silently double, and the reason it is
+        this one.** `D-2026-09-14-a-turn-outlives-its-request-already-and-nothing-can-pick-it-up`
+        measured that a tool killed mid-call is re-run on resume with its original arguments,
+        because the checkpoint holds no result for it — only the `__pregel_tasks` `Send` that
+        enqueued it. Nearly every side-effecting tool survives that: the durable launchers derive a
+        workflow id with `stable_hash` over their arguments, the knowledge writes take a
+        deterministic note id and stage byte-identical content that produces no commit, and the
+        tabular writes are upserts or `ON CONFLICT DO NOTHING`.
+
+        A `/memories/` edit survives none of it, because it is a **read-modify-write against live
+        content** and its store sits *outside* the checkpoint. `/scratch/` is safe for exactly the
+        reason this is not: its backend is the checkpoint, so a killed tool left no write to replay
+        over. Here the write lands in Postgres, the checkpoint has no record of it, and the replay
+        applies the edit to content that already carries it.
+
+        The commonest edit a model writes is the shape that breaks: an insert under a heading it
+        names as the anchor, so that the replacement opens with the anchor and adds a line under
+        it. Measured over three applications: each inserts another copy and reports **one**
+        replacement every time. No error,
+        no counter, nothing versioning it, and `BoundedStoreBackend`'s only bound is a row count, so
+        the duplicated content does not even show up as an extra row.
+
+        So the guard is narrow and targets exactly that shape: an edit whose `new_string` *contains*
+        its `old_string` is not idempotent, and if `new_string` is already present the previous
+        application is visible. A plain substitution needs no guard — the second application fails
+        loudly with upstream's own "String not found", which is the right answer.
+
+        What it costs is stated rather than hidden: a chemist deliberately inserting the identical
+        block twice is refused, and so is a first edit whose `new_string` already happens to appear
+        elsewhere in the file. Both are refusals with a reason, against a silent corruption of
+        memory that outlives the deployment.
+
+        Args:
+            file_path: The memory's path under `/memories/`.
+            old_string: The anchor to replace.
+            new_string: What to put in its place.
+            replace_all: Replace every occurrence rather than requiring exactly one.
+
+        Returns:
+            Upstream's result, or a refusal naming the repeat.
+        """
+        if old_string and old_string in new_string:
+            # The raw store value, not `aread`: that method paginates at 2,000 lines by default, so
+            # a long memory would come back truncated and `new_string in content` would answer
+            # False for an edit that *is* already applied — a guard failing open on exactly the
+            # files big enough to have been edited before. Read the way `super().aedit` reads.
+            content = await self._current_content(file_path)
+            if content is not None and new_string in content:
+                return EditResult(
+                    error=(
+                        f"Error: this edit is already applied to {file_path}. Its replacement "
+                        "contains its own anchor, so applying it again would insert a second copy "
+                        "rather than change anything — and a memory write is not replayable. If "
+                        "you meant to add something further, edit with different text."
+                    )
+                )
+        return await super().aedit(file_path, old_string, new_string, replace_all)
+
+    async def _current_content(self, file_path: str) -> str | None:
+        """This memory's whole text, or `None` when there is none — the way `aedit` itself reads it.
+
+        Deliberately the same two calls `StoreBackend.aedit` makes (`store.aget`, then
+        `file_data_to_string`) rather than a paginated read, so the guard above sees exactly the
+        content the replacement would be applied to. A malformed stored value answers `None`, which
+        sends the caller to upstream's own error rather than inventing a second one here.
+        """
+        from deepagents.backends.utils import file_data_to_string
+
+        item = await self._get_store().aget(self._get_namespace(), file_path)
+        if item is None:
+            return None
+        try:
+            return str(file_data_to_string(self._convert_store_item_to_file_data(item)))
+        except ValueError:
+            return None
 
     async def _evict_past_the_cap(self) -> None:
         """Drop the least recently updated memories until this namespace is inside the cap.
