@@ -183,6 +183,19 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
+- [ ] **Both published tool-utility results were measured against a control arm that also swaps
+      the prompt** — [M], `data/evals/profiles/no-tools.yaml` (`instructions:`),
+      `D-2026-09-14-tools-were-never-the-variable`. The benchmark half is corrected: the arms differ
+      by 13,895 characters of system prompt, `data/evals/profiles/tools-removed.yaml` is the arm
+      that varies only the tools, and with the prompt held fixed the benchmark moves 62 → 58 rather
+      than 62 → 74. The *probe* half is not, because it needs a run: `cli/live_probes.py`'s
+      `_AB_BASELINE_PROFILE` is that same profile, so
+      `D-2026-09-04-tools-help-a-third-of-the-time-and-hurt-a-quarter`'s 221-probe result is about
+      prompt-and-tools together too. What closes it is `make live-ab` and `make live-benchmark`
+      re-run with `tools-removed` as the baseline, on a gateway with a balance — this environment's
+      credential answers HTTP 400, "credit balance is too low". Nothing in the tree changes to start
+      it; the arm is already registered by `infra/live/processes.sh`.
+
 - [ ] **`hybrid` retrieval is measurably worse than the `graph` default, and the fix is not a
       fusion change** — [M], measured 2026-09-14 on the new gold set
       (`D-2026-09-14-one-corpus-one-vote-is-the-right-fix-for-a-different-problem`). Over 20 real

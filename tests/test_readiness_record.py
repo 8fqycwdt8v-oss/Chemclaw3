@@ -103,13 +103,24 @@ def test_the_record_still_carries_all_four_sections() -> None:
 def test_the_external_benchmark_number_is_still_in_it() -> None:
     """The one figure nobody here chose the questions for, and the one that flatters least.
 
-    62/100 with every tool bound against 74/100 for the same model with none. A readiness record
+    62/100 with every tool bound against 74/100 under the toolless control arm. A readiness record
     that quietly loses it is the failure this whole programme has been correcting — so the number
     is asserted here rather than trusted to survive an edit.
+
+    **And the variable is asserted beside it**, because the pair was published as a tools contrast
+    and is not one: the control arm replaces the whole system prompt, so a record stating the two
+    numbers without naming what moved between them repeats the attribution
+    `D-2026-09-14-tools-were-never-the-variable` withdrew. The second assertion is what stops the
+    correction being edited out while the flattering half of it stays.
     """
     text = _record_text()
     assert "62/100" in text and "74/100" in text, (
         "the readiness record no longer states the ChemBench result. It is the only external "
         "number this repository has, and it is 12 points worse with tools than without — which is "
         "exactly why it is the one a later edit would drop."
+    )
+    assert "62 → 58" in text and "D-2026-09-14-tools-were-never-the-variable" in text, (
+        "the readiness record states the ChemBench pair without saying which variable moved. "
+        "The arms differ by the whole system prompt as well as by the tools; with the prompt held "
+        "fixed, removing every tool moves 62 → 58."
     )

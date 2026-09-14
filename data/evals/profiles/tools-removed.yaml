@@ -1,0 +1,26 @@
+# The arm that varies **only** the tools, and the reason it exists beside `no-tools.yaml`.
+#
+# `no-tools.yaml` changes two things at once: it empties `tool_names` *and* it supplies its own
+# `instructions:`, which `instructions_for` treats as a wholesale replacement of the default
+# domain prose. Measured, that is a 13,895-character difference in the system prompt — and the
+# decisive sentence of the default prose ("you must never state a specific parameter as though it
+# came from the record …") sits in a `PromptBlock` with no `requires` gate, so removing every tool
+# does not remove it. A comparison against `no-tools` is therefore a prompt A/B, whatever the arm
+# is called: it cannot attribute a difference to the tools, and
+# `D-2026-09-14-tools-were-never-the-variable` is what happened when one did.
+#
+# This profile is the contrast that *can*. It declares `tool_names: []` and **no `instructions:`**,
+# so the prose is the deployment's own — narrowed exactly as the shipped agent narrows it when a
+# tool is absent (`PromptBlock.requires` / `.absent_unless`), because that narrowing is a function
+# of the tool surface and belongs to the treatment rather than to the confound. What varies between
+# this arm and `default` is the tools and what the shipped prose itself says about their absence.
+#
+# What it carries is what `no-tools.yaml`'s own header already states: `SubAgentMiddleware` and
+# `FilesystemMiddleware` are in `create_deep_agent`'s required set, so `task` and six file verbs are
+# bound in both arms. Neither reaches this programme's data.
+#
+# Kept out of `data/profiles/` for the same reason as the other control: a toolless agent is a
+# measurement instrument, not a capability a session may pick by name.
+
+# Empty, not absent — `None` means "do not narrow" and would give this arm the whole agent.
+tool_names: []

@@ -54,8 +54,9 @@ export CHEMCLAW_SERVICE_HOST="${CHEMCLAW_SERVICE_HOST:-127.0.0.1}"
 # pointed at a real gateway (`CHEMCLAW_LLM_BASE_URL` set by `e2e-full-stack/up.sh`) is unaffected
 # either way because the guard only looks at loopback addresses.
 export CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY="${CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY:-true}"
-# The eval profile directory beside the shipped one, because the tool-utility A/B's control arm is
-# a profile (`data/evals/profiles/no-tools.yaml`) and a profile has to be registered by the process
+# The eval profile directory beside the shipped one, because every control arm this repository
+# measures against is a profile — `no-tools.yaml` for the tool-utility A/B, `tools-removed.yaml` for
+# the benchmark arm that varies only the tools — and a profile has to be registered by the process
 # that builds the agent. It is not in `data/profiles/` on purpose — a toolless agent is a
 # measurement instrument, and every deployment that starts the front door advertises what is in
 # there. This lane is where measurements run, so this is where the two directories meet.

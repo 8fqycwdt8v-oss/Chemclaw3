@@ -12,6 +12,13 @@ from pathlib import Path
 
 import pytest
 
+from chemclaw.agent.chemclaw_agent import (
+    _capability_tools,
+    instructions_for,
+    skill_tool_names,
+)
+from chemclaw.agent.profile_discovery import _load
+from chemclaw.agent.profiles import get_profile
 from chemclaw.cli.live_benchmark import (
     BENCHMARK_DIR,
     Answered,
@@ -109,3 +116,64 @@ def test_the_report_separates_an_abstention_from_a_wrong_answer() -> None:
     report = render(results, None)
     assert "1/3 correct (33%)" in report
     assert "1 answer(s) named no option" in report
+
+
+# The two eval-only profiles the benchmark's arms are, and the sentence that separates them.
+_PROFILE_DIR = Path(__file__).resolve().parents[1] / "data/evals/profiles"
+# A `PromptBlock` with **no `requires` gate**, so no amount of tool removal takes it out of the
+# prompt. Quoted rather than imported: the claim is about what the model is sent, and importing the
+# block would let the two agree with each other while the shipped prose said something else.
+_NO_RECORD_SENTENCE = "you must never state a specific parameter as though it came from the record"
+
+
+def _toolless_prompt(filename: str) -> str:
+    """The system prompt an arm with no capability tools is actually sent.
+
+    `available` is what `build_langgraph_agent` passes — the names the graph binds — and for a
+    toolless profile that is the six `FilesystemMiddleware` verbs plus `task`, neither of which a
+    profile can strip. Passing it matters: `instructions_for(profile)` with no surface is the
+    *maximal* prompt, which is not what either arm sends.
+    """
+    return instructions_for(_load(_PROFILE_DIR / filename), skill_tool_names() | {"task"})
+
+
+def test_the_arm_that_varies_the_tools_varies_only_the_tools() -> None:
+    """`tools-removed` is the contrast a tools claim may rest on, and this is why it can.
+
+    It declares `tool_names: []` and **no** `instructions:`, so the prose is the deployment's own —
+    narrowed only by the blocks that name an absent tool, which is a consequence of the treatment
+    rather than a second variable. The sentence no tool removal can remove survives in it, which is
+    the property the published 62-against-74 pair did not have.
+    """
+    profile = _load(_PROFILE_DIR / "tools-removed.yaml")
+
+    assert profile.name == "tools-removed"
+    assert profile.tool_names == frozenset()
+    assert profile.instructions is None, (
+        "an arm that overrides the instructions varies the prompt as well as the tools, which is "
+        "the confound D-2026-09-14-tools-were-never-the-variable exists to end"
+    )
+    assert _capability_tools(profile) == []
+    assert _NO_RECORD_SENTENCE in _toolless_prompt("tools-removed.yaml")
+
+
+def test_the_prompt_swapping_arm_cannot_be_read_as_a_tools_contrast() -> None:
+    """The other direction, and the one that catches a relabelling.
+
+    `no-tools.yaml` is kept — it is the arm `make live-ab`'s merged measurement ran on — but it
+    replaces the whole default prose, so a document calling it a tools contrast is wrong about its
+    own fixture. Asserted as a property and a magnitude rather than a digit: the exact character
+    counts move whenever the prompt is edited, while "it replaces the prose, by thousands of
+    characters, including the sentence tools cannot remove" is the thing that would have to stop
+    being true for the label to become honest.
+    """
+    profile = _load(_PROFILE_DIR / "no-tools.yaml")
+    swapped = _toolless_prompt("no-tools.yaml")
+
+    assert profile.tool_names == frozenset()
+    assert profile.instructions is not None
+    assert _NO_RECORD_SENTENCE not in swapped
+    assert len(instructions_for(get_profile(None))) - len(swapped) > 10_000, (
+        "the two arms no longer differ by a large block of prompt; if the default prose shrank to "
+        "meet the control, the published pair's attribution may be worth re-measuring"
+    )

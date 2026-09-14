@@ -16,9 +16,16 @@ noise; this measures whether an answer is *right*, and inherits none.
 multiple-choice chemistry question is answered from what the model knows. This system's retrieval,
 its knowledge graph and its calculations have nothing to add to "what compounds form when aniline
 reacts with nitrous acid", so the score is a floor — what the deployment's model brings before this
-system does anything. `--profile no-tools` runs the same subset against a toolless agent so the
-difference is measured rather than assumed; `make live-ab` over `data/evals/probes/` is where the
-tools are actually the subject.
+system does anything. `make live-ab` over `data/evals/probes/` is where the tools are actually the
+subject.
+
+**Two control arms, and which one answers which question is the whole of
+`D-2026-09-14-tools-were-never-the-variable`.** `--profile tools-removed` removes every capability
+tool and changes nothing else, so a difference against the default arm is attributable to the
+tools. `--profile no-tools` *also* replaces the system prompt wholesale — a profile's
+`instructions:` are a replacement, not an addition — so a difference against it is a prompt result
+whatever the arm is called. The published 62-against-74 pair was the second one read as the first;
+with the prompt held fixed, removing every tool moved 62 to 58.
 
 Exit codes: 0 when the run completed, 3 when the lane could not be reached (never counted as a
 pass, the posture `live_probes` and `live_turn_cost` already take).
@@ -216,8 +223,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--profile",
         default=None,
-        help="the agent profile to ask (`no-tools` is the control arm; omitted, the front door's "
-        "default agent)",
+        help="the agent profile to ask. `tools-removed` varies only the tools; `no-tools` varies "
+        "the tools and the whole system prompt, so it answers a different question. Omitted, the "
+        "front door's default agent",
     )
     parser.add_argument(
         "--limit", type=int, default=0, help="ask only the first N questions (0 = all)"
