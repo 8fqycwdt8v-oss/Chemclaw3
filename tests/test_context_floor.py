@@ -441,7 +441,14 @@ load_profiles()
 #: What it buys is the plan gate attached in the posture every supported deployment already runs,
 #: which `D-2026-09-06-the-write-gate-is-three-names-and-the-plan-gate-carries-the-rest` names as
 #: the only cover over 29 write tools.
-CEILINGS: dict[str, int] = {"__default__": 67_500}
+#:
+#: **67,200 since `D-2026-09-14-a-lowering-that-loses-a-merge-is-a-raising`**, which is the 300 this
+#: ceiling should have fallen by when `D-2026-09-14-a-docstring-is-a-prompt-and-a-comment-is-not`
+#: moved 309 tokens of developer rationale out of three tool descriptions. Two changes landed in one
+#: wave — the harness default above, +2,000, and that lowering, -300 — and the merge that resolved
+#: them took the first and dropped the second, leaving three documents asserting a lowering the tree
+#: did not carry. The two are independent and both belong, so the ceiling is their sum.
+CEILINGS: dict[str, int] = {"__default__": 67_200}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.

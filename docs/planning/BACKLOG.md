@@ -734,8 +734,11 @@ only holds defects can only ever restore the system to what it already intended 
       scan for developer-rationale tells flags 28 paragraphs and most are `Args:` false positives.
 
       So there is no blanket cut here, and the per-paragraph judgment the old row asked for is worth
-      about **309 tokens** — which is what it was worth, measured, once taken (64,907 → 64,598,
-      ceiling 65,500 → 65,200). What is left open is the part a test cannot decide: `Args:` and
+      about **309 tokens** — which is what it was worth, measured, once taken (64,907 → 64,598).
+      The ceiling that lowering bought was dropped by the merge that resolved it against the
+      harness-default raise and is restored by
+      `D-2026-09-14-a-lowering-that-loses-a-merge-is-a-raising`; the shipped value is
+      `CEILINGS["__default__"]` and not a figure here. What is left open is the part a test cannot decide: `Args:` and
       `Returns:` together are 13,229 tokens of every model call, and whether a shorter
       argument contract still reaches the right tool is a `make live-ab` question, not a reading
       question.
