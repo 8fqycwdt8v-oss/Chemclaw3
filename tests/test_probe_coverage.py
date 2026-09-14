@@ -192,6 +192,41 @@ def test_no_exemption_names_a_tool_that_does_not_exist() -> None:
     assert not gone, f"{gone} are exempt but are not on the agent surface at all. Delete them."
 
 
+def test_no_tools_only_coverage_is_a_question_the_surface_cannot_answer() -> None:
+    """A tool covered solely by a bucket-C probe is a tool the corpus does not exercise.
+
+    The corpus is deliberately mixed: bucket A the surface should answer, B partly, **C not at
+    all**. That mix is right for measuring honesty, and it means "this tool appears in a probe" and
+    "this tool is exercised" are different statements — a C probe is satisfied by the system
+    *declining*, so a tool whose only probe is a C is covered on paper and never called.
+
+    This is the thin half of the concentration question, and it is the half that turned out to
+    matter. Measured 2026-09-14: 45 of 114 agent-callable tools are named by exactly **one** probe —
+    39% of the surface resting on a single phrasing — and **zero** of them rest on a C. So the tail
+    is thin and not hollow, and this assertion is what keeps it that way.
+
+    A count is not asserted, deliberately. A ratchet on "how many tools have one probe" would block
+    every new tool until somebody wrote it a second question, which is a toll on adding capability
+    rather than a bound on risk. What must not happen is a tool arriving with coverage that cannot
+    call it.
+    """
+    by_tool: dict[str, list[Probe]] = {}
+    for probe in _probes():
+        for name in probe.expects_tools:
+            by_tool.setdefault(name, []).append(probe)
+    live = available_tool_names()
+    hollow = sorted(
+        name
+        for name, probes in by_tool.items()
+        if name in live and all(probe.bucket == "C" for probe in probes)
+    )
+    assert by_tool, "no probe names a tool; this test proves nothing"
+    assert not hollow, (
+        f"{hollow} are named only by bucket-C probes, which the surface is not expected to answer. "
+        "Such a tool is covered on paper and never called. Give each one a bucket A or B question."
+    )
+
+
 def test_the_corpus_is_not_concentrated_on_one_tool() -> None:
     """No single tool may be what most of the corpus measures.
 
@@ -203,6 +238,13 @@ def test_the_corpus_is_not_concentrated_on_one_tool() -> None:
     The bound is deliberately loose. This is not asking for a flat distribution — a retrieval tool
     *should* be the most common thing an agent reaches for — it is asking that no one tool be a
     majority of what the suite knows how to check.
+
+    **Re-measured 2026-09-14 and the concentration has gone**: `gather_evidence` is in 126 of 297
+    probes, **42%**, with 55% of tool-naming probes touching any retrieval tool and only 14%
+    touching *nothing but* retrieval. The 2026-08-25 figure above is kept because it is why the
+    bound exists, not because it is current — a paragraph that reads as a live measurement is the
+    thing `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` is about, and the live number
+    is whatever this assertion computes.
     """
     probes = _probes()
     counts: dict[str, int] = {}

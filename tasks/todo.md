@@ -531,7 +531,13 @@ fail. That is worse than no gate, because it reports green.
       directions. Found while writing them: **nothing anywhere drove `validate_kg.main` over a note
       carrying a `calc_ref`**, so that whole branch of the entrypoint had never executed. The gate
       now says out loud when it had nothing to check.
-- [ ] W27.6 `Chemclaw3` — half the probe corpus tests one tool [S] (the concentration half).
+- [x] W27.6 `Chemclaw3` — half the probe corpus tests one tool [S] (the concentration half).
+      **Declined on measurement**: `gather_evidence` is **126 of 297 = 42%**, not half, against an
+      existing 60% bound; 55% of tool-naming probes touch any retrieval tool and only 14% touch
+      nothing else. What the measurement found instead: **45 of 114 tools rest on one probe**, and
+      **zero** of them on a bucket-C probe — thin, not hollow. That invariant is now a test
+      (`test_no_tools_only_coverage_is_a_question_the_surface_cannot_answer`); the tail itself is a
+      rewritten `BACKLOG.md` row, deliberately not a ratchet.
 - [ ] W27.7 `Chemclaw3` — no external benchmark has ever been run [M]. `make eval` gates 23 metric
       values over 15 cases, all first-party. Decide: run one, or record in `DEFERRED.md` with its
       trigger. Do not leave it implied.

@@ -786,25 +786,26 @@ only holds defects can only ever restore the system to what it already intended 
       name one, per-probe in `tasks/live-test/transcripts/ab/evidence.json`, so the comparison this
       was blocked on is a re-run rather than a new instrument.
 
-- [ ] **Half the probe corpus tests one tool** — [S], and only the *concentration* half is still
-      open. `gather_evidence` is in `expects_tools` for **125 of 292** probes (re-counted
-      2026-09-05 — the numerator is unchanged and the **denominator was stale**, 292 top-level
-      probes today rather than 288, so the concentration is 43%; 124/261 on 2026-08-27, 116/232 on
-      2026-08-25, and the corpus keeps growing while the concentration does not shrink with it);
-      `find_notes` 96; `expand_note` 60; bucket C is **48** probes against bucket A's **173** — 169
-      was this row's own figure and is the *paired* count from the A/B run below, four short of the
-      corpus, which is a different quantity wearing the same sentence. The tail is thin. So the
-      corpus still mostly measures one retrieval path, and widening it is what remains here.
+- [ ] **The probed surface has a long thin tail: 45 of 114 tools rest on one probe** — [S],
+      measured 2026-09-14, and it replaces the concentration row rather than continuing it.
 
-      **The second consequence is closed and it was the one blocked on a credential.**
-      `D-2026-09-04-tools-help-a-third-of-the-time-and-hurt-a-quarter` builds the arm
-      (`make live-ab`, a control profile with `tool_names: []`) and runs it over all 221 bucket-A
-      and bucket-C probes: ChemToolAgent's finding reproduces — on bucket A tools **helped 31% and
-      hurt 23%**, with 19 questions the toolless model correctly declined turned into fabricated
-      ones — and bucket C came out the *other* way, falsifying the hypothesis it was built on. The
-      record is `docs/archive/tool-utility-2026-09-04.md`. What that run is not evidence about is a
-      deployment's own model: it measured `claude-haiku-4-5-20251001`, and re-running on a site's
-      model is one command.
+      **The concentration is gone and the row's headline was stale.** `gather_evidence` is in
+      **126 of 297** probes — **42%**, against the 50% (116/232) the headline was written from and
+      the 60% bound `tests/test_probe_coverage.py` already holds. Widened: 55% of tool-naming probes
+      touch any retrieval tool and only **14%** touch nothing but retrieval, so "the corpus mostly
+      measures one retrieval path" does not reproduce.
+
+      What the same measurement found instead: **45 of 114 agent-callable tools are named by
+      exactly one probe** — 39% of the surface resting on a single phrasing, where a probe the model
+      happens to answer reads as coverage. It is thin and it is **not hollow**: zero of those 45
+      rest on a bucket-C probe, which `test_no_tools_only_coverage_is_a_question_the_surface_cannot_
+      answer` now holds, so a tool cannot arrive with coverage that never calls it.
+
+      Deliberately **not** a ratchet on the count. A bound on "how many tools have one probe" blocks
+      every new tool until somebody writes it a second question, which taxes adding capability
+      rather than bounding risk. What is open is ordinary corpus work: second questions for the
+      tools that matter most, chosen by what a deployment actually calls rather than by the list's
+      order.
 
 - [ ] **No external benchmark has ever been run** — [M]. `make eval` gates 23 metric values over 15
       case files (re-counted 2026-08-27; one has been added since the 2026-08-25 figure of 14), a
