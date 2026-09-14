@@ -316,9 +316,9 @@ def test_a_chartless_component_says_what_a_release_could_not_do(tmp_path: Path) 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     (fake_bin / "oc").write_text(
-        '#!/usr/bin/env bash\n'
+        "#!/usr/bin/env bash\n"
         'if [ "$1" = "set" ]; then\n'
-        '  echo \'Error from server (NotFound): deployments.apps "x" not found\' >&2\n'
+        "  echo 'Error from server (NotFound): deployments.apps \"x\" not found' >&2\n"
         "  exit 1\n"
         "fi\n"
         "exit 0\n"

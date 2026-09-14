@@ -492,16 +492,6 @@ topic).
       One probe, not a measurement pass: what is owed first is the threshold, whether it is
       configurable, and whether it fires on any real turn.
 
-- [ ] **Turn the image scan back on, with its contradiction resolved** — [M].
-      Carried forward unchanged from the SBOM work and re-confirmed by the 2026-08-26 CI review:
-      `image.yml` now emits an SBOM and pins/verifies both binaries it downloads, but there is
-      still no scan of the built image. It ran once, found three real classes of problem now fixed
-      in `deploy/Containerfile`, and then reported two packages the build's own exhaustive
-      filesystem listing says are not present. A gate whose last word contradicts the artifact it
-      scanned makes every future red build ambiguous, so it goes back on with its own change rather
-      than riding along on someone else's. The SBOM is now `main`-only, so a scan reading it is
-      `main`-only too.
-
 - [ ] **A corpus read is ~40 kB of memory per entry, and only 25 kB of it is boundable** — [M],
       measured 2026-09-14
       (`D-2026-09-14-the-memory-corpus-is-a-memory-bound-not-a-time-bound`), and it replaces the
@@ -606,25 +596,6 @@ topic).
       anywhere is tooling that performs or **verifies** a restore, and that cannot be built against
       a store this repo does not own. (The former separate "no backup tooling" row is folded in
       here; it was downstream of this one and overcounted the stores.)
-
-- [ ] **The image vulnerability scan is not merged as a gate** — [M]. The runbook's false claim that
-      it runs is corrected (2026-08-17) and
-      `tests/test_deploy_chart.py::test_every_supply_chain_gate_the_runbook_names_actually_runs`
-      keeps it corrected. **State the guarantee, not the implementation:** no supply-chain tool the
-      runbook's §(xiv) claims — in the gate table *or* in the prose beside it — may be one that
-      `image.yml` does not actually execute. It does not prove the named gate is *blocking*, only
-      that something runs it. This row said it "fails if the runbook names a gate nothing runs",
-      which was one degree stronger than the assertion then in the tree: the check was a substring
-      over the workflow, so a comment naming the tool satisfied it, and only backticked table rows
-      were read at all. Both holes were found and closed the same day — which is the argument for
-      naming the guarantee rather than the mechanism, since the mechanism changed under this row
-      within hours of it being written. The gate itself is still absent: `trivy`
-      appears nowhere in
-      `.github/workflows/image.yml`, which already builds `chemclaw:ci` locally on every PR, so the
-      step needs no registry. Held for a stated reason — per D-2026-08-01 the candidate scan
-      reported `setuptools` 70.3.0 and `msgpack` 1.1.2 while an exhaustive `find / -xdev` in the
-      same build listed neither, and a gate whose last word contradicts the artifact it scanned
-      makes every red build ambiguous. Re-check that against a current trivy before merging.
 
 - [ ] **Nothing audits the `github-actions` closure for advisories** — [S], the accepted risk
       `.github/dependabot.yml` now names out loud

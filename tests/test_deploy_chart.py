@@ -3242,30 +3242,43 @@ _SUPPLY_CHAIN_TOOLS = frozenset(
 _ABSENCE_MARKERS = ("nowhere", "there is no", "used to say", "is a real gap", "does not run")
 
 
-def _executable_workflow_text(workflow: str) -> str:
-    """Every string in `image.yml` a runner would actually execute: each step's `uses` and `run`.
+def _invoked_commands(workflow: str) -> set[str]:
+    """Every program `image.yml` actually *invokes*, plus each `make` target and each `uses`.
 
     Parsed as YAML rather than read as one blob, because a comment is not a control. Comments are
     the largest thing in this workflow — the file is more rationale than command — so a substring
     search over its text answers "is this word written down here", which is the question the runbook
-    already answers and not the one worth asking of CI.
+    already answers and not the one worth asking of CI. Shell comments inside a `run:` block survive
+    YAML parsing and are stripped for the same reason.
 
-    Shell comments inside a `run:` block survive YAML parsing, so they are stripped too: a `#` line
-    in a script is exactly as inert as a `#` line in the YAML around it. Only `#` at a line start or
-    after whitespace is treated as one, which is the shell's own rule closely enough for scripts
-    that quote their arguments.
+    **Command words, not substrings, and the difference is a whole gate.** This used to return the
+    executable text and callers asked `gate in executed`. Driven as a mutation: replacing
+    `trivy image ...` with `echo image ...` — a workflow that downloads the scanner and never runs
+    it — left the check green, because the installer's own URL and filename both contain the word.
+    Fetching a tool is not running it. So each fragment of each script is reduced to the program it
+    starts with, and `make <target>` contributes the target too, since that is how this workflow
+    spells several gates.
     """
     document: Any = yaml.safe_load(workflow)
-    executed: list[str] = []
+    commands: set[str] = set()
     for job in (document.get("jobs") or {}).values():
         for step in job.get("steps") or []:
             uses = step.get("uses")
             if isinstance(uses, str):
-                executed.append(uses)
+                commands.add(uses)
             run = step.get("run")
-            if isinstance(run, str):
-                executed.append(re.sub(r"(?m)(^|\s)#.*$", r"\1", run))
-    return "\n".join(executed)
+            if not isinstance(run, str):
+                continue
+            script = re.sub(r"(?m)(^|\s)#.*$", r"\1", run).replace("\\\n", " ")
+            for fragment in re.split(r"[\n|;&]+|\$\(", script):
+                words = fragment.split()
+                if not words:
+                    continue
+                program = words[0].rsplit("/", 1)[-1]
+                commands.add(program)
+                if program == "make":
+                    commands.update(words[1:])
+    return commands
 
 
 def test_every_supply_chain_gate_the_runbook_names_actually_runs() -> None:
@@ -3299,10 +3312,25 @@ def test_every_supply_chain_gate_the_runbook_names_actually_runs() -> None:
     workflow = (DEPLOY.parent / ".github" / "workflows" / "image.yml").read_text()
 
     section = runbook.split("### When a supply-chain gate goes red", 1)[1].split("\n## ", 1)[0]
-    table = [line for line in section.splitlines() if line.startswith("| `")]
-    assert table, "the gate table was not found — this check is reading the wrong section"
+    table = [line for line in section.splitlines() if line.startswith("|")]
+    assert any(line.startswith("| `") for line in table), (
+        "the gate table was not found — this check is reading the wrong section"
+    )
 
-    named = {re.match(r"\|\s*`([^`]+)`", line).group(1) for line in table}  # type: ignore[union-attr]
+    # **Every backticked tool in a table row, not just the row's first cell.** Reading only the
+    # leading `| \`gate\`` cell left the SBOM row — whose *third* cell says "it only fails if
+    # `syft` cannot run" — entirely unchecked: driven as a mutation, replacing `syft chemclaw:ci`
+    # with `echo chemclaw:ci` kept this green while the runbook went on naming the tool. A claim in
+    # a cell is a claim.
+    named = {
+        token
+        for line in table
+        for token in re.findall(r"`([^`]+)`", line)
+        if token in _SUPPLY_CHAIN_TOOLS
+    }
+    named |= {
+        match.group(1) for line in table if (match := re.match(r"\|\s*`([^`]+)`", line)) is not None
+    }
 
     # The prose half. Lines are joined before sentences are split because the section wraps mid
     # sentence, and the table lines are dropped because they are claims already counted above.
@@ -3317,17 +3345,38 @@ def test_every_supply_chain_gate_the_runbook_names_actually_runs() -> None:
             tool for tool in _SUPPLY_CHAIN_TOOLS if re.search(rf"\b{re.escape(tool)}\b", lowered)
         }
 
-    executed = _executable_workflow_text(workflow)
+    invoked = _invoked_commands(workflow)
     # `make deps-audit` is how the workflow spells pip-audit; the Makefile target is the real name.
     runs = {
         gate
         for gate in named
-        if gate in executed or gate.replace("pip-audit", "deps-audit") in executed
+        if gate in invoked or gate.replace("pip-audit", "deps-audit") in invoked
     }
     assert named == runs, (
         f"the runbook names supply-chain gate(s) that nothing runs: {sorted(named - runs)}. "
         "Either merge the gate or stop documenting it as one — a comment in the workflow is not "
         "a gate, and neither is a sentence next to the table."
+    )
+
+    # **And a gate that runs is not yet a gate that blocks**, which this check did not ask and the
+    # `BACKLOG.md` row said so in as many words: "it does not prove the named gate is *blocking*,
+    # only that something runs it". A step carrying `continue-on-error: true` executes, reports,
+    # and lets the merge through — a scanner nobody reads, which is the failure the image
+    # workflow's own comment names as the reason `pip-audit` blocks.
+    document: Any = yaml.safe_load(workflow)
+    non_blocking: list[str] = []
+    for job in (document.get("jobs") or {}).values():
+        for step in job.get("steps") or []:
+            body = f"{step.get('uses') or ''}\n{step.get('run') or ''}"
+            if not any(
+                gate in body or gate.replace("pip-audit", "deps-audit") in body for gate in named
+            ):
+                continue
+            if step.get("continue-on-error"):
+                non_blocking.append(str(step.get("name") or body.strip()[:60]))
+    assert not non_blocking, (
+        f"the runbook presents these as gates and their steps cannot fail the build: "
+        f"{non_blocking}. A non-blocking scanner is a report nobody opens."
     )
 
 
