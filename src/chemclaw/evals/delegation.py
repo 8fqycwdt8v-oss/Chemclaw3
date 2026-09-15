@@ -34,8 +34,23 @@ what repeats exist to survive. The aggregation is per `(task, arm)` and the repo
 because "delegation helped here and hurt there" is the finding a rate destroys and the one selective
 routing would need.
 
+**Two ways this comparison can flatter the arm, both of them conditioning on the treatment, and
+both now refused.** Dropping the tasks where the arm declined to delegate scores it only where it
+delegated — so a model that delegates *selectively* outscores one that delegates as a policy, which
+is a fact about the choice rather than about delegation. `MINIMUM_COMPARED_SHARE` bounds the
+denominator so a report over the minority raises instead of reading as a result. And compliance is
+symmetric: the baseline is refused if it delegated in *any* repeat, so the arm is required to have
+delegated in *every* one, with anything between reported as `partially_delegated` rather than
+credited. That second one shipped asymmetric, with `ArmAggregate.delegated_in` computed and thrown
+away.
+
 This module runs no model. It is a pure comparison over runs somebody else recorded, which is what
-makes it testable without a gateway — and the run half is what needs one.
+makes it testable without a gateway. **The run half does not exist yet, and that is more than a
+missing credential** — this paragraph read "the run half is what needs one", which describes a
+runner waiting on a gateway. There is no runner: nothing in `src/`, `tests/`, `data/` or the
+`Makefile` constructs an `ArmRun`, records `delegated`, or builds the `no-helper` arm at all
+(`data/evals/profiles/` holds `no-tools.yaml` and nothing else). `docs/planning/BACKLOG.md` carries
+that half with what it owes.
 """
 
 from __future__ import annotations

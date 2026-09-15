@@ -1100,6 +1100,7 @@ def run_checks(
         no_documented_failure: failures,
         precedent_consulted: precedent,
     }
+
     # **The stage gate is asked first, and that ordering is the whole reason `_REQUEST_STAGE`
     # means anything.** It shipped the other way round — `check in supplied` tested before the
     # stage — so a supplied check ran at both stages whatever `_REQUEST_STAGE` said, and the two

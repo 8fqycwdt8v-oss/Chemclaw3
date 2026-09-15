@@ -40,9 +40,9 @@ from chemclaw.kg.graph import load_notes
 from chemclaw.kg.note import external_record_ref
 from chemclaw.memory.failure import failures_against, observation_of
 from chemclaw.protocols.checks import (
-    used_structures,
     blockers,
     run_checks,
+    used_structures,
 )
 from chemclaw.protocols.diff import diff_designs
 from chemclaw.protocols.export import run_sheet_path

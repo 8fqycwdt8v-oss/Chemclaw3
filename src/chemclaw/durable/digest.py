@@ -124,11 +124,22 @@ def _match_corpus(subscriptions: Sequence[Subscription]) -> list[DigestItem]:
 
     Split out purely so `collect_digests` has one thing to offload; the body is unchanged.
     """
+    if not subscriptions:
+        return []
     notes = load_notes(settings.knowledge_path)
-    # One scan for every subscription, cached behind the corpus fingerprint that retrieval already
-    # warms — see `conflict_index`. Scoped `as_of` today, matching the retrieval-time caller: a
-    # superseded note is out of the current-evidence sweep, and reporting it as disagreeing with
-    # its own replacement is noise rather than news.
+    # One scan for every subscription. **Not warm here, which is what this comment claimed.** It
+    # said "cached behind the corpus fingerprint that retrieval already warms", and
+    # `kg.conflicts._INDEX_CACHE` is a *process-local* module global: the retrieval callers run in
+    # the API and agent processes, this runs in `background_worker`, so nothing they do warms it —
+    # and the fingerprint invalidates on exactly the corpus change that makes a digest worth
+    # sending. So this is a cold scan on most runs, at `conflict_index`'s own measured 1,525 ms on
+    # a 2,000-note corpus (68 ms on the 39-note shipped one). It is affordable on an hourly
+    # activity that is already offloaded to a thread; it is not free, and the early return above is
+    # there because a deployment with no subscriptions was paying for it in full.
+    #
+    # Scoped `as_of` today, matching the retrieval-time caller: a superseded note is out of the
+    # current-evidence sweep, and reporting it as disagreeing with its own replacement is noise
+    # rather than news.
     disputes = conflict_index(settings.knowledge_path, date.today())
     digests: list[DigestItem] = []
     for subscription in subscriptions:

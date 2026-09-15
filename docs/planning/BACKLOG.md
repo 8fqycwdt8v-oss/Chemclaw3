@@ -222,6 +222,38 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
+- [ ] **An agent-recorded note the model could not date reaches no subscriber who has a
+      watermark** — [M], found 2026-09-15 in the review of the wave 2/4/7 merge.
+      `durable/digest._is_new` reads an absent `valid_from` as *open-ended* — true for as long as
+      anyone has known — and therefore as not news, which is correct about the field and wrong
+      about the question a digest asks. Measured on the shipped corpus: **32 of 39 notes carry no
+      `valid_from`**, across ten types (`compound` 9, `playbook` 5, `campaign` 3, `interaction` 3,
+      `job-result` 3, `bo-candidate` 2, `failure-mode` 2, `optimization-campaign` 2, `report` 2,
+      `experiment-proposal` 1). Two producers are closed —
+      `retrieval.harness.report_note(drafted_on=…)` and
+      `durable.job_record.note_with_run_provenance(ran_on=…)`, both cases where validity and
+      arrival are the same day by construction. `agent/graph_tools.py:591`
+      (`record_knowledge_note`) is not: the model may legitimately not know when a fact became
+      true, and defaulting `valid_from` to today would trade a silence for a false claim about
+      chemistry. **The real fix is an arrival signal separate from `valid_from`**, which the
+      subscription watermark cannot express today: `agent/subscriptions.py:68` bounds
+      `last_seen_note_ids` to one day of matches *on purpose* (DARK-7), and an undated-id set
+      grows with the corpus instead. The candidate worth measuring is the notes repository's own
+      git history — one `git log --diff-filter=A --name-only` over `knowledge/` gives every note's
+      add-date in one subprocess, cacheable behind the same corpus fingerprint `load_notes` already
+      uses. Measure that scan on a 10k-note corpus before building it.
+
+- [ ] **The delegation A/B has a comparator and no runner** — [L], found 2026-09-15.
+      `evals/delegation.py` is a pure comparison over `ArmRun`s, and **nothing constructs one**:
+      `grep -rn "ArmRun" src/ tests/ data/ Makefile` finds the module and its own test, nothing
+      records `delegated`, and no profile, prompt or runner builds the `no-helper` arm
+      (`data/evals/profiles/` holds `no-tools.yaml` alone). The module docstring called this "the
+      run half is what needs [a gateway]", which reads as a runner waiting on a credential. What it
+      owes: a `no-helper` profile whose system prompt asks the model not to call `task`, a runner
+      that records `delegated` per repeat off the turn's own trace, and `MINIMUM_REPEATS` repeats
+      per (task, arm) against a real gateway. Until then the comparator's guards
+      (`MINIMUM_COMPARED_SHARE`, `partially_delegated`) are tested and unexercised.
+
 - [ ] **The `note_proposed` SSE event is not a proposal, and the name is a two-repo contract** —
       [S], found 2026-09-05 in the gate-deletion review. Nothing reviews a note, so the accurate
       name is `note_recorded`; the literal is switched on by `Chemclaw3_ui`
@@ -776,24 +808,37 @@ only holds defects can only ever restore the system to what it already intended 
       scan for developer-rationale tells flags 28 paragraphs and most are `Args:` false positives.
 
       So there is no blanket cut here, and the per-paragraph judgment the old row asked for is worth
-      about **309 tokens** — which is what it was worth, measured, once taken (64,907 → 64,598,
-      ceiling 65,500 → 65,200). What is left open is the part a test cannot decide: `Args:` and
+      about **309 tokens** — which is what it was worth, measured, once taken. **The ceiling half of
+      that sentence never happened**, and it is corrected here rather than in the ADR because a
+      merged ADR is never edited: it read "64,907 → 64,598, ceiling 65,500 → 65,200", and
+      `CEILINGS["__default__"]` was already **67,500** when that commit landed — wave 0 raised it
+      from 65,500 for the harness flip, in the same merge range, and the docstring commit does not
+      touch `tests/test_context_floor.py` at all. So the saving is real and **unratcheted**, and
+      the 64,907 it was measured from is the *harness-off* arm, a posture the repository had
+      stopped shipping one commit earlier. Re-measured 2026-09-15 on the shipped posture:
+      `_floor("default")` is **66,430** against a 67,500 ceiling. The slack is deliberately left:
+      `PREFIX_BOUND` derives both compaction defaults from that ceiling, so lowering it to bank
+      1,070 tokens would move `agent_tool_result_clear_trigger` and the budget for every
+      deployment, which is a behavioural change to buy a number.
+
+      What is left open is the part a test cannot decide: `Args:` and
       `Returns:` together are 13,229 tokens of every model call, and whether a shorter
       argument contract still reaches the right tool is a `make live-ab` question, not a reading
       question.
 
-- [ ] **The probed surface has a long thin tail: 45 of 114 tools rest on one probe** — [S],
-      measured 2026-09-14, and it replaces the concentration row rather than continuing it.
+- [ ] **The probed surface has a long thin tail: 39 of 114 tools rest on one probe** — [S],
+      measured 2026-09-15 (it read 45, measured 2026-09-14 and stale inside its own merge range —
+      `process-chemistry.yaml` added 36 probes in it), and it replaces the concentration row rather than continuing it.
 
       **The concentration is gone and the row's headline was stale.** `gather_evidence` is in
-      **126 of 297** probes — **42%**, against the 50% (116/232) the headline was written from and
+      **139 of 333** probes — **41.7%**, against the 50% (116/232) the headline was written from and
       the 60% bound `tests/test_probe_coverage.py` already holds. Widened: 55% of tool-naming probes
       touch any retrieval tool and only **14%** touch nothing but retrieval, so "the corpus mostly
       measures one retrieval path" does not reproduce.
 
-      What the same measurement found instead: **45 of 114 agent-callable tools are named by
-      exactly one probe** — 39% of the surface resting on a single phrasing, where a probe the model
-      happens to answer reads as coverage. It is thin and it is **not hollow**: zero of those 45
+      What the same measurement found instead: **39 of 114 agent-callable tools are named by
+      exactly one probe** — 34% of the surface resting on a single phrasing, where a probe the model
+      happens to answer reads as coverage. It is thin and it is **not hollow**: zero of those 39
       rest on a bucket-C probe, which `test_no_tools_only_coverage_is_a_question_the_surface_cannot_
       answer` now holds, so a tool cannot arrive with coverage that never calls it.
 

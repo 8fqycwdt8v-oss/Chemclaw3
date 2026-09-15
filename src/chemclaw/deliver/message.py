@@ -7,7 +7,8 @@ channel carries" while `redacted()` 140 lines below already said otherwise in as
 — and `_redacted_attachment` scrubs `Attachment.content` besides. `recipient` also carries
 `min_length=1` with no `max_length`, so it is not bounded in the sense that sentence used either.
 A delivered message is the one thing in this system that reaches a destination the deployment does
-not fully control — an inbox, a chat room, a mounted share. `core/logging.py` already resolves every connector bearer-token env-var name so a
+not fully control — an inbox, a chat room, a mounted share. `core/logging.py` already resolves
+every connector bearer-token env-var name so a
 credential can be scrubbed from a log line; the same filter runs here, because a message assembled
 from a tool result is exactly as capable of carrying one as a log line is, and a log line at least
 stays inside the cluster.
