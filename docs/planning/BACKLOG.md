@@ -311,14 +311,14 @@ topic).
       measured 2026-09-13. `ingest/documents/isolate.py` starts its server by fork **and exec**, so
       its pages are not copy-on-write with the front door's: driven on this tree, RSS was
       111,140 kB in the front door and 111,188 kB in the forkserver — a second, full resident copy of pypdf,
-      python-docx, openpyxl and python-pptx. `deploy/chemclaw/values.yaml`'s `resources.service` is
+      python-docx, openpyxl and python-pptx. `deploy/helm/chemclaw/values.yaml`'s `resources.service` is
       unchanged at `requests: 512Mi / limits: 1Gi`, so that is 21% of the request arriving the
       first time anybody uploads a document, and it is *per replica*. Nothing is wrong today; what
       is missing is that the chart was sized before this process existed. The decision is whether
       to raise the request, keep the forkserver cold (it is lazy, so a replica that never parses
       never pays), or both — and it wants a measurement of the Temporal worker too, which now
       starts one as well (`ingest/documents/sync.py`). Anchor: `isolate.parse_context`,
-      `deploy/chemclaw/values.yaml`.
+      `deploy/helm/chemclaw/values.yaml`.
 
 - [ ] **`JsonCommitmentExport` cannot run a destructive sweep, and the grant for one already
       exists** — [S], the row `ingest/commitments/json_export.py`'s `snapshot` attribute says is
@@ -369,38 +369,7 @@ topic).
       revisiting if psycopg gains a cancel that respects a deadline. Anchors:
       `api/routes/ops.py::_probe_database`, `core/db.py::connection`.
 
-- [ ] **`BoCampaignWorkflow` runs four sequential activities under a ceiling that funds one** —
-      [M], measured 2026-09-06. `connector_queue_wait_timeout`'s "fits by construction" argument is
-      a bound on **one** `q + w`: at the shipped numbers 10,170 + 300 = 10,470 s against a 25,200 s
-      `connector_job_timeout_seconds`. But the BO child runs `propose_initial`, `_evaluate(seed)`,
-      `propose_next`, `_evaluate` and `record_round` — at minimum four before a one-round campaign
-      can finish, so 4 × 10,470 = 41,880 s over the ceiling, reachable on four waits of ~6,300 s
-      each, well inside what the bound permits as normal. The docstring's own justification for one
-      generous wait per queue — "what has to fit is the worst composite on it" — is the sentence
-      this falsifies: the worst composite on `connector-bo` is `N × (q + w)`. The elegant fix is
-      `continue_as_new` per round rather than at the rounds bound (`_carry_on` already carries
-      exactly the state a round boundary needs), so the execution ceiling bounds a *round*; dividing
-      the headroom by a declared per-child activity count is the fragile alternative. It lives in
-      `connectors/bo/workflows.py`, so it is that bundle's change rather than core's. Anchors:
-      `durable/publish.py::connector_queue_wait_timeout`, `connectors/bo/workflows.py`.
-
 ## 4 — Operating it
-
-- [ ] **Nothing bounds what a helper writes into its caller's checkpointed state** — [M], opened
-      by `D-2026-09-04-a-helpers-file-crosses-back-and-stays` while closing the *reading* half.
-      A helper's `files` cross into the caller's state, and that crossing is deliberate — but the
-      report beside it is bounded at `agent_max_tool_result_chars` (60,000) and the state write is
-      bounded by nothing. Measured: a helper writing 2,000,000 characters lands **2,000,137** in
-      the caller's `files`, which is a *checkpointed* channel, so it reaches a `checkpoint_blobs`
-      row and every later turn of that session.
-      **Read the scope before reaching for a cap.** This is not a context blow-out: nothing loads
-      the whole channel into a prompt, and a `read_file` result crosses `bound_tool_results` like
-      any other, so the model only ever pays for what it asks for. What it costs is checkpoint
-      weight and retention. It is also **not a bound on delegation** — the caller's own
-      `write_file` reaches it identically, so a cap belongs on the scratchpad rather than on the
-      helper, and `agent/scratchpad.py` is where the permission set that would carry one already
-      lives. `durable/retention.py` prunes checkpoints by thread, so the row is about the size of
-      what accumulates between prunes rather than about an unbounded leak.
 
 - [ ] **A caller cannot tell that a helper's report is derived from untrusted reading**
       — [M], opened by `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread`, which
@@ -600,29 +569,24 @@ topic).
       that the receipt stays — but the copy downstream is somebody else's sweep, and the first
       deployment to point at a real store inherits the obligation. Settle it with that
       deployment, not before: the answer depends on whose database it is.
-- [ ] **Six tables still say "nothing bounds it"** — [M].
-      `durable/retention.py`'s `_NOT_PRUNED` is the register that makes this visible, and it is
-      doing its job: it names every table in the schema and does not invent an answer where none was
-      taken. Eight entries carried that wording — five of them also saying *no decision is on
-      record*, which an earlier version of this row quoted as though it were the same set; the
-      2026-08-28 erasure pass closed three of the eight
-      (`note_proposals`, `plan_approvals`, `turn_costs` — all three are kept through a data-subject
-      erasure, so the decision *was* on record one module over, and a derived test now couples the
-      two registers). The remaining six are `molecule_fingerprints`, `reaction_fingerprints`,
-      `user_preferences`, `predictions`, `measurements` and `store` — and `user_preferences` is the
-      weakest of them, because `leaver._ERASE` already deletes it per actor, so what is open there
-      is a clock rather than a policy. `store` is the newest and is **tracked by its own row above**
-      rather than here: the 2026-09-09 sweep withdrew the erasure-as-a-bound wording for it and
-      added that row, and did not touch this count in the same file in the same commit — which is
-      `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` happening inside a register rather
-      than inside prose. Five decisions are owed here; the sixth is owed there. Plus a sixth question of a different
-      kind: `tool_result_blobs` has a window and it ships at 0 "as a deliberate uniformity rather
-      than a considered policy for this table", which `retention.py` itself flags as the
-      highest-volume table in the set.
-      Each needs its own answer rather than one sweep — a fingerprint is derived and rebuildable but
-      expensive to rebuild, a preference is the person's and goes on erasure rather than on a clock,
-      and `predictions`/`measurements` are the calibration ledger nothing has yet filled. What is
-      owed is five decisions, not five `DELETE`s, and the register is where each belongs.
+- [ ] **`tool_result_blobs` ships its retention window at zero, and nobody chose zero** — [S].
+      What this row used to say — *"six tables still say `nothing bounds it`"* — is **false of the
+      current code**, and re-checked on 2026-09-15 before cutting it down: the phrase appears three
+      times in `durable/retention.py` and all three are meta-comments *about* the historical
+      wording (`:287`, `:292`, `:446`), never a register entry. Each of the six now states a
+      decision: `molecule_fingerprints` and `reaction_fingerprints` bounded by the corpus times the
+      definitions ever written with no runtime DELETE (`:501`, `:505`), `user_preferences` bounded
+      by its writer (`:506`), `store` bounded by `BoundedStoreBackend` (`:453`), and `predictions`
+      and `measurements` **unbounded and accepted**, each saying why (`:519`, `:523`). The five
+      decisions this row was opened to collect have been taken.
+
+      What survives is the one question it called "of a different kind", and it is smaller than the
+      row it is left in: `retention_tool_results_days` defaults to **0**
+      (`core/config/memory.py:125`), which is the same value as every other window that means "off",
+      so a deliberate uniformity is indistinguishable from an unconsidered default. Decide whether
+      a tool-result blob has a retention answer of its own, and if it does not, say so in the
+      register the way `predictions` does rather than by sharing a zero.
+      **Anchors:** `src/chemclaw/core/config/memory.py`, `src/chemclaw/durable/retention.py`.
 
 - [ ] **Postgres and Temporal are neither deployed nor owned** — [L]. The chart dials
       `chemclaw-temporal-frontend.temporal.svc:7233` and namespace `chemclaw`; there is no subchart
@@ -669,18 +633,32 @@ topic).
       `kg/graph.py::note_file_fingerprints`, `retrieval/vector_index.py::_needs_embedding`.
       Until it lands, `workers.background.replicas` stays 1 — the retirement half no longer gates
       it, this half does.
-- [ ] **The background worker is a singleton with no PDB, and the PDB is not the fix** — [M].
+- [ ] **A second background worker would diverge on its corpus view, not on its writes** — [M].
       `poddisruptionbudget.yaml` covers the front door alone and argues that correctly in the
       template: `minAvailable: 1` over a one-replica Deployment makes the pod un-evictable and
-      blocks every node drain forever, which is worse than no policy. So the row is not "add a PDB".
-      It is that core's background worker cannot safely run two replicas — the schedules, the
-      re-index and the sync jobs assume one holder — so a node drain ends whatever it was running
-      and Temporal re-delivers only after the activity's start-to-close timeout elapses.
-      What it needs is a distributed checkout lock so a second replica is safe, at which point a
-      `maxUnavailable: 1` PDB becomes meaningful. Until then the honest state is one replica, a
-      derived grace period long enough to drain (`chemclaw.workerGracePeriod`, shipped), and this
-      row. Raised by the 2026-08-27 deployment-monitoring review, which checked the PDB's argument
-      and found it sound; the singleton underneath it is the defect.
+      blocks every node drain forever, which is worse than no policy. That half stands
+      (`deploy/helm/chemclaw/templates/poddisruptionbudget.yaml`).
+
+      **The prescription this row used to carry is spent, checked 2026-09-15.** It said "what it
+      needs is a distributed checkout lock so a second replica is safe" — and that lock shipped:
+      `kg/git_writer.py:574`'s `_cluster_lock` is a Postgres advisory lock serialising submissions
+      to one remote across pods, `values.yaml:177-192` says in as many words that this reason is
+      closed, and `tests/test_datapath_review_db.py::test_the_submit_lock_names_the_thing_it_holds_a_connection_for`
+      holds it. Somebody working the row as written would build a lock that exists. Of the three
+      races it named, two are likewise closed by the chart's own note: the periodic jobs are
+      Temporal Schedules under `SKIP`, the ELN cursor has exactly one writer, retention re-checks
+      every predicate inside its own `DELETE`, and the result outbox claims rows with
+      `FOR UPDATE SKIP LOCKED`.
+
+      **What is actually left is `NoteReindexWorkflow`, and its blocker is a corpus view rather
+      than a lock** (`D-2026-08-27-what-a-second-background-worker-would-race-on`). Two pods hold
+      independent emptyDir knowledge checkouts, so they can disagree about what the corpus *is*
+      while neither writes anything the other conflicts with — which is the same root as the
+      `note_file_fingerprints` row below, where the fingerprint is `mtime_ns:size`
+      (`kg/graph.py:230`) and a fresh checkout changes it for every unchanged file. Work the two
+      together or not at all.
+      **Anchors:** `src/chemclaw/kg/graph.py`, `deploy/helm/chemclaw/values.yaml`,
+      `deploy/helm/chemclaw/templates/poddisruptionbudget.yaml`.
 
 - [ ] **A background-worker rollout that never becomes Ready is invisible until someone looks** —
       [S], the detection `8b23067` named as missing after measuring the review's proposed fix as
