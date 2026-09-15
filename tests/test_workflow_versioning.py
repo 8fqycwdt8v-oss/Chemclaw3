@@ -152,7 +152,15 @@ def test_every_durable_activity_is_registered_on_a_queue() -> None:
             if not isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
                 continue
             decorators = [ast.unparse(one) for one in node.decorator_list]
-            if not any(one.endswith("activity.defn") for one in decorators):
+            # `@activity.defn` and `@activity.defn(name="…")` both declare an activity, and the
+            # second form is what `durable/registry.py` documents as the way to override the
+            # name. Matching only the bare spelling made that form invisible to this scan: driven,
+            # `acknowledge_digest` — the live activity this guard exists for — rewritten as
+            # `@activity.defn(name="acknowledge_digest")` with `@durable_activity` removed left
+            # four files at 34 passed and the activity unregistered.
+            if not any(
+                one == "activity.defn" or one.startswith("activity.defn(") for one in decorators
+            ):
                 continue
             defined += 1
             if not any(one.startswith("durable_activity(") for one in decorators):

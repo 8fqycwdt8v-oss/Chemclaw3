@@ -611,8 +611,15 @@ _DISTINGUISHING = {"sites": "index", "points": "value", "conformers": "relative_
 def _grown(kind: str, calc_type: str, key: str, count: int) -> dict[str, int]:
     """Project one shape with `count` items under `key`, and count the rows per result-store table.
 
-    The items are copies of the fixture's own, re-identified so nothing dedupes them — the question
-    is the *shape* of the growth, and a fixture with one conformer cannot answer it.
+    The items are copies of the fixture's own, made distinct so the row counts below are about the
+    *shape* of the growth — a fixture with one conformer cannot answer it.
+
+    **The distinctness is not what stops a dedup, and the claim that it was is retracted.** This
+    said "re-identified so nothing dedupes them"; driven, deleting the re-identification entirely
+    still leaves this file at 58 passed, because `project` does not dedupe at all. So the premise
+    was never exercised and could not be: there is nothing to defeat. What the fields below do buy
+    is that the copies are distinguishable to a reader of a failure, and that a rename is loud —
+    see `_DISTINGUISHING`.
 
     **The re-identification used to write fields these items do not have.** It set `structure_id`,
     `conformer_id`, `id` and `atom_index`; the real keys are `index` on a fukui site, `value` on a

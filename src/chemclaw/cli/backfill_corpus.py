@@ -79,13 +79,24 @@ async def backfill(directory: Path, *, tags: list[str], dry_run: bool) -> tuple[
     # chemist cannot read yet — and that argument does not reach an operator command over a
     # directory of existing documents, where nobody is mid-turn and the wait is for the whole run.
     submitter = BatchingNoteWriter(default_writer(), settings.backfill_commit_batch_size)
-    # **The trailing flush is in a `finally`, because up to `batch_size - 1` notes are held in
-    # memory at every instant.** It shipped as a bare statement after the loop, so anything the
-    # `except` below does not catch — a `psycopg` error, a git failure, a `KeyboardInterrupt` on a
-    # long run — discarded the pending batch *after* `written` had already counted it and the log
-    # had already reported each note as written "(pending a batch)". A backfill is an operator
-    # command over a decade of documents; losing the tail silently and reporting it as written is
-    # the one failure mode that leaves nobody able to say which documents are missing.
+    # **The trailing flush runs on both exits, and only one of them may swallow it.** Up to
+    # `batch_size - 1` notes are held in memory at every instant, so the flush shipped as a bare
+    # statement after the loop lost them to anything the inner `except` does not catch — a git
+    # failure, a `psycopg` error, a `KeyboardInterrupt` — *after* `written` had counted them and
+    # the log had reported each as written "(pending a batch)".
+    #
+    # **The first repair put it in a `finally` with a blanket `except`, and that was worse.**
+    # Measured through the real CLI with a failing inner writer: the loop completed, the flush
+    # raised, the exception was logged and swallowed, and `main` printed `wrote 4 note(s)` and
+    # returned **0** with nothing in git — the exact "reporting it as written" failure the
+    # paragraph above exists to prevent, now on the *common* path (a push rejection, an auth
+    # failure, a hook). Pre-fix that case at least exited non-zero.
+    #
+    # So the two exits are separated. When the loop finished, the flush is the last thing that can
+    # fail and its failure **is** the run's failure: it propagates. When the loop is already
+    # unwinding, the flush is best-effort — the run is ending badly, the original cause is the one
+    # an operator needs, and a flush that also raises would replace it — but it is still attempted
+    # and still logged, because dropping the batch in silence is what started all of this.
     try:
         for path in sorted(p for p in directory.rglob("*") if p.is_file()):
             try:
@@ -105,18 +116,19 @@ async def backfill(directory: Path, *, tags: list[str], dry_run: bool) -> tuple[
                     "wrote %s from %s -> %s", note.id, path.name, reference or "(pending a batch)"
                 )
             written += 1
-    finally:
+    except BaseException:
         if not dry_run:
-            # Best-effort on the failure path: the run is already ending badly, and a flush that
-            # also raises would replace the original cause with this one. What must not happen is
-            # the batch being dropped in silence.
             try:
-                outcome = await submitter.flush()
+                await submitter.flush()
             except Exception:
-                logger.exception("the final batch could not be committed; its notes are not in git")
-            else:
-                if outcome.written:
-                    logger.info("committed the final batch -> %s", outcome.reference)
+                logger.exception(
+                    "the final batch could not be committed either; its notes are not in git"
+                )
+        raise
+    if not dry_run:
+        outcome = await submitter.flush()
+        if outcome.written:
+            logger.info("committed the final batch -> %s", outcome.reference)
     return written, skipped
 
 

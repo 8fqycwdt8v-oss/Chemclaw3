@@ -31,6 +31,7 @@ import pytest
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from chemclaw.deliver.message import Message
+from chemclaw.durable import connector_job
 from chemclaw.durable.deliver_message import (
     OutboundMessage,
     deliver_best_effort,
@@ -488,3 +489,50 @@ def test_an_attachment_a_workflow_builds_is_checked_where_it_can_be_caught(
 
     assert took == []
     assert not list(outbox.iterdir()) if outbox.exists() else True
+
+
+def test_a_sessionless_job_that_fails_still_tells_its_requester(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Driven through `_notify_failure`, because a call in a function is not a call on a path.
+
+    `_sending_functions` above resolves a `deliver_best_effort` call to the function that holds it
+    and says nothing about whether that function reaches it. Driven: putting the outbound copy back
+    inside `if job.session_id:` — the exact defect the failure-path guard's own docstring names,
+    "`_notify_failure` returns early when there is no session, which is exactly the Schedule- or
+    inbox-started run an outbound copy exists for" — left `tests/test_outbound_delivery.py` and
+    `tests/test_connector_job_workflow.py` at 29 passed. That is cause (g) in `tasks/lessons.md`,
+    existence standing in for reachability, in the guard written to close a reachability defect.
+
+    So the arm that matters is the sessionless one: a Schedule- or inbox-started run has no session
+    to fall back on, and the outbound copy is the only thing that tells anybody.
+    """
+    from chemclaw.durable.connector_job import ConnectorJobInput, ConnectorJobWorkflow
+
+    sent: list[OutboundMessage] = []
+
+    async def _record(message: OutboundMessage) -> list[str]:
+        sent.append(message)
+        return ["local"]
+
+    monkeypatch.setattr(connector_job, "deliver_best_effort", _record)
+
+    job = ConnectorJobInput(
+        connector="calc",
+        job="run_conformer_refinement",
+        workflow="ConformerRefinementWorkflow",
+        task_queue="connector-calc",
+        payload={},
+        rationale="why the tests run it",
+        requested_by="u-1",
+        session_id="",
+        correlation_id="corr-1",
+    )
+    asyncio.run(ConnectorJobWorkflow()._notify_failure(job, RuntimeError("the pod died")))
+
+    assert sent, (
+        "a job started by a Schedule or the inbox failed and told nobody: it has no session to "
+        "push back to, so the outbound copy is the whole of what reaches its requester"
+    )
+    assert sent[0].kind == "job-result" and sent[0].recipient == "u-1"
+    assert "the pod died" in sent[0].body

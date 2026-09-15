@@ -34,15 +34,21 @@ what repeats exist to survive. The aggregation is per `(task, arm)` and the repo
 because "delegation helped here and hurt there" is the finding a rate destroys and the one selective
 routing would need.
 
-**Two ways this comparison can flatter the arm, both of them conditioning on the treatment, and
-both now refused.** Dropping the tasks where the arm declined to delegate scores it only where it
-delegated — so a model that delegates *selectively* outscores one that delegates as a policy, which
-is a fact about the choice rather than about delegation. `MINIMUM_COMPARED_SHARE` bounds the
-denominator so a report over the minority raises instead of reading as a result. And compliance is
-symmetric: the baseline is refused if it delegated in *any* repeat, so the arm is required to have
-delegated in *every* one, with anything between reported as `partially_delegated` rather than
-credited. That second one shipped asymmetric, with `ArmAggregate.delegated_in` computed and thrown
-away.
+**This is an intention-to-treat comparison, and it took three tries to get there.** The arms are
+compared as *assigned*; how often the arm actually delegated is reported beside the result rather
+than deciding which tasks count. Both earlier shapes conditioned on the treatment and both
+flattered the instrument. Crediting an arm that delegated in at least one repeat while refusing a
+baseline that delegated in any was not symmetric; requiring every repeat and bounding the surviving
+share was worse — a Monte-Carlo puts the per-*repeat* delegation needed for an even chance of any
+report at ~87.4%, rising with the repeat count, so raising `MINIMUM_REPEATS` to steady the median
+guaranteed no median at all.
+
+Under ITT a repeat that did not delegate dilutes the effect toward zero, which is the conservative
+direction, and `TaskComparison.delegated_in`/`repeats` is what tells a reader how diluted. Nothing
+is dropped for the arm's *behaviour*: `undelegated` and `partially_delegated` are compliance
+reporting, not exclusions. The one drop that remains is `contaminated` — a baseline that delegated
+is not a baseline — and `incomplete`, which is a hole in the data rather than a selection on the
+result.
 
 This module runs no model. It is a pure comparison over runs somebody else recorded, which is what
 makes it testable without a gateway. **The run half does not exist yet, and that is more than a
@@ -73,15 +79,6 @@ BASELINE_ARM = "no-helper"
 #: name, which is the shape that let the deleted routing corpus report two numbers seven-fold apart
 #: as though each were a measurement.
 MINIMUM_REPEATS = 3
-
-#: The share of *eligible* tasks that must survive to the comparison for the report to mean
-#: anything. A report is a claim about delegation; a report over the minority of tasks where the
-#: arm happened to delegate is a claim about the arm's choice of when to delegate, which is a
-#: different question and is not what any caller reads it as.
-#:
-#: Two thirds rather than a majority: the drops this guards against are not random noise but a
-#: behaviour of the arm under test, so the bar has to be well clear of a coin flip to catch it.
-MINIMUM_COMPARED_SHARE: float = 2 / 3
 
 
 class ArmRun(BaseModel):
@@ -298,20 +295,33 @@ def compare_arms(
         if base.repeats < minimum_repeats or under_test.repeats < minimum_repeats:
             incomplete.append(task_id)
             continue
-        # Order matters: a run that is both contaminated and undelegated is reported as
-        # contaminated, because that is the more serious defect — the baseline is not a baseline.
+        # **The one drop, and the only one that is about the measurement rather than the result.**
+        # A baseline that delegated is not a baseline, so the pair compares delegation with
+        # delegation and averaging it in pulls every aggregate toward "no effect".
         if base.delegated_in:
             contaminated.append(task_id)
             continue
-        # Symmetric with the line above, which it was not: the baseline is refused if it delegated
-        # in *any* repeat, so the arm is required to have delegated in *every* one. Anything
-        # between is a mixture of two behaviours and is reported as such rather than credited.
+        # **The arm's own behaviour is reported, never a reason to drop the task.** This is an
+        # intention-to-treat comparison: the arms are compared as *assigned*, and how often the
+        # treatment was actually taken is a number beside the result rather than a filter in front
+        # of it. Both earlier shapes were selection effects on the treatment. Crediting an arm that
+        # delegated in at least one repeat while refusing a baseline that delegated in any was not
+        # symmetric and flattered the arm; requiring every repeat and bounding the surviving share
+        # was worse in a way a Monte-Carlo shows at once — it demands ~87.4% per-*repeat*
+        # delegation for even a 50/50 chance of producing a report, and gets *stricter* as repeats
+        # rise, so 20 tasks x 10 repeats at 96% delegation with delegation helping everywhere
+        # refuses to report at all. An instrument that is unusable at realistic compliance is not a
+        # conservative instrument.
+        #
+        # Under ITT a non-delegating repeat dilutes the effect toward zero, which is the
+        # conservative direction, and `delegated_in`/`repeats` on every comparison is what tells a
+        # reader how diluted. That also restores what this module's own docstring asks for:
+        # "delegation helped here and hurt there" over every task, including the ones the arm
+        # declined — which is exactly where a selective router's decision shows up.
         if not under_test.delegated_in:
             undelegated.append(task_id)
-            continue
-        if under_test.delegated_in < under_test.repeats:
+        elif under_test.delegated_in < under_test.repeats:
             partially_delegated.append(task_id)
-            continue
 
         scores.append(
             TaskScores(task_id=task_id, baseline=base.quality, augmented=under_test.quality)
@@ -335,25 +345,20 @@ def compare_arms(
         if wall_clock is not None:
             wall_clock_ratios.append(wall_clock)
 
-    # **The denominator is guarded, not just its emptiness.** `NoComparableTask` fired only on an
-    # empty set, so one surviving task produced a complete, confident-looking report. Driven over
-    # eight tasks where delegation genuinely helps on one and the arm declines the other seven:
-    # `compared: 1`, "helped everywhere, 60% cheaper, 33% faster". That is a selection effect, not
-    # a result — dropping the tasks where the arm chose not to delegate scores the arm only where
-    # it delegated, so a model that delegates *selectively* outscores one that delegates as a
-    # policy, and the two are not comparable at all. This module's own docstring indicts exactly
-    # that shape in the corpus it replaces.
-    eligible = len(comparisons) + len(contaminated) + len(undelegated) + len(partially_delegated)
-    shortfall = eligible and len(comparisons) < eligible * MINIMUM_COMPARED_SHARE
-    if not comparisons or shortfall:
+    # Empty only, and that is now the whole of it. A share bound over the *surviving* tasks was
+    # added to stop "helped everywhere, 60% cheaper" over one task of eight, and it did not: it
+    # counted only the tasks the arm declined, so an arm that instead crashed or timed out on the
+    # hard seven reproduced that headline verbatim with the guard green — and an arm that ran and
+    # *lost* on seven, completing 2 of 3 repeats each, did too, struck from the denominator by a
+    # repeat-count technicality. Nothing is dropped for the arm's behaviour any more, so there is
+    # no surviving-share to bound; `incomplete` is what is left, and it is a hole in the *data*
+    # rather than a selection on the result, reported beside the report as it always was.
+    if not comparisons:
         raise NoComparableTask(
-            f"{len(comparisons)} of {eligible} eligible tasks carried the comparison, below the "
-            f"{MINIMUM_COMPARED_SHARE:.0%} this report needs to mean anything: "
-            f"{len(contaminated)} contaminated (the baseline delegated), {len(undelegated)} "
-            f"undelegated (the arm did not), {len(partially_delegated)} partially delegated (the "
-            f"arm delegated in some repeats and not others), {len(incomplete)} incomplete (a "
-            f"missing arm, or fewer than {minimum_repeats} repeats). Scoring only where the arm "
-            "chose to delegate measures the choice rather than the delegation."
+            f"no task carried the comparison: {len(contaminated)} contaminated (the baseline "
+            f"delegated), {len(incomplete)} incomplete (a missing arm, or fewer than "
+            f"{minimum_repeats} repeats). A report over an empty set would read as 'no effect "
+            "anywhere'."
         )
 
     quality = compare_tool_utility(scores, higher_is_better=True)

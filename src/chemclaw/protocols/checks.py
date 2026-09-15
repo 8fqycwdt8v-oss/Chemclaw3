@@ -1087,9 +1087,12 @@ def run_checks(
     corpus never gave — so the lookup belongs with the caller that has the corpus, and
     `no_documented_failure` says so in as many words rather than implying a guarantee.
 
-    It runs at **both** stages, unlike every other protocol-only check: a structured ask already
-    names reagents and can already cite evidence, so a failure bearing on it is knowable before
-    there is a procedure — which is the moment it is cheapest to act on.
+    Both corpus checks run at **both** stages, unlike the protocol-only ones: a structured ask
+    already names reagents and can already cite evidence, so a failure bearing on it — and a
+    precedent the record already holds — are knowable before there is a procedure, which is the
+    moment they are cheapest to act on. (This said "it runs at both stages, unlike every other
+    protocol-only check" after `precedent_consulted` had joined it in `_REQUEST_STAGE`, which the
+    set's own comment ten lines below states.)
 
     `precedent` is the second input of that kind and arrives on the same terms, which is why the
     dispatch below is a mapping rather than a chain of identity tests: there is now a *class* of

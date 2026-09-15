@@ -1493,3 +1493,30 @@ def test_every_run_checks_caller_supplies_the_corpus_the_corpus_checks_need() ->
         f"{thin} call run_checks without the corpus those checks take as an argument, so they "
         "report 'no recorded failure bears on this design' over a lookup never made"
     )
+
+
+def test_the_precedent_check_runs_at_the_request_stage_too() -> None:
+    """The second half of `_REQUEST_STAGE`, which nothing drove.
+
+    `test_the_failure_check_runs_at_the_request_stage_too` holds `no_documented_failure`; nothing
+    held `precedent_consulted`. Driven: cutting `_REQUEST_STAGE` back to
+    `{"components_resolve", "no_documented_failure"}` left all 190 tests across the three protocol
+    files green while the precedent check silently stopped running on `structure_experiment_request`
+    — the stage `_REQUEST_STAGE`'s own comment calls "the moment it is cheapest to read".
+
+    A `note`, not a blocker, for the reason `precedent_consulted` is always a note: an offer the
+    chemist may decline is not a reason to refuse an ask.
+    """
+    design = ExperimentDesign(request=_request(reaction_smiles="CCO.CC(=O)O>>CCOC(C)=O"))
+    precedent = [UncitedPrecedent(id="ord-9f2", similarity=0.91, label="a near-identical run")]
+
+    verdicts = {
+        check.check_id: check for check in run_checks(design, stage="request", precedent=precedent)
+    }
+
+    assert not verdicts["precedent_consulted"].passed, (
+        "the precedent check did not run at the request stage, so an ask is graded without the "
+        "similar runs the record already holds"
+    )
+    assert "ord-9f2" in verdicts["precedent_consulted"].detail
+    assert verdicts["precedent_consulted"].severity == "note"

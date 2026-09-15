@@ -47,6 +47,7 @@ from pathlib import Path
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.logging import log_event, secret_env_names
+from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.kg.graph import invalidate_cache
 from chemclaw.kg.note import NoteError, parse_note
 from chemclaw.kg.record import NoteFile, NoteWrite, NoteWriter, WriteOutcome
@@ -1122,17 +1123,21 @@ class BatchingNoteWriter:
     string, which is why this is not a drop-in for the conversational path even leaving the product
     argument aside.
 
-    **`write` reports `written=True` for a note it accepts, and that is a deliberate reading of a
-    field whose usual meaning is narrower.** `record_note` gates
-    `chemclaw_notes_recorded_total` on `outcome.written` and documents the number as "a note
-    reached the graph" rather than "we tried". Returning `False` for a held note made that counter
-    count *commits*: at the shipped batch size a 10,000-note backfill moved it about 200 times, and
-    the notes landed by the trailing `flush()` — outside `record_note` entirely — moved it not at
-    all. An accepted note does reach the graph, so it is counted once, here. What is genuinely lost
-    is the narrower half of the field: a note byte-identical to what the tree already held is
-    indistinguishable from one that landed, because the batch cannot know which it was until it
-    commits and the counter has already fired. That is the honest trade and it is stated rather
-    than left in the metric.
+    **`write` reports `written=False` and the *flush* counts, because a batch cannot answer at
+    accept time and must not guess.** `record_note` gates `chemclaw_notes_recorded_total` on
+    `outcome.written` and documents the number as "a note reached the graph" rather than "we
+    tried". Returning `False` for a held note and nothing else made that counter count *commits* —
+    at the shipped batch size a 10,000-note backfill moved it about 200 times, and the notes landed
+    by the trailing `flush()`, outside `record_note` entirely, moved it not at all.
+
+    **Returning `True` at accept time was the obvious repair and is the inverse defect**, which is
+    worse: driven with an inner writer that raises on commit, nine accepted notes moved the counter
+    by 9 with **zero** notes in git, so a metric documented as "notes written into the knowledge
+    graph" counted notes that provably were not. So the count happens where the answer exists —
+    `flush()` increments by the batch's size once the inner write has returned. A note byte-
+    identical to what the tree already held is still indistinguishable from one that landed, which
+    is the narrower half of the field and the one genuine loss; a note that never reached git is
+    no longer counted at all.
     """
 
     def __init__(self, inner: NoteWriter, batch_size: int) -> None:
@@ -1150,10 +1155,10 @@ class BatchingNoteWriter:
         self._pending.append(write)
         if len(self._pending) >= self._batch_size:
             await self.flush()
-        # `written=True` for every accepted note, once — see the class docstring. The flush's own
-        # outcome is not returned here, because then the note that happened to fill the batch would
-        # be the only one this counter ever saw.
-        return WriteOutcome(reference="", written=True)
+        # `written=False` for every accepted note: this call has put nothing in git, and the class
+        # docstring has the measurement for why claiming otherwise is the worse error. `flush()`
+        # counts, once its inner write has returned.
+        return WriteOutcome(reference="", written=False)
 
     async def flush(self) -> WriteOutcome:
         """Commit and push everything held, as one write. A no-op when nothing is pending."""
@@ -1166,6 +1171,12 @@ class BatchingNoteWriter:
         outcome = await self._inner.write(
             NoteWrite(files=files, message=f"Add {len(batch)} backfilled note(s)")
         )
+        if outcome.written:
+            # Here rather than in `write`, because only this line knows the notes are in git.
+            # `record_note` cannot count them — it saw `written=False` for each, and the trailing
+            # `flush()` a caller makes never goes through it at all.
+            landed = len(batch)
+            record_metric(lambda m: m.increment("chemclaw_notes_recorded_total", landed))
         return outcome
 
 

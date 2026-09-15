@@ -131,7 +131,13 @@ def test_an_arm_that_never_delegated_is_reported_rather_than_credited() -> None:
     report = compare_arms(runs, arm=ARM)
 
     assert report.undelegated == ["inert"]
-    assert [c.task_id for c in report.comparisons] == ["real-a", "real-b"]
+    # **Reported, and still compared** — this is an intention-to-treat comparison, so the arm's own
+    # behaviour never decides which tasks count. Dropping "inert" would score the arm only where it
+    # chose to delegate, which measures the choice; keeping it dilutes the effect toward zero,
+    # which is the conservative direction, and `delegated_in` is what says how much.
+    assert [c.task_id for c in report.comparisons] == ["inert", "real-a", "real-b"]
+    inert = next(c for c in report.comparisons if c.task_id == "inert")
+    assert (inert.delegated_in, inert.repeats) == (0, MINIMUM_REPEATS)
 
 
 def test_a_task_missing_an_arm_is_incomplete_rather_than_absent() -> None:
@@ -331,18 +337,18 @@ def test_the_cost_axes_keep_the_midpoint_on_an_even_number_of_repeats() -> None:
     assert aggregate.wall_clock_seconds == 2.0
 
 
-def test_an_arm_that_delegated_in_some_repeats_is_not_credited_as_delegation() -> None:
-    """The asymmetry that flattered the arm, and the fact the report could not express.
+def test_an_arm_that_delegated_in_some_repeats_is_reported_with_its_compliance() -> None:
+    """Compliance is a number beside the result, never a filter in front of it.
 
-    The baseline is refused if it delegated in *any* repeat; the arm was credited if it delegated
-    in *at least one*. `ArmAggregate.delegated_in` is a count precisely because "delegated in one
-    repeat of three is a different fact from either extreme", and the comparator collapsed it to a
-    bool and threw it away — no report field carried compliance at all.
+    `ArmAggregate.delegated_in` is a count because "delegated in one repeat of three is a different
+    fact from either extreme and is the shape a behavioural arm actually produces". Two earlier
+    versions of this comparison threw that away: one collapsed it to `if not delegated_in` and
+    credited the task outright, the other required every repeat and dropped anything less. Both
+    conditioned on the treatment; the second also made the instrument refuse corpora a real run
+    produces (a Monte-Carlo puts the per-repeat delegation needed for an even chance of any report
+    at ~87.4%, rising with the repeat count).
 
-    Driven before the fix: an arm delegating in 1 of 3 repeats, that one run scoring 1.0 at 2,000
-    tokens and 20 s against 0.5 at 10,000 and 60 s for the two that did not, reported
-    `compared: 1`, `median_token_ratio: 1.0`, `verdict: no effect` — the single delegating run
-    averaged away and nothing saying compliance was a third.
+    So the task is compared and its compliance travels with it.
     """
     mixed = [
         *_runs("mixed", BASELINE_ARM, quality=0.5, tokens=10_000, seconds=60.0, delegated=False),
@@ -364,41 +370,51 @@ def test_an_arm_that_delegated_in_some_repeats_is_not_credited_as_delegation() -
             repeats=MINIMUM_REPEATS - 1,
         ),
     ]
-    runs = [*_pair("solid-a"), *_pair("solid-b"), *mixed]
 
-    report = compare_arms(runs, arm=ARM)
+    report = compare_arms([*_pair("solid"), *mixed], arm=ARM)
 
     assert report.partially_delegated == ["mixed"]
-    assert "mixed" not in [c.task_id for c in report.comparisons], (
-        "a task the arm delegated on a third of the time was scored as a delegation comparison"
-    )
     assert "mixed" not in report.undelegated, "it did delegate, so this is not that case"
-    assert all(c.delegated_in == c.repeats for c in report.comparisons), (
-        "every compared task must be fully compliant, mirroring the baseline's own requirement"
+    compared = next(c for c in report.comparisons if c.task_id == "mixed")
+    assert (compared.delegated_in, compared.repeats) == (1, MINIMUM_REPEATS), (
+        "a reader must be able to see that this task's result is one delegating run in three"
     )
 
 
-def test_a_report_over_the_minority_of_tasks_the_arm_chose_raises_rather_than_reporting() -> None:
-    """Conditioning on the treatment, which is the defect this whole module replaces.
+def test_an_arm_that_declines_or_fails_the_hard_tasks_cannot_report_that_it_helped() -> None:
+    """The selection effect, in the two shapes the bound that preceded this missed.
 
-    `NoComparableTask` fired only on an *empty* set, so one surviving task produced a complete,
-    confident-looking report. Driven over eight tasks where delegation genuinely helps on one and
-    the arm declines the other seven: `compared: 1`, `undelegated: [t2..t8]`, "helped everywhere,
-    60% cheaper, 33% faster". Dropping the tasks where the arm chose not to delegate scores the arm
-    only where it delegated — so a model that delegates *selectively* outscores one that delegates
-    as a policy, and the number is about the choice rather than about delegation.
+    A share bound over the *surviving* tasks was added to stop "helped everywhere, 60% cheaper,
+    33% faster" over one task of eight. It counted only the tasks the arm *declined*, so both of
+    these reproduced that headline with the guard green: an arm that crashed or timed out on the
+    hard seven (`incomplete`, excluded from the bound's denominator), and an arm that ran, lost
+    badly, and completed 2 of 3 repeats each (`incomplete` again, on a repeat-count technicality).
 
-    The share is asserted through its behaviour at the boundary rather than by naming the constant,
-    so moving `MINIMUM_COMPARED_SHARE` is a decision somebody takes, not a test that follows.
+    Under intention-to-treat there is nothing to bound, because nothing is dropped for the arm's
+    behaviour: a task the arm declined is compared and dilutes toward zero, and a task the arm lost
+    is compared and counts against it. Both arms of this test are the headline the old guard let
+    through.
     """
-    helped_once = list(
-        _pair("t1", base_quality=0.0, arm_quality=1.0, base_tokens=1000, arm_tokens=400)
-    )
+    helped_once = list(_pair("t1", base_quality=0.0, arm_quality=1.0, arm_tokens=400))
     declined = [run for index in range(2, 9) for run in _pair(f"t{index}", arm_delegated=False)]
 
-    with pytest.raises(NoComparableTask, match="measures the choice rather than the delegation"):
-        compare_arms([*helped_once, *declined], arm=ARM)
+    declining = compare_arms([*helped_once, *declined], arm=ARM)
 
-    # And the bound is a share, not a count: the same single compared task is fine when it is the
-    # only eligible one, because then nothing was selected away.
-    assert compare_arms(helped_once, arm=ARM).compared == 1
+    assert declining.compared == 8, "a task the arm declined is compared, not struck out"
+    assert declining.median_token_ratio is not None
+    assert declining.median_token_ratio > 0.4, (
+        "the cost win must be diluted by the seven tasks where nothing was delegated, not read "
+        "off the one task where it was"
+    )
+
+    lost = [
+        run
+        for index in range(2, 9)
+        for run in _pair(f"t{index}", base_quality=1.0, arm_quality=0.0, arm_tokens=9_000)
+    ]
+    losing = compare_arms([*helped_once, *lost], arm=ARM)
+
+    assert losing.compared == 8
+    assert [c.task_id for c in losing.comparisons if c.verdict == "hurt"], (
+        "seven tasks the arm lost must reach the report as losses"
+    )

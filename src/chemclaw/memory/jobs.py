@@ -134,18 +134,40 @@ def supported_from(reaction_ids: list[str], reactions: dict[str, OrdReaction]) -
     cluster whose anchor changes has become a different note by the id's own rule.
 
     **What it costs, stated rather than hidden.** The anchor is the smallest member id, not the
-    earliest or the most recent run, so this is not "when the pattern became knowable" — no
-    stable function of a growing set can be. A cluster whose anchor run is undated yields `None`
-    even when every other member carries a date; `Note.is_current` reads that as open-ended and
-    `digest._is_new` will not report it to a subscriber who already has a watermark. That is the
-    truthful answer for a corpus that cannot date the run this note is named after, and it is
-    bounded by `tests/test_memory.py::test_every_miner_dates_the_note_it_mints`, which asserts the
-    value each builder passes rather than the presence of the keyword.
+    earliest or the most recent run, so this is not "when the pattern became knowable" — no stable
+    function of a growing set can be.
+
+    **And anchoring alone was a coverage regression, which the first version of this fix stated as
+    a residual without measuring it.** `None` used to mean *every* member was undated; anchoring
+    made it mean *the anchor* was undated, however many members carried dates — so for a per-member
+    dating probability `p` over an `n`-member cluster the undated rate goes from `(1-p)^n` to
+    `(1-p)`. On a corpus where two runs in three state a date, a three-member cluster went from 4%
+    undated to 33%, and an undated note reaches no subscriber holding a watermark. That is a loss
+    in exactly the direction `D-2026-09-14-an-undated-note-is-not-news-every-hour` and this fix
+    exist to repair.
+
+    So the rule is two-tier, and the tiers are ordered by *stability* rather than by preference:
+
+    1. the anchor's own `performed_at`, which cannot move while the anchor does not; failing that,
+    2. the **earliest** dated member, which a cluster growing forward in time does not move either
+       — a later run joining leaves `min` alone, where `max` moved on every arrival.
+
+    `None` only when no member carries a date at all, which restores the old coverage. Tier 2 is
+    not fully stable — a member with an *earlier* date joining does move it — and that is a strict
+    improvement on a tier that is not reached at all, rather than a claim to have solved it.
     """
     if not reaction_ids:
         return None
     anchor = reactions.get(min(reaction_ids))
-    return anchor.performed_at if anchor is not None else None
+    if anchor is not None and anchor.performed_at is not None:
+        return anchor.performed_at
+    dated = [
+        reaction.performed_at
+        for reaction_id in reaction_ids
+        if (reaction := reactions.get(reaction_id)) is not None
+        and reaction.performed_at is not None
+    ]
+    return min(dated) if dated else None
 
 
 def _units(notes: list[Note], *, corpus_complete: bool) -> list[SynthesisUnit]:

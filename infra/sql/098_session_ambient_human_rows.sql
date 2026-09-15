@@ -56,16 +56,35 @@
 -- set in one transaction and Postgres refuses `CREATE INDEX CONCURRENTLY` inside a transaction
 -- block.
 --
--- So, the same escape hatch, and it costs nothing. **On a deployment whose `session_messages` is
--- already large or continuously written, build the index concurrently before deploying** —
+-- **Pre-building removes the build, not the wait, and the escape hatch 059 publishes is wrong
+-- about that.** 059 says a pre-built index makes its migration "a no-op" so "the deploy needs no
+-- window at all", and this file said the same until it was measured. `CREATE INDEX IF NOT EXISTS`
+-- opens the table with `ShareLock` **before** it checks whether the name is taken, so the lock
+-- wait is paid either way. Measured on this image (PostgreSQL 16.15), index already built, one
+-- open transaction holding `ROW EXCLUSIVE`:
+--
+--     SET lock_timeout='5s';
+--     CREATE INDEX IF NOT EXISTS ... ;
+--     Time: 5000.765 ms
+--     ERROR:  canceling statement due to lock timeout
+--
+--   pg_locks while waiting: relation | ShareLock | granted = f
+--
+-- which is the paragraph above happening exactly as it says — "the wait for the lock is what
+-- expires, not the work" — to the mitigation that paragraph then recommends.
+--
+-- So what pre-building actually buys is the ~0.5 s of build, and what a busy deployment needs is
+-- a moment with no in-flight write, or a raised `CHEMCLAW_PG_MIGRATION_LOCK_TIMEOUT_SECONDS` for
+-- the upgrade. Pre-build anyway if the table is large — it is free and it shortens the window the
+-- lock is held —
 --
 --     CREATE INDEX CONCURRENTLY IF NOT EXISTS session_messages_ambient_human_idx
 --         ON session_messages (session_id, message_shape, id)
 --         WHERE message_original IS NULL AND message->>'type' = 'human';
 --
 -- — outside any transaction, on the live database. The `IF NOT EXISTS` below then finds it and
--- does nothing, so the migration is a no-op and the deploy needs no window. Otherwise: apply this
--- in a maintenance window, or accept that a busy deployment may need the hook Job to retry.
+-- creates nothing. But plan for the lock either way: this is the hottest table in the schema and
+-- the hook Job self-heals only within its `backoffLimit: 3`.
 CREATE INDEX IF NOT EXISTS session_messages_ambient_human_idx
     ON session_messages (session_id, message_shape, id)
     WHERE message_original IS NULL AND message->>'type' = 'human';

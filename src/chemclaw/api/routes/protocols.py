@@ -334,9 +334,16 @@ async def post_revision(
     # precisely the "two halves of the surface would grade the same document differently depending
     # on who wrote it" this function's docstring exists to refuse.
     #
-    # Both lookups are awaited rather than threaded: each already offloads its own blocking read,
-    # and both answer `[]` instead of raising, so a corpus this deployment cannot reach costs a
-    # quieter check rather than a lost edit.
+    # Awaited rather than threaded, and **only one of the two offloads its own work** — this said
+    # "each already offloads its own blocking read" and that is false for the second.
+    # `recorded_failures` wraps `load_notes` in `asyncio.to_thread`; `uncited_precedent` calls
+    # `drfp_bitstring` — synchronous RDKit — on the loop before it awaits the store. Measured:
+    # 4.72 ms worst loop stall, 3.70 ms of it the fingerprint. That is two orders below the 3.2 s
+    # that made `diff_designs` twenty lines down worth a thread, and it is still loop time on a
+    # process that also serves every other chemist's SSE stream and both kubelet probes, so it is
+    # stated rather than left to be rediscovered. Both answer `[]` instead of raising — including
+    # on a value their own models refuse, since the reductions moved inside the guards — so a
+    # corpus this deployment cannot reach costs a quieter check rather than a lost edit.
     checks = run_checks(
         body.document,
         stage="protocol" if body.document.has_protocol else "request",

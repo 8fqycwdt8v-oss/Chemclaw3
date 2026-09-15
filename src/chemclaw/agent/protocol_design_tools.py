@@ -24,7 +24,7 @@ import logging
 import re
 from collections.abc import Sequence
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, computed_field
 
 from chemclaw.agent.authz import require_actor
 from chemclaw.agent.framing import defang
@@ -380,7 +380,23 @@ async def recorded_failures(design: ExperimentDesign) -> list[RecordedFailure]:
             exc,
         )
         return []
-    return [RecordedFailure(id=note.id, summary=observation_of(note)) for note in notes]
+    # **Inside the guard, because the reduction can raise too and the docstring above promises it
+    # cannot.** `RecordedFailure.id` is `Field(min_length=1)`, so a note the corpus holds with an
+    # empty id is a `ValidationError` out of a function two callers rely on never raising — and
+    # since `api/routes/protocols.post_revision` began calling this, such a value is a 500 on a
+    # chemist's edit rather than a quieter check. The lookup failing and the lookup returning
+    # something unusable are the same thing to a caller.
+    try:
+        return [RecordedFailure(id=note.id, summary=observation_of(note)) for note in notes]
+    except ValidationError as exc:
+        degraded(
+            logger,
+            "failure_memory",
+            "the corpus returned a failure record this check cannot read, so this design was "
+            "checked without it: %s",
+            exc,
+        )
+        return []
 
 
 async def uncited_precedent(design: ExperimentDesign) -> list[UncitedPrecedent]:
@@ -424,11 +440,26 @@ async def uncited_precedent(design: ExperimentDesign) -> list[UncitedPrecedent]:
             exc,
         )
         return []
-    return [
-        UncitedPrecedent(id=hit.id, similarity=hit.similarity, label=hit.label)
-        for hit in search.hits
-        if hit.id not in cited
-    ]
+    # Inside the guard for `recorded_failures`' reason, and this one is the reachable half:
+    # `Match.similarity` is an unconstrained float while `UncitedPrecedent.similarity` is
+    # `Field(ge=0.0, le=1.0)`, so a store returning `1.0000000000000002` — one float ulp from a
+    # perfectly ordinary exact match — or a `nan` raises out of a function whose docstring says it
+    # never does, and the route turns that into a lost edit.
+    try:
+        return [
+            UncitedPrecedent(id=hit.id, similarity=hit.similarity, label=hit.label)
+            for hit in search.hits
+            if hit.id not in cited
+        ]
+    except ValidationError as exc:
+        degraded(
+            logger,
+            "precedent_lookup",
+            "the reaction index returned a hit this check cannot read, so this design was "
+            "checked without it: %s",
+            exc,
+        )
+        return []
 
 
 @tool
