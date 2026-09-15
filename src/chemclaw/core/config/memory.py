@@ -236,9 +236,27 @@ class MemorySettings(BaseSettings):
     # at the worst misses and asks what they have in common — and a hundred rows is not read, it is
     # scrolled past while spending the model's context.
     calc_outliers_max_results: int = Field(default=25, ge=1)
-    # Standing-query digests (gap IDEA-1). Off by default: it needs the `subscriptions` table
-    # (migration 017), and a deployment nobody has subscribed on would just run an empty sweep.
-    digest_enabled: bool = False
+    # Standing-query digests (gap IDEA-1). **On by default since
+    # `D-2026-09-15-a-watch-that-nothing-evaluates-is-a-promise-a-deployment-cannot-keep`, and both
+    # reasons it was off had expired.** The first — "it needs the `subscriptions` table (migration
+    # 017)" — is satisfied by any deployment that has migrated, which is all of them. The second —
+    # "a deployment nobody has subscribed on would just run an empty sweep" — was answered in code
+    # rather than in config: `digest._match_corpus` returns before `load_notes` when there are no
+    # subscriptions, and that early return's own comment says it exists "because a deployment with
+    # no subscriptions was paying for it in full". What is left with no subscribers is one daily
+    # workflow that does a single indexed read and stops.
+    #
+    # `D-2026-08-27-a-digest-nobody-can-read-is-not-delivered` is the condition that had to hold
+    # first, and it does: turning this on while nothing could read a digest *lost* matches, because
+    # the acknowledgement advanced a watermark `_is_new` can never re-qualify. `GET /digests` and
+    # the UI's `/review` card are that reader.
+    #
+    # What made this worth changing rather than leaving as an opt-in: `watch_for` is an agent tool
+    # a chemist reaches by asking, it writes the row, and it answers "you'll be told when something
+    # new matches". Off, nothing ever evaluated that row and nothing anywhere said so — so the one
+    # proactive capability in this system reported success and did nothing, on every shipped
+    # deployment. A deployment may still turn it off, and `watch_for` now says so when it has.
+    digest_enabled: bool = True
     digest_schedule_minutes: float = Field(default=1440.0, gt=0)
     digest_timeout_seconds: float = Field(default=300.0, gt=0)
     # Uploaded working files (gap AGT-3). Bounded in both directions: one oversized upload must

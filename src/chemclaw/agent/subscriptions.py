@@ -168,6 +168,14 @@ async def watch_for(query: str, note_type: str | None = None) -> str:
         query: What to watch for (key terms, matched over note id, tags and body).
         note_type: Optionally narrow to one merged note type, e.g. "playbook" or "campaign".
 
+    **On a deployment that has turned digests off, this says so.** The watch is still saved — the
+    row is what a deployment turning them back on would deliver against, and `list_watches` still
+    shows it — but the sentence a chemist reads must not be a promise nobody will keep.
+    `durable/schedules.py` creates the `digest` Schedule only `if settings.digest_enabled`, so with
+    it off nothing ever evaluates a subscription and nothing anywhere says so: the tool wrote the
+    row, answered "you'll be told", and that was the end of it
+    (`D-2026-09-15-a-watch-that-nothing-evaluates-is-a-promise-a-deployment-cannot-keep`).
+
     Returns:
         Confirmation. Saving the same watch twice is a no-op, not a second notification.
     """
@@ -175,7 +183,15 @@ async def watch_for(query: str, note_type: str | None = None) -> str:
     await add(owner, query, note_type)
     # The confirmation echoes the model's own argument, so it is the same untrusted span
     # `list_watches` neutralises — it simply reaches the prompt a turn earlier.
-    return f"Watching for {defang(query)!r}; you'll be told when something new matches."
+    watched = defang(query)
+    if not settings.digest_enabled:
+        return (
+            f"Saved a watch for {watched!r}, but this deployment has standing-query digests "
+            "turned off (CHEMCLAW_DIGEST_ENABLED), so nothing will evaluate it and nobody will be "
+            "told. Say so plainly: the watch is recorded and will start reporting if an operator "
+            "turns digests on."
+        )
+    return f"Watching for {watched!r}; you'll be told when something new matches."
 
 
 @tool

@@ -765,6 +765,43 @@ class Note(TemporalWindow):
             seen[(relation.rel, relation.to)] = relation
         return list(seen.values())
 
+    def headline(self, limit: int = 120) -> str:
+        """The note's first line of prose, for a surface that can show one line and not a note.
+
+        **There is no `title` field and this is deliberately not one.** A title would be a second
+        place to say what a note is about, settable independently of the body and therefore able to
+        disagree with it — and every existing note would need one backfilled. The first non-empty
+        body line already *is* the headline in every note this corpus holds: a playbook opens with
+        the rule as a heading ("## Degas properly for Pd(0), or accept a bimodal yield
+        distribution"), a campaign with a one-sentence summary. Deriving it cannot drift from the
+        note, and it needs no migration.
+
+        Written because `durable/digest.py` had nothing else to send. A digest names the notes that
+        matched a standing query, and it named them by **id** — so the one proactive surface this
+        system has told a chemist `playbook-aee3d30407cc` and left them to go and look. The job
+        already holds the parsed note, so the line costs nothing to carry.
+
+        Leading `#` marks are stripped because they are the file's formatting rather than the
+        sentence, and `[[wikilinks]]` are flattened to their target text so a headline rendered
+        outside the graph does not show its brackets. Empty for a note with no body, which a caller
+        shows as the id — there is nothing better to say and inventing one would be worse.
+
+        Args:
+            limit: Longest headline to return; a longer first line is cut on a word boundary and
+                given a trailing ellipsis, so a surface can size a row without re-trimming.
+
+        Returns:
+            One line, never containing a newline, at most `limit` characters.
+        """
+        for raw in self.body.splitlines():
+            line = strip_links(raw).lstrip("#").strip()
+            if line:
+                if len(line) <= limit:
+                    return line
+                head = line[:limit].rsplit(" ", 1)[0] or line[:limit]
+                return f"{head}…"
+        return ""
+
 
 class NoteError(ChemclawError):
     """A note file could not be parsed or failed schema validation."""
