@@ -268,7 +268,7 @@ class TemplateWorkflow:
 
         for step in run.template.steps:
             try:
-                result = await self._run_step(step, scope, identity, timeout)
+                result = await self._run_step(step, scope, identity, timeout, run.template.name)
             except BaseException as exc:
                 # The completion push-back below had no counterpart, so a template that failed at
                 # step 3 of 5 told the chemist nothing at all: the workflow ended, the session
@@ -410,9 +410,19 @@ class TemplateWorkflow:
             )
 
     async def _run_step(
-        self, step: Any, scope: dict[str, Any], identity: StepIdentity, timeout: timedelta
+        self,
+        step: Any,
+        scope: dict[str, Any],
+        identity: StepIdentity,
+        timeout: timedelta,
+        template: str,
     ) -> Any:
-        """Dispatch one step on its kind, with its references already substituted."""
+        """Dispatch one step on its kind, with its references already substituted.
+
+        `template` is carried for one consumer — the prompt-truncation counter's label on an
+        `agent` step — and is deliberately not read to decide anything a step *does*. See
+        `AgentStepInput.template`.
+        """
         # Both dispatched activities beat while they wait (`durable/heartbeat.beating`), so both
         # carry the timeout that beat is derived from. Without it `start_to_close_timeout` was the
         # only liveness signal a step had, and a worker killed mid-step was indistinguishable from
@@ -457,6 +467,8 @@ class TemplateWorkflow:
                     # correlation id — so without this a two-`agent`-step template would book the
                     # second step's spend over the first's and report half of what it cost.
                     step_id=step.id,
+                    # Labels the truncation counter below and nothing else.
+                    template=template,
                 ),
                 start_to_close_timeout=timeout,
                 schedule_to_start_timeout=queue_wait_timeout(),

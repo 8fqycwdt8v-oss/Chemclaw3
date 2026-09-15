@@ -28,6 +28,7 @@ from temporalio.client import WorkflowExecutionStatus
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
+from chemclaw.agent.template_surface import run_ceiling_problems
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.turn_signals import JobSignal
@@ -768,7 +769,7 @@ def test_only_the_agent_step_carries_the_narrowed_retry(monkeypatch: pytest.Monk
     async def _dispatch() -> None:
         for step in template.steps:
             await template_job.TemplateWorkflow()._run_step(
-                step, {}, identity, timedelta(seconds=60)
+                step, {}, identity, timedelta(seconds=60), template.name
             )
 
     asyncio.run(_dispatch())
@@ -1338,3 +1339,95 @@ def test_the_gate_and_the_launcher_share_one_definition_of_resolving(
     monkeypatch.setattr(template_surface, "step_problems", _fake_rule)
     assert registry.unrunnable_reason(_template()) == "  - the shared rule spoke"
     assert calls == ["probe"]
+
+
+# --- the run ceiling has to cover the procedure, not one step of it ------------------------------
+
+
+def _job_steps(count: int) -> list[dict[str, Any]]:
+    """`count` `job` steps plus the `agent` step every shipped template ends with."""
+    steps: list[dict[str, Any]] = [
+        {"id": f"j{i}", "kind": "job", "job": "rank_species", "arguments": {}} for i in range(count)
+    ]
+    return [*steps, {"id": "report", "kind": "agent", "prompt": "sum it up"}]
+
+
+def test_a_template_that_cannot_finish_inside_the_run_ceiling_is_refused() -> None:
+    """The bound `core/config` cannot state, because it cannot see `data/templates/`.
+
+    `_the_template_run_ceiling_covers_one_step` checks the run ceiling against the longest *single*
+    step — the honest machine-checkable floor for an object holding no YAML. Measured on the
+    shipped defaults, one `job` step is 39,330 s against a run ceiling of 45,330 s, so that
+    validator passes and **two** of them in one file miss by 33,330 s.
+
+    What the gap costs is why this is a gate and not a note: a workflow *execution* timeout is not
+    delivered to workflow code, so `TemplateWorkflow`'s `except BaseException -> _notify_failure`
+    never runs. No failure row, no push-back, nothing on the session stream — the run simply stops.
+    Every other way a template can fail says so somewhere.
+    """
+    problems = run_ceiling_problems(_template(steps=_job_steps(2)))
+
+    assert len(problems) == 1
+    assert "cannot finish inside template_run_timeout_seconds" in problems[0]
+    # The arithmetic, not just the verdict: an operator reading this has to know which step to
+    # shorten, and "the template is too long" is unactionable over a procedure with five of them.
+    assert "j0=39,330s" in problems[0]
+    assert "j1=39,330s" in problems[0]
+
+
+def test_one_job_step_still_fits_so_the_gate_is_not_simply_refusing_job_steps() -> None:
+    """The control arm. Seven of the nine shipped templates have a `job` step and must still run."""
+    assert run_ceiling_problems(_template(steps=_job_steps(1))) == []
+
+
+@pytest.mark.parametrize("name", sorted(registry.discovered()))
+def test_every_shipped_template_fits_this_deployments_run_ceiling(name: str) -> None:
+    """Latent rather than live, which is exactly when a bound is worth adding.
+
+    No shipped template has two `job` steps — the catalogue measures 2,700 s to 41,130 s against
+    45,330 s — so this passes today and is here for the first template that deepens one. Per
+    template rather than over the set, so a failure names the file.
+    """
+    assert run_ceiling_problems(registry.discovered()[name]) == []
+
+
+def test_the_launcher_refuses_a_run_the_ceiling_cannot_hold_before_anything_is_queued() -> None:
+    """The gate's answer and the launcher's are one function, so they cannot drift apart.
+
+    `unrunnable_reason` already refused a template whose steps do not *resolve* at this deployment.
+    Timing is the same kind of fact — a deployment property that makes the launch pointless — and
+    it fails more quietly, so it is the better of the two to catch before a workflow id exists.
+    """
+    blocked = registry.unrunnable_reason(_template(steps=_job_steps(2)))
+
+    assert "cannot finish inside template_run_timeout_seconds" in blocked
+
+
+def test_the_config_floor_and_the_template_gate_read_one_step_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two readers, one definition — the property that keeps the two bounds from disagreeing.
+
+    `core/config` asks this for the *maximum* (does one step fit?) and `run_ceiling_problems` for
+    the *sum over a file's steps* (does the procedure fit?). Both questions, one arithmetic.
+
+    Checked by moving the setting the `job` ceiling is built from and watching the gate's answer
+    move with it, rather than by asserting a transcribed number — the count of post-child steps in
+    that sum was six, then it was not, and a test quoting the total would have gone stale with it.
+    """
+    ceilings = settings.template_step_ceilings()
+    assert set(ceilings) == {"tool", "agent", "job"}, "a step kind sized nowhere counts as free"
+    before = ceilings["job"][0]
+    one_job = _template(steps=_job_steps(1))
+    assert run_ceiling_problems(one_job) == []
+
+    monkeypatch.setattr(
+        settings,
+        "connector_job_timeout_seconds",
+        settings.connector_job_timeout_seconds + settings.template_run_timeout_seconds,
+    )
+
+    # The gate now refuses the same file, which is only possible if it is reading the same
+    # definition the config validator does rather than a second copy of the arithmetic.
+    assert settings.template_step_ceilings()["job"][0] > before
+    assert run_ceiling_problems(one_job) != []

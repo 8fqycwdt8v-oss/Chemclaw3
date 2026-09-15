@@ -298,9 +298,23 @@ def unrunnable_reason(template: Template) -> str:
     Returns:
         The problems, one per line, or `""` when every step resolves.
     """
-    from chemclaw.agent.template_surface import TemplateSurface, step_problems
+    from chemclaw.agent.template_surface import (
+        TemplateSurface,
+        run_ceiling_problems,
+        step_problems,
+    )
 
-    problems = step_problems(template, TemplateSurface.resolve(with_signatures=False))
+    # Two questions, and the second is not about the surface at all. `step_problems` asks whether
+    # the steps resolve here; `run_ceiling_problems` asks whether this deployment's
+    # `template_run_timeout_seconds` can hold them. Both are deployment facts and both make the
+    # launch pointless, but they fail differently: an unresolvable step fails the run loudly some
+    # minutes in, while a procedure that outlives the run ceiling is terminated by Temporal
+    # *without its workflow code running* — no failure row, no push-back, nothing on the session
+    # stream. The quieter one is the better reason to refuse before anything is queued.
+    problems = [
+        *step_problems(template, TemplateSurface.resolve(with_signatures=False)),
+        *run_ceiling_problems(template),
+    ]
     return "\n".join(f"  - {problem}" for problem in problems)
 
 

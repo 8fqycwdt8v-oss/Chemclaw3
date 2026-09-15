@@ -1190,6 +1190,36 @@ Both change what a `Component` is, so this wants its own ADR and its own measure
 partially-structured reaction does to retrieval — not a patch to `_smiles`. Measured and declared
 by `make live-data`; see `D-2026-08-18-a-corpus-is-not-reachable-because-it-is-on-disk`.
 
+## A failed template run restarts at step 1, and the steps it already ran are recorded unread
+
+`failed_template_record` (`durable/template_job.py`) writes a `job_records` row whose `result` is
+`{"steps": completed}`, and its docstring says why: *"A five-step procedure that died at step four
+ran four real steps, and discarding them would lose the work while recording only the failure."*
+**Nothing reads it back.** `scope` and `results` are rebuilt empty on every execution, and
+`ALLOW_DUPLICATE_FAILED_ONLY` means a relaunch is a fresh execution of the same id — so the work is
+kept as a *record* and redone as *work*.
+
+**Deliberately not now, and the reason is a measurement rather than a preference.** A `tool` or
+`job` step re-runs through `science/calc/store.cached_compute`, so D-011 makes most of a retry a
+cache hit rather than a recompute — the expensive half of a re-run is already free. What is *not*
+cached is the `agent` step, whose tokens are re-paid in full, and `agent_step_max_attempts` is 1
+(`D-2026-08-12`'s argument: a retried agent step re-runs its side effects), so an agent step is
+also the likeliest place a run dies. Every shipped template has exactly one and it is always last —
+so today the step that would be resumed *is* the step that failed, and resume buys nothing at all.
+
+**Trigger.** A template whose `agent` step is not last, or a deployment with failed runs to count.
+What is owed first is that count: over `job_records` rows with `state='failed'`, which step id they
+died at and what the completed steps cost. A resume built before it is a mechanism whose only
+caller is its own test — the shape `reject_widening` was deleted for.
+
+**And the design constraint, so it is not rediscovered:** loading prior results into `scope` is a
+database read, so it cannot happen in workflow code; it is an activity whose result enters history,
+which is also what keeps replay deterministic.
+
+Anchors: `durable/template_job.py::failed_template_record` and the `scope` rebuild at the top of
+`TemplateWorkflow.run`; `science/calc/store.cached_compute`;
+`D-2026-09-15-a-bound-that-stops-at-the-seam-is-not-a-bound` (which declines it and says why).
+
 ## Template step roles cross the durable boundary on an unsigned payload
 
 `durable/template_activities.py::_acting_as` binds `StepIdentity.roles` — the requester's real role

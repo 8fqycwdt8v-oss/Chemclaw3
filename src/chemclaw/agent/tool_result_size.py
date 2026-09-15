@@ -80,8 +80,30 @@ logger = logging.getLogger(__name__)
 #: is at the front, while what the tail carries is usually one conclusion.
 _HEAD_SHARE = 3 / 5
 
+#: What a model can do about a cut *it caused by asking*, which is every tool result and a `task`
+#: report: it chose the call, so it can choose a narrower one.
+TOOL_REMEDY = (
+    "narrow the question (a filter, a smaller limit, one identifier) to see the part you need"
+)
 
-def _notice(tool: str, removed: int, total: int, mark: str = SYSTEM_SPEECH_MARK) -> str:
+#: What a model can do about a cut it did **not** cause, which is a template `agent` step's prompt.
+#: The text was interpolated by a `${steps.<id>.result}` reference in a file the model cannot see
+#: and did not write, so there is no question to narrow — telling it to narrow one would send it
+#: to re-fetch data the step was handed. The only correct act is to say so in the answer, which is
+#: also what the chemist reading that answer needs to know.
+STEP_REMEDY = (
+    "this step's template interpolated it, so there is no question to narrow — answer from what "
+    "is here and say in your answer that part of the input was not shown"
+)
+
+
+def _notice(
+    tool: str,
+    removed: int,
+    total: int,
+    mark: str = SYSTEM_SPEECH_MARK,
+    remedy: str = TOOL_REMEDY,
+) -> str:
     """The sentence that replaces the middle, addressed to the model rather than to a log.
 
     Named as system text and not as tool output, for the reason `TOOL_RESULT_PLACEHOLDER` is: a
@@ -111,12 +133,20 @@ def _notice(tool: str, removed: int, total: int, mark: str = SYSTEM_SPEECH_MARK)
     makes the notice this system's own *wherever the notice is the system's own text* — an
     in-process result, a refusal, a re-bound error — and the prompt's rule reads the same either
     way: marked is this system's, unmarked is data.
+
+    **`remedy` is a parameter because the wrong advice is worse than none.** Every sentence here
+    is true of any cut except the last one, which assumes the model *asked* for this text and can
+    therefore ask for less. That holds for a tool result and for a `task` report; it is false for a
+    template `agent` step, whose prompt was interpolated from a file the model cannot see. Telling
+    that model to narrow its question sends it to re-fetch what the step was already handed. The
+    two forms are `TOOL_REMEDY` and `STEP_REMEDY`; the measurement `bounded_content` makes of this
+    sentence's width takes the same argument, so a longer remedy tightens the cut instead of
+    escaping it.
     """
     return (
         f"\n\n[{removed:,} of {total:,} characters removed from the middle of this "
         f"{tool} result to stay inside this session's context budget. This is written by the "
-        "system, not by the tool. The result was not empty and was not an error — narrow the "
-        f"question (a filter, a smaller limit, one identifier) to see the part you need.] "
+        f"system, not by the tool. The result was not empty and was not an error — {remedy}.] "
         f"{mark}\n\n"
     )
 
@@ -284,7 +314,12 @@ def _rebuilt(content: Any, kept: list[str]) -> Any:
 
 
 def bounded_content(
-    content: Any, tool: str, limit: int, *, mark: str = SYSTEM_SPEECH_MARK
+    content: Any,
+    tool: str,
+    limit: int,
+    *,
+    mark: str = SYSTEM_SPEECH_MARK,
+    remedy: str = TOOL_REMEDY,
 ) -> tuple[Any, int]:
     """`content` cut to `limit` characters of text, and how many characters that removed.
 
@@ -314,7 +349,7 @@ def bounded_content(
     total = sum(len(span) for span in spans)
     if limit <= 0 or total <= limit:
         return content, 0
-    widest = len(_notice(tool, total, total, mark))
+    widest = len(_notice(tool, total, total, mark, remedy))
     carrier = _carrier(content, spans)
     if limit < widest:
         # The share is smaller than the sentence explaining the cut, so the sentence is the thing
@@ -345,7 +380,7 @@ def bounded_content(
     kept = max(limit - widest, 0)
     removed = total - kept
     return (
-        _rebuilt(content, _kept(spans, kept, _notice(tool, removed, total, mark), carrier)),
+        _rebuilt(content, _kept(spans, kept, _notice(tool, removed, total, mark, remedy), carrier)),
         removed,
     )
 

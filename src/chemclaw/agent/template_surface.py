@@ -36,6 +36,7 @@ from chemclaw.agent.profiles import registered_profile_names
 from chemclaw.connectors.registry import discovered as discovered_connectors
 from chemclaw.connectors.registry import enabled as enabled_connectors
 from chemclaw.connectors.registry import server_tools_module
+from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import registered_tools
 from chemclaw.templates.manifest import AgentStep, JobStep, Template, ToolStep
 
@@ -254,6 +255,54 @@ def step_problems(template: Template, surface: TemplateSurface | None = None) ->
                 )
             problems.extend(write_tool_problems(template, step, tools, known_profile))
     return problems
+
+
+def run_ceiling_problems(template: Template) -> list[str]:
+    """Check that this deployment's run ceiling covers every step this template declares.
+
+    **The bound `core/config` cannot state, and the gap between the two is where a run dies
+    silently.** `_the_template_run_ceiling_covers_one_step` checks `template_run_timeout_seconds`
+    against the *longest single step*, because a `Settings` object cannot see `data/templates/` and
+    the honest machine-checkable floor is therefore "one step fits". Measured on the shipped
+    defaults, one `job` step's ceiling is 39,330 s against a run ceiling of 45,330 s — so the
+    validator passes and **two** `job` steps in one file do not fit, by 33,330 s.
+
+    What that costs is the reason this is a gate rather than a note. A workflow *execution* timeout
+    is not delivered to workflow code, so `TemplateWorkflow`'s `except BaseException ->
+    _notify_failure` never runs: the chemist is told nothing on the session stream, no failure row
+    is written, and the connector child is terminated with its parent before it can write its own.
+    The run just stops. Every other way a template can fail says so somewhere.
+
+    No shipped template has two `job` steps, so this is latent rather than live — which is exactly
+    when a bound is worth adding, because the first template that deepens one is the one that finds
+    out. It is the sum and not the max for the same reason: steps run strictly in sequence
+    (`durable/template_job.py` is one `await` per step, no fan-out), so the procedure's floor is
+    what its steps add up to.
+
+    Read by both `make template-validate` and `registry.unrunnable_reason`, so a file that cannot
+    complete is refused at the gate *and* refused at launch rather than started and abandoned.
+
+    Args:
+        template: The template to size, steps and all.
+
+    Returns:
+        One problem line when the run ceiling cannot hold the declared steps, or `[]`.
+    """
+    ceilings = settings.template_step_ceilings()
+    # `KeyError` rather than a default: a step kind nobody sized here would otherwise be counted as
+    # free, which is the silent direction. `template_step_ceilings` says so from the other side.
+    needed = sum(ceilings[step.kind][0] for step in template.steps)
+    if needed <= settings.template_run_timeout_seconds:
+        return []
+    worst = ", ".join(f"{step.id}={ceilings[step.kind][0]:,.0f}s" for step in template.steps)
+    return [
+        f"template {template.name!r} declares steps that cannot finish inside "
+        f"template_run_timeout_seconds={settings.template_run_timeout_seconds:,.0f}: they may take "
+        f"{needed:,.0f}s in total ({worst}). A run that outlives that ceiling is terminated by "
+        "Temporal without its workflow code running, so the chemist is told nothing and no failure "
+        "row is written. Raise template_run_timeout_seconds above the total, or shorten the "
+        "procedure."
+    ]
 
 
 def write_tool_problems(

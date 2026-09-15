@@ -100,7 +100,24 @@ returns a job id; poll it with `get_durable_job_status`.
 
 `make template-validate` checks every template before it ships: unique step ids, references that
 resolve, tools that exist, profiles that exist, declared write tools that exist and actually write,
-and no forward references.
+and no forward references. It also checks that the **run** can finish the steps the file declares —
+`template_run_timeout_seconds` against the sum of the per-kind step ceilings — and
+`unrunnable_reason` asks the same question again at launch, so a procedure that cannot complete is
+refused before a workflow id exists rather than terminated hours later. That second check is not
+redundant with `core/config`'s: a `Settings` object cannot see this directory, so it can only
+require that *one* step fits, and one `job` step is 39,330 s against a run ceiling of 45,330 s.
+
+## What an `agent` step is handed
+
+A step's prompt is cut to `agent_max_tool_result_chars` at the model's edge
+(`durable/template_activities.bounded_prompt`), head and tail, with a notice saying so in this
+system's own marked words. The chat path's cap does not reach here — `bound_tool_results` is an
+entry of `tool_call_middleware`, and a `tool` step runs through `invoke_governed`, which folds the
+governance chain without the three entries that exist to serve a model. So a `${steps.<id>.result}`
+reference to an oversized result used to arrive whole: measured, 245,700 characters against a
+60,000 ceiling, and unreclaimable, because compaction's two edits are for history and a step has
+none. Reference a *field* of a large result (`${steps.ranking.result.smiles}`) rather than all of
+it when you can — `chemclaw_template_prompt_truncated_total` names the template when you have not.
 
 ## Versioning
 

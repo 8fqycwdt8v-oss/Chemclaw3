@@ -567,6 +567,17 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_tool_results_truncated_total": (
         "Tool results cut to agent_max_tool_result_chars before the model read them, by tool."
     ),
+    # The same cut one seam over, and a **separate** counter because the fix is different. A
+    # truncated tool *result* is a tool answering too broadly, and the remedy is that tool's own
+    # ceiling. A truncated template *prompt* is a `${steps.<id>.result}` reference interpolating
+    # more than a model can read, and the remedy is the template — a narrower step, or a field
+    # path instead of the whole result. Folding them into one series would ask an operator to tell
+    # those two apart from a label that names neither.
+    "chemclaw_template_prompt_truncated_total": (
+        "Template agent-step prompts cut to agent_max_tool_result_chars before the step's model "
+        "read them, by template. A rate above zero means a step is interpolating a result too "
+        "large to read: narrow the step, or reference a field of the result rather than all of it."
+    ),
     # The counter for everything this codebase does *deliberately* and invisibly: catch, log a
     # warning, continue with less. Measured on `391b6ec^`: 41 such handlers across 34 modules, and
     # exactly 4 of them counted anything (`api/routes/turns.py`, `api/state.py`,
@@ -1010,6 +1021,11 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # string a caller invented (`agent/tool_result_size.py` reads the request's tool name, which is
     # the one the graph dispatched).
     "chemclaw_tool_results_truncated_total": ("tool",),
+    # A template's own name, which is its *filename* in `data/templates/` — so the label set is
+    # bounded by what a deployment ships and enables, never by a string a caller supplies. That is
+    # the same bound as `connector` above, arrived at one layer up: a chemist can choose to run a
+    # template and cannot choose to invent one.
+    "chemclaw_template_prompt_truncated_total": ("template",),
     # A retriever's own `name`, and the bound is the same kind as `connector`: a source is a
     # registry entry a deployment activates, never a string a caller supplies. The shipped set is
     # the knowledge graph, the lexical and dense indexes, and the fingerprint store.

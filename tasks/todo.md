@@ -1014,3 +1014,54 @@ analytics and the hazards are judgment over the chemistry and stay the model's. 
 `OptimizationProblem` carries none anywhere, and `quantities_are_plausible` reads *setpoints* rather
 than a factor's levels, so nothing downstream catches a temperature factor whose 80 might be °C or
 mol%. `notes` says so per parameter; it is the one gap this translation cannot close.
+
+## Wave D — the two template bounds that did not bound (2026-09-15)
+
+**Asked as an analysis of how well the agent composes multi-tool workflows, and it found the seam
+sound where it is argued and two ceilings stated over paths that do not enforce them.** The
+composition machinery itself is not missing: `chemclaw.templates` is a fixed sequence of
+`tool`/`job`/`agent` steps run as one durable workflow behind a single `run_<name>` launcher, so
+the model spends one tool call and the deterministic steps cost no model calls at all. What the
+measurement found is that both of its bounds stop at a seam.
+
+- [x] **An `agent` step's prompt is bounded at the model's edge** —
+      `durable/template_activities.bounded_prompt`. `bound_tool_results` is an entry of
+      `tool_call_middleware`; a `tool` step runs through `invoke_governed`, which folds
+      `tool_governance_middleware` — right for that step, which has no model, and silently wrong
+      for the next one, whose prompt interpolates the result and does. Measured: a payload a chat
+      turn cuts to 60,000 characters reached the step's model at **245,700**, and unreclaimably,
+      because both compaction edits are for history and a step is one `HumanMessage` with none.
+- [x] **In the activity, not the sequencer** — a settings read in workflow code feeds an activity
+      *argument*, which replay recomputes, so cutting there would fail a run on non-determinism
+      rather than bound anything.
+- [x] **`_notice` takes its remedy as a parameter.** Its last sentence assumes the model asked for
+      the text; false for a prompt a template interpolated, where "narrow the question" sends it to
+      re-fetch what it was already handed. `TOOL_REMEDY` / `STEP_REMEDY`, and the tool form is
+      byte-identical to what it was.
+- [x] **The run ceiling covers the procedure** — `agent/template_surface.run_ceiling_problems`,
+      read by `make template-validate` *and* by `registry.unrunnable_reason`. The config validator
+      could only require that one step fits, as its own docstring conceded; one `job` step is
+      39,330 s against a run ceiling of 45,330 s, so two in one file miss by 33,330 s — silently,
+      since an execution timeout is not delivered to workflow code and `_notify_failure` never
+      runs. All nine shipped templates fit with 4,200 s of headroom, so this is latent, which is
+      when a bound is worth adding.
+- [x] `Settings.template_step_ceilings` — one definition, asked for the max by the config floor and
+      for the sum by the gate. Identical arithmetic to what it replaced: `tool`/`agent` 900,
+      `job` 39,330.
+- [x] `chemclaw_template_prompt_truncated_total{template}`, because a cut nothing counts is the
+      invisible kind. A separate counter from the tool one: the remedies differ — a tool's own
+      ceiling versus a narrower step or a field path.
+
+**Declined, each with the decision that already governs it**, and stated here because reading them
+as missing parts is the easy mistake: parallel/fan-out steps
+(`D-2026-08-25-the-loop-is-a-composite-not-a-template`), agent-authored templates
+(`D-2026-08-12`'s plan-gate exemption holds *because* nothing at run time can create one), and
+resume-from-failed-step — deferred on a measurement rather than a preference, since D-011 makes
+most of a retry a cache hit and every shipped template's one `agent` step is last, so the step that
+would be resumed is the step that failed. `BACKLOG.md` carries that row and its trigger.
+
+### Review
+
+`D-2026-09-15-a-bound-that-stops-at-the-seam-is-not-a-bound` records both defects, both
+measurements and the three declines. Verified with the infrastructure up (`dockerd`, `make up`,
+`make db-migrate`) rather than against a suite that would have skipped the Postgres-backed half.
