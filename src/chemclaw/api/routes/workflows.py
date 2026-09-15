@@ -4,10 +4,10 @@
 workflow the agent composed, because a template run has no session and so nothing can put a human
 in front of an unreviewed launch. These two routes are the human, moved to where one exists.
 
-**Routes and deliberately not agent tools**, for the reason `routes/plan.py::decide_plan` gives in
-as many words: a model must never be able to authorize its own plan. The guarantee here is obtained
-the way that one's is — by not building the tool rather than by removing it afterwards — and
-`tests/test_composed_workflows.py` asserts the absence over the whole registered surface rather
+**Routes and deliberately not agent tools**, for the reason `api/routes/plan.py::decide_plan`
+gives in as many words: a model must never be able to authorize its own plan. The guarantee here
+is obtained the way that one's is — by not building the tool rather than by removing it afterwards
+— and `tests/test_api_workflows.py` asserts the absence over the whole registered surface rather
 than trusting this paragraph.
 
 **Owner-scoped, and that is the authorization.** A composed workflow is keyed `(owner, name)`, and

@@ -200,7 +200,7 @@ def test_both_routes_are_behind_the_authentication_gate(method: str, path: str) 
 def test_nothing_the_agent_can_call_approves_a_workflow() -> None:
     """**The control this whole seam rests on**, asserted over the surface rather than believed.
 
-    `routes/plan.py::decide_plan` states the rule for plans — *"a model must never be able to
+    `api/routes/plan.py::decide_plan` states the rule for plans — *"a model must never be able to
     authorize its own plan"* — and obtains it by not building the tool. This asserts that of the
     registered surface: no advertised tool writes an approval, so a workflow cannot approve itself.
 
