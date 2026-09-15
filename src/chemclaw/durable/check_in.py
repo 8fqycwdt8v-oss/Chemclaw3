@@ -498,6 +498,11 @@ class CheckInWorkflow:
         # `durable/orchestrator.py` writes out the rule.
         if not workflow.unsafe.is_replaying():
             record_metric(lambda m: m.increment("chemclaw_work_check_ins_total", amount=delivered))
+            # Counted rather than only logged, for the reason the declaration gives: a run that
+            # stops short is under-delivering the notice this sweep exists to send, and it is
+            # indistinguishable from a quiet night on `chemclaw_work_check_ins_total` alone.
+            if deferred:
+                record_metric(lambda m: m.increment("chemclaw_work_check_in_deferrals_total"))
         return delivered
 
     async def _tell(self, item: CheckIn) -> bool:

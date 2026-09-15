@@ -119,6 +119,21 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_premise_refusals_total": (
         "Questions refused because a note they cite was retired, not yet valid, or absent."
     ),
+    # The other half of the sweep's story: a run that stopped before reaching everybody. Spending
+    # the run budget is bounded under-delivery of the very notice the sweep exists to send, and it
+    # reached an operator only as a log line — a sweep silently telling half the fleet looks
+    # exactly like a sweep with nothing to say, which is the state this feature was built to end.
+    #
+    # **Runs, not requesters, and the first attempt at this counted requesters.** How many were
+    # missed is not knowable without another query — the common deferral is a run that finishes its
+    # current page and stops because a *later* page exists, where the requesters-remaining figure
+    # is exactly 0. A counter that reads zero on the ordinary case of the thing it exists to
+    # report is worse than none. "This run stopped short" is exact, always moves when it happens,
+    # and is the alertable fact. (A requester whose page was *truncated* is not a deferral: they
+    # were reached, and the notice names what it left out in the text they read.)
+    "chemclaw_work_check_in_deferrals_total": (
+        "Check-in runs that stopped before reaching every blocked requester."
+    ),
     # Requesters told their own work is still blocked, before its deadline rather than after.
     "chemclaw_work_check_ins_total": (
         "Check-ins delivered to a requester about questions of theirs still waiting."

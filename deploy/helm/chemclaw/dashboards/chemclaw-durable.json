@@ -441,7 +441,7 @@
       "id": 12,
       "type": "graph",
       "title": "Work waiting on a person",
-      "description": "Check-ins delivered to requesters whose own questions are still unanswered past the quiet threshold. Not an alert condition \u2014 some work waits on people, and that is the system working. A sustained climb is: more is being asked of the lab than the lab is answering, and the requesters now know it. Flat at zero with CHECK_IN_ENABLED set means either nothing is blocked or the sweep is not reaching its mailbox \u2014 read chemclaw_deliveries_total beside it to tell those apart.",
+      "description": "Check-ins delivered to requesters whose own questions are still unanswered past the quiet threshold. Not an alert condition — some work waits on people, and that is the system working. A sustained climb is: more is being asked of the lab than the lab is answering, and the requesters now know it. Flat at zero with CHECK_IN_ENABLED set means either nothing is blocked or the sweep is not reaching its mailbox — read chemclaw_deliveries_total beside it to tell those apart. The second series is the run's own shortfall: runs that stopped before reaching every blocked requester. Any sustained value there means the background queue is not being served fast enough for the sweep to finish inside its own interval, and some requesters are hearing nothing while the first series still looks healthy.",
       "datasource": "prometheus",
       "gridPos": {
         "h": 8,
@@ -485,6 +485,11 @@
           "expr": "sum(increase(chemclaw_work_check_ins_total[1d]))",
           "legendFormat": "requesters told",
           "refId": "A"
+        },
+        {
+          "expr": "sum(increase(chemclaw_work_check_in_deferrals_total[1d]))",
+          "legendFormat": "runs that stopped short (1d)",
+          "refId": "B"
         }
       ]
     }

@@ -1020,11 +1020,18 @@ def test_a_run_that_spends_its_budget_defers_the_rest_instead_of_overrunning(
             async with _sweep_worker(client, _staged_activities(pages, _Concurrency(), dwell=0.15)):
                 return await _sweep(client, "budget")
 
+    before = METRICS.value("chemclaw_work_check_in_deferrals_total")
     delivered = asyncio.run(_run())
 
     assert delivered == len(first), (
         f"the sweep told {delivered} requesters; it should have stopped after the first page's "
         f"{len(first)} and deferred the rest to the next fire"
+    )
+    assert METRICS.value("chemclaw_work_check_in_deferrals_total") > before, (
+        "a run that stopped short must say so on a series, not only in a log line: on "
+        "`chemclaw_work_check_ins_total` alone it is indistinguishable from a quiet night. This "
+        "counts *runs* because the first version counted requesters-not-reached, which is 0 in "
+        "exactly this case — the run finished its page and stopped because a later page existed."
     )
 
 
