@@ -2934,3 +2934,54 @@ def test_one_sites_withdrawal_does_not_retract_the_other_sites_run() -> None:
         "the unfiltered sweep dropped the wrong hit, or dropped both: exactly the site that "
         "withdrew its run must leave the evidence set, and exactly the other must stay"
     )
+
+
+def test_an_impurity_carries_the_rrt_its_docstrings_have_always_named() -> None:
+    """RRT is how a chemist says *which* peak, and there was nowhere to put it.
+
+    `Impurity`'s own docstring said an ELN reports "often only a chromatographic name/RRT", and
+    `warehouse/binding.py` said a site's analytics table carries "a chromatographic name or RRT far
+    more often than a structure" — while the model held name, SMILES and area% and nothing else. So
+    the one identifier that distinguishes two unresolved peaks at 0.11% and 0.19% fell to
+    `OrdReaction.attributes`, a `dict[str, str]` whose own docstring says it holds "strings, not
+    values" with "no unit to normalise to"
+    (`D-2026-09-15-a-relation-with-no-legal-target-is-a-question-nobody-can-answer`).
+
+    Driven through the JSON adapter rather than by constructing the model, because a field with no
+    producer is the defect this change exists to avoid rather than an instance of it.
+    """
+    raw = RawEntry(
+        entry_id="rrt-1",
+        created_at=_EPOCH,
+        payload={
+            "reactants": [{"smiles": "CCO"}],
+            "products": [
+                {
+                    "smiles": "CC(=O)Oc1ccccc1C(=O)O",
+                    "impurities": [
+                        {"name": "RRT 0.94 unknown", "area_percent": 0.11, "rrt": 0.94},
+                        {"name": "des-methyl impurity", "area_percent": 0.19, "rrt": 1.32},
+                    ],
+                }
+            ],
+        },
+    )
+    record = JsonExportAdapter().map_to_ord(raw)
+    by_name = {impurity.name: impurity for impurity in record.impurities}
+    assert by_name["RRT 0.94 unknown"].rrt == 0.94, (
+        "the adapter dropped the RRT, so two unresolved peaks are distinguishable by area% alone "
+        "and a chemist cannot say which one an answer is about"
+    )
+    assert by_name["des-methyl impurity"].rrt == 1.32
+
+
+def test_an_rrt_alone_does_not_identify_an_impurity() -> None:
+    """Deliberate: an RRT says *where* a peak eluted, not *what* it is.
+
+    A record carrying only `rrt` asks this model to stand in for a peak nobody has named — and the
+    honest place for that is a name of exactly that form ("RRT 0.94 unknown"), which is how a
+    chemist refers to one anyway. Letting it through would put rows in the corpus that no query can
+    join and no chemist can read, which is the failure `_identifiable` already exists to prevent.
+    """
+    with pytest.raises(ValidationError):
+        Impurity(rrt=0.94, area_percent=0.11)

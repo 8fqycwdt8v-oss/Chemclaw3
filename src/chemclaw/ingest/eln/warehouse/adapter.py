@@ -406,12 +406,14 @@ class WarehouseElnAdapter:
                 if not name and not smiles:
                     continue
                 area = _read(block.area_percent, scope) if block.area_percent else None
+                rrt = _read(block.rrt, scope) if block.rrt else None
                 try:
                     found.append(
                         Impurity(
                             name=str(name) if name else None,
                             smiles=str(smiles) if smiles else None,
                             area_percent=area,
+                            rrt=rrt,
                         )
                     )
                 except ValidationError as exc:

@@ -446,6 +446,20 @@ KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
         # rather than from a surrogate model (D-162) — the non-BO sibling of `bo-candidate`.
         "experiment-proposal",
         "failure-mode",  # a negative result worth not repeating (gap KNW-3)
+        # How a measurement was made: the assay or purity method a chemist actually ran, as they
+        # recorded it. **This exists because `relations.py` declares `measured-by` — "this claim
+        # rests on that experimental method or instrument" — and until now no note type could be
+        # its target.** Measured on the shipped corpus: the one `measured-by` edge in it points at
+        # `playbook-recrystallisation-purity`, a *transferable rule* about quoting a yield with the
+        # purification that produced it, because that was the nearest thing available. A corpus
+        # author had already hit the gap and worked around it
+        # (`D-2026-09-15-a-relation-with-no-legal-target-is-a-question-nobody-can-answer`).
+        #
+        # **It holds a method somebody ran; this system never devises one.** There is no
+        # chromatographic model here and nothing in this change adds one — what changes is that a
+        # method a chemist states can be recorded, cited, and pointed at by the results that rest
+        # on it, instead of being prose inside a reaction note that no edge can reach.
+        "analytical-method",
     }
 )
 

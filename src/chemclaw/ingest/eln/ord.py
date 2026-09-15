@@ -129,19 +129,41 @@ class Impurity(BaseModel):
     instructed to answer about "yield, purity, impurities", but the canonical record carried only
     `yield_percent`, so every purity question could only ever be answered "the data is silent".
 
-    All three descriptors are optional because ELNs report impurities inconsistently: sometimes a
+    Every descriptor is optional because ELNs report impurities inconsistently: sometimes a
     structure, often only a chromatographic name/RRT, usually an area%. Requiring any one of them
     would silently drop the rest at ingest, which is the failure this field exists to prevent.
+
+    **`rrt` was named in this docstring for as long as it existed and had nowhere to go.** This
+    paragraph said RRT is how an impurity is "often" identified, and
+    `ingest/eln/warehouse/binding.py` said a site's analytics table carries "a chromatographic name
+    or RRT far more often than a structure" — while the model held name, SMILES and area% and
+    nothing else. So the one identifier a process chemist uses to say *which peak* fell to
+    `attributes`, a `dict[str, str]` whose own docstring says it holds "strings, not values"
+    (`D-2026-09-15-a-relation-with-no-legal-target-is-a-question-nobody-can-answer`). Two
+    unresolved impurities at 0.11% and 0.19% are distinguishable by RRT and by nothing else here.
     """
 
     name: str | None = None
     smiles: str | None = None
     # Chromatographic area percent (HPLC/GC) — the number a process chemist actually tracks.
     area_percent: float | None = Field(default=None, ge=0.0, le=100.0)
+    # Relative retention time: this peak's retention divided by the main peak's, on the method that
+    # ran. Unitless by construction and **method-relative by construction** — an RRT means nothing
+    # without the method it was measured on, which is what the `analytical-method` note type and
+    # the `measured-by` edge are for. Unbounded above (a late-eluting impurity can exceed 1) and
+    # positive: a zero or negative RRT is not a chromatographic observation.
+    rrt: float | None = Field(default=None, gt=0.0)
 
     @model_validator(mode="after")
     def _identifiable(self) -> "Impurity":
-        """An impurity with neither a name nor a structure is not a record of anything."""
+        """An impurity with neither a name nor a structure is not a record of anything.
+
+        **An RRT alone does not identify one**, deliberately. It says where a peak eluted on one
+        method, which is how a chemist *refers* to an unknown — "the RRT 0.94 peak" — and that
+        reference is a name. So a record carrying only `rrt` is asking this model to stand in for a
+        peak nobody has named, and the honest place for it is a name of exactly that form. Letting
+        it through would put rows in the corpus that no query can join and no chemist can read.
+        """
         if not self.name and not self.smiles:
             raise ValueError("an impurity needs at least a name or a SMILES")
         return self

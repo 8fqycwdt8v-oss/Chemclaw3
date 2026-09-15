@@ -548,3 +548,33 @@ def test_a_calc_ref_the_store_never_produced_is_reported() -> None:
     problems = asyncio.run(_run())
     assert len(problems) == 1
     assert "job-result-x" in problems[0] and "calc_refs" in problems[0]
+
+
+def test_every_relation_this_graph_declares_has_a_note_type_that_can_be_its_target() -> None:
+    """A relation nothing can legally point at is a question the corpus cannot answer.
+
+    `measured-by` — "this claim rests on that experimental method or instrument" — was declared in
+    `kg/relations.py` with no note type an instrument or a method could be. Not a theoretical gap:
+    the one `measured-by` edge in the shipped corpus points at `playbook-recrystallisation-purity`,
+    a *transferable rule* about quoting a yield with the purification that produced it, because
+    that was the nearest thing available. A corpus author hit this and worked around it
+    (`D-2026-09-15-a-relation-with-no-legal-target-is-a-question-nobody-can-answer`).
+
+    **Asserted as a mapping rather than over the whole relation set**, because most relations are
+    note-to-note and need no special type — `contradicts`, `supersedes` and `part-of` point at
+    whatever they are about. The ones worth pinning are those whose *wording* names a kind of thing,
+    since that is the pair that can come apart: the relation says "an experimental method", and
+    nothing in the vocabulary is one.
+    """
+    from chemclaw.kg.relations import KNOWN_RELATIONS
+
+    needs_a_kind = {"measured-by": "analytical-method"}
+    for relation, target_type in needs_a_kind.items():
+        assert relation in KNOWN_RELATIONS, (
+            f"{relation!r} is no longer a declared relation; if it was removed, remove its row here"
+        )
+        assert target_type in known_note_types(), (
+            f"{relation!r} says it points at an experimental method or instrument, and "
+            f"{target_type!r} is not a note type this deployment can write — so the edge has no "
+            "legal target and the only way to use it is to point at something it is not"
+        )
