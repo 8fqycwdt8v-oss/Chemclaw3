@@ -70,7 +70,6 @@ from chemclaw.agent.spend_cap import (
 )
 from chemclaw.agent.state import turn_config
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
-from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.agent.turn_usage import (
     InFlightPrompts,
     TurnUsage,
@@ -113,6 +112,7 @@ from chemclaw.core.session_context import (
 )
 from chemclaw.core.temporal_client import connect
 from chemclaw.core.tracing import start_span
+from chemclaw.core.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.core.turn_signals import JobSignal
 from chemclaw.core.turn_text import reset_current_user_texts, set_current_user_texts
 from chemclaw.kg.note import cited_ids

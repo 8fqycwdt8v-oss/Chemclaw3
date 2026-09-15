@@ -44,12 +44,6 @@ from pydantic import Field
 
 from chemclaw.agent.audit import _served_by
 from chemclaw.connectors.calc.remote import calc_session
-from chemclaw.connectors.identity import (
-    HEADER_ACTOR,
-    HEADER_CORRELATION,
-    HEADER_SESSION,
-    turn_identity_hook,
-)
 from chemclaw.connectors.manifest import ConnectorManifest, HttpEndpoint, StdioEndpoint
 from chemclaw.connectors.registry import (
     _mcp_connection,
@@ -62,6 +56,12 @@ from chemclaw.connectors.registry import (
 from chemclaw.connectors.server import connector_app
 from chemclaw.connectors.transport import SERVED_BY, ConnectorSpec, _stamped
 from chemclaw.core import mcp_session
+from chemclaw.core.call_identity import (
+    HEADER_ACTOR,
+    HEADER_CORRELATION,
+    HEADER_SESSION,
+    turn_identity_hook,
+)
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import (
     reset_current_correlation_id,

@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "pc-03",
+    "section": 10,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "We are considering a Boc deprotection with TFA in dichloromethane at 40 °C, then quenching into aqueous sodium bicarbonate in the same vessel. Anything I should worry about at 50 L?",
+    "expects_tools": [
+      "screen_hazards",
+      "gather_evidence",
+      "conditions_for_similar_reaction",
+      "workup_precedent"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a gas evolution rate, a pressure rise or a vent sizing figure",
+      "an incompatibility matrix result presented as a screened reagent-compatibility check",
+      "a computed heat of neutralisation for the quench"
+    ],
+    "direction": "Partial by design. The structural hazard screen is real and should run; precedent on the workup is real. What it must not do is answer the *engineering* half — CO2 evolution on a bicarbonate quench is a gas-rate and vent-sizing question, and there is no model for it. A good answer names the qualitative concern (exotherm on quench, gas evolution, the vessel doing two operations) as things to have assessed, says it cannot size any of them, and does not invent a reagent-incompatibility screen — that is `reactivity` (8871), which is not built.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pc-03",
+    "section": 10,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "We are considering a Boc deprotection with TFA in dichloromethane at 40 °C, then quenching into aqueous sodium bicarbonate in the same vessel. Anything I should worry about at 50 L?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.44,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "24e849fa72e74ce0a50f888e77012eb1",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

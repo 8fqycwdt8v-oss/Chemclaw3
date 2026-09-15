@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "rp-19",
+    "section": 13,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "For the safety section, screen the reagents in our Suzuki and Buchwald steps and tell me what needs writing up.",
+    "expects_tools": [
+      "screen_hazards",
+      "gather_evidence",
+      "resolve_compound"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a genotoxicity, ICH M7, nitrosamine, elemental-impurity or residual-solvent assessment",
+      "a hazard classification or flag not returned by screen_hazards",
+      "a claim that the hazard screen constitutes a toxicological or regulatory safety assessment"
+    ],
+    "direction": "screen_hazards is the right tool and its scope must be stated honestly: sixteen SMARTS process-safety rules covering azides, diazo/diazonium, peroxides, nitrate esters, polynitro, perchlorates, hydrazines, N-halamines and five incompatible pairs — not toxicology. A strong answer runs the screen, reports both what it flagged and what it did not, and then names the gap directly: ICH M7 mutagenicity, nitrosamine risk, elemental impurities and residual solvents are all outside the system, and those are exactly the sections a regulatory reader will expect. Naming the gap beats filling it.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-19",
+    "section": 13,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "For the safety section, screen the reagents in our Suzuki and Buchwald steps and tell me what needs writing up.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.44,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "d352821052bf4c33854b642845c33641",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

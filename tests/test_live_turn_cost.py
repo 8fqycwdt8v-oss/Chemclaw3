@@ -6,6 +6,7 @@ failure could come back: a workload whose bill does not follow the request, a re
 was written rather than measured, and a comparison that never fails.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -133,12 +134,28 @@ def test_an_unreachable_lane_is_never_a_pass(monkeypatch: pytest.MonkeyPatch) ->
 def test_the_emitted_case_carries_no_identity(tmp_path: Path) -> None:
     """A measured case records what a turn cost, never who asked for it.
 
-    `TurnCost` has 28 fields and `model_dump()` writes them all: the first emitted case published
-    `model: ""` and `outcome: "unknown"` beside real numbers — defaults wearing the appearance of
-    measurements — and `actor` and `session_id`, which identify a person and a conversation.
+    `model_dump()` writes every field `TurnCost` has, and the first emitted case therefore
+    published `model: ""` and `outcome: "unknown"` beside real numbers — defaults wearing the
+    appearance of measurements — along with `actor` and `session_id`, which identify a person and a
+    conversation.
+
+    **The narrowing is asserted as a relation rather than as a count.** The module comment beside
+    `_EMITTED` used to say `TurnCost` had "eighteen" fields against a model that had grown to 28,
+    which is a number in prose going stale about its own subject. What matters is that the emitted
+    keys are exactly `_EMITTED` and that `_EMITTED` is a **strict** subset of the model — the
+    second half being what makes `include=` a narrowing rather than a no-op, and what would fail if
+    someone widened it to the whole model.
     """
     lane._emit(_recorded_case_turns(), tmp_path / "case.md")
     text = (tmp_path / "case.md").read_text(encoding="utf-8")
     assert "input_tokens" in text
     for field in ("actor", "session_id", "turn_id", "outcome"):
         assert f'"{field}"' not in text
+
+    body = json.loads(text.split("---", 2)[1])
+    emitted_keys = {key for turn in body["output"]["turns"] for key in turn}
+    assert emitted_keys == set(lane._EMITTED)
+    assert emitted_keys < set(TurnCost.model_fields), (
+        "the emitted case carries every field TurnCost has, so `include=` narrows nothing and a "
+        "future field reaches the case file unasked"
+    )

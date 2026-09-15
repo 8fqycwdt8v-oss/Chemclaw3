@@ -13,6 +13,7 @@ Real git against a real bare remote, because what is being asserted is a commit 
 writer that counted calls would assert the wrapper's arithmetic rather than git's.
 """
 
+import ast
 import asyncio
 import subprocess
 from pathlib import Path
@@ -20,10 +21,12 @@ from typing import Any, cast
 
 import pytest
 
+import chemclaw.cli.backfill_corpus as backfill_corpus
 from chemclaw.core.config import settings
+from chemclaw.core.metrics import METRICS
 from chemclaw.kg.git_writer import BatchingNoteWriter, GitNoteWriter
 from chemclaw.kg.note import Note
-from chemclaw.kg.record import record_note
+from chemclaw.kg.record import count_notes_recorded, record_note
 
 
 def _run(*args: str, cwd: Path | None = None) -> str:
@@ -138,61 +141,133 @@ def test_a_batch_size_that_batches_nothing_is_refused() -> None:
             BatchingNoteWriter(inner, batch_size=size)
 
 
+_BATCHER = "BatchingNoteWriter"
+
+
+def _names_the_batcher(path: Path) -> bool:
+    """Whether this module can reach `BatchingNoteWriter` at all, parsed rather than grepped.
+
+    **The scan this replaces looked for the literal `BatchingNoteWriter(`**, which is one spelling
+    of one way to construct it. Driven: a second module doing
+    `__import__("chemclaw.kg.git_writer", fromlist=["x"]).BatchingNoteWriter(...)` left the check
+    **green**, and `cls = BatchingNoteWriter` followed by `cls(...)` evades it the same way — a
+    control that matches a comment rather than a construction.
+
+    So the question asked is not "does this module call it" but "can this module *name* it", which
+    is the property a caller cannot route around: to construct a class you must first bind it. Three
+    arms, because there are three ways to bind one and all three are visible without running
+    anything — an `import`, an attribute access on the module, and a string handed to `getattr`.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and any(a.name == _BATCHER for a in node.names):
+            return True
+        if isinstance(node, ast.Attribute) and node.attr == _BATCHER:
+            return True
+        if isinstance(node, ast.Constant) and node.value == _BATCHER:
+            return True
+    return False
+
+
 def test_the_shipped_backfill_batches_and_nothing_else_does() -> None:
-    """The split, asserted where it can be: exactly one module wraps the writer this way.
+    """The split, asserted where it can be: exactly one module can reach the batching writer.
 
     A `BatchingNoteWriter` on the conversational path would be the thing
     `D-2026-09-13-the-lock-is-not-the-bound-the-commit-is` declined, arriving by import rather than
     by decision — and it would be invisible, because every test of that path injects its own writer.
+
+    `kg/git_writer.py` is absent from the list and does not need an exemption: it *defines* the
+    class, which is a `ClassDef` rather than any of the three bindings above — so the allowlist
+    stays one entry and says exactly what it means.
+
+    What this still cannot see is a module that receives an already-constructed one as an argument.
+    That is not the failure mode the rule is about: such a writer is the caller's decision, and the
+    caller is in this scan.
     """
     root = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
     users = sorted(
-        path.relative_to(root).as_posix()
-        for path in root.rglob("*.py")
-        if "BatchingNoteWriter(" in path.read_text(encoding="utf-8")
+        path.relative_to(root).as_posix() for path in root.rglob("*.py") if _names_the_batcher(path)
     )
     assert users == ["cli/backfill_corpus.py"], (
-        f"{users} construct a BatchingNoteWriter. Only the backfill command may: a batch is a "
+        f"{users} can reach a BatchingNoteWriter. Only the backfill command may: a batch is a "
         "queue, and a queued note is one a chemist cannot read yet."
     )
 
 
-def test_every_note_in_a_batch_is_counted_once_rather_than_once_per_commit(
+def test_the_counter_counts_notes_and_not_commits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`chemclaw_notes_recorded_total` means "a note reached the graph", and batching broke that.
+    """`chemclaw_notes_recorded_total` must move by the notes, not by the commits carrying them.
 
-    `kg/record.record_note` gates the counter on `outcome.written` and says so in as many words —
-    "the number means 'a note reached the graph' rather than 'we tried'". `BatchingNoteWriter.write`
-    returned `written=False` for every held note and `True` only for the one that filled a batch, so
-    at the shipped batch size of 50 a 10,000-note backfill moved the counter about 200 times; and
-    the notes landed by the trailing `flush()` never reach `record_note` at all, so they moved it
-    zero times.
+    **Measured before this test existed: fifty notes moved it by 1.0.** `record_note` incremented
+    on `outcome.written`, and under batching every note but the one that fills a batch returns
+    `written=False` — so the counter became a count of *commits*, and the operator reading "how
+    much has this backfill written" was reading a number fifty times too small at the shipped
+    batch size. The whole point of the metric is that a write path failing every note cannot
+    report healthy; a write path succeeding on fifty and reporting 1 fails the same sentence from
+    the other end.
 
-    Driven against the real metric over a real remote, at a batch size that makes the two readings
-    differ by a factor of three.
+    Driven on real git against a real bare remote, like the rest of this file: the count has to be
+    true of what landed, and a fake writer would assert the wrapper's arithmetic.
+
+    **And driven through `backfill()` rather than through a hand-assembled writer**, which is the
+    half this test was missing. `cli/backfill_corpus.py` books the final partial batch itself,
+    because that commit lands on a `flush()` call `record_note` never sees — and a test that calls
+    `count_notes_recorded(await writer.flush())` in its own body asserts that arithmetic while
+    leaving the production call uncovered. Measured: deleting that one line left every test naming
+    this counter green, including this one.
     """
-    from chemclaw.core.metrics import METRICS
+    clone = _notes_repo(tmp_path)
+    monkeypatch.setattr(settings, "note_repo_dir", str(clone))
+    monkeypatch.setattr(settings, "backfill_commit_batch_size", 3)
+    monkeypatch.setattr(
+        backfill_corpus,
+        "default_writer",
+        lambda: GitNoteWriter(repo_dir=str(clone), base_branch="main", remote="origin"),
+    )
+    documents = tmp_path / "documents"
+    documents.mkdir()
+    for index in range(7):
+        (documents / f"sop-{index}.md").write_text(f"Standard operating procedure {index}.\n")
+    before_commits = _commits(clone)
+    before_notes = METRICS.value("chemclaw_notes_recorded_total")
 
+    written, skipped = asyncio.run(backfill_corpus.backfill(documents, tags=[], dry_run=False))
+
+    assert (written, skipped) == (7, 0)
+
+    # Seven notes in three commits — two full batches and the flushed remainder. The two numbers
+    # are asserted together because either alone is satisfiable by the defect: counting commits
+    # gives 3, and dropping the batching gives 7 == 7 with the saving gone.
+    assert _commits(clone) - before_commits == 3
+    assert METRICS.value("chemclaw_notes_recorded_total") - before_notes == 7
+
+
+def test_a_batch_that_changed_nothing_counts_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other direction, which a plain `len(batch)` would get wrong.
+
+    Re-running a backfill over documents already in the corpus is the frequent, legitimate case,
+    and the inner writer answers it with a no-op — nothing committed. A batch reporting its size
+    regardless would turn "notes recorded" into "notes offered", which is the attempt-counting the
+    metric was declared to avoid.
+    """
     clone = _notes_repo(tmp_path)
     monkeypatch.setattr(settings, "note_repo_dir", str(clone))
     inner = GitNoteWriter(repo_dir=str(clone), base_branch="main", remote="origin")
 
-    before = METRICS.value("chemclaw_notes_recorded_total")
-
-    async def _run_backfill() -> None:
-        writer = BatchingNoteWriter(inner, batch_size=3)
-        for index in range(7):
+    async def _run_backfill() -> float:
+        for index in range(4):
+            await record_note(_note(index), inner)
+        before = METRICS.value("chemclaw_notes_recorded_total")
+        writer = BatchingNoteWriter(inner, batch_size=4)
+        for index in range(4):
             await record_note(_note(index), writer)
-        await writer.flush()
+        count_notes_recorded(await writer.flush())
+        return METRICS.value("chemclaw_notes_recorded_total") - before
 
-    asyncio.run(_run_backfill())
-
-    assert _commits(clone) - 1 == 3, "seven at three to a commit is two full batches and a tail"
-    assert METRICS.value("chemclaw_notes_recorded_total") - before == 7, (
-        "the counter must count notes, not commits: it read 2 for these seven notes, because five "
-        "were held and the tail flushed outside record_note entirely"
-    )
+    assert asyncio.run(_run_backfill()) == 0.0
 
 
 def test_a_backfill_that_dies_mid_run_still_commits_what_it_already_counted(

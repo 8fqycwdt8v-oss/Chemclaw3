@@ -258,6 +258,24 @@ apply_helm() {
   fi
 }
 
+# **What a `deployment` component's failure means, said once rather than left to `oc`.**
+# `oc set image` against a Deployment that is not there exits with `Error from server (NotFound)`,
+# and that sentence reads as a cluster somebody broke. It is not: it is the *shape* of this kind of
+# component. Neither `Chemclaw3_ui` nor any `Chemclaw3-mcp` server describes itself deployably, so a
+# release can change one's bytes and nothing else — it cannot create the Deployment, and it cannot
+# move a port, a probe, a resource limit or an env var. An operator creates it once by hand.
+# `docs/planning/DEFERRED.md` carries the trigger for closing that; this function carries the
+# consequence, because the place an operator meets it is a failed release rather than a document.
+chartless_failure() {
+  local deployment="$1"
+  cat >&2 <<EOF
+${deployment}: this component ships no chart, so this release can set its image and nothing else:
+  it cannot create the Deployment, and cannot move a port, a probe, a limit or an env var.
+  If the Deployment does not exist, an operator creates it once by hand; if it does, the container
+  name in the descriptor has to match one of its containers.
+EOF
+}
+
 apply_deployment() {
   local name deployment container image digest
   name="$1"
@@ -273,8 +291,11 @@ apply_deployment() {
     return
   fi
   log "${deployment}: setting ${container}=${image}@${digest}"
-  "${KUBECTL}" set image "deployment/${deployment}" "${container}=${image}@${digest}" \
-    --namespace "${NAMESPACE}"
+  if ! "${KUBECTL}" set image "deployment/${deployment}" "${container}=${image}@${digest}" \
+    --namespace "${NAMESPACE}"; then
+    chartless_failure "${deployment}"
+    return 1
+  fi
   "${KUBECTL}" rollout status "deployment/${deployment}" --namespace "${NAMESPACE}" --timeout=10m
 }
 

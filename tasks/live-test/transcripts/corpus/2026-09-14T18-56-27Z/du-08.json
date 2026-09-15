@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "du-08",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "This compound is drawn as the keto tautomer but the assay runs in water and the crystallisation is out of toluene. Does the dominant form change between the two? Keto is CC(=O)CC(C)=O and the enol is CC(O)=CC(C)=O.",
+    "expects_tools": [
+      "rank_species_across_solvents",
+      "rank_species",
+      "enumerate_tautomers"
+    ],
+    "expects_job": true,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a population, relative energy or swing the job did not return",
+      "that the enumeration is complete when only the two given forms were ranked",
+      "a solvent difference smaller than the reported uncertainty, stated as a real difference"
+    ],
+    "direction": "The right move is one screen across both media rather than two rankings the chemist has to compare, and this is the question the fan-out was built for. Grade four things. First, that it ran rather than recalling that beta-diketones enolise — the whole point is the number in *these* two solvents. Second, that the answer leads with whether the dominant form reordered: if it did, every other property either of them would compute — a pKa, a Fukui ranking, a dipole — is about a different species in the two media, and an answer that reports populations without that sentence has buried the finding. Third, the uncertainty: the result carries the largest swing and the method's uncertainty beside it, and a swing inside that band means the calculation did not distinguish the media, which the answer must say rather than ranking anyway. Fourth, the universe: only the two forms given were ranked, so the distribution describes those two — an answer that implies it covered every tautomer of the compound, without enumerating first, is confident about a set nobody computed.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "du-08",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "This compound is drawn as the keto tautomer but the assay runs in water and the crystallisation is out of toluene. Does the dominant form change between the two? Keto is CC(=O)CC(C)=O and the enol is CC(O)=CC(C)=O.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.16,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "96a06e5db6054b68bd3e63c6fb874df2",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

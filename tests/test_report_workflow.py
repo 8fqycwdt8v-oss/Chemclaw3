@@ -6,6 +6,7 @@ retrievers and submitter swapped via the module factories (no database or git).
 """
 
 import asyncio
+import inspect
 from typing import Any
 from unittest import mock
 
@@ -23,6 +24,7 @@ from chemclaw.durable.report_workflow import (
     DevelopmentReportWorkflow,
     ReportSectionWorkflow,
     propose_report,
+    record_report_note,
     retrieve_section,
 )
 from chemclaw.retrieval.evidence import EvidenceChunk
@@ -96,7 +98,12 @@ def test_report_workflow_drafts_and_pr_gates(monkeypatch: pytest.MonkeyPatch) ->
                 client,
                 task_queue=settings.background_task_queue,
                 workflows=[DevelopmentReportWorkflow, ReportSectionWorkflow],
-                activities=[retrieve_section, propose_report, resolve_fan_out_limit],
+                activities=[
+                    retrieve_section,
+                    record_report_note,
+                    propose_report,
+                    resolve_fan_out_limit,
+                ],
             ):
                 result = await client.execute_workflow(
                     DevelopmentReportWorkflow.run,
@@ -135,7 +142,12 @@ def test_failed_section_is_marked_not_dropped(monkeypatch: pytest.MonkeyPatch) -
                 client,
                 task_queue=settings.background_task_queue,
                 workflows=[DevelopmentReportWorkflow, ReportSectionWorkflow],
-                activities=[retrieve_section, propose_report, resolve_fan_out_limit],
+                activities=[
+                    retrieve_section,
+                    record_report_note,
+                    propose_report,
+                    resolve_fan_out_limit,
+                ],
             ):
                 await client.execute_workflow(
                     DevelopmentReportWorkflow.run,
@@ -516,3 +528,35 @@ def test_a_report_launched_outside_a_turn_stays_unjoined() -> None:
         section=ReportSection(heading="Scope", query="what is known", memory_layer="evidence")
     )
     assert activity_context([request], fn=retrieve_section).correlation_id == ""
+
+
+def test_the_old_activity_name_is_still_registered_and_still_writes() -> None:
+    """A rename that drops the old Temporal name orphans every in-flight history.
+
+    `propose_report` proposed nothing — `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`
+    removed the gate and the queue behind it — but the string is what a running
+    `DevelopmentReportWorkflow` history has *already scheduled*. A worker that no longer offers it
+    fails the activity with `NotFoundError` and the workflow retries it forever, so the rename is
+    two releases: this one offers both names and schedules the new one, and a later one deletes the
+    alias after `background-jobs` has drained
+    (`D-2026-09-14-an-activity-name-is-a-wire-name-so-it-is-renamed-in-two-releases`).
+
+    Both halves asserted, because each fails differently: the old name missing from the worker's
+    activity set is the orphaned history, and the old name present but not writing is a replayed
+    task that reports success and records nothing.
+    """
+    from chemclaw.durable.background_worker import BACKGROUND_ACTIVITIES
+    from chemclaw.durable.registry import temporal_name
+
+    registered = {temporal_name(activity) for activity in BACKGROUND_ACTIVITIES}
+    assert {"propose_report", "record_report_note"} <= registered, (
+        "a worker on `background-jobs` must offer both names for one deployment cycle; it offers "
+        f"{sorted(name for name in registered if 'report' in name)}"
+    )
+
+    # The alias delegates rather than duplicating, so a replayed old task writes the same note.
+    assert inspect.signature(propose_report) == inspect.signature(record_report_note), (
+        "the alias's signature differs from the activity's; `durable/interceptor.py` binds an "
+        "activity's ids by parameter name off the signature, so a replayed old task would be the "
+        "one unattributed write on this path"
+    )

@@ -27,10 +27,10 @@ from chemclaw.agent.tool_authz import (
     surface_authorization_denials,
     surface_domain_errors,
 )
-from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.core.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.core.turn_signals import _KEY as _SIGNAL_KEY
 from chemclaw.core.turn_signals import Signal, ToolFailureSignal
 from tests.fakes_langgraph import ScriptedChatModel

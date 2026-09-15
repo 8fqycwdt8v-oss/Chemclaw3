@@ -42,6 +42,7 @@ from chemclaw.core.fulltext import (
     reference_tokens,
 )
 from chemclaw.kg.graph import (
+    corpus_revision,
     invalidate_cache,
     load_notes,
     note_file_fingerprints,
@@ -80,22 +81,42 @@ class IndexHit(BaseModel):
 class NoteIndex(Protocol):
     """Persistence + dense/lexical search over the note corpus. Backends implement this."""
 
-    async def upsert(self, records: list[NoteRecord], embedding_key: str) -> None:
+    async def upsert(
+        self,
+        records: list[NoteRecord],
+        embedding_key: str,
+        *,
+        corpus_revision: int | None = None,
+    ) -> None:
         """Insert or replace index rows by note id, recording which configuration embedded them.
 
         `embedding_key` is `chemclaw.core.embeddings.embedding_config_key()` — a batch-level fact,
         not a per-record one, exactly as the document index takes it (`ingest/documents/index.py`),
         so one upsert can never write two generations of vector under one call.
+
+        `corpus_revision` is the same batch-level fact about the *corpus*: how many commits the
+        checkout these notes were read from had behind it
+        (`chemclaw.kg.graph.corpus_revision`). It is what `retire_absent`'s `built_before` is
+        compared against, and it is stored rather than derived because a later pass on another pod
+        has no way to recover it.
         """
         ...
 
-    async def retire_absent(self, keep: set[str]) -> int:
+    async def retire_absent(self, keep: set[str], *, built_before: int | None = None) -> int:
         """Delete every indexed note whose id is not in `keep`; return how many went.
 
         Phrased as "keep exactly these" rather than "delete these" because that is what the caller
         knows: `reindex_notes` has just listed the corpus on disk, and asking it to also enumerate
         what the backend holds would be a second round trip to compute a difference the backend can
         compute itself.
+
+        **`built_before` is the caller saying how current its own corpus is**, and rows built from
+        a *newer* corpus than that are left alone
+        (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`). The index is shared and
+        the checkout under it is not, so absence from one pod's disk cannot distinguish a deleted
+        note from a note that pod's sidecar has not fetched yet. `None` means the caller has no
+        revision to offer and everything absent is retired, which is what every backend did before
+        this argument existed and what an offline corpus still needs.
 
         **An empty `keep` must delete nothing.** A missing or mis-pointed notes directory would
         otherwise wipe the index, and a rebuild costs one embedding call per note.
@@ -209,22 +230,50 @@ class InMemoryNoteIndex:
         """Start with an empty index, keyed by note id (re-upserting an id replaces it)."""
         self._records: dict[str, NoteRecord] = {}
         self._embedding_keys: dict[str, str] = {}
+        self._corpus_revisions: dict[str, int | None] = {}
 
-    async def upsert(self, records: list[NoteRecord], embedding_key: str) -> None:
+    async def upsert(
+        self,
+        records: list[NoteRecord],
+        embedding_key: str,
+        *,
+        corpus_revision: int | None = None,
+    ) -> None:
         """Insert or replace each record by note id, under the configuration that embedded it."""
         for record in records:
             self._records[record.note_id] = record
             self._embedding_keys[record.note_id] = embedding_key
+            self._corpus_revisions[record.note_id] = corpus_revision
 
-    async def retire_absent(self, keep: set[str]) -> int:
-        """Drop every record whose note id is not in `keep`; an empty `keep` drops nothing."""
+    async def retire_absent(self, keep: set[str], *, built_before: int | None = None) -> int:
+        """Drop every record whose note id is not in `keep`; an empty `keep` drops nothing.
+
+        A record built from a corpus revision *newer* than `built_before` is kept: this caller's
+        checkout predates it and cannot know whether the note was deleted or simply not fetched.
+        """
         if not keep:
             return 0
-        gone = [note_id for note_id in self._records if note_id not in keep]
+        gone = [
+            note_id
+            for note_id in self._records
+            if note_id not in keep and not self._is_newer_than(note_id, built_before)
+        ]
         for note_id in gone:
             del self._records[note_id]
             self._embedding_keys.pop(note_id, None)
+            self._corpus_revisions.pop(note_id, None)
         return len(gone)
+
+    def _is_newer_than(self, note_id: str, built_before: int | None) -> bool:
+        """Was this row built from a corpus revision the caller has not reached?
+
+        Unknown on either side is "no constraint" — the same reading the Postgres predicate gives a
+        NULL column, so the reference oracle and the backend answer one question.
+        """
+        if built_before is None:
+            return False
+        stored = self._corpus_revisions.get(note_id)
+        return stored is not None and stored > built_before
 
     async def fingerprints(self, embedding_key: str) -> dict[str, str]:
         """Fingerprints of rows embedded under `embedding_key`; empty ones omitted.
@@ -320,13 +369,14 @@ class PostgresNoteIndex:
         width = settings.embedding_dim
         self._upsert = (
             "INSERT INTO note_index "
-            "(note_id, embedding, lexeme, fingerprint, embedding_key, updated_at) "
+            "(note_id, embedding, lexeme, fingerprint, embedding_key, updated_at, "
+            "corpus_commit_count) "
             f"VALUES (%(id)s, %(emb)s::vector({width}), "
-            "to_tsvector('english', %(text)s), %(fp)s, %(key)s, now()) "
+            "to_tsvector('english', %(text)s), %(fp)s, %(key)s, now(), %(corpus)s) "
             "ON CONFLICT (note_id) DO UPDATE SET "
             "embedding = EXCLUDED.embedding, lexeme = EXCLUDED.lexeme, "
             "fingerprint = EXCLUDED.fingerprint, embedding_key = EXCLUDED.embedding_key, "
-            "updated_at = now()"
+            "updated_at = now(), corpus_commit_count = EXCLUDED.corpus_commit_count"
         )
         # The `> 0` floor mirrors the InMemory reference (`score > 0.0`): a zero/near-zero or
         # negatively-correlated note is not a hit. Without it pgvector returns the top-k nearest
@@ -468,7 +518,13 @@ class PostgresNoteIndex:
         """
         return _vector_literal(record.embedding)
 
-    async def upsert(self, records: list[NoteRecord], embedding_key: str) -> None:
+    async def upsert(
+        self,
+        records: list[NoteRecord],
+        embedding_key: str,
+        *,
+        corpus_revision: int | None = None,
+    ) -> None:
         """Insert or replace each record (embedding + tsvector + fingerprint + key) by note id."""
         if not records:
             return
@@ -484,27 +540,49 @@ class PostgresNoteIndex:
                         "text": normalize_search_text(record.text),
                         "fp": record.fingerprint or None,
                         "key": embedding_key,
+                        "corpus": corpus_revision,
                     },
                 )
             await conn.commit()
 
-    async def retire_absent(self, keep: set[str]) -> int:
+    async def retire_absent(self, keep: set[str], *, built_before: int | None = None) -> int:
         """Delete rows for notes no longer on disk, returning the ids so a subclass can follow.
 
         `RETURNING note_id` rather than a count: `ExternalVectorNoteIndex` needs the ids to remove
         the matching points from its store, and asking the table twice would race its own delete.
         """
-        return len(await self._retire_absent_ids(keep))
+        return len(await self._retire_absent_ids(keep, built_before=built_before))
 
-    async def _retire_absent_ids(self, keep: set[str]) -> list[str]:
-        """The shared half: delete and report which ids went. Empty `keep` deletes nothing."""
+    async def _retire_absent_ids(
+        self, keep: set[str], *, built_before: int | None = None
+    ) -> list[str]:
+        """The shared half: delete and report which ids went. Empty `keep` deletes nothing.
+
+        The `built_before` clause is written so a NULL on either side prunes: a row from before
+        migration 099, or a caller with no corpus revision to offer, behaves exactly as it did
+        before this existed. Only a row that *states* it came from a newer corpus than the caller
+        holds is protected, which is the one case a pod cannot judge.
+
+        Two things about the predicate are load-bearing and neither is obvious. The `::int` casts:
+        a bare `%(before)s IS NOT NULL` gives Postgres a parameter it can infer no type for and the
+        statement fails to prepare (`AmbiguousParameter: could not determine data type of parameter
+        $2`) — on *every* prune, including the ones that pass no revision at all. And the two
+        `IS NULL` arms are spelled out rather than folded into a `NOT (... AND ...)`: three-valued
+        logic makes `NULL > 5` unknown, `TRUE AND unknown` unknown and `NOT unknown` unknown, so
+        the compact form silently *protected* every row written before migration 099 instead of
+        pruning it. Driven against a real table, which is why that arm is in the test.
+        """
         if not keep:
             return []
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "DELETE FROM note_index WHERE NOT (note_id = ANY(%(keep)s)) RETURNING note_id",
-                    {"keep": sorted(keep)},
+                    "DELETE FROM note_index WHERE NOT (note_id = ANY(%(keep)s)) "
+                    "AND (corpus_commit_count IS NULL "
+                    "OR %(before)s::int IS NULL "
+                    "OR corpus_commit_count <= %(before)s::int) "
+                    "RETURNING note_id",
+                    {"keep": sorted(keep), "before": built_before},
                 )
                 rows = await cur.fetchall()
             await conn.commit()
@@ -754,7 +832,18 @@ async def reindex_notes(
             len(unparsed),
             ", ".join(sorted(unparsed)[:5]),
         )
-    retired = await index.retire_absent({note.id for note in notes} | on_disk)
+    # **A prune is a claim about the corpus, and two pods hold different corpora**
+    # (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`). `note_index` is shared
+    # while the checkout under it is an `emptyDir` each pod's sidecar refreshes on its own
+    # schedule, so "absent from my disk" cannot distinguish a deleted note from one this pod has
+    # not fetched. `corpus_revision` is the one comparable fact the two share, and a row built
+    # from a *newer* revision than this pass holds is left alone. `None` — no git work tree, no
+    # `git`, no commits — is no constraint, which is what every offline corpus needs and what this
+    # did before the argument existed.
+    revision = await asyncio.to_thread(corpus_revision, directory)
+    retired = await index.retire_absent(
+        {note.id for note in notes} | on_disk, built_before=revision
+    )
     if retired:
         log.info("retired %d note(s) no longer on disk", retired)
     embedding_key = note_embedding_key()
@@ -787,7 +876,7 @@ async def reindex_notes(
             )
             for note, text, embedding in zip(batch, texts, embeddings, strict=True)
         ]
-        await index.upsert(records, embedding_key)
+        await index.upsert(records, embedding_key, corpus_revision=revision)
         indexed += len(records)
     return indexed
 

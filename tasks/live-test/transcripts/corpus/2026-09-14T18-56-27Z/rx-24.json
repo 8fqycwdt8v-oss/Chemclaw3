@@ -1,0 +1,63 @@
+{
+  "probe": {
+    "id": "rx-24",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "For this intermediate, should we purify by chromatography, crystallisation or distillation? Give me a recommendation and, if it is chromatography, a starting gradient.",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "predict_solubility",
+      "expand_note",
+      "similar_molecules"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a chromatography gradient, column, mobile phase or method",
+      "a predicted retention time, capacity factor or resolution",
+      "a predicted solubility in an organic solvent",
+      "a distillation boiling point or vacuum condition presented as computed"
+    ],
+    "direction": "The strategic half is answerable from chemistry and precedent; the method half is not. Selection criteria worth reasoning from: thermal stability and volatility for distillation, whether the impurities are structurally close (chromatography separates what crystallisation cannot reject) or far, whether the compound is a solid at all, the scale it will run at, and the recrystallisation playbook in the record. The system holds no chromatography model, no method store and no gradient recommender, and no NMR or MS prediction — so a request for a starting gradient must be declined explicitly rather than answered from general knowledge dressed as a recommendation. Should also carry the record's rule that a yield is meaningless without the purification that produced it, since the choice changes the number that gets reported.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-24",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "For this intermediate, should we purify by chromatography, crystallisation or distillation? Give me a recommendation and, if it is chromatography, a starting gradient.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.15,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "14e3cf2c071b4bc2a55ccb720de82a2a",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

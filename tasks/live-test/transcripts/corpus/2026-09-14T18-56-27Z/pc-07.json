@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "pc-07",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "I have concentration against time for four runs at three temperatures. Fit a rate law and tell me the order in catalyst and the activation energy.",
+    "expects_tools": [],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a reaction order in any component",
+      "an activation energy in kJ/mol or kcal/mol",
+      "a rate constant at any temperature",
+      "a fitted model or goodness-of-fit statistic"
+    ],
+    "direction": "Refuses. There is no kinetics engine and no regression surface the agent can reach — the sandboxed Python server is not wired into any deployment here, which is worth saying because the honest answer is \"the system has no way to run the fit\", not \"this is out of scope\". May offer to record the dataset and its conclusions as knowledge once the chemist has fitted it.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pc-07",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "I have concentration against time for four runs at three temperatures. Fit a rate law and tell me the order in catalyst and the activation energy.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.7,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "8b2aefdbd2034300b81cf2e06e954c68",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

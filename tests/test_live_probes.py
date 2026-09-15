@@ -192,6 +192,89 @@ def test_a_citation_counts_only_when_a_tool_result_actually_returned_it() -> Non
     assert _score_citations("see [[rxn-never-retrieved]]", returned) == ["rxn-never-retrieved"]
 
 
+def _notes_event(tool: str, note_ids: list[str]) -> dict[str, object]:
+    """A `tool_result` frame that returned these note ids, which is what a gold set grades."""
+    return {"type": "tool_result", "tool": tool, "preview": "", "note_ids": note_ids, "numbers": []}
+
+
+def test_the_gold_set_scores_what_retrieval_returned_and_not_what_the_answer_cited() -> None:
+    """The recall arithmetic, and the choice of denominator, neither of which had a test.
+
+    `expects_notes` grades **retrieval**: `expected & returned_ids` over `expected`. Scoring the
+    answer's citations instead would fold two different failures into one number — a turn handed
+    the right note and failing to cite it is a citation defect, and `uncited_note_ids` is where it
+    belongs. The fixture makes the two disagree on purpose: the answer cites one note it was never
+    given and omits one it was, so a scorer reading citations would produce 0.5 with a different
+    numerator and a different denominator.
+    """
+    outcome = _run(
+        _probe(expects_notes=["opt-a", "opt-b", "opt-c"]),
+        _notes_event("gather_evidence", ["opt-a", "opt-b", "unexpected-d"]),
+        {"type": "answer", "text": "see [[opt-a]] and [[never-returned]]"},
+    )
+
+    assert outcome.expected_notes_recall == pytest.approx(2 / 3)
+    assert outcome.expected_notes_missing == ["opt-c"]
+    # The two axes stay apart: retrieval got 2 of 3, and the answer invented a citation.
+    assert outcome.uncited_note_ids == ["never-returned"]
+
+
+def test_a_probe_expecting_notes_that_got_none_scores_zero_rather_than_nothing() -> None:
+    """`0.0` and `None` are different findings, and one line of the report depends on it.
+
+    `cli/live_probes` filters on `expected_notes_recall is not None` to decide which probes are in
+    the gold-set mean, then reads `o.expected_notes_recall or 0.0` — so a real zero that arrived as
+    `None` would leave the failing probe out of its own denominator and raise the reported mean.
+    The distinction is the same one `expected_tools_met` already keeps.
+    """
+    missed = _run(
+        _probe(expects_notes=["opt-a"]),
+        _notes_event("gather_evidence", ["something-else"]),
+        {"type": "answer", "text": "nothing relevant came back"},
+    )
+    ungraded = _run(_probe(), {"type": "answer", "text": "nothing was expected"})
+
+    assert missed.expected_notes_recall == 0.0
+    assert missed.expected_notes_missing == ["opt-a"]
+    assert ungraded.expected_notes_recall is None, (
+        "a probe declaring no expected notes must stay out of the gold-set mean entirely"
+    )
+    assert ungraded.expected_notes_missing == []
+
+
+def test_the_report_counts_a_zero_scoring_probe_in_the_gold_set_mean() -> None:
+    """The reporting half, which is where the `None`-versus-`0.0` distinction is spent.
+
+    Driven through the real `_summary` rather than re-deriving the arithmetic: one probe at 1.0,
+    one at 0.0 and one that declares no notes must read as a mean of **0.50 over 2 probes**. A
+    reader of that line is asking "how much of what the questions are about did retrieval reach",
+    and a mean that silently dropped its failures would answer 1.00.
+    """
+    probes = [_probe(id=f"t-0{i}") for i in (1, 2, 3)]
+
+    def _outcome(probe: Probe, **scored: object) -> ProbeOutcome:
+        """One outcome for `probe`, carrying only the gold-set fields a case varies."""
+        return ProbeOutcome(
+            probe_id=probe.id,
+            section=probe.section,
+            persona=probe.persona,
+            bucket=probe.bucket,
+            question=probe.question,
+            **scored,  # type: ignore[arg-type]
+        )
+
+    outcomes = [
+        _outcome(probes[0], expected_notes_recall=1.0),
+        _outcome(probes[1], expected_notes_recall=0.0, expected_notes_missing=["opt-a"]),
+        _outcome(probes[2]),
+    ]
+
+    report = live_probes._summary(probes, outcomes, [], "provenance: a test")
+
+    assert "mean recall over 2 probes) | 0.50" in report
+    assert "probes missing at least one expected note | 1" in report
+
+
 def test_a_citation_past_the_preview_budget_is_still_grounded() -> None:
     """The defect that made the metric unusable: 40 retrieved chunks scored against 200 characters.
 

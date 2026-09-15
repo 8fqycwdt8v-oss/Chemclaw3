@@ -25,7 +25,7 @@ from chemclaw.evals.baseline import (
     load_baseline,
     render_comparison,
 )
-from chemclaw.evals.metric import EvalCase, get_metric
+from chemclaw.evals.metric import EvalCase, gated_names, get_metric
 
 
 class ScoredResult(BaseModel):
@@ -84,8 +84,17 @@ class EvalReport(BaseModel):
         neither had ever been observed to fail.
 
         So a gated metric owes the set one case that fails it, the same way a fix owes the suite a
-        test that goes red without it. An ungated metric (`passed is None`) owes nothing: it reports
-        a number rather than a verdict, and there is no gate to demonstrate.
+        test that goes red without it. An ungated metric owes nothing: it reports a number rather
+        than a verdict, and there is no gate to demonstrate.
+
+        **Which metrics are gated comes from the registry, not from this run's results**, and that
+        is the whole of `D-2026-09-14-a-gate-with-no-case-is-absent-not-satisfied`. Derived from
+        the results, a metric no case scores contributes no row, so it was not in `gated` and this
+        list stayed empty — the one arrangement the check exists to catch is the one where its
+        input disappears. Driven: moving both `runaway_rate` cases out of `data/evals/cases/` left
+        `make eval-strict` at **exit 0** while `make eval-baseline-check` said
+        "Worsened: runaway_rate (0.25 → absent)" — and the documented response to a case-set change
+        is to re-record the baseline, which erases the only control that saw it.
 
         Name-sorted, so the list reads the same on every run.
         """
@@ -95,8 +104,7 @@ class EvalReport(BaseModel):
             for r in self.results
             if r.passed is False and r.case_id in demonstrations
         }
-        gated = {r.result_metric for r in self.results if r.passed is not None}
-        return sorted(gated - fired)
+        return sorted(gated_names() - fired)
 
     def inert_demonstrations(self) -> list[str]:
         """Demonstration cases that no longer fail anything — the other half of `expect_pass`.

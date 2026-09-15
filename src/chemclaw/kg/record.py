@@ -95,17 +95,34 @@ class NoteWrite(BaseModel):
 
 
 class WriteOutcome(BaseModel):
-    """What a write actually did: the reference, and whether anything changed on disk.
+    """What a write actually did: the reference, and **how many notes it put in the graph**.
 
-    `written=False` is the idempotent no-op — every file was byte-identical to what the tree
-    already held, so nothing was committed. The caller acts on the difference: the counter below
-    means "a note reached the graph", and incrementing it for a no-op would make it count attempts.
+    `notes=0` is the idempotent no-op — every file was byte-identical to what the tree already
+    held, so nothing was committed — and it is also the pending state of a batch that has not
+    flushed. The caller acts on the difference: `chemclaw_notes_recorded_total` means "a note
+    reached the graph", and incrementing it for a no-op would make it count attempts.
+
+    **It is a count rather than a flag, because one write can carry many notes.**
+    `BatchingNoteWriter` merges N notes into one commit, and against a `written: bool` the only
+    honest answer for a fifty-note commit was `True` — so the counter moved by **1** where fifty
+    notes had landed, measured (`D-2026-09-14-a-counter-of-commits-is-not-a-counter-of-notes`).
+    A boolean cannot carry that number, and a second field beside it would be the same fact stored
+    twice; `written` is therefore derived below and is exactly `notes > 0`.
+
+    `extra="forbid"` for that reason and not for tidiness: `written=` used to be a constructor
+    argument, and an ignored keyword would leave a no-op reporting one note.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     reference: str
-    written: bool = True
+    #: How many notes this write committed. 1 for the ordinary one-note-one-commit path.
+    notes: int = Field(default=1, ge=0)
+
+    @property
+    def written(self) -> bool:
+        """Whether anything was committed — `notes > 0`, derived rather than stored beside it."""
+        return self.notes > 0
 
 
 class NoteWriter(Protocol):
@@ -226,6 +243,22 @@ def _unresolved_links(note: Note, landing: list[Note], notes_dir: Path) -> list[
     return list(dict.fromkeys(target for source, target in reported if source == note.id))
 
 
+def count_notes_recorded(outcome: WriteOutcome) -> None:
+    """Book what `outcome` put in the graph on `chemclaw_notes_recorded_total`.
+
+    Counted **after** the writer returns, so the number means "a note reached the graph" rather
+    than "we tried" — counting the attempt would show a busy, working system during exactly the
+    outage the metric exists to reveal.
+
+    **Two callers, deliberately.** `record_note` books the ordinary path, and
+    `cli/backfill_corpus` books the final `flush()` — a batch's last commit lands on a call
+    `record_note` never sees, so a run's tail would otherwise be invisible. One function rather
+    than two increments, because the rule about what may be counted is one rule.
+    """
+    if outcome.notes:
+        record_metric(lambda m: m.increment("chemclaw_notes_recorded_total", outcome.notes))
+
+
 async def record_note(
     note: Note,
     writer: NoteWriter,
@@ -295,9 +328,5 @@ async def record_note(
             ", ".join(unresolved),
         )
     outcome = await writer.write(_build_write(note, directory, dependencies, superseded))
-    if outcome.written:
-        # Counted after the writer returns, so the number means "a note reached the graph" rather
-        # than "we tried" — the distinction `chemclaw_notes_recorded_total` was declared to make
-        # and, until the gate was measured, did not.
-        record_metric(lambda m: m.increment("chemclaw_notes_recorded_total"))
+    count_notes_recorded(outcome)
     return outcome.reference

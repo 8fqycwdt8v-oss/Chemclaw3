@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "rp-02",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Screening results from Friday — all Buchwald-Hartwig amination of 4-bromoanisole at 1 mol% Pd:\n\n- P2Et / dioxane / 80 C: 92% conversion, 88% assay yield\n- P2Et / toluene / 80 C: 90% conversion, 85% assay yield\n- MTBD / dioxane / 80 C: 61% conversion, 44% assay yield\n- MTBD / toluene / 80 C: 55% conversion, 39% assay yield\n- BTMG / dioxane / 80 C: 74% conversion, 70% assay yield\n- BTMG / toluene / 80 C: 71% conversion, 66% assay yield\n\nWhat's the story here?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "similar_reactions"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a conversion or assay yield figure that is not in the pasted list",
+      "agreement with published HTE data asserted without a retrieved, cited source",
+      "a mechanistic cause for the MTBD conversion/yield gap stated as fact"
+    ],
+    "direction": "Base is the dominant factor (P2Et > BTMG > MTBD) and solvent is a second-order effect of roughly three points with dioxane slightly ahead — the answer should give that ordering and then notice the more interesting signal: the conversion-to-yield gap widens sharply for MTBD (61 to 44), which points at product loss or a side reaction rather than merely slow conversion. Comparing against the Doyle Buchwald-Hartwig base-plate data in the corpus is a plus only when the retrieved notes are actually cited; asserting the comparison without retrieval is a fail.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-02",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Screening results from Friday — all Buchwald-Hartwig amination of 4-bromoanisole at 1 mol% Pd:\n\n- P2Et / dioxane / 80 C: 92% conversion, 88% assay yield\n- P2Et / toluene / 80 C: 90% conversion, 85% assay yield\n- MTBD / dioxane / 80 C: 61% conversion, 44% assay yield\n- MTBD / toluene / 80 C: 55% conversion, 39% assay yield\n- BTMG / dioxane / 80 C: 74% conversion, 70% assay yield\n- BTMG / toluene / 80 C: 71% conversion, 66% assay yield\n\nWhat's the story here?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.32,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "e6ec1399fdde41459b116a0cedfdf825",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

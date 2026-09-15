@@ -39,7 +39,7 @@ from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import configure_logging
 from chemclaw.kg.git_writer import BatchingNoteWriter, default_writer
 from chemclaw.kg.note import Note
-from chemclaw.kg.record import record_note
+from chemclaw.kg.record import count_notes_recorded, record_note
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +127,10 @@ async def backfill(directory: Path, *, tags: list[str], dry_run: bool) -> tuple[
         raise
     if not dry_run:
         outcome = await submitter.flush()
+        # Booked here because this commit lands on a call `record_note` never sees: the final
+        # partial batch is flushed by the driver, so without this the tail of every run would be
+        # missing from `chemclaw_notes_recorded_total`.
+        count_notes_recorded(outcome)
         if outcome.written:
             logger.info("committed the final batch -> %s", outcome.reference)
     return written, skipped

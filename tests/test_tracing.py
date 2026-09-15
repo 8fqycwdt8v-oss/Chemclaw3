@@ -6,7 +6,7 @@ hang them from, no tool call around them — and nothing at all from a connector
 connector process started an unrelated trace. `deploy/README.md` meanwhile claimed spans cover a
 turn and a job and that dashboards track loop iterations, none of which existed.
 
-The propagation is the half worth naming. `connectors/identity.py` sends a *custom*
+The propagation is the half worth naming. `core/call_identity.py` sends a *custom*
 `X-Chemclaw-Correlation` header, and that header is the tell: it exists because the standard one was
 not being sent. A correlation id joins log lines after the fact, by grep; `traceparent` joins spans,
 live, so a connector's work appears inside the turn that asked for it.
@@ -96,7 +96,10 @@ def test_a_connector_call_carries_the_standard_header_as_well_as_the_custom_one(
     on and survives where no collector is configured; `traceparent` is what makes a connector's
     spans children of this turn rather than an orphan trace.
     """
-    from chemclaw.connectors.identity import HEADER_CORRELATION, turn_headers
+    from chemclaw.core.call_identity import (
+        HEADER_CORRELATION,
+        turn_headers,
+    )
     from chemclaw.core.identity_context import (
         reset_current_correlation_id,
         set_current_correlation_id,
@@ -159,7 +162,8 @@ def test_both_boundaries_are_actually_instrumented() -> None:
 
     from chemclaw.agent import audit
     from chemclaw.api import runner
-    from chemclaw.connectors import identity, server
+    from chemclaw.connectors import server
+    from chemclaw.core import call_identity
 
     def _opens(module: object, name: str) -> bool:
         """Whether `module` calls `start_span` with `name` — across a line break.
@@ -174,7 +178,9 @@ def test_both_boundaries_are_actually_instrumented() -> None:
 
     assert _opens(runner, "chemclaw.turn"), "a turn opens no span"
     assert _opens(audit, "chemclaw.tool"), "a tool call opens no span"
-    assert "trace_headers()" in inspect.getsource(identity), "no trace context leaves the process"
+    assert "trace_headers()" in inspect.getsource(call_identity), (
+        "no trace context leaves the process"
+    )
     assert "continue_trace(" in inspect.getsource(server), "a connector ignores the caller's trace"
 
 

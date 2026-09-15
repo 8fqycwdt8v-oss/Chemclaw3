@@ -1,0 +1,62 @@
+{
+  "probe": {
+    "id": "rx-19",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We see a des-methyl impurity in the final API. Which step in the route is most likely putting it there, and is there anything in our record that already points at it?",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "similar_molecules",
+      "substructure_matches"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a definitive attribution of the impurity to one step",
+      "a level or percentage for the impurity at any step",
+      "a fabricated route step that the retrieved record does not contain"
+    ],
+    "direction": "Should work the record rather than speculate freely: find the steps that introduce or carry the methyl group, follow the precursor/product relations between compound and reaction notes, and separate two distinct origins — carried in with a starting material or reagent lot versus generated in a step under the conditions used. Should name the conditions that plausibly demethylate (strong base or nucleophile on an aryl methyl ether, acid and heat, high temperature with a nucleophilic halide) and map them onto steps the record actually shows. Must be explicit about which links are supported by a retrieved note and which are its own hypothesis, and must name the experiment that settles it — spiking, or assaying the intermediate at each step. If the record is too thin, say that rather than filling in a route.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-19",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We see a des-methyl impurity in the final API. Which step in the route is most likely putting it there, and is there anything in our record that already points at it?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.25,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "be5d574761db4cd3a8b54fad33c62b48",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

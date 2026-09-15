@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "pl-32",
+    "section": 16,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Which of our workstreams are at risk of missing their milestone dates, and which ones should I escalate this week?",
+    "expects_tools": [],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "any milestone, due date, risk rating or escalation recommendation",
+      "any workstream identified as at risk or on track",
+      "that risk could be inferred from activity in the corpus"
+    ],
+    "direction": "No milestones, no dates, no plan, no workstream entity — nothing to assess risk against. A tempting wrong answer infers risk from how recently notes were written or how many experiments a topic has; the answer must not do that, because activity in a note corpus is not evidence about a delivery plan, and presenting it as such would be a fabricated risk register. Saying clearly that the system has no view of plans or dates is the whole requirement.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pl-32",
+    "section": 16,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Which of our workstreams are at risk of missing their milestone dates, and which ones should I escalate this week?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.95,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "17d6beb644ed4e45ae41adec9c247458",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

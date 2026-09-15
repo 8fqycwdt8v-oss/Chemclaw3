@@ -170,7 +170,7 @@ class AgentSettings(BaseSettings):
     # `D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`'s deferred schemas — not a budget
     # that pretends the prefix is smaller than it is.
     #
-    # **119,000, and 133,000 re-opened the defect `D-2026-09-04` closed.** That ADR's whole
+    # **118,700, and 133,000 re-opened the defect `D-2026-09-04` closed.** That ADR's whole
     # pass/fail criterion was "does the request fit a 128k model", and it fixed a measured 137,301
     # down to 100,000. Holding the *thread* allowance fixed at 57,000 and letting the request bound
     # follow the prefix put it back at 133,000 — a maximal request of ~131,400 billed at the real
@@ -182,8 +182,9 @@ class AgentSettings(BaseSettings):
     # **So the derivation runs the other way now: the window is the input and the thread allowance
     # is what is left over.** 128,000 is the smallest window this stack targets (the chart ships
     # `gpt-oss`, published at 131,072, and `D-2026-09-04` argues every figure against 128k), less
-    # `llm_max_tokens` = 4,096 reserved for the answer, leaving **123,904** of input, and 119,000
-    # is inside it by 4,904.
+    # `llm_max_tokens` = 4,096 reserved for the answer, leaving **123,904** of input, and 118,700
+    # is inside it by 5,204. (Both figures are asserted in `tests/test_compaction.py`, which is why
+    # a change to either has to be stated here rather than discovered there.)
     #
     # **That criterion used to need a tokenizer constant and no longer does, which is the point.**
     # It was written as "a maximal request bills `budget + (r - 1) x prefix`", with `r` a
@@ -227,7 +228,7 @@ class AgentSettings(BaseSettings):
     # number alone. Both halves are asserted in `tests/test_compaction.py`
     # (`BUDGET_THREAD_ALLOWANCE`, `SMALLEST_TARGET_WINDOW`), because the reviewer who found this
     # collapsed the split to 107,000 and got 150 passing tests.
-    agent_context_token_budget: int = Field(default=119_000, ge=1)
+    agent_context_token_budget: int = Field(default=118_700, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=0, ge=0)
     # `agent_tool_result_clear_trigger` is the *lossless* edit's own threshold, and splitting it
@@ -302,13 +303,16 @@ class AgentSettings(BaseSettings):
     # moved is the size of the thing being translated. The 11,000 is a *bound* and belongs beside
     # the ceiling it extends, so it lives in `tests/test_context_floor.SERVED_ELSEWHERE_ALLOWANCE`
     # where the assertion can read it, not as a second number here that would drift away from it.
-    # 108,500 since D-2026-09-13: `tests/test_context_floor.py`'s ceiling rose 2,000 to seat
-    # `write_todos` in every profile's prefix once the harness became the default, and this is
-    # derived *upwards* from it, so it moves with it and keeps the whole thread allowance it was
-    # derived to have. The budget below cannot follow, because it is derived downwards from the
+    # 108,200 since `D-2026-09-14-a-lowering-that-loses-a-merge-is-a-raising`: the ceiling it is
+    # derived from is 67,200 — up 2,000 for `write_todos` in every profile's prefix once the
+    # harness became the default (D-2026-09-13), down 300 for the developer rationale
+    # `D-2026-09-14-a-docstring-is-a-prompt-and-a-comment-is-not` moved out of three tool
+    # descriptions, a lowering a merge dropped and this restores. This is derived *upwards* from
+    # that ceiling, so it moves with it and keeps the whole thread allowance it was derived to
+    # have. The budget below cannot follow, because it is derived downwards from the
     # window — which is why the ceiling's cost lands there and not here, and why that cost is
     # 4.7% of the thread this time rather than wave 13's 1.16%.
-    agent_tool_result_clear_trigger: int = Field(default=108_500, ge=1)
+    agent_tool_result_clear_trigger: int = Field(default=108_200, ge=1)
     # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
     # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
     # dependent in one direction. Re-measured 2026-09-06 against real BPE encodings, on the observed

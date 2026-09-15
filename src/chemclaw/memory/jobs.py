@@ -109,6 +109,43 @@ def build_optimization_notes(
     )
 
 
+#: What a note built from a truncated corpus read says about itself, in the body a chemist reads.
+#:
+#: **`memory_corpus_max_reactions`'s whole justification is that a deployment over the bound gets
+#: "partial knowledge that says it is partial"**
+#: (`D-2026-09-14-the-memory-corpus-is-a-memory-bound-not-a-time-bound`), and until this existed
+#: the note said nothing: the flag skipped the retirement pass and logged a
+#: WARNING into a worker's log, while the note landing in `knowledge/` was byte-identical to one
+#: distilled from the whole record. A caveat in a log is a caveat for whoever is reading logs, and
+#: nobody reading the note is.
+#:
+#: It names the two consequences separately because they are different risks. The evidence may be a
+#: subset — the cluster's other members were in the part that was not read. And the id itself may
+#: differ from the one the same cluster mints when read whole: `stable_id` anchors on the
+#: *smallest* member id, so a truncation that drops that member mints a different id (measured:
+#: `["r-001","r-002","r-003"]` → `playbook-22484f4007b4`, the same cluster minus `r-001` →
+#: `playbook-3a61d1964e6d`), and this is exactly the run whose retirement pass is skipped, so
+#: nothing supersedes the note it does not recognise as its predecessor.
+PARTIAL_READ_CAVEAT = (
+    "\n> Derived from an **incomplete** corpus read: this run hit "
+    "`memory_corpus_max_reactions`, so the evidence cited above may be a subset of what the record "
+    "holds, and this note's id may differ from the one the same cluster mints when the corpus is "
+    "read whole. No note was retired on the strength of this run.\n"
+)
+
+
+def _marked_partial(note: Note) -> Note:
+    """The note, saying in its own body that the read behind it was incomplete.
+
+    Stamped here rather than in the three builders because this is the one function both publish
+    paths go through — the same argument that put the retirement pairing here, and the same
+    failure if it were duplicated: a fourth builder would inherit the caveat and could not forget
+    it. A later run over a complete corpus rewrites the note without the line, which is the note
+    being corrected rather than a second note appearing beside it.
+    """
+    return note.model_copy(update={"body": f"{note.body}{PARTIAL_READ_CAVEAT}"})
+
+
 def supported_from(reaction_ids: list[str], reactions: dict[str, OrdReaction]) -> date | None:
     """The day the note's *anchor* run was performed, or `None` when the corpus cannot say.
 
@@ -179,7 +216,8 @@ def _units(notes: list[Note], *, corpus_complete: bool) -> list[SynthesisUnit]:
     definition), and it is assigned to that successor's unit so the pair travels together — the
     cap's rotating window can never again split "retire A" from the replacement it names.
 
-    **A partial corpus read builds notes but retires nothing.** A read that skipped entries can
+    **A partial corpus read builds notes that say so, and retires nothing.** A read that skipped
+    entries can
     legitimately stop minting a cluster's id — the cluster's members were in the skipped part —
     and retiring knowledge on the strength of a read that saw less than the record would retract
     notes that are still true. That used to be caught, if at all, by a reviewer with no way to know
@@ -201,7 +239,7 @@ def _units(notes: list[Note], *, corpus_complete: bool) -> list[SynthesisUnit]:
             "retiring notes on a partial view retracts knowledge that may "
             "still be true"
         )
-        return [SynthesisUnit(note=note) for note in notes]
+        return [SynthesisUnit(note=_marked_partial(note)) for note in notes]
     existing = load_notes(settings.knowledge_path)
     units = {note.id: SynthesisUnit(note=note) for note in notes}
     for retired in supersede_updates(notes, existing, date.today()):

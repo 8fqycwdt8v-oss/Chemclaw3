@@ -227,6 +227,15 @@ def test_a_vendored_corpus_that_failed_to_load_is_retried_rather_than_remembered
                 "licence": "CC-BY-4.0",
                 "retrieved_from": "https://example.invalid/reagents.csv",
                 "description": "reagent names",
+                # `retrieved_from` above names somebody else's file, so this corpus is a mirror and
+                # `DatasetManifest` requires it to say who re-takes the snapshot and how often
+                # (`D-2026-09-14-a-mirror-with-no-owner-goes-stale-in-silence`). Written out here
+                # rather than flipped to `mirrored: false`, because a fixture that dodges the rule
+                # by claiming to be first-party while pointing at a URL is the shape the rule is
+                # about.
+                "mirrored": True,
+                "refresh_owner": "the process-chemistry data team",
+                "refresh_cadence": "quarterly",
                 "sha256": hashlib.sha256(b"name\nacetone\n").hexdigest(),
                 "text_column": "name",
             }

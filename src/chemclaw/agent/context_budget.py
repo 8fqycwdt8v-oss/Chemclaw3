@@ -48,7 +48,7 @@ request. So `effective_trigger` subtracts it unconditionally, and `agent_context
 therefore a bound on **request** spend rather than on thread spend. A `ContextEdit` cannot see the
 prefix: upstream's protocol hands `apply` a message list and a counter and nothing else. A
 middleware can, so `MeasureRequestPrefix` publishes it and the edits read it — the same shape
-`agent/turn_flags.py` and `agent/repeat_guard.py` already use for a fact that belongs to the call
+`core/turn_flags.py` and `agent/repeat_guard.py` already use for a fact that belongs to the call
 in flight.
 
 **What that costs, stated rather than discovered.** At a fixed configured budget every deployment's

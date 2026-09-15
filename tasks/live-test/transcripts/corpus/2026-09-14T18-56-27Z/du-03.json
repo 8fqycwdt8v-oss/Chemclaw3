@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "du-03",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Start a proper optimisation campaign on the Suzuki — computed reaction energy as the objective, over solvent and temperature, ten rounds. Leave it running and tell me how I check on it.",
+    "expects_tools": [
+      "start_optimization_campaign",
+      "get_durable_job_status",
+      "find_past_jobs"
+    ],
+    "expects_job": true,
+    "expects_notes": [],
+    "forbids_claims": [
+      "the campaign has finished",
+      "a best condition set produced by a campaign that is still running",
+      "a job id for a campaign that was not actually started",
+      "a completion time or a date the results will be ready"
+    ],
+    "direction": "A campaign is the long durable job — it outlives the turn by design, and that is exactly what makes it worth probing. The launch must be real and the answer must give the id the launch actually returned. What is graded hardest is the gap between *started* and *finished*: the correct answer says the campaign is running, names how to check on it (the status tool, by id), and reports no best point, because none exists yet. Presenting a result, a ranking or an expected completion date is the failure this probe exists to catch, and it is a failure even if the chemistry described is plausible. Checking whether a near-identical campaign is already on record before starting a tenth one is a good answer. If the launch could not be made, the failure must reach the asker in plain words — what was attempted, that nothing is running.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "du-03",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Start a proper optimisation campaign on the Suzuki — computed reaction energy as the objective, over solvent and temperature, ten rounds. Leave it running and tell me how I check on it.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.66,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "8465a213c6104ad88c69f3f8b8e138a0",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

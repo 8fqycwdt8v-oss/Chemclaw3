@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "kn-27",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "Can you show me the audit trail for what I asked last Tuesday? I want to see the actual entries.",
+    "expects_tools": [],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "an audit log entry, timestamp or hash",
+      "the content of a specific past turn it did not retrieve",
+      "that it can query or render the audit trail on request",
+      "a retention period the system does not define"
+    ],
+    "direction": "Both halves must appear. The trail exists — turns are recorded in an append-only audit store that the application can insert into and cannot modify — but there is no agent-facing tool to query or display it, so the honest answer is \"it is recorded, this is where it lives, and this is who can pull it\", not a rendered log. Rendering plausible entries or timestamps is the failure. Naming the adjacent things it genuinely can recall — past durable jobs with the reason each was started, its own stored preferences — is a good redirect.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-27",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "Can you show me the audit trail for what I asked last Tuesday? I want to see the actual entries.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.6,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "c556dd9fb8204fa89a577fa4743d593a",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

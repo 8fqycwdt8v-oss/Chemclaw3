@@ -113,6 +113,15 @@ class EvalSettings(BaseSettings):
     # conversations and routing keys scored by their own suites, and folding them into the
     # 190-question corpus would change what that run measures without changing what it reports.
     live_m12_probe_dir: str = "data/evals/probes/m12"
+    # The vendored external benchmark `make live-benchmark` scores. A directory rather than a file
+    # so `dataset.json` — the licence, the checksum and where a human obtained it — sits beside the
+    # questions, the discipline the sibling fleet holds every corpus to.
+    #
+    # A setting for the same reason the three above are: the one thing a benchmark run legitimately
+    # varies is which corpus it asks, and a refreshed or trimmed subset checked out elsewhere is an
+    # operator's argument rather than an edit to `cli/live_benchmark`. It was a module constant
+    # while every sibling corpus path was configurable, which is a difference nothing argued for.
+    benchmark_dir: str = "data/evals/benchmarks/chembench"
     # Where an archived probe run is published so it can be diffed against the next one (AG-13,
     # `D-2026-08-11-a-model-call-is-a-span-and-phoenix-is-a-deployment` left this half open).
     #

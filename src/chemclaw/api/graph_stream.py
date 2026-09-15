@@ -47,7 +47,7 @@ from chemclaw.api.events import (
     Event,
     EvidenceSourceEvent,
     JobStartedEvent,
-    NoteProposedEvent,
+    NoteRecordedEvent,
     PlanEvent,
     QuestionEvent,
     TokenEvent,
@@ -485,4 +485,4 @@ def _signal_event(signal: Signal) -> Event:
         # field is now the same verdict the audit row records, rather than a second opinion.
         #
         return ToolFailedEvent(tool=signal.tool, message=signal.message, reason=signal.reason)
-    return NoteProposedEvent(note_id=signal.note_id, reference=signal.reference)
+    return NoteRecordedEvent(note_id=signal.note_id, reference=signal.reference)

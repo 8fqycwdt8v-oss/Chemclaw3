@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "kn-08",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Where is our knowledge actually thin? I mean places where we've run plenty and never distilled anything out of it.",
+    "expects_tools": [
+      "find_knowledge_gaps",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a gap, count or statistic that the tool did not return",
+      "a note id that was not retrieved",
+      "a project or programme that does not appear in the corpus"
+    ],
+    "direction": "Calls find_knowledge_gaps and reports what it actually returns — counts per note type, isolated/unlinked notes, evidence with no distilled playbook, the most-cited hub notes, dangling links — rather than reasoning about the corpus from memory. Every number quoted must be the tool's. A satisfying answer turns at least one gap into a concrete next action: the note that should be written, or the run that should be done.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-08",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Where is our knowledge actually thin? I mean places where we've run plenty and never distilled anything out of it.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.4,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "c99194740c154b82a8a6184b22901b10",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

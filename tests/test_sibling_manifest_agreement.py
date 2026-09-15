@@ -26,6 +26,15 @@ counter-argument to it: an agreement nothing checks is one that holds until some
 the whole subject of `D-2026-09-07-a-claim-about-another-repository-is-checked-by-reading-it` is
 that a claim about another repository has to be checked by reading that repository.
 
+**And the seam's own tripwire covered the modules it named rather than the seam**
+(`D-2026-09-14-a-tripwire-over-two-named-modules-covers-the-modules-it-names`). `_CALLERS` was two
+paths while this docstring and the test below both said "every hardcoded `calc` call": run against
+the tree on 2026-09-14, five modules hold such calls. The two unread ones were
+`connectors/calc/server/tools.py` (11 sites) and `connectors/bo/calculators.py` (2) — the half of
+the seam carrying `predict_pka`, `predict_solubility` and `compute_xtb_energy`. Every name they put
+on the wire is one the fleet records, so nothing was broken; the tripwire simply did not exist
+there. `_callers()` derives the list from who imports a dispatcher, and 13 sites became 26.
+
 **Opt-in, and it can only skip or fail.** Reading a few YAML files and one JSON file needs a
 checkout and no build, which is the property that makes these plausible to run in CI where the
 schema measurement in `tests/test_context_floor.py` is not. Without a checkout each skips with the
@@ -134,12 +143,43 @@ def test_a_bundle_declared_in_both_trees_declares_the_same_surface() -> None:
 #: The functions in `connectors/calc/` that put a tool name and an argument dict on the wire.
 _DISPATCHERS = frozenset({"cached_remote", "remote_call", "remote_compute", "_call"})
 
-#: The modules that hold those call sites. Both, because `remote.py`'s own `calculation_key` calls
-#: are as hardcoded as `compose.py`'s physics ones and break the same way.
-_CALLERS = (
-    "src/chemclaw/connectors/calc/compose.py",
-    "src/chemclaw/connectors/calc/remote.py",
-)
+#: Where this repository's own package lives, so the callers below are found rather than listed.
+_SRC = REPO_ROOT / "src"
+
+
+def _callers() -> tuple[str, ...]:
+    """Every module in `src/` that imports a calc dispatcher, as repository-relative paths.
+
+    **Derived, because the hand-kept list covered half the seam while claiming all of it**
+    (`D-2026-09-14-a-tripwire-over-two-named-modules-covers-the-modules-it-names`). It read
+    `compose.py` and `remote.py` — 13 call sites — and the docstring below said "every hardcoded
+    `calc` call". Measured against the tree on 2026-09-14 there are **five** modules holding such
+    calls: those two, plus `connectors/calc/server/tools.py` (11 sites) and
+    `connectors/bo/calculators.py` (2), which were unread. Every tool name they put on the wire is
+    one the fleet records today — so nothing was broken, and the tripwire for the half of the seam
+    that carries `predict_pka`, `predict_solubility` and `compute_xtb_energy` had simply never
+    existed.
+
+    The import is what scopes this, not the function name. `ingest/labels/labeller.py` defines its
+    own `_call` — the same spelling as one of `_DISPATCHERS` — against the **rxnlabel** server,
+    which has a different surface and no `tool-surface.json`; matching on the name alone would
+    check its three call sites against `calc`'s tools and fail on a server it never talks to.
+    """
+    found: list[str] = []
+    for path in sorted(_SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == _DISPATCHER_MODULE:
+                if any(alias.name in _DISPATCHERS for alias in node.names):
+                    found.append(str(path.relative_to(REPO_ROOT)))
+                    break
+    return tuple(found)
+
+
+#: The module the dispatchers are defined in. A caller is a module that imports one from *here* —
+#: which is also where `remote.py`'s own `calculation_key` calls live, and they are as hardcoded as
+#: `compose.py`'s physics ones and break the same way.
+_DISPATCHER_MODULE = "chemclaw.connectors.calc.remote"
 
 
 _Bindings = dict[str, frozenset[str] | None]
@@ -195,8 +235,15 @@ def _hardcoded_calls() -> list[tuple[str, ast.expr, frozenset[str], _Bindings]]:
     dispatcher handed a caller's `arguments` parameter — `remote_compute`'s single `_call`, and
     `cached_remote`'s own body — is a pass-through and declares nothing, so it is not a site.
     """
+    callers = _callers()
+    # `remote.py` defines the dispatchers rather than importing them, so it is added by name — the
+    # one module the derivation above cannot see, and the one whose `calculation_key` call sites
+    # were the original reason for a list.
+    definer = "src/chemclaw/connectors/calc/remote.py"
+    if definer not in callers:
+        callers = (*callers, definer)
     sites: list[tuple[str, ast.expr, frozenset[str], _Bindings]] = []
-    for relative in _CALLERS:
+    for relative in sorted(callers):
         tree = ast.parse((REPO_ROOT / relative).read_text(encoding="utf-8"))
         bound = _bindings(tree)
         for node in ast.walk(tree):
@@ -261,6 +308,38 @@ def test_the_calc_seam_calls_only_tools_the_fleet_records_serving() -> None:
                 f"{relative}:{expression.lineno} calls `{tool}` without "
                 f"{sorted(required - keys)}, which the server declares required."
             )
+
+
+def test_the_two_composites_this_repository_assembles_differ_in_why_they_are_assembled() -> None:
+    """`compute_thermochemistry` is not served; `predict_logd` is, and is composed here anyway.
+
+    Both are built in `connectors/calc/compose.py` out of separately keyed primitives, and
+    `connectors/calc/server/tools.py` said both were "not shipped by the server at all, because
+    their keys would name an output" — while `connectors/calc/remote.py::remote_key` said in the
+    present tense that `predict_logd` is *"the server's own"*. The fleet's file settles it, and the
+    two reasons are different: one composite has no server tool to collide with, the other has one
+    and this repository declines to call it because its expensive half is a cached pKa.
+
+    Worth a check rather than a corrected sentence, because the first half is a real invariant. The
+    fleet's own rule forbids duplicating a Chemclaw3 capability, and a `compute_thermochemistry`
+    appearing there would give this family two answers to one question — the failure that rule
+    exists to prevent — with nothing in either tree noticing.
+    """
+    root = _sibling_or_skip()
+    surface: dict[str, dict[str, Any]] = json.loads(
+        (root / "servers" / "calc" / "tool-surface.json").read_text(encoding="utf-8")
+    )
+
+    assert "compute_thermochemistry" not in surface, (
+        "Chemclaw3-mcp now serves `compute_thermochemistry`, which this repository composes from "
+        "separately keyed primitives. Two live definitions of one calculation is the duplication "
+        "both repositories' rules forbid — decide which one answers before either ships."
+    )
+    assert "predict_logd" in surface, (
+        "the fleet no longer serves `predict_logd`. `remote_key`'s docstring describes it as the "
+        "one tool that answers `calculation_key` with `None`, and `cached_remote` refuses such a "
+        "tool as a miswiring — so that paragraph is now about nothing."
+    )
 
 
 def test_the_fake_calc_server_serves_exactly_the_surface_the_fleet_records() -> None:

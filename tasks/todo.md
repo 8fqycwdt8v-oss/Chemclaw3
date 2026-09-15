@@ -668,19 +668,19 @@ of three repositories ship through a Jenkins pipeline that can skip its own gate
 - [ ] W29.4 `Chemclaw3-mcp` — `ci.yml:70` duplicates the lint command inline instead of calling
       `make lint` — the *exact* defect the comment above it says was found and fixed for `make type`.
       And `ci.yml:142` re-runs a strict subset of `ci.yml:80`.
-- [ ] W29.5 `Chemclaw3` — the image vulnerability scan is not merged as a gate [M], and the
+- [x] W29.5 `Chemclaw3` — the image vulnerability scan is not merged as a gate [M], and the
       runbook's claim about it is false. Turn it back on with its contradiction resolved.
-- [ ] W29.6 `Chemclaw3` — two of the four deployables have no chart, so a release changes their bytes
+- [x] W29.6 `Chemclaw3` — two of the four deployables have no chart, so a release changes their bytes
       and nothing renders them.
-- [ ] W29.7 `Chemclaw3` — the note reindex prunes a shared index against one pod's disk [M].
+- [x] W29.7 `Chemclaw3` — the note reindex prunes a shared index against one pod's disk [M].
 - [ ] W29.8 `Chemclaw3_ui` — **the gate-reproducibility gap**: CI steps ④⑪⑫⑬ and the whole
       `container` job are inline shell with no npm script, so they cannot be run locally; `npm run
       smoke` and `npm run check:openapi` are wired into nothing; and `Jenkinsfile` is a second,
       narrower gate that omits `npm audit`, contrast and e2e. One `npm run ci`, one gate definition,
       both pipelines calling it.
-- [ ] W29.9 `Chemclaw3` — snapshot refresh has no named owner or cadence in any fleet server README
+- [x] W29.9 `Chemclaw3` — snapshot refresh has no named owner or cadence in any fleet server README
       (`MODULES.md` open question (c)). Assign or record the posture.
-- [ ] W29.10 `Chemclaw3` — **the dependency gate and GitHub disagree, and the gate's own config file
+- [x] W29.10 `Chemclaw3` — **the dependency gate and GitHub disagree, and the gate's own config file
       says otherwise.** Measured 2026-09-12: `make deps-audit` reports no known vulnerabilities over
       both the production closure and the full one (212 and 246 packages), while a push to this
       repository returns `GitHub found 7 vulnerabilities on ... default branch (1 high, 6 moderate)`.
@@ -702,28 +702,28 @@ run ci` locally and show it covers what `ci.yml` runs.
 The last wave closes the seams between repositories — the only place a defect can hide from all
 three suites at once — and then states, with evidence, what a deployment team is getting.
 
-- [ ] W30.1 `Chemclaw3` + `Chemclaw3_ui` — nothing checks the client half of a wire contract, and it
+- [x] W30.1 `Chemclaw3` + `Chemclaw3_ui` — nothing checks the client half of a wire contract, and it
       has drifted twice [L]. This is the row that justifies the wave.
-- [ ] W30.2 `Chemclaw3` + `Chemclaw3_ui` — the `note_proposed` SSE event is not a proposal and the
+- [x] W30.2 `Chemclaw3` + `Chemclaw3_ui` — the `note_proposed` SSE event is not a proposal and the
       name is a two-repo contract. Rename across both, in the order a deployment can survive.
-- [ ] W30.3 `Chemclaw3` — `propose_report` proposes nothing and the string is a **registered Temporal
+- [x] W30.3 `Chemclaw3` — `propose_report` proposes nothing and the string is a **registered Temporal
       activity name**: register both for one deployment cycle, drop the old one after the queue
       drains. A release procedure, and the new ADR has to say what it now names.
-- [ ] W30.4 `Chemclaw3` — the labelling client is the one MCP leg with no identity or trace on the
+- [x] W30.4 `Chemclaw3` — the labelling client is the one MCP leg with no identity or trace on the
       wire (`ingest/labels/labeller.py:216`); closing it means deciding where identity stamping for a
       **non-connector** MCP client belongs, which is a layering decision.
-- [ ] W30.5 `Chemclaw3` + `Chemclaw3-mcp` — run `tests/test_sibling_manifest_agreement.py` and
+- [x] W30.5 `Chemclaw3` + `Chemclaw3-mcp` — run `tests/test_sibling_manifest_agreement.py` and
       `tests/siblings.py` against a real sibling checkout (both are present in this environment) and
       report what they *actually* compare, including the `calc` seam's hardcoded tool names that no
       manifest covers in either direction.
 - [ ] W30.6 `Chemclaw3_ui` — decide `ISSUES.md` Issue 5 (`/s/:sessionId` implies sharing and is not
       shareable) and Issue 8 (token in `sessionStorage`; the BFF cookie design exists on PR #11 and
       is blocked on tenant admin, not code). **Do not re-derive Issue 8** — record the posture.
-- [ ] W30.7 All three — the full four-repo live lane: `make live-infra`, `make live-up`,
+- [x] W30.7 All three — the full four-repo live lane: `make live-infra`, `make live-up`,
       `make live-probes` with the `API-KEY`→`CHEMCLAW_LLM_API_KEY` mapping beside a gateway, and
       `infra/live/e2e-full-stack/up.sh` across all four checkouts. This is the only step that
       exercises the system as a deployment runs it.
-- [ ] W30.8 All three — **the production-readiness record**: one ADR per repo stating what is
+- [x] W30.8 All three — **the production-readiness record**: one ADR per repo stating what is
       enforced, what is bounded, what is measured, and what is explicitly accepted as unbounded or
       unproven, each clause naming the test that holds it. Every remaining row moves to
       `DEFERRED.md` with a trigger or stays in `BACKLOG.md`; nothing is left implied.
@@ -737,6 +737,53 @@ repository in which every claim names a test.
 
 *(Filled in per wave as it closes — one short section each: what was planned, what the measurement
 changed, what Half B found, and what is left. Empty until W21 merges.)*
+
+### W29 and W30 — `Chemclaw3`'s rows (2026-09-14)
+
+**What the measurement changed, row by row.**
+
+- **W29.5** The scan was held back because it reported `setuptools` 70.3.0 and `msgpack` 1.1.2 that
+  the build's own `find / -xdev` could not locate. Re-run against trivy 0.58.2 on an image built
+  *with* the `uv cache clean` recorded as the fix: both reproduce, and both are two lines of pip's
+  vendored manifest in the base's `/opt/app-root`, with the code beside them, in pip 26.2.1 — the
+  current release. **The contradiction was the search being narrower than the scan**, and the
+  recorded diagnosis had been false in the tree in the present tense. Gate merged, blocking, on PRs
+  too. Two mutations of the runbook check found it matched a *substring* (downloading the scanner
+  passed) and read only a table row's *first cell* (the SBOM row's `syft` claim was unchecked).
+- **W29.6** Declined with a measurement: both chartless deployables are in other repositories. What
+  is here is the release path, which failed with `oc`'s own `NotFound` — a sentence that reads as a
+  broken cluster rather than as the shape of a component a release can only re-image.
+- **W29.7** The row said the prune was "the single change gating `replicas > 1`". **It is not.** The
+  probe's re-embed counts (2, then 3) show the whole corpus re-embedded on every alternating pass,
+  because `note_file_fingerprints` is `mtime_ns:size`. The prune half is closed; the larger half
+  replaced the row. A **timestamp**-based guard was built first and measured useless — `%cI` is
+  second-resolution, the probe's two commits compared equal, and the guard passed its own probe
+  while doing nothing.
+- **W29.9** This repository mirrors nothing, so there was no owner to assign. Recording that in
+  prose would be false the day somebody vendors a corpus, so the *manifest* answers it instead.
+- **W29.10** **The seven vulnerabilities are PyPI, not `github-actions`** — `cryptography` 49.0.0
+  (HIGH) and `pypdf` 6.14.2 (six MODERATE), at versions `uv.lock` does not contain, persisting
+  because GitHub's dependency graph is a union over the branch's history. Widening the gate would
+  have closed nothing, so the claim was corrected and the ecosystem gap made an explicit accepted
+  risk a test holds.
+- **W30.1** The one artefact the client can fetch declared **2 of 17** event members and **0 of 10**
+  error codes. Fixed by publishing the union into the OpenAPI document and holding it to the
+  fixture.
+- **W30.2 / W30.3** Two renames, each a two-repository or two-release procedure rather than a
+  commit, with the ordering argued and the removal step deferred against an observable trigger.
+- **W30.4** The layering question answered from what the code *depends on*: the stamp and the flag
+  are `core`'s; what is a connector's is which credential to send.
+- **W30.5** The `calc` seam's tripwire read **13 of 26** call sites while claiming all of them —
+  the fourth instance in this programme of a method that cannot drift over a fixture that can.
+- **W30.7** The four-tier lane came up against a real gateway and ran 331 probes; the credential's
+  balance was exhausted 17 in, so **no probe score exists**. Recorded as an accepted gap, not as a
+  pass.
+- **W30.8** The readiness record, four lists, every clause naming its test, leading with the one
+  external number that does not flatter the system.
+
+**What is left**, and it is all in one of the two registers: `Chemclaw3-mcp`'s W29.1–W29.4,
+`Chemclaw3_ui`'s W29.8 and W30.6, and the accepted risks in
+`docs/decisions/D-2026-09-14-what-a-deployment-team-is-getting.md` §4.
 
 ### W21 — pre-merge review of PR #350 (three fresh-context reviewers, fixes applied before merge)
 

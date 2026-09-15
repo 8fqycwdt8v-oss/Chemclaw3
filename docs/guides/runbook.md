@@ -2001,29 +2001,32 @@ the pods simply failed to pull, which reads as a broken image rather than a miss
 
 ### When a supply-chain gate goes red
 
-Two blocking gates run in `.github/workflows/image.yml`, and each fails differently:
+**Two gates block and one step only records**, all three in `.github/workflows/image.yml`:
 
 | Gate | What it read | First move |
 | --- | --- | --- |
 | `pip-audit` | the exported lockfile — the exact versions the image installs | `uv lock --upgrade-package <name>`; reproduce locally with `make deps-audit` |
+| `trivy` | the built filesystem — the base OS packages and every Python environment the base ships, which no lockfile audit can see | read the finding's path; if it is ours, fix it in `uv.lock` or `deploy/Containerfile`; if it is genuinely unfixable, an entry in `.trivyignore.yaml` with its reason and an expiry |
 | SBOM step | nothing; it records | it only fails if `syft` cannot run |
 
-**There is no image scan, and this section used to say there was.** It listed `trivy` as the second
-of three blocking gates and described how it was tuned, in the present tense; `trivy` appears
-nowhere in the workflow, the Makefile or anything else that runs. That is worse than a missing
-control — an operator reading this page would have believed the base OS layers were being scanned
-and that a red build would tell them. The scan is a real gap, tracked in `BACKLOG.md`, and it is
-held for a stated reason rather than forgotten: per
-`D-2026-08-01-a-tag-is-a-pointer-not-a-build`, the candidate scan kept reporting packages
-(`setuptools` 70.3.0, `msgpack` 1.1.2) that an exhaustive `find / -xdev` in the same build could not
-locate, and a gate whose last word contradicts the artifact it scanned makes every future red build
-ambiguous.
+`trivy` runs with `--ignore-unfixed` on HIGH and CRITICAL, and that is a deliberate narrowing
+rather than an oversight: a gate that fires on every LOW in a distro base is one an operator
+disables within a week, and a finding with no released fix is not something a build can act on. A
+finding that genuinely cannot be fixed gets an entry in `.trivyignore.yaml` **with its reason and
+an expiry in the diff** — never a downgrade of the whole gate, which is how a control becomes a
+badge. Two entries are there today and both are pip's own vendored manifest; that file carries the
+measurement.
 
-When the scan is merged, it should run with `ignore-unfixed: true` on HIGH and CRITICAL. That is a
-deliberate narrowing, not an oversight: a gate that fires on every LOW in a distro base is one an
-operator disables within a week. A finding that genuinely cannot be fixed gets an explicit
-`--ignore-vuln` **with its reason in
-the diff** — never a downgrade of the whole gate, which is how a control becomes a badge.
+**This section twice said something false about that scan, in opposite directions, and both are
+worth knowing before you read a red build.** It first listed `trivy` as a running gate when `trivy`
+appeared nowhere in the workflow. It then said there was no scan *because* the candidate one kept
+reporting `setuptools` 70.3.0 and `msgpack` 1.1.2 that an exhaustive `find / -xdev` in the same
+build could not locate — which read as a scanner contradicting its own artifact. Re-run on
+2026-09-14 (`D-2026-09-14-the-phantom-packages-were-pips-vendored-manifest`): both findings
+reproduce and both resolve to pip's own vendored manifest (`vendor.txt`, under `pip/_vendor/`) in
+the base image's `/opt/app-root` environment. The `find` missed them because it searched for `setuptools-[0-9]*`, which is a
+`dist-info`/wheel naming convention that a line in a text file does not have. The scanner was
+right; the search was narrower than the scan.
 
 The SBOM (SPDX) and the built image's digest are retained on the run for 90 days. That is what makes
 "what was in the image that produced this audit record" answerable at all, and it is the reason the
