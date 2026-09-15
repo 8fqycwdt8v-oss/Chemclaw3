@@ -274,6 +274,12 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
         # than from the current head is the write this pair exists to prevent.
         "read_experiment_protocol",
         "find_experiment_protocols",
+        # Arithmetic over a campaign's recorded points: it reads a campaign thread and returns
+        # factors and arms, writing nothing anywhere. Read-only is the substantive classification
+        # rather than the technical one — the plan gate lets a read run while a plan is still being
+        # built, and "what would this campaign's next experiments look like as a plate" is a
+        # question that has to be answerable *before* somebody approves drafting them, not after.
+        "experiment_arms_from_campaign",
         "get_durable_job_status",
         "list_attachments",
         "list_watches",

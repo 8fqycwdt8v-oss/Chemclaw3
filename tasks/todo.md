@@ -971,3 +971,46 @@ A second, unrelated finding worth keeping: a scratchpad script named `csv.py` sh
 module, so *any* python run from that directory executed it, and it overwrote
 `src/chemclaw/protocols/export.py`. Four earlier sessions blamed subagents running
 `git checkout -- <path>`. The real cause was a filename.
+
+## Wave C — a campaign's suggestion becomes arms (2026-09-15)
+
+**The gap was retyping, not judgment.** A BO suggestion is `Candidate.params` — a bare
+`dict[str, float | str]` with no units, no level labels and no roles. `draft_experiment_protocol`
+needs `Factor`s whose levels carry labels and structures, and `ProtocolArm`s citing those labels
+exactly. Nothing connected the two, so the model read the candidate table and typed the arms out by
+hand; a transposed value there is a different experiment with nobody able to see it.
+
+- [x] `protocols/from_bo.py::factors_and_arms` — the pure translation. It lives in `protocols/`
+      because `tests/test_layering.py` allows `protocols -> science` and allows neither
+      `science -> protocols` nor `connectors -> protocols`; and it is the *right* side on the
+      argument that file already makes — protocols reads prescriptive shapes, and a design space is
+      one.
+- [x] Four refusals rather than papering over: two parameters slugging to one `Factor.name`
+      (silently merging makes a consistent design describing experiments nobody planned, and
+      nothing downstream could see it); a parameter over 96 settings; runs that name or omit a
+      parameter the problem does not (a `factor_levels_declared` blocker, later and worse); and a
+      parameter the runs never vary — a **setpoint**, reported in `constants`, never dropped.
+- [x] Repeats become `replicate_of` the first occurrence, which is what a screening design's centre
+      points *are*.
+- [x] One `_label()` formats both the factor's level and the arm that cites it, because
+      `factor_levels_declared` matches them by string equality — `80` vs `80.0` fails a design that
+      is correct.
+- [x] `agent/protocol_design_tools.experiment_arms_from_campaign` makes it reachable, taking a
+      `campaign_id` rather than an `OptimizationProblem` so the schema stays small.
+- [x] Classified **read-only** in `authz`, explicitly — the plan gate lets a read run while a plan
+      is still being built, and "what would this campaign's next experiments look like as a plate"
+      has to be answerable before somebody approves drafting them.
+- [x] Nine tests, four driven red by mutation (label formatting, replicate marking, structure
+      carry-through, the constants split) before being believed.
+
+**The cost was caught by the ratchet and paid down rather than waived.** The tool's first docstring
+cost **626** tokens against 290 for `read_experiment_protocol` and 191 for
+`find_experiment_protocols`, and pushed `tests/test_context_floor.py` 26 tokens over its ceiling.
+Trimmed to **431** by moving the rationale into a comment, per
+`D-2026-09-14-a-docstring-is-a-prompt-and-a-comment-is-not`. The ceiling did not move.
+
+**What it deliberately does not do.** No `ProtocolBody` — the charge table, the steps, the
+analytics and the hazards are judgment over the chemistry and stay the model's. And no units: an
+`OptimizationProblem` carries none anywhere, and `quantities_are_plausible` reads *setpoints* rather
+than a factor's levels, so nothing downstream catches a temperature factor whose 80 might be °C or
+mol%. `notes` says so per parameter; it is the one gap this translation cannot close.
