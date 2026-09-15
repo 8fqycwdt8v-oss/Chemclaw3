@@ -6,12 +6,17 @@ the one registered caller (`autonomy.plan_execute_utility`) reads four hand-writ
 case file. So the comparison the corpus most needs was implemented, registered, gated, and never
 measured.
 
-**What the two arms are.** The augmented arm is the front door's default agent. The baseline arm is
-the *same question* asked of `data/evals/profiles/no-tools.yaml`, a profile whose `tool_names: []`
-structurally removes every capability tool (and, by `ToolScopedSkills`, every skill about them)
-before the graph is compiled. That is the comparison ChemToolAgent reports and this repository could
-not reproduce: tool augmentation does not consistently beat the base model, and it hurts on general
-chemistry questions.
+**What the two arms are, and what they differ by.** The augmented arm is the front door's default
+agent. The baseline arm is the *same question* asked of `data/evals/profiles/no-tools.yaml`, which
+empties `tool_names` — structurally, so the compiled graph never holds the tools and, by
+`ToolScopedSkills`, no skill about them — **and** replaces the system prompt wholesale, because a
+profile's `instructions:` are not additive. So a delta from this pairing is a prompt-and-tools delta
+and cannot be attributed to the tools (`D-2026-09-14-tools-were-never-the-variable`);
+`data/evals/profiles/tools-removed.yaml` is the arm that varies only the tools, and re-running the
+corpus against it is the open row in `docs/planning/BACKLOG.md`. The comparison ChemToolAgent
+reports — tool augmentation does not consistently beat the base model, and it hurts on general
+chemistry questions — is what this machinery was built to reproduce, and a run whose baseline also
+swaps the prose is not yet that run.
 
 **Why a verdict becomes a number rather than a rate.** `compare_tool_utility` scores *per task* so
 that "tools helped here and hurt there" survives, which an aggregate served-rate destroys — and the

@@ -23,6 +23,7 @@ at a control that is not there.
 """
 
 import ast
+import json
 import re
 from pathlib import Path
 
@@ -110,8 +111,17 @@ def test_the_external_benchmark_number_is_still_in_it() -> None:
     **And the variable is asserted beside it**, because the pair was published as a tools contrast
     and is not one: the control arm replaces the whole system prompt, so a record stating the two
     numbers without naming what moved between them repeats the attribution
-    `D-2026-09-14-tools-were-never-the-variable` withdrew. The second assertion is what stops the
+    `D-2026-09-14-tools-were-never-the-variable` withdrew. That assertion is what stops the
     correction being edited out while the flattering half of it stays.
+
+    **Asserted as the claim rather than as the digits, which is a change**
+    (`D-2026-09-14-a-pinned-figure-is-a-control-only-if-it-can-go-stale`). This test pinned the
+    literal `62 → 58`, a figure from a three-arm run whose transcripts are in no tree here and
+    which nothing in this repository can re-derive. A pin like that cannot notice the number going
+    stale — only a document that stops repeating it — so it does not detect staleness, it enforces
+    it, and whoever re-runs the arm on a gateway with a balance would have had to edit the control
+    to record the measurement. `62/100` and `74/100` stay pinned because `make live-benchmark`
+    produces them from a keyed corpus this repository vendors.
     """
     text = _record_text()
     assert "62/100" in text and "74/100" in text, (
@@ -119,8 +129,64 @@ def test_the_external_benchmark_number_is_still_in_it() -> None:
         "number this repository has, and it is 12 points worse with tools than without — which is "
         "exactly why it is the one a later edit would drop."
     )
-    assert "62 → 58" in text and "D-2026-09-14-tools-were-never-the-variable" in text, (
-        "the readiness record states the ChemBench pair without saying which variable moved. "
-        "The arms differ by the whole system prompt as well as by the tools; with the prompt held "
-        "fixed, removing every tool moves 62 → 58."
+    row = next((line for line in text.splitlines() if "62/100" in line), "")
+    assert "D-2026-09-14-tools-were-never-the-variable" in row, (
+        "the readiness record states the ChemBench pair without citing the ADR that withdrew its "
+        "attribution. The arms differ by the whole system prompt as well as by the tools."
+    )
+    assert "system prompt" in row, (
+        "the ChemBench row no longer names the variable that moved between the two arms, which is "
+        "the correction rather than the measurement."
+    )
+    assert "not reproducible from this tree" in row, (
+        "the ChemBench row carries the three-arm figures without saying that run's record is not "
+        "in this tree. Section 3's heading promises a number somebody can reproduce, and the row "
+        "below it ships 331 transcripts for exactly that reason."
+    )
+
+
+#: Where the live run the record cites left its per-probe transcripts. The record names this
+#: directory, so the two figures in that row are the one pair in §3 a reader can re-derive here.
+_CORPUS_TRANSCRIPTS = REPO_ROOT / "tasks" / "live-test" / "transcripts" / "corpus"
+
+
+def test_the_live_run_row_counts_what_its_transcripts_hold() -> None:
+    """The one row in §3 whose figures this tree can re-derive, derived rather than believed.
+
+    It shipped saying **27** distinct tools where the cited transcripts hold **26** across
+    `tools_called ∪ tools_failed ∪ tool_results` — a figure nothing could check, in the row that
+    exists precisely because its evidence is committed. Section 3's other rows either name a target
+    that reproduces them or now say their run's record is elsewhere
+    (`D-2026-09-14-a-pinned-figure-is-a-control-only-if-it-can-go-stale`); this one's evidence is
+    right here, so the digits are held against it.
+
+    **A second committed run fails this rather than being averaged in.** The row describes one
+    execution on one date. If another lands, that row has to be rewritten, and a check that quietly
+    unioned two runs would let it go on describing the first.
+    """
+    runs = sorted(path for path in _CORPUS_TRANSCRIPTS.iterdir() if path.is_dir())
+    assert len(runs) == 1, (
+        f"{len(runs)} live-probe runs are committed under {_CORPUS_TRANSCRIPTS}. The readiness "
+        "record's live-run row describes one execution on one date; rewrite it for the run it "
+        "should now cite rather than leaving it pointing at a directory holding several."
+    )
+    transcripts = sorted(runs[0].glob("*.json"))
+    tools: set[str] = set()
+    for path in transcripts:
+        outcome = json.loads(path.read_text(encoding="utf-8"))["outcome"]
+        for field in ("tools_called", "tools_failed"):
+            tools |= {str(name) for name in outcome.get(field) or []}
+        for result in outcome.get("tool_results") or []:
+            name = result.get("name") if isinstance(result, dict) else result
+            if name:
+                tools.add(str(name))
+
+    row = next(line for line in _record_text().splitlines() if "distinct tools exercised" in line)
+    assert f"then {len(transcripts)} probes" in row, (
+        f"the live-run row does not say {len(transcripts)} probes, which is how many transcripts "
+        f"{runs[0].name} holds."
+    )
+    assert f"{len(tools)} distinct tools exercised" in row, (
+        f"the live-run row's tool count disagrees with its own transcripts, which name "
+        f"{len(tools)}: {sorted(tools)}"
     )

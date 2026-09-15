@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+import chemclaw.cli.backfill_corpus as backfill_corpus
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from chemclaw.kg.git_writer import BatchingNoteWriter, GitNoteWriter
@@ -207,20 +208,32 @@ def test_the_counter_counts_notes_and_not_commits(
 
     Driven on real git against a real bare remote, like the rest of this file: the count has to be
     true of what landed, and a fake writer would assert the wrapper's arithmetic.
+
+    **And driven through `backfill()` rather than through a hand-assembled writer**, which is the
+    half this test was missing. `cli/backfill_corpus.py` books the final partial batch itself,
+    because that commit lands on a `flush()` call `record_note` never sees — and a test that calls
+    `count_notes_recorded(await writer.flush())` in its own body asserts that arithmetic while
+    leaving the production call uncovered. Measured: deleting that one line left every test naming
+    this counter green, including this one.
     """
     clone = _notes_repo(tmp_path)
     monkeypatch.setattr(settings, "note_repo_dir", str(clone))
-    inner = GitNoteWriter(repo_dir=str(clone), base_branch="main", remote="origin")
+    monkeypatch.setattr(settings, "backfill_commit_batch_size", 3)
+    monkeypatch.setattr(
+        backfill_corpus,
+        "default_writer",
+        lambda: GitNoteWriter(repo_dir=str(clone), base_branch="main", remote="origin"),
+    )
+    documents = tmp_path / "documents"
+    documents.mkdir()
+    for index in range(7):
+        (documents / f"sop-{index}.md").write_text(f"Standard operating procedure {index}.\n")
     before_commits = _commits(clone)
     before_notes = METRICS.value("chemclaw_notes_recorded_total")
 
-    async def _run_backfill() -> None:
-        writer = BatchingNoteWriter(inner, batch_size=3)
-        for index in range(7):
-            await record_note(_note(index), writer)
-        count_notes_recorded(await writer.flush())
+    written, skipped = asyncio.run(backfill_corpus.backfill(documents, tags=[], dry_run=False))
 
-    asyncio.run(_run_backfill())
+    assert (written, skipped) == (7, 0)
 
     # Seven notes in three commits — two full batches and the flushed remainder. The two numbers
     # are asserted together because either alone is satisfiable by the defect: counting commits

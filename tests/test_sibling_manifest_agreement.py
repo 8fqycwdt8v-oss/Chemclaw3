@@ -152,7 +152,7 @@ def _callers() -> tuple[str, ...]:
 
     **Derived, because the hand-kept list covered half the seam while claiming all of it**
     (`D-2026-09-14-a-tripwire-over-two-named-modules-covers-the-modules-it-names`). It read
-    `compose.py` and `remote.py` — 16 call sites — and the docstring below said "every hardcoded
+    `compose.py` and `remote.py` — 13 call sites — and the docstring below said "every hardcoded
     `calc` call". Measured against the tree on 2026-09-14 there are **five** modules holding such
     calls: those two, plus `connectors/calc/server/tools.py` (11 sites) and
     `connectors/bo/calculators.py` (2), which were unread. Every tool name they put on the wire is
@@ -308,6 +308,38 @@ def test_the_calc_seam_calls_only_tools_the_fleet_records_serving() -> None:
                 f"{relative}:{expression.lineno} calls `{tool}` without "
                 f"{sorted(required - keys)}, which the server declares required."
             )
+
+
+def test_the_two_composites_this_repository_assembles_differ_in_why_they_are_assembled() -> None:
+    """`compute_thermochemistry` is not served; `predict_logd` is, and is composed here anyway.
+
+    Both are built in `connectors/calc/compose.py` out of separately keyed primitives, and
+    `connectors/calc/server/tools.py` said both were "not shipped by the server at all, because
+    their keys would name an output" — while `connectors/calc/remote.py::remote_key` said in the
+    present tense that `predict_logd` is *"the server's own"*. The fleet's file settles it, and the
+    two reasons are different: one composite has no server tool to collide with, the other has one
+    and this repository declines to call it because its expensive half is a cached pKa.
+
+    Worth a check rather than a corrected sentence, because the first half is a real invariant. The
+    fleet's own rule forbids duplicating a Chemclaw3 capability, and a `compute_thermochemistry`
+    appearing there would give this family two answers to one question — the failure that rule
+    exists to prevent — with nothing in either tree noticing.
+    """
+    root = _sibling_or_skip()
+    surface: dict[str, dict[str, Any]] = json.loads(
+        (root / "servers" / "calc" / "tool-surface.json").read_text(encoding="utf-8")
+    )
+
+    assert "compute_thermochemistry" not in surface, (
+        "Chemclaw3-mcp now serves `compute_thermochemistry`, which this repository composes from "
+        "separately keyed primitives. Two live definitions of one calculation is the duplication "
+        "both repositories' rules forbid — decide which one answers before either ships."
+    )
+    assert "predict_logd" in surface, (
+        "the fleet no longer serves `predict_logd`. `remote_key`'s docstring describes it as the "
+        "one tool that answers `calculation_key` with `None`, and `cached_remote` refuses such a "
+        "tool as a miswiring — so that paragraph is now about nothing."
+    )
 
 
 def test_the_fake_calc_server_serves_exactly_the_surface_the_fleet_records() -> None:

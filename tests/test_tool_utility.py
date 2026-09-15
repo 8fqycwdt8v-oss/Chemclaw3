@@ -12,6 +12,7 @@ Three separate claims, because each fails differently:
   tools" must actually build an agent with none, and it must not be in the shipped profile set.
 """
 
+import subprocess
 from pathlib import Path
 from typing import Literal
 
@@ -219,3 +220,133 @@ def test_a_sample_is_reproducible_and_larger_than_the_corpus_is_the_corpus() -> 
     assert _systematic_sample(corpus, 9) == _systematic_sample(corpus, 9)
     assert _systematic_sample(corpus, 37) == corpus
     assert _systematic_sample(corpus, 99) == corpus
+
+
+# ---------------------------------------------------------------------------------------------
+# The control arm is a *prompt* contrast, and that has to be checked against the documents.
+#
+# `D-2026-09-14-tools-were-never-the-variable` decided two things: `no-tools.yaml` stays and is
+# labelled as a prompt contrast, and every site that quoted the pair as a tools result is restated.
+# Neither was carried out in the commit that decided them, and nothing could have caught that —
+# `test_the_prompt_swapping_arm_cannot_be_read_as_a_tools_contrast` asserts properties of the
+# *fixture*, and `prose-validate` only checks that a citation resolves. So the claim "no document
+# reads this arm as a tools contrast" was held by nobody, and a relabelling is a one-line edit away
+# from being undone. This is the half that reads the documents.
+
+_AB_ANCHORS = ("no-tools", "_AB_BASELINE_PROFILE", "live-ab", "--suite")
+"""A line that names the A/B or its control arm. The baseline *is* `no-tools`, so a sentence about
+`make live-ab` or the `--suite ab` run is a sentence about this profile whether or not it spells
+the name."""
+
+_TOOLS_CONTRAST = (
+    "without tools",
+    "with and without tools",
+    "tool utility",
+    "tool-utility",
+    "tool augmentation",
+    "removes every capability tool",
+)
+"""Phrases that describe the pairing as a comparison *about the tools*. Deliberately about the
+comparison rather than about the fixture: `tool_names: []` and "toolless" are true of this profile
+and are not the claim at issue, so neither is here — a trigger that fired on them would fire on
+`test_the_control_arm_is_not_in_the_shipped_profile_set`, which is right about its own subject."""
+
+_PROMPT_NAMED = ("prompt", "instructions")
+"""What makes such a sentence honest: it says the other variable moved too."""
+
+_WINDOW = 8
+"""Lines either side. A comment block or a docstring in this tree is smaller than this, so a caveat
+anywhere in the paragraph counts and one three screens away does not."""
+
+_SCAN_SKIPS = (
+    "docs/decisions/",  # merged records, never edited
+    "docs/archive/",  # what was believed then, kept as it was written
+    "tasks/",  # recorded run output; restating a transcript would falsify it
+    "uv.lock",
+)
+
+
+def _document_lines() -> list[tuple[str, int, str]]:
+    """Every tracked line, with its path and 1-based number.
+
+    Tracked rather than walked: `make mutants` copies the whole tree into a gitignored directory,
+    and `tests/test_prose_contract.py` records what that did to a corpus built with `rglob`.
+    """
+    listing = subprocess.run(
+        ["git", "-C", str(_REPO_ROOT), "ls-files", "-z"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    out: list[tuple[str, int, str]] = []
+    for name in listing.split("\0"):
+        if not name or name.startswith(_SCAN_SKIPS):
+            continue
+        try:
+            text = (_REPO_ROOT / name).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        out.extend((name, i, line) for i, line in enumerate(text.splitlines(), start=1))
+    return out
+
+
+def test_no_live_document_reads_the_control_arm_as_a_tools_contrast() -> None:
+    """The decision that was taken and not carried out, now held by the tree rather than by prose.
+
+    A site may describe the A/B as a comparison about tools only if the same paragraph says the
+    prompt moved as well. Five did not when the ADR was merged — the module that *computes* the
+    comparison among them — and the sixth was the control arm's own header, which opened "The
+    control arm of the tool-utility A/B" and enumerated what it still carried without naming the
+    13,895 characters of system prompt it does not.
+
+    Its reach is deliberately the whole tracked tree minus the records that may not change, so a
+    new document inherits the rule without anybody adding a path here.
+    """
+    lines = _document_lines()
+    assert len(lines) > 10_000, "the corpus is too small to have been the repository"
+
+    by_file: dict[str, list[str]] = {}
+    for name, _, line in lines:
+        by_file.setdefault(name, []).append(line)
+
+    offenders: list[str] = []
+    for name, body in by_file.items():
+        for index, line in enumerate(body):
+            if not any(anchor in line for anchor in _AB_ANCHORS):
+                continue
+            window = "\n".join(body[max(0, index - _WINDOW) : index + _WINDOW + 1]).lower()
+            claimed = [phrase for phrase in _TOOLS_CONTRAST if phrase in window]
+            if claimed and not any(word in window for word in _PROMPT_NAMED):
+                offenders.append(f"{name}:{index + 1}: reads as {claimed} — {line.strip()[:70]}")
+
+    assert not offenders, (
+        "these sites describe the `no-tools` A/B as a result about the tools without saying the "
+        "prompt moved too, which is the attribution D-2026-09-14-tools-were-never-the-variable "
+        "withdrew:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_the_control_arm_labels_itself_as_a_prompt_contrast() -> None:
+    """The profile's own header, because that is the document every other site cites.
+
+    Checked by the two things a reader needs and a scan cannot infer from a keyword: that the file
+    says what it is *not*, and that the paragraph enumerating what it still carries names the prose
+    it replaces. The second is where the original header failed — it listed `task` and six file
+    verbs, which are the smallest thing this arm changes, and omitted the largest.
+    """
+    header = "\n".join(
+        line
+        for line in _CONTROL_PROFILE.read_text(encoding="utf-8").splitlines()
+        if line.startswith("#")
+    ).lower()
+
+    assert "prompt contrast" in header
+    assert "not a tools contrast" in header
+    assert "d-2026-09-14-tools-were-never-the-variable" in header
+    assert "tools-removed.yaml" in header, "the arm that can carry a tools claim is not named"
+    carried = header.split("what it still carries", 1)
+    assert len(carried) == 2, "the header no longer states what the arm still carries"
+    assert "prose" in carried[1], (
+        "the paragraph that exists so the control arm does not overstate itself still omits the "
+        "system prompt, which is the largest thing this arm changes"
+    )
