@@ -127,8 +127,10 @@ def _awaiting_message(request: AwaitRequest, payload: dict[str, Any]) -> Outboun
     """The outbound copy of one wait notice — who it goes to, and what it says.
 
     **Two notices, two recipients, and reading them as one is a real error rather than a wording
-    choice.** `_push` fires on the opening notice, on each reminder and on expiry — `2 + reminders`
-    times — with two different payload shapes. While the wait is open it is an ask, and the person
+    choice.** `_push` fires on the opening notice, on each reminder and, *only if nobody answered*, on expiry —
+    so `1 + reminders` times for a wait that is answered and `2 + reminders` for one that is not:
+    `run` returns from its `self._answer is not None` branch before reaching the expiry push. With
+    two different payload shapes. While the wait is open it is an ask, and the person
     who has to act is `asked_of`; when it expires it is a report, and the person who
     needs to hear it is the requester — which is what the expiry's own call site already says in
     prose ("an unanswered question is exactly the thing a requester needs to hear about"). The

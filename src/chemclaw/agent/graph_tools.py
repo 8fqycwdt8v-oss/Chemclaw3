@@ -444,10 +444,7 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
     A `reaction-<id>` citation the graph does not hold resolves against the transcription store
     instead (D-2026-08-25), so a structure-search hit expands into its recipe — conditions, the
     charge sheet, the impurity profile, the procedure. It has no neighbourhood: it asserts
-    nothing and
-    therefore links to nothing. This is also what retires D-018's failure mode, where the same
-    citation raised "no note with that id" for as long as nobody merged its pull request, and a
-    chemist could not tell that from a typo.
+    nothing and therefore links to nothing.
 
     Args:
         note_id: The id of the entry note.

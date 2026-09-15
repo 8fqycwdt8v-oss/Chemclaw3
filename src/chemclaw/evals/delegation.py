@@ -59,6 +59,15 @@ BASELINE_ARM = "no-helper"
 #: as though each were a measurement.
 MINIMUM_REPEATS = 3
 
+#: The share of *eligible* tasks that must survive to the comparison for the report to mean
+#: anything. A report is a claim about delegation; a report over the minority of tasks where the
+#: arm happened to delegate is a claim about the arm's choice of when to delegate, which is a
+#: different question and is not what any caller reads it as.
+#:
+#: Two thirds rather than a majority: the drops this guards against are not random noise but a
+#: behaviour of the arm under test, so the bar has to be well clear of a coin flip to catch it.
+MINIMUM_COMPARED_SHARE: float = 2 / 3
+
 
 class ArmRun(BaseModel):
     """One task, answered once, by one arm.
@@ -118,6 +127,14 @@ class TaskComparison(BaseModel):
     #: The quality verdict from `compare_tool_utility`, above its noise floor:
     #: helped / hurt / no effect.
     verdict: str
+    #: How many of the arm's repeats actually delegated, out of how many it ran. Carried rather
+    #: than reduced to a bool because `ArmAggregate.delegated_in` is a *count* for a reason its own
+    #: docstring gives — "delegated in one repeat of three is a different fact from either extreme
+    #: and is the shape a behavioural arm actually produces" — and the comparator used to collapse
+    #: it to `if not under_test.delegated_in`, so a pair that delegated once in three was credited
+    #: as a delegation comparison with nothing in the report able to say so.
+    delegated_in: int
+    repeats: int
 
 
 class DelegationReport(BaseModel):
@@ -135,6 +152,13 @@ class DelegationReport(BaseModel):
     incomplete: list[str]
     #: Tasks where the *arm* never delegated, so the pair compares the baseline with itself.
     undelegated: list[str]
+    #: Tasks where the arm delegated in *some* repeats and not others. Kept apart from both
+    #: `undelegated` and the compared set: the aggregate over such a task is a mixture of two
+    #: behaviours, and the median over it answers neither question. The comparator credited these
+    #: as delegation while refusing the mirror-image baseline outright, which is an asymmetry that
+    #: flatters the arm — driven, an arm delegating in 1 of 3 repeats with that run scoring 1.0 at
+    #: 2,000 tokens against 0.5 at 10,000 reported `median_token_ratio: 1.0` and "no effect".
+    partially_delegated: list[str]
     #: Median across compared tasks of `arm / baseline`. Below 1.0 means delegation was cheaper.
     #: `None` means this axis had no usable ratio, which is different from a ratio of 1.0 and must
     #: not be rendered as one. It cannot mean "no task was compared" — `NoComparableTask` raises
@@ -245,6 +269,7 @@ def compare_arms(
     contaminated: list[str] = []
     incomplete: list[str] = []
     undelegated: list[str] = []
+    partially_delegated: list[str] = []
     token_ratios: list[float] = []
     wall_clock_ratios: list[float] = []
 
@@ -263,8 +288,14 @@ def compare_arms(
         if base.delegated_in:
             contaminated.append(task_id)
             continue
+        # Symmetric with the line above, which it was not: the baseline is refused if it delegated
+        # in *any* repeat, so the arm is required to have delegated in *every* one. Anything
+        # between is a mixture of two behaviours and is reported as such rather than credited.
         if not under_test.delegated_in:
             undelegated.append(task_id)
+            continue
+        if under_test.delegated_in < under_test.repeats:
+            partially_delegated.append(task_id)
             continue
 
         scores.append(
@@ -278,6 +309,8 @@ def compare_arms(
                 wall_clock_delta=under_test.wall_clock_seconds - base.wall_clock_seconds,
                 # Filled once `compare_tool_utility` has applied its noise floor, below.
                 verdict="",
+                delegated_in=under_test.delegated_in,
+                repeats=under_test.repeats,
             )
         )
         tokens = _ratio(under_test.billed_tokens, base.billed_tokens)
@@ -287,12 +320,25 @@ def compare_arms(
         if wall_clock is not None:
             wall_clock_ratios.append(wall_clock)
 
-    if not comparisons:
+    # **The denominator is guarded, not just its emptiness.** `NoComparableTask` fired only on an
+    # empty set, so one surviving task produced a complete, confident-looking report. Driven over
+    # eight tasks where delegation genuinely helps on one and the arm declines the other seven:
+    # `compared: 1`, "helped everywhere, 60% cheaper, 33% faster". That is a selection effect, not
+    # a result — dropping the tasks where the arm chose not to delegate scores the arm only where
+    # it delegated, so a model that delegates *selectively* outscores one that delegates as a
+    # policy, and the two are not comparable at all. This module's own docstring indicts exactly
+    # that shape in the corpus it replaces.
+    eligible = len(comparisons) + len(contaminated) + len(undelegated) + len(partially_delegated)
+    shortfall = eligible and len(comparisons) < eligible * MINIMUM_COMPARED_SHARE
+    if not comparisons or shortfall:
         raise NoComparableTask(
-            f"no task carried the comparison: {len(contaminated)} contaminated "
-            f"(the baseline delegated), {len(undelegated)} undelegated (the arm did not), "
-            f"{len(incomplete)} incomplete (a missing arm, or fewer than {minimum_repeats} "
-            "repeats). A report over an empty set would read as 'no effect anywhere'."
+            f"{len(comparisons)} of {eligible} eligible tasks carried the comparison, below the "
+            f"{MINIMUM_COMPARED_SHARE:.0%} this report needs to mean anything: "
+            f"{len(contaminated)} contaminated (the baseline delegated), {len(undelegated)} "
+            f"undelegated (the arm did not), {len(partially_delegated)} partially delegated (the "
+            f"arm delegated in some repeats and not others), {len(incomplete)} incomplete (a "
+            f"missing arm, or fewer than {minimum_repeats} repeats). Scoring only where the arm "
+            "chose to delegate measures the choice rather than the delegation."
         )
 
     quality = compare_tool_utility(scores, higher_is_better=True)
@@ -310,6 +356,7 @@ def compare_arms(
         contaminated=contaminated,
         incomplete=incomplete,
         undelegated=undelegated,
+        partially_delegated=partially_delegated,
         median_token_ratio=statistics.median(token_ratios) if token_ratios else None,
         median_wall_clock_ratio=(
             statistics.median(wall_clock_ratios) if wall_clock_ratios else None

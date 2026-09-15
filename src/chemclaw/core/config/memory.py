@@ -50,9 +50,16 @@ class MemorySettings(BaseSettings):
     # `docs/planning/BACKLOG.md` carries that with this measurement as its trigger.
     memory_corpus_max_reactions: int = Field(default=100_000, ge=0)
     # How many backfilled notes share one commit (`cli/backfill_corpus`, never the conversational
-    # path). One commit and one push per note is what bounds a backfill: measured 140.8 ms/note
-    # against a local remote on an empty corpus and 327.3 ms at a 10,000-note corpus against a real
-    # one, against 31.6 ms at ten to a commit and 8.5 at fifty. Batching the *conversational* path
+    # path). One commit and one push per note is what bounds a backfill. **Two conditions, each
+    # with its own triple, because this comment and `.env.example` shipped quoting one number from
+    # each and disagreeing by 2x** — an operator sizing the knob read whichever file they opened:
+    #
+    #   local bare remote, empty corpus  140.9 ms/note  ->  15.8 at ten to a commit  ->  4.8 at 50
+    #   real remote, 10,000-note corpus  327.3 ms/note  ->  31.6 at ten to a commit  ->  8.5 at 50
+    #
+    # The first is `tests/test_backfill_batching.py`'s own lane; the second is
+    # `D-2026-09-13-the-lock-is-not-the-bound-the-commit-is`, and is the one a deployment should
+    # plan against. Batching the *conversational* path
     # is declined and stays declined (`D-2026-09-13-the-lock-is-not-the-bound-the-commit-is`): a
     # queued note is one a chemist cannot read yet. Nobody is mid-turn during a backfill.
     #

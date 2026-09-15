@@ -41,44 +41,28 @@ def test_shipped_prose_names_only_real_tools() -> None:
     assert check_prose_contract() == []
 
 
-def test_no_tool_description_tells_the_model_about_a_tier_that_is_gone() -> None:
-    """A tool's docstring is its schema description, and it is re-sent on every model call.
+def _model_facing_descriptions() -> dict[str, str]:
+    """Every docstring this system ships to a model, by name.
 
-    `D-2026-08-26-semiempirical-is-the-whole-tier` deleted the DFT tier, the HPC launcher and every
-    tool that reached them. What it could not delete is prose *about* them sitting in a docstring
-    that is still shipped: `get_durable_job_status` carried 184 tokens explaining that a case "used
-    to degrade to a bare status, because the DFT job returned its own typed result and had its own
-    status tool (`agents/job_status.py`)" — on every turn, describing a system the model cannot
-    reach, at the model's expense.
+    Two sources, because one of them was the whole gap. `registered_tools()` holds the in-process
+    agent tools — 31 of them — while the agent's surface is 114, and every first-party connector
+    bundle's `server/tools.py` sat outside it. That is the entire `calc` surface: the bundle that
+    *lost* DFT was the one the guard below could not see. Driven: a sentence naming DFT, HPC,
+    Nextflow and `compute_dft_energy` — four of the five alternatives at once — inserted into
+    `connectors/calc/server/tools.py::report_measurement` left this file at 50 passed, while the
+    same sentence in a registered tool reds it immediately.
 
-    This is the narrow, checkable half of the wider rule. The wider one — rationale belongs in a
-    `#` comment and guidance in the docstring — is judgment and stays a review rule; naming a
-    removed tier is not judgment.
-
-    The registry rather than the compiled graph, so this needs no Postgres and runs in every lane:
-    a description reaches the model through `convert_to_openai_tool` either way, and what is
-    asserted is the text, not the binding.
-
-    **The registry alone was the wrong set, and it excluded exactly the tier at risk.**
-    `registered_tools()` holds the in-process agent tools — 31 of them — while the agent's surface
-    is 114, and every first-party connector bundle's `server/tools.py` sat outside it. That is the
-    whole `calc` surface: the bundle that *lost* DFT was the one this guard could not see. Driven:
-    a sentence naming DFT, HPC, Nextflow and `compute_dft_energy` — four of the five alternatives
-    at once — inserted into `connectors/calc/server/tools.py::report_measurement` left this file at
-    50 passed, while the same sentence in a registered tool reds it immediately. So the bundles are
-    read off their source with `ast`: their `@server.tool()` docstrings ship to the model through a
-    served manifest, and importing them here would drag each bundle's dependency closure into a
-    lane that does not need it.
+    The bundles are read off their source with `ast`: their `@server.tool()` docstrings ship to the
+    model through a served manifest, and importing them here would drag each bundle's dependency
+    closure into a lane that does not need it.
     """
     import ast
     import inspect
-    import re
     from pathlib import Path
 
     import chemclaw
     from chemclaw.core.tool_registry import registered_tools
 
-    gone = re.compile(r"\bDFT\b|\bHPC\b|Nextflow|Seqera|compute_dft_energy|agents/job_status")
     described: dict[str, str] = {
         getattr(fn, "__name__", str(fn)): inspect.getdoc(fn) or "" for fn in registered_tools()
     }
@@ -96,16 +80,69 @@ def test_no_tool_description_tells_the_model_about_a_tier_that_is_gone() -> None
                 for one in node.decorator_list
             )
             if served:
-                described[f"{module.parent.parent.name}:{node.name}"] = ast.get_docstring(node) or ""
+                where = f"{module.parent.parent.name}:{node.name}"
+                described[where] = ast.get_docstring(node) or ""
+    return described
+
+
+def test_no_tool_description_tells_the_model_about_a_tier_that_is_gone() -> None:
+    """A tool's docstring is its schema description, and it is re-sent on every model call.
+
+    `D-2026-08-26-semiempirical-is-the-whole-tier` deleted the DFT tier, the HPC launcher and every
+    tool that reached them. What it could not delete is prose *about* them sitting in a docstring
+    that is still shipped: `get_durable_job_status` carried 184 tokens explaining that a case "used
+    to degrade to a bare status, because the DFT job returned its own typed result and had its own
+    status tool (`agents/job_status.py`)" — on every turn, describing a system the model cannot
+    reach, at the model's expense.
+
+    This is the narrow, checkable half of the wider rule. The wider one — rationale belongs in a
+    `#` comment and guidance in the docstring — is judgment and stays a review rule; naming a
+    removed tier is not judgment.
+    """
+    import re
+
+    gone = re.compile(r"\bDFT\b|\bHPC\b|Nextflow|Seqera|compute_dft_energy|agents/job_status")
     offenders = {
         name: match.group(0)
-        for name, text in described.items()
+        for name, text in _model_facing_descriptions().items()
         if (match := gone.search(text))
     }
     assert not offenders, (
         f"{offenders} name a removed tier in text the model is sent on every turn. Move the "
         "history to a `#` comment in the function body: the model cannot act on it and pays for "
         "it, and `D-2026-08-26-semiempirical-is-the-whole-tier` deleted what it describes."
+    )
+
+
+def test_no_tool_description_tells_the_model_to_expect_a_review_gate() -> None:
+    """The same failure as the tier above, on the control that was removed instead of the hardware.
+
+    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted the PR-gate: knowledge lands in
+    `knowledge/` the moment it is learned. `synthesize_memory` went on telling the model it would
+    "propose what it finds for review", that "only this half opens pull requests", and that its
+    result is "the list of pull requests opened" — three present-tense statements about a control
+    that does not exist, in the text the model plans against. A model told its writes are reviewed
+    is a model reasoning about a safety net nobody is holding, which is worse than the wasted
+    tokens the tier check is about.
+
+    Scanned over the same surface and with the same argument: what is asserted is the text, not the
+    binding.
+    """
+    import re
+
+    retired = re.compile(
+        r"\bPR[- ]gate\b|pull request|propose[sd]? (?:what|it|them|the)|for review|NoteProposal",
+        re.IGNORECASE,
+    )
+    offenders = {
+        name: match.group(0)
+        for name, text in _model_facing_descriptions().items()
+        if (match := retired.search(text))
+    }
+    assert not offenders, (
+        f"{offenders} promise the model a review step that "
+        "`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted. A note is recorded, not "
+        "proposed; say what the tool does now."
     )
 
 
