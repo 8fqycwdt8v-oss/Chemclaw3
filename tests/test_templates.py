@@ -17,6 +17,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import time
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ from temporalio.client import WorkflowExecutionStatus
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
+from chemclaw.agent.template_surface import run_ceiling_problems
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.turn_signals import JobSignal
@@ -41,6 +43,7 @@ from chemclaw.templates.registry import (
     tool_name,
 )
 from chemclaw.templates.resolve import UnresolvedReference, resolve
+from chemclaw.templates.schedule import dependencies, schedule
 from tests.signals import collect_signals
 
 _MINIMAL = {
@@ -658,6 +661,16 @@ def test_a_template_run_executes_its_steps_in_order(monkeypatch: pytest.MonkeyPa
         }
     )
 
+    @activity.defn(name="completed_steps")
+    async def fake_completed_steps(request: Any) -> dict[str, Any]:
+        """Stand in for the resume read, which wants a record store this test does not configure.
+
+        Registered by the name the workflow dispatches, and answering `{}` — nothing to resume —
+        which is what a first run of any id gets. Without it the run stalls on an activity nothing
+        serves, exactly as the record write below does.
+        """
+        return {}
+
     @activity.defn(name="record_job")
     async def fake_record_job(record: Any) -> None:
         """Stand in for the real record write, which wants a sink this test does not configure.
@@ -688,7 +701,7 @@ def test_a_template_run_executes_its_steps_in_order(monkeypatch: pytest.MonkeyPa
                 Worker(
                     client,
                     task_queue=settings.background_task_queue,
-                    activities=[fake_record_job],
+                    activities=[fake_record_job, fake_completed_steps],
                 ),
             ):
                 return await client.execute_workflow(
@@ -768,7 +781,7 @@ def test_only_the_agent_step_carries_the_narrowed_retry(monkeypatch: pytest.Monk
     async def _dispatch() -> None:
         for step in template.steps:
             await template_job.TemplateWorkflow()._run_step(
-                step, {}, identity, timedelta(seconds=60)
+                step, {}, identity, timedelta(seconds=60), template.name
             )
 
     asyncio.run(_dispatch())
@@ -1338,3 +1351,451 @@ def test_the_gate_and_the_launcher_share_one_definition_of_resolving(
     monkeypatch.setattr(template_surface, "step_problems", _fake_rule)
     assert registry.unrunnable_reason(_template()) == "  - the shared rule spoke"
     assert calls == ["probe"]
+
+
+# --- the run ceiling has to cover the procedure, not one step of it ------------------------------
+
+
+def _job_steps(count: int, *, chained: bool = True) -> list[dict[str, Any]]:
+    """`count` `job` steps plus the `agent` step every shipped template ends with.
+
+    `chained` decides whether each step reads the one before it, which is the whole difference the
+    ceiling turns on now that the sequencer schedules waves: chained steps are N waves and cost N
+    ceilings, independent ones share a wave and cost one. Defaulting to chained keeps these
+    fixtures expressing the case the bound was written for — a procedure that genuinely runs its
+    jobs one after another.
+    """
+    steps: list[dict[str, Any]] = [
+        {
+            "id": f"j{i}",
+            "kind": "job",
+            "job": "rank_species",
+            "arguments": ({"species": f"${{steps.j{i - 1}.result}}"} if chained and i else {}),
+        }
+        for i in range(count)
+    ]
+    return [*steps, {"id": "report", "kind": "agent", "prompt": "sum it up"}]
+
+
+def test_a_template_that_cannot_finish_inside_the_run_ceiling_is_refused() -> None:
+    """The bound `core/config` cannot state, because it cannot see `data/templates/`.
+
+    `_the_template_run_ceiling_covers_one_step` checks the run ceiling against the longest *single*
+    step — the honest machine-checkable floor for an object holding no YAML. Measured on the
+    shipped defaults, one `job` step is 39,330 s against a run ceiling of 45,330 s, so that
+    validator passes and **two** of them in one file miss by 33,330 s.
+
+    What the gap costs is why this is a gate and not a note: a workflow *execution* timeout is not
+    delivered to workflow code, so `TemplateWorkflow`'s `except BaseException -> _notify_failure`
+    never runs. No failure row, no push-back, nothing on the session stream — the run simply stops.
+    Every other way a template can fail says so somewhere.
+    """
+    problems = run_ceiling_problems(_template(steps=_job_steps(2)))
+
+    assert len(problems) == 1
+    assert "cannot finish inside template_run_timeout_seconds" in problems[0]
+    # The arithmetic, not just the verdict: an operator reading this has to know which step to
+    # shorten, and "the template is too long" is unactionable over a procedure with five of them.
+    assert "j0=39,330s" in problems[0]
+    assert "j1=39,330s" in problems[0]
+
+
+def test_one_job_step_still_fits_so_the_gate_is_not_simply_refusing_job_steps() -> None:
+    """The control arm. Seven of the nine shipped templates have a `job` step and must still run."""
+    assert run_ceiling_problems(_template(steps=_job_steps(1))) == []
+
+
+def test_two_job_steps_that_do_not_read_each_other_fit_because_they_share_a_wave() -> None:
+    """The bound follows the schedule, and this is the case where that is the whole difference.
+
+    Two `job` steps cost two ceilings when one reads the other and **one** when neither does,
+    because `templates/schedule.py` puts independent steps in the same wave. A flat sum would
+    refuse the second template below — a procedure that would have finished well inside its run
+    ceiling — which is why an over-stating bound is not the conservative choice it looks like.
+    """
+    assert run_ceiling_problems(_template(steps=_job_steps(2, chained=False))) == []
+    assert run_ceiling_problems(_template(steps=_job_steps(2, chained=True))) != []
+
+
+@pytest.mark.parametrize("name", sorted(registry.discovered()))
+def test_every_shipped_template_fits_this_deployments_run_ceiling(name: str) -> None:
+    """Latent rather than live, which is exactly when a bound is worth adding.
+
+    No shipped template has two `job` steps — the catalogue measures 2,700 s to 41,130 s against
+    45,330 s — so this passes today and is here for the first template that deepens one. Per
+    template rather than over the set, so a failure names the file.
+    """
+    assert run_ceiling_problems(registry.discovered()[name]) == []
+
+
+def test_the_launcher_refuses_a_run_the_ceiling_cannot_hold_before_anything_is_queued() -> None:
+    """The gate's answer and the launcher's are one function, so they cannot drift apart.
+
+    `unrunnable_reason` already refused a template whose steps do not *resolve* at this deployment.
+    Timing is the same kind of fact — a deployment property that makes the launch pointless — and
+    it fails more quietly, so it is the better of the two to catch before a workflow id exists.
+    """
+    blocked = registry.unrunnable_reason(_template(steps=_job_steps(2)))
+
+    assert "cannot finish inside template_run_timeout_seconds" in blocked
+
+
+def test_the_config_floor_and_the_template_gate_read_one_step_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two readers, one definition — the property that keeps the two bounds from disagreeing.
+
+    `core/config` asks this for the *maximum* (does one step fit?) and `run_ceiling_problems` for
+    the *sum over a file's steps* (does the procedure fit?). Both questions, one arithmetic.
+
+    Checked by moving the setting the `job` ceiling is built from and watching the gate's answer
+    move with it, rather than by asserting a transcribed number — the count of post-child steps in
+    that sum was six, then it was not, and a test quoting the total would have gone stale with it.
+    """
+    ceilings = settings.template_step_ceilings()
+    assert set(ceilings) == {"tool", "agent", "job"}, "a step kind sized nowhere counts as free"
+    before = ceilings["job"][0]
+    one_job = _template(steps=_job_steps(1))
+    assert run_ceiling_problems(one_job) == []
+
+    monkeypatch.setattr(
+        settings,
+        "connector_job_timeout_seconds",
+        settings.connector_job_timeout_seconds + settings.template_run_timeout_seconds,
+    )
+
+    # The gate now refuses the same file, which is only possible if it is reading the same
+    # definition the config validator does rather than a second copy of the arithmetic.
+    assert settings.template_step_ceilings()["job"][0] > before
+    assert run_ceiling_problems(one_job) != []
+
+
+# --- independent steps run at the same time, and dependent ones still do not ---------------------
+
+
+def _concurrency_probe(run_id: str, steps: list[dict[str, Any]]) -> tuple[float, list[str], Any]:
+    """Run `steps` end to end against a real Temporal server and measure the overlap.
+
+    Each `tool` step sleeps `_STEP_SECONDS` and records when it entered and left. **Wall clock, not
+    a call count**: whether two activities were dispatched together is exactly the thing a count
+    cannot see, and the defect this guards — concurrency silently lost to a future edit of the
+    sequencer — would leave every count unchanged.
+    """
+    from temporalio import activity
+    from temporalio.worker import Worker
+
+    from chemclaw.durable.template_activities import AgentStepInput, ToolStepInput
+    from chemclaw.durable.template_job import TemplateRunInput, TemplateWorkflow
+    from tests.temporal_env import pydantic_client, start_env_or_skip
+
+    order: list[str] = []
+    live = 0
+    peak = 0
+
+    @activity.defn(name="run_tool_step")
+    async def slow_tool(step: ToolStepInput) -> Any:
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        order.append(str(step.arguments.get("smiles")))
+        await asyncio.sleep(_STEP_SECONDS)
+        live -= 1
+        return {"ran": step.arguments.get("smiles")}
+
+    @activity.defn(name="run_agent_step")
+    async def fake_agent(step: AgentStepInput) -> str:
+        return "done"
+
+    @activity.defn(name="completed_steps")
+    async def fake_completed_steps(request: Any) -> dict[str, Any]:
+        """Stand in for the resume read, which wants a record store this test does not configure.
+
+        Registered by the name the workflow dispatches, and answering `{}` — nothing to resume —
+        which is what a first run of any id gets. Without it the run stalls on an activity nothing
+        serves, exactly as the record write below does.
+        """
+        return {}
+
+    @activity.defn(name="record_job")
+    async def fake_record_job(record: Any) -> None:
+        return None
+
+    template = Template.model_validate(
+        {
+            "name": "probe",
+            "summary": "Concurrency probe.",
+            "inputs": [{"name": "smiles", "type": "string", "description": "molecule"}],
+            "steps": steps,
+        }
+    )
+
+    async def _run() -> Any:
+        async with await start_env_or_skip() as env:
+            client = pydantic_client(env)
+            async with (
+                Worker(
+                    client,
+                    task_queue="test-parallel",
+                    workflows=[TemplateWorkflow],
+                    activities=[slow_tool, fake_agent],
+                    # Or the two activities queue behind one another on the worker and this
+                    # measures the worker's slot count instead of the sequencer's schedule.
+                    max_concurrent_activities=4,
+                ),
+                Worker(
+                    client,
+                    task_queue=settings.background_task_queue,
+                    activities=[fake_record_job, fake_completed_steps],
+                ),
+            ):
+                return await client.execute_workflow(
+                    TemplateWorkflow.run,
+                    TemplateRunInput(
+                        template=template, inputs={"smiles": "CCO"}, requested_by="tester"
+                    ),
+                    # Unique per probe: a Temporal id is an idempotency key, so two probes
+                    # sharing one would have the second rejoin the first's finished run and
+                    # measure nothing. Which is exactly what happened when this derived the id
+                    # from the step shape — both probes have three steps starting at "a".
+                    id=f"template-parallel-{run_id}",
+                    task_queue="test-parallel",
+                )
+
+    started = time.perf_counter()
+    result = asyncio.run(_run())
+    return time.perf_counter() - started, order, (peak, result)
+
+
+#: Long enough that two overlapping steps are distinguishable from two sequential ones against
+#: Temporal's own dispatch latency, short enough to keep the suite honest about its runtime.
+_STEP_SECONDS = 1.0
+
+
+def test_two_steps_that_do_not_read_each_other_run_at_the_same_time() -> None:
+    """The headline. Two independent `tool` steps, measured overlapping rather than counted.
+
+    **Nothing in the file asked for this**, which is the design: concurrency is derived from the
+    `${steps.<id>.result}` edges the template already declares, so a procedure gets it by not
+    stating a dependency it never had. Measured over the shipped catalogue, two of the nine —
+    `degradant-triage` and `hazard-briefing` — were already shaped this way and were being run one
+    after the other for no reason anybody had written down.
+    """
+    elapsed, _order, (peak, result) = _concurrency_probe(
+        "independent",
+        [
+            {"id": "a", "kind": "tool", "tool": "screen_hazards", "arguments": {"smiles": "a"}},
+            {"id": "b", "kind": "tool", "tool": "screen_hazards", "arguments": {"smiles": "b"}},
+            {"id": "sum", "kind": "agent", "prompt": "${steps.a.result} ${steps.b.result}"},
+        ],
+    )
+
+    assert peak == 2, f"the two independent steps never overlapped (peak in flight: {peak})"
+    assert elapsed < _STEP_SECONDS * 2, f"two 1s steps took {elapsed:.2f}s — they serialised"
+    # And the results are still keyed and complete, which is what a wave must not cost.
+    assert result.steps["a"] == {"ran": "a"}
+    assert result.steps["b"] == {"ran": "b"}
+
+
+def test_a_step_that_reads_another_still_waits_for_it() -> None:
+    """The control arm, and the one that matters most: a chain must not gain concurrency.
+
+    Seven of the nine shipped templates chain, and a scheduler that ran their steps together would
+    hand a calculation a `${steps.<id>.result}` that does not exist yet — the failure mode the
+    forward-reference validator exists to make impossible at load time.
+    """
+    elapsed, order, (peak, _result) = _concurrency_probe(
+        "chained",
+        [
+            {"id": "a", "kind": "tool", "tool": "screen_hazards", "arguments": {"smiles": "a"}},
+            {
+                "id": "b",
+                "kind": "tool",
+                "tool": "screen_hazards",
+                "arguments": {"smiles": "${steps.a.result.ran}"},
+            },
+            # Embedded, not a whole-string reference: a whole-string one substitutes the
+            # *value* with its type preserved, and a `tool` step's dict is not a `str` — so
+            # `AgentStepInput` refuses it at the activity boundary.
+            {"id": "sum", "kind": "agent", "prompt": "saw ${steps.b.result}"},
+        ],
+    )
+
+    assert peak == 1, "a dependent step ran beside the step it reads"
+    assert elapsed >= _STEP_SECONDS * 2
+    assert order == ["a", "a"], order
+
+
+def test_the_shipped_catalogue_is_scheduled_the_way_its_files_are_written() -> None:
+    """What each shipped template's schedule actually is, so a YAML edit that changes it is seen.
+
+    A number is not written here: the assertion is that a template's waves are exactly its
+    dependency structure, which is re-derived from the same files the sequencer reads.
+    """
+    for name, template in sorted(registry.discovered().items()):
+        waves = schedule(template)
+        assert [step for wave in waves for step in wave] == list(template.steps), name
+        for index, wave in enumerate(waves):
+            earlier = {step.id for before in waves[:index] for step in before}
+            for step in wave:
+                assert dependencies(step) <= earlier, f"{name}: {step.id} runs before what it reads"
+
+
+# --- a failed run resumes rather than starting over -----------------------------------------------
+
+
+def _resumable_run(
+    fail_on: set[str], resume_from: dict[str, Any], fingerprint: str | None = None
+) -> tuple[list[str], Any]:
+    """Run a three-step chain end to end, failing the named steps, and report which steps ran.
+
+    `resume_from` is what the resume read answers with — the shape a real `job_records` row holds,
+    `{"steps": ..., "template_fingerprint": ...}` — so this drives the sequencer's own decision
+    about what to skip rather than re-testing the store.
+    """
+    from temporalio import activity
+    from temporalio.worker import Worker
+
+    from chemclaw.durable.template_activities import (
+        AgentStepInput,
+        ResumeRequest,
+        ToolStepInput,
+    )
+    from chemclaw.durable.template_job import (
+        TemplateRunInput,
+        TemplateWorkflow,
+        template_fingerprint,
+    )
+    from tests.temporal_env import pydantic_client, start_env_or_skip
+
+    ran: list[str] = []
+
+    template = Template.model_validate(
+        {
+            "name": "probe",
+            "summary": "Resume probe.",
+            "inputs": [{"name": "smiles", "type": "string", "description": "molecule"}],
+            "steps": [
+                {
+                    "id": "one",
+                    "kind": "tool",
+                    "tool": "screen_hazards",
+                    "arguments": {"smiles": "${inputs.smiles}"},
+                },
+                {
+                    "id": "two",
+                    "kind": "tool",
+                    "tool": "screen_hazards",
+                    "arguments": {"smiles": "${steps.one.result.ok}"},
+                },
+                {"id": "three", "kind": "agent", "prompt": "saw ${steps.two.result}"},
+            ],
+        }
+    )
+
+    @activity.defn(name="run_tool_step")
+    async def tool_step(step: ToolStepInput) -> Any:
+        name = str(step.arguments.get("smiles"))
+        ran.append(name)
+        if name in fail_on:
+            raise ValueError(f"{name} was told to fail")
+        return {"ok": "two" if name == "CCO" else "done"}
+
+    @activity.defn(name="run_agent_step")
+    async def agent_step(step: AgentStepInput) -> str:
+        ran.append("three")
+        return "final"
+
+    @activity.defn(name="record_job")
+    async def record(record: Any) -> None:
+        return None
+
+    # Annotated with the real type, not `Any`: the pydantic data converter decodes an activity's
+    # argument from its hint, so `Any` hands the body a bare dict and the fingerprint comparison
+    # below silently becomes an `AttributeError` inside the worker.
+    @activity.defn(name="completed_steps")
+    async def resume(request: ResumeRequest) -> dict[str, Any]:
+        stored = {
+            "steps": resume_from,
+            "template_fingerprint": (
+                fingerprint if fingerprint is not None else template_fingerprint(template)
+            ),
+        }
+        # The activity's own three conditions live in `template_activities.completed_steps`; what
+        # this stands in for is the row it reads, so the fingerprint comparison is exercised here
+        # exactly as the real one does it.
+        if stored["template_fingerprint"] != request.fingerprint:
+            return {}
+        return dict(resume_from)
+
+    async def _run() -> Any:
+        async with await start_env_or_skip() as env:
+            client = pydantic_client(env)
+            async with (
+                Worker(
+                    client,
+                    task_queue="test-resume",
+                    workflows=[TemplateWorkflow],
+                    activities=[tool_step, agent_step],
+                ),
+                Worker(
+                    client,
+                    task_queue=settings.background_task_queue,
+                    activities=[record, resume],
+                ),
+            ):
+                return await client.execute_workflow(
+                    TemplateWorkflow.run,
+                    TemplateRunInput(
+                        template=template, inputs={"smiles": "CCO"}, requested_by="tester"
+                    ),
+                    id=f"template-resume-{sorted(fail_on)}-{sorted(resume_from)}-{fingerprint}",
+                    task_queue="test-resume",
+                )
+
+    return ran, _run
+
+
+def test_a_resumed_run_does_not_redo_the_steps_that_already_finished() -> None:
+    """The headline: the work `failed_template_record` kept is the work the next attempt skips.
+
+    Before this, `scope` and `results` were rebuilt empty on every execution, so a procedure that
+    died at step four redid all four — while its own `job_records` row held their results under a
+    docstring explaining why discarding them would be wrong.
+    """
+    ran, run = _resumable_run(fail_on=set(), resume_from={"one": {"ok": "two"}})
+
+    result = asyncio.run(run())
+
+    # Step one never ran: its result came from the record. Step two ran, and read what step one
+    # produced on the attempt that did run it.
+    assert ran == ["two", "three"], ran
+    assert result.steps["one"] == {"ok": "two"}
+    assert result.result == "final"
+
+
+def test_a_resume_is_refused_when_the_template_has_changed_under_the_same_id() -> None:
+    """The guard, and it is the reason this is not simply a cache.
+
+    A run's id is `hash([name, inputs])` and says nothing about the steps, so editing the file and
+    relaunching lands on the same id carrying a different procedure. Folding the old run's step
+    results into it would mix two definitions silently — the failure mode that makes a wrong answer
+    rather than a slow one.
+    """
+    ran, run = _resumable_run(
+        fail_on=set(), resume_from={"one": {"ok": "two"}}, fingerprint="a-different-template"
+    )
+
+    asyncio.run(run())
+
+    # Everything ran: the stored steps were declined, so the run started over.
+    assert ran == ["CCO", "two", "three"], ran
+
+
+def test_a_first_run_with_nothing_to_resume_is_what_it_always_was() -> None:
+    """The control arm: resume is unconditional, so the empty answer has to cost nothing."""
+    ran, run = _resumable_run(fail_on=set(), resume_from={})
+
+    result = asyncio.run(run())
+
+    assert ran == ["CCO", "two", "three"], ran
+    assert result.result == "final"

@@ -186,5 +186,12 @@ def test_every_patch_is_declared_in_this_file_so_its_removal_date_is_readable() 
         # `DigestWorkflow.run`. Removable the day after it ships: the digest is a nightly Schedule
         # and a run completes in minutes, so no history older than one night can be replayed.
         "digest-outbound-delivery-seam",
+        # `TemplateWorkflow.run`. Gates both of one release's command-sequence changes — the resume
+        # read at the start, and scheduling steps in waves instead of one at a time. Removable once
+        # no run open at that release can still be executing, which is bounded by
+        # `template_run_timeout_seconds`, the execution timeout `templates/registry.py` starts
+        # every run with (12.6 h at the shipped default). One marker and not two because they
+        # landed in one commit: a run either predates both or neither.
+        "template-waves-and-resume",
     }
     assert {patch_id for _, patch_id in _patch_ids()} == declared

@@ -778,6 +778,11 @@ def test_the_erase_statements_are_valid_sql() -> None:
             "session_turns",
             "subscriptions",
             "user_preferences",
+            # The departing person's own composed workflows. Erased rather than retained for the
+            # reason the preference row above it is: a working procedure names no result and cites
+            # no evidence, so it is part of their conversation with this system rather than part of
+            # the record of what they did to the science.
+            "composed_workflows",
             "session_owners",
         }
 

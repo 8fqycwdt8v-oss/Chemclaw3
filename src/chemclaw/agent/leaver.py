@@ -258,6 +258,12 @@ _ERASE: tuple[tuple[str, str], ...] = (
     ),
     ("subscriptions", "DELETE FROM subscriptions WHERE owner = ANY(%(actors)s)"),
     ("user_preferences", "DELETE FROM user_preferences WHERE owner = ANY(%(actors)s)"),
+    # A composed workflow is the departing person's own working procedure, not a record of
+    # what they did to the science: it names no result, cites no evidence and nobody else can
+    # reach it (the store resolves `(owner, name)` against the caller). So it goes with the
+    # conversation rather than staying as an attribution — the same tier, and the same
+    # argument, as the preference row beside it.
+    ("composed_workflows", "DELETE FROM composed_workflows WHERE owner = ANY(%(actors)s)"),
     ("session_owners", "DELETE FROM session_owners WHERE owner = ANY(%(actors)s)"),
 )
 

@@ -36,8 +36,10 @@ from chemclaw.agent.profiles import registered_profile_names
 from chemclaw.connectors.registry import discovered as discovered_connectors
 from chemclaw.connectors.registry import enabled as enabled_connectors
 from chemclaw.connectors.registry import server_tools_module
+from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import registered_tools
 from chemclaw.templates.manifest import AgentStep, JobStep, Template, ToolStep
+from chemclaw.templates.schedule import schedule
 
 
 def available_tools() -> set[str]:
@@ -254,6 +256,67 @@ def step_problems(template: Template, surface: TemplateSurface | None = None) ->
                 )
             problems.extend(write_tool_problems(template, step, tools, known_profile))
     return problems
+
+
+def run_ceiling_problems(template: Template) -> list[str]:
+    """Check that this deployment's run ceiling covers every step this template declares.
+
+    **The bound `core/config` cannot state, and the gap between the two is where a run dies
+    silently.** `_the_template_run_ceiling_covers_one_step` checks `template_run_timeout_seconds`
+    against the *longest single step*, because a `Settings` object cannot see `data/templates/` and
+    the honest machine-checkable floor is therefore "one step fits". Measured on the shipped
+    defaults, one `job` step's ceiling is 39,330 s against a run ceiling of 45,330 s — so the
+    validator passes and **two** `job` steps in one file do not fit, by 33,330 s.
+
+    What that costs is the reason this is a gate rather than a note. A workflow *execution* timeout
+    is not delivered to workflow code, so `TemplateWorkflow`'s `except BaseException ->
+    _notify_failure` never runs: the chemist is told nothing on the session stream, no failure row
+    is written, and the connector child is terminated with its parent before it can write its own.
+    The run just stops. Every other way a template can fail says so somewhere.
+
+    No shipped template has two `job` steps, so this is latent rather than live — which is exactly
+    when a bound is worth adding, because the first template that deepens one is the one that finds
+    out.
+
+    **Summed over waves rather than over steps**, because `templates/schedule.py` runs a wave's
+    steps concurrently: a wave costs its slowest member. A flat sum is still sound — it can only
+    over-state — but an over-stating bound here *refuses a template that would have finished*, so
+    it is not the conservative choice it looks like.
+
+    Read by both `make template-validate` and `registry.unrunnable_reason`, so a file that cannot
+    complete is refused at the gate *and* refused at launch rather than started and abandoned.
+
+    Args:
+        template: The template to size, steps and all.
+
+    Returns:
+        One problem line when the run ceiling cannot hold the declared steps, or `[]`.
+    """
+    ceilings = settings.template_step_ceilings()
+    # `KeyError` rather than a default: a step kind nobody sized here would otherwise be counted as
+    # free, which is the silent direction. `template_step_ceilings` says so from the other side.
+    #
+    # **Over waves, not over steps**, since `templates/schedule.py` runs a wave's steps together: a
+    # wave costs its slowest member, and the run costs the waves added up. It was a flat sum while
+    # the sequencer was strictly sequential, which is still *sound* — a sum is never below a
+    # wave-sum — but it is the wrong bound now, and the wrong bound here refuses a template that
+    # would finish. Measured on the two shipped templates with a concurrent wave, this is the
+    # difference between counting `screen_hazards` and `similar_molecules` once and twice.
+    waves = schedule(template)
+    needed = sum(max(ceilings[step.kind][0] for step in wave) for wave in waves)
+    if needed <= settings.template_run_timeout_seconds:
+        return []
+    worst = "; ".join(
+        " + ".join(f"{step.id}={ceilings[step.kind][0]:,.0f}s" for step in wave) for wave in waves
+    )
+    return [
+        f"template {template.name!r} declares steps that cannot finish inside "
+        f"template_run_timeout_seconds={settings.template_run_timeout_seconds:,.0f}: they may take "
+        f"{needed:,.0f}s in total ({worst}). A run that outlives that ceiling is terminated by "
+        "Temporal without its workflow code running, so the chemist is told nothing and no failure "
+        "row is written. Raise template_run_timeout_seconds above the total, or shorten the "
+        "procedure."
+    ]
 
 
 def write_tool_problems(

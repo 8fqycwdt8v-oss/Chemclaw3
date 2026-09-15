@@ -312,7 +312,7 @@ class AgentSettings(BaseSettings):
     # have. The budget below cannot follow, because it is derived downwards from the
     # window — which is why the ceiling's cost lands there and not here, and why that cost is
     # 4.7% of the thread this time rather than wave 13's 1.16%.
-    agent_tool_result_clear_trigger: int = Field(default=108_200, ge=1)
+    agent_tool_result_clear_trigger: int = Field(default=110_000, ge=1)
     # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
     # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
     # dependent in one direction. Re-measured 2026-09-06 against real BPE encodings, on the observed

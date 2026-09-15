@@ -22,6 +22,7 @@ than one only CI ever checks.
 
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -31,6 +32,7 @@ from chemclaw.durable.template_job import (
     TEMPLATE_JOB_FAMILY,
     TemplateRunInput,
     failed_template_record,
+    template_fingerprint,
     template_job_record,
 )
 from chemclaw.templates.manifest import Template
@@ -142,8 +144,15 @@ def test_a_failed_template_run_records_where_it_stopped_and_keeps_the_steps_that
     assert record.summary == ""
     assert "write" in record.failure_reason
     assert "the model timed out" in record.failure_reason
-    # The four steps a five-step procedure completed before dying are real work, not noise.
-    assert record.result == {"steps": completed}
+    # The four steps a five-step procedure completed before dying are real work, not noise — and
+    # since they are what the next attempt resumes from, the row also says which version of the
+    # template produced them. A run's id is a hash of the name and the inputs and says nothing
+    # about the steps, so without this a relaunch after an edit would fold one procedure's results
+    # into another's.
+    assert record.result == {
+        "steps": completed,
+        "template_fingerprint": template_fingerprint(_run().template),
+    }
 
 
 def test_both_records_name_the_run_as_its_own_correlation() -> None:
@@ -204,6 +213,15 @@ def test_a_real_template_run_writes_the_row_and_a_failing_one_writes_its_own() -
     async def _capture(record: JobRecord) -> None:
         written.append(record)
 
+    @activity.defn(name="completed_steps")
+    async def _resume(request: Any) -> dict[str, Any]:
+        """Nothing to resume, which is what a first run of any id gets.
+
+        Registered because the sequencer now asks this before its first step, so a rig that omits
+        it measures an unserved activity rather than the record it is about.
+        """
+        return {}
+
     @activity.defn(name="run_agent_step")
     async def _agent(step: Any) -> str:
         # The activity is registered by name, so the payload arrives as the raw dict rather than
@@ -229,7 +247,7 @@ def test_a_real_template_run_writes_the_row_and_a_failing_one_writes_its_own() -
                 client,
                 task_queue=settings.background_task_queue,
                 workflows=[TemplateWorkflow],
-                activities=[_capture, _agent],
+                activities=[_capture, _agent, _resume],
             ):
                 await client.execute_workflow(
                     TemplateWorkflow.run,
@@ -263,3 +281,61 @@ def test_a_real_template_run_writes_the_row_and_a_failing_one_writes_its_own() -
     assert "the brief text" in str(finished.result)
     assert failed.job == "bad"
     assert "write" in failed.failure_reason
+
+
+# --- what the resume read will and will not hand back --------------------------------------------
+
+
+def test_the_resume_read_answers_only_for_a_failed_run_of_the_same_template(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The three conditions, against a real row rather than a stubbed store.
+
+    Each is a way resume could be *wrong* rather than merely absent, which is why none of them is
+    left to the caller: `job_records` is upserted on `job_id`, so a completed run's row would
+    otherwise be replayed as a resume of itself; and a run's id is a hash of the template name and
+    its inputs, so an edited file relaunches under the same id carrying a different procedure.
+    """
+    import asyncio
+
+    from chemclaw.core.config import settings
+    from chemclaw.durable.job_record import record_job
+    from chemclaw.durable.template_activities import ResumeRequest, completed_steps
+    from tests.pg import migrated_db_or_skip
+
+    # Durable records follow the session store's switch (`job_record._records_are_durable`), and
+    # the default is `memory` — under which both the write and the read are no-ops and every
+    # assertion below would pass for the wrong reason.
+    monkeypatch.setattr(settings, "session_store", "postgres")
+
+    async def _drive() -> None:
+        await migrated_db_or_skip()
+        job_id = f"template-resume-probe-{uuid4().hex[:12]}"
+        steps = {"one": {"ok": "two"}}
+
+        failed = JobRecord(
+            job_id=job_id,
+            connector="template",
+            job="probe",
+            requested_by="tester",
+            correlation_id=job_id,
+            payload={"smiles": "CCO"},
+            result={"steps": steps, "template_fingerprint": "fp-1"},
+            payload_kind="template",
+            state="failed",
+            failure_reason="step 'two': boom",
+        )
+        await record_job(failed)
+
+        assert await completed_steps(ResumeRequest(job_id=job_id, fingerprint="fp-1")) == steps
+        # A different definition under the same id.
+        assert await completed_steps(ResumeRequest(job_id=job_id, fingerprint="fp-2")) == {}
+        # An id nothing has ever recorded.
+        assert await completed_steps(ResumeRequest(job_id="nope", fingerprint="fp-1")) == {}
+
+        # And once the run succeeds, its row is upserted to `completed` — which must not read back
+        # as something to resume, or every re-ask of a finished procedure would skip its own work.
+        await record_job(failed.model_copy(update={"state": "completed"}))
+        assert await completed_steps(ResumeRequest(job_id=job_id, fingerprint="fp-1")) == {}
+
+    asyncio.run(_drive())

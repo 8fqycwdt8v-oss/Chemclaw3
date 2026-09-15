@@ -33,3 +33,4 @@ from chemclaw.agent import protocol_design_tools as _protocol_design_tools  # no
 from chemclaw.agent import protocol_tools as _protocol_tools  # noqa: F401
 from chemclaw.agent import research_tools as _research_tools  # noqa: F401
 from chemclaw.agent import subscriptions as _subscriptions  # noqa: F401
+from chemclaw.agent import workflow_tools as _workflow_tools  # noqa: F401

@@ -46,6 +46,7 @@ from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.spend_cap import spend_capped
 from chemclaw.agent.state import answer_text, turn_config, turn_input
 from chemclaw.agent.tool_invocation import invoke_governed
+from chemclaw.agent.tool_result_size import STEP_REMEDY, bounded_content
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_usage import TurnUsage, llm_result_usage
 from chemclaw.connectors.jobs import prepare_job_launch
@@ -58,6 +59,7 @@ from chemclaw.core.identity_context import (
     set_current_correlation_id,
     set_current_identity,
 )
+from chemclaw.core.logging import log_event
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from chemclaw.durable.heartbeat import beating
@@ -134,6 +136,15 @@ class AgentStepInput(BaseModel):
     # still decodes — such a run books one row per step id it has, which for the shipped template
     # is one step.
     step_id: str = ""
+    # The run's template name, carried for the prompt-truncation counter's label and for nothing
+    # else — a step's *behaviour* must not depend on it, or a worker would be deciding what to run
+    # from a name rather than from the resolved step beside it.
+    #
+    # Defaulted for `step_id`'s reason one field up: both workers poll `background-jobs`, so a
+    # rolling deploy schedules an old-code workflow's input onto a new-code activity worker. An
+    # unlabelled cut is still a cut, still counted (`template=""`), and still says so in the text
+    # the model reads — which is the half that must not depend on a rollout.
+    template: str = ""
 
 
 class AgentStepResult(BaseModel):
@@ -622,6 +633,140 @@ class _StepMeter(AsyncCallbackHandler):
         self.usage.add(llm_result_usage(response))
 
 
+class ResumeRequest(BaseModel):
+    """Which run to look for completed steps from, and the definition they must belong to."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    job_id: str = Field(min_length=1)
+    # The fingerprint of the *resolved* template this run is executing. A run's id is
+    # `hash([name, inputs])`, so a relaunch after an edit lands on the same id carrying a different
+    # procedure — and step results produced by the old definition would then be folded into the new
+    # one silently. This is what refuses that.
+    fingerprint: str = Field(min_length=1)
+
+
+@durable_activity("background")
+@activity.defn
+async def completed_steps(request: ResumeRequest) -> dict[str, Any]:
+    """The steps a previous failed run of `request.job_id` already finished, or `{}`.
+
+    **The work was always kept and never read.** `failed_template_record` writes
+    `result={"steps": completed}` and says why in as many words — *"A five-step procedure that died
+    at step four ran four real steps, and discarding them would lose the work while recording only
+    the failure"* — and then the sequencer rebuilt `scope` and `results` empty on every execution,
+    so a relaunch redid all four.
+
+    **An activity because it is a database read**, which workflow code may not do. That is also
+    what makes it safe for the thing it decides: the result is recorded in history, so a replay
+    folds the same steps rather than re-querying a table that has moved on (D-071 — a value that
+    shapes how many commands a workflow issues is captured once, not re-read).
+
+    **Three conditions, and each of them is a way this could be wrong rather than merely absent.**
+    The row must exist; it must be a *failure*, because `job_records` is upserted on `job_id` and a
+    completed run's row would otherwise be replayed as a resume of itself; and its fingerprint must
+    match, because the run id is a hash of the template *name* and its inputs, so editing the
+    file's steps produces a different procedure under the same id.
+
+    Best-effort in the same sense `_record_run` is: a resume that cannot be read is a slower run,
+    and failing a run because its optional shortcut was unavailable would trade a real outcome for
+    an optimisation.
+
+    Args:
+        request: The run to resume and the definition its steps must belong to.
+
+    Returns:
+        `{step_id: result}` for the steps already done, empty when there is nothing to resume.
+    """
+    from chemclaw.durable.job_record import lookup_job_record
+
+    try:
+        record = await lookup_job_record(request.job_id)
+    except Exception:
+        logger.warning("could not read %s to resume it; starting over", request.job_id)
+        return {}
+    if record is None or record.state != "failed":
+        return {}
+    result = record.result if isinstance(record.result, dict) else {}
+    if result.get("template_fingerprint") != request.fingerprint:
+        if result.get("steps"):
+            logger.info(
+                "not resuming %s: its completed steps belong to a different version of %r",
+                request.job_id,
+                record.job,
+            )
+        return {}
+    steps = result.get("steps")
+    return dict(steps) if isinstance(steps, dict) else {}
+
+
+def bounded_prompt(step: AgentStepInput) -> str:
+    """`step.prompt` cut to what a model may be handed in one blob, and said so in the text.
+
+    **The bound a template step did not have, and the one place the chat path's is not reachable
+    from.** `bound_tool_results` is an entry of `tool_call_middleware`; a template `tool` step runs
+    through `invoke_governed`, which folds `tool_governance_middleware` — deliberately, because the
+    three entries it omits exist to serve a model and a `tool` step has none. Correct for that step
+    and silently wrong one step later: the *next* step's prompt interpolates that unbounded result
+    through `${steps.<id>.result}`, and there is a model there. Measured over the shipped ceiling,
+    a result a chat turn cuts to 60,000 characters reached an `agent` step's prompt at **245,700**.
+
+    Nothing downstream could reclaim it either, which is what makes the hole the expensive kind.
+    The step's graph gets `agent/compaction.py` like any turn, and both of its edits are for
+    *history* — `ClearToolUsesEdit` clears tool results and the conversation window drops old
+    turns. A step is one `HumanMessage` with no history at all, so a prompt over the budget is
+    unreducible by construction: it ticks `chemclaw_context_unreducible_total` and goes out whole.
+
+    **In the activity and not in the sequencer**, which is the placement decision. Cutting in
+    workflow code would put a mutable setting into an activity *argument*, and an argument is
+    recomputed on replay while a result is read from history — so a deployment that lowered the
+    ceiling between the original execution and a replay would fail the run with a
+    non-determinism error rather than bound anything. It is also where `durable_tools.py` already
+    puts this class of rewrite, for a reason that reads the same here: the envelope belongs to the
+    model's context, so it belongs at the model's edge.
+
+    `agent_max_tool_result_chars` rather than a second setting, and that is the argument rather
+    than the convenience: it is this system's one answer to "how much text may reach a model in one
+    blob", and a prompt is a blob. A number of its own would be a second ceiling nobody could
+    reason about against the first, which is the defect `bounded_for_batch` names one layer down.
+
+    Head-and-tail is what makes this safe to do to a *prompt* rather than to a result. A template
+    prompt is instructions, then interpolated data, then instructions — read `tautomer-resolution`,
+    whose last four sentences are the whole judgment the step exists for. `_HEAD_SHARE` keeps both
+    ends and cuts the middle, so what a cut costs is the data it was already too large to read and
+    never the ask.
+
+    Args:
+        step: The resolved step. `template` labels the counter; `prompt` is what is bounded.
+
+    Returns:
+        The prompt, unchanged when it was already inside the ceiling.
+    """
+    bounded, removed = bounded_content(
+        step.prompt,
+        # Named for what it is rather than for a tool, because no tool returned it: the sentence
+        # the model reads says "this <name> result", and "template step input" is the true filler.
+        "template step input",
+        settings.agent_max_tool_result_chars,
+        remedy=STEP_REMEDY,
+    )
+    if not removed:
+        return step.prompt
+    METRICS.increment("chemclaw_template_prompt_truncated_total", 1.0, {"template": step.template})
+    log_event(
+        logger,
+        "template.prompt_truncated",
+        "cut %d characters from the %s step's prompt to stay inside the context ceiling",
+        removed,
+        step.step_id or "agent",
+        template=step.template,
+        step=step.step_id,
+        characters_removed=removed,
+        ceiling=settings.agent_max_tool_result_chars,
+    )
+    return str(bounded)
+
+
 @durable_activity("background")
 @activity.defn
 async def run_agent_step(step: AgentStepInput) -> AgentStepResult | str:
@@ -758,7 +903,10 @@ async def run_agent_step(step: AgentStepInput) -> AgentStepResult | str:
                 # `chemclaw_tokens_total` rather than free and silent. Measured: 52 paid model
                 # calls, 6,240 tokens, booked.
                 result = await beating(
-                    graph.ainvoke(turn_input(step.prompt), {**turn_config(), "callbacks": [meter]}),
+                    graph.ainvoke(
+                        turn_input(bounded_prompt(step)),
+                        {**turn_config(), "callbacks": [meter]},
+                    ),
                     f"template agent step {step.step_id or step.profile or 'agent'}",
                     settings.template_step_heartbeat_timeout_seconds,
                 )

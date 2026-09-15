@@ -43,7 +43,9 @@ from temporalio.testing import ActivityEnvironment
 
 from chemclaw.agent.authz import side_effecting_tools
 from chemclaw.agent.chemclaw_agent import advertised_tool_names
+from chemclaw.agent.framing import SYSTEM_SPEECH_MARK
 from chemclaw.agent.state import answer_text
+from chemclaw.agent.tool_result_size import STEP_REMEDY, TOOL_REMEDY
 from chemclaw.agent.turn_cost import TurnCost
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
@@ -605,7 +607,9 @@ def test_the_sequencer_hands_the_step_its_declared_writes() -> None:
             template_job, "workflow", types.SimpleNamespace(execute_activity=execute_activity)
         )
         asyncio.run(
-            template_job.TemplateWorkflow()._run_step(step, {}, identity, timedelta(seconds=60))
+            template_job.TemplateWorkflow()._run_step(
+                step, {}, identity, timedelta(seconds=60), "probe"
+            )
         )
 
     (payload,) = sent
@@ -654,7 +658,9 @@ def test_every_dispatched_step_carries_a_heartbeat_timeout() -> None:
         )
         for step in steps:
             asyncio.run(
-                template_job.TemplateWorkflow()._run_step(step, {}, identity, timedelta(seconds=60))
+                template_job.TemplateWorkflow()._run_step(
+                    step, {}, identity, timedelta(seconds=60), "probe"
+                )
             )
 
     expected = timedelta(seconds=settings.template_step_heartbeat_timeout_seconds)
@@ -1215,3 +1221,149 @@ def test_the_step_still_admits_the_answer_an_old_worker_returns() -> None:
     # And the worker's converter is the pydantic one, which is what makes the adapter above the
     # right thing to have asked (`core/temporal_client.py`).
     assert pydantic_data_converter is not None
+
+
+# --- the prompt a step is handed is bounded, because nothing else on this path bounds it ---------
+#
+# `bound_tool_results` is an entry of `tool_call_middleware`. A template `tool` step runs through
+# `invoke_governed`, which folds `tool_governance_middleware` — the same chain minus the three
+# entries that exist to serve a model, deliberately, because a `tool` step has no model. That is
+# right for the step and silently wrong for the *next* one: its prompt interpolates the unbounded
+# result through `${steps.<id>.result}`, and there is a model there.
+#
+# Measured over the shipped ceiling before the fix, one payload through both paths:
+#
+#     raw step result            :   245,688 chars
+#     chat-turn cap (config)     :    60,000 chars   agent_max_tool_result_chars
+#     template agent-step prompt :   245,700 chars   uncut
+#
+# And unreclaimable afterwards: the step's graph gets `agent/compaction.py` like any turn, but both
+# of its edits are for *history* — clearing tool results, dropping old turns — and a step is one
+# `HumanMessage` with no history. So it ticks `chemclaw_context_unreducible_total` and goes whole.
+
+
+#: What the step's model was asked to answer, one entry per model call.
+_SEEN: list[list[Any]] = []
+
+
+def _model_prompt(monkeypatch: pytest.MonkeyPatch, prompt: str) -> str:
+    """Drive the real activity on `prompt` and return the human text the model actually received.
+
+    **The model's own hooks are recorded, rather than `bounded_prompt` asserted on directly**,
+    because the question is what the *model* was sent: between the cut and the provider sit
+    `turn_input`, the graph's prompt assembly and `create_agent`'s model node, and a unit test on
+    the arithmetic alone would pass with the call site deleted.
+
+    Both hooks, because which one LangChain calls is its decision and not this test's —
+    `graph.ainvoke` does not stream, so a capture on `_stream` alone recorded nothing at all, which
+    is the failure this pair exists to have already had.
+
+    Patched on the class rather than on a subclass: `ScriptedChatModel` is a pydantic model, and
+    mypy's pydantic plugin regenerates `__init__` from the fields for any subclass — so a capturing
+    subclass cannot be constructed with the script shorthand every other test in this file uses.
+    """
+    _SEEN.clear()
+    for hook in ("_generate", "_stream"):
+        original = getattr(ScriptedChatModel, hook)
+
+        def recorded(
+            self: Any, messages: list[Any], *args: Any, _original: Any = original, **kwargs: Any
+        ) -> Any:
+            _SEEN.append(list(messages))
+            return _original(self, messages, *args, **kwargs)
+
+        monkeypatch.setattr(ScriptedChatModel, hook, recorded)
+
+    _drive(monkeypatch, _step(prompt=prompt, template="tautomer-resolution"), ["ok"])
+
+    human = [
+        message for request in _SEEN for message in request if isinstance(message, HumanMessage)
+    ]
+    assert human, "the step's own prompt never reached the model as a human message"
+    return str(human[0].content)
+
+
+def test_an_oversized_step_prompt_reaches_the_model_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The headline: a step result too large to read does not reach the step's model whole.
+
+    The ceiling is `agent_max_tool_result_chars` rather than a second setting, and that is the
+    argument rather than the convenience — it is this system's one answer to "how much text may
+    reach a model in one blob", and a prompt is a blob.
+    """
+    ask = "Report the tautomer resolution of CCO."
+    close = "Close by naming which downstream numbers this changes."
+    ranking = '{"g": 0.01}, ' * 20_000
+    prompt = f"{ask}\n\nRanking: {ranking}\n\n{close}"
+    assert len(prompt) > settings.agent_max_tool_result_chars
+
+    sent = _model_prompt(monkeypatch, prompt)
+
+    assert len(sent) <= settings.agent_max_tool_result_chars
+    # Head *and* tail, which is the property that makes cutting a prompt safe at all: a template
+    # prompt is instructions, then data, then instructions, and the judgment the step exists for is
+    # in the last sentences. A head-only cut would keep the ask and throw away the answer's shape.
+    assert sent.startswith(ask)
+    assert sent.rstrip().endswith(close)
+    assert "characters removed from the middle" in sent
+
+
+def test_the_cut_tells_the_step_something_it_can_actually_do(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The remedy is the step's, not a tool caller's — the wrong advice is worse than none.
+
+    Every other sentence in `_notice` is true of any cut. The last one assumes the model *asked*
+    for this text and can therefore ask for less, which holds for a tool result and for a `task`
+    report and is false here: the prompt was interpolated by a `${steps.<id>.result}` reference in
+    a file this model cannot see and did not write. Telling it to narrow its question sends it to
+    re-fetch what the step was already handed.
+    """
+    prompt = "Brief me.\n\n" + ("x" * settings.agent_max_tool_result_chars) + "\n\nBe brief."
+
+    sent = _model_prompt(monkeypatch, prompt)
+
+    assert STEP_REMEDY in sent
+    assert TOOL_REMEDY not in sent
+    # And it is named as this system's speech, which is the part a connector cannot forge: the
+    # interpolated half of that prompt is a tool result, so an unmarked sentence inside it would be
+    # asking to be believed on the strength of its own wording (`agent/tool_result_size._notice`).
+    assert SYSTEM_SPEECH_MARK in sent
+
+
+def test_a_prompt_inside_the_ceiling_is_handed_over_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control arm: the bound is not a rewrite that happens to every step.
+
+    Without this the two above are satisfied by cutting unconditionally, which would put a notice
+    about removed characters on every template prompt in the catalogue — all nine of which are far
+    inside the ceiling.
+    """
+    sent = _model_prompt(monkeypatch, "brief me on CCO")
+
+    assert sent == "brief me on CCO"
+    assert "characters removed" not in sent
+
+
+def test_the_counter_names_the_template_whose_prompt_was_cut(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cut that nothing counts is the invisible kind this repository keeps finding.
+
+    Labelled by *template* and not by tool, because the two cuts have different remedies: a
+    truncated tool result is a tool answering too broadly and is fixed in that tool's own ceiling;
+    a truncated template prompt is a step interpolating more than a model can read and is fixed in
+    the template — a narrower step, or a field path instead of the whole result.
+    """
+    seen: list[tuple[str, dict[str, str] | None]] = []
+    monkeypatch.setattr(
+        METRICS,
+        "increment",
+        lambda name, value=1.0, labels=None: seen.append((name, labels)),
+    )
+
+    _model_prompt(monkeypatch, "a\n\n" + "x" * settings.agent_max_tool_result_chars + "\n\nb")
+
+    assert ("chemclaw_template_prompt_truncated_total", {"template": "tautomer-resolution"}) in seen

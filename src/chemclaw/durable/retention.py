@@ -388,6 +388,12 @@ _NOT_PRUNED: dict[str, str] = {
     # that cascade is unreachable for the same reason — the parent is refused too — which is why
     # this entry states its own refusal rather than deferring to the parent the way `bo_suggestions`
     # does.
+    "composed_workflows": (
+        "refused: a procedure a chemist asked to have written down and is still using. Bounded "
+        "by composed.MAX_PER_OWNER at the write instead, because how many working procedures "
+        "somebody keeps is their own decision and a clock is the wrong owner of it. Offboarding "
+        "is the one thing that deletes one (agent/leaver.py)"
+    ),
     "experiment_protocols": "refused: the design of an experiment somebody may still run, kept "
     "through erasure (`leaver._RETAINED`); no DELETE on it is granted, so the refusal is enforced",
     "experiment_protocol_revisions": "refused: the append-only history of a design, whose human "

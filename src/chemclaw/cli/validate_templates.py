@@ -64,6 +64,7 @@ from chemclaw.agent.template_surface import (
     ToolArguments,
     argument_problems,
     resolvable_signatures,
+    run_ceiling_problems,
     step_problems,
 )
 from chemclaw.core.config import settings
@@ -157,7 +158,12 @@ def validate_templates(surface: TemplateSurface | None = None) -> list[str]:
     except ValueError as exc:  # ProfileError and TemplateError are both ValueError
         return [str(exc)]
     problems = [
-        problem for template in found.values() for problem in step_problems(template, surface)
+        problem
+        for template in found.values()
+        # Two questions per file, deliberately both: `step_problems` asks whether the steps
+        # *resolve*, `run_ceiling_problems` whether the run may finish them. A file can pass the
+        # first and be unable to complete, which is the failure that reaches nobody.
+        for problem in [*step_problems(template, surface), *run_ceiling_problems(template)]
     ]
     try:
         enabled()  # resolves `templates_enabled` against what exists
