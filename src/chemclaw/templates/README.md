@@ -156,12 +156,21 @@ same id carrying a different procedure.
 this system works out once stops being re-derived at one model call per step. It is the same
 `Template` model, so it gets the validators, the wave schedule and the resume above for free.
 
-**It may only read**, and that is what keeps the plan-gate exemption at the top of this file true:
+**It may not write**, and that is what keeps the plan-gate exemption at the top of this file true:
 the exemption holds *because* a template is reviewed and uncreatable at run time, so an
-agent-authored one may name no side-effecting tool, no durable job and no `write_tools` —
-`composed.authored_problems`, asked when it is stored and again when it is run. That costs the
-calculations: every durable job launcher is state-changing, so a procedure that needs a ranking is
-a template a person writes.
+agent-authored one may name no side-effecting tool and no `write_tools` —
+`composed.authored_problems`, asked when it is stored and again when it is run.
+
+**It may run a durable job once a person approves that version of it**
+(`D-2026-09-15-an-approval-is-for-one-version-of-one-workflow`). Composing is not the decision: a
+workflow with `job` steps is stored unapproved, and `composed.unapproved_jobs` withholds the run
+until `POST /workflows/{name}/approval` records a person's Yes against
+`template_fingerprint(document)`. Because the approval is keyed on the document, re-composing
+lapses it — there is nothing to clear. There is no tool for approving, deliberately: a workflow
+must not be able to approve itself, which is `routes/plan.py::decide_plan`'s rule one seam over.
+
+An approval lifts the `job` step and nothing else. A job is a call the approver read in the
+document; `write_tools` is a permission a model spends later on a call nobody has seen.
 
 ## Versioning
 
