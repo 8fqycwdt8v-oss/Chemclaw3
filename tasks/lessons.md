@@ -2748,3 +2748,21 @@ and that is what makes the new bound a bound rather than a silenced assertion.
 
 `CLAUDE.md` already carries the cost, about a different pair of tests: "a gate that reds for a
 scheduling artefact teaches everybody to re-run."
+
+## 2026-09-15 — a file name written from memory is a claim, and this tree checks it
+
+Third time this session a reference guard caught prose I wrote. The newest: a docstring in
+`kg/note.py` cited `tests/test_graph_analytics.py`, which does not exist — the analytics tests are
+in `tests/test_knowledge_gaps.py`, a fact I had *established by grep ten minutes earlier* and then
+wrote from memory anyway.
+
+The others were the same shape one layer out: a new tool and a new error class joining the tree
+without being declared in `mcp_face.WITHHELD`, the probe corpus, `_BAD_DATA_TYPES` and the registry
+list — four guards, four decisions, none of them rubber stamps.
+
+**The rule.** When a docstring names a path, a test, a tool or a setting, paste it from the shell
+rather than typing it. And when a change adds a *kind* of thing — a tool, an error class, a note
+type, a constant other packages read — run the full suite before pushing, not the affected suites:
+every one of these was invisible to the tests of the code I changed, because the guard lives with
+the declaration and not with the behaviour. `make test` is ~18 minutes; a red CI cycle is longer,
+and a red PR spends somebody's trust rather than my time.

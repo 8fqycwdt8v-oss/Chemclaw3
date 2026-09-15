@@ -461,7 +461,7 @@ KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
 #:
 #: Here rather than in `memory/` because two packages must agree on the string and only one of them
 #: may import the other: `memory/jobs.py` stamps it and `kg/analytics.py` counts it, and `kg` is
-#: layer 4 with no edge to `memory`. `tests/test_memory.py` and `tests/test_graph_analytics.py`
+#: layer 4 with no edge to `memory`. `tests/test_memory.py` and `tests/test_knowledge_gaps.py`
 #: both read it from here, so the producer and the reporter cannot drift apart.
 UNDISTILLED_TAG = "undistilled"
 
