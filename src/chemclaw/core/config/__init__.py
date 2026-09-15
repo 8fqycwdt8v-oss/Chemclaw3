@@ -1059,6 +1059,50 @@ class Settings(
                 )
         return self
 
+    def template_step_ceilings(self) -> dict[str, tuple[float, str]]:
+        """The longest one step of each kind may take, and the words that name the budget.
+
+        **One definition, two readers, because they ask different questions of it.** The validator
+        below asks for the *maximum* — the honest machine-checkable floor when the templates
+        themselves are invisible, which they are to this object. `cli/validate_templates.py` asks
+        for the *sum over the steps a file actually declares*, which is the bound that matters and
+        which only a reader holding the YAML can compute. Two copies of this arithmetic is the
+        defect class this repository keeps finding; `templates/registry.unrunnable_reason` says the
+        same thing about `step_problems` one seam over.
+
+        Keyed by the manifest's own `kind` values, so a new step kind that forgets to appear here
+        raises a `KeyError` at the gate rather than being silently counted as free.
+
+        `job` is not an activity and that is the whole reason this is not one number. It starts
+        `ConnectorJobWorkflow` as a child under `durable/connector_job.wrapper_execution_timeout()`
+        — `connector_job_timeout_seconds` plus what the wrapper still owes after the child returns,
+        which `finish_headroom` sums and this restates because `core` cannot import `durable` —
+        the module-level comment naming that restatement, near the top of this file, is the other
+        half of the same borrowing. The count of post-child steps is deliberately not written as a
+        number in either place: it was six, then it was not.
+
+        Returns:
+            `{kind: (seconds, why)}`, where `why` is phrased to be read inside a refusal.
+        """
+        return {
+            "tool": (self.template_step_timeout_seconds, "template_step_timeout_seconds"),
+            "agent": (self.template_step_timeout_seconds, "template_step_timeout_seconds"),
+            "job": (
+                self.connector_job_timeout_seconds
+                + (
+                    self.activity_queue_wait_seconds * 3
+                    + self.template_step_timeout_seconds * 3
+                    + self.activity_timeout_seconds * 2
+                    + self.job_record_timeout_seconds
+                    + self.result_publish_timeout_seconds
+                    + self.note_write_timeout_seconds
+                    + self.delivery_timeout_seconds
+                ),
+                "connector_job_timeout_seconds plus what the wrapper's post-child "
+                "steps may spend, the ceiling a `job` step carries",
+            ),
+        }
+
     @model_validator(mode="after")
     def _the_template_run_ceiling_covers_one_step(self) -> Self:
         """The same rule again, on the template run and the longest step it has to contain.
@@ -1091,32 +1135,17 @@ class Settings(
 
         Strictly greater rather than at least, because equality is the defect. Only one step is
         required rather than N: how many steps a template has is a property of a YAML file this
-        object cannot see, so the honest machine-checkable floor is "a single step fits", and the
-        setting's own comment carries the sizing advice for a longer procedure.
+        object cannot see, so the honest machine-checkable floor is "a single step fits".
+
+        **That floor is not the bound, and for a while it was the only check there was.** On the
+        shipped defaults one `job` step is 39,330 s against a run ceiling of 45,330 s, so this
+        validator passes and a file with *two* of them misses by 33,330 s — and misses silently,
+        because a workflow execution timeout is not delivered to workflow code. The N-step half
+        lives where the YAML is readable: `agent/template_surface.run_ceiling_problems`, read by
+        `make template-validate` and by `registry.unrunnable_reason`, over the step ceilings
+        `template_step_ceilings` defines once for this validator and that gate alike.
         """
-        # The max over the budgets a *step* can carry, the shape
-        # `_the_job_ceiling_covers_the_activity_it_bounds` already uses one level down: naming one
-        # step kind is how this rule came to be checking 900 s against an 18,120 s bound. A new
-        # step kind with its own ceiling gets covered by being added here.
-        job_step = self.connector_job_timeout_seconds + (
-            self.activity_queue_wait_seconds * 3
-            + self.template_step_timeout_seconds * 3
-            + self.activity_timeout_seconds * 2
-            + self.job_record_timeout_seconds
-            + self.result_publish_timeout_seconds
-            + self.note_write_timeout_seconds
-            + self.delivery_timeout_seconds
-        )
-        longest, budget = max(
-            (
-                (self.template_step_timeout_seconds, "template_step_timeout_seconds"),
-                (
-                    job_step,
-                    "connector_job_timeout_seconds plus what the wrapper's six post-child "
-                    "steps may spend, the ceiling a `job` step carries",
-                ),
-            )
-        )
+        longest, budget = max(self.template_step_ceilings().values(), key=lambda pair: pair[0])
         if self.template_run_timeout_seconds <= longest:
             raise ValueError(
                 f"template_run_timeout_seconds={self.template_run_timeout_seconds} does not cover "

@@ -19,6 +19,7 @@ not run themselves, so every step is authorized against the same actor, through 
 chat turn.
 """
 
+import asyncio
 import contextlib
 from datetime import timedelta
 from typing import Any, cast
@@ -42,15 +43,19 @@ with workflow.unsafe.imports_passed_through():
         AgentStepInput,
         AgentStepResult,
         JobStepInput,
+        ResumeRequest,
         StepIdentity,
         ToolStepInput,
         authorize_job_step,
+        completed_steps,
         run_agent_step,
         run_tool_step,
     )
     from chemclaw.templates.manifest import AgentStep, JobStep, Template, ToolStep
     from chemclaw.templates.resolve import resolve
+    from chemclaw.templates.schedule import schedule
 
+from chemclaw.core.ids import stable_hash
 from chemclaw.durable.publish import (
     BAD_DATA_RETRY,
     agent_step_retry,
@@ -90,6 +95,22 @@ class TemplateRunResult(BaseModel):
     result: Any = None
 
 
+class _StepFailed(Exception):
+    """Which step of a wave failed, and why — the pairing a concurrent wave would otherwise lose.
+
+    While steps ran one at a time the `except` block simply closed over the loop variable. A wave
+    has several, so the step and its cause have to travel together or the failure record names
+    whichever step the loop happened to be holding. Internal to this module and never crosses the
+    activity boundary: the caller unwraps it and re-raises the cause, so what Temporal sees, what
+    `failure_reason` reads and what `failure_exception_types` classifies are all unchanged.
+    """
+
+    def __init__(self, step: Any, cause: BaseException) -> None:
+        super().__init__(f"template step {getattr(step, 'id', '?')!r} failed")
+        self.step = step
+        self.cause = cause
+
+
 # On the light queue: the sequencer only substitutes references and dispatches. Whatever
 # weight a step carries is the tool's, the job's child workflow's, or the model turn's.
 #
@@ -108,6 +129,18 @@ class TemplateRunResult(BaseModel):
 # procedure. A literal rather than a setting, because it is an identifier inside stored rows —
 # changing it would orphan every row already written.
 TEMPLATE_JOB_FAMILY = "template"
+
+
+def template_fingerprint(template: "Template") -> str:
+    """What a resumable run's completed steps belong to — the resolved template, hashed.
+
+    A run's id is `hash([template.name, inputs])` (`templates/registry.run_workflow_id`), which is
+    deliberately blind to the *steps*: the same procedure asked the same question is the same run.
+    That is right for idempotency and wrong for resume, because editing `data/templates/<name>.yaml`
+    and relaunching lands on the same id carrying a different procedure. Hashing what the run
+    actually pinned is what lets `completed_steps` tell those two apart.
+    """
+    return stable_hash(template.model_dump(mode="json"))
 
 
 def run_summary(template: str, steps: int, degradations: dict[str, str]) -> str:
@@ -214,7 +247,10 @@ def failed_template_record(
         session_id=run.session_id,
         correlation_id=job_id,
         payload=dict(run.inputs),
-        result={"steps": completed},
+        # The fingerprint travels with the steps, not beside them: a reader that found the
+        # steps and had to look elsewhere for what they belong to is a reader that will one
+        # day skip the second lookup.
+        result={"steps": completed, "template_fingerprint": template_fingerprint(run.template)},
         payload_kind="template",
         state="failed",
         failure_reason=f"step {step_id!r}: {reason}",
@@ -259,17 +295,55 @@ class TemplateWorkflow:
         # only thing this stops being an error is the one case that should never have been one.
         scope: dict[str, Any] = {f"inputs.{item.name}": None for item in run.template.inputs}
         scope.update({f"inputs.{key}": value for key, value in run.inputs.items()})
-        results: dict[str, Any] = {}
+        # **Both of this release's command-sequence changes behind one marker**, because they
+        # landed in one commit and a run either predates them or does not. Off the marker the
+        # sequence is exactly what the shipped code emitted: nothing resumed, and one step per
+        # wave — which `_run_wave` awaits directly, creating no task and issuing the same commands
+        # in the same order. `tests/test_workflow_replay.py` is what asked: the background worker
+        # deploys `Recreate`, so the new generation inherits every unfinished run, and an
+        # ungated change wedges each of them on a nondeterminism error rather than failing it.
+        #
+        # Drainable once every run open at this release has ended — bounded by
+        # `template_run_timeout_seconds`, the execution timeout `templates/registry.py` starts
+        # every run with. Then `deprecate_patch`, then delete, per `docs/guides/workflow-
+        # versioning.md`. The id may never be reused.
+        scheduled = workflow.patched("template-waves-and-resume")
+        # **What a previous failed run of this id already finished.** Empty for a first run, for a
+        # run whose record says it completed, and for one whose steps belong to a different version
+        # of the file — see `completed_steps`, which is an activity because it is a database read
+        # and because its answer decides how many activities this workflow goes on to dispatch.
+        results: dict[str, Any] = await self._resume(run) if scheduled else {}
+        scope.update({f"steps.{step_id}.result": value for step_id, value in results.items()})
         # Which steps ran degraded, and in what way — keyed by step id, because "the run was
         # degraded" is as unactionable as "the template failed" was when a procedure has five
         # steps. Empty for a clean run, which is what keeps the record and the push-back of an
         # undegraded run byte-identical to what they were.
         degradations: dict[str, str] = {}
 
-        for step in run.template.steps:
+        # **Waves, not steps** — and a chained template yields one step per wave, so seven of the
+        # nine shipped ones run exactly as they did before concurrency existed. The grouping is
+        # derived from the `${steps.<id>.result}` edges the file already declares
+        # (`templates/schedule.py`), which is why this needed no new YAML key and does not reopen
+        # `D-2026-08-25-the-loop-is-a-composite-not-a-template`: that ADR declined a *loop* over a
+        # collection sized at run time, and this schedules steps that were already written down.
+        waves = (
+            schedule(run.template)
+            if scheduled
+            # The pre-marker shape, written in the new code's own terms rather than kept as a
+            # second loop: one step per wave *is* the old sequencer.
+            else tuple((step,) for step in run.template.steps)
+        )
+        for wave in waves:
+            # A resumed step is not re-dispatched, and the wave it was in may now be empty. Its
+            # result is already in `scope`, so everything downstream reads exactly what it read on
+            # the attempt that produced it.
+            wave = tuple(step for step in wave if step.id not in results)
+            if not wave:
+                continue
             try:
-                result = await self._run_step(step, scope, identity, timeout)
-            except BaseException as exc:
+                finished = await self._run_wave(wave, scope, identity, timeout, run.template.name)
+            except _StepFailed as failure:
+                step, exc = failure.step, failure.cause
                 # The completion push-back below had no counterpart, so a template that failed at
                 # step 3 of 5 told the chemist nothing at all: the workflow ended, the session
                 # stream stayed silent, and the only record was in Temporal's history. The
@@ -291,20 +365,26 @@ class TemplateWorkflow:
                     )
                 )
                 await self._notify_failure(run, step, exc)
-                raise
-            # **An `agent` step reports what was missing, and the run has to carry it.** The step
-            # returns an `AgentStepResult` rather than a bare string precisely so this loop can
-            # tell a degraded answer from a whole one; unwrapping it here — rather than inside
-            # `_run_step` — is what keeps `scope` and `results` holding the *text* every other
-            # step kind holds, so a `${steps.x.result}` reference still substitutes prose and a
-            # `tool` step's result is untouched. `step_value()` carries the notice into the text
-            # itself, because the next step reads nothing else.
-            if isinstance(result, AgentStepResult):
-                if result.degraded:
-                    degradations[step.id] = result.notice()
-                result = result.step_value()
-            results[step.id] = result
-            scope[f"steps.{step.id}.result"] = result
+                raise exc from None
+            # Folded in the wave's own declared order, so `results` and `scope` are built in the
+            # file's sequence whatever order the activities actually completed in. A dict built
+            # from completion timing would differ between an execution and its replay, which is
+            # the one thing workflow code may not do.
+            for step, result in finished:
+                # **An `agent` step reports what was missing, and the run has to carry it.** The
+                # step returns an `AgentStepResult` rather than a bare string precisely so this
+                # loop can tell a degraded answer from a whole one; unwrapping it here — rather
+                # than inside `_run_step` — is what keeps `scope` and `results` holding the *text*
+                # every other step kind holds, so a `${steps.x.result}` reference still
+                # substitutes prose and a `tool` step's result is untouched. `step_value()`
+                # carries the notice into the text itself, because the next step reads nothing
+                # else.
+                if isinstance(result, AgentStepResult):
+                    if result.degraded:
+                        degradations[step.id] = result.notice()
+                    result = result.step_value()
+                results[step.id] = result
+                scope[f"steps.{step.id}.result"] = result
 
         summary = run_summary(run.template.name, len(run.template.steps), degradations)
         # Recorded before the push-back, so the id a chemist is handed is one `find_past_jobs` and
@@ -331,6 +411,49 @@ class TemplateWorkflow:
         # and a caller that wants an earlier stage has every one of them in `steps`.
         last = run.template.steps[-1].id
         return TemplateRunResult(template=run.template.name, steps=results, result=results[last])
+
+    async def _resume(self, run: TemplateRunInput) -> dict[str, Any]:
+        """The steps a previous failed attempt at this id already finished.
+
+        **A run is retried, not resumed, without this.** `ALLOW_DUPLICATE_FAILED_ONLY` means the
+        only way to re-execute an id is after a failure, and `scope`/`results` were rebuilt empty
+        every time — so a five-step procedure that died at step four redid all four, while its own
+        `job_records` row held their results with a docstring explaining why they were worth
+        keeping.
+
+        Best-effort, and the failure direction is the safe one: an unreadable record yields `{}`
+        and the run starts over, which is exactly what it did before. A run must not fail because
+        the shortcut was unavailable.
+
+        Called unconditionally rather than behind a setting. A resumed step is a step whose side
+        effects already happened, so skipping it is *more* conservative than repeating it — and
+        `D-2026-09-15-a-watch-that-nothing-evaluates-is-a-promise-a-deployment-cannot-keep` is what
+        a default-off knob on a correct behaviour costs.
+
+        Args:
+            run: This execution's pinned template and inputs.
+
+        Returns:
+            `{step_id: result}`, empty when there is nothing to resume.
+        """
+        return cast(
+            dict[str, Any],
+            await workflow.execute_activity(
+                completed_steps,
+                ResumeRequest(
+                    job_id=workflow.info().workflow_id,
+                    fingerprint=template_fingerprint(run.template),
+                ),
+                task_queue=settings.background_task_queue,
+                start_to_close_timeout=timedelta(seconds=settings.job_record_timeout_seconds),
+                # The wait, which is the half `tests/test_activity_queue_bound.py` fails a call
+                # site for omitting. A light read at the *start* of a run, so it takes the light
+                # write's queue bound rather than core's hour: a resume nobody can serve promptly
+                # is a resume worth giving up on, since starting over is a correct outcome.
+                schedule_to_start_timeout=light_write_queue_wait_timeout(),
+                retry_policy=BAD_DATA_RETRY,
+            ),
+        )
 
     async def _record_run(self, record: JobRecord) -> None:
         """Persist the run's durable record, logging rather than failing the run if it cannot be.
@@ -409,10 +532,88 @@ class TemplateWorkflow:
                 },
             )
 
+    async def _run_wave(
+        self,
+        wave: tuple[Any, ...],
+        scope: dict[str, Any],
+        identity: StepIdentity,
+        timeout: timedelta,
+        template: str,
+    ) -> list[tuple[Any, Any]]:
+        """Run one wave's steps together and return `(step, result)` in the wave's declared order.
+
+        **A wave of one is awaited directly**, which is not an optimisation but the property that
+        keeps this change invisible to the seven shipped templates whose steps chain: no task is
+        created, nothing is scheduled differently, and their Temporal history is what it was.
+
+        **`gather(return_exceptions=True)`, which is this repository's fan-out shape**
+        (`durable/orchestrator.py`) rather than a choice made again here. The alternative considered
+        and rejected was `asyncio.wait(FIRST_EXCEPTION)` plus cancelling the siblings, which stops
+        paying for work nothing will read and costs three things this one does not: `asyncio.wait`
+        appears nowhere in this tree's workflow code, cancellation inside an activity arrives as
+        `ActivityError(cause=CancelledError)` rather than as `asyncio.CancelledError` (the three
+        windows `D-2026-09-13` documents), and a cancel is itself a command, so the failure path
+        would issue a different number of them depending on which branch lost. Waiting for a
+        sibling is bounded by that sibling's own `start_to_close`, which is already the bound this
+        wave was sized against; the subtlety is not.
+
+        **Cancellation is control flow and not a failed step**, the distinction `fan_out` makes in
+        as many words: a `CancelledError` among the outcomes is re-raised rather than recorded as
+        the step's failure, because a run whose parent is going away has not failed at step three.
+
+        The first failure *in declared order* is the one reported, rather than the first to be
+        noticed. Two steps failing in one wave is one run failing, and which of them the record
+        names must not depend on which worker was busier — the same reason the fold below is over
+        `wave` and never over a set or a completion order.
+
+        Args:
+            wave: The steps to run together, in the file's order.
+            scope: References resolved so far. Read only — a wave's steps cannot see each other.
+            identity: Who the run acts for.
+            timeout: One step's `start_to_close` budget.
+            template: The run's template name, for the prompt-truncation label.
+
+        Returns:
+            `(step, result)` for each step, in the wave's declared order.
+
+        Raises:
+            _StepFailed: Carrying the step that failed and its cause, so the caller can write the
+                record and the push-back that name it.
+        """
+        if len(wave) == 1:
+            step = wave[0]
+            try:
+                return [(step, await self._run_step(step, scope, identity, timeout, template))]
+            except BaseException as exc:
+                raise _StepFailed(step, exc) from exc
+
+        settled = await asyncio.gather(
+            *(self._run_step(step, scope, identity, timeout, template) for step in wave),
+            return_exceptions=True,
+        )
+        # `gather` returns in argument order, which is the wave's declared order — the property
+        # `fan_out` relies on too, and the reason nothing here has to sort or match by id.
+        for step, outcome in zip(wave, settled, strict=True):
+            if isinstance(outcome, asyncio.CancelledError):
+                raise outcome
+            if isinstance(outcome, BaseException):
+                raise _StepFailed(step, outcome) from outcome
+        return [(step, outcome) for step, outcome in zip(wave, settled, strict=True)]
+
     async def _run_step(
-        self, step: Any, scope: dict[str, Any], identity: StepIdentity, timeout: timedelta
+        self,
+        step: Any,
+        scope: dict[str, Any],
+        identity: StepIdentity,
+        timeout: timedelta,
+        template: str,
     ) -> Any:
-        """Dispatch one step on its kind, with its references already substituted."""
+        """Dispatch one step on its kind, with its references already substituted.
+
+        `template` is carried for one consumer — the prompt-truncation counter's label on an
+        `agent` step — and is deliberately not read to decide anything a step *does*. See
+        `AgentStepInput.template`.
+        """
         # Both dispatched activities beat while they wait (`durable/heartbeat.beating`), so both
         # carry the timeout that beat is derived from. Without it `start_to_close_timeout` was the
         # only liveness signal a step had, and a worker killed mid-step was indistinguishable from
@@ -457,6 +658,8 @@ class TemplateWorkflow:
                     # correlation id — so without this a two-`agent`-step template would book the
                     # second step's spend over the first's and report half of what it cost.
                     step_id=step.id,
+                    # Labels the truncation counter below and nothing else.
+                    template=template,
                 ),
                 start_to_close_timeout=timeout,
                 schedule_to_start_timeout=queue_wait_timeout(),

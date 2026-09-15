@@ -228,7 +228,7 @@ class AgentSettings(BaseSettings):
     # number alone. Both halves are asserted in `tests/test_compaction.py`
     # (`BUDGET_THREAD_ALLOWANCE`, `SMALLEST_TARGET_WINDOW`), because the reviewer who found this
     # collapsed the split to 107,000 and got 150 passing tests.
-    agent_context_token_budget: int = Field(default=119_500, ge=1)
+    agent_context_token_budget: int = Field(default=118_700, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=0, ge=0)
     # `agent_tool_result_clear_trigger` is the *lossless* edit's own threshold, and splitting it
@@ -320,7 +320,7 @@ class AgentSettings(BaseSettings):
     # have. The budget below cannot follow, because it is derived downwards from the
     # window — which is why the ceiling's cost lands there and not here, and why that cost is
     # 4.7% of the thread this time rather than wave 13's 1.16%.
-    agent_tool_result_clear_trigger: int = Field(default=109_000, ge=1)
+    agent_tool_result_clear_trigger: int = Field(default=110_800, ge=1)
     # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
     # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
     # dependent in one direction. Re-measured 2026-09-06 against real BPE encodings, on the observed

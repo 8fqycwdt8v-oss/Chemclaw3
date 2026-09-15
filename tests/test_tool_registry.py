@@ -48,6 +48,8 @@ _EXPECTED_INPROCESS_TOOLS = {
     # connector job for the reason the note tools are: the store is core's, and the drafting itself
     # is a turn's composition rather than durable work.
     "structure_experiment_request",
+    "compose_workflow",
+    "run_composed_workflow",
     "draft_experiment_protocol",
     "read_experiment_protocol",
     "find_experiment_protocols",

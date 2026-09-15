@@ -240,7 +240,7 @@ class Template(BaseModel):
         known_inputs = {f"inputs.{item.name}" for item in self.inputs}
         available: set[str] = set()
         for step in self.steps:
-            for reference in sorted(_step_references(step)):
+            for reference in sorted(step_references(step)):
                 if reference.startswith("inputs.") and reference not in known_inputs:
                     raise ValueError(
                         f"template {self.name!r} step {step.id!r} references unknown "
@@ -261,6 +261,12 @@ def _step_value(step: Step) -> Any:
     return step.prompt if isinstance(step, AgentStep) else step.arguments
 
 
-def _step_references(step: Step) -> set[str]:
-    """Every reference one step makes, whichever kind it is."""
+def step_references(step: Step) -> set[str]:
+    """Every reference one step makes, whichever kind it is.
+
+    Public because it is the dependency graph, and `templates/schedule.py` reads it to decide which
+    steps may run at the same time. That it was already here is the reason concurrency needed no
+    new YAML key: a `${steps.<id>.result}` is an edge, and the validators above make the declared
+    order a topological order of the DAG those edges form.
+    """
     return references(_step_value(step))

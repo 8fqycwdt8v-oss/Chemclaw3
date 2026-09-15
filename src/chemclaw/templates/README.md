@@ -92,6 +92,23 @@ makes a "simple config format" become a programming language with no debugger, a
 procedure needs them it wants an agent (a profile) or real code (a connector workflow), not more
 YAML.
 
+## Concurrency, which you do not write down
+
+Steps that do not read each other run at the same time. There is no `parallel:` key and there is
+nothing to opt into: a `${steps.<id>.result}` reference **is** a dependency edge, the validators
+above refuse a forward reference, so the declared order is already a topological order of a DAG and
+`templates/schedule.py` reads the waves straight off it. Two of the nine shipped templates —
+`degradant-triage` and `hazard-briefing` — turned out to be shaped this way and had been running
+one step after another for no reason anybody had written down.
+
+**This is not the fan-out `D-2026-08-25-the-loop-is-a-composite-not-a-template` declined.** That
+decision is about a *loop*: ranking N microstates, where N is known only once an earlier step has
+answered. A loop needs iteration and expressions and still lives in a composite. What runs together
+here is steps the file already declares.
+
+So the way to make a procedure faster is to stop making a step read something it does not need: a
+step that references an earlier result only to pass it through has just serialised itself.
+
 ## Running one
 
 Each template becomes a generated agent tool named `run_<name>`, so the model can start it exactly
@@ -100,7 +117,51 @@ returns a job id; poll it with `get_durable_job_status`.
 
 `make template-validate` checks every template before it ships: unique step ids, references that
 resolve, tools that exist, profiles that exist, declared write tools that exist and actually write,
-and no forward references.
+and no forward references. It also checks that the **run** can finish the steps the file declares —
+`template_run_timeout_seconds` against the sum of the per-kind step ceilings — and
+`unrunnable_reason` asks the same question again at launch, so a procedure that cannot complete is
+refused before a workflow id exists rather than terminated hours later. That second check is not
+redundant with `core/config`'s: a `Settings` object cannot see this directory, so it can only
+require that *one* step fits, and one `job` step is 39,330 s against a run ceiling of 45,330 s.
+
+## What an `agent` step is handed
+
+A step's prompt is cut to `agent_max_tool_result_chars` at the model's edge
+(`durable/template_activities.bounded_prompt`), head and tail, with a notice saying so in this
+system's own marked words. The chat path's cap does not reach here — `bound_tool_results` is an
+entry of `tool_call_middleware`, and a `tool` step runs through `invoke_governed`, which folds the
+governance chain without the three entries that exist to serve a model. So a `${steps.<id>.result}`
+reference to an oversized result used to arrive whole: measured, 245,700 characters against a
+60,000 ceiling, and unreclaimable, because compaction's two edits are for history and a step has
+none. Reference a *field* of a large result (`${steps.ranking.result.smiles}`) rather than all of
+it when you can — `chemclaw_template_prompt_truncated_total` names the template when you have not.
+
+## A failed run resumes
+
+A run's id is `hash([name, inputs])` under `ALLOW_DUPLICATE_FAILED_ONLY`, so the only way to
+re-execute one is after a failure — and the steps that *had* finished were already recorded
+(`failed_template_record`) and were not read, so the next attempt redid them. It does not now: the
+sequencer asks `completed_steps` what the previous attempt finished, folds those results into
+scope, and dispatches only what is left.
+
+Three conditions, each of them a way this could be *wrong* rather than merely absent: the row must
+exist, it must be a failure (`job_records` is upserted on `job_id`, so a completed run's row would
+otherwise read back as a resume of itself), and its fingerprint must match the resolved template —
+because the run id says nothing about the steps, so editing the file and relaunching lands on the
+same id carrying a different procedure.
+
+## A workflow the agent composed
+
+`compose_workflow` writes one down at run time and `run_composed_workflow` runs it, so a procedure
+this system works out once stops being re-derived at one model call per step. It is the same
+`Template` model, so it gets the validators, the wave schedule and the resume above for free.
+
+**It may only read**, and that is what keeps the plan-gate exemption at the top of this file true:
+the exemption holds *because* a template is reviewed and uncreatable at run time, so an
+agent-authored one may name no side-effecting tool, no durable job and no `write_tools` —
+`composed.authored_problems`, asked when it is stored and again when it is run. That costs the
+calculations: every durable job launcher is state-changing, so a procedure that needs a ranking is
+a template a person writes.
 
 ## Versioning
 

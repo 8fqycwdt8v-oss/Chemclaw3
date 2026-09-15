@@ -448,20 +448,32 @@ load_profiles()
 #: wave — the harness default above, +2,000, and that lowering, -300 — and the merge that resolved
 #: them took the first and dropped the second, leaving three documents asserting a lowering the tree
 #: did not carry. The two are independent and both belong, so the ceiling is their sum.
-#: **68,000 since 2026-09-15, up 800 for the analytical tier's two tools** — measured 316 for
-#: `check_against_specification` and 414 for `estimate_stability_trend`, which leaves the default
-#: profile at 67,930 and **70 tokens** of headroom. That is tight on purpose and tighter than usual:
-#: the entry above says the headroom here "is smaller than one `record_knowledge_note`'s schema
-#: costs, which is the property every entry above was chosen for", and widening it would narrow the
-#: budget's margin under a 128k model in the same commit — the direction
-#: `tests/test_compaction.py` makes somebody state.
+#: **Two branches added tools on the same day and each raised this ceiling for its own pair; the
+#: merged tree carries both, so neither number survived and this one is measured on the union.**
 #:
-#: **The tools were trimmed before the ceiling moved**, which is the order this file's history sets.
-#: `check_against_specification`'s description went from 1,266 characters to 844 and the prefix was
-#: still 316 over, because a tool's description is counted twice — once as itself and once inside
-#: the schema that embeds it — so trimming cannot close a 300-token overage without gutting the
-#: prompt the model reads. At 316 and 414 both tools sit below this file's own median.
-CEILINGS: dict[str, int] = {"__default__": 68_000}
+#: `D-2026-09-15-an-agent-authored-workflow-is-read-only-by-construction` adds `compose_workflow`
+#: and `run_composed_workflow` — **978 tokens**, 752 and 226. The split is its argument:
+#: `run_composed_workflow` takes a name and a dict, while `compose_workflow` publishes the step and
+#: input models a workflow is *written* in and cannot be smaller without the model guessing the
+#: shape. What it buys is the only path by which a procedure this system works out becomes one it
+#: can re-run.
+#:
+#: `D-2026-09-15-a-comparison-with-no-caller-is-a-promise-about-a-check-that-does-not-exist` adds
+#: `check_against_specification` and `estimate_stability_trend` — **730 tokens**, 316 and 414.
+#: **Those were trimmed before their ceiling moved**, which is the order this file's history sets:
+#: the first description went from 1,266 characters to 844 and the prefix was still 316 over,
+#: because a tool's description is counted twice — once as itself and once inside the schema that
+#: embeds it — so trimming cannot close a 300-token overage without gutting the prompt the model
+#: reads. All four are under `MAX_SINGLE_TOOL_TOKENS`.
+#:
+#: **The merge is the lesson, not the arithmetic.** Each branch measured honestly against a tree
+#: that did not contain the other's tools, so each ceiling was right when written and wrong on
+#: `main` — which is this file's own standing warning ("the floor moves on somebody else's diff")
+#: arriving as a merge conflict rather than as a red build. The number below is re-measured on the
+#: union and neither branch's: **68,908**, which is 67,200 plus both pairs exactly. 69,800 leaves
+#: 892 of headroom — the ~856 the workflow branch argued for, restored on the merged basis, where
+#: its own 69,000 leaves 92 and is the 34-token tripwire it was written to escape.
+CEILINGS: dict[str, int] = {"__default__": 69_800}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.
