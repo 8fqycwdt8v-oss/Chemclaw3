@@ -298,10 +298,120 @@ def unrunnable_reason(template: Template) -> str:
     Returns:
         The problems, one per line, or `""` when every step resolves.
     """
-    from chemclaw.agent.template_surface import TemplateSurface, step_problems
+    from chemclaw.agent.template_surface import (
+        TemplateSurface,
+        run_ceiling_problems,
+        step_problems,
+    )
 
-    problems = step_problems(template, TemplateSurface.resolve(with_signatures=False))
+    # Two questions, and the second is not about the surface at all. `step_problems` asks whether
+    # the steps resolve here; `run_ceiling_problems` asks whether this deployment's
+    # `template_run_timeout_seconds` can hold them. Both are deployment facts and both make the
+    # launch pointless, but they fail differently: an unresolvable step fails the run loudly some
+    # minutes in, while a procedure that outlives the run ceiling is terminated by Temporal
+    # *without its workflow code running* — no failure row, no push-back, nothing on the session
+    # stream. The quieter one is the better reason to refuse before anything is queued.
+    problems = [
+        *step_problems(template, TemplateSurface.resolve(with_signatures=False)),
+        *run_ceiling_problems(template),
+    ]
     return "\n".join(f"  - {problem}" for problem in problems)
+
+
+async def start_template_run(template: Template, inputs: dict[str, Any]) -> str:
+    """Start one run of `template` and return its job id, rejoining an identical run in flight.
+
+    **Extracted so the two launchers cannot drift.** A `data/templates/` file reaches this through
+    its generated `run_<name>` tool; a workflow the agent composed reaches it through
+    `agent/workflow_tools.run_composed_workflow`. Everything that makes a template run *a template
+    run* — the refusal when its steps do not resolve here, the deterministic id, the run ceiling,
+    the idempotent rejoin, the `JobSignal` that lets the turn wait on it — belongs to the run and
+    not to either caller, and a second copy of it is how one of them would quietly lose the rejoin
+    or the ceiling.
+
+    Args:
+        template: The resolved template to run. Pinned into the workflow input, so an edit
+            afterwards cannot change a run already executing.
+        inputs: The validated inputs, already JSON-shaped.
+
+    Returns:
+        The workflow id to poll with `get_durable_job_status`.
+
+    Raises:
+        TemplateError: When this deployment cannot run the template, or the broker could not
+            confirm the start.
+    """
+    blocked = unrunnable_reason(template)
+    if blocked:
+        logger.warning(
+            "template %r cannot run at this deployment; refusing to start it:\n%s",
+            template.name,
+            blocked,
+        )
+        raise TemplateError(
+            f"the {template.name!r} template cannot run at this deployment, so nothing was "
+            f"queued:\n{blocked}\nThis is the connector set this deployment runs, not a bad "
+            "request: the same problem `make template-validate` reports. Do not retry it — "
+            "use the tools that are available, or ask for the missing capability to be "
+            "enabled."
+        )
+    workflow_id = run_workflow_id(template, inputs)
+    requested_by = require_actor()
+    client = await connect()
+    try:
+        handle = await client.start_workflow(
+            TemplateWorkflow.run,
+            TemplateRunInput(
+                # The resolved template, pinned into the run — an edit afterwards cannot change
+                # what is already executing (`workflows.template_job`).
+                template=template,
+                inputs=inputs,
+                requested_by=requested_by,
+                roles=sorted(get_current_roles()),
+                session_id=get_current_session_id() or "",
+            ),
+            id=workflow_id,
+            task_queue=settings.background_task_queue,
+            id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+            # The run-level ceiling, the same one `ConnectorJobWorkflow` gives the children it
+            # starts (`durable/connector_job.py`) and for the same reason. There was none, so
+            # an N-step template's only bound was `template_step_timeout_seconds` × N — a
+            # product nothing declares, that grows silently when an author adds a step, and
+            # that no operator can read off any setting. A per-step timeout bounds a wedged
+            # *step*; only this bounds a wedged *procedure*.
+            execution_timeout=timedelta(seconds=settings.template_run_timeout_seconds),
+        )
+    except WorkflowAlreadyStartedError:
+        # The identical run is already going, or already done: the idempotency contract
+        # succeeding. **Announced when it is still going**, which is the half this branch used
+        # to skip — it returned the id and told nobody, so no `JobSignal` reached the turn, the
+        # session's `started_jobs` stayed empty, `agent/job_results.py` had nothing to wait on,
+        # and the second chemist to ask for a running template was told "in progress" with no
+        # row a later `job_completed` could clear. That is the defect `connectors/jobs.py`
+        # documents having fixed for jobs, one seam over, unfixed here.
+        #
+        # `RUNNING` and not "not completed", for that launcher's reason: a run that failed, was
+        # cancelled or timed out will never emit the completion an announced row waits for.
+        if await _still_running(client.get_workflow_handle(workflow_id)):
+            record_job_started(workflow_id, f"template:{template.name}")
+        return workflow_id
+    except Exception as exc:
+        # `connect()` above frames an unreachable broker; this is the call *after* it — a
+        # queue with no worker, a transient RPC timeout, a serialization error — which escaped
+        # raw, so `surface_domain_errors` classified an `RPCError` as neither a `ChemclawError`
+        # nor a transport failure and the model was handed `unexpected_error_result()`. The
+        # sibling launcher's framing, with its promise kept as narrow: a connected client may
+        # have reached the server before failing, so this cannot say nothing started.
+        raise TemplateError(
+            f"the {template.name!r} template could not be confirmed as started "
+            f"({type(exc).__name__}); most likely nothing was queued, but this call cannot "
+            f"promise that either way. Check `get_durable_job_status({workflow_id!r})` before "
+            "relaunching, and if it truly did not start, the same call will work once the "
+            "fault clears."
+        ) from exc
+
+    record_job_started(handle.id, f"template:{template.name}")
+    return handle.id
 
 
 def build_template_tool(template: Template) -> CapabilityTool:
@@ -320,86 +430,7 @@ def build_template_tool(template: Template) -> CapabilityTool:
         # lived. `model_validate` is the one entry point that accepts either a dict or an
         # already-built model, so a caller holding one (a test, a step) is still not wrong.
         spec = params_model.model_validate(params)
-        # **Before the actor, the client and the start** — see `unrunnable_reason`. A template
-        # whose steps do not resolve against this deployment's surface cannot produce anything, so
-        # the only honest outcome is a refusal that names what is missing — rather than a workflow
-        # that fails several minutes in, or never resolves at all where nothing polls the queue.
-        #
-        # WARNING rather than only raising, because the two readers need different things: the
-        # model is told a capability is missing, and an operator needs to see *which bundle* to
-        # enable without reading a chat transcript.
-        blocked = unrunnable_reason(template)
-        if blocked:
-            logger.warning(
-                "template %r cannot run at this deployment; refusing to start it:\n%s",
-                template.name,
-                blocked,
-            )
-            raise TemplateError(
-                f"the {template.name!r} template cannot run at this deployment, so nothing was "
-                f"queued:\n{blocked}\nThis is the connector set this deployment runs, not a bad "
-                "request: the same problem `make template-validate` reports. Do not retry it — "
-                "use the tools that are available, or ask for the missing capability to be "
-                "enabled."
-            )
-        inputs: dict[str, Any] = spec.model_dump(mode="json", exclude_none=True)
-        workflow_id = run_workflow_id(template, inputs)
-        requested_by = require_actor()
-        client = await connect()
-        try:
-            handle = await client.start_workflow(
-                TemplateWorkflow.run,
-                TemplateRunInput(
-                    # The resolved template, pinned into the run — an edit afterwards cannot change
-                    # what is already executing (`workflows.template_job`).
-                    template=template,
-                    inputs=inputs,
-                    requested_by=requested_by,
-                    roles=sorted(get_current_roles()),
-                    session_id=get_current_session_id() or "",
-                ),
-                id=workflow_id,
-                task_queue=settings.background_task_queue,
-                id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
-                # The run-level ceiling, the same one `ConnectorJobWorkflow` gives the children it
-                # starts (`durable/connector_job.py`) and for the same reason. There was none, so
-                # an N-step template's only bound was `template_step_timeout_seconds` × N — a
-                # product nothing declares, that grows silently when an author adds a step, and
-                # that no operator can read off any setting. A per-step timeout bounds a wedged
-                # *step*; only this bounds a wedged *procedure*.
-                execution_timeout=timedelta(seconds=settings.template_run_timeout_seconds),
-            )
-        except WorkflowAlreadyStartedError:
-            # The identical run is already going, or already done: the idempotency contract
-            # succeeding. **Announced when it is still going**, which is the half this branch used
-            # to skip — it returned the id and told nobody, so no `JobSignal` reached the turn, the
-            # session's `started_jobs` stayed empty, `agent/job_results.py` had nothing to wait on,
-            # and the second chemist to ask for a running template was told "in progress" with no
-            # row a later `job_completed` could clear. That is the defect `connectors/jobs.py`
-            # documents having fixed for jobs, one seam over, unfixed here.
-            #
-            # `RUNNING` and not "not completed", for that launcher's reason: a run that failed, was
-            # cancelled or timed out will never emit the completion an announced row waits for.
-            if await _still_running(client.get_workflow_handle(workflow_id)):
-                record_job_started(workflow_id, f"template:{template.name}")
-            return workflow_id
-        except Exception as exc:
-            # `connect()` above frames an unreachable broker; this is the call *after* it — a
-            # queue with no worker, a transient RPC timeout, a serialization error — which escaped
-            # raw, so `surface_domain_errors` classified an `RPCError` as neither a `ChemclawError`
-            # nor a transport failure and the model was handed `unexpected_error_result()`. The
-            # sibling launcher's framing, with its promise kept as narrow: a connected client may
-            # have reached the server before failing, so this cannot say nothing started.
-            raise TemplateError(
-                f"the {template.name!r} template could not be confirmed as started "
-                f"({type(exc).__name__}); most likely nothing was queued, but this call cannot "
-                f"promise that either way. Check `get_durable_job_status({workflow_id!r})` before "
-                "relaunching, and if it truly did not start, the same call will work once the "
-                "fault clears."
-            ) from exc
-
-        record_job_started(handle.id, f"template:{template.name}")
-        return handle.id
+        return await start_template_run(template, spec.model_dump(mode="json", exclude_none=True))
 
     launch.__name__ = tool_name(template)
     launch.__qualname__ = launch.__name__

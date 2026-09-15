@@ -448,7 +448,21 @@ load_profiles()
 #: wave — the harness default above, +2,000, and that lowering, -300 — and the merge that resolved
 #: them took the first and dropped the second, leaving three documents asserting a lowering the tree
 #: did not carry. The two are independent and both belong, so the ceiling is their sum.
-CEILINGS: dict[str, int] = {"__default__": 67_200}
+#: **69,000 since `D-2026-09-15-an-agent-authored-workflow-is-read-only-by-construction`**, which
+#: adds `compose_workflow` and `run_composed_workflow`: measured in one process through the same
+#: conversion path, **978 tokens** — 752 and 226 — taking `default` from 67,166 to **68,144**, over
+#: the old ceiling by 944. Both are declared here rather than narrowed away, and the split is the
+#: argument: `run_composed_workflow` is 226 because it takes a name and a dict, while
+#: `compose_workflow` publishes the step and input models a workflow is *written* in and cannot be
+#: smaller without the model guessing the shape. It is still under `MAX_SINGLE_TOOL_TOKENS`.
+#:
+#: What it buys is the only path by which a procedure this system works out becomes a procedure it
+#: can re-run: without it every multi-step answer is re-derived on every ask, at one model call per
+#: step. What it costs, by the rule above: `agent_tool_result_clear_trigger` rises 1,800 with it and
+#: costs nothing, while `agent_context_token_budget` cannot follow, so the thread allowance falls
+#: by the same 1,800 — **4.4% of the thread**. Set with ~856 of headroom for ordinary drift, which
+#: is a ratchet rather than the 34-token tripwire this ceiling had become.
+CEILINGS: dict[str, int] = {"__default__": 69_000}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.

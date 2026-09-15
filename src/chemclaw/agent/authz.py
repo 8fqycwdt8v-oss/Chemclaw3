@@ -158,6 +158,14 @@ STATE_CHANGING_TOOLS: frozenset[str] = (
             # would put drafting a protocol behind the same door as pushing to the graph.
             "structure_experiment_request",  # writes the structured ask as revision 1
             "draft_experiment_protocol",  # writes a protocol revision
+            # Both halves of the composed-workflow seam. `compose_workflow` writes a row that
+            # later *runs*, which is a stronger reason to gate it than the row itself: what is
+            # being approved is a procedure, not a note. `run_composed_workflow` starts a durable
+            # run exactly as a `run_<template>` launcher does, and is here rather than in
+            # `template_tool_names()` because that function reads `data/templates/` and this tool
+            # is one name whatever a chemist has composed.
+            "compose_workflow",  # writes composed_workflows
+            "run_composed_workflow",  # starts a TemplateWorkflow run
         }
     )
     | DEFAULT_WRITE_TOOL_GATES

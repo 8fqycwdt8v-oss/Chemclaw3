@@ -140,6 +140,15 @@ BEGIN
         'molecule_fingerprints, reaction_fingerprints, reaction_labels, corpus_molecules, '
         'corpus_reactions, corpus_cursors, '
         'tool_result_links TO %I', app_role);
+
+    -- `composed_workflows` takes DELETE beside the two, and the DELETE is the offboarding one.
+    -- UPDATE because re-composing under the same name revises one working procedure rather than
+    -- adding a second (the row is keyed `(owner, name)` and the store upserts it). DELETE because
+    -- `chemclaw.agent.leaver` erases a departing person's workflows: a procedure names no result
+    -- and cites no evidence, so it belongs to their conversation with this system rather than to
+    -- the record of what they did to the science, and an erasure that left it would be the partial
+    -- kind that reads as complete.
+    EXECUTE format('GRANT INSERT, UPDATE, DELETE ON composed_workflows TO %I', app_role);
     -- `tool_result_links` joins that list and `tool_result_blobs` the full-DML one below, even
     -- though retention deletes only the blob: a cascading delete is performed with the referencing
     -- table's owner privileges, not the deleting role's, so the link rows go without DELETE ever

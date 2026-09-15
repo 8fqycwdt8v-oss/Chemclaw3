@@ -41,6 +41,10 @@ SELECTABLE = {
     "InMemoryCampaignStore": "session_store",
     "InMemoryHistoryProvider": "session_store",
     "InMemoryPlanApprovalStore": "session_store",
+    # Same switch, same argument: whether this deployment keeps conversation state durably
+    # is one decision, and a composed workflow that vanishes with a CLI process is the
+    # honest behaviour there rather than a failure to configure something.
+    "InMemoryComposedStore": "session_store",
     "InMemoryDesignStore": "session_store",
     "InMemoryVectorStore": "vector_store_provider",
 }

@@ -463,6 +463,11 @@
           "expr": "sum(rate(chemclaw_tool_results_truncated_total[15m]))",
           "legendFormat": "tool results truncated",
           "refId": "I"
+        },
+        {
+          "expr": "sum by (template) (rate(chemclaw_template_prompt_truncated_total[15m]))",
+          "legendFormat": "template prompt truncated: {{template}}",
+          "refId": "J"
         }
       ]
     },

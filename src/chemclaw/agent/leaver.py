@@ -267,6 +267,12 @@ _ERASE: tuple[tuple[str, str], ...] = (
     # from. Deleting this row hands the departing person's successor a fresh window, which is the
     # correct outcome: there is nobody left to meter.
     ("budget_usage", "DELETE FROM budget_usage WHERE actor = ANY(%(actors)s)"),
+    # A composed workflow is the departing person's own working procedure, not a record of
+    # what they did to the science: it names no result, cites no evidence and nobody else can
+    # reach it (the store resolves `(owner, name)` against the caller). So it goes with the
+    # conversation rather than staying as an attribution — the same tier, and the same
+    # argument, as the preference row beside it.
+    ("composed_workflows", "DELETE FROM composed_workflows WHERE owner = ANY(%(actors)s)"),
     ("session_owners", "DELETE FROM session_owners WHERE owner = ANY(%(actors)s)"),
 )
 

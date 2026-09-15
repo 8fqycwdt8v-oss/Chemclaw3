@@ -1152,7 +1152,14 @@ CLEAR_TRIGGER_THREAD_ALLOWANCE = 30_000
 #: for one middleware's schema, which is worth saying plainly rather than burying: a todo list is
 #: expensive, and what it buys is the plan gate attached in the posture every supported deployment
 #: already ran while no test measured it.
-BUDGET_THREAD_ALLOWANCE = 40_500
+#: **38,700 since `D-2026-09-15-an-agent-authored-workflow-is-read-only-by-construction`**, down
+#: 1,800 because `CEILINGS["__default__"]` rose by that to hold `compose_workflow` and
+#: `run_composed_workflow`. This is the number that *falls* when the prefix grows: the trigger
+#: above is derived upwards from `PREFIX_BOUND` and nothing bounds it, while the budget is derived
+#: downwards from the 128k window and has nothing above it to take from — so a token of prefix is
+#: a token of thread, here, every time. 4.4% of the thread for the composed-workflow seam, stated
+#: where the constraint is rather than spread until nobody can see it.
+BUDGET_THREAD_ALLOWANCE = 38_700
 
 #: The smallest context window this stack is designed against, in billed tokens.
 #:
