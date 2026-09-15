@@ -12,6 +12,7 @@ separated (5b.5).
 """
 
 import re
+from datetime import date
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -395,7 +396,7 @@ def _citation(source_note_id: str) -> str:
     return f"[[{source_note_id}]]"
 
 
-def report_note(report: Report) -> Note:
+def report_note(report: Report, *, drafted_on: date | None = None) -> Note:
     """Render the report as a `report` note citing every source (5b.7).
 
     Each section shows its memory layer and lists its evidence, every chunk wikilinking its
@@ -425,6 +426,21 @@ def report_note(report: Report) -> Note:
     two agreeing-looking bullets are most likely to be read as two independent confirmations.
     The rest is rendered only when set, because a line of empty metadata under every bullet
     would bury the one bullet that carries a warning.
+
+    **`drafted_on` is what makes the note reach a standing query.** `durable/digest._is_new` reads
+    an absent `valid_from` as *open-ended* — true for as long as anyone has known — and therefore
+    as not news, so a report note minted without one is delivered to a subscriber who has never
+    been told anything and to nobody else, ever. That silence is not what
+    `D-2026-09-14-an-undated-note-is-not-news-every-hour` intended and its mitigation reached only
+    the memory miners: measured on the shipped corpus, 32 of 39 notes carried no `valid_from`,
+    across ten types, and `report` was one of them. A report is the easy case of the fix, because
+    its validity date and its arrival date are the same day by construction — it states what the
+    corpus supported when it was drafted.
+
+    Defaulted to `None` rather than to today because this function is called in **workflow** code
+    (`durable/report_workflow.py` renders it to read the id for the delivery attachment), where a
+    wall-clock read is a replay break. The activity that records the note is what holds a clock,
+    and `_report_id` keys on the title alone, so the two calls agree on the id either way.
     """
     lines = [f"# {report.title}\n"]
     for section in report.sections:
@@ -481,4 +497,5 @@ def report_note(report: Report) -> Note:
         created_by="agent",
         source="report:development-report",
         body="\n".join(lines) + "\n",
+        valid_from=drafted_on,
     )

@@ -21,7 +21,7 @@ back to the null sink and loses nothing it had before.
 """
 
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
@@ -389,7 +389,7 @@ async def record_job(record: JobRecord) -> None:
         )
 
 
-def note_with_run_provenance(note: Note, record: JobRecord) -> Note:
+def note_with_run_provenance(note: Note, record: JobRecord, *, ran_on: date | None = None) -> Note:
     """Return `note` with a footer naming the run that produced it and the reason it was started.
 
     **Applied by core to every connector note**, which is the whole point: the reason a job ran is
@@ -406,10 +406,28 @@ def note_with_run_provenance(note: Note, record: JobRecord) -> Note:
 
     `Note` is frozen, so this builds a copy — which also leaves the connector's own object intact
     for the result envelope the launching tool hands back.
+
+    **`ran_on` dates the note so a standing query can see it, and only where the connector did
+    not.** `durable/digest._is_new` reads an absent `valid_from` as *open-ended* — true for as long
+    as anyone has known — and therefore as not news, so an undated `job-result` note reaches a
+    subscriber who has never been told anything and then nobody, ever. Measured on the shipped
+    corpus, 32 of 39 notes carried no `valid_from` across ten types and `job-result` was three of
+    them; `D-2026-09-14-an-undated-note-is-not-news-every-hour`'s mitigation reached only the
+    memory miners. A connector result's validity date and its arrival date are the same day by
+    construction, so the run's own day is the honest reading.
+
+    A note that already carries a date keeps it: the connector knows what its result is *about*
+    and this function does not, so overwriting would replace a claim about chemistry with a claim
+    about scheduling. `record.completed_at` is deliberately not the source — it is filled by the
+    database's own `now()` *after* this runs, so it is `None` here — and the caller is workflow
+    code, which is why the date is passed in from `workflow.now()` rather than read from a clock.
     """
     footer = (
         f"\nWhy this ran: {record.rationale}\n\n"
         f"- run: `{record.job_id}` ({record.connector}/{record.job})\n"
         f"- requested by: {record.requested_by}\n"
     )
-    return note.model_copy(update={"body": note.body.rstrip("\n") + "\n" + footer})
+    update: dict[str, object] = {"body": note.body.rstrip("\n") + "\n" + footer}
+    if ran_on is not None and note.valid_from is None:
+        update["valid_from"] = ran_on
+    return note.model_copy(update=update)

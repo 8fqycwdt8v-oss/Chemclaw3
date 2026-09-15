@@ -540,18 +540,56 @@ def test_a_synthesized_note_is_dated_by_its_evidence_and_not_by_the_clock() -> N
     first = supported_from(["r1", "r2"], runs)
     again = supported_from(["r1", "r2"], runs)
 
-    assert first == again == date(2026, 7, 31)
+    assert first == again == date(2026, 7, 1)
 
 
-def test_the_date_is_the_latest_run_rather_than_the_earliest() -> None:
-    """A pattern became knowable when the last run supporting it happened.
+def test_a_cluster_that_gains_a_member_keeps_both_its_id_and_its_date() -> None:
+    """The one assertion that would have caught the defect this function shipped with.
 
-    Dating it from the first would claim the knowledge before the evidence for it existed, which
-    `Note.is_current` would then serve as current evidence for a period it could not have been.
+    `supported_from` was `max(performed_at)` over the members, and its docstring justified that
+    with "when a member joins, the id changes too, so the identity and the date move together or
+    not at all". `memory/ids.stable_id` hashes `min(member_ids)` *deliberately* — its own docstring
+    says hashing the set would mint a new id on every cluster growth — so the premise was false and
+    nothing asserted it either way.
+
+    What that cost: a nightly ELN sync adds a member, the id does not move, `valid_from` rises, and
+    `digest._is_new` reports a note the subscriber already holds as news. The silent direction is
+    worse — a member dropping out, or a `corpus_complete=False` partial read, lowers `valid_from`
+    under one id, and `_is_new` then answers `False` forever for a note whose content just changed.
+
+    So the property is asserted as the docstring states it: over a *growing* cluster, id and date
+    are both invariant. `max` fails this; the anchor does not.
     """
-    runs = {"r1": _dated("r1", date(2026, 7, 1)), "r2": _dated("r2", date(2026, 7, 31))}
+    runs = {
+        "r1": _dated("r1", date(2026, 7, 1)),
+        "r2": _dated("r2", date(2026, 7, 31)),
+        "r3": _dated("r3", date(2026, 8, 20)),
+    }
+    before, after = ["r1", "r2"], ["r1", "r2", "r3"]
 
-    assert supported_from(["r1", "r2"], runs) == date(2026, 7, 31)
+    assert stable_id("playbook", before) == stable_id("playbook", after)
+    assert supported_from(before, runs) == supported_from(after, runs) == date(2026, 7, 1)
+
+
+def test_the_date_is_the_anchor_run_rather_than_the_newest_or_the_oldest() -> None:
+    """Keyed on `min(reaction_ids)` — the same single input the note's id is keyed on.
+
+    Not the earliest date and not the latest: either is a function of the member *set*, and a
+    function of the set moves under an id that is a function of one member. The anchor's own date
+    is the only reading that makes the two move together, which is what the id's stability rule
+    already promised and what `supported_from` claimed and did not deliver.
+
+    Ordered so the anchor is neither the newest nor the oldest run, because a fixture where it
+    happens to be both cannot tell the three rules apart.
+    """
+    runs = {
+        "r2": _dated("r2", date(2026, 7, 15)),
+        "r1": _dated("r1", date(2026, 7, 20)),
+        "r3": _dated("r3", date(2026, 7, 10)),
+    }
+
+    assert min(["r2", "r1", "r3"]) == "r1"
+    assert supported_from(["r2", "r1", "r3"], runs) == date(2026, 7, 20)
 
 
 def test_evidence_that_states_no_date_leaves_the_note_open_ended() -> None:
@@ -566,10 +604,18 @@ def test_evidence_that_states_no_date_leaves_the_note_open_ended() -> None:
 
 
 def test_a_member_the_corpus_does_not_hold_is_skipped_rather_than_raising() -> None:
-    """A partial corpus read is an ordinary condition here — `_units` has a whole guard for it."""
+    """A partial corpus read is an ordinary condition here — `_units` has a whole guard for it.
+
+    Both directions, because anchoring changes what "missing" costs: a missing *non-anchor* is
+    invisible (which is the point — the date cannot move as the cluster changes around the anchor),
+    while a missing *anchor* leaves the note open-ended rather than silently re-dating it to
+    whichever member did survive the read.
+    """
     runs = {"r1": _dated("r1", date(2026, 7, 1))}
 
-    assert supported_from(["r1", "missing"], runs) == date(2026, 7, 1)
+    assert supported_from(["r1", "zz-missing"], runs) == date(2026, 7, 1)
+    assert supported_from(["aa-missing", "r1"], runs) is None
+    assert supported_from([], runs) is None
 
 
 def _dated(rid: str, performed_at: date) -> OrdReaction:
@@ -587,6 +633,14 @@ def test_every_miner_dates_the_note_it_mints() -> None:
 
     Read off the source, because driving all three needs a chain, a cross-project candidate and an
     optimization group — three fixtures asserting one wiring fact.
+
+    **The assertion is the argument's value, not the keyword's presence, and that distinction is
+    the whole worth of this test.** It shipped asserting `"minted_on" in kwargs`, and all three
+    builders were re-broken to `minted_on=None` — the exact pre-fix behaviour, an undated note —
+    with this file green at 38 passed, including this test and its confident failure message. An
+    AST guard that reads the call's *shape* cannot see the defect it names, because the defect
+    lives in the value. `tests/test_observations.py` had the value arm from the start and this was
+    written from it with that half dropped.
     """
     import ast
     from pathlib import Path
@@ -595,7 +649,7 @@ def test_every_miner_dates_the_note_it_mints() -> None:
 
     tree = ast.parse(Path(jobs.__file__).read_text(encoding="utf-8"))
     minted = {
-        node.func.id: [kw.arg for kw in node.keywords]
+        node.func.id: {kw.arg: kw.value for kw in node.keywords}
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
@@ -606,4 +660,10 @@ def test_every_miner_dates_the_note_it_mints() -> None:
         assert "minted_on" in minted[builder], (
             f"{builder} mints an undated note, which the digest reads as open-ended and never "
             "reports to a subscriber who has a watermark"
+        )
+        passed = ast.unparse(minted[builder]["minted_on"])
+        assert passed.startswith("supported_from("), (
+            f"{builder} passes minted_on={passed}, which is not the corpus-derived date. A "
+            "literal None is the pre-fix behaviour this test exists to refuse, and today's date "
+            "would re-date a stable id on every run — the storm D-2026-09-14 closed."
         )

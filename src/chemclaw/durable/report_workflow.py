@@ -17,6 +17,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.identity_context import reset_current_identity, set_current_identity
     from chemclaw.durable.connector_job import ConnectorJobResult
+    from chemclaw.durable.observation_jobs import workflow_safe_today
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.ingest.eln.records import default_record_store
     from chemclaw.ingest.sources.registry import active_retrieve_sources
@@ -117,11 +118,17 @@ async def propose_report(report: Report, requested_by: str = "", correlation_id:
     is `core/logging.ContextFilter`, so the stamp is what ties a durable note write's log lines back
     to the chemist and the turn that asked for it.
     """
+    # `drafted_on` is what gets the note past `durable/digest._is_new`, which reads an absent
+    # `valid_from` as open-ended and therefore as "not news" — so an undated report is delivered
+    # only to a subscriber who has never been told anything. A report's validity date and its
+    # arrival date are the same day by construction, and this is activity code, so it may read a
+    # clock: `workflow_safe_today` is the named seam for exactly that.
+    drafted = report_note(report, drafted_on=workflow_safe_today())
     if not requested_by:
-        return await record_note(report_note(report), default_writer())
+        return await record_note(drafted, default_writer())
     token = set_current_identity(requested_by, frozenset())
     try:
-        return await record_note(report_note(report), default_writer())
+        return await record_note(drafted, default_writer())
     finally:
         reset_current_identity(token)
 

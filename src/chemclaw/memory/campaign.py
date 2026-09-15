@@ -31,10 +31,13 @@ def campaign_note_from_chain(
     the product→reactant handoffs that make it a campaign. The project (if the members share
     one) is carried so the semantic layer can group campaigns across projects.
 
-    `minted_on` becomes `valid_from` — the day the corpus first supported the chain, which
-    `jobs.supported_from` derives from the same member ids this note's id is keyed on. Without it
-    the note is open-ended, which `durable/digest._is_new` correctly reads as "not news" and which
-    is therefore silence rather than a default.
+    `minted_on` becomes `valid_from` — the day this chain's *anchor* run was performed, which
+    `jobs.supported_from` derives from `min(reaction_ids)`, the single member id this note's id is
+    also keyed on. Said the other way because the wording here was wrong and the error mattered:
+    the id is **not** a function of the member set, so a date derived from the set moves under a
+    stable id every time the cluster grows. Without a date the note is open-ended, which
+    `durable/digest._is_new` correctly reads as "not news" and which is therefore silence rather
+    than a default.
     """
     steps = []
     for position, reaction_id in enumerate(chain.reaction_ids, start=1):
