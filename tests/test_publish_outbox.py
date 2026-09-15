@@ -603,9 +603,19 @@ def test_two_workers_claiming_at_once_split_the_queue(monkeypatch: pytest.Monkey
                 outbox._CLAIM, ("alpha", 5, settings.result_publish_lease_seconds, 2)
             )
             mine = {str(row[1]) for row in await cursor.fetchall()}
-            # Worker B, on its own connection, against that live lock. Bounded well under the
-            # statement timeout so a blocked claim is reported as a blocked claim.
-            theirs = {ref for _, ref, _ in await asyncio.wait_for(outbox.claim("alpha", 2), 10)}
+            # Worker B, on its own connection, against that live lock. The bound separates
+            # *blocked* from *not blocked*, which is the only thing time can observe here — and it
+            # is deliberately close to `pg_statement_timeout_seconds` (30 s) rather than tight.
+            #
+            # **It was 10 s, and that made this test fail under load rather than under the
+            # defect.** Measured on an idle box, an unblocked claim is 0.9 ms; a blocked one holds
+            # until the statement timeout. So any bound between those two distinguishes the
+            # implementations, and the only thing a *tight* one adds is a second failure mode:
+            # connection acquisition that is merely slow. It fired once that way, in a full serial
+            # run on a machine also carrying a second suite, four subagents and two MCP servers —
+            # and `CLAUDE.md` names exactly that cost, about a different pair of tests: "a gate
+            # that reds for a scheduling artefact teaches everybody to re-run".
+            theirs = {ref for _, ref, _ in await asyncio.wait_for(outbox.claim("alpha", 2), 25)}
             await first.commit()
 
         assert len(mine) == 2 and len(theirs) == 2

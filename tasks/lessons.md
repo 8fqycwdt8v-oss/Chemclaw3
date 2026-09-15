@@ -2725,3 +2725,26 @@ triggered it.
 with no plausible writer, do not reason about who might have run git — put an `sys.addaudithook`
 on `open`-for-write against that path and print the stack. It took one script and found the cause
 immediately, after four sessions of a confident wrong answer.
+
+## 2026-09-15 — a timing bound must separate the two outcomes, not the two speeds
+
+`tests/test_publish_outbox.py::test_two_workers_claiming_at_once_split_the_queue` failed once in a
+full serial run and never again — 5/5 alone, 28/28 in its own file, and green in the next full run.
+The tempting conclusion was "flake", which this repository's own rules forbid.
+
+The cause is in the test. It proves `FOR UPDATE SKIP LOCKED` by racing a second claim against a
+held lock, and the only thing time can observe there is **blocked or not blocked**. Measured: an
+unblocked claim is **0.9 ms**; a blocked one holds until `pg_statement_timeout_seconds` (30 s). Any
+bound between those distinguishes the implementations. The bound was **10 s** — four orders of
+magnitude above the passing case, and still tight enough to fire on connection acquisition under
+load, which is a *third* outcome the assertion cannot tell from the defect.
+
+**The rule.** When a test uses a deadline to observe a behaviour, write down both outcomes it must
+separate and put the bound between them, as far from the passing case as the real backstop allows.
+A bound chosen as "comfortably more than it takes" is chosen against the passing case alone, and
+the failure it then invents is indistinguishable from the one it was written to catch. Widening is
+only safe with the defect arm driven: here, deleting `SKIP LOCKED` still fails at 25 s (28.4 s),
+and that is what makes the new bound a bound rather than a silenced assertion.
+
+`CLAUDE.md` already carries the cost, about a different pair of tests: "a gate that reds for a
+scheduling artefact teaches everybody to re-run."
