@@ -2940,8 +2940,9 @@ def test_an_impurity_carries_the_rrt_its_docstrings_have_always_named() -> None:
     """RRT is how a chemist says *which* peak, and there was nowhere to put it.
 
     `Impurity`'s own docstring said an ELN reports "often only a chromatographic name/RRT", and
-    `warehouse/binding.py` said a site's analytics table carries "a chromatographic name or RRT far
-    more often than a structure" — while the model held name, SMILES and area% and nothing else. So
+    `src/chemclaw/ingest/eln/warehouse/binding.py` said a site's analytics table carries "a
+    chromatographic name or RRT far more often than a structure" — while the model held name,
+    SMILES and area% and nothing else. So
     the one identifier that distinguishes two unresolved peaks at 0.11% and 0.19% fell to
     `OrdReaction.attributes`, a `dict[str, str]` whose own docstring says it holds "strings, not
     values" with "no unit to normalise to"

@@ -2760,8 +2760,17 @@ The others were the same shape one layer out: a new tool and a new error class j
 without being declared in `mcp_face.WITHHELD`, the probe corpus, `_BAD_DATA_TYPES` and the registry
 list — four guards, four decisions, none of them rubber stamps.
 
-**The rule.** When a docstring names a path, a test, a tool or a setting, paste it from the shell
-rather than typing it. And when a change adds a *kind* of thing — a tool, an error class, a note
+**It happened again in the next commit, one entry later.** A docstring in `tests/test_eln.py`
+said `warehouse/binding.py`; the file is `src/chemclaw/ingest/eln/warehouse/binding.py`. Same
+guard, same session, having just written the rule down. So the rule as first stated — "paste it
+from the shell" — is not enough, because the failure is not mistyping a name: it is writing the
+*shorthand a human would say out loud*. `warehouse/binding.py` is what you would call it in
+conversation and is not what it is called.
+
+**The rule, restated.** A backticked path is repo-rooted or it is wrong. Before committing prose
+that names one, run
+`make lint && .venv/bin/python -m pytest tests/test_docstring_paths.py -q` — five seconds, and it
+is the guard that has now caught four of my sentences this session. And when a change adds a *kind* of thing — a tool, an error class, a note
 type, a constant other packages read — run the full suite before pushing, not the affected suites:
 every one of these was invisible to the tests of the code I changed, because the guard lives with
 the declaration and not with the behaviour. `make test` is ~18 minutes; a red CI cycle is longer,
