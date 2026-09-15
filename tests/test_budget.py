@@ -412,6 +412,56 @@ def test_the_warning_fires_before_the_cap_rather_than_at_it(
     asyncio.run(tracker.check("s1", None))
 
 
+def test_the_warning_fires_once_for_a_crossing_rather_than_on_every_turn_in_the_band(
+    monkeypatch: pytest.MonkeyPatch, _enabled: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A crossing is an edge, and the band behind it is wide enough to matter.
+
+    `_near` is a predicate over a running total, so warning whenever it holds warns on every turn
+    spent between the fraction and the cap — measured at ten warnings for one crossing of a
+    1,000-token cap, and at the shipped 20,000,000-token user cap the band is 4,000,000 tokens
+    wide, some 130 turns. It is not only log volume: the alert over this series is written with no
+    `for:` clause on the stated ground that "a crossing is a **step**, not a rate ... a single
+    crossing never produces a repetition", which is a property the level-triggered version did not
+    have.
+    """
+    monkeypatch.setattr(settings, "budget_max_tokens_per_session", 1_000)
+    monkeypatch.setattr(settings, "budget_warn_fraction", 0.8)
+    tracker = BudgetTracker()
+
+    before = METRICS.value("chemclaw_budget_warnings_total")
+    with caplog.at_level(logging.WARNING, logger="chemclaw.api.budget"):
+        tracker.record("s1", None, tokens=800)
+        for _ in range(9):
+            tracker.record("s1", None, tokens=20)
+
+    assert METRICS.value("chemclaw_budget_warnings_total") == before + 1, (
+        "nine further turns inside the same band must not each re-announce the one crossing"
+    )
+
+
+def test_the_warning_names_the_principal_it_is_about(
+    monkeypatch: pytest.MonkeyPatch, _enabled: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The series is unlabelled on purpose, so the log line is the only route to *who*.
+
+    A session id or an Entra `oid` cannot be a label value (`033_cost_attribution.sql`), which is
+    why the alert names no principal and why three documents said in the present tense that the
+    log line beside it carried one. It carried the scope *kind* — "session", "user" — which no
+    `grep` turns into somebody an operator can go and talk to.
+    """
+    monkeypatch.setattr(settings, "budget_max_tokens_per_session", 1_000)
+    monkeypatch.setattr(settings, "budget_max_tokens_per_user", 1_000)
+    monkeypatch.setattr(settings, "budget_warn_fraction", 0.8)
+    tracker = BudgetTracker()
+
+    with caplog.at_level(logging.WARNING, logger="chemclaw.api.budget"):
+        tracker.record("session-abc-123", "oid-alice-9999", tokens=850)
+
+    assert "session-abc-123" in caplog.text, "the session warning must name the session"
+    assert "oid-alice-9999" in caplog.text, "the user warning must name the principal"
+
+
 def test_the_warning_is_silent_below_the_fraction_and_at_the_cap(
     monkeypatch: pytest.MonkeyPatch, _enabled: None
 ) -> None:

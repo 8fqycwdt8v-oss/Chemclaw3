@@ -210,7 +210,7 @@
           "refId": "B"
         }
       ],
-      "description": "Lookups by outcome, and what they were worth. `hit` answered from the store, `shared` joined another caller's in-flight computation, `miss` computed. The seconds series is the wall clock those hits and shares did not spend \u2014 a thousand avoided millisecond lookups and one avoided nineteen-minute CREST search are the same number of lookups and not the same saving, so read the rate against the count rather than instead of it."
+      "description": "Lookups by outcome, and what they were worth. `hit` answered from the store, `shared` joined another caller's in-flight computation, `miss` computed. The seconds series is the wall clock those hits and shares did not spend — a thousand avoided millisecond lookups and one avoided nineteen-minute CREST search are the same number of lookups and not the same saving, so read the rate against the count rather than instead of it."
     },
     {
       "id": 8,
@@ -930,7 +930,7 @@
       "id": 20,
       "type": "graph",
       "title": "Turns whose transcript and thread parted company",
-      "description": "The two records of one conversation: the transcript a chemist sees on reload, and the checkpoint the model is rebuilt from. A teardown between the two leaves the model holding an exchange the chemist cannot see. Counts one branch \u2014 a completed run that never answered \u2014 and deliberately not the whole class, so a flat line is not proof of agreement.",
+      "description": "The two records of one conversation: the transcript a chemist sees on reload, and the checkpoint the model is rebuilt from. A teardown between the two leaves the model holding an exchange the chemist cannot see. Counts one branch — a completed run that never answered — and deliberately not the whole class, so a flat line is not proof of agreement.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -949,7 +949,7 @@
       "id": 21,
       "type": "graph",
       "title": "Refusals the ledger's growth bound deleted",
-      "description": "`ingest_rejections` keeps the newest 1,000 refusals per source, on the argument that a source refusing more than that has one systematic defect its newest thousand rows describe as well as a million would. That is an assumption about the *distribution* of a source's refusals, not a fact about any source: one with more distinct one-off refusals than the cap loses its oldest permanently, and `refusals_matching` then reports those records as never refused \u2014 the record gone rather than unread. A flat zero is the assumption holding. A source with a steady rate here is one whose refusal history is being destroyed faster than anyone reads it.",
+      "description": "`ingest_rejections` keeps the newest 1,000 refusals per source, on the argument that a source refusing more than that has one systematic defect its newest thousand rows describe as well as a million would. That is an assumption about the *distribution* of a source's refusals, not a fact about any source: one with more distinct one-off refusals than the cap loses its oldest permanently, and `refusals_matching` then reports those records as never refused — the record gone rather than unread. A flat zero is the assumption holding. A source with a steady rate here is one whose refusal history is being destroyed faster than anyone reads it.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1037,6 +1037,25 @@
         "x": 0,
         "y": 76
       }
+    },
+    {
+      "id": 24,
+      "type": "graph",
+      "title": "Questions refused because the knowledge moved",
+      "description": "A durable wait can stand open for 90 days, and the notes it rests on can be superseded or refuted in the meantime. Split by `end` because the two are acted on differently: an `ask` refusal is the model being told to rewrite its own citation, which it can do; an `answer` refusal turns a chemist away with no override. A climbing `answer` line is the signal that this guard is refusing work it should be admitting — which it did, for every citation naming a reaction record and for every replica whose knowledge checkout was behind.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 84
+      },
+      "targets": [
+        {
+          "expr": "sum by (end, reason) (rate(chemclaw_premise_refusals_total[1h]))",
+          "legendFormat": "{{end}} / {{reason}}",
+          "refId": "A"
+        }
+      ]
     }
   ],
   "refresh": "30s",

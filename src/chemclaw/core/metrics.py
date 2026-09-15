@@ -96,24 +96,40 @@ _COUNTERS: dict[str, str] = {
         "event on an open stream, previously an HTTP 503)."
     ),
     "chemclaw_turns_refused_budget_total": "Turns refused with 429 by the turn/token budget.",
-    # The lead time the refusal above does not give. A 429 tells an operator about a budget on the
-    # turn that was lost to it; this says so while there is still room, at `budget_warn_fraction` of
-    # any cap. Unlabelled on purpose: the scope it names is a session id or an Entra `oid`, and
-    # `033_cost_attribution.sql` rules those out as label values for the cardinality reason the
-    # 64-series cap (D-152) exists to enforce. The log line beside it carries the identity.
     # The revision loop over a flagged answer. Two series rather than one, because "how often
     # does the verifier reject an answer" and "how often does rejecting it fail to help" are
     # different questions and only the second is a defect: a deployment whose revisions always
     # exhaust is paying double for every flagged turn and getting nothing.
     "chemclaw_answer_revisions_total": "Revision passes run over an answer the verifier flagged.",
-    # Requesters told their own work is still blocked, before its deadline rather than after.
-    "chemclaw_work_check_ins_total": (
-        "Check-ins delivered to a requester about questions of theirs still waiting."
-    ),
+    # The denominator the ratio above needs, and the reason it is a third series rather than a
+    # reuse: `chemclaw_answer_revisions_total` counts *passes* and the exhaustion counter counts
+    # *turns*, so dividing them compared two units. Measured with every flagged turn exhausting,
+    # the ratio read 1.00 at `answer_review_max_rounds=1` and 0.20 at 5 — the alert going silent
+    # at total failure, and its own advice (raise the rounds) pushing it further below threshold.
+    "chemclaw_answer_review_turns_total": ("Turns whose flagged answer entered the revision loop."),
     "chemclaw_answer_review_exhausted_total": (
         "Turns whose answer was still unsupported after every allowed revision, and went out "
         "marked for review."
     ),
+    # Questions refused because the knowledge they rest on moved. Two ends and three reasons, both
+    # labelled, because they are acted on differently and were previously indistinguishable: an
+    # `ask` refusal is a model being told to rewrite its own citation, an `answer` refusal is a
+    # chemist being turned away with no override. A series that climbs at the `answer` end is the
+    # signal that this guard is refusing work it should be admitting.
+    "chemclaw_premise_refusals_total": (
+        "Questions refused because a note they cite was retired, not yet valid, or absent."
+    ),
+    # Requesters told their own work is still blocked, before its deadline rather than after.
+    "chemclaw_work_check_ins_total": (
+        "Check-ins delivered to a requester about questions of theirs still waiting."
+    ),
+    # The lead time the refusal above does not give. A 429 tells an operator about a budget on the
+    # turn that was lost to it; this says so while there is still room, at `budget_warn_fraction` of
+    # any cap. Unlabelled on purpose: the scope it names is a session id or an Entra `oid`, and
+    # `033_cost_attribution.sql` rules those out as label values for the cardinality reason the
+    # 64-series cap (D-152) exists to enforce. The log line beside it carries the identity — which
+    # it did not when this comment was first written, three documents said it did, and `_warn` was
+    # passed the scope *kind* instead.
     "chemclaw_budget_warnings_total": (
         "Times a session or user crossed `budget_warn_fraction` of a turn or token cap."
     ),
@@ -1022,6 +1038,10 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # candidate is a session id, which is unbounded cardinality.
     "chemclaw_ingest_rejections_evicted_total": ("source",),
     "chemclaw_delivery_failures_total": ("channel",),
+    # Six series at most, and every value is a source literal: `end` is `ask`/`answer`, fixed at
+    # the two call sites, and `reason` is one of `BrokenPremise`'s three, fixed in `kg/premise.py`.
+    # Neither can carry a note id, which would be a caller's string and unbounded.
+    "chemclaw_premise_refusals_total": ("end", "reason"),
     # Three values, fixed in `agent/condense.py`'s own `DigestSource` literal rather than by a
     # caller: `extracted`, `degraded`, `oversized`. Bounded by the code that emits it, which is the
     # same guarantee `state` above gets from a CHECK constraint.

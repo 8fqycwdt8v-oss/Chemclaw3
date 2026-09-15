@@ -2926,15 +2926,27 @@ def test_every_ratio_alert_has_a_traffic_floor() -> None:
     against a 0.1 threshold, and one failed durable job in an idle half hour to `0.56` against
     0.2. Both now require their own denominator to clear an absolute rate first.
 
-    Derived rather than listed: any expression that divides one `rate()` by another is a ratio, so
-    a third one added tomorrow is covered on the day it is added.
+    Derived rather than listed: any expression that divides one range vector by another is a ratio,
+    so a third one added tomorrow is covered on the day it is added.
+
+    **That sentence was false the day it was written, and `increase()` is why.** The detector
+    matched `rate(` only, so the third ratio — added in the same commit as this docstring's claim —
+    carried a `clamp_min` denominator and no floor and was simply not seen: `ChemclawAnswer
+    RevisionsNotHelping` divides `increase()` by `increase()`. Both functions produce a range
+    vector and both have the same idle-window problem, so both are matched now, and the floor may
+    be expressed with either.
     """
     rules = re.split(r"\n\s*- alert: ", (CHART / "templates" / "prometheusrule.yaml").read_text())
     ratios = []
     for block in rules[1:]:
         name = block.splitlines()[0].strip()
-        expr = " ".join(block.split("expr:")[1].split("for:")[0].split())
-        if re.search(r"rate\([^)]*\)\)?\s*/\s*", expr):
+        # Terminated the same way `_alert_expressions` is, and for the same reason: `for:` is only
+        # one of the three keys that can follow `expr:`, and a rule without one would otherwise
+        # swallow its own labels and annotations into the expression.
+        expr = " ".join(
+            re.split(r"\n\s*(?:for|labels|annotations):", block.split("expr:")[1])[0].split()
+        )
+        if re.search(r"(?:rate|increase)\([^)]*\)\)?\s*/\s*", expr):
             ratios.append((name, expr))
     assert ratios, "no ratio alerts found — the extraction is broken, not the rules"
     for name, expr in ratios:
@@ -2942,9 +2954,9 @@ def test_every_ratio_alert_has_a_traffic_floor() -> None:
             f"{name} still guards its denominator with clamp_min, which converts an idle window "
             "into a large finite ratio instead of no sample"
         )
-        assert re.search(r"\band\s+sum\(rate\(", expr), (
-            f"{name} divides two rates with no absolute floor on the denominator, so one event in "
-            "an idle window is a 100% failure rate"
+        assert re.search(r"\band\s+sum\((?:rate|increase)\(", expr), (
+            f"{name} divides two range vectors with no absolute floor on the denominator, so one "
+            "event in an idle window is a 100% failure rate"
         )
 
 

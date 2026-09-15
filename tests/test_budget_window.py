@@ -158,14 +158,27 @@ def test_an_unreachable_meter_admits_the_turn_rather_than_refusing_it(
     asyncio.run(_run())
 
 
-def test_the_in_process_counter_still_binds_before_the_durable_write_lands(_durable: None) -> None:
+def test_the_in_process_counter_still_binds_before_the_durable_write_lands(
+    monkeypatch: pytest.MonkeyPatch, _durable: None
+) -> None:
     """`record` is synchronous and its durable write is not, so the gap has to be covered.
 
-    This is the case `max(in-process, durable)` exists for. The write is deliberately *not* drained
-    here: immediately after `record` returns, the row may hold nothing, and the guard must still
-    refuse on what this pod knows. Booking and checking through one tracker is what a single pod
-    does on every turn, so a regression here is not an edge case.
+    This is the case `max(in-process, durable)` exists for: immediately after `record` returns the
+    row may hold nothing, and the guard must still refuse on what this pod knows.
+
+    **The durable half is silenced rather than merely un-drained, and that is the whole fixture.**
+    This test used to skip `_drain()` and trust that the write had not landed — but `check` awaits
+    before it reads, which yields to the very task `record` just scheduled, so the row was often
+    already written and the refusal came from the half the test is not about. Measured over 20
+    runs: the write had landed in 2, and with the in-process half deleted the assertion still held
+    in 2 — a test that passes a broken implementation one run in ten, and unpredictably more under
+    `PYTEST_WORKERS`. Forcing the read to zero makes the refusal attributable to one source.
     """
+
+    async def _silent(actor: str) -> tuple[int, int]:
+        return 0, 0
+
+    monkeypatch.setattr(budget_store, "usage", _silent)
 
     async def _run() -> None:
         await migrated_db_or_skip()
@@ -176,6 +189,52 @@ def test_the_in_process_counter_still_binds_before_the_durable_write_lands(_dura
         settings.budget_max_tokens_per_user = 500
         with pytest.raises(BudgetExceeded, match="user token budget"):
             await tracker.check("s2", "window-notyet")
+
+    asyncio.run(_run())
+
+
+def _age_counter(tracker: BudgetTracker, actor: str, hours: float) -> None:
+    """Rewind a live in-process counter's window start, so elapsed time can be simulated.
+
+    Reaching into `_users` deliberately: the in-process half keeps its window on `time.monotonic()`,
+    which nothing can move from outside, and the alternative — a window set to a second and a real
+    sleep — is the race this file's header argues against for the durable half. Ageing *both* halves
+    is what makes a test model 25 hours passing rather than a database edit.
+    """
+    counter = tracker._users.get(actor)
+    assert counter is not None, "nothing was booked for this actor"
+    counter.started -= hours * 3600.0
+
+
+def test_a_rolled_window_stops_binding_on_the_pod_that_spent_it(_durable: None) -> None:
+    """The window has to roll on *both* halves, or `max()` is a ratchet instead of a floor.
+
+    The defect this pins shipped: the durable row rolled and the in-process counter never did, so
+    `max()` held the principal at their lifetime spend for as long as the pod stayed up. Measured,
+    a tracker that had booked 900 tokens still refused against a 500-token cap after the durable
+    row had correctly read (0, 0) — while a *freshly built* tracker admitted the same turn. That
+    inverts this feature's premise: a restart became the only thing that handed the allowance back,
+    and the test that was supposed to cover the roll never re-checked the tracker that did the
+    spending, only `budget_store.usage()`.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clean("window-both-halves")
+
+        tracker = BudgetTracker()
+        tracker.record("s1", "window-both-halves", tokens=900)
+        await _drain()
+
+        settings.budget_max_tokens_per_user = 500
+        with pytest.raises(BudgetExceeded, match="user token budget"):
+            await tracker.check("s2", "window-both-halves")
+
+        past = settings.budget_window_hours + 1
+        await _age_window("window-both-halves", past)
+        _age_counter(tracker, "window-both-halves", past)
+
+        await tracker.check("s3", "window-both-halves")
 
     asyncio.run(_run())
 
@@ -192,3 +251,48 @@ async def _drain() -> None:
 
     while _PENDING:
         await asyncio.gather(*tuple(_PENDING), return_exceptions=True)
+
+
+def test_two_concurrent_bookings_neither_lose_an_update_nor_reset_twice(_durable: None) -> None:
+    """The upstream behaviour the whole durable window rests on, pinned rather than believed.
+
+    `_BOOK` is one `INSERT ... ON CONFLICT DO UPDATE` whose three `CASE` arms each test
+    `budget_usage.window_start`. That is only safe because a conflicting writer blocks on the row
+    lock and then re-evaluates against what the first writer *committed* — not against its own
+    command snapshot, which is what this module's comment asserted until it was measured. Under the
+    snapshot reading, two concurrent bookings would each add 1 to the same pre-image and the window
+    would be reset once per writer.
+
+    Driven over the pool on both arms of the `CASE`: a live window must accumulate every booking,
+    and an expired one must reset exactly once no matter how many writers arrive together.
+
+    **This is a pin on Postgres, not a mutation-provable assertion about our code**, and saying so
+    is the point — there is no edit to `_BOOK` that produces the snapshot semantics the old comment
+    described, because the re-check is unconditional. It fails if a future server changes that, or
+    if somebody splits the reset into a second statement. `tests/test_upstream_surface.py` keeps
+    the same kind of assertion for the same reason: a promise nothing in this repository owns.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+
+        for actor, age_hours in (("window-race-live", None), ("window-race-rolled", 25.0)):
+            await _clean(actor)
+            await budget_store.book(actor, 10)
+            if age_hours is not None:
+                await _age_window(actor, age_hours)
+
+            await asyncio.gather(*(budget_store.book(actor, 10) for _ in range(32)))
+
+            turns, tokens = await budget_store.usage(actor)
+            if age_hours is None:
+                assert (turns, tokens) == (33, 330), (
+                    "a booking inside a live window was lost — the arms read a stale pre-image"
+                )
+            else:
+                assert (turns, tokens) == (32, 320), (
+                    "an expired window must reset once for the batch, not once per writer"
+                )
+            await _clean(actor)
+
+    asyncio.run(_run())
