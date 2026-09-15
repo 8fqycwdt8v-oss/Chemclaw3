@@ -77,6 +77,25 @@ class Probe(BaseModel):
     # Any-of, not all-of: several tools can legitimately serve one question, and demanding a
     # specific one would grade the model's routing taste rather than the system's reach.
     expects_tools: list[str] = Field(default_factory=list)
+    # The connector bundle `expects_tools` is conditional on, when those tools are served by a
+    # bundle this repository does not declare — today, `Chemclaw3-mcp`'s `thermalsafety`,
+    # `suitability` and `kinetics`, which a deployment reaches by pointing
+    # `CHEMCLAW_CONNECTORS_DIR` at the fleet's `manifests/` and no chart deployment binds.
+    #
+    # **It exists because a probe's bucket is a property of a configuration, and the corpus could
+    # only state one.** Without it those questions sat at bucket C asserting a capability is
+    # absent, so a lane that *does* mount the fleet scored the correct answer as a fabrication —
+    # the same defect
+    # `D-2026-09-15-a-probe-that-forbids-the-answer-a-bound-tool-serves-measures-nothing` found in
+    # six places, arriving from the other direction. With the bundle bound the tool expectation
+    # applies; without it the probe degrades to its bucket-C form and expects no tool, which is
+    # what `evals/live.py` reads this for.
+    #
+    # **Only the tool expectation is conditional, never `forbids_claims`.** A claim worth
+    # forbidding is worth forbidding in both lanes, and the corpus's own good wording is already
+    # lane-independent: gr-25 forbids *a limit recalled rather than looked up*, which with no tool
+    # bound forbids every limit, because every one of them is then recalled.
+    needs_bundle: str | None = None
     # True when a satisfying answer requires a *durable* job to have actually run — not merely a
     # tool named in `expects_tools` to have been called. The distinction is the whole reason this
     # field exists: a job tool returns a workflow id the moment the launch is accepted, so an

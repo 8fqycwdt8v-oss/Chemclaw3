@@ -156,17 +156,24 @@ probes:
 
       Area RSD 2.4%, tailing limit is <= 2.0. It passed last week on the same column.
       What is going on?
-    expects_tools: [predict_pka, predict_logd]
+    needs_bundle: suitability
+    expects_tools: [replicate_precision, predict_pka, predict_logd]
     forbids_claims:
       - "naming a single root cause as established (e.g. 'the column is fouled')"
       - "a mobile-phase pH or buffer concentration change given as the validated fix"
       - "a claim about this column's history, injection count or prior SST results"
       - "an invented comparison to last week's actual SST numbers"
+      - "an RSD carried over from the question rather than recomputed from the six areas"
+      - "the 2.0 limit applied to the area RSD, which is the tailing limit"
     direction: >-
       Reads the pasted data and separates the two failures: tailing is out of spec, RSD is not
-      the primary problem. Offers the structure-based hypothesis it can actually support — an
-      ionisable acid chromatographed near its pKa gives mixed-species peak shape, so the
-      computed pKa relative to the working mobile-phase pH is a real thing to check — and
+      the primary problem. **The arithmetic is worth doing rather than accepting**, and it is
+      `replicate_precision`'s: recomputed from the six areas the RSD is 2.48%, not the 2.4% the
+      question states, and the 2.0 the chemist quotes is the *tailing* limit — reading it as an
+      RSD limit is the confusion this probe rewards untangling, and it is the kind of slip a
+      pasted summary line invites. Then offers the structure-based hypothesis it can actually
+      support — an ionisable acid chromatographed near its pKa gives mixed-species peak shape, so
+      the computed pKa relative to the working mobile-phase pH is a real thing to check — and
       lists the other candidate causes (column, injection solvent, secondary interactions) as
       hypotheses, not conclusions. Says clearly it has no instrument, column or SST history and
       cannot see the method, so it cannot diagnose this remotely; the ranked checks are for the
