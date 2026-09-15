@@ -1792,7 +1792,7 @@ def test_a_resume_is_refused_when_the_template_has_changed_under_the_same_id() -
 
 
 def test_a_first_run_with_nothing_to_resume_is_what_it_always_was() -> None:
-    """The control arm. Resume is called unconditionally, so the empty answer has to cost nothing."""
+    """The control arm: resume is unconditional, so the empty answer has to cost nothing."""
     ran, run = _resumable_run(fail_on=set(), resume_from={})
 
     result = asyncio.run(run())

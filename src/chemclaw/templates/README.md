@@ -150,6 +150,19 @@ otherwise read back as a resume of itself), and its fingerprint must match the r
 because the run id says nothing about the steps, so editing the file and relaunching lands on the
 same id carrying a different procedure.
 
+## A workflow the agent composed
+
+`compose_workflow` writes one down at run time and `run_composed_workflow` runs it, so a procedure
+this system works out once stops being re-derived at one model call per step. It is the same
+`Template` model, so it gets the validators, the wave schedule and the resume above for free.
+
+**It may only read**, and that is what keeps the plan-gate exemption at the top of this file true:
+the exemption holds *because* a template is reviewed and uncreatable at run time, so an
+agent-authored one may name no side-effecting tool, no durable job and no `write_tools` —
+`composed.authored_problems`, asked when it is stored and again when it is run. That costs the
+calculations: every durable job launcher is state-changing, so a procedure that needs a ranking is
+a template a person writes.
+
 ## Versioning
 
 A run pins the *resolved* template in its workflow input, so editing a file never changes an

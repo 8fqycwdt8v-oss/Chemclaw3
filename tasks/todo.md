@@ -1074,48 +1074,86 @@ ignoring it.
 
 ### E1 — parallel steps, derived rather than declared
 
-- [ ] **This is not the thing D-2026-08-25 declined.** That ADR is about a *loop*: a fan-out over a
+- [x] **This is not the thing D-2026-08-25 declined.** That ADR is about a *loop*: a fan-out over a
       collection whose size is known only at run time, which needs iteration and expressions and is
       why the loop lives in a composite. **Static parallelism is a different question** — which
       already-declared steps may run at the same time — and the template already answers it:
       `_step_references` is the dependency graph, and `_references_resolve_and_point_backwards`
       guarantees it is a DAG by refusing a forward reference. So no new YAML key: concurrency is
       *derived*, and a template that declares no dependency between two steps gets it for free.
-- [ ] Interaction with Wave D that must not be missed: `run_ceiling_problems` sums the step
+- [x] Interaction with Wave D that must not be missed: `run_ceiling_problems` sums the step
       ceilings because steps were sequential. With parallelism the bound is the **critical path**.
       Sum is still correct-but-pessimistic; the fix is the longer path through the DAG.
-- [ ] Failure semantics: a sibling still running when one branch fails must be cancelled, not
+- [x] Failure semantics: a sibling still running when one branch fails must be cancelled, not
       orphaned, and the failure record must name the step that actually failed.
 
 ### E2 — agent-authored workflows, without the escalation the exemption would grant
 
-- [ ] **The coupling is real and is closed rather than argued away.** `D-2026-08-12` exempts a
+- [x] **The coupling is real and is closed rather than argued away.** `D-2026-08-12` exempts a
       template `agent` step from the plan gate *because* a template is human-authored and
       uncreatable at run time. So an agent-authored one **does not inherit that exemption**:
       `author_kind` is on the template, the exemption keys on `human`, and `write_tools` is refused
       outright on an agent-authored draft — the agent cannot grant itself a write path because the
       field is rejected at validation, not filtered at run time.
-- [ ] One tool, not one per draft: `run_composed_workflow(name, inputs)`. Generating a `run_<name>`
+- [x] One tool, not one per draft: `run_composed_workflow(name, inputs)`. Generating a `run_<name>`
       launcher per draft would put an unbounded, agent-written schema into the prompt prefix, which
       `tests/test_context_floor.py` exists to prevent.
-- [ ] Same `Template` model, same `step_problems`, same `run_ceiling_problems` — a draft that would
+- [x] Same `Template` model, same `step_problems`, same `run_ceiling_problems` — a draft that would
       not pass `make template-validate` cannot be stored.
-- [ ] A draft may only name tools the composing actor is authorized for, checked at compose time
+- [x] A draft may only name tools the composing actor is authorized for, checked at compose time
       *and* again at run time, where `_acting_as` already decides against the real requester.
 
 ### E3 — resume from a failed step
 
-- [ ] The completed steps are already recorded (`failed_template_record`) and never read. Read them.
-- [ ] Constraint that decides the shape: it is a database read, so it cannot be workflow code. An
+- [x] The completed steps are already recorded (`failed_template_record`) and never read. Read them.
+- [x] Constraint that decides the shape: it is a database read, so it cannot be workflow code. An
       activity, whose result enters history and so keeps replay deterministic.
-- [ ] The guard that makes it safe: a run's id is `hash([name, inputs])` and the *template* is
+- [x] The guard that makes it safe: a run's id is `hash([name, inputs])` and the *template* is
       pinned per run, so an edited template relaunching under the same id must not resume against
       step results produced by the old definition. Resume only on an exact template match.
 
+### Review
+
+All three built. What changed against the plan, and why, because two of them did:
+
+**E1 was the smaller change the plan thought it was, and the ceiling interaction was real.** The
+wave runner started as `asyncio.wait(FIRST_EXCEPTION)` plus sibling cancellation and was reverted to
+the house `gather(return_exceptions=True)`: `asyncio.wait` appears nowhere in this tree's workflow
+code, a cancellation inside an activity arrives as `ActivityError(cause=CancelledError)` rather than
+`asyncio.CancelledError`, and a cancel is itself a command, so the failure path would issue a
+different number of them depending on which branch lost. Two of the nine shipped templates turned
+out to already have independent steps.
+
+**Nothing in the plan anticipated the replay control, and it was right to fire.**
+`tests/test_workflow_replay.py` failed on both archived `TemplateWorkflow` histories: the resume
+read and the wave schedule both change the command sequence, and the background worker deploys
+`Recreate`, so the new generation inherits every unfinished run. Both are behind one
+`workflow.patched("template-waves-and-resume")` marker, with the old path written in the new code's
+own terms rather than kept as a second loop.
+
+**E2's security design changed shape once the code was read.** The plan said "re-attach the plan
+gate to an agent-authored template's steps". That is not a control: a step runs in an activity with
+no session, so `enforce_plan_approval` would refuse *every* write for want of a plan nobody can
+approve. The rule that ships instead restores `D-2026-08-12`'s premise rather than re-arguing its
+conclusion — no side-effecting tool, no durable job, no `write_tools` — and the sharp case was not
+the one the plan named: a `tool` step calling `record_knowledge_note` is a bigger hole than
+`write_tools:`, because nothing in the chain asks whether a human saw the sequence.
+
+**What it cost, measured**: 978 tokens of prefix against 34 tokens of headroom, so the ceiling rose
+to 69,000 and the thread allowance fell 40,500 → 38,700. And a composed workflow cannot run a
+calculation, which is a real limit and is stated in the tool's own description rather than
+discovered.
+
 ### Verify
 
-- [ ] `make lint type test` green, with the skip count stated.
-- [ ] Parallel: a template whose steps are independent runs them concurrently, measured, and one
+- [x] `make lint type test` green, with the skip count stated.
+- [x] All ten validators pass.
+- [x] Parallel: measured on wall clock against a real Temporal server — two independent 1s steps
+      peak at 2 in flight and finish under 2s; a chained pair peaks at 1 and does not.
+- [x] Authored: every refusal driven in both directions, both store backends.
+- [x] Resume: a run resumes from a record, declines a record from a different template version, and
+      a first run is unchanged.
+- [x] Parallel: a template whose steps are independent runs them concurrently, measured, and one
       whose steps chain still runs in order.
-- [ ] Authored: a draft naming a write tool is refused; a draft's agent step is plan-gated.
-- [ ] Resume: a run that failed at step N re-runs only from N.
+- [x] Authored: a draft naming a write tool is refused; a draft's agent step is plan-gated.
+- [x] Resume: a run that failed at step N re-runs only from N.

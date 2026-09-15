@@ -139,6 +139,12 @@ BEGIN
         'plan_approvals, sync_cursors, turn_costs, '
         'molecule_fingerprints, reaction_fingerprints, reaction_labels, corpus_molecules, '
         'corpus_reactions, corpus_cursors, '
+        -- `composed_workflows` takes UPDATE beside INSERT because re-composing under the same name
+        -- is a revision of one working procedure rather than a second one: the row is keyed
+        -- `(owner, name)` and `store` upserts it. No DELETE — a workflow that is no longer wanted
+        -- is stopped being run, and a credential able to remove one could take a procedure out
+        -- from under a chemist mid-use.
+        'composed_workflows, '
         'tool_result_links TO %I', app_role);
     -- `tool_result_links` joins that list and `tool_result_blobs` the full-DML one below, even
     -- though retention deletes only the blob: a cascading delete is performed with the referencing
