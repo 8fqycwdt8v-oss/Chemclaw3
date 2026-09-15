@@ -50,7 +50,15 @@ belonging to another effort. Overwriting it to satisfy a convention would destro
       needed was the loop itself, in the runner rather than a middleware, because the verdict
       is produced after the graph returns. Exhaustion ships the answer still marked — the arm
       D-2026-08-16 found `RubricMiddleware` lacking.
-- [ ] **D — an agent heartbeat: the agent wakes on a timer to report and ask, never to decide**
+- [x] **D — a scheduled check-in over a requester's own blocked work** —
+      `D-2026-09-15-the-requester-hears-nothing-until-it-is-too-late`. **The plan promised an
+      agent heartbeat and this deliberately is not one**, for a reason found while building
+      it: `run_agent_step` takes a `StepIdentity`, because a worker has no request context and
+      an agent step is run *as* somebody — and a Schedule has nobody to be. Synthesizing an
+      identity from a `requested_by` string is not a question the read-only narrowing answers,
+      since a narrowing bounds what an actor may do and does not supply the actor. The gap the
+      item was really about is still closed: `awaiting.py` re-notifies `asked_of` and tells the
+      requester only on expiry, so a 90-day wait meant three months of silence.
 
 Ordered by ascending blast radius, so each lands green before the next starts.
 
@@ -66,4 +74,35 @@ Ordered by ascending blast radius, so each lands green before the next starts.
 
 ## Review
 
-(filled in at the end)
+All four shipped, each with an ADR, its ledger row, a topic-table entry and tests that drive the
+real path. `make lint type test` green with Docker up; the full run is reported in the PR body with
+its skip count, because a run without `dockerd` skips ~216 tests and is not evidence about the
+durable layer.
+
+**What the work changed about the plan.** Four of the premises this file opened with survived; three
+things did not, and each was found by building rather than by reading:
+
+1. **C did not need to fix a fail-open verifier.** The plan said `score_answer` had to be stopped
+   from shipping an answer clean on a grader crash. It already fails *closed* — a crash sets
+   `review_required = True`. The real gap was only the missing loop.
+2. **B's fingerprint design was wrong and could not be made right.** There is no arrival signal for
+   a note anywhere in this tree, and the two readings would have come from two pods whose knowledge
+   checkouts drift by minutes. Asking the narrower question at *both* ends establishes "since" by
+   construction instead.
+3. **D is not the agent heartbeat the plan promised**, and the reason is worth more than the feature
+   would have been: an agent step is run *as* somebody, and a Schedule has nobody to be.
+
+**Three bugs found in existing code on the way past**, none of them in the new features:
+
+- `_alert_expressions()` terminated on `for:`, which is optional in a Prometheus rule. All 51
+  existing rules happened to carry one, so the guard against false coverage was correct by
+  coincidence; the first rule without one read a metric named in prose as alerted.
+- `budget_usage` reaching `session_store._ACTOR_SCOPED_ONLY` surfaced that a `session_id` predicate
+  there would have made "delete the conversation" a free quota reset.
+- My own absence test for D scanned 18% of the file it was guarding. Rewritten over the AST and
+  proven by planting a violation where the first version could not see.
+
+**Two mistakes of mine worth recording.** A `git checkout` meant to revert a probe reverted an
+hour of unrelated work in the same file — probes now go through a scratchpad copy. And the first
+`open_days` arithmetic was a tautology returning 0 for every row, caught by writing the test that
+read it.

@@ -46,6 +46,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.temporal_client import connect
 from chemclaw.durable.artifact_eviction import ArtifactEvictionWorkflow
+from chemclaw.durable.check_in import CheckInWorkflow
 from chemclaw.durable.commitment_sync import CommitmentSyncWorkflow
 from chemclaw.durable.corpus_sync import ReactionCorpusWorkflow, corpus_sources
 from chemclaw.durable.digest import DigestWorkflow
@@ -95,6 +96,7 @@ OWNED_SCHEDULE_IDS = frozenset(
         # has run one.
         "audit-verify",
         "digest",
+        "agent-check-in",
         "artifact-eviction",
         "observations",
         "document-sync",
@@ -224,6 +226,13 @@ def planned_schedules() -> list[PlannedSchedule]:
     if settings.digest_enabled:
         digest_every = timedelta(minutes=settings.digest_schedule_minutes)
         schedules.append(PlannedSchedule("digest", DigestWorkflow, digest_every))
+    # The check-in over a requester's own blocked work earns a Schedule where a deployment turns
+    # it on. Gated on a flag rather than on a registry, unlike its four neighbours above, because
+    # there is no manifest to ask: the thing it reports on is `pending_requests`, which every
+    # deployment has, and what a deployment chooses is whether its people want to hear about it.
+    if settings.check_in_enabled:
+        check_in_every = timedelta(minutes=settings.check_in_schedule_minutes)
+        schedules.append(PlannedSchedule("agent-check-in", CheckInWorkflow, check_in_every))
     # Retention only earns a Schedule where the deployment has stated a policy (gap SCH-1); an
     # unconfigured deployment must never start deleting records on a default it did not choose.
     #

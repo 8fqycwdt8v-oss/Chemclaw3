@@ -106,6 +106,10 @@ _COUNTERS: dict[str, str] = {
     # different questions and only the second is a defect: a deployment whose revisions always
     # exhaust is paying double for every flagged turn and getting nothing.
     "chemclaw_answer_revisions_total": "Revision passes run over an answer the verifier flagged.",
+    # Requesters told their own work is still blocked, before its deadline rather than after.
+    "chemclaw_work_check_ins_total": (
+        "Check-ins delivered to a requester about questions of theirs still waiting."
+    ),
     "chemclaw_answer_review_exhausted_total": (
         "Turns whose answer was still unsupported after every allowed revision, and went out "
         "marked for review."
