@@ -246,7 +246,7 @@ async def post_message(
             # budget is spent, so the next attempt fails identically until an operator raises the
             # cap or the counters reset.
             try:
-                front.budget.check(session_id, principal.oid)
+                await front.budget.check(session_id, principal.oid)
             except BudgetExceeded as exc:
                 METRICS.increment("chemclaw_turns_refused_budget_total")
                 refused = ErrorEvent(
@@ -374,7 +374,7 @@ async def post_message(
         # was never going to run. It is a fast path, not the guard: the binding check is the one
         # inside the stream, after the permit (see there for the measurement).
         try:
-            front.budget.check(session_id, principal.oid)
+            await front.budget.check(session_id, principal.oid)
         except BudgetExceeded as exc:
             METRICS.increment("chemclaw_turns_refused_budget_total")
             raise HTTPException(status_code=429, detail=str(exc)) from exc

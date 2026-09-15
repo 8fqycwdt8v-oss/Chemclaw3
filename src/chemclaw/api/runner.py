@@ -471,6 +471,33 @@ async def run_turn(
                 tool_trace.outputs,
                 tool_trace.called_tools,
             )
+            # **The flagged answer goes back for another pass, and nothing used to do that.**
+            # `agent/verifier.py` marks an answer `review_required` and
+            # `D-2026-08-16-a-second-judge-is-a-second-answer-about-the-same-answer` concedes what
+            # happened next: "Nothing routes a flagged answer back for another pass." Looped here
+            # rather than in a middleware because the verdict is produced *outside* the graph — the
+            # graph has returned by this line — and because the rounds must be bounded by something
+            # a chemist's own follow-up resets, which a per-turn local is and a state channel is
+            # not. Off at `answer_review_max_rounds = 0`.
+            rounds = 0
+            while answer.review_required and rounds < settings.answer_review_max_rounds:
+                rounds += 1
+                async for event in _revise_answer(
+                    graph,
+                    config=graph_config,
+                    trace=tool_trace,
+                    ledger=ledger,
+                    carry=cap_carry,
+                    answer=answer,
+                ):
+                    yield event
+                answer = await build_answer_event(
+                    ledger.answer_text,
+                    tool_trace.outputs,
+                    tool_trace.called_tools,
+                )
+            if rounds:
+                _record_review_rounds(session, answer, rounds)
             await _record_transcript(
                 history, session, user_message, ledger.answer_text, ledger.exchanges
             )
@@ -1053,6 +1080,102 @@ async def _resume_on_job_results(
     ):
         yield event
     ledger.run_complete = True
+
+
+async def _revise_answer(
+    graph: Any,
+    *,
+    config: dict[str, Any],
+    trace: ToolCallTrace,
+    ledger: _TurnLedger,
+    carry: dict[str, Any],
+    answer: AnswerEvent,
+) -> AsyncIterator[Event]:
+    """Run one revision pass over an answer the verifier flagged, in the same turn.
+
+    Built on `_resume_on_job_results`'s shape — a second `graph_events` over the same graph and
+    `thread_id`, with `run_complete` cleared for its duration and the same `carry`, so a revision is
+    counted by the loop cap and the spend cap rather than buying a fresh allowance of either. That
+    is the conclusion `D-2026-08-16` reached about `RubricMiddleware`'s revisions and it holds for
+    these: a revision is a model call, and a cap it could skip would be a bypass.
+
+    **`answer_parts` is cleared, which is the one place this is *not* the resume.** A resume
+    continues an answer, so appending is right there; a revision *replaces* one, and
+    `ledger.answer_text` joins the parts — so without this the transcript and the `AnswerEvent`
+    would both carry the flagged prose with the corrected prose stapled to its end, which is worse
+    than either alone. The client has already been streamed the first attempt's tokens and cannot
+    un-see them; `AnswerEvent.text` is the authoritative answer and carries only this pass, which
+    is what the event contract already says it is.
+
+    **Framed as data, not as an instruction.** The unsupported claims are this system's own
+    verdict, but they quote the model's prose back at it, and prose that reaches a model inside an
+    instruction is prose that can instruct — the discipline `_job_results_message` follows for the
+    same reason one line over.
+    """
+    ledger.run_complete = False
+    ledger.answer_parts.clear()
+    METRICS.increment("chemclaw_answer_revisions_total")
+    async for event in _stream_into(
+        graph_events(
+            graph,
+            _revision_message(answer),
+            config=config,
+            trace=trace,
+            # A no-op for the reason the resume gives: a revision that fed its own job ids back into
+            # `started_jobs` would let one chemist turn chain durable work indefinitely.
+            on_signal=lambda _signal: None,
+            usage=ledger.usage,
+            exchanges=ledger.exchanges,
+            carry=carry,
+        ),
+        ledger,
+    ):
+        yield event
+    ledger.run_complete = True
+
+
+def _revision_message(answer: AnswerEvent) -> str:
+    """What the model is told about its own flagged answer, worded and framed.
+
+    A function of its own for the reason `_job_results_message` is one: this text is the decision
+    the revision carries. It names the claims rather than saying "try again", because a revision
+    prompt with no specifics measures nothing and licenses the model to reword instead of reground.
+    """
+    claims = "\n".join(f"- {claim}" for claim in answer.unsupported_claims)
+    return (
+        "Your previous answer was checked against the evidence this turn actually retrieved, and "
+        "the claims below are not supported by it. Answer again: drop or correct each one, cite "
+        "the evidence for what you keep, and say plainly what the evidence does not settle rather "
+        "than filling the gap. Do not restate the previous answer.\n"
+        + frame_untrusted(claims, note_id="unsupported-claims")
+    )
+
+
+def _record_review_rounds(session: TurnSession, answer: AnswerEvent, rounds: int) -> None:
+    """Book what the revision loop did, including the case where it ran out of rounds.
+
+    **Exhaustion is counted separately and is not silent.** The answer still goes out and still
+    carries `review_required`, which is exactly what it carried before this loop existed — so a
+    deployment that runs out of rounds is no worse off than one with the loop off, and the
+    difference is visible rather than inferred. That is the property
+    `D-2026-08-16` found `RubricMiddleware` lacking: its `_finalize_evaluation` rewrites the result
+    to `max_iterations_reached` and mutates no message, so a grader outage ships every answer
+    ungraded with a log line nothing reads.
+    """
+    if answer.review_required:
+        METRICS.increment("chemclaw_answer_review_exhausted_total")
+        logger.warning(
+            "the answer for session %s is still unsupported after %d revision(s); it goes out "
+            "marked for review",
+            session.session_id,
+            rounds,
+        )
+    else:
+        logger.info(
+            "the answer for session %s was grounded after %d revision(s)",
+            session.session_id,
+            rounds,
+        )
 
 
 def _loop_cap_event(session: TurnSession, ledger: _TurnLedger) -> ErrorEvent | None:

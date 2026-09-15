@@ -29,6 +29,7 @@ and never asks whether it says what these tests claim. Asserting on rendered doc
 here as "the template source says so", not "the cluster will see so".
 """
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -766,7 +767,7 @@ def test_the_shipped_budget_guard_actually_refuses_a_turn(monkeypatch: pytest.Mo
     tracker = BudgetTracker()
     tracker.record("s1", "alice", tokens=chart.budget_max_tokens_per_session)
     with pytest.raises(Exception) as refused:
-        tracker.check("s1", "alice")
+        asyncio.run(tracker.check("s1", "alice"))
     assert "budget" in str(refused.value).lower() or "cap" in str(refused.value).lower()
 
 

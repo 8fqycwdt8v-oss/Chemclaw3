@@ -21,12 +21,15 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from chemclaw.agent.authz import authorize_trigger, require_actor
 from chemclaw.agent.framing import defang
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.temporal_client import connect
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_signals import record_job_started
 from chemclaw.durable import pending_store
 from chemclaw.durable.awaiting import AwaitAnswerWorkflow, AwaitRequest, request_id_for
+from chemclaw.kg.note import cited_ids
+from chemclaw.kg.premise import premise_breaks
 
 #: The kinds a *chemist-facing* ask may take. Narrower than `awaiting.KINDS`, which also carries
 #: `approval` — an approval is raised by the effector seam and by the plan gate, never by the model
@@ -72,11 +75,30 @@ async def request_external_input(
         The request id, which is also how the wait is found in the inbox.
     """
     authorize_trigger("request_external_input")
+    # **The premise is derived, never an argument.** A `premise_note_ids` parameter would be a
+    # control the model can disable by forgetting it, which is the `map_to_hpc_identity` shape this
+    # repository has deleted twice — a claim that a check exists. `cited_ids` reads the
+    # `[[wikilinks]]` the question already writes, so the notes it rests on are whatever it says it
+    # rests on, and a question citing nothing carries an empty premise honestly.
+    premise = cited_ids(f"{subject}\n{rationale}")
+    # **Refused here, at the ask, and that is what makes the answer-time check mean "since".** This
+    # tree has no arrival signal for a note, so a break found at answer time is indistinguishable
+    # from one that predates the question — unless every wait that exists began with a whole
+    # premise. Refusing the open is what establishes that, by construction rather than by comparing
+    # two readings taken on two pods whose knowledge checkouts drift apart.
+    broken = await premise_breaks(premise)
+    if broken:
+        raise ChemclawError(
+            "this question rests on knowledge that no longer holds, so nobody could answer it "
+            "usefully: " + "; ".join(item.describe() for item in broken) + ". Re-read the current "
+            "evidence and ask again on what it says."
+        )
     request = AwaitRequest(
         kind=kind,
         subject=subject,
         rationale=rationale,
         asked_of=asked_of,
+        premise_note_ids=premise,
         # The core rule (F4-T3): refuse durable work with no user behind it.
         requested_by=require_actor(),
         session_id=get_current_session_id() or "",

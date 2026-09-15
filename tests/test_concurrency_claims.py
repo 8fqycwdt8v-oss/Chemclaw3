@@ -154,7 +154,10 @@ def _race_checks(tracker: BudgetTracker, session_id: str, threads: int) -> int:
     def one_turn() -> None:
         barrier.wait(timeout=30)
         try:
-            tracker.check(session_id, None)
+            # `check` is a coroutine since the per-user window went durable; each thread drives
+            # it on a loop of its own, which keeps this a test of the `threading.Lock` around the
+            # counters rather than of an event loop's serialization.
+            asyncio.run(tracker.check(session_id, None))
         except BudgetExceeded:
             return
         with lock:

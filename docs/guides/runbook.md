@@ -1351,6 +1351,49 @@ whether caching is paying off before you raise the threshold.
 Read `chemclaw_tokens_total` beside it — either the allowance is genuinely spent, or the window is
 set below real traffic.
 
+#### ChemclawBudgetNearingItsCap
+`info`, and the only one of the three that arrives while you can still do something for free.
+Somebody has crossed `budget_warn_fraction` (0.8) of a turn or token cap and has **not** been
+refused yet; the rule above is what fires once they are.
+
+**The scope is not on the series, so do not look for it there.** A budget scope is a session id or
+an Entra `oid`, and `033_cost_attribution.sql` rules those out as label values for the cardinality
+reason the 64-series cap (D-152) enforces. The identity is in the WARNING log line from
+`chemclaw.api.budget`, which names the scope, the unit, the percentage and both numbers:
+
+    oc logs -l app.kubernetes.io/name=chemclaw --since=1h | grep 'budget .* spent'
+
+Three things it can mean, in the order worth checking. **A real runaway** — read
+`chemclaw_tokens_total` and the `turn_costs` rows for that actor; the per-turn ceiling
+(`agent_max_turn_billed_tokens`) ships at 0, so nothing bounds a single turn and one is enough to
+do this. **A cap set below real traffic** — if several unrelated principals cross in the same
+window, the cap is the outlier, not them. **A window that is too short for the work** —
+`budget_window_hours` is rolling and anchored at each principal's first turn, so a user who does a
+day's work in an hour waits out the remainder.
+
+The durable half only engages where `SESSION_STORE=postgres`. Everywhere else the per-user counters
+are per-pod and reset on restart, so this alert under-reports by roughly the replica count — and
+`degraded{subsystem="budget_window"}` is what says the durable half was configured and could not be
+reached, which silently returns the cap to its per-process meaning.
+
+#### ChemclawAnswerRevisionsNotHelping
+`warning`. More than half the revision passes over a flagged answer ran out of rounds without the
+answer becoming grounded. Nothing is *lost* — those turns answered, and they carry `review_required`
+exactly as they would have with `answer_review_max_rounds=0` — but each one spent a second model
+call to arrive where it already was.
+
+Three readings, and the first is the likeliest. **The claims are not fixable by rewording**: the
+answer needs evidence the turn never retrieved, so the model drops or hedges and the shape gate
+flags it again. Read `chemclaw_answer_revisions_total` against
+`chemclaw_retrieval_*` for those turns — if retrieval returned nothing, the revision was never
+going to help and the fix is upstream. **The rounds are too few**: raise
+`answer_review_max_rounds` and watch the ratio. **The verdict is wrong**: if
+`verifier_confidence_threshold` sits above what this corpus can support, every answer is flagged and
+every revision exhausts — check what fraction of *all* turns are flagged before raising the rounds.
+
+Turning it back to 0 is a legitimate outcome, not a defeat: the verifier's mark was the signal
+before this loop existed and still is.
+
 ### chemclaw.fleet — a process is gone
 
 #### ChemclawTargetDown

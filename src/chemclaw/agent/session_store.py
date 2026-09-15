@@ -631,6 +631,15 @@ _ACTOR_SCOPED_ONLY: dict[str, str] = {
         "the next session is meant to run"
     ),
     "user_preferences": "a preference is the person's, and survives every session they close",
+    # **And a session delete must not be a way to buy allowance.** A spend window is keyed by the
+    # principal for the reason the whole guard exists — it bounds what one *person* may spend, not
+    # what one conversation may. Deleting a session is an ordinary thing a chemist may do to their
+    # own session at will, so a `session_id` predicate here would turn "delete the conversation"
+    # into "reset my quota", available to exactly the runaway the budget is there to stop.
+    "budget_usage": (
+        "a spend window bounds a person, not a conversation — and a session delete that reset it "
+        "would be a free allowance reset available to anyone who is over budget"
+    ),
 }
 
 

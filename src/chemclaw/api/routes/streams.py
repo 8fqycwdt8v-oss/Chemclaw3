@@ -56,6 +56,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.metrics import METRICS
 from chemclaw.durable.awaiting import AWAITING_KIND
+from chemclaw.durable.check_in import CHECK_IN_KIND
 from chemclaw.durable.digest import DIGEST_KIND, digest_channel
 
 logger = logging.getLogger(__name__)
@@ -537,6 +538,77 @@ async def read_digests(principal: CurrentUser) -> list[Digest]:
     return [_digest(event.payload) for event in claimed]
 
 
+class CheckInOut(BaseModel):
+    """One question the caller asked that is still waiting on somebody.
+
+    The workflow's own `BlockedRequest` restated at the wire rather than imported, for the reason
+    every other model in this module is: `durable/check_in.py` is a worker-side shape free to gain
+    fields a client has no business seeing, and an API model that *is* a durable payload makes the
+    two impossible to move apart. The fields here are the ones a person acts on.
+    """
+
+    request_id: str = ""
+    subject: str = ""
+    rationale: str = ""
+    asked_of: str = ""
+    open_days: int = 0
+    days_left: int = 0
+
+
+def _check_in(payload: dict[str, Any]) -> list[CheckInOut]:
+    """Read one claimed check-in row, tolerating a payload an older sweep wrote.
+
+    Lenient for exactly `_digest`'s reason and with a sharper edge: the claim has already consumed
+    the row by the time this runs, so a `ValidationError` here would destroy the notice rather than
+    defer it — and unlike a digest, there is nothing to re-find afterwards. A blocked question that
+    went unreported is one a chemist simply does not learn about until it expires, which is the gap
+    this whole feature exists to close.
+    """
+    requests = payload.get("requests")
+    if not isinstance(requests, list):
+        return []
+    out: list[CheckInOut] = []
+    for item in requests:
+        if not isinstance(item, dict):
+            continue
+        out.append(
+            CheckInOut(
+                request_id=str(item.get("request_id", "")),
+                subject=str(item.get("subject", "")),
+                rationale=str(item.get("rationale", "")),
+                asked_of=str(item.get("asked_of", "")),
+                open_days=int(item.get("open_days", 0) or 0),
+                days_left=int(item.get("days_left", 0) or 0),
+            )
+        )
+    return out
+
+
+async def read_check_ins(principal: CurrentUser) -> list[CheckInOut]:
+    """Claim and return the caller's own blocked work, as the check-in sweep left it.
+
+    **A route of its own rather than a second list on `/digests`**, and the alternative is worth
+    naming because it looks cheaper: `read_digests` answers `list[Digest]`, so folding these in
+    would mean either changing that response into an object — a breaking change for a client that
+    reads it today — or widening `Digest` with fields that have nothing to do with a standing
+    query. A check-in and a digest ask the reader for different things: one says somebody owes you
+    an answer, the other says the corpus learned something. They share a mailbox and nothing else.
+
+    Everything else is `read_digests`'s, deliberately: the channel is derived from the authenticated
+    principal rather than named by the caller, so there is nothing to authorize and no path segment
+    to get right; the read is the consume, scoped to `CHECK_IN_KIND` so claiming here cannot destroy
+    another consumer's rows; and the answer is unbounded because the claim has already run by the
+    time a slice could be taken.
+
+    **This is the reader `CHECK_IN_KIND` did not have when the sweep was written**, and shipping
+    without it would have been `D-2026-08-27-a-digest-nobody-can-read-is-not-delivered` a second
+    time — a job writing nightly into a mailbox nothing opens, reporting success. The sweep ships
+    off, and `check_in_enabled` names what a deployment needs before turning it on.
+    """
+    claimed = await claim_unconsumed(digest_channel(principal.oid), kinds=(CHECK_IN_KIND,))
+    return [item for event in claimed for item in _check_in(event.payload)]
+
+
 def register(app: FastAPI) -> None:
     """Attach this module's route to `app` — called once, by `create_app` only.
 
@@ -566,3 +638,5 @@ def register(app: FastAPI) -> None:
     # No `dependencies=[Depends(resolve_session)]`, and that absence is the authorization model
     # rather than a gap in it: this route accepts no session id to resolve. See `read_digests`.
     app.get("/digests")(read_digests)
+    # Same absence of a session dependency, for the same reason, one mailbox kind over.
+    app.get("/check-ins")(read_check_ins)

@@ -82,7 +82,7 @@ def test_a_failed_settle_still_books_the_budget_and_the_row(
     asyncio.run(_book())
 
     with pytest.raises(BudgetExceeded):
-        budget.check("s-book", "chemist-1")
+        asyncio.run(budget.check("s-book", "chemist-1"))
     (row,) = booked
     assert (row.input_tokens, row.output_tokens) == (90, 10), "the spend was lost with the outcome"
     assert row.outcome == "unknown", (

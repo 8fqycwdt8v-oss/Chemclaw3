@@ -436,6 +436,57 @@
           "refId": "B"
         }
       ]
+    },
+    {
+      "id": 12,
+      "type": "graph",
+      "title": "Work waiting on a person",
+      "description": "Check-ins delivered to requesters whose own questions are still unanswered past the quiet threshold. Not an alert condition \u2014 some work waits on people, and that is the system working. A sustained climb is: more is being asked of the lab than the lab is answering, and the requesters now know it. Flat at zero with CHECK_IN_ENABLED set means either nothing is blocked or the sweep is not reaching its mailbox \u2014 read chemclaw_deliveries_total beside it to tell those apart.",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(chemclaw_work_check_ins_total[1d]))",
+          "legendFormat": "requesters told",
+          "refId": "A"
+        }
+      ]
     }
   ],
   "refresh": "30s",
