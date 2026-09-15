@@ -3,12 +3,29 @@
 # route scouting and building-block availability, and solid form.
 #
 # **This file exists so that the fleet's largest capability gap has an exit criterion**, and it is
-# written before the servers rather than after (issue #358). `thermalsafety` (8851) and `kinetics`
-# (8852) are `next` in `Chemclaw3-mcp/MODULES.md`, with `unitops`, `solidform`, `rxnsearch`,
-# `blocks` and `reactivity` catalogued behind them. When one ships, the question "did this move
-# anything" is answered by re-bucketing the probes below from C to A and re-running — the same way
-# `analytical.yaml` can answer it for its own section today. A probe set written afterwards would
-# re-baseline its own exam.
+# written before the servers rather than after (issue #358). When one ships, the question "did this
+# move anything" is answered by re-bucketing the probes below from C to A and re-running — the same
+# way `analytical.yaml` can answer it for its own section today. A probe set written afterwards
+# would re-baseline its own exam.
+#
+# **The first one shipped on 2026-09-15, and this header still called it `next`.** `thermalsafety`
+# (8851) is `built` in `Chemclaw3-mcp/MODULES.md`: adiabatic temperature rise, MTSR, TMR_ad, the
+# temperature at which TMR reaches a target, the Stoessel criticality class, jacket heat-removal
+# capacity, a Semenov critical-ambient estimate and an oxygen-balance screen. `kinetics` (8852) is
+# still `next`, with `unitops`, `solidform`, `rxnsearch`, `blocks` and `reactivity` catalogued
+# behind it.
+#
+# So the denial below is now **conditional on the lane**, not on the calendar. This tree declares no
+# `thermalsafety` bundle, so `build_langgraph_agent` binds none of those tools; only a deployment
+# pointing `CHEMCLAW_CONNECTORS_DIR` at the fleet's own `manifests/` directory reaches them, which
+# `infra/live/e2e-full-stack/up.sh` does and no chart deployment does. Re-bucket a probe from C
+# only for the lane it is run in, and record which lane — a C scored against a mounted fleet, or an
+# A scored against an unmounted one, is a number about the wiring rather than about the capability.
+#
+# One clause below remains true in **every** lane and is worth keeping separate: that server holds
+# no calorimetry *model*. Every input to it is a DSC, ARC or RC1 number a person measured, and it
+# fits, measures and predicts nothing. A probe asking it to *produce* calorimetry is bucket C
+# whatever is mounted.
 #
 # What does **not** exist, stated here so a reader meets it before the questions: no reaction
 # calorimetry and no heat-transfer model, so no adiabatic temperature rise, MTSR, TMR_ad, SADT or

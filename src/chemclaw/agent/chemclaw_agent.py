@@ -417,9 +417,18 @@ _INSTRUCTION_BLOCKS: tuple[PromptBlock, ...] = (
         "What this system does not hold. Everything above says what you can reach; this says what "
         "nothing can. Nothing here predicts a separation: there is no chromatographic model and "
         "no column database (HPLC, UHPLC, GC); no NMR or MS prediction; no solid-state data "
-        "(XRPD, DSC/TGA, particle size, polymorph forms); no stability, shelf-life or "
+        "(XRPD, DSC/TGA, particle size, polymorph forms); no stability study, shelf-life or "
         "batch-trending data; "
     ),
+    # **"stability" gained the word "study", for the reason "method store" left this list.**
+    # `estimate_stability_trend` shipped on 2026-09-15 and is an in-process tool bound on every
+    # turn, so a flat "no stability or shelf-life" denial was about to be read beside a tool that
+    # extrapolates a shelf life — the exact shape the `absent_unless` field exists to catch, except
+    # that keying it on an always-bound tool would drop the clause in every deployment and that
+    # would be wrong too. The distinction is the one the method-store comment draws: this system
+    # holds no stability *data* — no study, no batch history, no trending series — and it can now
+    # do arithmetic on timepoints a chemist supplies. The denial is of the content, and the word
+    # "study" is what makes a reader unable to take it as a denial of the arithmetic.
     # The two clauses a served fleet refutes, cut out as their own blocks and keyed the other way
     # round (`PromptBlock.absent_unless`). Each is one semicolon-separated item of the list above
     # and below, so a dropped one leaves the sentence grammatical — which is what makes the cut
@@ -436,8 +445,28 @@ _INSTRUCTION_BLOCKS: tuple[PromptBlock, ...] = (
     PromptBlock(
         "no instrument, equipment, inventory, scheduling or lab-automation interface; no "
         "calorimetry, heat- or mass-transfer, mixing or addition-rate model, so a computed "
-        "reaction enthalpy is never a process heat load, an adiabatic rise, a jacket duty or a "
-        "safe addition rate; no criticality assessment — no critical process parameter, proven "
+        "reaction enthalpy is never a process heat load or a safe addition rate; "
+    ),
+    # **A third clause a served fleet would refute — and the validator refused the block that said
+    # so, correctly.** `Chemclaw3-mcp`'s `thermalsafety` server computes an adiabatic temperature
+    # rise and a jacket heat-removal duty, so this sentence's "nor an adiabatic rise or a jacket
+    # duty" reads false beside it. Keyed on those two tool names, `cli/validate_prose_contract.py`
+    # refused the block: `build_langgraph_agent` never binds them, because **this tree declares no
+    # `thermalsafety` bundle** — only `CHEMCLAW_CONNECTORS_DIR` pointed at the fleet's own
+    # `manifests/` directory reaches that server, which is what `infra/live/e2e-full-stack/up.sh`
+    # does and what no chart deployment does. So an `absent_unless` there would have been a
+    # refutation that can never fire: the `map_to_hpc_identity` shape, in a prompt.
+    #
+    # The clause therefore stays true for every deployment this repository can build, and the
+    # sentence keeps only the half that is exact — that server holds no calorimetry *model*, since
+    # every input to it is a DSC, ARC or RC1 number a person measured and it fits and predicts
+    # nothing. What is **dropped rather than keyed** is the "adiabatic rise / jacket duty"
+    # consequence, because it is the one a mounted fleet makes wrong and nothing here can tell
+    # whether the fleet is mounted. Under-claiming a limit is the safe direction: a model told
+    # only that there is no calorimetry model will still reach a bound tool that computes from
+    # numbers it is given.
+    PromptBlock(
+        "no criticality assessment — no critical process parameter, proven "
         "acceptable range, design space, tech-transfer package or master batch record; and no "
         "project, programme, capacity, headcount or timeline data. When a question needs one of "
         "these, say so first and plainly — before anything else — then offer only what you can "

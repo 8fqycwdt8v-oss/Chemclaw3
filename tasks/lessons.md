@@ -2903,3 +2903,65 @@ were waited for here.
 **Rule: after `git merge origin/main` — or any base update — run `make db-migrate` before starting a
 local gate.** An error in a file the branch did not touch, on a table the branch did not add, is the
 signature: check the migration ledger before reaching for anything cleverer.
+
+
+## A figure recalled from the shape of the code is wrong about a third of the time
+
+**2026-09-15.** Three timing claims were written into prose from a sense of what the code does, and
+all three were wrong when measured:
+
+- `thermalsafety`'s tool docstring named `semenov_critical_ambient` as its slowest tool at "roughly
+  60 µs". The slowest is `tmr_ad` at 63.7 µs, because it runs a fixed 200-step bisection; semenov
+  stops on a tolerance and is 16.3 µs.
+- `suitability`'s tool docstring said the report was 10.6 µs and the primitives 0.3–1.4 µs. Measured:
+  29.8 µs and 1.9–4.9 µs. Most of each figure turned out to be pydantic building the result model,
+  not the chromatography — which is not something the shape of the code suggests at all.
+- The `CEILING_IS_ARGUED_ABSENT` table gave `props` at "11.7 ms of CPU". Measured on the engine it is
+  **1.8 µs**, four orders of magnitude out.
+
+Each conclusion survived its correction — every one of those tools is still far too cheap to need a
+concurrency ceiling — which is exactly why the habit is dangerous. The argument being right is what
+makes the number feel checked.
+
+**Rule: a number that will be written into prose gets measured in the same session it is written,
+even when the conclusion does not depend on it.** The cost is one script. Where the number exists to
+justify a decision, put the measurement in a test so the next reader does not have to trust the
+prose either.
+
+## Two numbers on different bases do not compare, however carefully each was measured
+
+**2026-09-15.** The `props` figure above was not simply wrong — it was measured, correctly, as a
+whole MCP round trip, and then written next to `thermalsafety`'s 63.7 µs, which was the engine
+alone. Both were real measurements of different things. The table then read as though `props` were
+200× the cost of `thermalsafety`, when on one basis it is the cheapest of the three by two orders of
+magnitude, and the exemption that looked least justified was the best justified.
+
+This is the same defect `CLAUDE.md` already records about the helper's tool count ("54 in-process
+against 24 bound, one subtraction that does not work"). It is not a careless-measurement failure; it
+is a units failure wearing measurement's clothes.
+
+**Rule: when several numbers appear in one table, state the basis once, above the table, and derive
+every entry the same way.** If two entries genuinely need different bases, that is two tables.
+
+## A refutation that cannot fire is a guard with no caller
+
+**2026-09-15.** `thermalsafety` serves an adiabatic temperature rise and a jacket heat-removal duty,
+and the agent's system prompt still says "a computed reaction enthalpy is never … an adiabatic rise,
+a jacket duty". The obvious fix was the mechanism already there: cut that clause into its own
+`PromptBlock(absent_unless={"adiabatic_temperature_rise", "heat_removal_capacity"})`, so a deployment
+that binds those tools stops being told the capability does not exist.
+
+`make prose-validate` refused it, and was right. **This tree declares no `thermalsafety` bundle**, so
+`build_langgraph_agent` can never bind those names; only a deployment pointing
+`CHEMCLAW_CONNECTORS_DIR` at the fleet's own `manifests/` directory reaches that server. The block
+would have been dropped from no deployment, ever — a clause keyed on a condition that cannot occur,
+which is `reject_widening` and `map_to_hpc_identity` in a prompt: the appearance of a control.
+
+What shipped instead was the honest half — the denial was narrowed to what is true in every lane
+(that server holds no calorimetry *model*; every input to it is a number a person measured) and the
+refutable consequence was dropped rather than keyed. Under-claiming a limit is the safe direction.
+
+**Rule: before keying anything on a tool name, check that this tree can bind it.** Writing a
+capability in one repository does not make it reachable from another; that takes a manifest, and a
+sibling repository's `manifests/` directory is not this one's surface. The validator knows this and
+is faster to ask than a checkout is to read.
