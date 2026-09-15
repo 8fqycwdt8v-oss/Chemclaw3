@@ -497,9 +497,16 @@ def _impurities(payload: dict[str, Any]) -> list[Impurity]:
             logger.warning("skipped an impurity row with neither name nor smiles: %r", row)
             continue
         area = row.get("area_percent")
+        # RRT reads the same way area% does, and for the reason `Impurity.rrt` gives: it is how a
+        # chemist names an unresolved peak, so a row that carries one and loses it here is a row
+        # that can no longer say *which* impurity it is about.
+        rrt = row.get("rrt")
         profile.append(
             Impurity(
-                name=name, smiles=smiles, area_percent=float(area) if area is not None else None
+                name=name,
+                smiles=smiles,
+                area_percent=float(area) if area is not None else None,
+                rrt=float(rrt) if rrt is not None else None,
             )
         )
     return profile

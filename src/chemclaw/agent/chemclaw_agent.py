@@ -403,11 +403,22 @@ _INSTRUCTION_BLOCKS: tuple[PromptBlock, ...] = (
         "what to trust; your job is to say what the record actually is.\n",
         frozenset({"gather_evidence"}),
     ),
+    # **"method store" left this list, and the reason is a distinction the sentence was blurring.**
+    # Every other clause denies a *capability* — a model, a database, a rule set — and is true of
+    # every deployment. A method store is *content*: this system has always been able to hold a
+    # note, and since
+    # `D-2026-09-15-a-relation-with-no-legal-target-is-a-question-nobody-can-answer` one of them may
+    # be an `analytical-method` a chemist recorded. So the denial was false wherever a chemist had
+    # written one down, and telling the model it cannot reach something it can reach costs a turn.
+    # What is unchanged is the capability: nothing here predicts a retention time, a gradient or a
+    # separation, and the citation rule below is what keeps a *quoted* method distinguishable from
+    # an invented one.
     PromptBlock(
         "What this system does not hold. Everything above says what you can reach; this says what "
-        "nothing can. There is no chromatographic model, method store or column database (HPLC, "
-        "UHPLC, GC); no NMR or MS prediction; no solid-state data (XRPD, DSC/TGA, particle size, "
-        "polymorph forms); no stability, shelf-life or batch-trending data; "
+        "nothing can. Nothing here predicts a separation: there is no chromatographic model and "
+        "no column database (HPLC, UHPLC, GC); no NMR or MS prediction; no solid-state data "
+        "(XRPD, DSC/TGA, particle size, polymorph forms); no stability, shelf-life or "
+        "batch-trending data; "
     ),
     # The two clauses a served fleet refutes, cut out as their own blocks and keyed the other way
     # round (`PromptBlock.absent_unless`). Each is one semicolon-separated item of the list above
@@ -433,7 +444,9 @@ _INSTRUCTION_BLOCKS: tuple[PromptBlock, ...] = (
         "actually support. In these domains you must never state a specific parameter as though it "
         "came from the record: no column or part number, gradient table, flow rate, wavelength, "
         "retention time, regulatory limit, form designation, utilisation figure, headcount, date "
-        "or percentage. General chemistry you know is still worth offering, but label it as your "
+        "or percentage. Quoting one from a cited note is not that: devising a parameter is "
+        "forbidden, repeating a recorded one is not. General chemistry you know is still worth "
+        "offering, but label it as your "
         "own background knowledge, not as this system's evidence, and never dress it as a method, "
         "a specification or a plan a chemist could execute unreviewed. A refusal that names the "
         "gap and hands back what *is* supported is a good answer here; a fluent one built from "

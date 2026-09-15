@@ -289,6 +289,10 @@ class ImpurityBinding(BaseModel):
     name: FieldBinding | None = None
     smiles: FieldBinding | None = None
     area_percent: FieldBinding | None = None
+    # The column this docstring has always named and could not read. A site's analytics table keys
+    # its unresolved peaks by RRT, and without a binding for it the profile arrived carrying a
+    # label and an area% with no way to say which peak either belonged to.
+    rrt: FieldBinding | None = None
 
     @model_validator(mode="after")
     def _identifies_something(self) -> Self:
