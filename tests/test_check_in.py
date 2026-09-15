@@ -265,3 +265,108 @@ def test_the_schedule_is_planned_only_when_a_deployment_asks(
     monkeypatch.setattr(settings, "check_in_enabled", True)
     assert "agent-check-in" in {job.schedule_id for job in planned_schedules()}
     assert "agent-check-in" in OWNED_SCHEDULE_IDS, "an unowned id can never be pruned"
+
+
+def test_the_mailbox_the_sweep_writes_is_one_a_reader_can_open() -> None:
+    """The round trip, and the defect it was written to catch was mine.
+
+    `CHECK_IN_KIND` shipped with no reader: `GET /digests` claims `DIGEST_KIND` only, so a check-in
+    would have landed in the mailbox nightly and nothing would ever have opened it — which is
+    `D-2026-08-27-a-digest-nobody-can-read-is-not-delivered` a second time, in a commit whose own
+    settings comment cited the ADR about it. Asserted end to end rather than at either half,
+    because both halves passed their own tests while the feature delivered nothing.
+    """
+    from fastapi.testclient import TestClient
+
+    from chemclaw.agent.session_events import claim_unconsumed, record_session_event
+    from chemclaw.api.app import create_app
+    from chemclaw.api.auth import Principal, require_principal
+    from chemclaw.durable.check_in import CHECK_IN_KIND
+    from chemclaw.durable.digest import digest_channel
+
+    async def _write() -> None:
+        await migrated_db_or_skip()
+        await claim_unconsumed(digest_channel(_OWNER))  # start clean
+        await record_session_event(
+            digest_channel(_OWNER),
+            CHECK_IN_KIND,
+            {
+                "requests": [
+                    {
+                        "request_id": "check-in-wire",
+                        "subject": "run the four conditions from round 3",
+                        "rationale": "the Suzuki screen is suspended on it",
+                        "asked_of": "lab-team",
+                        "open_days": 9,
+                        "days_left": 5,
+                    }
+                ]
+            },
+        )
+
+    asyncio.run(_write())
+
+    app = create_app(connector_factory=lambda _profile: [])
+    app.dependency_overrides[require_principal] = lambda: Principal(
+        oid=_OWNER, upn=f"{_OWNER}@corp"
+    )
+    with TestClient(app) as client:
+        first = client.get("/check-ins").json()
+        second = client.get("/check-ins").json()
+
+    assert [item["request_id"] for item in first] == ["check-in-wire"]
+    assert first[0]["open_days"] == 9 and first[0]["days_left"] == 5
+    assert first[0]["subject"] == "run the four conditions from round 3"
+    assert second == [], "the read is the consume, so a second call must not re-deliver it"
+
+
+def test_a_check_in_does_not_reach_another_chemists_mailbox() -> None:
+    """The channel is derived from the authenticated principal, so there is nothing to authorize.
+
+    Asserted anyway, because "nothing to authorize" is a claim about the derivation rather than a
+    property nobody has to check — and the row must be left *untouched* for its owner, not merely
+    filtered out of the wrong caller's answer.
+    """
+    from fastapi.testclient import TestClient
+
+    from chemclaw.agent.session_events import record_session_event
+    from chemclaw.api.app import create_app
+    from chemclaw.api.auth import Principal, require_principal
+    from chemclaw.durable.check_in import CHECK_IN_KIND
+    from chemclaw.durable.digest import digest_channel
+
+    async def _write() -> None:
+        await migrated_db_or_skip()
+        # Deleted rather than claimed: `claim_unconsumed` leaves the rows it consumed in place, so
+        # a neighbour test's already-consumed row would sit in this channel and the "untouched"
+        # assertion below would read its `consumed_at` as this test's doing. Found by running the
+        # file rather than the test.
+        async with db.connection(_dsn()) as conn:
+            await conn.execute(
+                "DELETE FROM session_events WHERE session_id = ANY(%s)",
+                ([digest_channel(_OWNER), digest_channel(_OTHER)],),
+            )
+        await record_session_event(
+            digest_channel(_OWNER), CHECK_IN_KIND, {"requests": [{"request_id": "check-in-mine"}]}
+        )
+
+    asyncio.run(_write())
+
+    app = create_app(connector_factory=lambda _profile: [])
+    app.dependency_overrides[require_principal] = lambda: Principal(
+        oid=_OTHER, upn=f"{_OTHER}@corp"
+    )
+    with TestClient(app) as client:
+        assert client.get("/check-ins").json() == [], "another chemist's check-in was served"
+
+    async def _untouched() -> None:
+        async with db.connection(_dsn()) as conn:
+            cursor = await conn.execute(
+                "SELECT consumed_at FROM session_events WHERE session_id = %s",
+                (digest_channel(_OWNER),),
+            )
+            assert [row[0] for row in await cursor.fetchall()] == [None], (
+                "the owner's row was consumed by somebody else's read"
+            )
+
+    asyncio.run(_untouched())

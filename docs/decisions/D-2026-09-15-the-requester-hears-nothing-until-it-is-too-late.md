@@ -71,6 +71,36 @@ scanned `source.split('\"\"\"')[2]` — measured at **18% of the file** — so a
 the first class docstring passed; planting one at the bottom proved the AST version catches what the
 slice version missed.
 
+## The mailbox needed a reader, and the first version of this shipped without one
+
+Caught before merge, and worth recording because it is the defect this ADR's own settings comment
+cites. `CHECK_IN_KIND` was written into the digest mailbox and **nothing claimed it**:
+`read_digests` claims `DIGEST_KIND` only, so a check-in would have landed nightly in a mailbox
+nobody opens while the sweep reported success — `D-2026-08-27-a-digest-nobody-can-read-is-not-delivered`
+a second time, and `D-2026-09-15-a-watch-that-nothing-evaluates-is-a-promise-a-deployment-cannot-keep`
+a second time, in a commit that cites the latter.
+
+Both halves passed their own tests. The activity grouped correctly and the route returned digests
+correctly; what nothing asserted was that the thing written could be read.
+`test_the_mailbox_the_sweep_writes_is_one_a_reader_can_open` is that assertion, end to end.
+
+`GET /check-ins` is the reader — **a route of its own rather than a second list on `/digests`**,
+because that route answers `list[Digest]`: folding these in would mean either changing its response
+into an object, which breaks a client reading it today, or widening `Digest` with fields that have
+nothing to do with a standing query. A check-in and a digest ask the reader for different things.
+They share a mailbox and nothing else.
+
+## The failure stance is the opposite of its neighbours'
+
+`CheckInWorkflow` is in `_MUST_FAIL`, where every other nightly sweep on the queue is in
+`_MAY_PARK`. Those park because nobody is waiting on them and a bug should wait for a fix. Here
+**silence is the output**: a check-in that delivers nothing is indistinguishable from "nothing of
+yours is blocked", which is the good state — so a parked run reads as reassurance. Under
+`ScheduleOverlapPolicy.SKIP` one parked run then skips every subsequent night, and the requester
+goes back to hearing nothing until expiry. That is the defect this sweep exists to fix, reproduced
+by its own failure mode. A failure reaches an operator through `ScheduleHealth.last_outcome`; a
+park reaches nobody.
+
 ## Off by default
 
 `check_in_enabled = False`. It delivers to a mailbox and an outbound channel, so a deployment that
@@ -95,3 +125,12 @@ avoid.
   already run and already address `asked_of`.
 - **It does not interpret.** See above. A chemist reading "open 9 days, 5 left" knows more than
   they did; they do not learn anything this system inferred.
+- **`Chemclaw3_ui` does not call `/check-ins` yet.** The backend is complete and the route is
+  reachable; until the UI reads it, a deployment sees check-ins only through a configured outbound
+  channel. That is a companion-repo change and is queued in `docs/planning/BACKLOG.md` rather than
+  left to be discovered, which is what `check_in_enabled`'s own comment means by naming what a
+  deployment needs before turning it on.
+- **It has no archived replay history.** `tests/test_workflow_replay.py` names it as uncovered with
+  the reason: this control catches today's code refusing a history the *shipped* code wrote, and
+  this workflow has never shipped, so a fixture recorded now would be the self-certifying shape
+  `recorded_workflow_histories.py` rejects. It earns one at its first change.

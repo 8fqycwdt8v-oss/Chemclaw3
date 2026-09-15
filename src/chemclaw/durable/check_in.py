@@ -151,7 +151,16 @@ def _message(item: CheckIn) -> OutboundMessage:
 
 
 @durable_workflow("background")
-@workflow.defn
+# **Fails rather than parks**, and for this sweep that is not the usual periodic-job
+# argument (`D-2026-08-27-a-periodic-job-decides-for-itself-whether-a-bug-should-park-it`).
+# Its neighbours on the nightly queue park because nobody is waiting on them and a bug
+# should wait for a fix. Here silence *is* the output: a check-in that delivers nothing is
+# indistinguishable from "nothing of yours is blocked", which is the good state — so a
+# parked run reads as reassurance. Under `ScheduleOverlapPolicy.SKIP` one parked run then
+# skips every subsequent night, and a requester goes back to hearing nothing until expiry,
+# which is precisely the defect this whole sweep exists to fix. A failure reaches an
+# operator through `ScheduleHealth.last_outcome`; a park reaches nobody.
+@workflow.defn(failure_exception_types=[Exception])
 class CheckInWorkflow:
     """Tell each requester what of their own work is still blocked."""
 

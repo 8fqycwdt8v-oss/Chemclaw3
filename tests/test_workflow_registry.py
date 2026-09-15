@@ -256,6 +256,13 @@ _MUST_FAIL = frozenset(
         # through `ScheduleHealth.last_outcome`, a parked one reaches nobody while the index it
         # rebuilds goes stale. See the comment on the workflow itself.
         "NoteReindexWorkflow",
+        # The check-in over blocked work. Schedule-only, and the one nightly sweep that fails
+        # rather than parks: its output *is* the absence of silence, so a parked run reads as
+        # "nothing of yours is blocked" — the good state — while under `SKIP` it silently
+        # skips every subsequent night and the requester goes back to hearing nothing until
+        # expiry. That is the defect the sweep was built to fix, reproduced by its own
+        # failure mode.
+        "CheckInWorkflow",
         # An uncapped second starter beside the Schedule: the live lane's backfill, which awaits
         # `handle.result()`.
         "ElnSyncWorkflow",
