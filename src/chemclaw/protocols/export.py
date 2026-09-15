@@ -4,8 +4,11 @@
 CSV export" among the five things written once because there is one design shape,
 `protocols/models.py` repeats it in the same breath, and `ProtocolArm.arm_id`'s own comment calls
 itself "the CSV row key". Measured before this file: `grep -rn "csv" src/chemclaw/protocols/`
-returned three prose hits and no executable line, and the only `import csv` in `src/` is in ingest
-readers. That is the shape `D-2026-09-14-a-declared-kind-with-no-producer-is-not-a-channel` names
+returned three prose hits and no executable line. (That sentence went on "and the only `import
+csv` in `src/` is in ingest readers", which was wrong when written — there were three, and
+`cli/live_data.py` is a CLI. `D-2026-09-15` corrects it in the ADR that made the claim; this is the
+docstring that made it too.) That is the shape
+`D-2026-09-14-a-declared-kind-with-no-producer-is-not-a-channel` names
 one seam over — a declared artefact with no producer — and the fix is the same: build it, or stop
 claiming it.
 

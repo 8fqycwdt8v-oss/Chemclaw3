@@ -48,7 +48,7 @@ touched still mint undated notes. So the pair, taken together, silenced more tha
 
 **The guard that should have caught it could not.** `test_every_miner_dates_the_note_it_mints` is an
 AST scan asserting the *keyword* `minted_on` appears in each builder call. All three miners reset to
-`minted_on=None` — the exact pre-fix behaviour — and the file ran **38 passed**, including that test
+`minted_on=None` — the exact pre-fix behaviour — and the file ran **32 passed** — its whole collection, including that test
 and its failure message. Its sibling in `tests/test_observations.py` asserts
 `ast.unparse(value) == "workflow_safe_today()"`; this one was written from it with that half
 dropped.
@@ -65,7 +65,7 @@ dropped.
 
 Mis-aiming one of those mutations found a sixth gap nobody had looked for: removing
 `@durable_activity("background")` from `acknowledge_digest` — a **live** activity on the digest's
-success path — left 35 tests green across the four files that could plausibly hold it.
+success path — left 34 tests green across the four files that could plausibly hold it.
 
 ### A route that published a clean bill the corpus never gave
 
@@ -153,7 +153,7 @@ cheaper, 33% faster" over one. A model that delegates **selectively** therefore 
 delegates as a policy — the selection effect this module's own docstring indicts in the corpus it
 replaces.
 
-### Nine ADR sentences falsified by the code they describe
+### Eleven ADR sentences, across nine records, falsified by the code they describe
 
 Merged ADRs are never edited, so they are corrected here.
 
@@ -167,7 +167,6 @@ Merged ADRs are never edited, so they are corrected here.
 | `an-artefact-three-files-name-and-none-produces` | "the only `import csv` anywhere in `src/` was in ingest readers" | three, one of them `cli/live_data.py` |
 | `the-seam-shipped-a-replay-break…` | quotes the record it corrects as saying "`pyexec` is named in five files" | that record says "five **times** in `up.sh`" and lists four locations; the correction's substance is right and its quotation is invented |
 | `an-undated-note-is-not-news-every-hour` | ":63 — the 31 already-written undated notes" | 32, as its own `:35` says |
-| `a-durable-job-may-start-a-turn…` | "at roughly fifteen call sites" | 21 |
 | `a-pointer-is-not-a-deliverable` | "The pattern admits no separator, no `..` and no leading dot" | `^[A-Za-z0-9][A-Za-z0-9._-]*$` admits `..` after the first character — harmless, since no separator can accompany it, but it is a claim about a traversal control |
 
 ## Decision
@@ -221,8 +220,8 @@ about the same object — the rest need a different object, a wider set, or a di
 **A number in prose is a claim about a commit, and this programme kept proving it on itself.** Two
 of the stale figures above went stale *inside their own merge range*, falsified by a sibling commit
 in the same pull request. `tests/test_probe_coverage.py` cites
-`D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` two paragraphs above a figure that was
-wrong the day it was written.
+`D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` two tests below a figure that was wrong
+the day it was written.
 
 ## What keeps it true
 

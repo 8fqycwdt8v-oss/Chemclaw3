@@ -2598,12 +2598,18 @@ asserting something *stronger about the same object*:
    tools; the agent binds 114. The excluded set contained the exact bundle the guard was about.
    Fix: derive the universe from what actually ships, and assert the universe is non-empty so a
    glob that stops matching is red rather than vacuous.
+
+   **This is the same axis as cause 3 and the entry first listed them as unrelated.** Cause 3 (the
+   fixture returns an empty set) is the degenerate case of 6: same object — the universe — and the
+   same repair. Keep both numbers because the *tell* differs (3 shows up as a loop body that never
+   runs; 6 as one that runs over the wrong things), but diagnose them together.
 7. **Existence stands in for reachability.** A symbol can exist, be referenced, and not be served —
    `@activity.defn` without `@durable_activity` wedges a replay exactly as deletion would. Fix:
    assert the registration, not the symbol.
 
-So the diagnostic is now seven-way, and the branch matters: 1–4 want a different payload or a second
-call, 5 wants a different assertion, 6 wants a different universe, 7 wants a different property.
+So the diagnostic is seven-way and the branch matters: 1, 2 and 4 want a different payload or a
+second call; 3 and 6 want a different universe (3 is 6's degenerate case); 5 wants a different
+assertion; 7 wants a different property.
 **Do not reach for a bigger mutation** — a bigger mutation that still goes green tells you nothing
 about which of the seven you are in.
 
@@ -2612,3 +2618,38 @@ stale *inside their own merge range*: a probe-coverage figure measured on 2026-0
 because a sibling commit in the same pull request added 36 probes, in a docstring citing
 `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` two paragraphs above. Re-measure a figure
 at the end of the branch, not when you first take it — a merge range is a commit too.
+
+## Round two: the repair was worse than the defect twice, and cause (e) shipped inside the entry defining it (2026-09-15)
+
+**What happened.** Five fresh-context reviewers were pointed at the *fixes* from the entry above
+rather than at the original code, and told to attack the premise each fix rests on. Seven of the
+fixes were wrong. Two were worse than what they replaced:
+
+- the backfill's trailing flush, moved into a `finally` with a blanket `except`, turned a loud
+  failure into `wrote 4 note(s)` and exit **0** with nothing in git — on the *common* path;
+- `BatchingNoteWriter.write` returning `written=True` at accept time made
+  `chemclaw_notes_recorded_total` count notes that provably never reached the graph, under a
+  metric declared as "Notes written into the knowledge graph".
+
+And the delegation bound, written to stop a selection effect, both missed the effect (it excluded
+`incomplete`, so an arm that *crashed* on the hard tasks reproduced the headline verbatim) and made
+the instrument unusable — a Monte-Carlo put the per-repeat delegation needed for an even chance of
+any report at ~87.4%, **rising** with the repeat count.
+
+**The rule: a repair has a failure mode of its own, and it is usually the mirror of the defect.**
+Before shipping a fix, ask what the *inverse* error looks like and check you have not just bought
+it. Under-counting notes became over-counting; a silent drop became a silent success; a bound that
+admitted a selection effect became a bound that admits no data. In each case one more mutation —
+"make the thing the fix depends on fail" — would have shown it.
+
+**And cause (e) shipped twice in the commit that added cause (e) to the list above.** The miner
+guard was "fixed" from asserting the keyword to asserting `ast.unparse(value).startswith(
+"supported_from(")` — the callee's *name* — so `supported_from(sorted(ids)[1:], by_id)`, the
+original defect in a new dress, passed. The route guard was written asserting that the keywords
+`failures=` and `precedent=` appear, so `failures=[], precedent=[]` passed at 190 green. Both
+docstrings argued that driving the behaviour would "prove the fixture, not the wiring". That
+argument was wrong both times and is worth naming as its own tell:
+
+**"Driving this would only test the fixture" is the sentence that precedes a vacuous guard.** It is
+occasionally true and it is mostly a reason not to write the harder test. Both were 20 lines, and
+the pattern for one of them was already in the file it belonged in.

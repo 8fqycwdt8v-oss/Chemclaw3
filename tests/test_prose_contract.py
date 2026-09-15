@@ -55,6 +55,22 @@ def _model_facing_descriptions() -> dict[str, str]:
     The bundles are read off their own source with `ast`: their `@server.tool()` docstrings
     ship to the model through a served manifest, and importing them here would drag each
     bundle's dependency closure into a lane that does not need it.
+
+    **This is not the whole model-facing surface, and saying that it was is the same error one
+    level out.** `D-2026-09-15`'s "What keeps it true" claimed these guards run "over the whole
+    model-facing surface, bundles included". Measured, three classes are still outside: the
+    `description:` on each of the 14 `workflow:` job entries in the connector manifests — which
+    `connectors/jobs.py` assembles into a tool docstring and calls "the job's model-facing
+    documentation", and which is 100% of the `results` bundle since it has no `server/tools.py` at
+    all — the bundle `SKILL.md` files, and `agent/chemclaw_agent.py`'s `_INSTRUCTION_BLOCKS`.
+    Driven: every forbidden string at once in `connectors/results/connector.yaml`'s job description
+    left this file green.
+
+    Widening the universe is coupled to narrowing the patterns and is a `docs/planning/BACKLOG.md`
+    row for that reason: shipped prose in those three places legitimately *names* the removed tier
+    and the removed gate in order to say they are gone ("there is no DFT tier", "the PR gate … was
+    deleted"), so a wider scan with these patterns would red on correct text. What is asserted here
+    is what is scanned, and the docstring now says which that is.
     """
     import ast
     import inspect

@@ -222,6 +222,32 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
+- [ ] **The model-facing prose guards scan the in-process registry and four bundles, not the
+      surface** — [M], found 2026-09-15 in the round-two review.
+      `tests/test_prose_contract.py::test_no_tool_description_tells_the_model_about_a_tier_that_is_gone`
+      and `::test_no_tool_description_tells_the_model_to_expect_a_review_gate` read
+      `registered_tools()` plus `glob("connectors/*/server/tools.py")`. Three classes of text the
+      model is sent are outside that: the `description:` on the 14 `workflow:` job entries in the
+      connector manifests, which `src/chemclaw/connectors/jobs.py:226` assembles into a tool
+      docstring and its own comment calls "the job's model-facing documentation" — and which is
+      **all** of the `results` bundle, since it ships no `server/tools.py`; the bundle skills
+      (`connectors/{bo,calc,safety}/skills/*/SKILL.md`); and
+      `agent/chemclaw_agent.py::_INSTRUCTION_BLOCKS`. Driven: every forbidden string at once in
+      `connectors/results/connector.yaml`'s job `description:` left both guards green.
+
+      **The universe and the patterns are one problem, not two, which is why this is a row rather
+      than a widening.** Shipped prose in those places names the removed tier and the removed gate
+      *in order to say they are gone* — `connectors/calc/connector.yaml:23` "there is no DFT tier",
+      `agent/chemclaw_agent.py:240` "never present one as if it were DFT",
+      `connectors/safety/skills/safety-screening/SKILL.md:77` "the PR gate … was deleted",
+      `skills/deep-research/SKILL.md:95` "propose the next point(s)" — so widening with today's
+      patterns reds on correct text. Both directions are already measurable: the review-gate
+      pattern also misses `a PR`/`PRs`, "awaits review", "staged behind the knowledge gate" and
+      "submits the finding to the review queue". The shape that works is probably sentence-level
+      with a negation/past-tense exclusion; measure the false-positive rate over the three classes
+      before building it, the way
+      `D-2026-09-11-the-debt-was-in-the-claims-not-in-the-code` measured 82.9% and declined.
+
 - [ ] **An agent-recorded note the model could not date reaches no subscriber who has a
       watermark** — [M], found 2026-09-15 in the review of the wave 2/4/7 merge.
       `durable/digest._is_new` reads an absent `valid_from` as *open-ended* — true for as long as
@@ -232,7 +258,7 @@ topic).
       `experiment-proposal` 1). Two producers are closed —
       `retrieval.harness.report_note(drafted_on=…)` and
       `durable.job_record.note_with_run_provenance(ran_on=…)`, both cases where validity and
-      arrival are the same day by construction. `agent/graph_tools.py:591`
+      arrival are the same day by construction. `agent/graph_tools.py:527`
       (`record_knowledge_note`) is not: the model may legitimately not know when a fact became
       true, and defaulting `valid_from` to today would trade a silence for a false claim about
       chemistry. **The real fix is an arrival signal separate from `valid_from`**, which the
@@ -828,7 +854,7 @@ only holds defects can only ever restore the system to what it already intended 
 
 - [ ] **The probed surface has a long thin tail: 39 of 114 tools rest on one probe** — [S],
       measured 2026-09-15 (it read 45, measured 2026-09-14 and stale inside its own merge range —
-      `process-chemistry.yaml` added 36 probes in it), and it replaces the concentration row rather than continuing it.
+      `feba79b` added 36 probes in it, 28 of them `process-chemistry.yaml`), and it replaces the concentration row rather than continuing it.
 
       **The concentration is gone and the row's headline was stale.** `gather_evidence` is in
       **139 of 333** probes — **41.7%**, against the 50% (116/232) the headline was written from and

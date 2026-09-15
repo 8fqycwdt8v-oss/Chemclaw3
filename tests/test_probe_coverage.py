@@ -206,7 +206,7 @@ def test_no_tools_only_coverage_is_a_question_the_surface_cannot_answer() -> Non
     is thin and not hollow, and this assertion is what keeps it that way.
 
     That figure read 45 for one day and was stale on the commit that wrote it: `process-chemistry`
-    (+661 lines of probes) landed in the same merge range, which is
+    (28 probes) and `delegation` (8) landed in the same merge range, which is
     `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` happening to a paragraph that cites
     it two tests below. The **zero** is the load-bearing half and is what the assertion holds; the
     ratio is a snapshot and is dated so a reader can tell which it is.
@@ -250,8 +250,8 @@ def test_the_corpus_is_not_concentrated_on_one_tool() -> None:
     because it is current — a paragraph that reads as a live measurement is the thing
     `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` is about, and the live number is
     whatever this assertion computes. Which is why the 126-of-297 this said first was wrong within
-    its own merge: `process-chemistry.yaml` added 36 probes in the same range and nothing re-ran the
-    count.
+    its own merge: the same range added 36 probes — 28 in `process-chemistry.yaml`, 8 in
+    `delegation.yaml` — and nothing re-ran the count.
     """
     probes = _probes()
     counts: dict[str, int] = {}
