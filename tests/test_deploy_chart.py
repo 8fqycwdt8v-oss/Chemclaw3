@@ -2736,9 +2736,22 @@ def _alert_expressions() -> str:
     tells an operator to break the ratio down with three other series — so any check that reads the
     file as text will call a metric "alerted" because a sentence mentioned it. That is the exact
     shape of false coverage these tests exist to prevent, so the expressions are extracted first.
+
+    **The terminator is `for` *or* `labels` *or* `annotations`, and reading only `for` was this
+    function doing the thing it exists to prevent.** `for` is optional in a Prometheus rule — it
+    means "fire on the first evaluation" when omitted — and every one of the 51 rules here happened
+    to carry one, so the narrower pattern was correct by coincidence rather than by construction.
+    The first rule without one (`ChemclawBudgetNearingItsCap`, whose trigger is a step rather than a
+    rate) made the match run past its own annotations and the Go-template comment after them into
+    the *next* rule's `for`, so a metric named in somebody's prose read as alerted — false coverage,
+    from the guard against false coverage. `labels` and `annotations` are the only other keys that
+    can follow `expr`, and every rule has both. Verified behaviour-preserving: over the 51 rules
+    that predate this, the two patterns extract byte-identical text.
     """
     rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
-    return " ".join(re.findall(r"expr:\s*(?:>-\s*)?((?:.|\n)*?)\n\s*for:", rule))
+    return " ".join(
+        re.findall(r"expr:\s*(?:>-\s*)?((?:.|\n)*?)\n\s*(?:for|labels|annotations):", rule)
+    )
 
 
 def _series_referenced(text: str) -> set[str]:

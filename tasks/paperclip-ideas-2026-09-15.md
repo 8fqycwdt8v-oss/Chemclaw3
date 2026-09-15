@@ -35,7 +35,14 @@ belonging to another effort. Overwriting it to satisfy a convention would destro
       `record` only, since the front door checks twice per turn. Three declared registers went
       red, the sharpest being `_ACTOR_SCOPED_ONLY` — a `session_id` predicate there would have
       made "delete the conversation" a free quota reset.
-- [ ] **B — the answer's premise is re-checked before it is applied**
+- [x] **B — the answer's premise is re-checked before it is applied** —
+      `D-2026-09-15-an-answer-days-later-is-answered-against-a-corpus-that-moved`. The
+      fingerprint design was built on paper and abandoned: this tree has no arrival signal for
+      a note, and the two readings would come from two pods whose knowledge checkouts drift.
+      What ships asks the narrower question at *both* ends — the ask refuses an already-broken
+      premise, which is what makes an answer-time break mean *since*, by construction. The
+      premise is `cited_ids(subject + rationale)`, derived and never an argument. Found and
+      fixed a latent bug in `_alert_expressions()` on the way past.
 - [ ] **C — a flagged answer is routed back for another pass, counting only agent-initiated rounds**
 - [ ] **D — an agent heartbeat: the agent wakes on a timer to report and ask, never to decide**
 

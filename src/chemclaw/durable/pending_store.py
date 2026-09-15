@@ -44,6 +44,11 @@ class PendingRequest(BaseModel):
     answered_by: str = ""
     answer: dict[str, Any] = Field(default_factory=dict)
     created_at: str = ""
+    #: The knowledge notes the question rests on, so the answer route can ask whether they still
+    #: hold (`kg/premise.py`). Read out of the row rather than recomputed from `subject`, because a
+    #: re-ask may reword the question and the premise that was *validated* at ask time is the one an
+    #: answer must be checked against.
+    premise_note_ids: list[str] = Field(default_factory=list)
 
 
 #: The most rows one `open_requests` call will serve, however much a caller asks for. A module
@@ -109,8 +114,8 @@ def _connect() -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]
 _OPEN = """
     INSERT INTO pending_requests
         (request_id, kind, subject, rationale, asked_of, requested_by, session_id,
-         correlation_id, due_at, run_id)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         correlation_id, premise_note_ids, due_at, run_id)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (request_id) DO UPDATE SET
         kind = EXCLUDED.kind,
         subject = EXCLUDED.subject,
@@ -127,6 +132,12 @@ _OPEN = """
         requested_by = EXCLUDED.requested_by,
         session_id = EXCLUDED.session_id,
         correlation_id = EXCLUDED.correlation_id,
+        -- Refreshed for the same reason, and with a sharper edge: a re-ask is a *new* question that
+        -- was validated against today's corpus, so keeping the previous cycle's premise would check
+        -- an answer against notes this question never rested on — and, where the old cycle cited a
+        -- note that has since been retired, would refuse every answer to a question whose own
+        -- premise is whole.
+        premise_note_ids = EXCLUDED.premise_note_ids,
         state = 'waiting',
         answered_at = NULL,
         answered_by = '',
@@ -227,7 +238,7 @@ _REMIND = """
 
 _COLUMNS = (
     "request_id, kind, subject, rationale, asked_of, requested_by, session_id, state, "
-    "due_at, reminders, answered_at, answered_by, answer, created_at"
+    "due_at, reminders, answered_at, answered_by, answer, created_at, premise_note_ids"
 )
 
 
@@ -242,6 +253,7 @@ async def open_request(
     session_id: str,
     correlation_id: str,
     due_at: datetime,
+    premise_note_ids: list[str] | None = None,
     run_id: str = "",
 ) -> None:
     """Record a wait as open — archiving the previous cycle's answer when there is one.
@@ -273,6 +285,7 @@ async def open_request(
                 requested_by,
                 session_id,
                 correlation_id,
+                list(premise_note_ids or []),
                 due_at,
                 run_id,
             ),
@@ -323,6 +336,7 @@ def _row(values: tuple[Any, ...]) -> PendingRequest:
         answered_by=str(values[11]),
         answer=dict(values[12] or {}),
         created_at=values[13].isoformat() if values[13] else "",
+        premise_note_ids=list(values[14] or []),
     )
 
 

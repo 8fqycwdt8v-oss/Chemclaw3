@@ -83,6 +83,13 @@ class AwaitRequest(BaseModel):
     requested_by: str = ""
     session_id: str = ""
     correlation_id: str = ""
+    #: The knowledge notes this question rests on — derived from the `[[wikilinks]]` the question's
+    #: own `subject` and `rationale` cite, never taken as an argument, so it cannot be omitted.
+    #: `api/routes/pending.py` refuses an answer once any of them has been superseded or refuted
+    #: (`D-2026-09-15-an-answer-days-later-is-answered-against-a-corpus-that-moved`). A question
+    #: citing nothing carries an empty list and the check is a no-op, which is honest rather than
+    #: silent: the control covers exactly the questions that say what they rest on.
+    premise_note_ids: list[str] = Field(default_factory=list)
     #: How long the question stays open. Clamped against `awaiting_max_days` by
     #: `open_pending_request_activity` — one place, so no caller can pass an unbounded value.
     deadline_days: float = 7.0
@@ -273,6 +280,7 @@ async def open_pending_request_activity(payload: _OpenInput) -> str:
         requested_by=payload.request.requested_by,
         session_id=payload.request.session_id,
         correlation_id=payload.request.correlation_id,
+        premise_note_ids=payload.request.premise_note_ids,
         due_at=due_at,
         run_id=payload.run_id,
     )
