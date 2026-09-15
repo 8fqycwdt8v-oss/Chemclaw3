@@ -32,6 +32,7 @@ from chemclaw.durable.template_job import (
     TEMPLATE_JOB_FAMILY,
     TemplateRunInput,
     failed_template_record,
+    template_fingerprint,
     template_job_record,
 )
 from chemclaw.templates.manifest import Template
@@ -143,8 +144,15 @@ def test_a_failed_template_run_records_where_it_stopped_and_keeps_the_steps_that
     assert record.summary == ""
     assert "write" in record.failure_reason
     assert "the model timed out" in record.failure_reason
-    # The four steps a five-step procedure completed before dying are real work, not noise.
-    assert record.result == {"steps": completed}
+    # The four steps a five-step procedure completed before dying are real work, not noise — and
+    # since they are what the next attempt resumes from, the row also says which version of the
+    # template produced them. A run's id is a hash of the name and the inputs and says nothing
+    # about the steps, so without this a relaunch after an edit would fold one procedure's results
+    # into another's.
+    assert record.result == {
+        "steps": completed,
+        "template_fingerprint": template_fingerprint(_run().template),
+    }
 
 
 def test_both_records_name_the_run_as_its_own_correlation() -> None:
@@ -205,6 +213,15 @@ def test_a_real_template_run_writes_the_row_and_a_failing_one_writes_its_own() -
     async def _capture(record: JobRecord) -> None:
         written.append(record)
 
+    @activity.defn(name="completed_steps")
+    async def _resume(request: Any) -> dict[str, Any]:
+        """Nothing to resume, which is what a first run of any id gets.
+
+        Registered because the sequencer now asks this before its first step, so a rig that omits
+        it measures an unserved activity rather than the record it is about.
+        """
+        return {}
+
     @activity.defn(name="run_agent_step")
     async def _agent(step: Any) -> str:
         # The activity is registered by name, so the payload arrives as the raw dict rather than
@@ -230,7 +247,7 @@ def test_a_real_template_run_writes_the_row_and_a_failing_one_writes_its_own() -
                 client,
                 task_queue=settings.background_task_queue,
                 workflows=[TemplateWorkflow],
-                activities=[_capture, _agent],
+                activities=[_capture, _agent, _resume],
             ):
                 await client.execute_workflow(
                     TemplateWorkflow.run,
