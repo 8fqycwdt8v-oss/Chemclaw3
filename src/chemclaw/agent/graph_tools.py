@@ -503,9 +503,16 @@ async def find_knowledge_gaps() -> GraphGaps:
     projects — there is no project field on a note. Reporting them as projects is how a live run
     came to state a confident portfolio status the record could not support.
 
+    `undistilled_playbook_ids` is the other half and answers a different question: not "which
+    topics have no playbook" but "which playbooks record a recurrence nobody has generalised".
+    Each is a note id you can open with `expand_note` and whose cited reactions you can read — and
+    the `playbook-distillation` skill is the judgment for turning one into a transferable rule. If
+    a chemist asks what the system has spotted but not yet made sense of, this is the list.
+
     Returns:
         Counts per note type, isolated (unlinked) notes, tags with evidence but no distillation,
-        the most-cited hub notes, and any dangling links in the served graph.
+        the playbooks still awaiting a rule, the most-cited hub notes, and any dangling links in
+        the served graph.
     """
     directory = settings.knowledge_path
     graph = await asyncio.to_thread(build_graph, directory)
