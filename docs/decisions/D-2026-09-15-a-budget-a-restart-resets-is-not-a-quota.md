@@ -36,7 +36,7 @@ the turn that was lost to it. Nothing said "80% spent" while there was still roo
 
 ### The per-user window is durable; the per-session one is not
 
-`infra/sql/100_budget_usage.sql` and `api/budget_store.py`. Engaged wherever
+`infra/sql/102_budget_usage.sql` and `api/budget_store.py`. Engaged wherever
 `session_store == "postgres"` — the same switch `agent/turn_cost.default_turn_cost_sink` and the
 audit sink read, rather than a `budget_durable` flag beside it, which could only restate that or
 contradict it (the argument `durable/schedules.py` makes three times over for asking the manifests
