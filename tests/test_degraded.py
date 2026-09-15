@@ -80,7 +80,7 @@ _EXPECTED_SUBSYSTEMS = {
     # probe surface — down with it. Counted because the alternative is a gauge that quietly stops
     # moving, which reads as "no durable work" rather than as "nobody asked".
     "jobs_in_flight",
-    # `agent/protocol_design_tools._recorded_failures`, on a corpus that cannot be read. The check
+    # `agent/protocol_design_tools.recorded_failures`, on a corpus that cannot be read. The check
     # it feeds reports "no recorded failure bears on this design" either way, so a lookup that has
     # silently stopped working returns every draft clean — which is the one state a chemist would
     # read as reassurance. Swallowed deliberately (a corpus outage must not refuse a design), and
@@ -123,7 +123,7 @@ _EXPECTED_SUBSYSTEMS = {
     # counter, so from outside they were the same silence as a genuinely empty portfolio.
     "commitment_export",
     "plan_approval",
-    # `agent/protocol_design_tools._uncited_precedent`, on a reaction index that cannot be reached.
+    # `agent/protocol_design_tools.uncited_precedent`, on a reaction index that cannot be reached.
     # The same shape as `failure_memory` one function over and counted for the same reason, with
     # one addition: this search reaches Postgres, so "cannot be reached" is the ordinary condition
     # of a laptop rather than a rare fault — and `precedent_consulted`'s passing text therefore

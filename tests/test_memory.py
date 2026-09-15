@@ -585,18 +585,56 @@ def test_a_synthesized_note_is_dated_by_its_evidence_and_not_by_the_clock() -> N
     first = supported_from(["r1", "r2"], runs)
     again = supported_from(["r1", "r2"], runs)
 
-    assert first == again == date(2026, 7, 31)
+    assert first == again == date(2026, 7, 1)
 
 
-def test_the_date_is_the_latest_run_rather_than_the_earliest() -> None:
-    """A pattern became knowable when the last run supporting it happened.
+def test_a_cluster_that_gains_a_member_keeps_both_its_id_and_its_date() -> None:
+    """The one assertion that would have caught the defect this function shipped with.
 
-    Dating it from the first would claim the knowledge before the evidence for it existed, which
-    `Note.is_current` would then serve as current evidence for a period it could not have been.
+    `supported_from` was `max(performed_at)` over the members, and its docstring justified that
+    with "when a member joins, the id changes too, so the identity and the date move together or
+    not at all". `memory/ids.stable_id` hashes `min(member_ids)` *deliberately* — its own docstring
+    says hashing the set would mint a new id on every cluster growth — so the premise was false and
+    nothing asserted it either way.
+
+    What that cost: a nightly ELN sync adds a member, the id does not move, `valid_from` rises, and
+    `digest._is_new` reports a note the subscriber already holds as news. The silent direction is
+    worse — a member dropping out, or a `corpus_complete=False` partial read, lowers `valid_from`
+    under one id, and `_is_new` then answers `False` forever for a note whose content just changed.
+
+    So the property is asserted as the docstring states it: over a *growing* cluster, id and date
+    are both invariant. `max` fails this; the anchor does not.
     """
-    runs = {"r1": _dated("r1", date(2026, 7, 1)), "r2": _dated("r2", date(2026, 7, 31))}
+    runs = {
+        "r1": _dated("r1", date(2026, 7, 1)),
+        "r2": _dated("r2", date(2026, 7, 31)),
+        "r3": _dated("r3", date(2026, 8, 20)),
+    }
+    before, after = ["r1", "r2"], ["r1", "r2", "r3"]
 
-    assert supported_from(["r1", "r2"], runs) == date(2026, 7, 31)
+    assert stable_id("playbook", before) == stable_id("playbook", after)
+    assert supported_from(before, runs) == supported_from(after, runs) == date(2026, 7, 1)
+
+
+def test_the_date_is_the_anchor_run_rather_than_the_newest_or_the_oldest() -> None:
+    """Keyed on `min(reaction_ids)` — the same single input the note's id is keyed on.
+
+    Not the earliest date and not the latest: either is a function of the member *set*, and a
+    function of the set moves under an id that is a function of one member. The anchor's own date
+    is the only reading that makes the two move together, which is what the id's stability rule
+    already promised and what `supported_from` claimed and did not deliver.
+
+    Ordered so the anchor is neither the newest nor the oldest run, because a fixture where it
+    happens to be both cannot tell the three rules apart.
+    """
+    runs = {
+        "r2": _dated("r2", date(2026, 7, 15)),
+        "r1": _dated("r1", date(2026, 7, 20)),
+        "r3": _dated("r3", date(2026, 7, 10)),
+    }
+
+    assert min(["r2", "r1", "r3"]) == "r1"
+    assert supported_from(["r2", "r1", "r3"], runs) == date(2026, 7, 20)
 
 
 def test_evidence_that_states_no_date_leaves_the_note_open_ended() -> None:
@@ -611,10 +649,49 @@ def test_evidence_that_states_no_date_leaves_the_note_open_ended() -> None:
 
 
 def test_a_member_the_corpus_does_not_hold_is_skipped_rather_than_raising() -> None:
-    """A partial corpus read is an ordinary condition here — `_units` has a whole guard for it."""
-    runs = {"r1": _dated("r1", date(2026, 7, 1))}
+    """A partial corpus read is an ordinary condition here — `_units` has a whole guard for it.
 
-    assert supported_from(["r1", "missing"], runs) == date(2026, 7, 1)
+    Three cases, because the two-tier rule answers each differently and the differences are the
+    whole design: a missing *non-anchor* is invisible (the point — the date does not move as the
+    cluster changes around a dated anchor); a missing or undated *anchor* falls to the earliest
+    dated member rather than leaving the note open-ended, which is the coverage the first version
+    of this fix lost; and a corpus that dates nothing at all is still `None`, because that is the
+    truthful answer rather than a fallback to today.
+    """
+    runs = {"r1": _dated("r1", date(2026, 7, 1)), "r2": _dated("r2", date(2026, 8, 20))}
+
+    assert supported_from(["r1", "zz-missing"], runs) == date(2026, 7, 1)
+    assert supported_from(["aa-missing", "r1", "r2"], runs) == date(2026, 7, 1)
+    assert supported_from([], runs) is None
+    assert supported_from(["r1"], {"r1": _reaction("r1", ["CC"], ["CCO"])}) is None
+
+
+def test_an_undated_anchor_falls_to_the_earliest_dated_member_rather_than_to_nothing() -> None:
+    """The coverage this fix lost on its first attempt, asserted so it cannot be lost again.
+
+    Anchoring the date on `min(reaction_ids)` made the note open-ended whenever *the anchor* was
+    undated, however many members carried dates — `None` went from meaning "no member is dated" to
+    "one particular member is not", which for a per-member dating probability `p` over `n` members
+    takes the undated rate from `(1-p)^n` to `(1-p)`. An undated note reaches no subscriber holding
+    a watermark, so that is a regression in the metric this whole wave exists to improve, and the
+    first version stated it as a residual without measuring it.
+
+    Tier 2 is `min` rather than `max` for the reason tier 1 exists at all: a cluster growing
+    forward in time does not move its earliest member, where `max(performed_at)` moved on every
+    arrival.
+    """
+    runs = {
+        "r1": _reaction("r1", ["CC"], ["CCO"]),  # the anchor, undated
+        "r2": _dated("r2", date(2026, 8, 20)),
+        "r3": _dated("r3", date(2026, 7, 31)),
+    }
+
+    assert min(["r1", "r2", "r3"]) == "r1", "the fixture's anchor must be the undated one"
+    assert supported_from(["r1", "r2", "r3"], runs) == date(2026, 7, 31)
+
+    # And it is still stable under growth: a later run joining moves neither tier.
+    runs["r4"] = _dated("r4", date(2026, 9, 30))
+    assert supported_from(["r1", "r2", "r3", "r4"], runs) == date(2026, 7, 31)
 
 
 def _dated(rid: str, performed_at: date) -> OrdReaction:
@@ -626,12 +703,92 @@ def test_every_miner_dates_the_note_it_mints() -> None:
     """Three builders, one defect — fixing one would leave the other two silently unreachable.
 
     `D-2026-09-14-an-undated-note-is-not-news-every-hour` named only the playbook producer and left
-    the rest "for the pass that touches it". This is that pass, and the assertion is over all three
-    rather than the one, because the argument does not distinguish them: a mined note became
-    knowledge the day the miner's evidence did.
+    the rest "for the pass that touches it". The argument does not distinguish them: a mined note
+    became knowledge the day its evidence did.
 
-    Read off the source, because driving all three needs a chain, a cross-project candidate and an
-    optimization group — three fixtures asserting one wiring fact.
+    **This assertion has been wrong twice, each time one notch less wrong, and the third version is
+    the first that drives anything.** It shipped asserting `"minted_on" in kwargs`, and all three
+    builders re-broken to `minted_on=None` left 38 passing — an AST guard reading the call's
+    *shape*. It was then "fixed" to assert `ast.unparse(value).startswith("supported_from(")`,
+    which is the callee's *name*: `minted_on=supported_from([], by_id)` (always `None`) and
+    `minted_on=supported_from(sorted(ids)[1:], by_id)` — the original defect in a new dress, a date
+    keyed on something other than the id's own input — both passed, 33 green. The list of builders
+    was hardcoded besides, so a fourth miner minting undated notes was invisible.
+
+    So it drives the builders and reads the result. The property is the one the whole fix rests on:
+    **a note's `valid_from` is the date `supported_from` derives from the members its own id is
+    anchored on**, recomputed here from the note's citations rather than from the builder's
+    arguments, so a date wired to a different member set fails.
+    """
+    from chemclaw.memory.ids import MEMBER_PREFIX
+    from chemclaw.memory.jobs import (
+        build_campaign_notes,
+        build_optimization_notes,
+        build_playbook_notes,
+        supported_from,
+    )
+
+    def _on(reaction: OrdReaction, day: date) -> OrdReaction:
+        """The corpus's own reaction, dated — `_dated` builds its own fixed structure."""
+        return reaction.model_copy(update={"performed_at": day})
+
+    chain = [
+        _on(_reaction("c1", ["CCO"], ["CC=O"]), date(2026, 7, 10)),
+        _on(_reaction("c2", ["CC=O"], ["CC(O)O"]), date(2026, 8, 20)),
+    ]
+    playbook = [
+        _on(
+            _reaction("p1", ["CCO", "CC(=O)O"], ["CCOC(C)=O"], project="proj-x"),
+            date(2026, 7, 10),
+        ),
+        _on(
+            _reaction("p2", ["CCCO", "CC(=O)O"], ["CCCOC(C)=O"], project="proj-y"),
+            date(2026, 8, 20),
+        ),
+    ]
+    optimization = [
+        _on(_reaction("o1", ["CCO", "CC(=O)O"], ["CCOC(C)=O"]), date(2026, 7, 10)),
+        _on(_reaction("o2", ["CCO", "CC(=O)O"], ["CCOC(C)=O"]), date(2026, 8, 20)),
+    ]
+
+    built = {
+        "campaign": (build_campaign_notes(chain), chain),
+        "playbook": (build_playbook_notes(playbook), playbook),
+        "optimization": (build_optimization_notes(optimization), optimization),
+    }
+
+    for kind, (units, corpus) in built.items():
+        assert units, f"the {kind} fixture built nothing; this test would prove nothing"
+        by_id = {reaction.reaction_id: reaction for reaction in corpus}
+        for unit in units:
+            members = [
+                cited.removeprefix(MEMBER_PREFIX)
+                for cited in unit.note.outgoing_links()
+                if cited.startswith(MEMBER_PREFIX)
+            ]
+            assert members, f"the {kind} note cites no member, so its date cannot be checked"
+            expected = supported_from(members, by_id)
+            assert expected is not None, "the fixture must date its runs, or this proves nothing"
+            assert unit.note.valid_from == expected, (
+                f"the {kind} note's valid_from is {unit.note.valid_from}, not the "
+                f"{expected} its own cited members anchor. A date keyed on anything but the "
+                "members the id is keyed on moves under a stable id — the storm D-2026-09-14 "
+                "closed, and the defect the first two versions of this test could not see."
+            )
+
+
+def test_no_miner_mints_a_note_without_passing_the_corpus_derived_date() -> None:
+    """The builder list is derived from the calls, not written down beside them.
+
+    The driving test above proves the three miners that exist are wired correctly; this one is what
+    notices a *fourth*. Its predecessor hardcoded `["campaign_note_from_chain", "playbook_note",
+    "optimization_campaign_note"]` while holding every `ast.Call` in the module, so a new miner
+    minting undated notes passed — cause (f) in `tasks/lessons.md`, a universe that is a strict
+    subset of the surface at risk.
+
+    Every call in `memory/jobs.py` to a `*_note*` builder must pass `minted_on`, and the argument
+    must name `supported_from`. That is deliberately the weaker of the two assertions — the strong
+    one is above — because its job is coverage rather than correctness.
     """
     import ast
     from pathlib import Path
@@ -639,16 +796,21 @@ def test_every_miner_dates_the_note_it_mints() -> None:
     import chemclaw.memory.jobs as jobs
 
     tree = ast.parse(Path(jobs.__file__).read_text(encoding="utf-8"))
-    minted = {
-        node.func.id: [kw.arg for kw in node.keywords]
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    }
-    builders = ["campaign_note_from_chain", "playbook_note", "optimization_campaign_note"]
-
-    for builder in builders:
-        assert builder in minted, f"{builder} is not called here any more; this test is stale"
-        assert "minted_on" in minted[builder], (
-            f"{builder} mints an undated note, which the digest reads as open-ended and never "
-            "reports to a subscriber who has a watermark"
-        )
+    thin: dict[str, str] = {}
+    seen = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if not (node.func.id.endswith("_note") or "_note_" in node.func.id):
+            continue
+        seen += 1
+        passed = {keyword.arg: keyword.value for keyword in node.keywords}
+        if "minted_on" not in passed:
+            thin[node.func.id] = "no minted_on at all"
+        elif "supported_from" not in ast.unparse(passed["minted_on"]):
+            thin[node.func.id] = ast.unparse(passed["minted_on"])
+    assert seen >= 3, f"only {seen} note builders found in memory/jobs.py; this scan is stale"
+    assert not thin, (
+        f"{thin} mint notes the digest reads as open-ended, so they reach no subscriber who has a "
+        "watermark. Every miner dates its note from the members its id is anchored on."
+    )

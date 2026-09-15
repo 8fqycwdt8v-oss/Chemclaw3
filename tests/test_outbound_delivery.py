@@ -31,6 +31,7 @@ import pytest
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from chemclaw.deliver.message import Message
+from chemclaw.durable import connector_job
 from chemclaw.durable.deliver_message import (
     OutboundMessage,
     deliver_best_effort,
@@ -133,6 +134,78 @@ def _sent_kinds() -> dict[str, set[str]]:
                     if kind is not None:
                         found.setdefault(kind, set()).add(str(path.relative_to(SRC)))
     return found
+
+
+def _sending_functions() -> dict[str, set[str]]:
+    """Every kind that reaches `deliver_best_effort`, by the *function* that sends it.
+
+    One granularity finer than `_sent_kinds`, and the difference is a whole delivery path.
+    `connector_job.py` sends `job-result` twice — from `_finish` when a job completes and from
+    `_notify_failure` when it does not — so a module-level set is satisfied by either one alone.
+    Driven: deleting the entire `deliver_best_effort` block from `_notify_failure` left
+    `tests/test_connector_job_workflow.py` and this file at 28 passed. That block is the half that
+    matters most, because `_notify_failure` returns early when there is no session, which is
+    exactly the Schedule- or inbox-started run an outbound copy exists for.
+
+    Same one-hop rule and same fail-closed behaviour as `_sent_kinds`: a producer hiding behind two
+    calls reads as absent rather than being credited on a chain nobody checked.
+    """
+    found: dict[str, set[str]] = {}
+    for path in sorted(SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        builders = {
+            node.name: node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        }
+        for holder in builders.values():
+            for node in ast.walk(holder):
+                if not isinstance(node, ast.Call):
+                    continue
+                if _constructor_name(node.func) != "deliver_best_effort":
+                    continue
+                for argument in node.args:
+                    if not isinstance(argument, ast.Call):
+                        continue
+                    reached = [argument] if _kind_of(argument) is not None else []
+                    if not reached:
+                        body = builders.get(_constructor_name(argument.func) or "")
+                        if body is not None:
+                            reached = [
+                                inner
+                                for inner in ast.walk(body)
+                                if isinstance(inner, ast.Call) and _kind_of(inner) is not None
+                            ]
+                    for call in reached:
+                        kind = _kind_of(call)
+                        if kind is not None:
+                            where = f"{path.relative_to(SRC)}::{holder.name}"
+                            found.setdefault(kind, set()).add(where)
+    return found
+
+
+def test_a_job_that_fails_tells_its_requester_and_not_only_a_job_that_finishes() -> None:
+    """Both outcomes travel, or the silent one reads as the good one.
+
+    `_run_child`'s own comment makes the argument — "an outcome that says nothing is not neutral,
+    it is an invitation to assume the good one" — and the `job-result` copy shipped on `_finish`
+    alone, so a job that completed travelled and a job that failed did not.
+    `test_every_declared_delivery_kind_has_a_producer` cannot see it and says so in the code: the
+    declared↔produced equality is over *kinds*, and `Message.kind` has no failure value, so the
+    success path satisfies it by itself.
+
+    Named functions rather than a count, so moving the send out of `_notify_failure` into a helper
+    that nothing calls is red rather than a shrug.
+    """
+    sending = _sending_functions()
+    assert "durable/connector_job.py::_notify_failure" in sending.get("job-result", set()), (
+        "a connector job that fails sends nothing to the chemist who launched it; the outbound "
+        "copy exists on the success path alone, and `_notify_failure`'s early return covers the "
+        "Schedule- or inbox-started run that has no session to fall back on"
+    )
+    assert "durable/connector_job.py::_finish" in sending.get("job-result", set()), (
+        "the success path stopped sending; this test names both outcomes on purpose"
+    )
 
 
 def test_every_declared_delivery_kind_has_a_producer() -> None:
@@ -244,16 +317,28 @@ def test_a_kind_outside_the_vocabulary_never_reaches_the_outbox(
     escapes the outbox with `mkdir(parents=True)` creating whatever it traverses to.
     `OutboundMessage` is deliberately a plain `str` there — the constraint has to fail inside the
     activity — so this is the assertion that the looser wire model did not loosen the bound.
+
+    **The payload is one level up, and the depth is the whole reason this test works.** It shipped
+    with `"../../../etc/cron.d/escape"`, which under `tmp_path`
+    (`/tmp/pytest-of-root/pytest-N/test_x0/outbox`) traverses to `/tmp/pytest-of-root/etc/cron.d` —
+    a directory that does not exist, so `_write_atomically`'s `NamedTemporaryFile(dir=...)` raised,
+    the registry counted a failure, and every assertion here passed *because the traversal missed*.
+    Driven with the `Literal` deleted and a deeper tempdir, the same payload wrote
+    `/etc/cron.d/escape-<hash>.md` and the seam reported `took=['local']` — a successful delivery.
+    One level up always has a parent, so the escape succeeds whenever the bound is gone, and the
+    assertions below then have something to catch.
     """
     outbox = _local_channel(monkeypatch, tmp_path)
     before = _degraded_series("message_delivery")
     took = asyncio.run(
-        deliver_message_activity(
-            OutboundMessage(recipient="u-1", subject="s", kind="../../../etc/cron.d/escape")
-        )
+        deliver_message_activity(OutboundMessage(recipient="u-1", subject="s", kind="../escape"))
     )
-    assert took == []
+    assert took == [], "a kind outside the vocabulary was delivered rather than refused"
     assert _degraded_series("message_delivery") != before
+    # The refusal is what is asserted, not the outbox being empty: a *successful* escape leaves
+    # the outbox empty too, by definition, so that assertion cannot tell the two apart. The
+    # escape's landing site is checked directly instead.
+    assert list(outbox.parent.glob("escape-*")) == []
     assert not outbox.exists() or list(outbox.iterdir()) == []
 
 
@@ -404,3 +489,50 @@ def test_an_attachment_a_workflow_builds_is_checked_where_it_can_be_caught(
 
     assert took == []
     assert not list(outbox.iterdir()) if outbox.exists() else True
+
+
+def test_a_sessionless_job_that_fails_still_tells_its_requester(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Driven through `_notify_failure`, because a call in a function is not a call on a path.
+
+    `_sending_functions` above resolves a `deliver_best_effort` call to the function that holds it
+    and says nothing about whether that function reaches it. Driven: putting the outbound copy back
+    inside `if job.session_id:` — the exact defect the failure-path guard's own docstring names,
+    "`_notify_failure` returns early when there is no session, which is exactly the Schedule- or
+    inbox-started run an outbound copy exists for" — left `tests/test_outbound_delivery.py` and
+    `tests/test_connector_job_workflow.py` at 29 passed. That is cause (g) in `tasks/lessons.md`,
+    existence standing in for reachability, in the guard written to close a reachability defect.
+
+    So the arm that matters is the sessionless one: a Schedule- or inbox-started run has no session
+    to fall back on, and the outbound copy is the only thing that tells anybody.
+    """
+    from chemclaw.durable.connector_job import ConnectorJobInput, ConnectorJobWorkflow
+
+    sent: list[OutboundMessage] = []
+
+    async def _record(message: OutboundMessage) -> list[str]:
+        sent.append(message)
+        return ["local"]
+
+    monkeypatch.setattr(connector_job, "deliver_best_effort", _record)
+
+    job = ConnectorJobInput(
+        connector="calc",
+        job="run_conformer_refinement",
+        workflow="ConformerRefinementWorkflow",
+        task_queue="connector-calc",
+        payload={},
+        rationale="why the tests run it",
+        requested_by="u-1",
+        session_id="",
+        correlation_id="corr-1",
+    )
+    asyncio.run(ConnectorJobWorkflow()._notify_failure(job, RuntimeError("the pod died")))
+
+    assert sent, (
+        "a job started by a Schedule or the inbox failed and told nobody: it has no session to "
+        "push back to, so the outbound copy is the whole of what reaches its requester"
+    )
+    assert sent[0].kind == "job-result" and sent[0].recipient == "u-1"
+    assert "the pod died" in sent[0].body

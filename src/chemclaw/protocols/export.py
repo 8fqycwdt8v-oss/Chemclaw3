@@ -4,8 +4,11 @@
 CSV export" among the five things written once because there is one design shape,
 `protocols/models.py` repeats it in the same breath, and `ProtocolArm.arm_id`'s own comment calls
 itself "the CSV row key". Measured before this file: `grep -rn "csv" src/chemclaw/protocols/`
-returned three prose hits and no executable line, and the only `import csv` in `src/` is in ingest
-readers. That is the shape `D-2026-09-14-a-declared-kind-with-no-producer-is-not-a-channel` names
+returned three prose hits and no executable line. (That sentence went on "and the only `import
+csv` in `src/` is in ingest readers", which was wrong when written — there were three, and
+`cli/live_data.py` is a CLI. `D-2026-09-15` corrects it in the ADR that made the claim; this is the
+docstring that made it too.) That is the shape
+`D-2026-09-14-a-declared-kind-with-no-producer-is-not-a-channel` names
 one seam over — a declared artefact with no producer — and the fix is the same: build it, or stop
 claiming it.
 
@@ -81,17 +84,57 @@ def run_sheet_path(design_id: str, revision: int) -> str:
     return f"/protocols/{quote(design_id, safe='')}/run-sheet.csv?revision={revision}"
 
 
+#: The characters that make a spreadsheet treat a cell as a formula rather than as text.
+#:
+#: Excel, LibreOffice and Google Sheets all evaluate a cell opening with one of these, and quoting
+#: does not prevent it — the quotes are stripped at import and the text is then parsed. Tab and CR
+#: are here because both are treated as leading whitespace before the trigger.
+_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _is_number(text: str) -> bool:
+    """True where the cell is a plain number, so a negative temperature is left exactly as it is."""
+    try:
+        float(text)
+    except ValueError:
+        return False
+    return True
+
+
 def _cell(value: object) -> str:
     """One value as a cell: empty for absent, and never in exponent form inside laboratory range.
 
     `None` becomes `""` rather than `"None"` — a spreadsheet reading the literal string `None` in a
     numeric column is the kind of thing that survives all the way to somebody weighing it out.
+
+    **A text cell opening with a formula trigger is prefixed with `'`, and that case was neither
+    handled nor argued when this shipped.** `run_sheet_csv`'s docstring enumerated the hazards as
+    "a comma, a quote or a newline" and `tests/test_protocol_export.py`'s as "a comma, a quote, a
+    newline, an absent number, and a column order" — the one case that *executes* was in neither
+    list. Driven at the time, a `solvent` of `@SUM(1+9)*cmd|'/C calc'!A0` and a `note` of
+    an `=HYPERLINK(...)` naming an attacker's host both reached a spreadsheet as live formulas, and
+    `QUOTE_MINIMAL` does nothing about it because quoting is stripped before the parse. Those
+    fields are free text on a design drafted from tool results and then edited over
+    `POST /protocols/{id}/revisions`, which is exactly the text this repository treats as untrusted
+    everywhere else.
+
+    **Numbers are never prefixed, which is the whole reason the check is not on the trigger alone.**
+    `-40` is an ordinary temperature and `+2.5` an ordinary equivalents figure; prefixing either
+    would corrupt the value for the LIMS import this export exists to feed, trading a real hazard
+    for a certain one. So the prefix lands only where the cell is text *and* opens with a trigger,
+    which leaves every numeric column byte-identical and every formula inert. The cost is stated
+    rather than hidden: such a cell arrives in a spreadsheet showing a leading apostrophe, and a
+    strict machine parser sees one character it did not write — for a value that was going to be
+    executable code otherwise.
     """
     if value is None:
         return ""
     if isinstance(value, float):
         return f"{value:.10g}"
-    return str(value)
+    text = str(value)
+    if text.startswith(_FORMULA_TRIGGERS) and not _is_number(text):
+        return f"'{text}"
+    return text
 
 
 def run_sheet_csv(design: ExperimentDesign) -> str:
@@ -113,9 +156,10 @@ def run_sheet_csv(design: ExperimentDesign) -> str:
     """
     rows = run_sheet_rows(design)
     factors = [factor.name for factor in design.factors]
+    headers = _factor_headers(factors)
     buffer = io.StringIO()
     writer = csv.writer(buffer, quoting=csv.QUOTE_MINIMAL, lineterminator="\r\n")
-    writer.writerow([*_FIXED, *factors])
+    writer.writerow([*_FIXED, *headers])
     for row in rows:
         writer.writerow(
             [
@@ -124,6 +168,24 @@ def run_sheet_csv(design: ExperimentDesign) -> str:
             ]
         )
     return buffer.getvalue()
+
+
+def _factor_headers(factors: list[str]) -> list[str]:
+    """Column names for the factors, disambiguated where one collides with a fixed column.
+
+    A solvent screen is the canonical HTE design and its factor is called `solvent` — which is also
+    a `_FIXED` column, so the header shipped with two columns of that name. Driven: the first (from
+    `Setpoints.solvent`) is empty because the value varies, and readers disagree about which is
+    real — `header.index("solvent")` and `pandas.read_csv` both take the empty one, while
+    `dict(zip(header, row))` takes the factor. A LIMS import keyed by column name got blanks for
+    the factor that is the point of the plate. The same held for a factor named `temperature_c`,
+    `ph` or `note`.
+
+    Suffixed rather than refused, because refusing would reject the commonest design this export
+    exists for, and suffixed rather than renamed wholesale so a factor whose name collides with
+    nothing keeps the name a chemist wrote.
+    """
+    return [f"{name} (factor)" if name in _FIXED else name for name in factors]
 
 
 def _level(row: ArmRow, factor: str) -> str:

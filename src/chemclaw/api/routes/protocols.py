@@ -31,6 +31,7 @@ from datetime import datetime
 from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from chemclaw.agent.protocol_design_tools import recorded_failures, uncited_precedent
 from chemclaw.api.auth import Principal
 from chemclaw.api.deps import (
     DESIGN,
@@ -322,8 +323,32 @@ async def post_revision(
     # that fires on the normal path is a blocker a reader learns to ignore, which is the property
     # the one real blocker depends on. The revision's `kind` is the same question and is no longer
     # any caller's to answer — `store.revision_kind` derives it from `has_protocol` there.
+    # **With the corpus, because a check that is handed none passes by construction.**
+    # `no_documented_failure` and `precedent_consulted` take their evidence as an argument —
+    # `run_checks`' own docstring says "a caller that skips the lookup therefore publishes a clean
+    # bill the corpus never gave" — and this route shipped calling it with neither. Measured on one
+    # document: the agent's two call sites reported "the corpus records 1 failure(s) bearing on
+    # this design" and "the record holds 1 similar run(s) this design does not cite", and this one
+    # reported "no recorded failure bears on this design". So a chemist fixing a typo on a design
+    # the agent had flagged republished it with a clean bill, overwriting the verdict — which is
+    # precisely the "two halves of the surface would grade the same document differently depending
+    # on who wrote it" this function's docstring exists to refuse.
+    #
+    # Awaited rather than threaded, and **only one of the two offloads its own work** — this said
+    # "each already offloads its own blocking read" and that is false for the second.
+    # `recorded_failures` wraps `load_notes` in `asyncio.to_thread`; `uncited_precedent` calls
+    # `drfp_bitstring` — synchronous RDKit — on the loop before it awaits the store. Measured:
+    # 4.72 ms worst loop stall, 3.70 ms of it the fingerprint. That is two orders below the 3.2 s
+    # that made `diff_designs` twenty lines down worth a thread, and it is still loop time on a
+    # process that also serves every other chemist's SSE stream and both kubelet probes, so it is
+    # stated rather than left to be rediscovered. Both answer `[]` instead of raising — including
+    # on a value their own models refuse, since the reductions moved inside the guards — so a
+    # corpus this deployment cannot reach costs a quieter check rather than a lost edit.
     checks = run_checks(
-        body.document, stage="protocol" if body.document.has_protocol else "request"
+        body.document,
+        stage="protocol" if body.document.has_protocol else "request",
+        failures=await recorded_failures(body.document),
+        precedent=await uncited_precedent(body.document),
     )
     # **In a thread, because what the diff itself could not remove is still seconds of loop.**
     # `diff_designs` now orders only the paths that differ, which took a chemist's edit at every

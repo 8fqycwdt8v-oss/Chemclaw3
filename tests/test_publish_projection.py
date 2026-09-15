@@ -601,22 +601,45 @@ def test_every_result_shape_projects(kind: str, calc_type: str, payload: dict[st
     assert record.payload == payload
 
 
+#: The field that makes two copies of one fixture item distinct, per grown shape.
+#:
+#: Written out per shape rather than probed, because the failure this exists to stop is a field
+#: that quietly is not there: the first version wrote four names none of these items carry.
+_DISTINGUISHING = {"sites": "index", "points": "value", "conformers": "relative_kcal"}
+
+
 def _grown(kind: str, calc_type: str, key: str, count: int) -> dict[str, int]:
     """Project one shape with `count` items under `key`, and count the rows per result-store table.
 
-    The items are copies of the fixture's own, re-identified so nothing dedupes them — the question
-    is the *shape* of the growth, and a fixture with one conformer cannot answer it.
+    The items are copies of the fixture's own, made distinct so the row counts below are about the
+    *shape* of the growth — a fixture with one conformer cannot answer it.
+
+    **The distinctness is not what stops a dedup, and the claim that it was is retracted.** This
+    said "re-identified so nothing dedupes them"; driven, deleting the re-identification entirely
+    still leaves this file at 58 passed, because `project` does not dedupe at all. So the premise
+    was never exercised and could not be: there is nothing to defeat. What the fields below do buy
+    is that the copies are distinguishable to a reader of a failure, and that a rename is loud —
+    see `_DISTINGUISHING`.
+
+    **The re-identification used to write fields these items do not have.** It set `structure_id`,
+    `conformer_id`, `id` and `atom_index`; the real keys are `index` on a fukui site, `value` on a
+    scan point and `relative_kcal` on a conformer (`structure_id` exists, one level *inside*
+    `structure`, and was never reached). Deleting the whole loop left this file at 58 passed, so
+    the growth law was measured over byte-identical copies and the anti-dedup premise it rests on
+    was never exercised. `_DISTINGUISHING` names the field per shape and the assertion below fails
+    if one stops existing, because a silently-skipped rename is how the first version died.
     """
     payload = next(p for k, c, _m, p in _cases() if k == kind and c == calc_type)
     items = payload[key]
     grown = [copy.deepcopy(items[index % len(items)]) for index in range(count)]
+    field = _DISTINGUISHING[key]
     for index, item in enumerate(grown):
-        if isinstance(item, dict):
-            for field in ("structure_id", "conformer_id", "id", "atom_index"):
-                if field in item:
-                    item[field] = (
-                        f"{item[field]}-{index}" if isinstance(item[field], str) else index
-                    )
+        assert isinstance(item, dict) and field in item, (
+            f"a {key} item carries no `{field}`, so these copies are indistinguishable and this "
+            "helper is measuring dedup rather than growth"
+        )
+        item[field] = index if isinstance(item[field], int) else float(index)
+    assert len({item[field] for item in grown}) == count, "the copies did not come out distinct"
     scaled = copy.deepcopy(payload) | {key: grown}
     record = project(
         calc_ref=f"{calc_type}@v1:a:b", calc_type=calc_type, payload=scaled, payload_kind=kind

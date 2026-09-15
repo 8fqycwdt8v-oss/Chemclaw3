@@ -124,11 +124,22 @@ def _match_corpus(subscriptions: Sequence[Subscription]) -> list[DigestItem]:
 
     Split out purely so `collect_digests` has one thing to offload; the body is unchanged.
     """
+    if not subscriptions:
+        return []
     notes = load_notes(settings.knowledge_path)
-    # One scan for every subscription, cached behind the corpus fingerprint that retrieval already
-    # warms — see `conflict_index`. Scoped `as_of` today, matching the retrieval-time caller: a
-    # superseded note is out of the current-evidence sweep, and reporting it as disagreeing with
-    # its own replacement is noise rather than news.
+    # One scan for every subscription. **Not warm here, which is what this comment claimed.** It
+    # said "cached behind the corpus fingerprint that retrieval already warms", and
+    # `kg.conflicts._INDEX_CACHE` is a *process-local* module global: the retrieval callers run in
+    # the API and agent processes, this runs in `background_worker`, so nothing they do warms it —
+    # and the fingerprint invalidates on exactly the corpus change that makes a digest worth
+    # sending. So this is a cold scan on most runs, at `conflict_index`'s own measured 1,525 ms on
+    # a 2,000-note corpus (68 ms on the 39-note shipped one). It is affordable on an hourly
+    # activity that is already offloaded to a thread; it is not free, and the early return above is
+    # there because a deployment with no subscriptions was paying for it in full.
+    #
+    # Scoped `as_of` today, matching the retrieval-time caller: a superseded note is out of the
+    # current-evidence sweep, and reporting it as disagreeing with its own replacement is noise
+    # rather than news.
     disputes = conflict_index(settings.knowledge_path, date.today())
     digests: list[DigestItem] = []
     for subscription in subscriptions:
@@ -218,9 +229,27 @@ def _is_new(note: Note, subscription: Subscription) -> bool:
     *open-ended* — true for as long as anyone has known — so a note carrying it is by definition
     not something that became knowledge after a subscriber was last told. The branch now says
     that, and the honest consequence is stated rather than hidden: a genuinely new note that omits
-    its date reaches only a subscriber who has never been told anything. That is why
-    `memory.playbook.playbook_note` takes `minted_on` — a distilled rule is the one note type
-    nobody writes on a day, and it was the note type this silence actually cost.
+    its date reaches only a subscriber who has never been told anything.
+
+    **How much that consequence was worth was asserted here and never measured, and the number is
+    the reason this paragraph was rewritten.** It used to read "a distilled rule is the one note
+    type nobody writes on a day, and it was the note type this silence actually cost", which named
+    `playbook` as the whole of it. Measured on the shipped corpus instead: **32 of 39 notes carried
+    no `valid_from`**, spread over ten types — `compound` 9, `playbook` 5, `campaign` 3,
+    `interaction` 3, `job-result` 3, `bo-candidate` 2, `failure-mode` 2, `optimization-campaign` 2,
+    `report` 2, `experiment-proposal` 1. So the mitigation that shipped with this branch reached
+    the memory miners and left every other producer silent, and a chemist watching "suzuki" who had
+    already had one digest would never again be told that a report was drafted or that a connector
+    job wrote its result.
+
+    The producers are what close that, not this branch: `retrieval.harness.report_note` takes
+    `drafted_on` and `durable.job_record.note_with_run_provenance` takes `ran_on`, each dating a
+    note whose validity date and arrival date are the same day by construction. What stays open is
+    `agent.graph_tools.record_knowledge_note`, where the model may legitimately omit the date — a
+    note about chemistry the model cannot date is genuinely open-ended, and defaulting it to today
+    would trade this silence for a false claim about when something became true. That residual is a
+    `docs/planning/BACKLOG.md` row with its measurement, because closing it needs an *arrival*
+    signal separate from `valid_from`, which this subscription's bounded watermark cannot express.
     """
     valid_from = note.valid_from
     if subscription.last_seen_at is None:

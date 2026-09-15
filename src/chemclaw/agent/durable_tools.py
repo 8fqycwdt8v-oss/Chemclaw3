@@ -257,10 +257,10 @@ _MEMORY_JOBS: dict[MemoryJobKind, MethodAsyncNoParam[Any, list[str]]] = {
 
 
 @tool
-async def synthesize_memory(
+async def synthesize_memory(  # noqa: D417 - `runtime` is deliberately not in `Args:`; see below
     kind: MemoryJobKind, runtime: ToolRuntime[Any, Any], fresh: bool = False
 ) -> str:
-    """Mine the reaction corpus for a class of knowledge and propose what it finds for review.
+    """Mine the reaction corpus for a class of knowledge and record what it finds.
 
     Use this when someone asks what the corpus now supports — "have we accumulated enough on this
     route to write it up", "what campaigns are in the record", "is anything worth distilling" —
@@ -268,9 +268,9 @@ async def synthesize_memory(
     sources and records notes directly, so nothing decides what becomes
     knowledge; this only decides *when to look*.
 
-    Nothing runs these on a timer (D-2026-08-25). A pull request nobody asked for is knowledge
-    arriving unbidden, which is the thing that decision removed — so the corpus is mined when a
-    person has a reason, and this tool is that reason arriving.
+    Nothing runs these on a timer (D-2026-08-25). Knowledge arriving unbidden is what that
+    decision removed — so the corpus is mined when a person has a reason, and this tool is that
+    reason arriving.
 
     The kinds:
 
@@ -278,14 +278,12 @@ async def synthesize_memory(
       reactant, citing every member.
     - `playbook` — distil a transformation that recurs *across projects* into reusable judgment.
     - `optimization` — group same-transformation runs into a screen and read it as a series.
-    - `observation-promotion` — propose playbook notes for the ungated observations that have
-      crossed both support thresholds. The mining that feeds it still runs on a timer, because it
-      writes rows nobody reviews; only this half opens pull requests.
+    - `observation-promotion` — write playbook notes for the ungated observations that have
+      crossed both support thresholds. The mining that feeds it still runs on a timer; only this
+      half puts what it found into the graph.
 
     Args:
         kind: Which synthesis to run.
-        runtime: Injected by LangChain; its `tool_call_id` is what makes a `fresh`
-            run's id a function of the ask rather than of the clock.
         fresh: Force a new run even when one already ran today. The default deduplicates by UTC
             day — two chemists asking the same morning share one scan — but the tool's own
             recommended use ("after a large ELN ingest") is exactly the case where rejoining the
@@ -293,13 +291,13 @@ async def synthesize_memory(
             has changed since the day's first run.
 
     Returns:
-        The job id. Poll it with `get_durable_job_status`; the result is the list of pull requests
-        opened, which may be empty when the corpus supports nothing new.
+        The job id. Poll it with `get_durable_job_status`; the result is the list of notes
+        recorded, which may be empty when the corpus supports nothing new.
     """
     authorize_trigger("synthesize_memory")
-    # `require_actor` before anything durable starts, the core rule (F4-T3): these open pull
-    # requests in the knowledge repository, and a PR with no author behind it is exactly what the
-    # gate exists to prevent.
+    # `require_actor` before anything durable starts, the core rule (F4-T3): these write notes
+    # into the knowledge repository, and a note with no author behind it is exactly what the gate
+    # exists to prevent.
     actor = require_actor()
     client = await connect()
     # The tool call's own id is what is identical on a replay and different between two
@@ -327,9 +325,9 @@ def _memory_job_id(kind: MemoryJobKind, *, fresh: bool = False, discriminator: s
     """A deterministic id for one kind's synthesis, keyed on the **UTC date**.
 
     There is no request to key on: the input is the whole corpus as it stands, so two chemists
-    asking the same morning want the same answer and must not each pay a full re-scan — nor open
-    two pull requests for one finding, which is what `memory.ids.with_id`'s anchor can produce when
-    a cluster grows between two runs.
+    asking the same morning want the same answer and must not each pay a full re-scan — nor write
+    one finding twice, which is what `memory.ids.with_id`'s anchor can produce when a cluster grows
+    between two runs.
 
     A day is the unit because a day is what the retired Schedule used
     (`memory_synthesis_schedule_minutes` defaulted to 1440), so the cadence a deployment already

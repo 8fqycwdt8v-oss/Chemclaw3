@@ -147,33 +147,64 @@ def _marked_partial(note: Note) -> Note:
 
 
 def supported_from(reaction_ids: list[str], reactions: dict[str, OrdReaction]) -> date | None:
-    """The day the corpus first supported a synthesis over these runs, or `None` when it cannot say.
+    """The day the note's *anchor* run was performed, or `None` when the corpus cannot say.
 
-    **Derived from the same inputs as the note's id, which is the whole reason it is safe.** Every
-    synthesized note is keyed by `stable_id(kind, reaction_ids)`, so a miner re-run over the same
-    members mints the same id — and `date.today()` would then rewrite that note with a new
-    `valid_from` on every run. Under
-    `D-2026-09-14-an-undated-note-is-not-news-every-hour` that is the storm it closed, in a new
-    dress: the note's content changes, `record_note` commits, and the digest reports it as new
-    again the next day. A date that is a function of the members cannot do that — and when a member
-    joins, the id changes too, so the identity and the date move together or not at all.
+    **Keyed on the one member the note's id is keyed on, and that is the whole safety argument.**
+    Every synthesized note is `stable_id(kind, reaction_ids)`, which `memory/ids.py` documents as
+    hashing `min(member_ids)` *deliberately* — hashing the whole set would mint a new id whenever a
+    cluster gained a member, leaving the subset note behind as stale "current" knowledge. So the id
+    survives a cluster growing, and any date derived from the *set* moves underneath it.
 
-    The latest member's `performed_at` is the honest reading of `valid_from`: a cross-project
-    pattern became knowable when the last run supporting it happened, not when a miner got round to
-    noticing. Earlier would claim the knowledge before the evidence existed.
+    That is the defect this function shipped with, and it is worth stating plainly because the
+    docstring here previously asserted the opposite ("when a member joins, the id changes too").
+    It does not. Measured: `{r1,r2}` and `{r1,r2,r3}` both mint `playbook-aee3d30407cc`, and
+    `max(performed_at)` moved that note's `valid_from` from 2026-07-10 to 2026-08-20 under one
+    unchanged id. Forwards that is the hourly re-notification storm
+    `D-2026-09-14-an-undated-note-is-not-news-every-hour` closed, in a new dress — `digest._is_new`
+    reads a risen `valid_from` as news about a note the subscriber already holds. Backwards is
+    worse and silent: a member dropping out, or a `corpus_complete=False` partial read that misses
+    the newest run, lowers `valid_from` under the same id, and `_is_new` then answers `False`
+    forever for a note whose content has just changed.
 
-    `None` when no member carries a date, which is the truthful answer rather than a fallback to
-    today — `Note.is_current` reads an absent `valid_from` as open-ended, and a corpus that never
-    said when its runs happened cannot support a narrower claim. `OrdReaction.performed_at` is
-    optional precisely because a source may not state one.
+    Anchoring on `min(reaction_ids)` makes the identity and the date functions of the same single
+    input, so they genuinely move together or not at all: a cluster that grows keeps both, and a
+    cluster whose anchor changes has become a different note by the id's own rule.
+
+    **What it costs, stated rather than hidden.** The anchor is the smallest member id, not the
+    earliest or the most recent run, so this is not "when the pattern became knowable" — no stable
+    function of a growing set can be.
+
+    **And anchoring alone was a coverage regression, which the first version of this fix stated as
+    a residual without measuring it.** `None` used to mean *every* member was undated; anchoring
+    made it mean *the anchor* was undated, however many members carried dates — so for a per-member
+    dating probability `p` over an `n`-member cluster the undated rate goes from `(1-p)^n` to
+    `(1-p)`. On a corpus where two runs in three state a date, a three-member cluster went from 4%
+    undated to 33%, and an undated note reaches no subscriber holding a watermark. That is a loss
+    in exactly the direction `D-2026-09-14-an-undated-note-is-not-news-every-hour` and this fix
+    exist to repair.
+
+    So the rule is two-tier, and the tiers are ordered by *stability* rather than by preference:
+
+    1. the anchor's own `performed_at`, which cannot move while the anchor does not; failing that,
+    2. the **earliest** dated member, which a cluster growing forward in time does not move either
+       — a later run joining leaves `min` alone, where `max` moved on every arrival.
+
+    `None` only when no member carries a date at all, which restores the old coverage. Tier 2 is
+    not fully stable — a member with an *earlier* date joining does move it — and that is a strict
+    improvement on a tier that is not reached at all, rather than a claim to have solved it.
     """
+    if not reaction_ids:
+        return None
+    anchor = reactions.get(min(reaction_ids))
+    if anchor is not None and anchor.performed_at is not None:
+        return anchor.performed_at
     dated = [
         reaction.performed_at
         for reaction_id in reaction_ids
         if (reaction := reactions.get(reaction_id)) is not None
         and reaction.performed_at is not None
     ]
-    return max(dated) if dated else None
+    return min(dated) if dated else None
 
 
 def _units(notes: list[Note], *, corpus_complete: bool) -> list[SynthesisUnit]:

@@ -129,9 +129,11 @@ def optimization_campaign_note(
         created_by="agent",
         source="memory:optimization-grouping",
         body=body,
-        # The day the corpus first supported this grouping, from the same member ids `note_id` is
-        # keyed on — see `jobs.supported_from`. Absent, the note is open-ended and
-        # `durable/digest._is_new` correctly never reports it to anyone with a watermark.
+        # The day this grouping's anchor run was performed — `min(reaction_ids)`, the single
+        # member id `note_id` is keyed on, not the member *set*, which would move this date under a
+        # stable id on every cluster growth. See `jobs.supported_from`. Absent, the note is
+        # open-ended and `durable/digest._is_new` correctly never reports it to anyone with a
+        # watermark.
         valid_from=minted_on,
     )
 

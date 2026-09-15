@@ -361,3 +361,32 @@ def test_a_turn_that_failed_is_not_a_turn_that_declined() -> None:
 
     assert "1 answer(s) named no option" in report, "an errored turn was counted as an abstention"
     assert "1 turn(s) failed and answered nothing (loop_cap_reached x1)" in report
+
+
+def test_a_decimal_is_not_a_choice_and_a_full_stop_is_not_a_decimal() -> None:
+    r"""The word-boundary rule, in both directions, on the one external number this repo publishes.
+
+    The change that fixed it shipped with no test at all: `(?<!\w)(?<!\.)`, `(?<!\w)(?<!\d\.)`
+    and a bare `(?<!\w)` all left this file at 10 passed, so nothing in the suite distinguished
+    the buggy form, the fixed form and no lookbehind whatever — on the scorer behind the only
+    benchmark figure this repository reports to anyone outside it.
+
+    The rule the docstring states is that a `.` blocks only where a digit is on the other side of
+    it, which is the difference between a decimal and a full stop. Each arm below is one half of
+    that, and each fails under at least one of the three forms.
+    """
+    digits = ["1", "3", "4", "5"]
+
+    # A decimal: the option must not match inside a number, on either side of the point.
+    assert _chosen("the yield was approximately 1.07 percent", digits) == ""
+    assert _chosen("the ratio came out at 3.5 to one", digits) == ""
+
+    # A full stop is not a decimal: an option after one still counts. This is the arm the buggy
+    # leading `(?<!\.)` failed, scoring the answer as an abstention.
+    words = ["n-alkanes", "aromatics"]
+    assert _chosen("that rules out the others. n-alkanes", words) == "n-alkanes"
+    assert _chosen("that rules them out.n-alkanes", words) == "n-alkanes"
+
+    # And the ordinary case still scores, so a lookbehind tightened until nothing
+    # matches is red rather than quietly conservative.
+    assert _chosen("the answer is 4", digits) == "4"

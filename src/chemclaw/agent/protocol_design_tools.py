@@ -24,7 +24,7 @@ import logging
 import re
 from collections.abc import Sequence
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, computed_field
 
 from chemclaw.agent.authz import require_actor
 from chemclaw.agent.framing import defang
@@ -40,9 +40,9 @@ from chemclaw.kg.graph import load_notes
 from chemclaw.kg.note import external_record_ref
 from chemclaw.memory.failure import failures_against, observation_of
 from chemclaw.protocols.checks import (
-    _used_structures,
     blockers,
     run_checks,
+    used_structures,
 )
 from chemclaw.protocols.diff import diff_designs
 from chemclaw.protocols.export import run_sheet_path
@@ -341,7 +341,7 @@ async def _stored_status(store: DesignStore, design_id: str) -> DesignStatus:
     return header.status
 
 
-async def _recorded_failures(design: ExperimentDesign) -> list[RecordedFailure]:
+async def recorded_failures(design: ExperimentDesign) -> list[RecordedFailure]:
     """What the corpus already records as having failed, for the citations and reagents in `design`.
 
     **The seam between a pure check and a corpus, and it lives here because this is the layer that
@@ -362,7 +362,7 @@ async def _recorded_failures(design: ExperimentDesign) -> list[RecordedFailure]:
     returns every draft clean.
     """
     cited = [ref.ref for ref in design.evidence if ref.ref]
-    structures = [smiles for _, smiles in _used_structures(design)]
+    structures = [smiles for _, smiles in used_structures(design)]
     if not cited and not structures:
         return []
     try:
@@ -380,13 +380,29 @@ async def _recorded_failures(design: ExperimentDesign) -> list[RecordedFailure]:
             exc,
         )
         return []
-    return [RecordedFailure(id=note.id, summary=observation_of(note)) for note in notes]
+    # **Inside the guard, because the reduction can raise too and the docstring above promises it
+    # cannot.** `RecordedFailure.id` is `Field(min_length=1)`, so a note the corpus holds with an
+    # empty id is a `ValidationError` out of a function two callers rely on never raising — and
+    # since `api/routes/protocols.post_revision` began calling this, such a value is a 500 on a
+    # chemist's edit rather than a quieter check. The lookup failing and the lookup returning
+    # something unusable are the same thing to a caller.
+    try:
+        return [RecordedFailure(id=note.id, summary=observation_of(note)) for note in notes]
+    except ValidationError as exc:
+        degraded(
+            logger,
+            "failure_memory",
+            "the corpus returned a failure record this check cannot read, so this design was "
+            "checked without it: %s",
+            exc,
+        )
+        return []
 
 
-async def _uncited_precedent(design: ExperimentDesign) -> list[UncitedPrecedent]:
+async def uncited_precedent(design: ExperimentDesign) -> list[UncitedPrecedent]:
     """Runs the record already holds that resemble this design and that it does not cite.
 
-    **The second caller of the seam `_recorded_failures` opened**, and deliberately the same shape:
+    **The second caller of the seam `recorded_failures` opened**, and deliberately the same shape:
     a check must stay pure over its arguments, `protocols` may import only `core` and `science`, so
     the lookup lives here and `precedent_consulted` decides. Two instances is what makes that a
     pattern rather than one function's arrangement — and it is why `run_checks` now dispatches
@@ -403,7 +419,7 @@ async def _uncited_precedent(design: ExperimentDesign) -> list[UncitedPrecedent]
     raw would report every citation the design *does* carry as uncited, which is the noisiest
     possible way to be wrong. `external_record_ref` is the inverse that already exists.
 
-    It never raises, for `_recorded_failures`' reason and one more: this search reaches Postgres,
+    It never raises, for `recorded_failures`' reason and one more: this search reaches Postgres,
     so an unreachable index is an ordinary condition of a laptop rather than a fault of the design.
     The cost of that is the same — a silent "nothing to offer" is indistinguishable from having
     looked — which is why the failure is counted through `degraded()` and why
@@ -424,11 +440,26 @@ async def _uncited_precedent(design: ExperimentDesign) -> list[UncitedPrecedent]
             exc,
         )
         return []
-    return [
-        UncitedPrecedent(id=hit.id, similarity=hit.similarity, label=hit.label)
-        for hit in search.hits
-        if hit.id not in cited
-    ]
+    # Inside the guard for `recorded_failures`' reason, and this one is the reachable half:
+    # `Match.similarity` is an unconstrained float while `UncitedPrecedent.similarity` is
+    # `Field(ge=0.0, le=1.0)`, so a store returning `1.0000000000000002` — one float ulp from a
+    # perfectly ordinary exact match — or a `nan` raises out of a function whose docstring says it
+    # never does, and the route turns that into a lost edit.
+    try:
+        return [
+            UncitedPrecedent(id=hit.id, similarity=hit.similarity, label=hit.label)
+            for hit in search.hits
+            if hit.id not in cited
+        ]
+    except ValidationError as exc:
+        degraded(
+            logger,
+            "precedent_lookup",
+            "the reaction index returned a hit this check cannot read, so this design was "
+            "checked without it: %s",
+            exc,
+        )
+        return []
 
 
 @tool
@@ -502,8 +533,8 @@ async def structure_experiment_request(request: ExperimentRequest, salt: str = "
     checks = run_checks(
         design,
         stage="protocol" if design.has_protocol else "request",
-        failures=await _recorded_failures(design),
-        precedent=await _uncited_precedent(design),
+        failures=await recorded_failures(design),
+        precedent=await uncited_precedent(design),
     )
     revision = await store.append(
         design_id,
@@ -628,8 +659,8 @@ async def draft_experiment_protocol(
 
     checks = run_checks(
         design,
-        failures=await _recorded_failures(design),
-        precedent=await _uncited_precedent(design),
+        failures=await recorded_failures(design),
+        precedent=await uncited_precedent(design),
     )
     if failed := blockers(checks):
         raise ChemclawError(

@@ -19,7 +19,11 @@ why `durable/digest.py` advances its watermark on the mailbox and ignores what t
 async I/O over a configured driver, so it can only run in an activity; an activity is a registration
 and a queue and a timeout triple, and four copies of that is four chances to get the
 `schedule_to_start` bound wrong in the way `durable/notify.py` documents at length. The digest's own
-activity is what this generalises: it is gone, and its two hard-won properties are kept here —
+activity is what this generalises. **It is not gone, and this said it was**: deleting
+`deliver_digest_activity` was itself a replay break — an open `DigestWorkflow` has
+`ActivityTaskScheduled(deliver_digest_activity)` in its history — so it is back as a shim on the
+`digest-outbound-delivery-seam` patch's off branch, and `tests/test_workflow_versioning.py` exists
+to stop it being tidied away a second time. What generalises here are its two hard-won properties —
 the enablement check runs *inside* the activity (a workflow that branched on `delivery_enabled()`
 would emit a command its replayed history does not contain), and the `Message` is *constructed*
 inside it (see `OutboundMessage`).

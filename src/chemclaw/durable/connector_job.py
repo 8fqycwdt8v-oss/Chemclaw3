@@ -1133,7 +1133,16 @@ class ConnectorJobWorkflow:
                 [
                     # A connector job never retires anything — retirement is the synthesis
                     # miners' judgment — so its unit carries the note alone.
-                    SynthesisUnit(note=note_with_run_provenance(result.note, record)),
+                    # `ran_on` is `workflow.now()`, the deterministic clock a workflow may
+                    # read — so it survives replay — and it is what gets an undated
+                    # connector note past `digest._is_new`, which reads no `valid_from` as
+                    # open-ended and therefore as not news. A connector that dated its own
+                    # note keeps that date.
+                    SynthesisUnit(
+                        note=note_with_run_provenance(
+                            result.note, record, ran_on=workflow.now().date()
+                        )
+                    ),
                     job.requested_by,
                 ],
                 label=f"{job.connector}:{job.job}",

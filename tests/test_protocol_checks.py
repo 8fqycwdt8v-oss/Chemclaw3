@@ -1445,3 +1445,78 @@ def test_the_precedent_check_never_writes_into_evidence() -> None:
     run_checks(design, precedent=[UncitedPrecedent(id="ord-9f2", similarity=0.99)])
 
     assert list(design.evidence) == before
+
+
+def test_every_run_checks_caller_supplies_the_corpus_the_corpus_checks_need() -> None:
+    """A caller that skips the lookup publishes a clean bill the corpus never gave.
+
+    `run_checks`' own docstring says that in as many words, and the route added in the same merge
+    was such a caller: `api/routes/protocols.post_revision` passed neither `failures=` nor
+    `precedent=`. Measured on one document, the two shapes side by side —
+
+        no_documented_failure  agent: FAIL "the corpus records 1 failure(s) bearing on this design"
+                               route: PASS "no recorded failure bears on this design"
+        precedent_consulted    agent: FAIL "the record holds 1 similar run(s) ... does not cite"
+                               route: PASS "no uncited precedent was offered for this design"
+
+    — so a chemist fixing a typo on a flagged design republished it clean and overwrote the
+    verdict. `post_revision`'s docstring exists to refuse exactly that ("the two halves of the
+    surface would grade the same document differently depending on who wrote it").
+
+    Read off the source rather than driven, because the two call shapes differ only in arguments a
+    unit test would have to supply itself — asserting on a corpus this test built would prove the
+    fixture, not the wiring. The keyword names are what the defect was, so they are what is
+    asserted; `supplied` in `run_checks` is the single place that says which those are.
+    """
+    import ast
+    from pathlib import Path
+
+    needed = {"failures", "precedent"}
+    src = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
+    thin: dict[str, set[str]] = {}
+    seen = 0
+    for module in sorted(src.rglob("*.py")):
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name != "run_checks":
+                continue
+            seen += 1
+            passed = {keyword.arg for keyword in node.keywords if keyword.arg}
+            if missing := needed - passed:
+                thin[f"{module.relative_to(src)}:{node.lineno}"] = missing
+    assert seen, "no run_checks call sites found; this test is reading the wrong tree"
+    assert not thin, (
+        f"{thin} call run_checks without the corpus those checks take as an argument, so they "
+        "report 'no recorded failure bears on this design' over a lookup never made"
+    )
+
+
+def test_the_precedent_check_runs_at_the_request_stage_too() -> None:
+    """The second half of `_REQUEST_STAGE`, which nothing drove.
+
+    `test_the_failure_check_runs_at_the_request_stage_too` holds `no_documented_failure`; nothing
+    held `precedent_consulted`. Driven: cutting `_REQUEST_STAGE` back to
+    `{"components_resolve", "no_documented_failure"}` left all 190 tests across the three protocol
+    files green while the precedent check silently stopped running on `structure_experiment_request`
+    — the stage `_REQUEST_STAGE`'s own comment calls "the moment it is cheapest to read".
+
+    A `note`, not a blocker, for the reason `precedent_consulted` is always a note: an offer the
+    chemist may decline is not a reason to refuse an ask.
+    """
+    design = ExperimentDesign(request=_request(reaction_smiles="CCO.CC(=O)O>>CCOC(C)=O"))
+    precedent = [UncitedPrecedent(id="ord-9f2", similarity=0.91, label="a near-identical run")]
+
+    verdicts = {
+        check.check_id: check for check in run_checks(design, stage="request", precedent=precedent)
+    }
+
+    assert not verdicts["precedent_consulted"].passed, (
+        "the precedent check did not run at the request stage, so an ask is graded without the "
+        "similar runs the record already holds"
+    )
+    assert "ord-9f2" in verdicts["precedent_consulted"].detail
+    assert verdicts["precedent_consulted"].severity == "note"

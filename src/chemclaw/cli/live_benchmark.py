@@ -198,7 +198,7 @@ def _needle(option: str) -> str:
 
 
 def _chosen(answer: str, options: list[str]) -> str:
-    """Which option the answer names, or `''` when it names none.
+    r"""Which option the answer names, or `''` when it names none.
 
     **The last line first, and the whole answer only as a fallback**, because a model that reasons
     before answering writes every wrong option into its own working. Measured on the first five
@@ -212,7 +212,11 @@ def _chosen(answer: str, options: list[str]) -> str:
 
     **Word-boundary matching**, and a decimal point is not a boundary: the option `"1"` must not
     match inside `"1.07"`, while `"n-alkanes"` must still match at the end of a sentence. So a `.`
-    blocks only when a digit follows it, which is the difference between a decimal and a full stop.
+    blocks only where a digit is on the other side of it — `(?<!\d\.)` before and `(?!\.\d)`
+    after — which is the difference between a decimal and a full stop. The leading guard was
+    `(?<!\.)`, blocking *any* preceding period, so an option after a full stop
+    (`"…done.n-alkanes"`) scored as an abstention while this paragraph described the symmetric
+    rule.
     Substring-with-boundaries rather than equality, because a model asked for an option's text
     routinely returns it inside a sentence, and scoring that as an abstention would measure
     formatting rather than chemistry.
@@ -222,7 +226,7 @@ def _chosen(answer: str, options: list[str]) -> str:
         normalised = _normalised(haystack)
         for option in sorted(options, key=lambda opt: len(_normalised(opt)), reverse=True):
             needle = _needle(option)
-            if needle and re.search(rf"(?<!\w)(?<!\.){needle}(?!\w)(?!\.\d)", normalised):
+            if needle and re.search(rf"(?<!\w)(?<!\d\.){needle}(?!\w)(?!\.\d)", normalised):
                 return option
     return ""
 

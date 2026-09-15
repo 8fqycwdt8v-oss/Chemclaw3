@@ -235,6 +235,64 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
+- [ ] **The model-facing prose guards scan the in-process registry and four bundles, not the
+      surface** — [M], found 2026-09-15 in the round-two review.
+      `tests/test_prose_contract.py::test_no_tool_description_tells_the_model_about_a_tier_that_is_gone`
+      and `::test_no_tool_description_tells_the_model_to_expect_a_review_gate` read
+      `registered_tools()` plus `glob("connectors/*/server/tools.py")`. Three classes of text the
+      model is sent are outside that: the `description:` on the 14 `workflow:` job entries in the
+      connector manifests, which `src/chemclaw/connectors/jobs.py:226` assembles into a tool
+      docstring and its own comment calls "the job's model-facing documentation" — and which is
+      **all** of the `results` bundle, since it ships no `server/tools.py`; the bundle skills
+      (`connectors/{bo,calc,safety}/skills/*/SKILL.md`); and
+      `agent/chemclaw_agent.py::_INSTRUCTION_BLOCKS`. Driven: every forbidden string at once in
+      `connectors/results/connector.yaml`'s job `description:` left both guards green.
+
+      **The universe and the patterns are one problem, not two, which is why this is a row rather
+      than a widening.** Shipped prose in those places names the removed tier and the removed gate
+      *in order to say they are gone* — `connectors/calc/connector.yaml:23` "there is no DFT tier",
+      `agent/chemclaw_agent.py:240` "never present one as if it were DFT",
+      `connectors/safety/skills/safety-screening/SKILL.md:77` "the PR gate … was deleted",
+      `skills/deep-research/SKILL.md:95` "propose the next point(s)" — so widening with today's
+      patterns reds on correct text. Both directions are already measurable: the review-gate
+      pattern also misses `a PR`/`PRs`, "awaits review", "staged behind the knowledge gate" and
+      "submits the finding to the review queue". The shape that works is probably sentence-level
+      with a negation/past-tense exclusion; measure the false-positive rate over the three classes
+      before building it, the way
+      `D-2026-09-11-the-debt-was-in-the-claims-not-in-the-code` measured 82.9% and declined.
+
+- [ ] **An agent-recorded note the model could not date reaches no subscriber who has a
+      watermark** — [M], found 2026-09-15 in the review of the wave 2/4/7 merge.
+      `durable/digest._is_new` reads an absent `valid_from` as *open-ended* — true for as long as
+      anyone has known — and therefore as not news, which is correct about the field and wrong
+      about the question a digest asks. Measured on the shipped corpus: **32 of 39 notes carry no
+      `valid_from`**, across ten types (`compound` 9, `playbook` 5, `campaign` 3, `interaction` 3,
+      `job-result` 3, `bo-candidate` 2, `failure-mode` 2, `optimization-campaign` 2, `report` 2,
+      `experiment-proposal` 1). Two producers are closed —
+      `retrieval.harness.report_note(drafted_on=…)` and
+      `durable.job_record.note_with_run_provenance(ran_on=…)`, both cases where validity and
+      arrival are the same day by construction. `agent/graph_tools.py:527`
+      (`record_knowledge_note`) is not: the model may legitimately not know when a fact became
+      true, and defaulting `valid_from` to today would trade a silence for a false claim about
+      chemistry. **The real fix is an arrival signal separate from `valid_from`**, which the
+      subscription watermark cannot express today: `agent/subscriptions.py:68` bounds
+      `last_seen_note_ids` to one day of matches *on purpose* (DARK-7), and an undated-id set
+      grows with the corpus instead. The candidate worth measuring is the notes repository's own
+      git history — one `git log --diff-filter=A --name-only` over `knowledge/` gives every note's
+      add-date in one subprocess, cacheable behind the same corpus fingerprint `load_notes` already
+      uses. Measure that scan on a 10k-note corpus before building it.
+
+- [ ] **The delegation A/B has a comparator and no runner** — [L], found 2026-09-15.
+      `evals/delegation.py` is a pure comparison over `ArmRun`s, and **nothing constructs one**:
+      `grep -rn "ArmRun" src/ tests/ data/ Makefile` finds the module and its own test, nothing
+      records `delegated`, and no profile, prompt or runner builds the `no-helper` arm
+      (`data/evals/profiles/` holds `no-tools.yaml` alone). The module docstring called this "the
+      run half is what needs [a gateway]", which reads as a runner waiting on a credential. What it
+      owes: a `no-helper` profile whose system prompt asks the model not to call `task`, a runner
+      that records `delegated` per repeat off the turn's own trace, and `MINIMUM_REPEATS` repeats
+      per (task, arm) against a real gateway. Until then the comparator's guards
+      (`MINIMUM_COMPARED_SHARE`, `partially_delegated`) are tested and unexercised.
+
 - [ ] **A `pending_requests` row whose run was terminated, or lost with its worker, has no
       collector** — [M]. What is left of the row above after
       `D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-the-row-waiting`, which closed
@@ -757,18 +815,19 @@ only holds defects can only ever restore the system to what it already intended 
       argument contract still reaches the right tool is a `make live-ab` question, not a reading
       question.
 
-- [ ] **The probed surface has a long thin tail: 45 of 114 tools rest on one probe** — [S],
-      measured 2026-09-14, and it replaces the concentration row rather than continuing it.
+- [ ] **The probed surface has a long thin tail: 39 of 114 tools rest on one probe** — [S],
+      measured 2026-09-15 (it read 45, measured 2026-09-14 and stale inside its own merge range —
+      `feba79b` added 36 probes in it, 28 of them `process-chemistry.yaml`), and it replaces the concentration row rather than continuing it.
 
       **The concentration is gone and the row's headline was stale.** `gather_evidence` is in
-      **126 of 297** probes — **42%**, against the 50% (116/232) the headline was written from and
+      **139 of 333** probes — **41.7%**, against the 50% (116/232) the headline was written from and
       the 60% bound `tests/test_probe_coverage.py` already holds. Widened: 55% of tool-naming probes
       touch any retrieval tool and only **14%** touch nothing but retrieval, so "the corpus mostly
       measures one retrieval path" does not reproduce.
 
-      What the same measurement found instead: **45 of 114 agent-callable tools are named by
-      exactly one probe** — 39% of the surface resting on a single phrasing, where a probe the model
-      happens to answer reads as coverage. It is thin and it is **not hollow**: zero of those 45
+      What the same measurement found instead: **39 of 114 agent-callable tools are named by
+      exactly one probe** — 34% of the surface resting on a single phrasing, where a probe the model
+      happens to answer reads as coverage. It is thin and it is **not hollow**: zero of those 39
       rest on a bucket-C probe, which `test_no_tools_only_coverage_is_a_question_the_surface_cannot_
       answer` now holds, so a tool cannot arrive with coverage that never calls it.
 

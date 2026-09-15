@@ -89,6 +89,90 @@ def test_the_off_branch_is_reachable_from_the_workflow_that_needs_it() -> None:
     )
 
 
+def test_the_off_branch_activity_is_registered_on_the_queue_that_replays_it() -> None:
+    """A symbol the worker does not serve is as unreplayable as a symbol that is gone.
+
+    **This is the arm the two tests above could not reach, and the gap was silent.** Both assert
+    the deprecated activity exists and is referenced; neither asserts the worker *serves* it.
+    Driven: removing `@durable_activity("background")` from `deliver_digest_activity` — leaving the
+    symbol, its `@activity.defn` and the `DigestWorkflow` reference all intact — left this file and
+    `tests/test_digest.py` at 20 passed and `tests/test_workflow_registry.py` plus
+    `tests/test_workers.py` at 14 passed. An open run replaying the off branch would then schedule
+    an activity type the `background-jobs` worker does not register, which surfaces as
+    `ApplicationError: NotFoundError: Activity function ... is not registered on this worker` and
+    wedges the run exactly as a deletion would.
+
+    So the assertion is registration on the same queue `DigestWorkflow` is registered on: the
+    decorator is what makes the shim reachable, and "nothing calls this" is as true of the
+    decorator as of the symbol it decorates.
+    """
+    from chemclaw.durable import digest
+    from chemclaw.durable.registry import (
+        registered_activities,
+        registered_workflows,
+        temporal_name,
+    )
+
+    queue = "background"
+    assert digest.DigestWorkflow in registered_workflows(queue), (
+        "DigestWorkflow is not on the background queue any more; this test is reading the wrong one"
+    )
+    served = {temporal_name(one) for one in registered_activities(queue)}
+    assert temporal_name(digest.deliver_digest_activity) in served, (
+        "`deliver_digest_activity` is defined and referenced but not registered on the queue that "
+        "replays it, so the off branch of `digest-outbound-delivery-seam` schedules an activity "
+        "type the worker cannot resolve — the same wedge deleting it would cause, with both "
+        "existing guards green"
+    )
+
+
+def test_every_durable_activity_is_registered_on_a_queue() -> None:
+    """`@activity.defn` alone defines an activity nobody serves, and nothing else notices.
+
+    Found while driving the guard above and aiming the mutation one decorator short: removing
+    `@durable_activity("background")` from `acknowledge_digest` — a **live** activity on the
+    digest's own success path, not a replay shim — left `tests/test_workflow_registry.py`,
+    `tests/test_workers.py`, `tests/test_digest.py` and this file at 35 passed. The wedge is the
+    same either way: the workflow schedules a type the worker does not register, and Temporal
+    answers `NotFoundError: Activity function ... is not registered on this worker` at run time,
+    on a queue whose tests all pass.
+
+    Asserted over the whole package rather than for the one activity that exposed it, because the
+    defect is a decorator being dropped in a tidying pass and there is nothing special about which
+    one. 45 activities carry both today and the pairing is the invariant: `@activity.defn` says
+    what the function is, `@durable_activity` says who serves it, and an activity with only the
+    first is unreachable in exactly the way a deleted one is.
+    """
+    durable = Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "durable"
+    unserved: list[str] = []
+    defined = 0
+    for module in sorted(durable.rglob("*.py")):
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
+                continue
+            decorators = [ast.unparse(one) for one in node.decorator_list]
+            # `@activity.defn` and `@activity.defn(name="…")` both declare an activity, and the
+            # second form is what `durable/registry.py` documents as the way to override the
+            # name. Matching only the bare spelling made that form invisible to this scan: driven,
+            # `acknowledge_digest` — the live activity this guard exists for — rewritten as
+            # `@activity.defn(name="acknowledge_digest")` with `@durable_activity` removed left
+            # four files at 34 passed and the activity unregistered.
+            if not any(
+                one == "activity.defn" or one.startswith("activity.defn(") for one in decorators
+            ):
+                continue
+            defined += 1
+            if not any(one.startswith("durable_activity(") for one in decorators):
+                unserved.append(f"{module.relative_to(durable)}::{node.name}")
+    assert defined, "no durable activities found; this test is reading the wrong tree"
+    assert not unserved, (
+        f"{unserved} are declared with `@activity.defn` and registered on no queue, so any "
+        "workflow scheduling them fails at run time with `NotFoundError: Activity function ... is "
+        "not registered on this worker` — while every queue's own tests pass"
+    )
+
+
 def test_every_patch_is_declared_in_this_file_so_its_removal_date_is_readable() -> None:
     """A patch is temporary by design, and nothing else in the tree records when it may go.
 

@@ -201,9 +201,15 @@ def test_no_tools_only_coverage_is_a_question_the_surface_cannot_answer() -> Non
     *declining*, so a tool whose only probe is a C is covered on paper and never called.
 
     This is the thin half of the concentration question, and it is the half that turned out to
-    matter. Measured 2026-09-14: 45 of 114 agent-callable tools are named by exactly **one** probe —
-    39% of the surface resting on a single phrasing — and **zero** of them rest on a C. So the tail
+    matter. Measured 2026-09-15: 39 of 114 agent-callable tools are named by exactly **one** probe —
+    34% of the surface resting on a single phrasing — and **zero** of them rest on a C. So the tail
     is thin and not hollow, and this assertion is what keeps it that way.
+
+    That figure read 45 for one day and was stale on the commit that wrote it: `process-chemistry`
+    (28 probes) and `delegation` (8) landed in the same merge range, which is
+    `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` happening to a paragraph that cites
+    it two tests below. The **zero** is the load-bearing half and is what the assertion holds; the
+    ratio is a snapshot and is dated so a reader can tell which it is.
 
     A count is not asserted, deliberately. A ratchet on "how many tools have one probe" would block
     every new tool until somebody wrote it a second question, which is a toll on adding capability
@@ -239,12 +245,13 @@ def test_the_corpus_is_not_concentrated_on_one_tool() -> None:
     *should* be the most common thing an agent reaches for — it is asking that no one tool be a
     majority of what the suite knows how to check.
 
-    **Re-measured 2026-09-14 and the concentration has gone**: `gather_evidence` is in 126 of 297
-    probes, **42%**, with 55% of tool-naming probes touching any retrieval tool and only 14%
-    touching *nothing but* retrieval. The 2026-08-25 figure above is kept because it is why the
-    bound exists, not because it is current — a paragraph that reads as a live measurement is the
-    thing `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` is about, and the live number
-    is whatever this assertion computes.
+    **Re-measured 2026-09-15 and the concentration has gone**: `gather_evidence` is in 139 of 333
+    probes, **41.7%**. The 2026-08-25 figure above is kept because it is why the bound exists, not
+    because it is current — a paragraph that reads as a live measurement is the thing
+    `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` is about, and the live number is
+    whatever this assertion computes. Which is why the 126-of-297 this said first was wrong within
+    its own merge: the same range added 36 probes — 28 in `process-chemistry.yaml`, 8 in
+    `delegation.yaml` — and nothing re-ran the count.
     """
     probes = _probes()
     counts: dict[str, int] = {}

@@ -2595,3 +2595,92 @@ stronger" fixes only the second.
 what the guard was for. A confident docstring above an assertion is evidence that the author
 understood the defect — it is not evidence the assertion reaches it, and it made me slower to
 suspect the test.
+
+## Nine vacuous guards, seven causes — and the last three were a different kind (2026-09-15)
+
+**What happened.** Six fresh-context reviews of the wave programme's own merge found five more
+guards green against the defect they name, on top of the four already recorded here. More
+importantly, three of the six reviews found their worst defect *inside a fix from the previous
+wave* — written by a session that had just measured the defect it was repairing and did not measure
+the repair.
+
+The clearest: `supported_from` was added to stop the digest re-notifying, and its docstring closed
+"when a member joins, the id changes too, so the identity and the date move together or not at
+all." `stable_id` hashes `min(member_ids)` and its own docstring spends a paragraph explaining why
+it deliberately does not hash the set. One `python -c` would have shown the premise false before the
+sentence asserting it was written. The cost was the same storm the fix was closing, in a new dress,
+plus a silent direction the old code did not have.
+
+**The rule.** *A fix's premise is a claim about code you did not write. Check it against that code
+before you write the docstring that rests on it* — the docstring is where the premise becomes
+invisible, because from then on every reader is reading your sentence instead of the function.
+Concretely: when a fix says "X is safe **because** Y", open Y and drive it. The tell is the word
+"because" pointing at a symbol in another module.
+
+**The second rule, extending the four-way diagnostic.** The four causes already here were: an
+assertion the harness cannot express; a string absent for an unrelated reason; a fixture returning
+an empty set; one call where the defect needs two. Three new ones, and they are not fixed by
+asserting something *stronger about the same object*:
+
+5. **The assertion is about the call's shape, not its argument's value.** An AST scan for
+   `minted_on` in the keywords passes when every call passes `minted_on=None`. Fix: assert
+   `ast.unparse(value)`, the way the sibling guard one file over already did.
+6. **The scan's universe is a strict subset of the surface at risk.** `registered_tools()` is 31
+   tools; the agent binds 114. The excluded set contained the exact bundle the guard was about.
+   Fix: derive the universe from what actually ships, and assert the universe is non-empty so a
+   glob that stops matching is red rather than vacuous.
+
+   **This is the same axis as cause 3 and the entry first listed them as unrelated.** Cause 3 (the
+   fixture returns an empty set) is the degenerate case of 6: same object — the universe — and the
+   same repair. Keep both numbers because the *tell* differs (3 shows up as a loop body that never
+   runs; 6 as one that runs over the wrong things), but diagnose them together.
+7. **Existence stands in for reachability.** A symbol can exist, be referenced, and not be served —
+   `@activity.defn` without `@durable_activity` wedges a replay exactly as deletion would. Fix:
+   assert the registration, not the symbol.
+
+So the diagnostic is seven-way and the branch matters: 1, 2 and 4 want a different payload or a
+second call; 3 and 6 want a different universe (3 is 6's degenerate case); 5 wants a different
+assertion; 7 wants a different property.
+**Do not reach for a bigger mutation** — a bigger mutation that still goes green tells you nothing
+about which of the seven you are in.
+
+**The third rule, on writing the finding down.** Two of the numbers corrected in this pass went
+stale *inside their own merge range*: a probe-coverage figure measured on 2026-09-14 was wrong
+because a sibling commit in the same pull request added 36 probes, in a docstring citing
+`D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` two paragraphs above. Re-measure a figure
+at the end of the branch, not when you first take it — a merge range is a commit too.
+
+## Round two: the repair was worse than the defect twice, and cause (e) shipped inside the entry defining it (2026-09-15)
+
+**What happened.** Five fresh-context reviewers were pointed at the *fixes* from the entry above
+rather than at the original code, and told to attack the premise each fix rests on. Seven of the
+fixes were wrong. Two were worse than what they replaced:
+
+- the backfill's trailing flush, moved into a `finally` with a blanket `except`, turned a loud
+  failure into `wrote 4 note(s)` and exit **0** with nothing in git — on the *common* path;
+- `BatchingNoteWriter.write` returning `written=True` at accept time made
+  `chemclaw_notes_recorded_total` count notes that provably never reached the graph, under a
+  metric declared as "Notes written into the knowledge graph".
+
+And the delegation bound, written to stop a selection effect, both missed the effect (it excluded
+`incomplete`, so an arm that *crashed* on the hard tasks reproduced the headline verbatim) and made
+the instrument unusable — a Monte-Carlo put the per-repeat delegation needed for an even chance of
+any report at ~87.4%, **rising** with the repeat count.
+
+**The rule: a repair has a failure mode of its own, and it is usually the mirror of the defect.**
+Before shipping a fix, ask what the *inverse* error looks like and check you have not just bought
+it. Under-counting notes became over-counting; a silent drop became a silent success; a bound that
+admitted a selection effect became a bound that admits no data. In each case one more mutation —
+"make the thing the fix depends on fail" — would have shown it.
+
+**And cause (e) shipped twice in the commit that added cause (e) to the list above.** The miner
+guard was "fixed" from asserting the keyword to asserting `ast.unparse(value).startswith(
+"supported_from(")` — the callee's *name* — so `supported_from(sorted(ids)[1:], by_id)`, the
+original defect in a new dress, passed. The route guard was written asserting that the keywords
+`failures=` and `precedent=` appear, so `failures=[], precedent=[]` passed at 190 green. Both
+docstrings argued that driving the behaviour would "prove the fixture, not the wiring". That
+argument was wrong both times and is worth naming as its own tell:
+
+**"Driving this would only test the fixture" is the sentence that precedes a vacuous guard.** It is
+occasionally true and it is mostly a reason not to write the harder test. Both were 20 lines, and
+the pattern for one of them was already in the file it belonged in.

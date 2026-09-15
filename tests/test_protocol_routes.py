@@ -33,7 +33,9 @@ from chemclaw.protocols.models import (
     ExperimentDesign,
     ExperimentRequest,
     ProtocolArm,
+    RecordedFailure,
     Setpoints,
+    UncitedPrecedent,
 )
 from chemclaw.protocols.store import InMemoryDesignStore
 from tests.test_route_auth_coverage import _PROBE_ALLOWLIST
@@ -875,3 +877,56 @@ def test_a_design_id_cannot_write_its_own_response_headers(
 def test_a_run_sheet_of_a_design_that_does_not_exist_is_a_404(client: TestClient) -> None:
     """A 200 carrying a header row alone would read as "this design has no arms"."""
     assert client.get("/protocols/design-nope/run-sheet.csv").status_code == 404
+
+
+def test_a_human_edit_is_graded_against_the_corpus_the_agent_was_graded_against(
+    client: TestClient, store: InMemoryDesignStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The verdict a chemist's typo fix must not silently overwrite.
+
+    `post_revision`'s own docstring says the checks are re-run here "rather than trusted from the
+    caller", so that "an edit that breaks the charge table has to say so with the same verdict the
+    draft got, or the two halves of the surface would grade the same document differently depending
+    on who wrote it". It shipped calling `run_checks` with neither `failures=` nor `precedent=`,
+    while both agent call sites pass them — measured, the agent reported "the corpus records 1
+    failure(s) bearing on this design" where the route reported "no recorded failure bears on this
+    design", and the chemist's edit republished the clean bill.
+
+    **Driven, because the call-site scan beside this cannot see it.** That guard asserts the
+    keyword *names* appear, which is cause (e) in `tasks/lessons.md` — the assertion this whole
+    programme keeps re-committing. Restoring the defect as `failures=[], precedent=[]` keeps both
+    keywords and left 190 tests green, this file included. The lookups are stubbed rather than
+    driven off a real corpus on purpose: what is asserted is the *wiring* — that whatever the
+    corpus says reaches the verdict — and a fixture that built a corpus would prove the fixture.
+    """
+
+    async def _one_failure(design: object) -> list[RecordedFailure]:
+        return [RecordedFailure(id="failure-abc123", summary="the catalyst dies above 60 C")]
+
+    async def _one_precedent(design: object) -> list[UncitedPrecedent]:
+        return [UncitedPrecedent(id="ord-9f2", similarity=0.91, label="a near-identical run")]
+
+    monkeypatch.setattr(routes, "recorded_failures", _one_failure)
+    monkeypatch.setattr(routes, "uncited_precedent", _one_precedent)
+    _seed(store, _design())
+
+    response = client.post(
+        f"/protocols/{_DESIGN_ID}/revisions",
+        json={
+            "document": _design(arms=2).model_dump(mode="json"),
+            "parent_revision": 1,
+            "change_note": "fixed a typo in the title",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    verdicts = {check["check_id"]: check for check in response.json()["checks"]}
+    assert not verdicts["no_documented_failure"]["passed"], (
+        "the route graded a design the corpus records a failure against as clean, so a chemist's "
+        "edit overwrote the verdict the agent's draft carried"
+    )
+    assert "failure-abc123" in verdicts["no_documented_failure"]["detail"]
+    assert not verdicts["precedent_consulted"]["passed"], (
+        "the route offered no precedent over a record that holds an uncited similar run"
+    )
+    assert "ord-9f2" in verdicts["precedent_consulted"]["detail"]
