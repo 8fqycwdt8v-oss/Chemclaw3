@@ -64,19 +64,60 @@ def _constructor_name(node: ast.AST) -> str | None:
     return None
 
 
-def _kind_of(call: ast.Call) -> str | None:
-    """The literal `kind=` on an `OutboundMessage(...)`, or `None`.
+def _kind_of(call: ast.Call, constants: dict[str, str] | None = None) -> str | None:
+    """The kind an `OutboundMessage(...)` actually sends — its literal `kind=`, or its default.
 
     A non-literal `kind=` is deliberately not collected — it would be a value derived from a
     payload, which is the arbitrary-file-write shape `Message.kind`'s `Literal` exists to refuse,
     and this scan must not quietly credit it as a producer.
+
+    **An *omitted* `kind=` is collected, and its absence is how a wrong-kind producer hid from this
+    whole file.** `durable/check_in.py` built its outbound copy with no `kind=` at all, so it sent
+    `OutboundMessage`'s default `"digest"` into the digest's own outbox file — and this scan saw
+    nothing, because it only ever looked at keywords that were present. Every producer that forgets
+    the keyword is a producer of the default, so that is what it is credited with: the equality in
+    `test_every_declared_delivery_kind_has_a_producer` then reads as "somebody sends this" rather
+    than "somebody wrote this word", and the default is no longer a place to hide.
+
+    The default is read off the model rather than transcribed, for `_declared_kinds`'s reason: a
+    changed default that this file spelled out itself would agree with nothing.
+
+    A `**kwargs` splat is refused (`None`), because a `kind` may be in it and this cannot see.
+    Fail-closed is the same direction the two-hop rule fails in.
+
+    `constants` are the module's own `NAME = "literal"` bindings, so `kind=CHECK_IN_KIND` resolves.
+    A module constant is source-fixed — the same property `degraded()`'s subsystem rule demands —
+    so it is not the payload-derived value the refusal above is about, and refusing it would push a
+    producer into spelling its mailbox kind twice. `durable/check_in.py` needs exactly one spelling:
+    the claim that a check-in is distinguishable from a digest is the claim that the mailbox kind
+    and the channel kind are the same string.
     """
     if _constructor_name(call.func) != "OutboundMessage":
         return None
     for keyword in call.keywords:
-        if keyword.arg == "kind" and isinstance(keyword.value, ast.Constant):
-            return str(keyword.value.value)
-    return None
+        if keyword.arg is None:
+            return None
+        if keyword.arg == "kind":
+            if isinstance(keyword.value, ast.Constant):
+                return str(keyword.value.value)
+            if isinstance(keyword.value, ast.Name):
+                return (constants or {}).get(keyword.value.id)
+            return None
+    return str(OutboundMessage.model_fields["kind"].default)
+
+
+def _module_constants(tree: ast.Module) -> dict[str, str]:
+    """This module's top-level `NAME = "literal"` bindings — nothing nested, nothing computed."""
+    found: dict[str, str] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
+            continue
+        if not isinstance(node.value.value, str):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                found[target.id] = node.value.value
+    return found
 
 
 def _sent_kinds() -> dict[str, set[str]]:
@@ -105,6 +146,7 @@ def _sent_kinds() -> dict[str, set[str]]:
     found: dict[str, set[str]] = {}
     for path in sorted(SRC.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        constants = _module_constants(tree)
         builders = {
             node.name: node
             for node in ast.walk(tree)
@@ -118,7 +160,7 @@ def _sent_kinds() -> dict[str, set[str]]:
             for argument in node.args:
                 reached: list[ast.Call] = []
                 if isinstance(argument, ast.Call):
-                    if _kind_of(argument) is not None:
+                    if _kind_of(argument, constants) is not None:
                         reached.append(argument)
                     else:
                         name = _constructor_name(argument.func)
@@ -127,10 +169,11 @@ def _sent_kinds() -> dict[str, set[str]]:
                             reached.extend(
                                 inner
                                 for inner in ast.walk(body)
-                                if isinstance(inner, ast.Call) and _kind_of(inner) is not None
+                                if isinstance(inner, ast.Call)
+                                and _kind_of(inner, constants) is not None
                             )
                 for call in reached:
-                    kind = _kind_of(call)
+                    kind = _kind_of(call, constants)
                     if kind is not None:
                         found.setdefault(kind, set()).add(str(path.relative_to(SRC)))
     return found
@@ -153,6 +196,7 @@ def _sending_functions() -> dict[str, set[str]]:
     found: dict[str, set[str]] = {}
     for path in sorted(SRC.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        constants = _module_constants(tree)
         builders = {
             node.name: node
             for node in ast.walk(tree)
@@ -167,17 +211,18 @@ def _sending_functions() -> dict[str, set[str]]:
                 for argument in node.args:
                     if not isinstance(argument, ast.Call):
                         continue
-                    reached = [argument] if _kind_of(argument) is not None else []
+                    reached = [argument] if _kind_of(argument, constants) is not None else []
                     if not reached:
                         body = builders.get(_constructor_name(argument.func) or "")
                         if body is not None:
                             reached = [
                                 inner
                                 for inner in ast.walk(body)
-                                if isinstance(inner, ast.Call) and _kind_of(inner) is not None
+                                if isinstance(inner, ast.Call)
+                                and _kind_of(inner, constants) is not None
                             ]
                     for call in reached:
-                        kind = _kind_of(call)
+                        kind = _kind_of(call, constants)
                         if kind is not None:
                             where = f"{path.relative_to(SRC)}::{holder.name}"
                             found.setdefault(kind, set()).add(where)
@@ -208,6 +253,34 @@ def test_a_job_that_fails_tells_its_requester_and_not_only_a_job_that_finishes()
     )
 
 
+def test_a_producer_that_forgets_the_keyword_is_not_invisible() -> None:
+    """The guard's own blind spot, as an assertion — it is what let a wrong-kind producer ship.
+
+    `_kind_of` collected the `kind=` keyword and nothing else, so a producer that simply **omitted**
+    it sent `OutboundMessage`'s default and appeared in no scan in this file. That is exactly what
+    `durable/check_in.py` did: it declared `CHECK_IN_KIND` for its mailbox, built its outbound copy
+    with no `kind=`, and delivered every check-in as a `digest` —
+    `test_every_declared_delivery_kind_has_a_producer` stayed green throughout, because "digest" had
+    a producer either way and "work-check-in" was not yet declared.
+
+    Driven on parsed source rather than on the tree, so it keeps failing whatever `src/` does next.
+    """
+    omitted = ast.parse('OutboundMessage(recipient="u-1", subject="s")').body[0]
+    assert isinstance(omitted, ast.Expr) and isinstance(omitted.value, ast.Call)
+    assert _kind_of(omitted.value) == OutboundMessage.model_fields["kind"].default, (
+        "a producer that omits `kind=` still sends the default, and a scan that cannot see it "
+        "cannot tell a deliberate digest from a forgotten one"
+    )
+
+    named = ast.parse('OutboundMessage(recipient="u-1", kind=CHECK_IN_KIND)').body[0]
+    assert isinstance(named, ast.Expr) and isinstance(named.value, ast.Call)
+    assert _kind_of(named.value, {"CHECK_IN_KIND": "work-check-in"}) == "work-check-in"
+
+    splat = ast.parse("OutboundMessage(**payload)").body[0]
+    assert isinstance(splat, ast.Expr) and isinstance(splat.value, ast.Call)
+    assert _kind_of(splat.value) is None, "a splat may carry a kind this cannot see; fail closed"
+
+
 def test_every_declared_delivery_kind_has_a_producer() -> None:
     """The whole finding, as an assertion: three of four kinds were a vocabulary with no caller.
 
@@ -235,6 +308,7 @@ def test_each_kind_is_produced_by_the_workflow_that_owns_that_event() -> None:
     assert produced["report"] == {"durable/report_workflow.py"}
     assert produced["job-result"] == {"durable/connector_job.py"}
     assert produced["awaiting"] == {"durable/awaiting.py"}
+    assert produced["work-check-in"] == {"durable/check_in.py"}
 
 
 def _local_channel(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:

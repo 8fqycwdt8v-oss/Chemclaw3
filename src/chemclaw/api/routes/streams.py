@@ -431,6 +431,27 @@ class Digest(BaseModel):
     headlines: dict[str, str] = Field(default_factory=dict)
 
 
+def _whole(raw: object) -> int:
+    """A count out of a mailbox payload, with no input this can raise on.
+
+    **An `isinstance` test rather than `int(...)`, because `int()` is not total and three mappers in
+    this module promise that they are.** `int("many")` raises `ValueError`, `int({})` raises
+    `TypeError`, and every caller here runs *after* the claim that consumed the row — so a raise
+    does not defer the notice, it destroys it, and takes the rest of the claimed batch with it.
+    `_awaiting_event` measured that in full (the generator dies, the `except` above books it on
+    `chemclaw_db_unavailable_total`, `restore_unconsumed` puts the poisoned row back and the client
+    reconnects into it for ever) and then carried the guard inline, where the two conversions in
+    `_check_in` could not reach it and did not have it.
+
+    `bool` is excluded because it is an `int` in Python and `True` reminders is not a count.
+    Negatives are floored at zero: every count this reads is a duration or a tally, and a negative
+    one is a corrupt payload rather than a fact about the reader's work.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return 0
+    return max(raw, 0)
+
+
 def _awaiting_event(payload: dict[str, Any]) -> dict[str, str]:
     """Read one claimed `awaiting-answer` row into the SSE frame the contract declares.
 
@@ -457,7 +478,6 @@ def _awaiting_event(payload: dict[str, Any]) -> dict[str, str]:
     `reminders` "and nothing else" and that the open did not send `subject` — both halves wrong,
     read off the two `_push` call sites in `durable/awaiting.py`.)
     """
-    raw_reminders = payload.get("reminders", 0)
     event = AwaitingAnswerEvent(
         request_id=str(payload.get("request_id", "")),
         state=str(payload.get("state", "waiting")),
@@ -465,13 +485,7 @@ def _awaiting_event(payload: dict[str, Any]) -> dict[str, str]:
         kind=str(payload.get("kind", "")),
         asked_of=str(payload.get("asked_of", "")),
         due_at=str(payload.get("due_at", "")),
-        # An `isinstance` test rather than a conversion, so there is no input this can raise on.
-        # `bool` is excluded because it is an `int` in Python and `True` reminders is not a count.
-        reminders=(
-            raw_reminders
-            if isinstance(raw_reminders, int) and not isinstance(raw_reminders, bool)
-            else 0
-        ),
+        reminders=_whole(payload.get("reminders")),
     )
     return sse_frame(event)
 
@@ -563,6 +577,12 @@ def _check_in(payload: dict[str, Any]) -> list[CheckInOut]:
     defer it — and unlike a digest, there is nothing to re-find afterwards. A blocked question that
     went unreported is one a chemist simply does not learn about until it expires, which is the gap
     this whole feature exists to close.
+
+    **That was the docstring and not the code.** The two day counts went through `int(...)`, which
+    is not total: measured against this route, a text `open_days` raised `ValueError` and a dict
+    raised `TypeError` — a 500 with the row already gone, which is the one outcome the paragraph
+    above says cannot be allowed. They go through `_whole` now, the same guard `_awaiting_event`
+    already had for the same reason.
     """
     requests = payload.get("requests")
     if not isinstance(requests, list):
@@ -577,8 +597,8 @@ def _check_in(payload: dict[str, Any]) -> list[CheckInOut]:
                 subject=str(item.get("subject", "")),
                 rationale=str(item.get("rationale", "")),
                 asked_of=str(item.get("asked_of", "")),
-                open_days=int(item.get("open_days", 0) or 0),
-                days_left=int(item.get("days_left", 0) or 0),
+                open_days=_whole(item.get("open_days")),
+                days_left=_whole(item.get("days_left")),
             )
         )
     return out

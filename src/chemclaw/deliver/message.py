@@ -136,7 +136,14 @@ class Message(BaseModel):
     #: creating whatever it traverses to. Inert while the single caller passes a literal, and an
     #: arbitrary file write with the pod's uid the moment a `kind` is ever derived from a payload.
     #: The type is the bound; the prose was not.
-    kind: Literal["digest", "awaiting", "job-result", "report"] = "digest"
+    #:
+    #: `work-check-in` is the fifth, and it was the first value to be *declared elsewhere and
+    #: delivered as something else*: `durable/check_in.py` names the kind for its mailbox and then
+    #: built its outbound copy without a `kind=` at all, so every check-in travelled as a `digest` —
+    #: into the digest's own outbox file, and into the webhook `Idempotency-Key` as a digest. A
+    #: reader cannot tell "new knowledge matched your query" from "your own work is still blocked"
+    #: if both arrive under one name, which is the distinction that feature exists for.
+    kind: Literal["digest", "awaiting", "job-result", "report", "work-check-in"] = "digest"
     #: The turn or job this came from, for the same join. Never rendered to the recipient.
     correlation_id: str = ""
     #: The files this message carries. **Bounded, because a delivery leaves the cluster**: a driver

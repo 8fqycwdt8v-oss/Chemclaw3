@@ -43,7 +43,7 @@ UNCOVERED_BACKGROUND_WORKFLOWS = frozenset(
         "AwaitAnswerWorkflow",
         "CampaignSynthesisWorkflow",
         # New in `D-2026-09-15-the-requester-hears-nothing-until-it-is-too-late`, and uncovered for
-        # a reason the other twenty do not have: this control catches today's code refusing a
+        # a reason none of the others has: this control catches today's code refusing a
         # history the *shipped* code wrote, and `recorded_workflow_histories.py` records "from the
         # shape this repository ships". `CheckInWorkflow` has never shipped, so there is no older
         # command sequence it could be incompatible with, and a fixture recorded from it now would
@@ -152,8 +152,12 @@ def test_the_control_still_detects_the_divergence_it_was_built_for(
 def test_the_background_workflows_this_control_does_not_cover_are_named() -> None:
     """The gap is declared, so adding a workflow forces a decision about its history.
 
-    Covering all of them would mean recording twenty-one more histories against infrastructure this
-    repository does not have offline, which is a backlog item rather than a thing to fake. What
+    Covering all of them would mean recording one history per name below against infrastructure
+    this repository does not have offline, which is a backlog item rather than a thing to fake.
+    (A count is not written here. The two that were said "twenty" and "twenty-one" over a set of
+    twenty-two, one of them wrong on the day it was written — which is the argument
+    `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` makes, inside the file whose whole
+    subject is a declaration going stale.) What
     must not happen is the gap disappearing from view: "there is a replay check" is exactly the
     kind of sentence this repository has been wrong about before.
     """
