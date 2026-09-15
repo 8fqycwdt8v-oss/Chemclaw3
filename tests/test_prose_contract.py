@@ -46,15 +46,15 @@ def _model_facing_descriptions() -> dict[str, str]:
 
     Two sources, because one of them was the whole gap. `registered_tools()` holds the in-process
     agent tools — 31 of them — while the agent's surface is 114, and every first-party connector
-    bundle's `server/tools.py` sat outside it. That is the entire `calc` surface: the bundle that
+    bundle's served tool module sat outside it. That is the entire `calc` surface: the bundle that
     *lost* DFT was the one the guard below could not see. Driven: a sentence naming DFT, HPC,
     Nextflow and `compute_dft_energy` — four of the five alternatives at once — inserted into
     `connectors/calc/server/tools.py::report_measurement` left this file at 50 passed, while the
     same sentence in a registered tool reds it immediately.
 
-    The bundles are read off their source with `ast`: their `@server.tool()` docstrings ship to the
-    model through a served manifest, and importing them here would drag each bundle's dependency
-    closure into a lane that does not need it.
+    The bundles are read off their own source with `ast`: their `@server.tool()` docstrings
+    ship to the model through a served manifest, and importing them here would drag each
+    bundle's dependency closure into a lane that does not need it.
     """
     import ast
     import inspect

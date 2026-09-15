@@ -6,14 +6,15 @@ gets *n+1* full `harness_max_loop_iterations` allowances. `calls_already_made` i
 count is re-derived from state that already survives a pod death rather than persisted on the hot
 path.
 
-**This file is what is left of `tests/test_resume.py`, and the deletion is the finding.**
-`agent/resume.py`'s public surface — `resume_turn`, `resumability`, `Resumability`,
-`ResumeOutcome` — had no caller anywhere in `src/`, only this test file, which is the shape
+**This file is what is left of the deleted resume test module, and the deletion is the finding.**
+The resume module's public surface — `resume_turn`, `resumability`, `Resumability`,
+`ResumeOutcome` — had no caller anywhere in `src/`, only its own test file, which is the shape
 `CLAUDE.md` names by hand: "a guard with no caller, kept alive by a test that calls it directly, is
 the `map_to_hpc_identity` shape — a claim that a control exists". It also shipped three defects a
 caller would have hit, recorded in
-`D-2026-09-15-a-resume-with-no-caller-is-three-untested-defects`: `resume_turn` established none of
-the four per-turn ambients `api/runner.py` sets, and `plan_gate.enforce_plan_approval` returns
+`D-2026-09-15-a-review-of-the-review-found-the-feature-wrong-from-both-ends`: `resume_turn`
+established none of the four per-turn ambients `api/runner.py` sets, and
+`plan_gate.enforce_plan_approval` returns
 early when `get_current_session_id()` is empty — so every side-effecting tool replayed on a resume
 skipped the plan gate; the lease was taken once and never refreshed against a 60 s default, so any
 resume longer than a minute reopened the fork the module existed to prevent; and the

@@ -29,6 +29,7 @@ from typing import Any
 
 import pytest
 
+from chemclaw.agent.subscriptions import Subscription
 from chemclaw.science.calc.store import InMemoryStore
 
 
@@ -171,11 +172,17 @@ def test_the_digest_reads_and_matches_the_corpus_off_the_event_loop(
         time.sleep(_BLOCK_SECONDS)
         return []
 
-    async def _no_subscriptions() -> list[Any]:
-        return []
+    # One subscription, not zero. `_match_corpus` returns before touching the corpus when nothing
+    # will read it — a deployment with no subscriptions was paying for a full `load_notes` and a
+    # `conflict_index` scan on every run — so a zero-subscription fixture asserts the offload of
+    # work this activity no longer does. It is also the more honest fixture: the match pass this
+    # test names is O(subscriptions x notes), and at zero subscriptions there is no match pass.
+    async def _one_subscription() -> list[Any]:
+        return [Subscription(id=1, owner="u-1", query="suzuki")]
 
     monkeypatch.setattr(digest, "load_notes", _slow_load)
-    monkeypatch.setattr(digest, "all_subscriptions", _no_subscriptions)
+    monkeypatch.setattr(digest, "all_subscriptions", _one_subscription)
+    monkeypatch.setattr(digest, "conflict_index", lambda *a, **k: {})
 
     stall_ms, loop_thread = _worst_loop_stall(digest.collect_digests)
 
