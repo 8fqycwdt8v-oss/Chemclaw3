@@ -43,9 +43,11 @@ with workflow.unsafe.imports_passed_through():
         AgentStepInput,
         AgentStepResult,
         JobStepInput,
+        ResumeRequest,
         StepIdentity,
         ToolStepInput,
         authorize_job_step,
+        completed_steps,
         run_agent_step,
         run_tool_step,
     )
@@ -53,6 +55,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.templates.resolve import resolve
     from chemclaw.templates.schedule import schedule
 
+from chemclaw.core.ids import stable_hash
 from chemclaw.durable.publish import (
     BAD_DATA_RETRY,
     agent_step_retry,
@@ -126,6 +129,18 @@ class _StepFailed(Exception):
 # procedure. A literal rather than a setting, because it is an identifier inside stored rows —
 # changing it would orphan every row already written.
 TEMPLATE_JOB_FAMILY = "template"
+
+
+def template_fingerprint(template: "Template") -> str:
+    """What a resumable run's completed steps belong to — the resolved template, hashed.
+
+    A run's id is `hash([template.name, inputs])` (`templates/registry.run_workflow_id`), which is
+    deliberately blind to the *steps*: the same procedure asked the same question is the same run.
+    That is right for idempotency and wrong for resume, because editing `data/templates/<name>.yaml`
+    and relaunching lands on the same id carrying a different procedure. Hashing what the run
+    actually pinned is what lets `completed_steps` tell those two apart.
+    """
+    return stable_hash(template.model_dump(mode="json"))
 
 
 def run_summary(template: str, steps: int, degradations: dict[str, str]) -> str:
@@ -232,7 +247,10 @@ def failed_template_record(
         session_id=run.session_id,
         correlation_id=job_id,
         payload=dict(run.inputs),
-        result={"steps": completed},
+        # The fingerprint travels with the steps, not beside them: a reader that found the
+        # steps and had to look elsewhere for what they belong to is a reader that will one
+        # day skip the second lookup.
+        result={"steps": completed, "template_fingerprint": template_fingerprint(run.template)},
         payload_kind="template",
         state="failed",
         failure_reason=f"step {step_id!r}: {reason}",
@@ -277,7 +295,25 @@ class TemplateWorkflow:
         # only thing this stops being an error is the one case that should never have been one.
         scope: dict[str, Any] = {f"inputs.{item.name}": None for item in run.template.inputs}
         scope.update({f"inputs.{key}": value for key, value in run.inputs.items()})
-        results: dict[str, Any] = {}
+        # **Both of this release's command-sequence changes behind one marker**, because they
+        # landed in one commit and a run either predates them or does not. Off the marker the
+        # sequence is exactly what the shipped code emitted: nothing resumed, and one step per
+        # wave — which `_run_wave` awaits directly, creating no task and issuing the same commands
+        # in the same order. `tests/test_workflow_replay.py` is what asked: the background worker
+        # deploys `Recreate`, so the new generation inherits every unfinished run, and an
+        # ungated change wedges each of them on a nondeterminism error rather than failing it.
+        #
+        # Drainable once every run open at this release has ended — bounded by
+        # `template_run_timeout_seconds`, the execution timeout `templates/registry.py` starts
+        # every run with. Then `deprecate_patch`, then delete, per `docs/guides/workflow-
+        # versioning.md`. The id may never be reused.
+        scheduled = workflow.patched("template-waves-and-resume")
+        # **What a previous failed run of this id already finished.** Empty for a first run, for a
+        # run whose record says it completed, and for one whose steps belong to a different version
+        # of the file — see `completed_steps`, which is an activity because it is a database read
+        # and because its answer decides how many activities this workflow goes on to dispatch.
+        results: dict[str, Any] = await self._resume(run) if scheduled else {}
+        scope.update({f"steps.{step_id}.result": value for step_id, value in results.items()})
         # Which steps ran degraded, and in what way — keyed by step id, because "the run was
         # degraded" is as unactionable as "the template failed" was when a procedure has five
         # steps. Empty for a clean run, which is what keeps the record and the push-back of an
@@ -290,7 +326,20 @@ class TemplateWorkflow:
         # (`templates/schedule.py`), which is why this needed no new YAML key and does not reopen
         # `D-2026-08-25-the-loop-is-a-composite-not-a-template`: that ADR declined a *loop* over a
         # collection sized at run time, and this schedules steps that were already written down.
-        for wave in schedule(run.template):
+        waves = (
+            schedule(run.template)
+            if scheduled
+            # The pre-marker shape, written in the new code's own terms rather than kept as a
+            # second loop: one step per wave *is* the old sequencer.
+            else tuple((step,) for step in run.template.steps)
+        )
+        for wave in waves:
+            # A resumed step is not re-dispatched, and the wave it was in may now be empty. Its
+            # result is already in `scope`, so everything downstream reads exactly what it read on
+            # the attempt that produced it.
+            wave = tuple(step for step in wave if step.id not in results)
+            if not wave:
+                continue
             try:
                 finished = await self._run_wave(wave, scope, identity, timeout, run.template.name)
             except _StepFailed as failure:
@@ -362,6 +411,49 @@ class TemplateWorkflow:
         # and a caller that wants an earlier stage has every one of them in `steps`.
         last = run.template.steps[-1].id
         return TemplateRunResult(template=run.template.name, steps=results, result=results[last])
+
+    async def _resume(self, run: TemplateRunInput) -> dict[str, Any]:
+        """The steps a previous failed attempt at this id already finished.
+
+        **A run is retried, not resumed, without this.** `ALLOW_DUPLICATE_FAILED_ONLY` means the
+        only way to re-execute an id is after a failure, and `scope`/`results` were rebuilt empty
+        every time — so a five-step procedure that died at step four redid all four, while its own
+        `job_records` row held their results with a docstring explaining why they were worth
+        keeping.
+
+        Best-effort, and the failure direction is the safe one: an unreadable record yields `{}`
+        and the run starts over, which is exactly what it did before. A run must not fail because
+        the shortcut was unavailable.
+
+        Called unconditionally rather than behind a setting. A resumed step is a step whose side
+        effects already happened, so skipping it is *more* conservative than repeating it — and
+        `D-2026-09-15-a-watch-that-nothing-evaluates-is-a-promise-a-deployment-cannot-keep` is what
+        a default-off knob on a correct behaviour costs.
+
+        Args:
+            run: This execution's pinned template and inputs.
+
+        Returns:
+            `{step_id: result}`, empty when there is nothing to resume.
+        """
+        return cast(
+            dict[str, Any],
+            await workflow.execute_activity(
+                completed_steps,
+                ResumeRequest(
+                    job_id=workflow.info().workflow_id,
+                    fingerprint=template_fingerprint(run.template),
+                ),
+                task_queue=settings.background_task_queue,
+                start_to_close_timeout=timedelta(seconds=settings.job_record_timeout_seconds),
+                # The wait, which is the half `tests/test_activity_queue_bound.py` fails a call
+                # site for omitting. A light read at the *start* of a run, so it takes the light
+                # write's queue bound rather than core's hour: a resume nobody can serve promptly
+                # is a resume worth giving up on, since starting over is a correct outcome.
+                schedule_to_start_timeout=light_write_queue_wait_timeout(),
+                retry_policy=BAD_DATA_RETRY,
+            ),
+        )
 
     async def _record_run(self, record: JobRecord) -> None:
         """Persist the run's durable record, logging rather than failing the run if it cannot be.

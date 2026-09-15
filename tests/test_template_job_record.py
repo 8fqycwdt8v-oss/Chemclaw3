@@ -22,6 +22,7 @@ than one only CI ever checks.
 
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -263,3 +264,61 @@ def test_a_real_template_run_writes_the_row_and_a_failing_one_writes_its_own() -
     assert "the brief text" in str(finished.result)
     assert failed.job == "bad"
     assert "write" in failed.failure_reason
+
+
+# --- what the resume read will and will not hand back --------------------------------------------
+
+
+def test_the_resume_read_answers_only_for_a_failed_run_of_the_same_template(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The three conditions, against a real row rather than a stubbed store.
+
+    Each is a way resume could be *wrong* rather than merely absent, which is why none of them is
+    left to the caller: `job_records` is upserted on `job_id`, so a completed run's row would
+    otherwise be replayed as a resume of itself; and a run's id is a hash of the template name and
+    its inputs, so an edited file relaunches under the same id carrying a different procedure.
+    """
+    import asyncio
+
+    from chemclaw.core.config import settings
+    from chemclaw.durable.job_record import record_job
+    from chemclaw.durable.template_activities import ResumeRequest, completed_steps
+    from tests.pg import migrated_db_or_skip
+
+    # Durable records follow the session store's switch (`job_record._records_are_durable`), and
+    # the default is `memory` — under which both the write and the read are no-ops and every
+    # assertion below would pass for the wrong reason.
+    monkeypatch.setattr(settings, "session_store", "postgres")
+
+    async def _drive() -> None:
+        await migrated_db_or_skip()
+        job_id = f"template-resume-probe-{uuid4().hex[:12]}"
+        steps = {"one": {"ok": "two"}}
+
+        failed = JobRecord(
+            job_id=job_id,
+            connector="template",
+            job="probe",
+            requested_by="tester",
+            correlation_id=job_id,
+            payload={"smiles": "CCO"},
+            result={"steps": steps, "template_fingerprint": "fp-1"},
+            payload_kind="template",
+            state="failed",
+            failure_reason="step 'two': boom",
+        )
+        await record_job(failed)
+
+        assert await completed_steps(ResumeRequest(job_id=job_id, fingerprint="fp-1")) == steps
+        # A different definition under the same id.
+        assert await completed_steps(ResumeRequest(job_id=job_id, fingerprint="fp-2")) == {}
+        # An id nothing has ever recorded.
+        assert await completed_steps(ResumeRequest(job_id="nope", fingerprint="fp-1")) == {}
+
+        # And once the run succeeds, its row is upserted to `completed` — which must not read back
+        # as something to resume, or every re-ask of a finished procedure would skip its own work.
+        await record_job(failed.model_copy(update={"state": "completed"}))
+        assert await completed_steps(ResumeRequest(job_id=job_id, fingerprint="fp-1")) == {}
+
+    asyncio.run(_drive())

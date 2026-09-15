@@ -661,6 +661,16 @@ def test_a_template_run_executes_its_steps_in_order(monkeypatch: pytest.MonkeyPa
         }
     )
 
+    @activity.defn(name="completed_steps")
+    async def fake_completed_steps(request: Any) -> dict[str, Any]:
+        """Stand in for the resume read, which wants a record store this test does not configure.
+
+        Registered by the name the workflow dispatches, and answering `{}` — nothing to resume —
+        which is what a first run of any id gets. Without it the run stalls on an activity nothing
+        serves, exactly as the record write below does.
+        """
+        return {}
+
     @activity.defn(name="record_job")
     async def fake_record_job(record: Any) -> None:
         """Stand in for the real record write, which wants a sink this test does not configure.
@@ -691,7 +701,7 @@ def test_a_template_run_executes_its_steps_in_order(monkeypatch: pytest.MonkeyPa
                 Worker(
                     client,
                     task_queue=settings.background_task_queue,
-                    activities=[fake_record_job],
+                    activities=[fake_record_job, fake_completed_steps],
                 ),
             ):
                 return await client.execute_workflow(
@@ -1496,6 +1506,16 @@ def _concurrency_probe(run_id: str, steps: list[dict[str, Any]]) -> tuple[float,
     async def fake_agent(step: AgentStepInput) -> str:
         return "done"
 
+    @activity.defn(name="completed_steps")
+    async def fake_completed_steps(request: Any) -> dict[str, Any]:
+        """Stand in for the resume read, which wants a record store this test does not configure.
+
+        Registered by the name the workflow dispatches, and answering `{}` — nothing to resume —
+        which is what a first run of any id gets. Without it the run stalls on an activity nothing
+        serves, exactly as the record write below does.
+        """
+        return {}
+
     @activity.defn(name="record_job")
     async def fake_record_job(record: Any) -> None:
         return None
@@ -1525,7 +1545,7 @@ def _concurrency_probe(run_id: str, steps: list[dict[str, Any]]) -> tuple[float,
                 Worker(
                     client,
                     task_queue=settings.background_task_queue,
-                    activities=[fake_record_job],
+                    activities=[fake_record_job, fake_completed_steps],
                 ),
             ):
                 return await client.execute_workflow(
@@ -1618,3 +1638,164 @@ def test_the_shipped_catalogue_is_scheduled_the_way_its_files_are_written() -> N
             earlier = {step.id for before in waves[:index] for step in before}
             for step in wave:
                 assert dependencies(step) <= earlier, f"{name}: {step.id} runs before what it reads"
+
+
+# --- a failed run resumes rather than starting over -----------------------------------------------
+
+
+def _resumable_run(
+    fail_on: set[str], resume_from: dict[str, Any], fingerprint: str | None = None
+) -> tuple[list[str], Any]:
+    """Run a three-step chain end to end, failing the named steps, and report which steps ran.
+
+    `resume_from` is what the resume read answers with — the shape a real `job_records` row holds,
+    `{"steps": ..., "template_fingerprint": ...}` — so this drives the sequencer's own decision
+    about what to skip rather than re-testing the store.
+    """
+    from temporalio import activity
+    from temporalio.worker import Worker
+
+    from chemclaw.durable.template_activities import (
+        AgentStepInput,
+        ResumeRequest,
+        ToolStepInput,
+    )
+    from chemclaw.durable.template_job import (
+        TemplateRunInput,
+        TemplateWorkflow,
+        template_fingerprint,
+    )
+    from tests.temporal_env import pydantic_client, start_env_or_skip
+
+    ran: list[str] = []
+
+    template = Template.model_validate(
+        {
+            "name": "probe",
+            "summary": "Resume probe.",
+            "inputs": [{"name": "smiles", "type": "string", "description": "molecule"}],
+            "steps": [
+                {
+                    "id": "one",
+                    "kind": "tool",
+                    "tool": "screen_hazards",
+                    "arguments": {"smiles": "${inputs.smiles}"},
+                },
+                {
+                    "id": "two",
+                    "kind": "tool",
+                    "tool": "screen_hazards",
+                    "arguments": {"smiles": "${steps.one.result.ok}"},
+                },
+                {"id": "three", "kind": "agent", "prompt": "saw ${steps.two.result}"},
+            ],
+        }
+    )
+
+    @activity.defn(name="run_tool_step")
+    async def tool_step(step: ToolStepInput) -> Any:
+        name = str(step.arguments.get("smiles"))
+        ran.append(name)
+        if name in fail_on:
+            raise ValueError(f"{name} was told to fail")
+        return {"ok": "two" if name == "CCO" else "done"}
+
+    @activity.defn(name="run_agent_step")
+    async def agent_step(step: AgentStepInput) -> str:
+        ran.append("three")
+        return "final"
+
+    @activity.defn(name="record_job")
+    async def record(record: Any) -> None:
+        return None
+
+    # Annotated with the real type, not `Any`: the pydantic data converter decodes an activity's
+    # argument from its hint, so `Any` hands the body a bare dict and the fingerprint comparison
+    # below silently becomes an `AttributeError` inside the worker.
+    @activity.defn(name="completed_steps")
+    async def resume(request: ResumeRequest) -> dict[str, Any]:
+        stored = {
+            "steps": resume_from,
+            "template_fingerprint": (
+                fingerprint if fingerprint is not None else template_fingerprint(template)
+            ),
+        }
+        # The activity's own three conditions live in `template_activities.completed_steps`; what
+        # this stands in for is the row it reads, so the fingerprint comparison is exercised here
+        # exactly as the real one does it.
+        if stored["template_fingerprint"] != request.fingerprint:
+            return {}
+        return dict(resume_from)
+
+    async def _run() -> Any:
+        async with await start_env_or_skip() as env:
+            client = pydantic_client(env)
+            async with (
+                Worker(
+                    client,
+                    task_queue="test-resume",
+                    workflows=[TemplateWorkflow],
+                    activities=[tool_step, agent_step],
+                ),
+                Worker(
+                    client,
+                    task_queue=settings.background_task_queue,
+                    activities=[record, resume],
+                ),
+            ):
+                return await client.execute_workflow(
+                    TemplateWorkflow.run,
+                    TemplateRunInput(
+                        template=template, inputs={"smiles": "CCO"}, requested_by="tester"
+                    ),
+                    id=f"template-resume-{sorted(fail_on)}-{sorted(resume_from)}-{fingerprint}",
+                    task_queue="test-resume",
+                )
+
+    return ran, _run
+
+
+def test_a_resumed_run_does_not_redo_the_steps_that_already_finished() -> None:
+    """The headline: the work `failed_template_record` kept is the work the next attempt skips.
+
+    Before this, `scope` and `results` were rebuilt empty on every execution, so a procedure that
+    died at step four redid all four — while its own `job_records` row held their results under a
+    docstring explaining why discarding them would be wrong.
+    """
+    ran, run = _resumable_run(fail_on=set(), resume_from={"one": {"ok": "two"}})
+
+    result = asyncio.run(run())
+
+    # Step one never ran: its result came from the record. Step two ran, and read what step one
+    # produced on the attempt that did run it.
+    assert ran == ["two", "three"], ran
+    assert result.steps["one"] == {"ok": "two"}
+    assert result.result == "final"
+
+
+def test_a_resume_is_refused_when_the_template_has_changed_under_the_same_id() -> None:
+    """The guard, and it is the reason this is not simply a cache.
+
+    A run's id is `hash([name, inputs])` and says nothing about the steps, so editing the file and
+    relaunching lands on the same id carrying a different procedure. Folding the old run's step
+    results into it would mix two definitions silently — the failure mode that makes a wrong answer
+    rather than a slow one.
+    """
+    ran, run = _resumable_run(
+        fail_on=set(), resume_from={"one": {"ok": "two"}}, fingerprint="a-different-template"
+    )
+
+    asyncio.run(run())
+
+    # Everything ran: the stored steps were declined, so the run started over.
+    assert ran == ["CCO", "two", "three"], ran
+
+
+def test_a_first_run_with_nothing_to_resume_is_what_it_always_was() -> None:
+    """The control arm. Resume is called unconditionally, so the empty answer has to cost nothing."""
+    ran, run = _resumable_run(fail_on=set(), resume_from={})
+
+    result = asyncio.run(run())
+
+    assert ran == ["CCO", "two", "three"], ran
+    assert result.result == "final"

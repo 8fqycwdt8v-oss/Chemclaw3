@@ -136,6 +136,20 @@ reference to an oversized result used to arrive whole: measured, 245,700 charact
 none. Reference a *field* of a large result (`${steps.ranking.result.smiles}`) rather than all of
 it when you can — `chemclaw_template_prompt_truncated_total` names the template when you have not.
 
+## A failed run resumes
+
+A run's id is `hash([name, inputs])` under `ALLOW_DUPLICATE_FAILED_ONLY`, so the only way to
+re-execute one is after a failure — and the steps that *had* finished were already recorded
+(`failed_template_record`) and were not read, so the next attempt redid them. It does not now: the
+sequencer asks `completed_steps` what the previous attempt finished, folds those results into
+scope, and dispatches only what is left.
+
+Three conditions, each of them a way this could be *wrong* rather than merely absent: the row must
+exist, it must be a failure (`job_records` is upserted on `job_id`, so a completed run's row would
+otherwise read back as a resume of itself), and its fingerprint must match the resolved template —
+because the run id says nothing about the steps, so editing the file and relaunching lands on the
+same id carrying a different procedure.
+
 ## Versioning
 
 A run pins the *resolved* template in its workflow input, so editing a file never changes an

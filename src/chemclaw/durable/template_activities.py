@@ -633,6 +633,73 @@ class _StepMeter(AsyncCallbackHandler):
         self.usage.add(llm_result_usage(response))
 
 
+class ResumeRequest(BaseModel):
+    """Which run to look for completed steps from, and the definition they must belong to."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    job_id: str = Field(min_length=1)
+    # The fingerprint of the *resolved* template this run is executing. A run's id is
+    # `hash([name, inputs])`, so a relaunch after an edit lands on the same id carrying a different
+    # procedure — and step results produced by the old definition would then be folded into the new
+    # one silently. This is what refuses that.
+    fingerprint: str = Field(min_length=1)
+
+
+@durable_activity("background")
+@activity.defn
+async def completed_steps(request: ResumeRequest) -> dict[str, Any]:
+    """The steps a previous failed run of `request.job_id` already finished, or `{}`.
+
+    **The work was always kept and never read.** `failed_template_record` writes
+    `result={"steps": completed}` and says why in as many words — *"A five-step procedure that died
+    at step four ran four real steps, and discarding them would lose the work while recording only
+    the failure"* — and then the sequencer rebuilt `scope` and `results` empty on every execution,
+    so a relaunch redid all four.
+
+    **An activity because it is a database read**, which workflow code may not do. That is also
+    what makes it safe for the thing it decides: the result is recorded in history, so a replay
+    folds the same steps rather than re-querying a table that has moved on (D-071 — a value that
+    shapes how many commands a workflow issues is captured once, not re-read).
+
+    **Three conditions, and each of them is a way this could be wrong rather than merely absent.**
+    The row must exist; it must be a *failure*, because `job_records` is upserted on `job_id` and a
+    completed run's row would otherwise be replayed as a resume of itself; and its fingerprint must
+    match, because the run id is a hash of the template *name* and its inputs, so editing the
+    file's steps produces a different procedure under the same id.
+
+    Best-effort in the same sense `_record_run` is: a resume that cannot be read is a slower run,
+    and failing a run because its optional shortcut was unavailable would trade a real outcome for
+    an optimisation.
+
+    Args:
+        request: The run to resume and the definition its steps must belong to.
+
+    Returns:
+        `{step_id: result}` for the steps already done, empty when there is nothing to resume.
+    """
+    from chemclaw.durable.job_record import lookup_job_record
+
+    try:
+        record = await lookup_job_record(request.job_id)
+    except Exception:
+        logger.warning("could not read %s to resume it; starting over", request.job_id)
+        return {}
+    if record is None or record.state != "failed":
+        return {}
+    result = record.result if isinstance(record.result, dict) else {}
+    if result.get("template_fingerprint") != request.fingerprint:
+        if result.get("steps"):
+            logger.info(
+                "not resuming %s: its completed steps belong to a different version of %r",
+                request.job_id,
+                record.job,
+            )
+        return {}
+    steps = result.get("steps")
+    return dict(steps) if isinstance(steps, dict) else {}
+
+
 def bounded_prompt(step: AgentStepInput) -> str:
     """`step.prompt` cut to what a model may be handed in one blob, and said so in the text.
 
