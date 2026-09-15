@@ -46,6 +46,7 @@ from chemclaw.protocols.checks import (
 )
 from chemclaw.protocols.diff import diff_designs
 from chemclaw.protocols.export import run_sheet_path
+from chemclaw.protocols.from_bo import factors_and_arms
 from chemclaw.protocols.layout import LayoutError, place, smallest_plate_for
 from chemclaw.protocols.models import (
     DesignStatus,
@@ -67,6 +68,7 @@ from chemclaw.protocols.render import (
     render_markdown,
 )
 from chemclaw.protocols.store import DesignStore, RevisionConflict, default_design_store
+from chemclaw.science.bo.campaign_record import read_campaign_thread
 from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions
 from chemclaw.science.fingerprints.store import default_reaction_store
 
@@ -839,4 +841,82 @@ async def find_experiment_protocols(status: str = "", project: str = "", limit: 
     )
     return _readable(
         ProtocolListing(designs=index.designs, total=index.total, limit_applied=index.limit_applied)
+    )
+
+
+class ExperimentArms(BaseModel):
+    """A campaign's suggested points as the factors and arms a protocol is drafted from."""
+
+    campaign_id: str
+    objective: str
+    factors: list[Factor]
+    arms: list[ProtocolArm]
+    constants: dict[str, str]
+    #: What the translation could not supply, one sentence each — units above all. Read these
+    #: before drafting; none of them is optional and none is checked downstream.
+    notes: list[str]
+
+
+# The description below is deliberately short, and the rationale a reader wants is here rather than
+# there. `D-2026-09-14-a-docstring-is-a-prompt-and-a-comment-is-not`: a tool's docstring is sent to
+# the model on every call of every turn, so it holds what the model needs to decide whether to call
+# this and what to pass — and nothing else. Measured, the first draft of it cost **626** tokens
+# against 290 for `read_experiment_protocol` and 191 for `find_experiment_protocols`, and pushed
+# `tests/test_context_floor.py`'s observed prefix 26 tokens over its ceiling.
+#
+# What moved here: a BO suggestion is `{parameter: value}` points and a design needs factors whose
+# levels carry labels and arms citing those labels exactly, so the model has been transcribing a
+# candidate table by hand — which is where a level lands in the wrong column and a plate runs a
+# condition nobody planned. `protocols/from_bo.py` carries the whole argument, including why the
+# protocol body is not translated and why this lives in `protocols/` rather than beside the
+# optimiser.
+@tool
+async def experiment_arms_from_campaign(campaign_id: str, prefix: str = "arm") -> str:
+    """Turn a campaign's latest suggestion into the factors and arms to draft a protocol from.
+
+    Use this between `suggest_next_experiment` and `draft_experiment_protocol` instead of reading
+    the candidate table and writing the arms out yourself. It gives you which parameters the runs
+    vary, the settings they take, and which runs repeat each other. It does **not** give you the
+    protocol body — the charge table, steps, analytics and hazards are yours to write.
+
+    **Read `notes` before drafting.** An optimisation problem carries no units, so a temperature
+    factor comes back with none and no check downstream will catch it. `notes` also names the
+    parameters that are the same in every run: those are setpoints for the body, not factors, and
+    they are not in the arms.
+
+    Args:
+        campaign_id: The campaign, as `suggest_next_experiment` returned it. The id is a hash of
+            the decision space, so one whose space has since changed will not resolve — ask for a
+            fresh suggestion instead.
+        prefix: The arm-id stem. Use another when adding a second block of arms to one design.
+
+    Returns:
+        The objective, the factors and arms, the parameters held constant, and what you must still
+        supply.
+
+    Raises:
+        ChemclawError: The campaign has suggested nothing yet, or its points and its decision space
+            disagree. Retrying fixes neither.
+    """
+    thread = await read_campaign_thread(campaign_id)
+    if not thread.last_candidates:
+        raise ChemclawError(
+            f"campaign {campaign_id!r} has no recorded suggestion yet, so there are no points to "
+            "turn into arms. Call `suggest_next_experiment` for this campaign first."
+        )
+    translated = await asyncio.to_thread(
+        factors_and_arms,
+        thread.problem,
+        [candidate.params for candidate in thread.last_candidates],
+        prefix=prefix,
+    )
+    return _readable(
+        ExperimentArms(
+            campaign_id=thread.campaign_id,
+            objective=thread.objective,
+            factors=translated.factors,
+            arms=translated.arms,
+            constants=translated.constants,
+            notes=translated.notes,
+        )
     )

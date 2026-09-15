@@ -408,10 +408,26 @@ async def session_events(
 
 
 class Digest(BaseModel):
-    """One standing query's new matches, as the digest job left them in the caller's mailbox."""
+    """One standing query's new matches, as the digest job left them in the caller's mailbox.
+
+    **Two of the job's four fields used to stop here, and both were the ones a reader acts on.**
+    `collect_digests` has computed `disputed` since `D-2026-08-27` — which notes among the matches
+    the corpus now disagrees with — and writes it into the mailbox payload, and this model had no
+    such field and `_digest` never read the key. The outbound delivery channels rendered it, so a
+    deployment that had configured one saw "2 of 9 disagree with something already in the graph"
+    and a deployment that had not — the shipped default, `CHEMCLAW_DELIVERY_CHANNELS` empty — lost
+    it entirely on the only path a UI reads. `DigestItem`'s own docstring calls that asymmetry the
+    reason the field exists: "a chemist who happens to ask is told, and a chemist watching the
+    subject is not." It was still true, one layer further down.
+
+    `headlines` is the other: without it this route answers with note **ids** and a client can do
+    nothing but print them.
+    """
 
     query: str = ""
     note_ids: list[str] = Field(default_factory=list)
+    disputed: list[str] = Field(default_factory=list)
+    headlines: dict[str, str] = Field(default_factory=dict)
 
 
 def _awaiting_event(payload: dict[str, Any]) -> dict[str, str]:
@@ -466,11 +482,23 @@ def _digest(payload: dict[str, Any]) -> Digest:
     marked consumed and the subscription's watermark is long past the notes it names, so a payload
     that failed validation would take the digest with it and there would be nothing to re-deliver.
     A missing key costs one blank field; a raised `ValidationError` costs the whole digest.
+
+    That leniency is exactly why the two fields this used to drop were droppable in silence: a row
+    written before they existed is still read, and a row written after them was read as though it
+    had been. The `isinstance` guards are what keep both true at once.
     """
     note_ids = payload.get("note_ids")
+    disputed = payload.get("disputed")
+    headlines = payload.get("headlines")
     return Digest(
         query=str(payload.get("query", "")),
         note_ids=[str(note_id) for note_id in note_ids] if isinstance(note_ids, list) else [],
+        disputed=[str(note_id) for note_id in disputed] if isinstance(disputed, list) else [],
+        headlines=(
+            {str(key): str(value) for key, value in headlines.items()}
+            if isinstance(headlines, dict)
+            else {}
+        ),
     )
 
 

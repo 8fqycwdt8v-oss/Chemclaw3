@@ -109,6 +109,28 @@ defect `_bound_tools` was written to end one section below. `AgentProfile.model_
 delegation *rate* over one-tool probes, which is a mediator rather than an outcome and gave
 isolation no mechanism to appear.
 
+**And a helper reaches the connectors, since
+`D-2026-09-15-a-helper-shares-the-session-its-caller-already-opened` drove a bound that had been
+restated twice and run never.** It was two claims. The first — *two concurrent readers of one MCP
+tool object deadlock* — is **false** for this shape: over one `HeldConnectorSession`, four
+concurrent 1.88 s `pyexec` calls finish in **1.99 s** fully overlapped, 32 fast `props` calls in
+348 ms, zero errors, and a call that fails mid-flight beside another damages neither it nor the
+session. The second — misattribution in the connector's log — does not reach a helper, because
+`core/call_identity.py` binds the headers from the ambient context when the *session* opens and a
+helper is the same actor, session and correlation id. The lifecycle argument that replaced them in
+D-2026-08-29 survives and never applied: it forbids a helper opening sessions of its **own**, and
+the caller's are already open when the roster is compiled, so sharing them costs **zero** extra
+sockets. What a helper holds is now its caller's set minus `side_effecting_tools()` on *both*
+halves — `helper_profile` for the in-process one, `helper_connectors` for the connector one, one
+switch applying both. Its prefix grew and needs no second ceiling: a strict subset plus a smaller
+prompt is an inequality, which `tests/test_context_floor.py` asserts rather than a number restates.
+**A third claim went with them** — *nothing counts how often `task` is called*, given here and in
+two merged records as why the roster question could not be settled. It was false when it was
+written: `task` is an ordinary tool in the caller's `ToolNode`, so
+`chemclaw_tool_calls_total{tool="task"}` has always moved. No specialist roster ships; re-measured,
+every profile would now hold something, and it stays unbuilt for the reason `agent/subagents.py`
+gives — but the excuse is gone.
+
 **The isolation it rests on is real, and measuring it found what a helper's report is**
 (`D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread`). Driven on a compiled graph,
 a helper reading ~9.8 kB leaves its caller a thread of **57 characters** — and that is the *whole*

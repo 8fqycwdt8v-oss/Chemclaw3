@@ -47,7 +47,7 @@ from chemclaw.durable.digest import (
     digest_channel,
 )
 from chemclaw.durable.retention import prune_expired_rows
-from chemclaw.kg.graph import invalidate_cache
+from chemclaw.kg.graph import invalidate_cache, load_notes
 from chemclaw.kg.note import Note, Relation
 from chemclaw.kg.render import render_note
 from chemclaw.kg.search import query_terms
@@ -271,7 +271,17 @@ def test_a_digest_is_read_by_its_owner_and_by_nobody_else() -> None:
         with _digest_client(alice) as client:
             first = client.get("/digests")
             second = client.get("/digests")
-        assert first.json() == [{"query": "suzuki", "note_ids": ["reaction-1"]}]
+        # The two fields `D-2026-09-15-a-digest-that-names-an-id-names-nothing` added are part
+        # of the answer's shape, not decoration: written absent here, they must come back empty
+        # rather than missing, which is what a client renders against.
+        assert first.json() == [
+            {
+                "query": "suzuki",
+                "note_ids": ["reaction-1"],
+                "disputed": [],
+                "headlines": {},
+            }
+        ]
         assert second.json() == [], "the claim is the consume; a digest must not re-deliver"
         assert await _consumed_at(digest_channel(alice)) != [None], "the row was left unconsumed"
 
@@ -296,7 +306,9 @@ def test_only_the_digest_kind_is_claimed_from_the_mailbox() -> None:
         await record_session_event(channel, "job_completed", {"job_id": "j-1"})
 
         with _digest_client(owner) as client:
-            assert client.get("/digests").json() == [{"query": "q", "note_ids": ["n-1"]}]
+            assert client.get("/digests").json() == [
+                {"query": "q", "note_ids": ["n-1"], "disputed": [], "headlines": {}}
+            ]
 
         leftover = await claim_unconsumed(channel)
         assert [event.kind for event in leftover] == ["job_completed"]
@@ -483,3 +495,126 @@ def test_every_render_of_one_digest_says_the_same_thing() -> None:
     # One definition plus the two sites that render a *body*: the session mailbox carries the
     # two lists as structured fields rather than prose, so it is not a third renderer.
     assert source.count("_digest_body(") == 3
+
+
+def test_the_route_carries_the_dispute_flag_the_job_computed() -> None:
+    """`disputed` reached the mailbox and stopped at the API model, on the only default-config path.
+
+    `collect_digests` has computed which matches the corpus now disagrees with since
+    `D-2026-08-27`, and writes them into the payload. Both outbound delivery channels rendered
+    them. `api/routes/streams.Digest` had no such field and `_digest` never read the key — and
+    `CHEMCLAW_DELIVERY_CHANNELS` is empty in every shipped deployment, so the flag existed, was
+    computed on every run, and reached nobody.
+
+    That is the asymmetry `DigestItem`'s own docstring names as the reason the field exists — "a
+    chemist who happens to ask is told, and a chemist watching the subject is not" — reproduced one
+    layer down. Driven here against a row written the way the job writes one, rather than against
+    the model, because a model assertion would have been satisfied by the field being *declared*.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        owner = "digest-disputed-route"
+        await claim_unconsumed(digest_channel(owner))
+        await record_session_event(
+            digest_channel(owner),
+            DIGEST_KIND,
+            {
+                "query": "biaryl",
+                "note_ids": ["playbook-a", "reaction-b"],
+                "disputed": ["reaction-b"],
+                "headlines": {"playbook-a": "Change the ligand before the temperature"},
+            },
+        )
+        with _digest_client(owner) as client:
+            answer = client.get("/digests").json()
+
+        assert answer == [
+            {
+                "query": "biaryl",
+                "note_ids": ["playbook-a", "reaction-b"],
+                "disputed": ["reaction-b"],
+                "headlines": {"playbook-a": "Change the ligand before the temperature"},
+            }
+        ], (
+            "the route dropped what the job computed; a subscriber reading this surface cannot "
+            "tell a contradiction from an ordinary find, which is the one thing in a digest that "
+            "changes what they should do next"
+        )
+
+    asyncio.run(_run())
+
+
+def test_a_digest_names_what_it_found_and_not_only_its_id() -> None:
+    """A digest built off a real corpus carries a sentence per match, not just a handle.
+
+    Driven through `_match_corpus` against notes on disk rather than by calling `Note.headline`,
+    because the defect was never in the deriving — there was nothing to derive from, and every
+    surface printed `playbook-<hash>`. What has to hold is that the *job* carries it.
+
+    The id stays beside the headline everywhere it is rendered: it is what a reader passes to
+    `GET /notes/{id}` and what the watermark works in.
+    """
+    corpus = Path(settings.knowledge_path)
+    notes = [note for note in load_notes(corpus) if note.headline()]
+    assert notes, f"no note under {corpus} has a body, so this test proves nothing about headlines"
+
+    subject = notes[0]
+    term = subject.id.split("-")[0]
+    items = chemclaw.durable.digest._match_corpus(
+        [Subscription(id=1, owner="o", query=term, note_type=None, last_seen_at=None)]
+    )
+    assert items, f"no subscription match for {term!r}; the fixture cannot show a headline"
+    item = items[0]
+    named = [note_id for note_id in item.note_ids if item.headlines.get(note_id)]
+    assert named, (
+        f"the digest carried {len(item.note_ids)} matches and named none of them; a subscriber is "
+        "told a list of note ids and has to go and look up their own digest"
+    )
+    for note_id in named:
+        assert "\n" not in item.headlines[note_id]
+        assert item.headlines[note_id] != note_id
+
+    body = chemclaw.durable.digest._digest_body(item.note_ids, item.disputed, item.headlines)
+    for note_id in named:
+        assert item.headlines[note_id] in body
+        assert note_id in body, "the id must survive beside the headline; it is the handle"
+
+
+def test_a_watch_says_so_when_nothing_will_evaluate_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Off, `watch_for` used to answer "you'll be told" and no schedule existed to tell anyone.
+
+    The two halves are separate failures and this pins the second. `digest_enabled` now defaults
+    **on**, so the shipped deployment evaluates a watch — but a deployment may still turn it off,
+    and `durable/schedules.py` then creates no `digest` Schedule at all. Nothing else in the tree
+    reads that setting, so with it off a chemist's watch was written, confirmed in the first
+    person, and never looked at again.
+
+    Asserted in both directions, because "says so when off" is satisfied by a tool that always
+    warns — which would be a different defect, telling every chemist on every deployment that their
+    watch does not work.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        tokens = set_current_identity("watch-truth", frozenset())
+        try:
+            monkeypatch.setattr(settings, "digest_enabled", False)
+            off = await watch_for("biaryl coupling")
+            monkeypatch.setattr(settings, "digest_enabled", True)
+            on = await watch_for("biaryl coupling")
+        finally:
+            reset_current_identity(tokens)
+
+        assert "turned off" in off and "nobody will be told" in off, (
+            "a deployment with digests off answered a watch with a promise it cannot keep; "
+            f"it said: {off!r}"
+        )
+        assert "turned off" not in on, (
+            f"every watch is told its deployment is broken, including working ones: {on!r}"
+        )
+        # The row is saved either way — an operator turning digests on must have something to
+        # deliver against, and `list_watches` must still show it.
+        assert any(w.query == "biaryl coupling" for w in await for_owner("watch-truth"))
+
+    asyncio.run(_run())

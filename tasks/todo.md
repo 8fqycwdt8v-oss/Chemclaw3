@@ -869,3 +869,148 @@ worker loss rather than ordinary operation); the unbounded `tools` declaration a
 argument-driven blind spot (two new rows, each with its own measurement); and `-n auto` on a high-core
 box, which nothing here measured. The W22 item's durable/Temporal and connector-job tool bodies were
 not driven on a real worker under the plan gate.
+
+---
+
+## Wave A — a helper that can actually research (2026-09-15)
+
+### What changed the plan
+
+The plan was a six-name specialist roster from `data/profiles/*.yaml`. Measured what
+survives `helper_profile`'s narrowing per profile, and four of six held **nothing**:
+
+| profile | declares | in-process | survives |
+| --- | --- | --- | --- |
+| computation | 41 | 2 | 1 |
+| design | 8 | 2 | 1 |
+| evidence | 15 | 8 | 7 |
+| property-lookup | 5 | 1 | 0 |
+| reporting | 8 | 8 | 3 |
+| safety | 6 | 1 | 0 |
+
+Their whole point is connector tools, and a helper reaches no connector. So the roster was
+gated on the connector bound, not on the roster design.
+
+### The bound, driven rather than argued
+
+`tests/test_subagents.py::test_a_helper_holds_no_connector_tool` rests on "two concurrent
+readers of one MCP tool object deadlock". Driven against two real `Chemclaw3-mcp` servers
+on loopback, over **one** `HeldConnectorSession`:
+
+- `props.solvent_properties`, 2/4/8/16/32 concurrent: 42 / 55 / 94 / 197 / 348 ms, **0 errors**.
+- `pyexec.run_python` at 1.88 s per call, 4 concurrent: **1.99 s wall** — fully overlapped,
+  0 errors. The server's own log shows three ~1.9 s requests completing within 60 ms of
+  each other on one session.
+- A call that fails mid-flight beside a fast one: both resolve correctly and the session
+  answers a third call afterwards.
+
+So the deadlock claim is false for this shape. The second half of the bound —
+misattribution in the connector's log — does not reach a helper either: identity is bound
+from the ambient context when the **session** opens (`core/call_identity.py`), and a helper
+is the same actor, session and correlation id by
+`D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor`. The headers are correct.
+
+And the lifecycle argument of
+`D-2026-08-29-a-helper-reaches-no-connector-because-of-the-lifecycle-not-the-deadlock`
+never applied to *sharing*: the caller's tools are already open when `_subagents` runs.
+Sharing costs **zero** extra sockets, which is better than either alternative that ADR weighed.
+
+### Steps
+
+- [ ] `_subagents` takes `connectors` and passes it to the helper's build.
+- [ ] The helper's connector half is narrowed by `side_effecting_tools()` beside the
+      in-process narrowing, so one switch (`helper=True`) still carries the whole attenuation.
+- [ ] `general_purpose_helper`'s description and `HELPER_BRIEF` stop saying a helper cannot
+      call a connector — a model that believes a false bound wastes a turn learning otherwise.
+- [ ] Replace `test_a_helper_holds_no_connector_tool` with one that proves the caller's
+      read-only connector tools reach the helper and its state-changing ones do not.
+- [ ] Count delegation (`chemclaw_subagent_spawns_total`). CLAUDE.md records that nothing
+      counts how often `task` is called, and that absence is what left the roster question
+      unanswerable twice.
+- [ ] Re-measure the specialist table with connectors bound, and decide the roster on that
+      number rather than on the one above.
+- [ ] ADR + `tests/test_context_floor.py` re-run (the helper is a second graph, so the
+      caller's ceiling should not move — assert it rather than assume it).
+
+### Wave A — done
+
+- [x] `_subagents` takes `connectors` and passes it to the helper's build.
+- [x] `helper_connectors` narrows the connector half by `side_effecting_tools()`, beside
+      `helper_profile`'s in-process narrowing — one switch, two halves, one set.
+- [x] `general_purpose_helper`'s description and `HELPER_BRIEF` corrected.
+- [x] `test_a_helper_holds_no_connector_tool` replaced by
+      `test_a_helper_holds_its_callers_reading_connectors_and_none_that_act`, **driven red on all
+      three edits it claims to catch** (the call site, the pass-down, the narrowing) before being
+      believed. Its acting name is derived from `side_effecting_tools()`, not transcribed.
+- [x] The upstream closure read is declared in `tests/test_upstream_surface.py`.
+- [x] Delegation counting: **already existed and three documents said it did not.** Driven,
+      `chemclaw_tool_calls_total{outcome="ok",tool="task"} 1`. Pinned by
+      `test_a_delegation_is_counted_where_every_other_tool_call_is`.
+- [x] Cost stated: helper prefix **26,626** tokens against the caller's **66,316**. No second
+      ceiling — a strict subset plus a smaller prompt is an inequality, asserted by
+      `test_a_helpers_prefix_is_bounded_by_the_one_this_file_already_ratchets`. The caller's
+      ceiling did not move.
+- [x] ADR `D-2026-09-15-a-helper-shares-the-session-its-caller-already-opened`, ledger row, topic
+      row, `CLAUDE.md` paragraph, and the closed `BACKLOG.md` row deleted.
+
+**Roster decision: not built.** Re-measured with connectors reachable, every profile now holds
+something (`computation` 12, `evidence` 14, `design` 4, `safety` 4, `reporting` 3,
+`property-lookup` 1). It stays unbuilt for the reason that did not change — a named partition is a
+routing hypothesis, and six descriptions in `task`'s schema are paid on every model call of every
+turn. What changed is that the *excuse* is gone: the spawn rate is on `/metrics`, so the next
+argument about this has a number under it.
+
+**Review.** The interesting part was not the code, it was that a bound restated twice had never
+been run, and that one of its three supporting claims was false the day it was written. Two
+sessions had corrected the *reason* for the bound without driving the bound. The lesson is already
+in `tasks/lessons.md` in a weaker form; the sharper statement is that **correcting a justification
+is not evidence about the thing it justifies**, and a correction that leaves the behaviour in place
+should say explicitly which arm it did not run.
+
+A second, unrelated finding worth keeping: a scratchpad script named `csv.py` shadowed the stdlib
+module, so *any* python run from that directory executed it, and it overwrote
+`src/chemclaw/protocols/export.py`. Four earlier sessions blamed subagents running
+`git checkout -- <path>`. The real cause was a filename.
+
+## Wave C — a campaign's suggestion becomes arms (2026-09-15)
+
+**The gap was retyping, not judgment.** A BO suggestion is `Candidate.params` — a bare
+`dict[str, float | str]` with no units, no level labels and no roles. `draft_experiment_protocol`
+needs `Factor`s whose levels carry labels and structures, and `ProtocolArm`s citing those labels
+exactly. Nothing connected the two, so the model read the candidate table and typed the arms out by
+hand; a transposed value there is a different experiment with nobody able to see it.
+
+- [x] `protocols/from_bo.py::factors_and_arms` — the pure translation. It lives in `protocols/`
+      because `tests/test_layering.py` allows `protocols -> science` and allows neither
+      `science -> protocols` nor `connectors -> protocols`; and it is the *right* side on the
+      argument that file already makes — protocols reads prescriptive shapes, and a design space is
+      one.
+- [x] Four refusals rather than papering over: two parameters slugging to one `Factor.name`
+      (silently merging makes a consistent design describing experiments nobody planned, and
+      nothing downstream could see it); a parameter over 96 settings; runs that name or omit a
+      parameter the problem does not (a `factor_levels_declared` blocker, later and worse); and a
+      parameter the runs never vary — a **setpoint**, reported in `constants`, never dropped.
+- [x] Repeats become `replicate_of` the first occurrence, which is what a screening design's centre
+      points *are*.
+- [x] One `_label()` formats both the factor's level and the arm that cites it, because
+      `factor_levels_declared` matches them by string equality — `80` vs `80.0` fails a design that
+      is correct.
+- [x] `agent/protocol_design_tools.experiment_arms_from_campaign` makes it reachable, taking a
+      `campaign_id` rather than an `OptimizationProblem` so the schema stays small.
+- [x] Classified **read-only** in `authz`, explicitly — the plan gate lets a read run while a plan
+      is still being built, and "what would this campaign's next experiments look like as a plate"
+      has to be answerable before somebody approves drafting them.
+- [x] Nine tests, four driven red by mutation (label formatting, replicate marking, structure
+      carry-through, the constants split) before being believed.
+
+**The cost was caught by the ratchet and paid down rather than waived.** The tool's first docstring
+cost **626** tokens against 290 for `read_experiment_protocol` and 191 for
+`find_experiment_protocols`, and pushed `tests/test_context_floor.py` 26 tokens over its ceiling.
+Trimmed to **431** by moving the rationale into a comment, per
+`D-2026-09-14-a-docstring-is-a-prompt-and-a-comment-is-not`. The ceiling did not move.
+
+**What it deliberately does not do.** No `ProtocolBody` — the charge table, the steps, the
+analytics and the hazards are judgment over the chemistry and stay the model's. And no units: an
+`OptimizationProblem` carries none anywhere, and `quantities_are_plausible` reads *setpoints* rather
+than a factor's levels, so nothing downstream catches a temperature factor whose 80 might be °C or
+mol%. `notes` says so per parameter; it is the one gap this translation cannot close.

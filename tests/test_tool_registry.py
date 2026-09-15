@@ -51,6 +51,11 @@ _EXPECTED_INPROCESS_TOOLS = {
     "draft_experiment_protocol",
     "read_experiment_protocol",
     "find_experiment_protocols",
+    # The join between the two halves of "propose an experiment": a campaign's suggested points
+    # are `{parameter: value}` and a design needs labelled factors and arms citing those labels.
+    # In-process for the same reason as the pair above — the campaign store is core's and the
+    # translation is arithmetic, not durable work.
+    "experiment_arms_from_campaign",
     "find_knowledge_gaps",
     "record_knowledge_note",
     "record_confirmed_answer",

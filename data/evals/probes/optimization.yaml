@@ -819,3 +819,28 @@ probes:
       the round expires and the campaign ends with what it has, rather than guessing — is the mark
       of an answer that understands the mechanism instead of paraphrasing it.
 
+
+  - id: op-34
+    section: 4
+    persona: lab_technician
+    bucket: A
+    question: >-
+      The campaign just gave me eight conditions. Turn them into a plate I can actually run —
+      I need a run sheet, not a table of numbers.
+    expects_tools: [resume_campaign, experiment_arms_from_campaign, draft_experiment_protocol]
+    forbids_claims:
+      - "a unit on any factor the campaign did not declare one for"
+      - "a condition, level or arm that is not one of the points the campaign suggested"
+      - "that the design is ready to run while it still carries blockers"
+    direction: >-
+      The gap this probe exists for is a transcription: a suggestion is `{parameter: value}` points
+      and a plate needs factors whose levels are labelled and arms citing those labels, and until
+      `experiment_arms_from_campaign` the model did that by hand, where a transposed value is a
+      different experiment nobody can see. A good answer translates rather than retypes, and is
+      candid about the two things the translation cannot supply. **Units**: an optimisation problem
+      carries none, so a temperature factor arrives unitless and nothing downstream will catch it —
+      the answer must ask or state the assumption, never quietly pick one. **Evidence**: arms
+      assembled from a campaign's arithmetic have cited nothing, so `evidence_present` is still a
+      blocker and the design is not draftable until the chemist's precedent goes in. Naming the
+      parameters that turned out to be the same in every run as *setpoints* rather than factors is
+      the mark of an answer that read what came back instead of paraphrasing it.

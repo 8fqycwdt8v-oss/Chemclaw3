@@ -77,6 +77,13 @@ _BAD_DATA_TYPES = [
     "IngestError",
     "MetricError",
     "PlaybookError",
+    # A campaign's recorded points and its decision space disagreeing, or a design space whose
+    # parameters cannot be expressed as factors (`protocols/from_bo.py`). Bad data by the same
+    # test as every entry here: all four refusals are permanent properties of the two documents —
+    # two parameter names slugging to one factor name, a parameter over 96 settings, runs naming
+    # or omitting a declared parameter, a campaign that has suggested nothing. Waiting changes
+    # none of them, and retrying finds the identical disagreement.
+    "BoTranslationError",
     "NoteError",
     # A channel named in `CHEMCLAW_DELIVERY_CHANNELS` with no folder, or a `config:`
     # block the driver's signature refuses (`chemclaw.deliver.registry`). Both are a

@@ -32,7 +32,7 @@ skipped — the same reject-and-continue discipline the ELN sync uses.
 
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date, timedelta
 
 from pydantic import BaseModel, Field
@@ -78,6 +78,18 @@ class DigestItem(BaseModel):
     because that is the shape the body renders and the shape a client can count. It defaults to
     empty for the reason every added field here must: this model is an activity's *return*, and a
     run opened on the previous release replays a recorded result that has no such key.
+
+    **`headlines` is what makes a digest readable, and its absence is why one was not.** Every
+    surface downstream — the text body, the mailbox payload, `GET /digests`, the card on the UI's
+    `/review` — named each match by its **note id**, so the one proactive thing this system does
+    told a chemist `playbook-aee3d30407cc` and left them to go and look it up. Nothing else could
+    be sent: `Note` has no title field, and the id is the only handle the watermark works in. The
+    job has already parsed every note by the time it builds this, so `Note.headline()` costs one
+    string per match and says what the match *is*.
+
+    A mapping keyed by id rather than a list parallel to `note_ids`, because the two must not be
+    able to come apart: a parallel list that is reordered or short by one relabels somebody's
+    evidence. A missing key is a note with no body, which a reader shows as the id.
     """
 
     subscription_id: int
@@ -85,6 +97,7 @@ class DigestItem(BaseModel):
     query: str
     note_ids: list[str]
     disputed: list[str] = Field(default_factory=list)
+    headlines: dict[str, str] = Field(default_factory=dict)
 
 
 @durable_activity("background")
@@ -161,12 +174,21 @@ def _match_corpus(subscriptions: Sequence[Subscription]) -> list[DigestItem]:
                     query=subscription.query,
                     note_ids=sorted(matches),
                     disputed=sorted(one for one in matches if one in disputes),
+                    headlines={
+                        note.id: headline
+                        for note in notes
+                        if note.id in matches and (headline := note.headline())
+                    },
                 )
             )
     return digests
 
 
-def _digest_body(note_ids: Sequence[str], disputed: Sequence[str]) -> str:
+def _digest_body(
+    note_ids: Sequence[str],
+    disputed: Sequence[str],
+    headlines: Mapping[str, str] | None = None,
+) -> str:
     """The lines a subscriber reads: every new note, and which of them the corpus disputes.
 
     One function because three call sites render this — the session mailbox's sibling, the current
@@ -177,9 +199,22 @@ def _digest_body(note_ids: Sequence[str], disputed: Sequence[str]) -> str:
     question is "what is new" and the dispute is a property of an entry in that list. The trailing
     count is what a reader acts on: `kg/conflicts.py`'s own rule is that a silent truncation reads
     as completeness, and a list in which two of nine entries are marked says so out loud.
+
+    **A line leads with what the note says and keeps the id beside it.** It used to be the id
+    alone, which is a handle rather than a sentence — a subscriber was told
+    `- playbook-aee3d30407cc` and had to go and look up their own digest. The id stays, in
+    brackets, because it is what a reader types into `GET /notes/{id}` and what the watermark
+    works in; a headline that replaced it would make the message prettier and unusable.
+    `headlines` is optional so the deprecated replay shim, which has only ids, still renders.
     """
     marked = set(disputed)
-    lines = [f"- {note_id}{' (disputed)' if note_id in marked else ''}" for note_id in note_ids]
+    named = headlines or {}
+    lines = [
+        f"- {named.get(note_id) or note_id}"
+        f"{f' [{note_id}]' if named.get(note_id) else ''}"
+        f"{' (disputed)' if note_id in marked else ''}"
+        for note_id in note_ids
+    ]
     if marked:
         lines.append(
             f"\n{len(marked)} of {len(note_ids)} disagree with something already in the graph. "
@@ -337,7 +372,12 @@ class DigestWorkflow:
             sent = await notify_session_best_effort(
                 digest_channel(item.owner),
                 DIGEST_KIND,
-                {"query": item.query, "note_ids": item.note_ids, "disputed": item.disputed},
+                {
+                    "query": item.query,
+                    "note_ids": item.note_ids,
+                    "disputed": item.disputed,
+                    "headlines": item.headlines,
+                },
             )
             # Only after delivery — see the module docstring on why this ordering matters. The
             # acknowledgement used to run unconditionally, which made a swallowed delivery failure
@@ -379,7 +419,7 @@ class DigestWorkflow:
                     OutboundMessage(
                         recipient=item.owner,
                         subject=f"New for your standing query: {item.query}",
-                        body=_digest_body(item.note_ids, item.disputed),
+                        body=_digest_body(item.note_ids, item.disputed, item.headlines),
                         kind="digest",
                     )
                 )

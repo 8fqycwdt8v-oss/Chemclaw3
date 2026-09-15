@@ -469,25 +469,6 @@ topic).
       answers 200 against the vendor and no gateway is configured. Until the run exists, no claim
       that helpers do or do not pay is evidence about this deployment.
 
-- [ ] **A helper reaches no connector, and only the behavioural half of this row is still open**
-      — [L], and it is gated on the row above rather than on an argument. The prose half is
-      **done**: `D-2026-08-29-a-helper-reaches-no-connector-because-of-the-lifecycle-not-the-deadlock`
-      corrected the three places that gave the bound as a concurrency measurement — two concurrent
-      turns over one MCP tool object deadlock — which is real (D-110) but is about **sharing one
-      session object**, so it never reached the question of a helper holding sessions *of its own*.
-      **The constraint that binds is the lifecycle.** Connectors are opened by the *caller* — the runner, the CLI, the template activity — into an
-      `AsyncExitStack` **before** the graph is compiled, and `build_langgraph_agent` is synchronous
-      and receives them already open. The roster is fixed per compiled graph
-      (`SubAgentMiddleware._subagents` is set once, `subagent_names` is a frozen snapshot), so a
-      helper cannot open sessions at spawn time. Giving it its own set therefore means opening a
-      second full set **eagerly, on every turn**, whether or not a helper is ever spawned: double
-      the sockets, handshakes and server-side session state, against an unmeasured spawn rate, on a
-      path whose tail already cost six sequential connect timeouts when a fleet went dark.
-      **What would reopen it**: the row above showing that delegation pays *and* that the reading
-      helpers do is connector-bound. Even then the cheap form is not a second eager session set but
-      a lazily compiled roster entry — a change to a shape upstream owns, which belongs in
-      `tests/test_upstream_surface.py`'s count before anything relies on it.
-
 - [ ] **An advisor is the one delegation shape every merged decision already permits**
       — [M], and the design is fully determined rather than open.
       `D-2026-08-25-a-summarizer-in-the-thread-and-a-condenser-behind-a-tool` settles the objection

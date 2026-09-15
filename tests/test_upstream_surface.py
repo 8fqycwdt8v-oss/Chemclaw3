@@ -1859,3 +1859,52 @@ def test_a_store_search_still_pages_by_offset_and_still_dates_every_item() -> No
         "`InMemoryStore` no longer answers a query-less search in insertion order — the "
         "disagreement with `AsyncPostgresStore` that `_evict_past_the_cap` declines to rely on"
     )
+
+
+def test_the_task_tool_still_closes_over_its_roster_as_subagent_graphs() -> None:
+    """The one accessor-less read `tests/test_subagents.py` needs, and why it is a read at all.
+
+    `SubAgentMiddleware` builds the `task` tool as a closure over a `subagent_graphs` dict and
+    exposes no way to ask a compiled caller what its roster actually holds. That matters because
+    the property worth asserting about a helper is now a *narrowing* rather than an absence — it
+    holds its caller's read-only connector tools and none that act
+    (`D-2026-09-15-a-helper-shares-the-session-its-caller-already-opened`) — and the edit that
+    would break it is `build_langgraph_agent` no longer handing `_subagents` its connectors. That
+    is an argument, not a behaviour: a test that compiles its own helper to check it would agree
+    with itself forever, which is the failure mode
+    `D-2026-09-05-a-ratchet-that-re-derives-half-its-basis-bounds-half-a-request` names.
+
+    So `tests/test_subagents.py::_helper_of` walks the closure, and the coupling is declared here
+    rather than discovered on a bump — the whole point of this file. Two shapes, not one: that the
+    body is reachable as `coroutine`/`func`, and that the nonlocal is spelled `subagent_graphs` and
+    keyed by subagent name. If upstream ever grows an accessor, this test is what should turn red
+    so the walk can be deleted rather than outlive its reason.
+    """
+    import inspect
+
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage
+
+    from chemclaw.agent.langgraph_agent import build_langgraph_agent
+    from chemclaw.agent.profiles import AgentProfile
+
+    caller = build_langgraph_agent(
+        model=GenericFakeChatModel(messages=iter([AIMessage(content="")])),
+        profile=AgentProfile(name="default"),
+    )
+    task = caller.nodes["tools"].bound.tools_by_name["task"]
+    body = getattr(task, "coroutine", None) or getattr(task, "func", None)
+    assert body is not None, (
+        "the `task` tool no longer carries its body on `coroutine` or `func`; "
+        "tests/test_subagents.py::_helper_of reaches the roster through exactly those two names"
+    )
+    nonlocals = inspect.getclosurevars(body).nonlocals
+    assert "subagent_graphs" in nonlocals, (
+        f"the `task` tool no longer closes over `subagent_graphs` (it closes over "
+        f"{sorted(nonlocals)}); tests/test_subagents.py::_helper_of reads the compiled roster "
+        "from that name, and without it the helper's connector narrowing has no observed basis"
+    )
+    assert "general-purpose" in nonlocals["subagent_graphs"], (
+        "the roster is no longer keyed by subagent name, so `_helper_of` cannot name the one "
+        "helper `agent/subagents.py` compiles"
+    )

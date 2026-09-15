@@ -77,7 +77,7 @@ import uuid
 from collections.abc import Collection, Iterable
 from functools import cache
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
@@ -1673,4 +1673,56 @@ def test_a_narrowing_profile_is_actually_cheaper_than_the_default() -> None:
     assert not not_narrowing, (
         f"the default profile's prefix is {default_total} tokens and these are not below it: "
         f"{not_narrowing}. A profile that advertises fewer tools should cost fewer tokens."
+    )
+
+
+def test_a_helpers_prefix_is_bounded_by_the_one_this_file_already_ratchets() -> None:
+    """The helper is a second graph with a second prefix, and since 2026-09-15 not a small one.
+
+    `D-2026-09-15-a-helper-shares-the-session-its-caller-already-opened` gave a helper its caller's
+    *reading* connector tools, which is a real per-model-call cost this file did not previously
+    bound: every ceiling here is the prefix of the graph a chemist talks to, and a helper's schemas
+    are never on that wire. A fan-out of four helpers is four of these prefixes.
+
+    **The answer is not a second ceiling, and the reason is why this is an assertion rather than a
+    number.** A helper's surface is a *strict subset* of its caller's
+    (`tests/test_subagents.py::test_a_helper_holds_no_tool_its_caller_does_not`), and its prompt is
+    its caller's plus `HELPER_BRIEF` minus the harness block it is built without. So the caller's
+    ceiling already bounds it — as an inequality, which holds under every future edit to either
+    side, where a transcribed helper ceiling would be a second number to keep true. Measured here
+    the day it was written: **26,626 against 66,316**, 40%.
+
+    What this catches is the direction that would break the argument: a helper prompt that grows
+    past what the harness block pays for, or a tool source that reaches a helper without reaching
+    its caller. Either turns the inequality red and this file's single ceiling stops covering two
+    graphs.
+    """
+    import inspect
+
+    profile = get_profile("default")
+    connectors = _connector_tools(profile)
+    caller = build_langgraph_agent(
+        model=_CapturingModel(messages=iter([AIMessage(content="") for _ in range(8)])),
+        profile=profile,
+        audit_sink=NullAuditSink(),
+        connectors=connectors,
+    )
+    task = caller.nodes["tools"].bound.tools_by_name["task"]
+    body = cast(Any, getattr(task, "coroutine", None) or getattr(task, "func", None))
+    helper = inspect.getclosurevars(body).nonlocals["subagent_graphs"]["general-purpose"]
+
+    def prefix(graph: Any) -> int:
+        _RECEIVED.clear()
+        _BOUND.clear()
+        graph.invoke({"messages": [HumanMessage("what does this turn cost?")]})
+        system = [message for message in _RECEIVED if isinstance(message, SystemMessage)][0]
+        content = system.content if isinstance(system.content, str) else str(system.content)
+        return _count(content) + sum(_count(_tool_schema(tool)) for tool in _BOUND)
+
+    caller_prefix, helper_prefix = prefix(caller), prefix(helper)
+    assert helper_prefix < caller_prefix, (
+        f"a helper's static prefix is {helper_prefix} tokens against its caller's {caller_prefix}, "
+        "so the ceilings in this file no longer bound it — and a fan-out pays that prefix once per "
+        "helper. Either the helper's prompt has outgrown the harness block it is built without, or "
+        "something now binds a tool to a helper that it does not bind to its caller"
     )
