@@ -644,10 +644,19 @@ def bind_pool_metrics() -> None:
     """
     from chemclaw.core.metrics import METRICS
 
-    METRICS.bind_gauge("chemclaw_pg_pool_size", lambda: float(pool_stats()["pool_size"]))
-    METRICS.bind_gauge("chemclaw_pg_pool_available", lambda: float(pool_stats()["pool_available"]))
+    # **`coherent_pool_stats` rather than `pool_stats`, and the difference is the whole point.**
+    # `render()` calls each gauge's source, so three lambdas over `pool_stats()` walked the pools
+    # three times per scrape — publishing a `pool_size`, a `pool_available` and a
+    # `requests_waiting` from three different instants. The saturation question these exist for is
+    # read across all three at once, so a triple that never held together is the one reading they
+    # must not give.
+    METRICS.bind_gauge("chemclaw_pg_pool_size", lambda: float(coherent_pool_stats()["pool_size"]))
     METRICS.bind_gauge(
-        "chemclaw_pg_pool_requests_waiting", lambda: float(pool_stats()["requests_waiting"])
+        "chemclaw_pg_pool_available", lambda: float(coherent_pool_stats()["pool_available"])
+    )
+    METRICS.bind_gauge(
+        "chemclaw_pg_pool_requests_waiting",
+        lambda: float(coherent_pool_stats()["requests_waiting"]),
     )
     METRICS.bind_gauge("chemclaw_pg_pool_max_size", lambda: float(_process_max_connections()))
     METRICS.bind_gauge(
@@ -681,6 +690,7 @@ async def pooling() -> AsyncIterator[None]:
         yield
     finally:
         _POOLING = False
+        reset_pool_snapshot()
         # **Only the pools this loop opened.** `psycopg_pool` schedules a pool's shutdown on the
         # loop it was opened in, so closing one built on a *different* loop raises
         # `RuntimeError: Event loop is closed` from inside the close — after the reference would
@@ -896,6 +906,63 @@ def pool_stats() -> dict[str, int]:
         for name in total:
             total[name] += int(stats.get(name, 0))
     return total
+
+
+#: How long one walk of the pools stands in for the next, in seconds.
+#:
+#: **This is a coherence window, not a cache for speed.** `render()` reads every gauge by calling
+#: its own source, so three gauges bound to three `pool_stats()` lambdas walked the pools three
+#: times per scrape and published a triple that never existed together — harmless for a trend and
+#: wrong for the one question D-119 introduced them to answer, which is read across all three at
+#: once: is the pool full *and* are callers waiting.
+#:
+#: One second against a scrape interval of 15-30 s: long enough that the three reads of a single
+#: render see one instant, and far too short to make a scrape stale. The alternative the backlog
+#: row offered — collapsing the three into one labelled family — was declined because the names are
+#: what existing dashboards and alerts select on, and they are three quantities rather than three
+#: values of one.
+_POOL_SNAPSHOT_WINDOW_SECONDS = 1.0
+
+#: `(taken_at, stats)` for the most recent walk, or `None`. Guarded by `_POOL_SNAPSHOT_LOCK`
+#: because `/metrics` can be scraped concurrently and two renders must not interleave a half-built
+#: snapshot — which would reintroduce exactly the incoherence this exists to remove.
+_POOL_SNAPSHOT: tuple[float, dict[str, int]] | None = None
+_POOL_SNAPSHOT_LOCK = threading.Lock()
+
+
+def coherent_pool_stats() -> dict[str, int]:
+    """`pool_stats()`, but one walk per scrape rather than one per gauge.
+
+    Every gauge bound to this within `_POOL_SNAPSHOT_WINDOW_SECONDS` of the first reads the *same*
+    walk, so `pool_size`, `pool_available` and `requests_waiting` describe one instant.
+
+    Returns:
+        A copy, so a caller cannot mutate the shared snapshot for the gauges that follow it.
+    """
+    global _POOL_SNAPSHOT
+    now = time.monotonic()
+    with _POOL_SNAPSHOT_LOCK:
+        cached = _POOL_SNAPSHOT
+        if cached is not None and now - cached[0] < _POOL_SNAPSHOT_WINDOW_SECONDS:
+            return dict(cached[1])
+    # Walked outside the lock: `get_stats()` touches every pool, and holding the lock across it
+    # would serialise concurrent scrapes behind the walk rather than behind the snapshot. A race
+    # here costs one extra walk and stores whichever finished last, which is still one instant.
+    fresh = pool_stats()
+    with _POOL_SNAPSHOT_LOCK:
+        _POOL_SNAPSHOT = (now, fresh)
+    return dict(fresh)
+
+
+def reset_pool_snapshot() -> None:
+    """Drop the cached walk, so the next read takes a fresh one.
+
+    For tests, and for `pooling()`'s exit: a process that has closed its pools should not answer a
+    later scrape from a window opened while they were live.
+    """
+    global _POOL_SNAPSHOT
+    with _POOL_SNAPSHOT_LOCK:
+        _POOL_SNAPSHOT = None
 
 
 def vector_recall_settings() -> dict[str, str]:
