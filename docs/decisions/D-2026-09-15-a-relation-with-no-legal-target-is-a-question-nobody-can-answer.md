@@ -80,9 +80,18 @@ schema, not for flipping a default whose reasoning still holds.
 
 ## Consequences
 
-- `measured-by` can be used as declared. The corpus's existing edge is left as it is: repointing it
-  would mean writing an `analytical-method` note on a human author's behalf, and the seed corpus
-  records what a person wrote.
+- `measured-by` can be used as declared, **and the wrong edge now refuses**. This consequence
+  originally read that the corpus's workaround edge would be left alone — falsified within the hour
+  by `tests/test_seed_corpus.py::test_every_note_type_has_a_real_instance`, whose argument is that
+  "a type nothing in the corpus uses is a type no retrieval filter has ever been exercised on". It
+  is right, and it forced the better answer: the seed corpus gains the method note that reaction had
+  been describing in prose all along, and its edge points at it.
+- **`RELATION_SIGNATURES` gains `measured-by`**, which is what makes this structural. The type
+  existing makes the right edge *possible*; only a signature makes the wrong one refuse. Driven
+  against the corpus's own former edge, `kg-validate` now reports: *"asserts 'measured-by' toward
+  'playbook-recrystallisation-purity', a 'playbook' note — that relation targets
+  ['analytical-method']"*. That is the same argument the signatures block already makes about twelve
+  backwards edges that merged green under a validator checking relation *names* only.
 - An analytics table with an RRT column can be bound and ingested. Nothing infers one.
 - **The prefix cost was paid down twice, not waived.** The prompt edit measured 39 tokens over
   `tests/test_context_floor.py`'s ceiling, then 1 over; it was tightened both times. The ceiling did
