@@ -2775,3 +2775,63 @@ type, a constant other packages read — run the full suite before pushing, not 
 every one of these was invisible to the tests of the code I changed, because the guard lives with
 the declaration and not with the behaviour. `make test` is ~18 minutes; a red CI cycle is longer,
 and a red PR spends somebody's trust rather than my time.
+
+## Do not edit the tree while the gate is running
+
+**2026-09-15.** A 24-minute `make test` came back with five failures. Three were real (a new tool
+over the context-floor ceiling, and the two compaction defaults derived from it). Two —
+`test_layering.py::test_module_scope_imports_are_declared` and
+`test_workflow_replay.py::…[TemplateWorkflow-before-the-run-record.json]` — were artefacts of my
+own editing: I wrote `analytical/stability.py` and its imports *while the suite ran*, and several of
+these tests walk the source tree at run time rather than at collection. `test_workflow_replay`
+passed in isolation immediately afterwards.
+
+The cost is not the wasted run, it is the **diagnosis**: a failure list mixing real defects with
+artefacts of the run's own conditions is one you cannot act on without re-running everything, and
+the tempting move is to dismiss the ones that look unrelated. That is how a real failure gets
+written off as a flake.
+
+**Rule: once `make test` starts, the tree is frozen until it finishes.** Queue the next edit; do not
+apply it. If something must be edited, kill the run rather than let it produce evidence about a tree
+that no longer exists.
+
+## A shallow clone makes a citation check skip, not pass
+
+**2026-09-15.** `Chemclaw3-mcp`'s CI was red on a test that had *skipped* in every local run:
+`test_every_commit_the_registers_cite_is_reachable_from_head` cannot decide reachability in a
+shallow clone, so it skips locally and runs in CI, where the checkout is full. Five ADRs on `main`
+cited a branch commit a squash merge had discarded.
+
+Two things follow. First, the failure was **pre-existing on the base branch** and my PR merely
+surfaced it — established by reproducing it on `origin/main` before touching anything, which is the
+step that decides whether a red CI is yours. Second, and more usefully: **`git fetch --unshallow`
+before believing a green local run**, in every repository of this family. A test that skips is not a
+test that passed, and this repository's own `tests/conftest.py` epilogue exists to say so about the
+Postgres set — the same discipline applies to the git-history set, which has no epilogue.
+
+**Rule: when a check's skip reason names a property of the *checkout* rather than of the
+environment, fix the checkout and re-run before pushing.**
+
+
+## Run the gate's command, not your own approximation of it
+
+**2026-09-15.** CI's `static` job went red on `mypy` errors in tests I had just written, after I had
+run `uv run mypy --strict src/chemclaw` and reported it clean. `make type` is
+`uv run mypy src examples tests` — **880 files**. Mine was 472, and the 408 it skipped were exactly
+where the new code was.
+
+The same shape as the two entries above, and the third instance in one session: I ran a *narrower*
+check than the gate and read its green as the gate's. The other two were a narrower *test set*; this
+one was a narrower *file set*, reached by hand-writing an invocation instead of using the target
+that exists.
+
+**Rule: never hand-roll a gate step.** `make lint`, `make type`, `make test` are what CI runs, and
+`CLAUDE.md` says so in as many words — *"Use them rather than raw invocations — CI runs exactly
+these, so a green `make` locally means a green CI."* A hand-written `mypy`/`pytest`/`ruff` line is
+fine for a fast inner loop and is never the evidence that something is ready to push.
+
+The fix was worth more than the silencing, too: four call sites carried `# type: ignore[arg-type]`,
+and mypy actually raises `arg-type` for a list *variable* and `list-item` for a list *literal* — so
+two of the four ignores named the wrong code and the other two were load-bearing. One `_plan()`
+helper that states the conversion once replaced all four. **An ignore that has to be spelled two
+ways for one mismatch is a sign the ignore is the wrong tool.**

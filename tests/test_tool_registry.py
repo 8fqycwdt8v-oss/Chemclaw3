@@ -58,6 +58,12 @@ _EXPECTED_INPROCESS_TOOLS = {
     # In-process for the same reason as the pair above — the campaign store is core's and the
     # translation is arithmetic, not durable work.
     "experiment_arms_from_campaign",
+    # Unit arithmetic with a verdict, over values passed in the call. In-process because it reaches
+    # nothing — no store, no connector, no engine — and because `core/units` is where the comparison
+    # that refuses an area percent against a weight-percent limit already lives.
+    "check_against_specification",
+    # Its sibling over time, and scipy's least squares plus a t-quantile is still arithmetic.
+    "estimate_stability_trend",
     "find_knowledge_gaps",
     "record_knowledge_note",
     "record_confirmed_answer",

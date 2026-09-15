@@ -63,31 +63,6 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
-- [ ] **A plan step's `tools` declaration is unbounded, and it sizes both a durable row and a
-  refusal** — [S]. `agent/plan_scope.ScopedTodo.tools` is `list[str]` with no constraint, so a
-  `write_todos` declaring 50,000 names validates, the union lands in `plan_approvals.scope`
-  (`TEXT[]`, written by `api/routes/plan.py::decide_plan`), and
-  `plan_gate.out_of_scope_refusal` sorts and joins the whole set into one sentence — measured at
-  **600,192 characters** over ten-character names, bounded to 60,000 by
-  `agent/tool_authz._refusal_message` before the model reads it and unbounded everywhere before
-  that (the exception, the log, the audit row). Not an escalation: the scope
-  only ever *narrows* what a call may do, and a name no tool answers to is refused by
-  `enforce_tool_authz` regardless. What it is is an unpriced write a model can repeat, and the
-  natural fix is a `Field(max_length=...)` on the declaration plus a setting, which is a config
-  decision rather than an edit — a low ceiling refuses a legitimately broad plan at the tool's own
-  argument validation, where the model can read the error and split the plan.
-- [ ] **The 0/49 plan-scope ratchet cannot see the argument-driven gated call** — [S].
-  `tests/test_plan_scope.py::test_the_surface_a_read_only_plans_approval_reaches` drives every name
-  in `authz.side_effecting_tools()` through the gate under an approval that declared nothing, and
-  requires every one to be refused. `write_file` is not in that set: `authz.side_effecting_call`
-  classifies it on its *arguments* — durable under `/memories/`, turn-local under `/scratch/` — so
-  the one tool whose gatedness is a function of the call is the one the ratchet enumerates past.
-  Measured: `side_effecting_call("write_file", {"file_path": "/memories/x.md", ...})` is `True` and
-  `"write_file" in side_effecting_tools()` is `False`, so the gate does refuse it and nothing holds
-  that it will.
-  The fix is one more arm over the argument-driven cases rather than a change to the partition, and
-  it should derive them from `authz` rather than listing `write_file` by name.
-
 - [ ] **A helper spawn costs 20,712 kB of checkpoint rows and nothing yet explains where they
   go** — [M]. The cost is real and measured on a real `AsyncPostgresSaver` with incompressible
   text: one helper writing 2 MB costs **20,712 kB** above a 296 kB baseline (10.4x), and
@@ -219,19 +194,42 @@ topic).
       question is about — `playbook-degassing` 1 → 7, `opt-suzuki-conditions` 3 → 9,
       `report-biaryl-development` 2 → 7.
 
-      **Three remedies are now measured no-ops** and the numbers are here so nobody re-litigates
+      **Four remedies are now measured no-ops** and the numbers are here so nobody re-litigates
       them: `retrieval_fusion_k` (0 of 7 queries reordered, at any `k` down to the minimum),
-      `retrieval_source_weights` (tiering `graph`+`lexical` at 0.5 is inert), and one-corpus-one-vote
-      (**0 of 46** gold ranks, structurally — grouping the three legs leaves the cross-corpus stage
-      a single list, so the final order is the within-corpus fusion). The mechanism shipped anyway,
-      for the different case it does fix.
+      `retrieval_source_weights` tiering the strong legs *up* (`graph`+`lexical` at 0.5 is inert),
+      one-corpus-one-vote (**0 of 46** gold ranks, structurally — grouping the three legs leaves the
+      cross-corpus stage a single list, so the final order is the within-corpus fusion), and
+      down-weighting the *correlated* leg, which is the one a reader reaches for next
+      (`D-2026-09-15-a-weight-small-enough-to-work-is-a-removal-spelled-as-a-number`): mean gold
+      rank 4.72 / 4.56 / 4.67 at `vector` weights 1.0 / 0.5 / 0.1, top-3 *falling* 19 → 18. A weight
+      divides the **rank** and the rank term is nearly flat at `k=60`, so the crossover is
+      **`w < 2.7e-4`** — the dense leg's rank-1 hit fusing as though it were rank 3,729. The dial is
+      impractical rather than inert, and `tests/test_hybrid_rrf.py` now asserts both sides of that
+      so the distinction cannot decay. The one-corpus-one-vote mechanism shipped anyway, for the
+      different case it does fix.
 
-      What is left is the cause rather than the fusion: the shipped `embedding_provider` is `hash`,
-      token-count hashing, so all three legs are term-overlap rankers — pairwise agreement 47/55,
-      44/55 and 41/53. The two honest options are an `openai_compatible` embedding provider, which
-      makes the dense leg genuinely orthogonal and is the thing to measure next, or not running
-      three legs over one corpus. `retrieval_mode` stays `graph` until one of them is taken, which
-      is now a decision with a number behind it rather than caution.
+      **The row's second option is also measured now, and it is a trade rather than a win.** RRF
+      over `graph`+`lexical` — not running three legs over one corpus — is the *first* configuration
+      ever measured to beat the shipped round-robin: mean gold rank **3.69** against 4.69, 20 notes
+      up against 4 down, top-3 21 against 20. It loses **3 of 39** gold notes outright, every one of
+      them found only by the dense leg and one at baseline rank 3 (checked for a `retrieval_top_k`
+      artefact; it is not one). `retrieval_recall` is the gated retrieval metric and rank is the
+      diagnostic, so the leg stays.
+
+      **And "correlated" is not "redundant", which this row used to imply.** Under `hash` the dense
+      leg is a differently weighted term ranker — token-count hashing with a cosine, against
+      BM25-lite and substring — reaching gold notes the other two never return. Measured over eight
+      free-text questions it contributes 27 of 98 delivered chunks and reorders 7 of 8.
+
+      What is left is the cause rather than the fusion: an `openai_compatible` embedding provider,
+      which makes the dense leg genuinely orthogonal and is still the thing to measure next. It was
+      not measured on 2026-09-15 for a stated reason rather than a vague one — this environment
+      carries a credential but no embeddings gateway, and the only available `openai_compatible`
+      embedder is `cli/mock_llm.py`'s, which would measure the mock. `retrieval_mode` stays `graph`.
+
+      **Run `make retrieval-arms` before quoting any number above**: four sessions have rebuilt this
+      measurement from scratch, and the baseline itself moved 4.38 → 4.69 between 2026-09-14 and
+      2026-09-15 with no retrieval code changed, because the corpus grew.
 
 ## 3 — Work that is lost, dropped or invisible
 

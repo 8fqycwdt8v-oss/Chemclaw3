@@ -170,7 +170,7 @@ class AgentSettings(BaseSettings):
     # `D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`'s deferred schemas — not a budget
     # that pretends the prefix is smaller than it is.
     #
-    # **118,700, and 133,000 re-opened the defect `D-2026-09-04` closed.** That ADR's whole
+    # **119,500, and 133,000 re-opened the defect `D-2026-09-04` closed.** That ADR's whole
     # pass/fail criterion was "does the request fit a 128k model", and it fixed a measured 137,301
     # down to 100,000. Holding the *thread* allowance fixed at 57,000 and letting the request bound
     # follow the prefix put it back at 133,000 — a maximal request of ~131,400 billed at the real
@@ -182,8 +182,8 @@ class AgentSettings(BaseSettings):
     # **So the derivation runs the other way now: the window is the input and the thread allowance
     # is what is left over.** 128,000 is the smallest window this stack targets (the chart ships
     # `gpt-oss`, published at 131,072, and `D-2026-09-04` argues every figure against 128k), less
-    # `llm_max_tokens` = 4,096 reserved for the answer, leaving **123,904** of input, and 118,700
-    # is inside it by 5,204. (Both figures are asserted in `tests/test_compaction.py`, which is why
+    # `llm_max_tokens` = 4,096 reserved for the answer, leaving **123,904** of input, and 119,500
+    # is inside it by 4,404. (Both figures are asserted in `tests/test_compaction.py`, which is why
     # a change to either has to be stated here rather than discovered there.)
     #
     # **That criterion used to need a tokenizer constant and no longer does, which is the point.**
@@ -303,16 +303,24 @@ class AgentSettings(BaseSettings):
     # moved is the size of the thing being translated. The 11,000 is a *bound* and belongs beside
     # the ceiling it extends, so it lives in `tests/test_context_floor.SERVED_ELSEWHERE_ALLOWANCE`
     # where the assertion can read it, not as a second number here that would drift away from it.
-    # 108,200 since `D-2026-09-14-a-lowering-that-loses-a-merge-is-a-raising`: the ceiling it is
-    # derived from is 67,200 — up 2,000 for `write_todos` in every profile's prefix once the
-    # harness became the default (D-2026-09-13), down 300 for the developer rationale
-    # `D-2026-09-14-a-docstring-is-a-prompt-and-a-comment-is-not` moved out of three tool
-    # descriptions, a lowering a merge dropped and this restores. This is derived *upwards* from
+    # 109,000 since `D-2026-09-15-a-comparison-with-no-caller-is-a-promise-about-a-check-that-does-
+    # not-exist`: the ceiling it is derived from is 68,000 — 67,200 (itself up 2,000 for
+    # `write_todos` in every profile's prefix once the harness became the default, D-2026-09-13, and
+    # down 300 for the developer rationale `D-2026-09-14-a-docstring-is-a-prompt-and-a-comment-is-
+    # not` moved out of three tool descriptions) plus 800 for `check_against_specification`, the
+    # analytical tier's one tool. **That tool was trimmed first and the ceiling moved second**,
+    # which is the order this file's own history sets: the description came down from 1,266
+    # characters to 844 and the measured prefix still landed at 67,516, because a tool's
+    # description is counted twice — once as the description and once inside the schema that
+    # embeds it — so trimming cannot reach a 300-token overage without gutting the prompt the
+    # model reads. The cost is a real one and is stated rather than absorbed: every deployment's
+    # thread allowance is unchanged at 30,000, and the *request* bound moved up by 800 to keep it
+    # so. This is derived *upwards* from
     # that ceiling, so it moves with it and keeps the whole thread allowance it was derived to
     # have. The budget below cannot follow, because it is derived downwards from the
     # window — which is why the ceiling's cost lands there and not here, and why that cost is
     # 4.7% of the thread this time rather than wave 13's 1.16%.
-    agent_tool_result_clear_trigger: int = Field(default=110_000, ge=1)
+    agent_tool_result_clear_trigger: int = Field(default=110_800, ge=1)
     # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
     # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
     # dependent in one direction. Re-measured 2026-09-06 against real BPE encodings, on the observed
@@ -568,6 +576,28 @@ class AgentSettings(BaseSettings):
     harness_enabled: bool = True
     harness_autonomy: HarnessAutonomy = "plan_only"
     harness_max_loop_iterations: int = Field(default=25, ge=1)
+
+    # **What one `write_todos` call may declare.** Both halves of a plan were unbounded, and each
+    # sizes something that outlives the call: the step count sizes the row
+    # `api/routes/plan.py::decide_plan` writes, and the per-step declaration sizes the union that
+    # lands in `plan_approvals.scope` (`TEXT[]`) and then the sentence
+    # `plan_gate.out_of_scope_refusal` builds out of it. Measured on the shipped schema: 50,000
+    # ten-character names in one step validated, and the refusal came back at **600,192
+    # characters** — bounded to 60,000 by `agent/tool_authz._refusal_message` before the model
+    # reads it, and unbounded everywhere before that (the exception, the log, the audit row).
+    # 20,000 steps validated too, which is the half the backlog row that found this did not name.
+    #
+    # **Not an escalation, which is why these are bounds rather than a gate.** The scope only ever
+    # *narrows* what a call may do, and a name no tool answers to is refused by `enforce_tool_authz`
+    # regardless. What it is is an unpriced write a model can repeat.
+    #
+    # Refused at the tool's own argument validation on purpose: that is the one place the model
+    # reads the error and can act on it by splitting the plan, rather than the call succeeding and
+    # a person meeting the consequence later. The defaults are generous against real use — a step
+    # declares nought to a handful of tools, and the whole bound surface is ~113 — and far below
+    # what motivated them.
+    plan_max_steps: int = Field(default=64, ge=1)
+    plan_max_tools_per_step: int = Field(default=32, ge=1)
 
     # What one turn may **bill** before the runaway guard stops it, counting every dimension the
     # provider reports (input, output and cache) across every model call of the turn, the
