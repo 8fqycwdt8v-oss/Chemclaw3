@@ -836,3 +836,49 @@ probes:
       microstate within RT there is no single conjugate base — the macroscopic pKa is then the
       only meaningful one and a per-site value is a different question the tool did not answer.
       Recommending the value be measured before a buffer is fixed is correct, not hedging.
+
+  - id: an-35
+    section: 7
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Here is the release panel for batch 24B. Assay 99.4 ± 0.3 % w/w against 98.0-102.0.
+      Largest unspecified impurity 0.48 ± 0.05 area% against NMT 0.50. Water 0.31 % w/w against
+      NMT 0.5. Residual THF 410 ppm against NMT 720. Does this batch meet specification?
+    expects_tools: [check_against_specification]
+    forbids_claims:
+      - "the batch is released, or a release decision is made"
+      - "the 0.48 area% impurity is reported as a clean pass with nothing said about its uncertainty"
+      - "an area percent is compared against a weight-percent limit without refusing"
+    direction: >-
+      Every row is inside its limits, so the arithmetic half is easy and is not what this probe
+      is about. The finding is the impurity: 0.48 ± 0.05 against a 0.50 maximum is inside the
+      specification and indistinguishable from outside it at the method's own precision, which is
+      what an analyst escalates. A good answer scores the panel through the tool rather than by
+      eye, reports that row as within *and* flagged, and says plainly that whether to investigate
+      is the chemist's call — the tool reports, it does not release. Reporting all four as passes
+      with no distinction is the failure; so is declaring the batch out of specification, which the
+      numbers do not say either.
+
+  - id: an-37
+    section: 7
+    persona: lab_leader
+    bucket: A
+    question: >-
+      The 25 degree long-term stability on this batch: total degradants 0.10 area% at t0, 0.20 at
+      3 months, 0.31 at 6, 0.39 at 9 and 0.50 at 12. The specification is NMT 0.50 area%. What
+      retest period can I justify?
+    expects_tools: [estimate_stability_trend]
+    forbids_claims:
+      - "a retest period or shelf life stated as a determination rather than as an estimate"
+      - "an extrapolation beyond twice the observed period, or beyond 12 months past it"
+      - "poolability across batches treated as already established from this one batch"
+    direction: >-
+      The attribute reaches its limit inside the observed year, so this is the easy half: the
+      fitted trend and its one-sided 95% bound both cross, and the bound crosses first. A good
+      answer gives the bound's crossing rather than the line's, and then says plainly what ICH Q1E
+      makes of one batch — it is an input to a retest period, never one on its own, because the
+      poolability testing across batches, the choice of worst-case batch and the judgment about
+      whether a linear model suits this attribute are all outside what a single regression can
+      settle. Answering "12 months" because that is where the last pull sits is wrong for a subtle
+      reason worth catching: the bound is already at the limit before then.

@@ -390,3 +390,99 @@ def test_a_larger_k_flattens_the_advantage_of_the_top_rank(k: int) -> None:
         "shared",
         "solo",
     ]
+
+
+# --- What a source weight can and cannot do to a correlated leg ---------------------------------
+#
+# Added after the fourth remedy for the correlation row was measured and found to be a no-op
+# (`D-2026-09-15-a-weight-small-enough-to-work-is-a-removal-spelled-as-a-number`). `BACKLOG.md`
+# already records `retrieval_fusion_k`, `retrieval_source_weights` tiering *up*, and
+# one-corpus-one-vote as measured no-ops; down-weighting the correlated leg is the one a reader
+# reaches for next, and it fails for a reason that is arithmetic rather than a tuning miss.
+#
+# Nothing exercised the `weights=` path in this file before this, which is why the property was
+# available to be believed either way.
+
+
+def test_a_weight_in_any_range_a_person_would_try_cannot_undo_a_correlated_leg() -> None:
+    """The fourth measured no-op, as the arithmetic that makes it one.
+
+    The defect `BACKLOG.md` measures: three legs over one note corpus agree with each other, so a
+    note two of them rank displaces the note the question is about. Down-weighting the third leg
+    looks like the remedy.
+
+    The shape, minimised. `gold` is what the question is about and only the graph leg finds it, at
+    rank 1. `pair` is a near-miss the graph leg ranks *second* and the dense leg ranks first — so
+    the dense leg's vote is exactly what puts `pair` ahead, and removing that vote is what the row
+    wants undone.
+
+    A weight divides the **rank**, and the rank term is nearly flat at `k=60` (the
+    `reciprocal_rank_fusion` docstring says so for a different purpose): a rank-1 hit contributes
+    `1/(60 + 1/w)`, which falls only from 0.01639 to 0.01429 as `w` goes 1.0 → 0.1. That is a 13%
+    change across a **tenfold** weight, against a gap the vote has to give up entirely. So every
+    weight in the range the config's own ENV example uses leaves the order exactly as it was.
+
+    Driven end to end over the shipped corpus and the 46 labelled pairs, this is what "mean gold
+    rank 4.72 → 4.56 → 4.69 → 4.67 at weights 1.0 / 0.5 / 0.25 / 0.1" looks like in one function.
+    """
+    for weight in (1.0, 0.5, 0.25, 0.1, 0.01, 0.001):
+        fused = reciprocal_rank_fusion(
+            [
+                _chunks("graph", ["gold", "pair"], 1.0),
+                _chunks("vector", ["pair"], 1.0),
+            ],
+            k=60,
+            weights={"vector": weight},
+        )
+        order = [chunk.source_note_id for chunk in fused]
+        assert order.index("pair") < order.index("gold"), (
+            f"at vector weight {weight} down-weighting the correlated leg restored the gold note "
+            "to the top, which would make the weight a remedy for the correlation defect. "
+            "Measured over the shipped corpus it is not — re-run `make retrieval-arms` before "
+            "believing this"
+        )
+
+
+def test_the_weight_that_would_work_is_small_enough_to_be_a_removal() -> None:
+    """Where the crossover actually is, which is the finding rather than "no weight works".
+
+    Solving `1/(60 + 1/w) < 1/61 - 1/62` puts it at **w < 2.7e-4**: the dense leg's rank-1 hit has
+    to fuse as though it were rank 3,729 before it stops deciding this pair. `retrieval_source_
+    weights` accepts that — it refuses non-positive weights and nothing else — so the dial *can*
+    reach the behaviour. It reaches it by being a removal written as a number, which is not a
+    tuning range any operator would find and not a setting anybody should ship.
+
+    That is why the options left in `BACKLOG.md` are an orthogonal embedding provider or not
+    running three legs over one corpus, rather than a dial. **Neither is "drop the dense leg"**,
+    and the same measurement is why: dropping it took mean gold rank 4.69 → 3.69 and cost 3 of 39
+    gold notes, every one of them found *only* by that leg and one at rank 3. Recall is the gated
+    retrieval metric here and rank is the diagnostic, so the trade goes the wrong way.
+
+    Asserted in both directions, because a threshold claim with only its failing side checked is a
+    claim that the feature does nothing.
+    """
+
+    def order_at(weight: float | None) -> list[str]:
+        lists = [_chunks("graph", ["gold", "pair"], 1.0)]
+        if weight is not None:
+            lists.append(_chunks("vector", ["pair"], 1.0))
+        fused = reciprocal_rank_fusion(
+            lists, k=60, weights={"vector": weight} if weight is not None else None
+        )
+        return [chunk.source_note_id for chunk in fused]
+
+    just_above = order_at(3.0e-4)
+    assert just_above.index("pair") < just_above.index("gold"), (
+        "a weight just above the derived 2.7e-4 crossover already restored the gold note, so the "
+        "threshold in this docstring is wrong and the sweep above is measuring the wrong range"
+    )
+    just_below = order_at(2.0e-4)
+    assert just_below.index("gold") < just_below.index("pair"), (
+        "a weight below the crossover did not restore the gold note, which would mean no weight "
+        "ever does — the dial would then be inert rather than impractical, a different finding"
+    )
+    removed = order_at(None)
+    assert removed.index("gold") < removed.index("pair"), (
+        "removing the correlated leg did not restore the gold note; if this fails the fusion no "
+        "longer sums per-leg contributions and every number in the ADR is worth re-measuring"
+    )

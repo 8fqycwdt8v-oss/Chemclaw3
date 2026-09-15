@@ -1633,11 +1633,16 @@ def test_a_maximal_request_at_the_shipped_budget_fits_the_smallest_window_it_tar
         f"a budget 10% above {budget} would still fit {input_ceiling}, so this test has so much "
         "headroom that it is not the bound it claims to be; tighten it or say why."
     )
-    # 5,204 since `D-2026-09-14-a-lowering-that-loses-a-merge-is-a-raising`: the budget fell 300
-    # with the ratchet ceiling it is derived from, and the window it is measured against did not
-    # move. The margin widening is the safe direction — this arm exists so that a *narrowing* one
-    # has to be stated rather than discovered.
-    assert input_ceiling - budget == 5_204, (
+    # 4,404 since `D-2026-09-15-a-comparison-with-no-caller-is-a-promise-about-a-check-that-does-
+    # not-exist`: the budget rose 800 with the ratchet ceiling it is derived from, for the
+    # analytical tier's one tool, and the window it is measured against did not move. **This is the
+    # narrowing direction, which is exactly the case this arm exists to make somebody state.** What
+    # it costs: a maximal request now leaves 4,404 tokens of head-room under a 128k model rather
+    # than 5,204, and the arm above still refuses a budget 10% higher. What buys it back is a
+    # narrower prefix — profile routing, or
+    # `D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`'s deferred schemas — not a further
+    # raise here, because the next one would be measured against the same unmoved window.
+    assert input_ceiling - budget == 4_404, (
         "the margin under the smallest window this stack targets moved; say which of the two "
         "numbers changed and why"
     )

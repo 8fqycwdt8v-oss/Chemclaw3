@@ -280,6 +280,13 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
         # built, and "what would this campaign's next experiments look like as a plate" is a
         # question that has to be answerable *before* somebody approves drafting them, not after.
         "experiment_arms_from_campaign",
+        # Arithmetic over numbers the caller supplied in the call itself: it reads no store, opens
+        # no session and writes nothing. Read-only here is not a close call — the question is
+        # whether a result meets a limit, and a plan that cannot ask it before being approved is a
+        # plan whose analytical rows nobody checked.
+        "check_against_specification",
+        # The same case: a regression over timepoints the caller passed in the call.
+        "estimate_stability_trend",
         "get_durable_job_status",
         "list_attachments",
         "list_watches",

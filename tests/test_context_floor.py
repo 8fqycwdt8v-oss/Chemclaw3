@@ -448,7 +448,20 @@ load_profiles()
 #: wave — the harness default above, +2,000, and that lowering, -300 — and the merge that resolved
 #: them took the first and dropped the second, leaving three documents asserting a lowering the tree
 #: did not carry. The two are independent and both belong, so the ceiling is their sum.
-CEILINGS: dict[str, int] = {"__default__": 67_200}
+#: **68,000 since 2026-09-15, up 800 for the analytical tier's two tools** — measured 316 for
+#: `check_against_specification` and 414 for `estimate_stability_trend`, which leaves the default
+#: profile at 67,930 and **70 tokens** of headroom. That is tight on purpose and tighter than usual:
+#: the entry above says the headroom here "is smaller than one `record_knowledge_note`'s schema
+#: costs, which is the property every entry above was chosen for", and widening it would narrow the
+#: budget's margin under a 128k model in the same commit — the direction
+#: `tests/test_compaction.py` makes somebody state.
+#:
+#: **The tools were trimmed before the ceiling moved**, which is the order this file's history sets.
+#: `check_against_specification`'s description went from 1,266 characters to 844 and the prefix was
+#: still 316 over, because a tool's description is counted twice — once as itself and once inside
+#: the schema that embeds it — so trimming cannot close a 300-token overage without gutting the
+#: prompt the model reads. At 316 and 414 both tools sit below this file's own median.
+CEILINGS: dict[str, int] = {"__default__": 68_000}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.
@@ -738,7 +751,28 @@ SERVED_ELSEWHERE_ALLOWANCE = 11_000
 #: also added its manifest here. Measured 2026-09-07 against the checkout beside this one: 13,942
 #: tokens over 28 tools (`chem` 5,577 / 12, `props` 2,936 / 6, `pyexec` 1,142 / 1, `rxnpredict`
 #: 2,655 / 6, `safety` 1,632 / 3). The headroom is the same 11.5% and for the same reason.
-FLEET_PUBLISHED_ALLOWANCE = 15_500
+#:
+#: **It did exactly that on 2026-09-15, which is the first time this bound has been the thing that
+#: noticed.** The fleet gained a `thermalsafety` server — runaway arithmetic from calorimetry, seven
+#: tools — and the directory went to **17,835 over 35 tools** (`chem` 5,577 / 12, `props` 2,936 / 6,
+#: `pyexec` 1,142 / 1, `rxnpredict` 2,784 / 6, `safety` 1,632 / 3, `thermalsafety` 3,764 / 7),
+#: 2,335 over the 15,500 that stood. Raised to 19,800, which is the same 11% headroom over the new
+#: measurement.
+#:
+#: The cost is stated rather than absorbed, because raising a bound quietly is how one stops being
+#: one: every deployment that mounts this directory — `infra/live/e2e-full-stack/up.sh` does — now
+#: pays 3,764 more tokens on every model call. At 538 tokens a tool `thermalsafety` is in the band
+#: its siblings occupy (`safety` 544, `props` 489, `chem` 465) rather than an outlier, and the
+#: length is the fleet's own rule about a tool docstring stating what the tool is *not* — which for
+#: a server that answers "what happens if the cooling fails" is the paragraph that keeps a Semenov
+#: estimate from being quoted as an SADT. Trimming to fit would have cost ~330 tokens a tool, which
+#: is that paragraph.
+#:
+#: `SERVED_ELSEWHERE_ALLOWANCE` deliberately did **not** move with it: `thermalsafety` is not a
+#: bundle this tree declares, so no chart deployment binds it, and charging `PREFIX_BOUND` for it
+#: would tighten both compaction defaults everywhere on account of a lane that talks to
+#: `chemclaw.cli.mock_llm`. That is the same argument this entry opens with, arriving for real.
+FLEET_PUBLISHED_ALLOWANCE = 19_800
 
 #: The whole static prefix a shipped `default` turn may cost, as a bound: this file's ceiling plus
 #: the allowance for what it cannot see.
