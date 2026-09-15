@@ -91,6 +91,12 @@ WITHHELD: dict[str, str] = {
         "named employee who opened it — the same enumeration `check_pending_requests` is withheld "
         "for, and the discovery path for the ids `read_experiment_protocol` takes"
     ),
+    "experiment_arms_from_campaign": (
+        "the same disclosure as `read_experiment_protocol` one door over: a campaign's objective, "
+        "the parameter space a team is exploring and the exact conditions they are about to run. "
+        "A `campaign_id` is a hash of the decision space, so it is guessable by anyone who knows "
+        "the space — which is the guessability argument that withholds the two entries below"
+    ),
     "read_experiment_protocol": (
         "one chemist's in-flight design: the goal they typed, their `prior_work` and `notes`, and "
         "what they ruled out. A `design-<hash>` id is derived from the ask, which is the same "
