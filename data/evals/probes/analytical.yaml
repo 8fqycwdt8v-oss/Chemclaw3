@@ -4,8 +4,38 @@
 #
 # This is the thinnest area of the system and that is the point. There is no
 # chromatography model, no NMR or MS prediction, no XRPD/DSC/TGA library, no
-# particle-size data, no stability trending and no elemental-impurity or
-# residual-solvent tables. What exists and is genuinely adjacent: computed IR via
+# particle-size data and no elemental-impurity or residual-solvent tables.
+#
+# **Two of this paragraph's clauses stopped being true on 2026-09-15, and they went
+# in opposite directions, which is why the sentence is now split.**
+#
+# "No stability trending" is **false of this tree**: `estimate_stability_trend`
+# ships in `chemclaw.analytical.stability` and is bound on every turn. It holds no
+# study and no batch history — it extrapolates an ICH Q1E shelf life from
+# timepoints the chemist supplies — so the probes below that ask for a *trend* have
+# a real tool to reach, and the ones that ask for stability *data* still do not.
+# Bucket those two kinds separately when re-running, because conflating them is how
+# a corpus scores a refusal as correct against a capability that exists.
+#
+# "No chromatography model" is **still true**, and the server that shipped the same
+# day does not change it. `Chemclaw3-mcp`'s `suitability` (8892) serves USP <621>
+# arithmetic — RSD, plate count, resolution, tailing, the adjustment allowances —
+# from numbers a chromatogram already reported. It predicts no retention, no
+# gradient and no separation, which is the thing this clause denies; that remains
+# the proposed `chromatography` server (8891), still unbuilt. The probe at an-04
+# that pastes six injections *is* now answerable, and it is answerable by
+# arithmetic rather than by a model.
+#
+# **What neither server changes is whether this repository can reach them.** This
+# tree declares no `thermalsafety` and no `suitability` bundle, so
+# `build_langgraph_agent` binds neither — only a deployment pointing
+# `CHEMCLAW_CONNECTORS_DIR` at the fleet's own `manifests/` directory does, which
+# `infra/live/e2e-full-stack/up.sh` does and no chart deployment does. So re-bucket
+# a probe from C only for the lane it is being run in, and say which. The prose
+# contract validator makes the same point structurally: it refused a prompt clause
+# keyed on `adiabatic_temperature_rise` because nothing here binds that name.
+#
+# What exists and is genuinely adjacent: computed IR via
 # `compute_thermochemistry`, `predict_pka`, `predict_logd`,
 # `predict_developability_profile`, `predict_site_reactivity`,
 # `compute_electronic_properties`, fingerprint search and knowledge-graph retrieval.

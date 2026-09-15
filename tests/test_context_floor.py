@@ -784,7 +784,28 @@ SERVED_ELSEWHERE_ALLOWANCE = 11_000
 #: bundle this tree declares, so no chart deployment binds it, and charging `PREFIX_BOUND` for it
 #: would tighten both compaction defaults everywhere on account of a lane that talks to
 #: `chemclaw.cli.mock_llm`. That is the same argument this entry opens with, arriving for real.
-FLEET_PUBLISHED_ALLOWANCE = 19_800
+#:
+#: **It happened again the same day, which is what a bound that works looks like.** The fleet
+#: gained a `suitability` server — USP <621> chromatographic system suitability, seven tools — and
+#: the directory went to **22,306 over 42 tools** (`chem` 5,577 / 12, `props` 2,936 / 6, `pyexec`
+#: 1,142 / 1, `rxnpredict` 2,784 / 6, `safety` 1,632 / 3, `suitability` 4,471 / 7, `thermalsafety`
+#: 3,764 / 7), 2,506 over the 19,800 that stood. Raised to 24,800, the same ~11% headroom over the
+#: new measurement.
+#:
+#: The cost again stated rather than absorbed: every deployment that mounts that directory pays
+#: 4,471 more tokens on every model call. At 639 tokens a tool `suitability` is **above** the band
+#: its siblings occupy (`thermalsafety` 538, `safety` 544, `props` 489, `chem` 465) — the first
+#: entry here where that is true — and the reason is one tool rather than a verbose server. Six of
+#: its seven cost 458-614, inside the band; `system_suitability_report` costs 1,171, being the only
+#: composite in the fleet that takes a nested model (a peak table) plus nine named criteria. That
+#: server's README argues why it is kept at that price: the alternative is the model decomposing a
+#: pasted table across the single-peak tools, which means pairing widths with retention times and
+#: resolving *adjacent* pairs, and a resolution computed between the wrong two peaks looks exactly
+#: like a correct one.
+#:
+#: `SERVED_ELSEWHERE_ALLOWANCE` again did not move, for the reason given directly above: this tree
+#: declares no `suitability` bundle, so no chart deployment binds it.
+FLEET_PUBLISHED_ALLOWANCE = 24_800
 
 #: The whole static prefix a shipped `default` turn may cost, as a bound: this file's ceiling plus
 #: the allowance for what it cannot see.
