@@ -5,6 +5,8 @@ tokens per session and per user and refuses a turn past a cap, `graph_usage_toke
 streamed chunk's usage, and the whole thing is a no-op when `budget_enabled` is off (the default).
 """
 
+import asyncio
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +14,7 @@ import pytest
 from chemclaw.api.budget import BudgetExceeded, BudgetTracker
 from chemclaw.api.runner_usage import graph_usage_tokens
 from chemclaw.core.config import settings
+from chemclaw.core.metrics import METRICS
 
 
 @pytest.fixture
@@ -45,10 +48,11 @@ def test_disabled_is_a_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
     tracker = BudgetTracker()
     tracker.record("s1", "alice", tokens=10_000_000)
     tracker.record("s1", "alice", tokens=10_000_000)
-    tracker.check("s1", "alice")  # no cap enforced while disabled
+    asyncio.run(tracker.check("s1", "alice"))  # no cap enforced while disabled
 
     monkeypatch.setattr(settings, "budget_enabled", True)
-    tracker.check("s1", "alice")  # a cap of 1 turn, and nothing was ever booked against it
+    # A cap of 1 turn, and nothing was ever booked against it.
+    asyncio.run(tracker.check("s1", "alice"))
 
 
 def test_session_turn_cap_refuses_the_next_turn(
@@ -57,12 +61,12 @@ def test_session_turn_cap_refuses_the_next_turn(
     """A session turn cap of N allows N turns and refuses the N+1-th."""
     monkeypatch.setattr(settings, "budget_max_turns_per_session", 2)
     tracker = BudgetTracker()
-    tracker.check("s1", "alice")  # turn 1 admitted
+    asyncio.run(tracker.check("s1", "alice"))  # turn 1 admitted
     tracker.record("s1", "alice", tokens=0)
-    tracker.check("s1", "alice")  # turn 2 admitted
+    asyncio.run(tracker.check("s1", "alice"))  # turn 2 admitted
     tracker.record("s1", "alice", tokens=0)
     with pytest.raises(BudgetExceeded, match="session turn budget"):
-        tracker.check("s1", "alice")  # turn 3 refused
+        asyncio.run(tracker.check("s1", "alice"))  # turn 3 refused
 
 
 def test_session_token_cap_refuses_when_spent(
@@ -71,10 +75,10 @@ def test_session_token_cap_refuses_when_spent(
     """A session token cap refuses once metered tokens reach it."""
     monkeypatch.setattr(settings, "budget_max_tokens_per_session", 1000)
     tracker = BudgetTracker()
-    tracker.check("s1", "alice")
+    asyncio.run(tracker.check("s1", "alice"))
     tracker.record("s1", "alice", tokens=1000)
     with pytest.raises(BudgetExceeded, match="session token budget"):
-        tracker.check("s1", "alice")
+        asyncio.run(tracker.check("s1", "alice"))
 
 
 def test_user_cap_spans_sessions(monkeypatch: pytest.MonkeyPatch, _enabled: None) -> None:
@@ -83,9 +87,9 @@ def test_user_cap_spans_sessions(monkeypatch: pytest.MonkeyPatch, _enabled: None
     tracker = BudgetTracker()
     tracker.record("s1", "alice", tokens=0)
     tracker.record("s2", "alice", tokens=0)  # different session, same user
-    tracker.check("s3", "bob")  # a different user is unaffected
+    asyncio.run(tracker.check("s3", "bob"))  # a different user is unaffected
     with pytest.raises(BudgetExceeded, match="user turn budget"):
-        tracker.check("s3", "alice")  # alice's user cap is spent
+        asyncio.run(tracker.check("s3", "alice"))  # alice's user cap is spent
 
 
 def test_zero_cap_is_unlimited(monkeypatch: pytest.MonkeyPatch, _enabled: None) -> None:
@@ -93,7 +97,7 @@ def test_zero_cap_is_unlimited(monkeypatch: pytest.MonkeyPatch, _enabled: None) 
     tracker = BudgetTracker()
     for _ in range(1000):
         tracker.record("s1", "alice", tokens=1_000_000)
-    tracker.check("s1", "alice")  # never refused — all caps are 0
+    asyncio.run(tracker.check("s1", "alice"))  # never refused — all caps are 0
 
 
 def test_anonymous_user_only_hits_session_caps(
@@ -104,7 +108,7 @@ def test_anonymous_user_only_hits_session_caps(
     tracker = BudgetTracker()
     tracker.record("s1", None, tokens=0)
     tracker.record("s1", None, tokens=0)
-    tracker.check("s1", None)  # no user counter to exceed
+    asyncio.run(tracker.check("s1", None))  # no user counter to exceed
 
 
 def test_a_reported_total_is_preferred_and_a_missing_one_is_derived() -> None:
@@ -157,8 +161,9 @@ def test_user_counters_are_bounded_and_evict_lru(
     tracker.record("s2", "bob", tokens=0)
     tracker.record("s3", "carol", tokens=0)  # evicts alice (LRU)
     with pytest.raises(BudgetExceeded, match="user turn budget"):
-        tracker.check("s4", "bob")  # bob's counter survived and binds
-    tracker.check("s4", "alice")  # alice was evicted → her budget reset (best-effort trade)
+        asyncio.run(tracker.check("s4", "bob"))  # bob's counter survived and binds
+    # Alice was evicted, so her budget reset — the documented best-effort trade.
+    asyncio.run(tracker.check("s4", "alice"))
 
 
 def test_recently_checked_user_survives_eviction(
@@ -171,10 +176,10 @@ def test_recently_checked_user_survives_eviction(
     tracker.record("s1", "alice", tokens=0)
     tracker.record("s2", "bob", tokens=0)
     with pytest.raises(BudgetExceeded, match="user turn budget"):
-        tracker.check("s3", "alice")  # touches alice → bob becomes the LRU
+        asyncio.run(tracker.check("s3", "alice"))  # touches alice → bob becomes the LRU
     tracker.record("s4", "carol", tokens=0)  # evicts bob, not alice
     with pytest.raises(BudgetExceeded, match="user turn budget"):
-        tracker.check("s5", "alice")  # alice's spent budget still binds
+        asyncio.run(tracker.check("s5", "alice"))  # alice's spent budget still binds
 
 
 def test_tokens_accumulate_across_turns_rather_than_replacing_each_other(
@@ -197,7 +202,7 @@ def test_tokens_accumulate_across_turns_rather_than_replacing_each_other(
     for _ in range(3):
         tracker.record("s1", None, tokens=400)
     with pytest.raises(BudgetExceeded, match="session token budget"):
-        tracker.check("s1", None)
+        asyncio.run(tracker.check("s1", None))
 
 
 def test_a_turn_that_metered_no_tokens_books_none(
@@ -214,7 +219,8 @@ def test_a_turn_that_metered_no_tokens_books_none(
     for _ in range(50):
         tracker.record("s-free", None, tokens=0)
     monkeypatch.setattr(settings, "budget_max_tokens_per_session", 1)
-    tracker.check("s-free", None)  # fifty free turns must not have spent a single token
+    # Fifty free turns must not have spent a single token.
+    asyncio.run(tracker.check("s-free", None))
 
 
 def test_graph_usage_does_not_count_a_cached_token_twice() -> None:
@@ -330,8 +336,6 @@ def test_a_judge_reply_that_fails_validation_still_books_what_the_gateway_served
     `response_metadata["body"]` — because that shape is the whole mechanism: it is what makes this
     the provider's measured number rather than an estimate.
     """
-    import asyncio
-
     from langchain_core.messages import AIMessage
     from langchain_core.outputs import ChatGeneration, LLMResult
 
@@ -384,3 +388,82 @@ def test_a_judge_reply_that_fails_validation_still_books_what_the_gateway_served
     # A request the gateway never answered has no usage block, and must book nothing — the test
     # for "were we billed" is the gateway's own block, not a classification of the exception.
     assert unbilled.total == 0 and unbilled.unreadable == 0
+
+
+def test_the_warning_fires_before_the_cap_rather_than_at_it(
+    monkeypatch: pytest.MonkeyPatch, _enabled: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A budget whose first signal is the 429 gives an operator no lead time.
+
+    The turn that reports the problem is the turn that was lost to it, which is the whole reason
+    `budget_warn_fraction` exists. 800 of 1,000 is 80%: over the fraction, under the cap.
+    """
+    monkeypatch.setattr(settings, "budget_max_tokens_per_session", 1_000)
+    monkeypatch.setattr(settings, "budget_warn_fraction", 0.8)
+    tracker = BudgetTracker()
+
+    before = METRICS.value("chemclaw_budget_warnings_total")
+    with caplog.at_level(logging.WARNING, logger="chemclaw.api.budget"):
+        tracker.record("s1", None, tokens=800)
+
+    assert METRICS.value("chemclaw_budget_warnings_total") == before + 1
+    assert "80% spent" in caplog.text
+    # And the turn is still admitted — a warning that refused would just be an earlier cap.
+    asyncio.run(tracker.check("s1", None))
+
+
+def test_the_warning_is_silent_below_the_fraction_and_at_the_cap(
+    monkeypatch: pytest.MonkeyPatch, _enabled: None
+) -> None:
+    """Both ends are excluded, and the top end is the one worth pinning.
+
+    Under the fraction there is nothing to say. At or past the cap the *refusal* says it, to the
+    caller rather than only to a log — so a warning there would be a second, weaker copy of a
+    message that already arrived, on every subsequent turn, forever.
+    """
+    monkeypatch.setattr(settings, "budget_max_tokens_per_session", 1_000)
+    monkeypatch.setattr(settings, "budget_warn_fraction", 0.8)
+
+    quiet = BudgetTracker()
+    before = METRICS.value("chemclaw_budget_warnings_total")
+    quiet.record("s-low", None, tokens=799)
+    assert METRICS.value("chemclaw_budget_warnings_total") == before, "warned below the fraction"
+
+    spent = BudgetTracker()
+    spent.record("s-cap", None, tokens=1_000)
+    assert METRICS.value("chemclaw_budget_warnings_total") == before, "warned at the cap"
+
+
+def test_checking_a_budget_never_warns(monkeypatch: pytest.MonkeyPatch, _enabled: None) -> None:
+    """The warning is booked by `record`, because `check` runs twice for every one turn.
+
+    `api/routes/turns.py` checks once on the fast path before taking an admission permit and again
+    inside the stream after it — the second being the binding one. A warning emitted from `check`
+    would therefore count every turn twice and log it twice, for a fact that changed once.
+    """
+    monkeypatch.setattr(settings, "budget_max_tokens_per_session", 1_000)
+    monkeypatch.setattr(settings, "budget_warn_fraction", 0.8)
+    tracker = BudgetTracker()
+    tracker.record("s1", None, tokens=800)
+
+    before = METRICS.value("chemclaw_budget_warnings_total")
+    asyncio.run(tracker.check("s1", None))
+    asyncio.run(tracker.check("s1", None))
+
+    assert METRICS.value("chemclaw_budget_warnings_total") == before, (
+        "a warning emitted from `check` doubles every count, because the front door checks twice"
+    )
+
+
+def test_a_zero_fraction_disables_the_warning(
+    monkeypatch: pytest.MonkeyPatch, _enabled: None
+) -> None:
+    """0 is off, on the convention `core/config/agent.py` states for numeric ceilings."""
+    monkeypatch.setattr(settings, "budget_max_tokens_per_session", 1_000)
+    monkeypatch.setattr(settings, "budget_warn_fraction", 0)
+    tracker = BudgetTracker()
+
+    before = METRICS.value("chemclaw_budget_warnings_total")
+    tracker.record("s1", None, tokens=999)
+
+    assert METRICS.value("chemclaw_budget_warnings_total") == before

@@ -186,6 +186,16 @@ BEGIN
     -- group is still spelled out on its own line rather than folded into the full-DML list below.
     EXECUTE format('GRANT INSERT, UPDATE, DELETE ON session_owners TO %I', app_role);
 
+    -- `budget_usage` holds all three for three distinct writes, and none of them is a retention
+    -- sweep. INSERT and UPDATE are the two arms of one upsert (`api/budget_store.py::_BOOK`): a
+    -- principal's first turn in a window inserts the row, every later one updates it in place,
+    -- and the window's reset is an arm of that same UPDATE rather than a delete-and-reinsert —
+    -- which is what keeps a concurrent booking from observing the row missing. The DELETE is
+    -- offboarding's (`chemclaw.agent.leaver`), the same reason `session_owners` above holds one.
+    -- `durable/retention.py` refuses this table on the clock, so offboarding is the *only* thing
+    -- that ever removes a row, and the grant is that narrow by intent rather than by accident.
+    EXECUTE format('GRANT INSERT, UPDATE, DELETE ON budget_usage TO %I', app_role);
+
     -- `commitments` is a **mirror**, which is why it holds DELETE where the tables it used to sit
     -- beside do not. Those withhold it so a retention refusal is enforced rather than intended; a
     -- mirror's job is the opposite — to converge on a source this system does not own — and a

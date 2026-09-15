@@ -778,6 +778,7 @@ def test_the_erase_statements_are_valid_sql() -> None:
             "session_turns",
             "subscriptions",
             "user_preferences",
+            "budget_usage",
             "session_owners",
         }
 

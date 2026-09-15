@@ -62,6 +62,12 @@ _EXPECTED_SUBSYSTEMS = {
     # a declared context window would then be subtracted from nothing, and the budget would quietly
     # be the configured constant again.
     "context_budget",
+    # `api/budget.py`, both halves of the durable spend window. A meter that cannot be read or
+    # written degrades to this pod's own counters rather than refusing the turn, which is the
+    # right direction and is silent: the cap then binds per-process again, which is precisely
+    # the behaviour `D-2026-09-15-a-budget-a-restart-resets-is-not-a-quota` removed. Counted so
+    # a deployment can see it has silently gone back to it.
+    "budget_window",
     "cost_ledger",
     # A retrieval source that could not be asked. Added when `fanout._sweep`'s swallow was moved
     # onto `degraded()` — it had been a bare `logger.exception` plus a private counter, so the one

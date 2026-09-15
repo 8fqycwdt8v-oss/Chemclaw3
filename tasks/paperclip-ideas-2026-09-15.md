@@ -27,7 +27,14 @@ belonging to another effort. Overwriting it to satisfy a convention would destro
 
 ## Items
 
-- [ ] **A — durable per-actor budget with a warning threshold** (smallest, no new subsystem)
+- [x] **A — durable per-actor budget with a warning threshold** — `D-2026-09-15-a-budget-a-restart-resets-is-not-a-quota`.
+      Measured defect first: a second `BudgetTracker` (a restart, an LRU eviction or a second
+      pod) **admitted** a turn against a 500-token cap after 900 were spent. Now one Postgres
+      row per principal on a rolling window, reset in place; `check` async and `record` still
+      synchronous because it runs in a `finally` (D-130); `budget_warn_fraction` warns from
+      `record` only, since the front door checks twice per turn. Three declared registers went
+      red, the sharpest being `_ACTOR_SCOPED_ONLY` — a `session_id` predicate there would have
+      made "delete the conversation" a free quota reset.
 - [ ] **B — the answer's premise is re-checked before it is applied**
 - [ ] **C — a flagged answer is routed back for another pass, counting only agent-initiated rounds**
 - [ ] **D — an agent heartbeat: the agent wakes on a timer to report and ask, never to decide**

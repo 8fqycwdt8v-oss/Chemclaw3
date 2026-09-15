@@ -258,6 +258,15 @@ _ERASE: tuple[tuple[str, str], ...] = (
     ),
     ("subscriptions", "DELETE FROM subscriptions WHERE owner = ANY(%(actors)s)"),
     ("user_preferences", "DELETE FROM user_preferences WHERE owner = ANY(%(actors)s)"),
+    # **Erasable rather than retained, and the line this module draws is what decides it.** A
+    # `budget_usage` row is a rate-limiting counter keyed by a principal — how much of a rolling
+    # window they have spent — and says nothing about the science: it is not an attributable record
+    # of who did what, it is the operational meter that decides whether the next turn is admitted.
+    # `turn_costs` sits on the other side of the same line and stays in `_RETAINED` because it says
+    # what a *turn* cost and who ran it, which is the spend record a deployment answers questions
+    # from. Deleting this row hands the departing person's successor a fresh window, which is the
+    # correct outcome: there is nobody left to meter.
+    ("budget_usage", "DELETE FROM budget_usage WHERE actor = ANY(%(actors)s)"),
     ("session_owners", "DELETE FROM session_owners WHERE owner = ANY(%(actors)s)"),
 )
 
