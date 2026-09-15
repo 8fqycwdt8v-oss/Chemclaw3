@@ -478,7 +478,7 @@ async def _open_many(requesters: dict[str, int], *, text_chars: int = 40) -> Non
     Bulk because the population this exists to bound is thousands of rows and a per-row
     `open_request` round trip would make the bound untestable at the size it bites.
     """
-    rows = [
+    rows: list[tuple[str, str, str, str, str, str, str, str, list[str]]] = [
         (
             f"check-in-bulk-{owner}-{index}",
             "measurement",

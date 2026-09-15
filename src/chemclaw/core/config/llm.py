@@ -216,6 +216,10 @@ class LlmSettings(BaseSettings):
     # off because it is only reachable behind `verifier_enabled` or
     # `answer_shape_gate_enabled`, which are themselves off, and because a revision doubles a
     # flagged turn's model spend — a real cost that a deployment should choose.
+    #
+    # **Bounded against the turn deadline** by the cross-field check in `core/config/__init__.py`:
+    # each round is a model round-trip *and* a judge call, so a setting whose judging alone fills
+    # `service_turn_timeout_seconds` buys rounds the chemist can never be shown.
     answer_review_max_rounds: int = Field(default=0, ge=0)
     verifier_band_rerolls: int = Field(default=2, ge=1)
     # The per-protocol condensation call's own deadline (`agent.condense`). Per *map unit*, so
