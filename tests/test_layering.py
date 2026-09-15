@@ -398,6 +398,17 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     # and a measurement in one model.
     ("chemclaw.protocols", "chemclaw.core"),
     ("chemclaw.protocols", "chemclaw.science"),
+    # The narrowest package in the tree, and deliberately: `analytical` reads `core.units` and
+    # nothing else. It imports no `science` — there is no chemistry in "is this number under that
+    # number" — and no `kg` or `ingest`, for the same reason `protocols` does not: a specification
+    # is prescriptive and a `reaction_records` row is descriptive, so a shared shape would put a
+    # limit and a measurement in one model. If a second edge ever appears here, the question to ask
+    # is whether the thing being added is a verdict about numbers or a judgment about a batch.
+    ("chemclaw.analytical", "chemclaw.core"),
+    # The agent reaches the analytical tier the same way it reaches `protocols`: one tools module
+    # over the models, with no logic of its own beyond parsing what the model wrote into the
+    # `Measurement`s the tier takes.
+    ("chemclaw.agent", "chemclaw.analytical"),
     ("chemclaw.publish", "chemclaw.core"),
     ("chemclaw.publish", "chemclaw.ingest"),
     ("chemclaw.durable", "chemclaw.publish"),

@@ -510,6 +510,10 @@ live-jobs:  ## Run a real durable job end to end (Temporal + connector worker + 
 live-probes:  ## Ask the running front door the live probe set (exit 3 unreached, 2 ungraded).
 	uv run python -m chemclaw.cli.live_probes $(ARGS)
 
+.PHONY: retrieval-arms
+retrieval-arms:  ## Score retrieval configurations against the labelled gold set (needs `make up`).
+	uv run python -m chemclaw.cli.retrieval_arms $(ARGS)
+
 # The cost half of what `live-probes` asks. `make eval` scores `turn_cost_ratio` over committed
 # literals, so no change to the agent can move it; this drives a fixed three-turn workload through
 # the running front door, scores the `turn_costs` rows it actually produced with the same metric,

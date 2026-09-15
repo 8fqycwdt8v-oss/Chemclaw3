@@ -1159,7 +1159,17 @@ CLEAR_TRIGGER_THREAD_ALLOWANCE = 30_000
 #: downwards from the 128k window and has nothing above it to take from — so a token of prefix is
 #: a token of thread, here, every time. 4.4% of the thread for the composed-workflow seam, stated
 #: where the constraint is rather than spread until nobody can see it.
-BUDGET_THREAD_ALLOWANCE = 38_700
+#:
+#: **37,900 on the merged tree**, down a further 800 for the analytical tier's two tools
+#: (`D-2026-09-15-a-comparison-with-no-caller-is-a-promise-about-a-check-that-does-not-exist`) —
+#: the same rule applied a second time in the same day, by a second branch, which is worth leaving
+#: visible rather than folding into one figure. Two branches each added a pair of tools measuring
+#: 978 and 730, each raised the ceiling for its own pair against a tree that did not hold the
+#: other's, and the merge is where the thread pays for both. The alternative was raising the budget
+#: to keep this number whole, and it is refused for the reason the paragraph above gives: the window
+#: is the input and this is the dependent number, so a budget that rose with the prefix would be
+#: spending head-room under a 128k model that the provider, not this repository, decides.
+BUDGET_THREAD_ALLOWANCE = 37_900
 
 #: The smallest context window this stack is designed against, in billed tokens.
 #:
@@ -1640,10 +1650,17 @@ def test_a_maximal_request_at_the_shipped_budget_fits_the_smallest_window_it_tar
         f"a budget 10% above {budget} would still fit {input_ceiling}, so this test has so much "
         "headroom that it is not the bound it claims to be; tighten it or say why."
     )
-    # 5,204 since `D-2026-09-14-a-lowering-that-loses-a-merge-is-a-raising`: the budget fell 300
-    # with the ratchet ceiling it is derived from, and the window it is measured against did not
-    # move. The margin widening is the safe direction — this arm exists so that a *narrowing* one
-    # has to be stated rather than discovered.
+    # **Back to 5,204 on the merged tree, and the round trip is the record worth keeping.** One
+    # branch raised the budget 800 to hold its thread allowance whole when the analytical tier's
+    # tools landed, which narrowed this margin to 4,404 — the direction this arm exists to make
+    # somebody state. Merging with the composed-workflow branch, which had grown the prefix as well
+    # and had *not* raised the budget, made that choice the wrong one: two raises would have spent
+    # 1,600 of head-room under a window the provider decides, to protect a number the paragraph at
+    # `BUDGET_THREAD_ALLOWANCE` says is the dependent one. So the budget is back where the window
+    # put it and the thread absorbs both pairs of tools. What buys the thread back is a narrower
+    # prefix — profile routing, or
+    # `D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`'s deferred schemas — not a raise
+    # here, because every raise is measured against the same unmoved window.
     assert input_ceiling - budget == 5_204, (
         "the margin under the smallest window this stack targets moved; say which of the two "
         "numbers changed and why"

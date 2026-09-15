@@ -288,6 +288,13 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
         # built, and "what would this campaign's next experiments look like as a plate" is a
         # question that has to be answerable *before* somebody approves drafting them, not after.
         "experiment_arms_from_campaign",
+        # Arithmetic over numbers the caller supplied in the call itself: it reads no store, opens
+        # no session and writes nothing. Read-only here is not a close call — the question is
+        # whether a result meets a limit, and a plan that cannot ask it before being approved is a
+        # plan whose analytical rows nobody checked.
+        "check_against_specification",
+        # The same case: a regression over timepoints the caller passed in the call.
+        "estimate_stability_trend",
         "get_durable_job_status",
         "list_attachments",
         "list_watches",
@@ -366,6 +373,22 @@ def side_effecting_tools() -> frozenset[str]:
 # `scratchpad_tools()` withholds it; `execute` for the same reason. Both of the two take the path as
 # `file_path`, which is what makes one predicate able to read either.
 _MEMORY_WRITE_VERBS: frozenset[str] = frozenset({"write_file", "edit_file"})
+
+
+def memory_write_verbs() -> frozenset[str]:
+    """The tools whose gatedness is a function of their *arguments* rather than their name.
+
+    `side_effecting_tools()` is the set a gate can enumerate; this is the set it cannot, and the two
+    together are the whole gated surface. Exposed because a ratchet that walks only the first proves
+    nothing about the second, and the alternative — a test naming `write_file` — would be a third
+    declaration of a partition that already has two owners
+    (`D-2026-09-15-a-ratchet-that-enumerates-one-half-of-a-partition-proves-nothing-about-the-other`).
+
+    A reader wanting "is this call gated" wants `side_effecting_call`, which composes both halves.
+    This exists for the callers that need to *enumerate* the second half, of which the ratchet in
+    `tests/test_plan_scope.py` is the first.
+    """
+    return _MEMORY_WRITE_VERBS
 
 
 def writes_durable_memory(name: str, arguments: Mapping[str, Any]) -> bool:

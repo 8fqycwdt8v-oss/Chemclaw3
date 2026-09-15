@@ -52,8 +52,10 @@ from langchain.tools import ToolRuntime
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from typing_extensions import TypedDict
+
+from chemclaw.core.config import settings
 
 # The key a step's declaration is spelled with, in the tool schema, in the state channel and in the
 # two readers below. One constant because a rename has to move all of them at once — and because
@@ -77,9 +79,49 @@ class ScopedTodo(TypedDict):
 
 
 class ScopedWriteTodosInput(BaseModel):
-    """The `write_todos` argument schema — upstream's, with each step declaring its tools."""
+    """The `write_todos` argument schema — upstream's, with each step declaring its tools.
+
+    **Bounded here rather than in `ScopedTodo`**, and the reason is mechanical: `ScopedTodo` is a
+    `TypedDict` whose annotations are evaluated when the class is defined, so an
+    `Annotated[..., Field(max_length=...)]` could only carry a literal — and this repository's rule
+    is that a threshold comes from the one settings object, ENV-overridable. A validator reads the
+    setting at validation time, which is also the only form that can name the offending step.
+    """
 
     todos: list[ScopedTodo]
+
+    @model_validator(mode="after")
+    def _a_plan_is_bounded_in_both_directions(self) -> "ScopedWriteTodosInput":
+        """Refuse a plan longer, or a step broader, than the configured bound.
+
+        Both halves were unbounded and each sizes something that outlives the call — the step count
+        sizes the durable approval row, the per-step declaration sizes the union in
+        `plan_approvals.scope` and the refusal sentence built from it (measured at 600,192
+        characters over 50,000 ten-character names). See `core/config/agent.py`, which carries the
+        arithmetic and why this is a bound rather than a gate.
+
+        The message names the step and the count and says what to do, because this is refused at
+        argument validation precisely so the model can read it and split the plan.
+
+        Raises:
+            ValueError: The plan declares more steps than `plan_max_steps`, or a step names more
+                tools than `plan_max_tools_per_step`.
+        """
+        if len(self.todos) > settings.plan_max_steps:
+            raise ValueError(
+                f"this plan has {len(self.todos)} steps and at most {settings.plan_max_steps} are "
+                "accepted. Write the plan for the part you are doing now; a plan a person cannot "
+                "read is not one they can approve."
+            )
+        for position, todo in enumerate(self.todos, start=1):
+            declared = todo.get("tools", [])
+            if len(declared) > settings.plan_max_tools_per_step:
+                raise ValueError(
+                    f"step {position} declares {len(declared)} tools and at most "
+                    f"{settings.plan_max_tools_per_step} are accepted per step. Split it into "
+                    "steps that each name the tools they will actually call."
+                )
+        return self
 
 
 # What the model is told about the new field, appended to upstream's own tool description and to
