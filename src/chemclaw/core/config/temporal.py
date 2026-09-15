@@ -205,6 +205,23 @@ class TemporalSettings(BaseSettings):
     # `activity_timeout_seconds` so tightening the general budget cannot silently make a wait's
     # bookkeeping the thing that fails, on a workflow whose entire purpose is to survive.
     awaiting_activity_timeout_seconds: float = Field(default=30.0, gt=0)
+    # The check-in over a requester's own blocked work
+    # (`D-2026-09-15-the-requester-hears-nothing-until-it-is-too-late`, `durable/check_in.py`).
+    # The wait above already re-notifies `asked_of` on `reminder_hours`; the *requester* is
+    # written to exactly once, on expiry — so with `awaiting_max_days` at 90 they can hear
+    # nothing about their own suspended campaign for three months and then hear it failed.
+    #
+    # Off by default, because it delivers to a mailbox and an outbound channel: a deployment
+    # that has configured neither would be running a sweep to write somewhere nobody reads,
+    # which is what `digest_enabled` shipping off for the wrong reason already cost once
+    # (`D-2026-09-15-a-watch-that-nothing-evaluates-is-a-promise-a-deployment-cannot-keep`).
+    check_in_enabled: bool = False
+    # How long a question must have been open before it is worth mentioning. A question asked
+    # this morning is not news to the person who asked it, and a check-in that said so on the
+    # first night would train its reader to ignore the second.
+    check_in_quiet_days: float = Field(default=3.0, gt=0)
+    check_in_schedule_minutes: float = Field(default=1440.0, gt=0)
+    check_in_timeout_seconds: float = Field(default=60.0, gt=0)
 
     # **The two halves of the calculation backend's admission budget**
     # (`D-2026-08-27-a-per-worker-cap-is-not-a-backend-ceiling`). Same shape as the fleet turn

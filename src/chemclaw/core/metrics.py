@@ -96,6 +96,27 @@ _COUNTERS: dict[str, str] = {
         "event on an open stream, previously an HTTP 503)."
     ),
     "chemclaw_turns_refused_budget_total": "Turns refused with 429 by the turn/token budget.",
+    # The lead time the refusal above does not give. A 429 tells an operator about a budget on the
+    # turn that was lost to it; this says so while there is still room, at `budget_warn_fraction` of
+    # any cap. Unlabelled on purpose: the scope it names is a session id or an Entra `oid`, and
+    # `033_cost_attribution.sql` rules those out as label values for the cardinality reason the
+    # 64-series cap (D-152) exists to enforce. The log line beside it carries the identity.
+    # The revision loop over a flagged answer. Two series rather than one, because "how often
+    # does the verifier reject an answer" and "how often does rejecting it fail to help" are
+    # different questions and only the second is a defect: a deployment whose revisions always
+    # exhaust is paying double for every flagged turn and getting nothing.
+    "chemclaw_answer_revisions_total": "Revision passes run over an answer the verifier flagged.",
+    # Requesters told their own work is still blocked, before its deadline rather than after.
+    "chemclaw_work_check_ins_total": (
+        "Check-ins delivered to a requester about questions of theirs still waiting."
+    ),
+    "chemclaw_answer_review_exhausted_total": (
+        "Turns whose answer was still unsupported after every allowed revision, and went out "
+        "marked for review."
+    ),
+    "chemclaw_budget_warnings_total": (
+        "Times a session or user crossed `budget_warn_fraction` of a turn or token cap."
+    ),
     "chemclaw_turns_conflict_total": "Turns rejected with 409 (a turn was already running).",
     "chemclaw_turn_timeouts_total": "Turns cancelled by the wall-clock turn timeout.",
     # A separate series from the one above, and deliberately so: this counts turns cut because the

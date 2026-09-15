@@ -42,6 +42,15 @@ UNCOVERED_BACKGROUND_WORKFLOWS = frozenset(
         "ArtifactEvictionWorkflow",
         "AwaitAnswerWorkflow",
         "CampaignSynthesisWorkflow",
+        # New in `D-2026-09-15-the-requester-hears-nothing-until-it-is-too-late`, and uncovered for
+        # a reason the other twenty do not have: this control catches today's code refusing a
+        # history the *shipped* code wrote, and `recorded_workflow_histories.py` records "from the
+        # shape this repository ships". `CheckInWorkflow` has never shipped, so there is no older
+        # command sequence it could be incompatible with, and a fixture recorded from it now would
+        # be the self-certifying shape that module's docstring rejects — "a test that runs a
+        # workflow and then replays the history it just produced compares code against a history
+        # that same code wrote". It earns a fixture at its first change, not at its first commit.
+        "CheckInWorkflow",
         "CommitmentSyncWorkflow",
         "ConnectorJobWorkflow",
         "DevelopmentReportWorkflow",

@@ -311,6 +311,38 @@ class ServiceSettings(BaseSettings):
     # a conscious deferral. The per-session map is bounded by `service_max_live_sessions` (the
     # session lifecycle bound).
     budget_max_tracked_users: int = Field(default=10_000, gt=0)
+    # The rolling window the *durable* per-user counters reset on
+    # (`D-2026-09-15-a-budget-a-restart-resets-is-not-a-quota`, `api/budget_store.py`). The
+    # in-process counters above have no window at all — they run until the process restarts or the
+    # LRU evicts the scope, which is a reset on an operational event rather than on a policy, and
+    # is what made `budget_max_tokens_per_user` mean "per pod, between restarts". A window makes
+    # the cap mean what a deployment reads it as.
+    #
+    # There is deliberately **no** `budget_durable` flag: the durable half engages exactly where
+    # `session_store == "postgres"`, the same switch the audit sink and the turn-cost ledger read
+    # (`agent/turn_cost.default_turn_cost_sink`). A second flag could only restate that or
+    # contradict it, which is the argument `durable/schedules.py` makes three times over for asking
+    # the manifests rather than adding an enable switch beside them.
+    #
+    # Rolling rather than calendar-aligned, anchored at a principal's first turn in the window —
+    # `api/budget_store.py` carries that argument and what it costs.
+    budget_window_hours: float = Field(default=24.0, gt=0)
+    # Warn a deployment *before* the cap refuses a turn, rather than only at the refusal. A budget
+    # whose first observable signal is a 429 gives an operator no lead time and a chemist no
+    # explanation: the turn that reports the problem is the turn that was lost to it. At this
+    # fraction of any cap, `chemclaw_budget_warnings_total` increments and a WARNING names the
+    # scope — once per turn, from `record`, because `check` runs twice per turn (a fast path before
+    # the admission permit and the binding one after it) and would double every count.
+    #
+    # **It reaches a metric and a log, not the chemist.** Putting it on the wire means a new member
+    # of the SSE `Event` union in `api/events.py`, which is a coordinated change across
+    # `Chemclaw3_ui` and `Chemclaw3_mock` — the same reason `AnswerEvent.challenged` is still
+    # declared. Stated here rather than left to be discovered, because "the user is warned at 80%"
+    # is what this setting's name suggests and is not what it does.
+    #
+    # 0 disables the warning, on the convention `agent.py` states for numeric ceilings; 1.0 makes
+    # it fire only on the turn that also refuses, which is legal and pointless.
+    budget_warn_fraction: float = Field(default=0.8, ge=0, le=1)
     # Job→session push-back (plan F3-T2/T3): a finished Temporal job writes a `session_events`
     # row; the front door tails the table and wakes the owning session (appending the result,
     # flipping the `awaiting` todo) instead of the user polling. This is the tailer's poll

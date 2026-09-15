@@ -363,6 +363,20 @@ _NOT_PRUNED: dict[str, str] = {
         "refused: `pending_requests`' attribution, archived on a re-ask so the answer is not "
         "blanked — the same record, so the same refusal"
     ),
+    # Not pruned because there is nothing for a clock to collect. The table holds **one row per
+    # principal**, reset in place by `api/budget_store.py`'s upsert rather than appended to, so its
+    # size is the number of distinct people the deployment has served and is independent of how many
+    # turns they ran — the bound `budget_max_tracked_users` already names for the in-process map it
+    # backs. A row whose window has rolled reads as zero and is rewritten by that principal's next
+    # turn, so a sweep would reclaim one row per departed user and nothing else.
+    #
+    # It is in `_ERASE` rather than `_RETAINED` (`agent/leaver.py`), which is the other half of the
+    # same argument: a spend meter is not an attributable record, so it may go when its subject does
+    # — which is also the only thing that ever removes a row here.
+    "budget_usage": (
+        "refused: one row per principal, reset in place rather than appended, so a clock would "
+        "reclaim nothing; erased with its subject instead (`agent/leaver.py::_ERASE`)"
+    ),
     "job_records": "refused: a durable run's evaluation record, which used to expire with "
     "Temporal's history and take a campaign's results with it (D-157)",
     "calculation_results": "refused: evicting a cached result converts a hit into a "

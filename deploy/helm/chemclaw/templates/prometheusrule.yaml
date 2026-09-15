@@ -636,6 +636,56 @@ spec:
               its allowance — read `chemclaw_tokens_total` beside this — or the window is set below
               real traffic. The affected users see a 429, not an explanation.
 
+        {{- /* And the lead time the two rules above cannot give. Both fire on a bound that has
+               already bound: the token-burn rule on a fleet rate with no cap in it, and the refusal
+               rule on the turn that was lost to the cap. `budget_warn_fraction` (0.8) crosses while
+               there is still room, which is the only point at which raising a cap or talking to a
+               user costs nobody a question.
+
+               Not `for: 15m`, unlike its neighbour. A crossing is a **step**, not a rate: a user
+               passes 80% once per window, so a sustained-for clause would wait for a repetition
+               that a single crossing never produces, and the alert would fire only for somebody
+               spending fast enough to cross it again inside the interval — precisely the case the
+               refusal rule already catches. */}}
+        - alert: ChemclawBudgetNearingItsCap
+          expr: sum(increase(chemclaw_budget_warnings_total[1h])) > 0
+          labels:
+            severity: info
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawbudgetnearingitscap
+            summary: A session or user has spent most of its turn or token budget
+            description: >-
+              Somebody crossed `budget_warn_fraction` of a cap and has not been refused yet. The
+              scope is in the WARNING log line, not on this series: the identity is a session id or
+              an Entra `oid`, and `033_cost_attribution.sql` rules those out as label values. Act
+              here or the next rule up is the one that fires.
+
+        {{- /* The revision loop paying for nothing. A revision doubles a flagged turn's model
+               spend, and the deal is that it buys a grounded answer; when most of them exhaust
+               instead, the deployment is paying twice and still shipping the answer marked for
+               review — which is exactly what it shipped before the loop existed.
+
+               A ratio rather than a count, because the count scales with traffic and says nothing
+               on its own: ten exhaustions out of a thousand revisions is a working loop, ten out of
+               twelve is a broken one. `clamp_min(..., 1)` keeps the expression from dividing by
+               zero on a quiet window — with the feature off (the shipped default) both series are
+               absent and the rule is simply empty, which is the correct silence. */}}
+        - alert: ChemclawAnswerRevisionsNotHelping
+          expr: >-
+            sum(increase(chemclaw_answer_review_exhausted_total[6h]))
+            / clamp_min(sum(increase(chemclaw_answer_revisions_total[6h])), 1) > 0.5
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawanswerrevisionsnothelping
+            summary: Most flagged answers are still unsupported after every allowed revision
+            description: >-
+              More than half the revision passes ran out of rounds. The turns still answered and
+              still carry `review_required`, so nothing is lost that was not already lost — but the
+              second model call bought nothing. Raise `answer_review_max_rounds`, or turn it back to
+              0 and treat the verifier's verdict as the signal it was before.
+
     {{- /* The group nothing in this file used to have, and the one whose absence made every rule
            above conditional on something no rule stated: **every one of them alerts on an
            application counter, so a process that is gone emits silence** — and silence is what a

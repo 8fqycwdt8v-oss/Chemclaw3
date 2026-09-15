@@ -200,6 +200,23 @@ class LlmSettings(BaseSettings):
     # `verifier_band_rerolls` extra judge calls only on answers that land inside the band, each
     # under its own `verifier_timeout_seconds`.
     verifier_review_band: float = Field(default=0.2, ge=0, le=0.5)
+    # How many times a flagged answer is sent back to be answered again, in the same turn
+    # (`D-2026-09-15-a-flagged-answer-that-goes-out-flagged-is-a-verdict-nobody-acted-on`).
+    # `agent/verifier.py` has always *marked* an unsupported answer and nothing routed it back
+    # — `D-2026-08-16-a-second-judge-is-a-second-answer-about-the-same-answer` concedes the gap
+    # in those words while declining upstream's `RubricMiddleware` on four other counts.
+    #
+    # **Counts only agent-initiated rounds.** The bound is a per-turn local in
+    # `api/runner.py`, so a chemist's own follow-up starts a fresh allowance while the model
+    # cannot buy itself one — the distinction `loop_cap`/`spend_cap` cannot express, because
+    # they count uniformly. Each revision is still a model call and is still counted by both,
+    # which is the conclusion D-2026-08-16 reached about revisions and a cap they could skip.
+    #
+    # 0 is off, on the convention `core/config/agent.py` states for numeric ceilings. It ships
+    # off because it is only reachable behind `verifier_enabled` or
+    # `answer_shape_gate_enabled`, which are themselves off, and because a revision doubles a
+    # flagged turn's model spend — a real cost that a deployment should choose.
+    answer_review_max_rounds: int = Field(default=0, ge=0)
     verifier_band_rerolls: int = Field(default=2, ge=1)
     # The per-protocol condensation call's own deadline (`agent.condense`). Per *map unit*, so
     # one stalled extraction costs one row of the comparison and never the turn — the same

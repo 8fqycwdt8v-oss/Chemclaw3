@@ -26,6 +26,7 @@ from chemclaw.api.deps import CurrentUser
 from chemclaw.api.schemas import PendingAnswerIn, PendingRequestOut, PendingRequestsOut
 from chemclaw.core.temporal_client import connect
 from chemclaw.durable import pending_store
+from chemclaw.kg.premise import premise_breaks
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +140,7 @@ async def answer_pending(
 ) -> Response:
     """Answer one held-open question, releasing whatever is waiting on it.
 
-    Four refusals, each a different fact and each with its own status:
+    Five refusals, each a different fact and each with its own status:
 
     - **404** — no such request. Also what an already-settled request returns from the *store*
       check below, but not the same case, so they are separated.
@@ -148,9 +149,22 @@ async def answer_pending(
       one, and a second answer must be told rather than silently ignored. The workflow ignores a
       duplicate signal because a signal has no reply channel; this route is where a caller can
       actually be told.
+    - **409, again, and a different fact** — the knowledge the question rests on has been
+      superseded or refuted while it waited. The request is still `waiting`, so this is not the
+      settled case above; it is an answer that would be applied to a premise that has gone. A wait
+      can stand open for `awaiting_max_days` (90), so this is not a rare window.
     - **503** — the broker is unreachable, so the answer was not delivered. Deliberately not
       written to the store first: a row saying `answered` with nothing released is worse than a
       failed request, because the thing waiting would wait forever while the inbox looked clean.
+
+    **The premise check is here rather than in the workflow**, and that placement is the whole
+    reason it cost one column and no replay risk. A workflow cannot read the corpus — it is
+    deterministic and replayed — so checking there would mean a new activity, which changes the
+    command sequence and needs a `workflow.patched` guard, and a new outcome state, which the
+    `pending_requests_state_known` CHECK would have to be widened to admit. This route already has
+    the authenticated caller, the stored row, permission to do I/O and a reply channel to refuse on.
+    The wait is left `waiting`: the premise moving is not an ending, and the question can still be
+    answered by somebody who re-reads it, or expire on its own deadline.
     """
     stored = await pending_store.get_request(request_id)
     if stored is None:
@@ -159,6 +173,16 @@ async def answer_pending(
         raise HTTPException(status_code=403, detail="this request is not routed to you")
     if stored.state != "waiting":
         raise HTTPException(status_code=409, detail=f"this request is already {stored.state}")
+    broken = await premise_breaks(stored.premise_note_ids)
+    if broken:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "the knowledge this question rests on has changed since it was asked: "
+                + "; ".join(item.describe() for item in broken)
+                + ". Re-read it before answering; the question is still open."
+            ),
+        )
 
     try:
         client = await connect()

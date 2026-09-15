@@ -2776,6 +2776,51 @@ every one of these was invisible to the tests of the code I changed, because the
 the declaration and not with the behaviour. `make test` is ~18 minutes; a red CI cycle is longer,
 and a red PR spends somebody's trust rather than my time.
 
+## A `git checkout <file>` to undo a probe undid an hour of unrelated work (2026-09-15)
+
+I wanted to prove a line was load-bearing, so I edited `src/chemclaw/api/runner.py` to remove it,
+ran the tests, and then "reverted the probe" with `git checkout src/chemclaw/api/runner.py`. That
+file also held an hour of uncommitted feature work in the same session. `git checkout` restores from
+`HEAD`; it does not know which of my edits was the probe. All of it went.
+
+The recovery was cheap only because the edit had been applied by a script I still had in context. It
+would not have been cheap an hour earlier or later.
+
+**The rule.** A destructive-by-design probe — remove a guard, break an import, delete a line, and
+see what fails — copies the file to the scratchpad **first** and restores from that copy, never from
+git:
+
+    cp src/path/file.py "$SCRATCH/file.py.bak"   # before the probe
+    cp "$SCRATCH/file.py.bak" src/path/file.py   # after it
+
+More generally: **`git checkout -- <path>` is only safe on a path with nothing uncommitted worth
+keeping**, and during a feature that is almost never true of the file I am probing, because the
+reason I am probing it is that I just changed it. Commit first, or copy first. This is the same
+shape as the `rm`-before-`ls` rule the working-tree guidance already states, one tool over.
+
+## An absence test that scanned 18% of the file it was guarding (2026-09-15)
+
+I wrote a test asserting `durable/check_in.py` contains no model-running call, and implemented it as
+`source.split('"""')[2]` — meaning to skip the module docstring. That slice ends at the *next*
+docstring, so it covered the 1,636 characters between the module docstring and the first class, out
+of 9,001. Anything below the first class was unguarded, which is where the code that would violate
+it actually lives.
+
+It passed, of course. Both versions pass on a clean file; that is what a guard does, and it is why
+passing says nothing about whether it works.
+
+**The rule.** A test that asserts an **absence** is only as good as the region it reads, and the
+region must be proven, not intended. Two things, both cheap:
+
+1. Parse the tree rather than slicing the text — `ast.walk` covers every statement and skips
+   docstrings for free, because a docstring is a `Constant` carrying no `Name` or `alias`.
+2. **Plant the violation** the test exists to catch, in the place the implementation would really
+   put it (the bottom of the file, not the top), and watch it fail. I did this and the AST version
+   caught what the slice version had been missing all along.
+
+This is `tests/test_state_channels.py`'s lesson in a different costume: a hook returning the right
+dict proves nothing about whether the channel exists, and a scan that finds nothing proves nothing
+about whether it looked.
 ## Do not edit the tree while the gate is running
 
 **2026-09-15.** A 24-minute `make test` came back with five failures. Three were real (a new tool
