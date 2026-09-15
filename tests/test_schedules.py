@@ -30,6 +30,7 @@ from temporalio.exceptions import ApplicationError
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from chemclaw.core.config import settings
+from chemclaw.durable.digest import DigestWorkflow
 from chemclaw.durable.eln_sync import ElnSyncWorkflow
 from chemclaw.durable.eval_drift import EvalDriftWorkflow
 from chemclaw.durable.label_sync import ReactionLabelWorkflow
@@ -97,15 +98,35 @@ class _FakeTemporal:
 
 
 def test_plan_covers_all_periodic_jobs() -> None:
-    """The two Schedules a plain reaction corpus earns, each planned exactly once.
+    """What a plain reaction corpus earns by default, each planned exactly once.
 
-    They travel together because they ask one question between them: an ingest source writes ELN
-    entries, and every entry it writes needs labelling. Everything else in this file is gated on a
-    setting or a second declaration.
+    Two of the three ask one question between them: an ingest source writes ELN entries, and every
+    entry it writes needs labelling.
+
+    The third is the digest, and it is here rather than gated because
+    `D-2026-09-15-a-watch-that-nothing-evaluates-is-a-promise-a-deployment-cannot-keep` made
+    `digest_enabled` default `True`. `watch_for` writes a subscription and tells the chemist they
+    will be told; with no `digest` Schedule nothing ever evaluates that row, and nothing anywhere
+    said so. A deployment may still turn it off, and `tests/test_digest.py`'s
+    `test_a_watch_says_so_when_nothing_will_evaluate_it` is what holds the tool honest when it
+    does; with no subscribers the run is one indexed read.
+
+    Everything else in this file is gated on a setting or a second declaration.
     """
     plan = planned_schedules()
-    assert {p.workflow for p in plan} == {ElnSyncWorkflow, ReactionLabelWorkflow}
+    assert {p.workflow for p in plan} == {ElnSyncWorkflow, ReactionLabelWorkflow, DigestWorkflow}
     assert len({p.schedule_id for p in plan}) == len(plan)  # unique ids
+
+
+def test_the_digest_schedule_is_dropped_when_a_deployment_turns_digests_off() -> None:
+    """The opt-out still reaches the plan, which is what makes the default a default.
+
+    Asserted beside the test above rather than folded into it: "on by default" and "off when asked"
+    are two claims, and a change that hard-wired the Schedule would satisfy the first alone.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(settings, "digest_enabled", False)
+        assert DigestWorkflow not in {p.workflow for p in planned_schedules()}
 
 
 def test_no_scheduled_job_opens_a_pull_request() -> None:
