@@ -27,6 +27,7 @@ from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
 
 from chemclaw.agent.authz import side_effecting_tools
+from chemclaw.agent.chemclaw_agent import _capability_tools
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.agent.state import turn_config, turn_input
@@ -131,7 +132,7 @@ def test_the_general_purpose_helper_is_the_one_this_repository_compiled(agent: A
         "tool this agent holds and none of its middleware — no audit row, no authorization gate, "
         "no dry-run refusal, no plan gate, and nothing fails while it does not"
     )
-    assert "cannot call external connector tools" in task.description, (
+    assert "read-only subset of every tool you hold" in task.description, (
         "the roster is not the spec `agent/subagents.py` builds"
     )
 
@@ -355,32 +356,75 @@ def test_a_helper_cannot_spawn_a_helper(agent: Any, helper: Any) -> None:
     assert "task" not in _tool_names(helper)
 
 
-def test_a_helper_holds_no_connector_tool(helper: Any) -> None:
-    """A lifecycle bound, not a narrowing, and the reason it has to be a test.
+def test_a_helper_holds_its_callers_reading_connectors_and_none_that_act() -> None:
+    """The bound this replaced was false, and the narrowing that replaced it is the real one.
 
-    **What this test protects against is passing the caller's already-open tools down**, and that is
-    the one thing the deadlock measurement does cover: two concurrent readers of one MCP tool object
-    deadlock, and the second's calls travel over the first's connection, misattributing them in the
-    connector's own log. A helper is concurrent with its caller by construction, so handing it
-    `connectors=` reproduces that exactly.
+    **What was here before.** `test_a_helper_holds_no_connector_tool` asserted the opposite, on two
+    stated reasons: that two concurrent readers of one MCP tool object deadlock, and that a helper
+    could only get connectors of its own by the caller opening a second set eagerly.
+    `D-2026-09-15-a-helper-shares-the-session-its-caller-already-opened` drove the first against two
+    real servers and found it false — 4 concurrent 1.88 s calls over one open tool object finish in
+    1.99 s, 32 fast ones in 348 ms, and a call that fails mid-flight beside another damages neither
+    it nor the session — and the second was about a shape nobody was proposing, since the caller's
+    sessions are *already open* when the roster is compiled.
 
-    **It is not why a helper has no connectors of its own**, and the two were conflated until
-    `D-2026-08-29-a-helper-reaches-no-connector-because-of-the-lifecycle-not-the-deadlock`.
-    Sessions of its own share nothing; what rules them out is that connectors are opened by the
-    async caller before the synchronous builder runs and the roster is frozen per compiled graph,
-    so a second set would have to be opened eagerly on every turn. `agent/subagents.py` carries it.
+    **What replaces it is a narrowing rather than an absence, which is the stronger assertion.**
+    The reading half must arrive and the acting half must not, so this cannot pass by the helper
+    getting nothing — which is exactly how the test it replaced would have read if `connectors=`
+    had simply been dropped everywhere.
 
-    `_subagents` expresses the bound by omitting `connectors=`, which is an *absence* — the class of
-    thing an edit removes without noticing. Passing the caller's connectors in would keep every
-    other test in this file green, including the attenuation one above, because a connector tool the
-    caller holds is not a widening.
+    **The acting name is derived, not transcribed.** It is taken from `side_effecting_tools()` minus
+    what the in-process build resolved, so it is a name some enabled bundle's manifest really
+    declares `state_changing` — a literal here would be a fourth copy of a classification three
+    sources already own, correct on the day it was written. It is also the one arrangement in which
+    a bundle added next year is covered by this test on the day it is enabled.
+
+    **Read off the caller's compiled roster rather than off a second call to the builder**, because
+    the edit worth catching is `build_langgraph_agent` no longer handing `_subagents` its
+    connectors — an argument, not a behaviour, and a helper built directly in this test would
+    agree with itself about it forever. `tests/test_upstream_surface.py` carries the coupling that
+    makes the read possible.
     """
-    connectors = [_named("chembl_search"), _named("share_document_search")]
-    caller = build_langgraph_agent(
-        model=_model(), profile=AgentProfile(name="default"), connectors=connectors
+    inprocess = {fn.__name__ for fn in _capability_tools(AgentProfile(name="default"))}
+    acting = sorted(side_effecting_tools() - inprocess)
+    assert acting, (
+        "no enabled bundle declares a `state_changing` tool, so the acting arm of this test is "
+        "vacuous — it would pass against a helper that was handed every connector tool unfiltered"
     )
-    assert {"chembl_search", "share_document_search"} <= _tool_names(caller)
-    assert not {"chembl_search", "share_document_search"} & _tool_names(helper)
+    reads, writes = "zz_probe_reads", acting[0]
+    caller = build_langgraph_agent(
+        model=_model(),
+        profile=AgentProfile(name="default"),
+        connectors=[_named(reads), _named(writes)],
+    )
+    assert {reads, writes} <= _tool_names(caller)
+
+    spawned = _helper_of(caller)
+    assert reads in _tool_names(spawned), (
+        "a helper holds none of its caller's connector tools, so it cannot look up anything the "
+        "chemist's agent can look up — the isolation it exists for buys nothing on a question "
+        "whose evidence is out of process"
+    )
+    assert writes not in _tool_names(spawned), (
+        f"a helper holds {writes!r}, which some bundle declares `state_changing`; a helper reads "
+        "and it does not act, and that has to be one property of `helper=True` rather than two "
+        "half-properties over `tool_names` and `connectors` that can drift apart"
+    )
+
+
+def _helper_of(caller: Any) -> Any:
+    """The graph behind the caller's `task` tool, as the caller really compiled it.
+
+    Upstream closes over `subagent_graphs` inside the `task` tool it builds; there is no accessor.
+    Walked rather than rebuilt for the reason the test above gives — a helper this file builds
+    itself cannot notice `build_langgraph_agent` failing to pass its connectors down.
+    """
+    import inspect
+
+    task = caller.nodes["tools"].bound.tools_by_name["task"]
+    body = cast(Any, getattr(task, "coroutine", None) or getattr(task, "func", None))
+    graphs = inspect.getclosurevars(body).nonlocals["subagent_graphs"]
+    return graphs["general-purpose"]
 
 
 def _named(name: str) -> Any:
@@ -1171,4 +1215,50 @@ def test_the_helper_graph_is_compiled_without_a_checkpointer() -> None:
         "the helper graph was given a checkpointer: it would then hold a thread nobody addresses, "
         "and its state would be persisted twice — once under its own thread and again through the "
         "keys upstream copies into the caller's"
+    )
+
+
+def test_a_delegation_is_counted_where_every_other_tool_call_is() -> None:
+    """Delegation *rate* is observable in production, and three places said it was not.
+
+    `CLAUDE.md`, `agent/subagents.py` and
+    `D-2026-08-29-a-helper-reaches-no-connector-because-of-the-lifecycle-not-the-deadlock` each
+    gave "nothing counts how often `task` is called" as a reason the roster question could not be
+    settled — the ADR weighing a second connector set against "a spawn rate nobody has measured",
+    and this file's own module docstring resting the one-name roster on the same absence. Driven on
+    a compiled graph, the counter was already there: `task` is an ordinary tool in the caller's
+    `ToolNode`, so it passes the same `@wrap_tool_call` chain as everything else and
+    `agent/audit.py::_count_outcome` counts it like everything else.
+
+    The claim was a belief about a tool that looks special, and it was load-bearing for two
+    decisions. This is the assertion that stops it coming back: a rename of the tool, or a
+    middleware order that let `task` skip the counting chain, turns this red rather than quietly
+    restoring the reason.
+
+    **Not a proxy for the question it was quoted for.** A spawn *rate* is a mediator, not an
+    outcome — `D-2026-08-12`/`D-2026-08-13` measured exactly that and settled nothing. What this
+    fixes is narrower and worth having anyway: the number exists, so an argument may no longer
+    claim it does not.
+    """
+    from chemclaw.agent.audit import NullAuditSink
+    from chemclaw.core.metrics import METRICS
+
+    def counted() -> int:
+        for line in METRICS.render().splitlines():
+            if "chemclaw_tool_calls_total" in line and 'tool="task"' in line:
+                return int(float(line.rsplit(" ", 1)[1]))
+        return 0
+
+    before = counted()
+    agent = build_langgraph_agent(
+        model=_HelperScript(messages=iter([]), read=True),
+        audit_sink=NullAuditSink(),
+        profile=AgentProfile(name="default"),
+    )
+    asyncio.run(agent.ainvoke(turn_input("sweep the sources"), turn_config("counted-session")))
+
+    assert counted() == before + 1, (
+        'spawning a helper did not move `chemclaw_tool_calls_total{tool="task"}`, so delegation '
+        "rate is once again invisible in production — which is the absence three merged documents "
+        "used as a reason not to decide the roster"
     )

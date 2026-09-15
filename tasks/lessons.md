@@ -2684,3 +2684,44 @@ argument was wrong both times and is worth naming as its own tell:
 **"Driving this would only test the fixture" is the sentence that precedes a vacuous guard.** It is
 occasionally true and it is mostly a reason not to write the harder test. Both were 20 lines, and
 the pattern for one of them was already in the file it belonged in.
+
+## 2026-09-15 — correcting a justification is not evidence about the thing it justifies
+
+`tests/test_subagents.py::test_a_helper_holds_no_connector_tool` rested on "two concurrent readers
+of one MCP tool object deadlock". Two sessions had touched that bound. The first stated it. The
+second (`D-2026-08-29-a-helper-reaches-no-connector-because-of-the-lifecycle-not-the-deadlock`)
+noticed the reason was broader than the evidence, wrote a careful ADR saying so, corrected three
+docstrings — and kept the behaviour, because it re-scoped the deadlock claim to the one shape it
+*did* cover rather than driving it. Driven on 2026-09-15 against two real servers, it is false for
+that shape too: 4 concurrent 1.88 s calls over one open tool object finish in 1.99 s.
+
+That ADR's own words were "the risk is not that the bound is wrong — it is that the next reader
+either removes it, having noticed the gap, or leaves it in place believing a measurement covers
+it." It then did the second thing.
+
+**The rule.** When an ADR corrects *why* a control exists and leaves the control standing, it must
+state which arm it did not run, in the ADR, as a named gap. "The measurement is real and it is
+about X" is a claim about the measurement's scope, not about X — and a scope claim is cheap to
+write and cheap to be wrong about. If the remaining arm is drivable in one script, drive it in the
+same commit.
+
+**A third claim in the same bound was false the day it was written**: "nothing counts how often
+`task` is called", repeated in `CLAUDE.md`, `agent/subagents.py` and that ADR, and used in all
+three as a reason a decision could not be taken. `task` is an ordinary tool in the caller's
+`ToolNode`; `chemclaw_tool_calls_total{tool="task"}` had always moved. **An absence used as a
+reason not to decide is exactly the claim to check first**, because nobody checks the thing that
+lets them stop.
+
+## 2026-09-15 — a scratchpad file named after a stdlib module rewrites the repository
+
+`src/chemclaw/protocols/export.py` was clobbered five times across two sessions, and four
+diagnoses blamed subagents running `git checkout -- <path>` in the shared working tree. Wrong. The
+scratchpad held a leftover script named `csv.py`. Python puts a script's own directory at the head
+of `sys.path`, so running *anything* from there made `import csv` execute it — and that script's
+body wrote a file into `src/`. `importlib.metadata` imports `csv`, so every chemclaw import
+triggered it.
+
+**The rule.** Never name a scratchpad script after a stdlib module. When a tracked file changes
+with no plausible writer, do not reason about who might have run git — put an `sys.addaudithook`
+on `open`-for-write against that path and print the stack. It took one script and found the cause
+immediately, after four sessions of a confident wrong answer.

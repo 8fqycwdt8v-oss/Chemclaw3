@@ -31,29 +31,30 @@ has measured against real work. Fan-out needs no partition: `task` already tells
 several agents concurrently when their tasks are independent, so a parallel evidence sweep is N
 invocations of one name. A second name gets added when a measurement asks for one.
 
-**What a helper does not inherit, and where each bound is enforced.** No connector tools, for the
-reason below. No checkpointer, because upstream's contract is that a helper sees only the prompt it
-was given and returns one report. No helpers of its own, which is the recursion guard
-`build_langgraph_agent(helper=…)` carries.
+**What a helper does not inherit, and where each bound is enforced.** No checkpointer, because
+upstream's contract is that a helper sees only the prompt it was given and returns one report. No
+helpers of its own, which is the recursion guard `build_langgraph_agent(helper=…)` carries. No
+store, so there is no `/memories/` route and nothing it writes outlives the turn.
 
-**Why a helper reaches no connector, corrected**
-(`D-2026-08-29-a-helper-reaches-no-connector-because-of-the-lifecycle-not-the-deadlock`). This used
-to be given as a concurrency bound: two concurrent turns over one MCP tool object deadlock, which is
-the measurement `build_langgraph_agent` gives as why a graph is compiled per turn at all. That
-measurement is real and it is about **sharing one session object** — a helper holding sessions of
-its own shares nothing, and `open_connector_specs` already opens a whole fleet concurrently by
-design, so the bound as stated did not reach the case it was quoted for.
+**It does reach a connector, since
+`D-2026-09-15-a-helper-shares-the-session-its-caller-already-opened`, and for two rounds it did
+not.** The first reason given was a concurrency bound — two readers of one MCP tool object deadlock
+— and `D-2026-08-29-a-helper-reaches-no-connector-because-of-the-lifecycle-not-the-deadlock`
+corrected it to a lifecycle bound without driving it. Driven, the concurrency claim is false: over
+**one** open `HeldConnectorSession`, four concurrent 1.88 s `pyexec.run_python` calls finish in
+1.99 s with no error and the server's own log shows them overlapping, 32 fast `props` calls finish
+in 348 ms, and a call that fails mid-flight beside another damages neither it nor the session. The
+second half of that bound — misattribution in the connector's log — does not reach a helper either:
+`core/call_identity.py` binds the headers from the ambient context when the *session* opens, and a
+helper is the same actor, session and correlation id by
+`D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor`, so the headers are right.
 
-What actually binds is the **lifecycle**, and it is the stronger argument. Connectors are opened by
-the *caller* — the front-door runner, the CLI, a template activity — into an `AsyncExitStack`
-**before** the graph is compiled, and `build_langgraph_agent` is synchronous and receives them
-already open. The roster is fixed per compiled graph (`SubAgentMiddleware` sets `_subagents` once
-and freezes `subagent_names`), so a helper cannot open sessions at spawn time even in principle.
-Giving it its own set therefore means opening a second full set **eagerly, on every turn**, whether
-or not a helper is ever spawned: twice the sockets, handshakes and server-side session state, on a
-path whose tail already cost six sequential connect timeouts the day a fleet went dark, bought
-against a spawn rate nobody has measured. `docs/planning/BACKLOG.md` holds what would change that,
-and it is a number rather than an argument.
+The lifecycle argument survives intact and simply never applied to this shape. It is about a helper
+opening sessions of its **own**, which would have to happen eagerly on every turn because
+`build_langgraph_agent` is synchronous and the roster is frozen per compiled graph. Sharing needs
+none of that: the caller's sessions are already open when `_subagents` runs, so `helper_connectors`
+hands the same objects down at **zero** extra sockets, handshakes or server-side session state —
+which is better than either shape that ADR weighed, and is why it is the one that shipped.
 
 **And, since `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller`, nothing that changes
 anything.** `helper_profile` is what made that true, and it was written because the surface and the
@@ -131,10 +132,12 @@ crosses back, so a note you found and did not name is a note your caller cannot 
 and has no way to learn exists. An unattributed summary is the one thing your report must never be
 — it would reach a chemist as this system's own assertion rather than as the record it came from.
 
-Every tool of this system's that you hold only reads. You cannot start a durable job, record a
-knowledge note, record an answer, ask the chemist a question, or call an external connector tool;
-the agent that spawned you can do all of those, and the right way to make one happen is to say so
-in your report. You do hold file tools that write, and a file you write is **not** private to you:
+Every tool you hold only reads, and that includes the connector tools — you can look up anything
+your caller could look up. What you cannot do is act: you cannot start a durable job, record a
+knowledge note, record an answer, or ask the chemist a question. The agent that spawned you can do
+all of those, and the right way to make one happen is to say so in your report.
+
+You do hold file tools that write, and a file you write is **not** private to you:
 it crosses back to the agent that spawned you along with your report, and it stays there — the
 conversation you were spawned from can read it again on a later turn, long after you are gone. So
 treat anything you put in one as something you are handing over for keeps. Do not describe work as
@@ -208,12 +211,12 @@ def general_purpose_helper(runnable: Any) -> dict[str, Any]:
             "intermediate reading would otherwise crowd this conversation: sweeping several "
             "evidence sources in parallel, or working through a long search whose steps do not "
             "matter to the final answer. It reads and it reports, and that is all: it holds the "
-            "read-only subset of the in-process tools you hold, so it cannot start a durable job, "
-            "record a note, record an answer or ask the chemist anything, and it cannot call "
-            "external connector tools — do all of those here, yourself, after reading what it "
-            "found. It is never a way to reach something you cannot reach yourself. Give it the "
-            "full context in the prompt, since it sees nothing of this conversation, and say "
-            "exactly what to return."
+            "read-only subset of every tool you hold — your own and the connectors' — so it can "
+            "look anything up that you can look up, and it cannot start a durable job, record a "
+            "note, record an answer or ask the chemist anything. Do those here, yourself, after "
+            "reading what it found. It is never a way to reach something you cannot reach "
+            "yourself. Give it the full context in the prompt, since it sees nothing of this "
+            "conversation, and say exactly what to return."
         ),
         "runnable": runnable,
     }
@@ -244,8 +247,9 @@ def helper_profile(caller: AgentProfile, held: frozenset[str]) -> AgentProfile:
     build resolved — a caller that already narrowed itself, like `property-lookup` with its four
     names, hands in the smaller set — and every operation here removes from it. There is no path
     that adds a name, which is what makes "a helper holds no tool its caller does not" a property of
-    the construction rather than a check bolted beside it. Connector names are simply not in `held`
-    and do not need to be excluded: a helper is built with no connectors at all.
+    the construction rather than a check bolted beside it. Connector names are not in `held` at all:
+    they arrive already open on a different parameter, and `helper_connectors` subtracts the same
+    `side_effecting_tools()` from them — one switch, two halves, one set.
 
     Args:
         caller: The resolved profile of the agent that would spawn this helper.
@@ -301,3 +305,46 @@ def helper_profile(caller: AgentProfile, held: frozenset[str]) -> AgentProfile:
             "harness_enabled": False,
         }
     )
+
+
+def helper_connectors(connectors: list[Any] | None) -> list[Any] | None:
+    """The caller's open connector tools, minus every one that acts.
+
+    The connector half of `helper_profile`'s subtraction, and a second function rather than a
+    second argument because the two halves arrive at `build_langgraph_agent` on different
+    parameters and in different shapes: the in-process half is narrowed through `tool_names`
+    before `_capability_tools` resolves it, while a connector tool is an already-open `BaseTool`
+    that goes straight to `_bound_surface`. One switch (`helper=True`) applies both, which is what
+    keeps "a helper reads, it does not act" a property of the construction.
+
+    **Shared, not reopened, and that is the whole cost argument.** These objects belong to sessions
+    the caller opened for this turn and holds open for its duration, so a helper that calls one
+    spends no handshake, no socket and no server-side session state.
+    `D-2026-08-29-a-helper-reaches-no-connector-because-of-the-lifecycle-not-the-deadlock` weighed
+    two shapes — passing these down, and opening a second full set eagerly — and rejected the first
+    on a concurrency measurement and the second on cost.
+    `D-2026-09-15-a-helper-shares-the-session-its-caller-already-opened` drove the first and found
+    it false: 4 concurrent 1.88 s calls over one open tool object finish in 1.99 s, and a call that
+    fails mid-flight beside another damages neither it nor the session. What is left of that ADR is
+    its cost argument, which now points the other way.
+
+    The subtraction is `side_effecting_tools()`, the same set and for the same reason
+    `helper_profile` gives: it already carries every enabled connector's declared `state_changing`
+    names and every connector job, assembled from the manifests rather than from a list written
+    here, so a bundle added next year is outside a helper's reach on the day it is enabled.
+
+    `SPEAKS_TO_THE_CHEMIST` is deliberately not subtracted here: it names an in-process tool, and a
+    connector tool cannot write a turn signal — the signal is written in this process, by the
+    capability, and a connector's answer comes back over the wire as a `ToolMessage`.
+
+    Args:
+        connectors: The caller's already-open connector tools, or `None` for a turn with none.
+
+    Returns:
+        The subset a helper may call, or `None` if the caller had none — `None` rather than `[]` so
+        that "this agent has no out-of-process capability" stays one value through the builder.
+    """
+    if not connectors:
+        return None
+    acting = side_effecting_tools()
+    return [tool for tool in connectors if tool.name not in acting]

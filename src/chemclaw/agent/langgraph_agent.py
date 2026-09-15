@@ -127,6 +127,7 @@ from chemclaw.agent.subagents import (
     HELPER_BRIEF,
     general_purpose_helper,
     governed_roster,
+    helper_connectors,
     helper_profile,
 )
 from chemclaw.agent.tool_authz import (
@@ -203,8 +204,10 @@ def build_langgraph_agent(
             guard: `_subagents` builds its spec by calling this function, so a graph that handed its
             helper a helper would not terminate. It is a parameter rather than a depth counter
             because one level is the whole design — `agent/subagents.py` says why the roster is one
-            name and why a helper holds no connector tools — so a counter would be a knob for a
-            depth nobody has asked for.
+            name — so a counter would be a knob for a depth nobody has asked for. It also
+            narrows: a helper gets `helper_profile`'s in-process subtraction and
+            `helper_connectors`' matching one over the caller's open connector tools, so "a helper
+            reads, it does not act" travels with this switch rather than with a call site.
 
     Returns:
         A compiled graph. No network call happens here; construction only, exactly as
@@ -243,9 +246,20 @@ def build_langgraph_agent(
     # right answer today (they are side-effecting, so they are subtracted anyway) for a reason that
     # stops being true the first time a generated tool is a read. Filtering the registry twice is a
     # dict comprehension over a value already computed; being right by construction is worth it.
+    #
+    # **The connector half is narrowed here too, and it has to be a second operation.**
+    # `helper_profile` narrows `tool_names`, which governs `_capability_tools` — the in-process
+    # half. A connector tool is a `BaseTool` that arrives on `connectors` already open and goes
+    # straight into `_bound_surface`, so `tool_names` never sees it and the subtraction one line
+    # above cannot reach it. Applying `side_effecting_tools()` to both is what keeps "a helper
+    # reads, it does not act" one property of `helper=True` rather than two half-properties that
+    # can drift apart; `tests/test_subagents.py` compares the two *compiled* graphs, so a connector
+    # bundle whose manifest declares a `state_changing` tool is out of a helper's reach on the day
+    # it is enabled.
     if helper:
         prof = helper_profile(prof, frozenset(fn.__name__ for fn in tools))
         tools = _capability_tools(prof)
+        connectors = helper_connectors(connectors)
     # **Resolved once, here, because two things now depend on which sink this graph got.** The
     # middleware writes the rows and the prompt tells the chemist what the trail is
     # (`instructions_for(durable_trail=…)`), and the two disagreeing is precisely the defect that
@@ -362,7 +376,7 @@ def build_langgraph_agent(
         # `skills=` is deliberately absent: it is what would make upstream compose a second skills
         # middleware beside `ReloadingSkillsMiddleware`. `_skills_middleware` says why one is right.
         permissions=filesystem_permissions(),
-        subagents=_subagents(prof, chat_model, sink, correlation_id, actor),
+        subagents=_subagents(prof, chat_model, sink, correlation_id, actor, connectors),
         **shared,
     )
 
@@ -511,6 +525,7 @@ def _subagents(
     audit_sink: AuditSink | None,
     correlation_id: str | None,
     actor: str,
+    connectors: list[Any] | None,
 ) -> list[Any]:
     """The helpers this agent may spawn — one, compiled here so it carries this chain.
 
@@ -524,18 +539,15 @@ def _subagents(
 
     Three things the helper does *not* inherit, each for its own reason:
 
-    - **No connector tools**, which is a lifecycle bound rather than a narrowing — and *not* the
-      concurrency bound this said until
-      `D-2026-08-29-a-helper-reaches-no-connector-because-of-the-lifecycle-not-the-deadlock`. The
-      deadlock measurement above is about two turns **sharing one** MCP tool object; a helper with
-      sessions of its own shares nothing, so it never reached this case. What binds is that
-      connectors are opened by the async caller into an exit stack *before* this synchronous
-      function runs, and the roster is frozen per compiled graph — so a helper cannot open sessions
-      at spawn time, and giving it its own set means opening a second full set eagerly on every
-      turn, spawned or not. It is expressed by omitting `connectors=` below, and asserted against
-      the two *compiled* graphs in `tests/test_subagents.py`, because under a one-name roster any
-      build-time comparison of the caller's profile with the helper's would compare a value with
-      itself.
+    - **The caller's read-only connector tools, and none of its state-changing ones.** This used
+      to be "no connector tools at all", on two bounds that
+      `D-2026-09-15-a-helper-shares-the-session-its-caller-already-opened` drove and found do not
+      reach the case. The concurrency half was measured false: 4 concurrent 1.88 s calls over one
+      open MCP tool object complete in 1.99 s with no error, and 32 fast ones in 348 ms. The
+      lifecycle half was about a helper opening sessions of its *own*, which is not what happens
+      here — the caller's sessions are already open when this runs, so the helper is handed
+      `connectors` and costs no second socket. The narrowing is applied in `build_langgraph_agent`
+      beside the in-process one, so it travels with `helper=True` rather than with this call site.
     - **No checkpointer.** Upstream's contract is that a helper sees the prompt it was given and
       returns one report; a thread to resume would be a second conversation nobody addresses.
     - **No durable memory and no store.** `store=` is not forwarded, so the helper's backend has no
@@ -581,6 +593,8 @@ def _subagents(
         audit_sink: The caller's trail, so a helper's tool calls land in the same place.
         correlation_id: The caller's correlation id, so the two halves of one turn are joinable.
         actor: The caller's fallback audit actor.
+        connectors: This turn's already-open connector tools, shared with the helper rather than
+            reopened. Narrowed to the read-only half by the helper's own build.
 
     Returns:
         The single-entry list to hand `create_deep_agent(subagents=…)`.
@@ -594,6 +608,7 @@ def _subagents(
                     actor=actor,
                     correlation_id=correlation_id,
                     audit_sink=audit_sink,
+                    connectors=connectors,
                     helper=True,
                 )
             )
