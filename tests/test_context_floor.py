@@ -805,7 +805,28 @@ SERVED_ELSEWHERE_ALLOWANCE = 11_000
 #:
 #: `SERVED_ELSEWHERE_ALLOWANCE` again did not move, for the reason given directly above: this tree
 #: declares no `suitability` bundle, so no chart deployment binds it.
-FLEET_PUBLISHED_ALLOWANCE = 24_800
+#:
+#: **And a third time the same day, which is what makes this a bound rather than a number.** The
+#: fleet gained `kinetics` — isothermal rate and ideal-reactor arithmetic, six tools — and the
+#: directory went to **25,695 over 48 tools** (`chem` 5,577 / 12, `kinetics` 3,389 / 6, `props`
+#: 2,936 / 6, `pyexec` 1,142 / 1, `rxnpredict` 2,784 / 6, `safety` 1,632 / 3, `suitability`
+#: 4,471 / 7, `thermalsafety` 3,764 / 7), 895 over the 24,800 that stood. Raised to 28,500, the
+#: same ~11% headroom.
+#:
+#: Three consecutive fleet additions, each caught here rather than noticed later, is the argument
+#: for the bound existing at all: nothing in this tree builds those servers or watches their
+#: merges, so the only thing standing between a sibling's pull request and a silently larger
+#: prefix on every model call is this assertion failing.
+#:
+#: The cost again stated rather than absorbed: 3,389 more tokens on every model call for a
+#: deployment that mounts that directory. At 565 tokens a tool `kinetics` is **inside** the band
+#: its siblings occupy (`thermalsafety` 538, `safety` 544, `props` 489, `chem` 465) — unlike
+#: `suitability` above, and for a reason worth keeping: its six tools are single-purpose, where
+#: `suitability`'s seventh is a composite taking a nested model plus nine named criteria.
+#:
+#: `SERVED_ELSEWHERE_ALLOWANCE` did not move for the third time, and for the third time because
+#: this tree declares no such bundle.
+FLEET_PUBLISHED_ALLOWANCE = 28_500
 
 #: The whole static prefix a shipped `default` turn may cost, as a bound: this file's ceiling plus
 #: the allowance for what it cannot see.
