@@ -923,39 +923,6 @@ only holds defects can only ever restore the system to what it already intended 
       stating before anybody builds it, because "required field" reads as a stronger control than
       it is.
 
-- [ ] **A bundle declared only in the fleet reaches an agent surface with no probe covering it** —
-      [M], and it is a cross-repository gap rather than a missing file.
-      `D-2026-09-14-a-bundle-this-tree-does-not-declare-is-still-reachable` decided that `pyexec`
-      is enabled by an operator's values file and ships no manifest stub here, which is right and
-      leaves this residual: `tests/test_probe_coverage.py` computes
-      `available_tool_names() - _expected_tools() - EXEMPT`, and `available_tool_names()` reads the
-      bundles on *this* checkout's `connectors_dir`.
-
-      **The gate is blind in the default environment rather than blind by construction, and that
-      distinction is the work.** On a bare checkout a bundle declared only in `Chemclaw3-mcp` is
-      outside it in both directions — no probe is demanded, and a probe naming `run_python` would
-      name a tool this repository cannot resolve. But `connectors_dir` is
-      `CHEMCLAW_CONNECTORS_DIR`, which is exactly what a deployment mounting `pyexec` sets and what
-      `infra/live/e2e-full-stack/up.sh` sets. Measured with the fleet's `manifests/` on the path:
-      121 agent-callable tools instead of 114, and
-      `test_every_agent_callable_tool_is_probed_or_exempt` **fails**, naming seven —
-      `run_python` plus the six `props` serves. So a developer who runs the four-repo lane's
-      environment and then runs the suite gets a red test for a corpus gap, which teaches people to
-      unset the variable.
-
-      So a deployment that mounts `pyexec` gets arbitrary Python execution on the agent surface
-      with nothing measuring whether the model uses it well, refuses it when it should, or
-      substitutes it for a tool that exists. The same is true of `props`, and will be true of every
-      bundle the fleet adds that this tree does not declare.
-
-      **The shape of the fix is already in the tree, one problem over.** `SERVED_ELSEWHERE` and
-      `tests/test_sibling_manifest_agreement.py` are how the context floor and the manifest
-      agreement handle "a fact about a repository this one cannot watch": resolve the sibling
-      checkout through `tests/siblings.py`, run against it when it is there, and skip with the
-      reason counted by `tests/conftest.py::_report_sibling_skips` when it is not. A probe corpus
-      that may name a fleet-served tool wants exactly that treatment, and wants it once rather than
-      per bundle. Not started; it belongs beside those two rather than beside the connector seam.
-
 - [ ] **This environment's `API-KEY` comes and goes, and one row is blocked exactly while it is
       down** — [S], and it is operational rather than code. It was three until 2026-09-04, when the
       credential answered and the tool-utility A/B was built and run through it in one session

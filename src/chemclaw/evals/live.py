@@ -340,6 +340,38 @@ def _verified_numbers(answer: str, returned: list[float]) -> list[str]:
     return [numeral for numeral in stated_numerals(answer) if is_rounding_of(numeral, returned)]
 
 
+def _tool_expectation_applies(probe: Probe, outcome: ProbeOutcome) -> bool:
+    """Whether this turn could have met `expects_tools` at all.
+
+    A probe that names a tool the system under test does not have is not measuring the model, it is
+    measuring the deployment — and scoring it as a miss is how a corpus comes to penalise capability
+    that exists somewhere else. Two ways a tool can be out of reach, and both have to be read
+    because they are different facts:
+
+    * **Not on the surface.** `Chemclaw3-mcp` serves `thermalsafety`, `suitability` and `kinetics`,
+      which this repository declares no bundle for, so they are bound only where a deployment points
+      `CHEMCLAW_CONNECTORS_DIR` at the fleet's `manifests/`. A probe declares that dependence with
+      `needs_bundle`; what is read *here* is the surface itself rather than the bundle name, because
+      "is this tool callable" is the question being asked and it needs no mapping to answer.
+    * **Bound and degraded.** `capability_degraded` names a connector whose server did not answer
+      this turn. The tool is on the surface and was still unreachable, which is the deployment's
+      fault and not the model's.
+
+    **The limit is worth stating rather than leaving to be discovered**: the surface is read from
+    *this process's* configuration, and the runner drives the system over HTTP. In the lane that
+    mounts the fleet (`infra/live/e2e-full-stack/up.sh`) the runner and the server are given the
+    same `CHEMCLAW_CONNECTORS_DIR`, so the two agree. A runner pointed at a remote deployment with a
+    different bundle set would read its own surface and not that one — which makes this a check on
+    the configuration the run was launched with, not on the one answering.
+    """
+    if probe.needs_bundle is not None and probe.needs_bundle in outcome.degraded:
+        return False
+    from chemclaw.agent.chemclaw_agent import available_tool_names
+
+    surface = available_tool_names()
+    return any(name in surface for name in probe.expects_tools)
+
+
 def _asked_in_prose(outcome: ProbeOutcome) -> bool:
     """Did the turn end on a question it never raised through `ask_clarifying_question`?
 
@@ -536,7 +568,7 @@ async def run_turn(
     outcome.uncited_note_ids = _score_citations(outcome.answer, returned_ids)
     outcome.verified_numbers = _verified_numbers(outcome.answer, returned_values)
     outcome.asked_clarifying_in_prose = _asked_in_prose(outcome)
-    if probe.expects_tools:
+    if probe.expects_tools and _tool_expectation_applies(probe, outcome):
         outcome.expected_tools_met = any(t in outcome.tools_called for t in probe.expects_tools)
     if probe.expects_notes:
         # `returned_ids` rather than the answer's citations: the question is whether *retrieval*
