@@ -2835,3 +2835,26 @@ and mypy actually raises `arg-type` for a list *variable* and `list-item` for a 
 two of the four ignores named the wrong code and the other two were load-bearing. One `_plan()`
 helper that states the conversion once replaced all four. **An ignore that has to be spelled two
 ways for one mismatch is a sign the ignore is the wrong tool.**
+
+
+## `make db-migrate` after merging main, before believing a local gate
+
+**2026-09-15.** The full local gate came back with 9 errors in `tests/test_runtime_ddl_privilege.py`
+— a file the branch never touched — all of them `relation "composed_workflows" does not exist`. That
+table arrived with a PR that merged into `main` while mine was in CI. I had merged `main` into the
+branch and never migrated, so a long-lived local database was one migration behind the code it was
+testing. One `make db-migrate` (7 ms) and all 11 passed.
+
+**The general point is the asymmetry between the two gates, which is worth holding onto.** CI builds
+its database from migrations on every run, so it can *never* hit this. The sandbox database persists
+across a session, so it drifts from `main` the moment a migration lands there. Each gate is
+therefore stricter than the other in a different place: CI caught a `mypy` gap the same afternoon
+that my narrower invocation missed, and the local run caught a migration drift CI structurally
+cannot see — and it has Postgres-backed coverage CI's throwaway container skips entirely.
+
+Neither is "the" gate. **Merging on one alone is merging on half the evidence**, which is why both
+were waited for here.
+
+**Rule: after `git merge origin/main` — or any base update — run `make db-migrate` before starting a
+local gate.** An error in a file the branch did not touch, on a table the branch did not add, is the
+signature: check the migration ledger before reaching for anything cleverer.
