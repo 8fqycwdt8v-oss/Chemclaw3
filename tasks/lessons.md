@@ -2965,3 +2965,30 @@ refutable consequence was dropped rather than keyed. Under-claiming a limit is t
 capability in one repository does not make it reachable from another; that takes a manifest, and a
 sibling repository's `manifests/` directory is not this one's surface. The validator knows this and
 is faster to ask than a checkout is to read.
+
+## Correcting half a sentence carries the other half forward unchecked
+
+**2026-09-15.** A probe header read: "`thermalsafety` (8851) and `kinetics` (8852) are `next` in
+`Chemclaw3-mcp/MODULES.md`". `thermalsafety` had just shipped as `built`, so I rewrote the sentence
+— and wrote "`kinetics` (8852) is **still `next`**", preserving the clause I had not looked at.
+
+`kinetics` has been `proposed`, never `next`. The only server at `next` in that catalogue is
+`nomenclature` (8864). So a commit whose entire subject was stale cross-repo claims shipped a stale
+cross-repo claim, in the sentence it was correcting, an hour before a subagent reading the actual
+file caught it.
+
+**Two things made it invisible.** The word "still" reads as a *check* — it asserts continuity, which
+is a claim about having looked — when in fact it was inherited. And half the sentence had just been
+verified, which lends the other half a borrowed credibility: the edit felt like an act of
+verification because part of it was one.
+
+**Rule: an edit that corrects part of a sentence re-verifies the rest of it, or deletes the rest.**
+A clause surviving a correction is not evidence; it is the part nobody looked at. "Still", "remains",
+"unchanged" and "as before" are the words to search for — each one asserts a check, so each one owes
+one.
+
+**Second rule, for this case specifically: do not transcribe another repository's status field at
+all.** That header now records what was observed with the date it was observed, the way
+`Chemclaw3-mcp/CLAUDE.md` records this family's port assignments — because a status in a file no
+test here can read goes stale on somebody else's merge schedule, and the present tense claims
+otherwise.

@@ -9,11 +9,22 @@
 # would re-baseline its own exam.
 #
 # **The first one shipped on 2026-09-15, and this header still called it `next`.** `thermalsafety`
-# (8851) is `built` in `Chemclaw3-mcp/MODULES.md`: adiabatic temperature rise, MTSR, TMR_ad, the
-# temperature at which TMR reaches a target, the Stoessel criticality class, jacket heat-removal
-# capacity, a Semenov critical-ambient estimate and an oxygen-balance screen. `kinetics` (8852) is
-# still `next`, with `unitops`, `solidform`, `rxnsearch`, `blocks` and `reactivity` catalogued
-# behind it.
+# (8851) serves adiabatic temperature rise, MTSR, TMR_ad, the temperature at which TMR reaches a
+# target, the Stoessel criticality class, jacket heat-removal capacity, a Semenov critical-ambient
+# estimate and an oxygen-balance screen.
+#
+# **This paragraph no longer transcribes that catalogue's statuses, because the first attempt to
+# correct it got one wrong in the same edit.** The sentence being fixed said `thermalsafety` and
+# `kinetics` were both `next`; the fix corrected the first half and carried the second half
+# forward unchecked, and `kinetics` has been `proposed` — not `next` — the whole time. Observed on
+# 2026-09-15 against `Chemclaw3-mcp/MODULES.md`, the only server at `next` is `nomenclature`
+# (8864). That is a fact about a file this repository cannot read on any run, so it is recorded
+# with the date it was looked at rather than stated in the present tense, the same way
+# `Chemclaw3-mcp/CLAUDE.md` records this family's port assignments and for the same reason.
+#
+# What is safe to say without reading that file: the servers behind this section's probes are
+# `kinetics`, `unitops`, `solidform`, `rxnsearch`, `blocks` and `reactivity`, and which of them is
+# queued is a question for the catalogue rather than for this header.
 #
 # So the denial below is now **conditional on the lane**, not on the calendar. This tree declares no
 # `thermalsafety` bundle, so `build_langgraph_agent` binds none of those tools; only a deployment
