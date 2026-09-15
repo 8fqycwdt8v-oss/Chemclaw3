@@ -625,6 +625,11 @@ _ACTOR_SCOPED_ONLY: dict[str, str] = {
     "store": "an agent memory outlives the session it was written in — that is what it is for",
     "store_vectors": "the embedding half of the same memory",
     "subscriptions": "a standing query belongs to the person, not to one conversation",
+    "composed_workflows": (
+        "a workflow the agent wrote down outlives the conversation that asked for it — that is "
+        "the whole point of composing one, and deleting one session must not take the procedure "
+        "the next session is meant to run"
+    ),
     "user_preferences": "a preference is the person's, and survives every session they close",
 }
 

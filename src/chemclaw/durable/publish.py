@@ -187,6 +187,9 @@ _BAD_DATA_TYPES = [
     "UnstorableDocument",
     "UnknownDesign",
     "TemplateError",
+    # A composed workflow that names a write, a job, or a step that does not resolve. Bad data in
+    # exactly this list's sense: the document is what is wrong, so every attempt fails identically.
+    "ComposedWorkflowError",
     "UnresolvedReference",
     "ProfileError",
     # A BoFire/botorch surrogate fit or acquisition step failed on the given observations

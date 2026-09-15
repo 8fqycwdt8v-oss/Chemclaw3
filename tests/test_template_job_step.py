@@ -382,7 +382,7 @@ def test_a_template_naming_an_unknown_job_fails_instead_of_hanging() -> None:
                 client,
                 task_queue=settings.background_task_queue,
                 workflows=[TemplateWorkflow],
-                activities=[authorize_job_step, _swallow_record],
+                activities=[authorize_job_step, _swallow_record, _nothing_to_resume],
             ):
                 with pytest.raises(WorkflowFailureError):
                     await asyncio.wait_for(
@@ -411,6 +411,17 @@ def test_a_template_naming_an_unknown_job_fails_instead_of_hanging() -> None:
 @activity.defn(name="record_job")
 async def _swallow_record(record: Any) -> None:
     """Accept the run's durable record and discard it — this file is not about that write."""
+
+
+@activity.defn(name="completed_steps")
+async def _nothing_to_resume(request: Any) -> dict[str, Any]:
+    """Answer the sequencer's resume read with "nothing", which is what a first run of an id gets.
+
+    Served for the same reason `_swallow_record` above is: `TemplateWorkflow` dispatches it before
+    its first step, and a rig that leaves it unserved measures an unregistered activity rather than
+    the thing it is about.
+    """
+    return {}
 
 
 def _record_audit(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
@@ -818,7 +829,12 @@ def test_a_failed_template_step_wakes_the_session_and_names_which_step(
                 client,
                 task_queue=_QUEUE,
                 workflows=[TemplateWorkflow],
-                activities=[authorize_job_step, record_session_event_activity, _swallow_record],
+                activities=[
+                    authorize_job_step,
+                    record_session_event_activity,
+                    _swallow_record,
+                    _nothing_to_resume,
+                ],
             ):
                 with pytest.raises(WorkflowFailureError):
                     await asyncio.wait_for(
@@ -912,7 +928,7 @@ def test_a_declared_optional_input_the_caller_omitted_resolves_to_none() -> None
                 client,
                 task_queue=settings.background_task_queue,
                 workflows=[TemplateWorkflow],
-                activities=[_agent, _swallow_record],
+                activities=[_agent, _swallow_record, _nothing_to_resume],
             ):
                 await asyncio.wait_for(
                     client.execute_workflow(

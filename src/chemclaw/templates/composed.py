@@ -40,6 +40,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.jsonb import json_column
 from chemclaw.templates.manifest import AgentStep, JobStep, Template, ToolStep
 
 #: How many workflows one owner may keep. A bound rather than a policy: the listing is read into a
@@ -190,8 +191,6 @@ class PostgresComposedStore:
 
     async def save(self, workflow: ComposedWorkflow) -> None:
         """Insert or revise this owner's workflow of that name."""
-        from psycopg.types.json import Jsonb
-
         from chemclaw.core import db
         from chemclaw.core.identity_context import get_current_correlation_id
         from chemclaw.core.session_context import get_current_session_id
@@ -203,7 +202,10 @@ class PostgresComposedStore:
                     {
                         "owner": workflow.owner,
                         "name": workflow.name,
-                        "document": Jsonb(workflow.document.model_dump(mode="json")),
+                        # Through `json_column`, not a bare `Jsonb`: it refuses a non-finite
+                        # float here rather than at the wall, and `tests/test_jsonb_boundaries`
+                        # requires every `jsonb` write in the tree to go one way.
+                        "document": json_column(workflow.document.model_dump(mode="json")),
                         "summary": workflow.summary,
                         "session_id": get_current_session_id() or "",
                         "correlation_id": get_current_correlation_id() or "",
