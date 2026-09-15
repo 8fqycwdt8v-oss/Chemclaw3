@@ -61,8 +61,9 @@ def _model_facing_descriptions() -> dict[str, str]:
     model-facing surface, bundles included". Measured, three classes are still outside: the
     `description:` on each of the 14 `workflow:` job entries in the connector manifests — which
     `connectors/jobs.py` assembles into a tool docstring and calls "the job's model-facing
-    documentation", and which is 100% of the `results` bundle since it has no `server/tools.py` at
-    all — the bundle `SKILL.md` files, and `agent/chemclaw_agent.py`'s `_INSTRUCTION_BLOCKS`.
+    documentation", and which is 100% of the `results` bundle since it ships no served tool
+    module at all — the bundle `SKILL.md` files, and `agent/chemclaw_agent.py`'s
+    `_INSTRUCTION_BLOCKS`.
     Driven: every forbidden string at once in `connectors/results/connector.yaml`'s job description
     left this file green.
 
