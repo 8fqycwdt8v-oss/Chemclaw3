@@ -43,7 +43,13 @@ belonging to another effort. Overwriting it to satisfy a convention would destro
       premise, which is what makes an answer-time break mean *since*, by construction. The
       premise is `cited_ids(subject + rationale)`, derived and never an argument. Found and
       fixed a latent bug in `_alert_expressions()` on the way past.
-- [ ] **C — a flagged answer is routed back for another pass, counting only agent-initiated rounds**
+- [x] **C — a flagged answer is routed back for another pass, counting only agent-initiated
+      rounds** — `D-2026-09-15-a-flagged-answer-that-goes-out-flagged-is-a-verdict-nobody-acted-on`.
+      One premise of the original plan was wrong and is corrected: `score_answer` **already**
+      fails closed (a crash sets `review_required`), so C did not need to fix that. What it
+      needed was the loop itself, in the runner rather than a middleware, because the verdict
+      is produced after the graph returns. Exhaustion ships the answer still marked — the arm
+      D-2026-08-16 found `RubricMiddleware` lacking.
 - [ ] **D — an agent heartbeat: the agent wakes on a timer to report and ask, never to decide**
 
 Ordered by ascending blast radius, so each lands green before the next starts.

@@ -101,6 +101,15 @@ _COUNTERS: dict[str, str] = {
     # any cap. Unlabelled on purpose: the scope it names is a session id or an Entra `oid`, and
     # `033_cost_attribution.sql` rules those out as label values for the cardinality reason the
     # 64-series cap (D-152) exists to enforce. The log line beside it carries the identity.
+    # The revision loop over a flagged answer. Two series rather than one, because "how often
+    # does the verifier reject an answer" and "how often does rejecting it fail to help" are
+    # different questions and only the second is a defect: a deployment whose revisions always
+    # exhaust is paying double for every flagged turn and getting nothing.
+    "chemclaw_answer_revisions_total": "Revision passes run over an answer the verifier flagged.",
+    "chemclaw_answer_review_exhausted_total": (
+        "Turns whose answer was still unsupported after every allowed revision, and went out "
+        "marked for review."
+    ),
     "chemclaw_budget_warnings_total": (
         "Times a session or user crossed `budget_warn_fraction` of a turn or token cap."
     ),

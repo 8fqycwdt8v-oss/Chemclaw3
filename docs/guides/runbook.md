@@ -1376,6 +1376,24 @@ are per-pod and reset on restart, so this alert under-reports by roughly the rep
 `degraded{subsystem="budget_window"}` is what says the durable half was configured and could not be
 reached, which silently returns the cap to its per-process meaning.
 
+#### ChemclawAnswerRevisionsNotHelping
+`warning`. More than half the revision passes over a flagged answer ran out of rounds without the
+answer becoming grounded. Nothing is *lost* — those turns answered, and they carry `review_required`
+exactly as they would have with `answer_review_max_rounds=0` — but each one spent a second model
+call to arrive where it already was.
+
+Three readings, and the first is the likeliest. **The claims are not fixable by rewording**: the
+answer needs evidence the turn never retrieved, so the model drops or hedges and the shape gate
+flags it again. Read `chemclaw_answer_revisions_total` against
+`chemclaw_retrieval_*` for those turns — if retrieval returned nothing, the revision was never
+going to help and the fix is upstream. **The rounds are too few**: raise
+`answer_review_max_rounds` and watch the ratio. **The verdict is wrong**: if
+`verifier_confidence_threshold` sits above what this corpus can support, every answer is flagged and
+every revision exhausts — check what fraction of *all* turns are flagged before raising the rounds.
+
+Turning it back to 0 is a legitimate outcome, not a defeat: the verifier's mark was the signal
+before this loop existed and still is.
+
 ### chemclaw.fleet — a process is gone
 
 #### ChemclawTargetDown

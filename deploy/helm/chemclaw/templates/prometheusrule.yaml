@@ -660,6 +660,32 @@ spec:
               an Entra `oid`, and `033_cost_attribution.sql` rules those out as label values. Act
               here or the next rule up is the one that fires.
 
+        {{- /* The revision loop paying for nothing. A revision doubles a flagged turn's model
+               spend, and the deal is that it buys a grounded answer; when most of them exhaust
+               instead, the deployment is paying twice and still shipping the answer marked for
+               review — which is exactly what it shipped before the loop existed.
+
+               A ratio rather than a count, because the count scales with traffic and says nothing
+               on its own: ten exhaustions out of a thousand revisions is a working loop, ten out of
+               twelve is a broken one. `clamp_min(..., 1)` keeps the expression from dividing by
+               zero on a quiet window — with the feature off (the shipped default) both series are
+               absent and the rule is simply empty, which is the correct silence. */}}
+        - alert: ChemclawAnswerRevisionsNotHelping
+          expr: >-
+            sum(increase(chemclaw_answer_review_exhausted_total[6h]))
+            / clamp_min(sum(increase(chemclaw_answer_revisions_total[6h])), 1) > 0.5
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawanswerrevisionsnothelping
+            summary: Most flagged answers are still unsupported after every allowed revision
+            description: >-
+              More than half the revision passes ran out of rounds. The turns still answered and
+              still carry `review_required`, so nothing is lost that was not already lost — but the
+              second model call bought nothing. Raise `answer_review_max_rounds`, or turn it back to
+              0 and treat the verifier's verdict as the signal it was before.
+
     {{- /* The group nothing in this file used to have, and the one whose absence made every rule
            above conditional on something no rule stated: **every one of them alerts on an
            application counter, so a process that is gone emits silence** — and silence is what a
