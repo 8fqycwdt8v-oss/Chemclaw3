@@ -9,8 +9,16 @@ and the gate enforced the ordering on the campaign's own PR — and both halves 
 D-2026-08-25 made the transcription a row and
 `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the PR. This builder produces the
 citable, factual skeleton (the transformation sequence and its evidence); the richer prose
-narrative is the `campaign-narrative-synthesis` skill's judgment (per plan 5.3), layered on top,
-not invented here.
+narrative is the `campaign-narrative-synthesis` skill's judgment (per plan 5.3), not invented here.
+
+**Nothing layers it automatically, and this used to say it did.** That skill is loaded on demand
+in a chat turn; no durable path invokes it, so a campaign note stays the skeleton unless a model
+reaches for the skill and writes over it. Phrased as though something applied it, it read as a
+pipeline — the shape `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`
+names, a present-tense claim about a producer with no caller. The skeleton is complete and useful
+as it stands, which is why this corrects the prose and not the builder; the one note whose
+body was *not* usable on its own is the cross-project playbook, and
+`D-2026-09-15-a-note-that-asks-a-reader-to-finish-it-is-not-knowledge` is what changed there.
 """
 
 from datetime import date

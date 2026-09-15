@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.ingest.eln.ord import OrdReaction, OutcomeClass
-from chemclaw.kg.note import Note
+from chemclaw.kg.note import UNDISTILLED_TAG, Note
 from chemclaw.memory.ids import is_cluster_anchored
 from chemclaw.memory.similarity import cluster_by_similarity, reaction_fingerprints
 
@@ -106,14 +106,19 @@ def find_playbook_candidates(
 
 
 def playbook_note(
-    note_id: str, summary: str, evidence_note_ids: list[str], *, minted_on: date | None = None
+    note_id: str,
+    summary: str,
+    evidence_note_ids: list[str],
+    *,
+    minted_on: date | None = None,
+    distilled: bool = True,
 ) -> Note:
     """Build an agent `playbook` note citing its evidence; reject one with no citations.
 
     `note_id` is the full note id (e.g. from `chemclaw.memory.ids.stable_id("playbook", ...)`).
-    `summary` is the distilled rule (from the `playbook-distillation` skill); every playbook
-    must cite the notes that evidence it via `[[wikilinks]]`, so a process chemist meeting the
-    rule as evidence can trace it back to real experiments. Nothing gates the write
+    `summary` is the rule this playbook states; every playbook must cite the notes that evidence
+    it via `[[wikilinks]]`, so a process chemist meeting the rule as evidence can trace it back to
+    real experiments. Nothing gates the write
     (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), which is what makes the citation the
     control rather than a courtesy: this line used to say the citations were what let a reviewer
     check the rule *before approving the merge*, and there is no merge to approve.
@@ -146,6 +151,18 @@ def playbook_note(
     only activities may read a wall clock — `observation_jobs.workflow_safe_today` exists for
     exactly this and is the argument it passes. `None` keeps the open-ended note, which is what a
     test constructing one by hand wants.
+
+    **`distilled=False` is what this docstring used to assert instead of take as an argument.** It
+    said `summary` "is the distilled rule (from the `playbook-distillation` skill)" — true of the
+    promotion caller and false of the cluster miner, which passes a deterministic sentence stating
+    that a transformation recurs. Nothing has ever invoked that skill from a durable path
+    (`D-2026-09-15-a-note-that-asks-a-reader-to-finish-it-is-not-knowledge`), so the sentence was a
+    claim about a producer with no caller — the shape
+    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` deleted elsewhere.
+
+    So the caller says which it is, and an undistilled one carries `UNDISTILLED_TAG`. That is what
+    makes it findable: `kg.analytics` reports them, so "which recurrences have nobody generalised"
+    is answerable rather than a thing a reader is told to go and do inside the note itself.
     """
     if not evidence_note_ids:
         raise PlaybookError(f"playbook {note_id!r} has no evidence references")
@@ -160,6 +177,7 @@ def playbook_note(
             if is_cluster_anchored(note_id, evidence_note_ids)
             else SOURCE_PROMOTED_OBSERVATION
         ),
+        tags=[] if distilled else [UNDISTILLED_TAG],
         body=body,
         valid_from=minted_on,
     )

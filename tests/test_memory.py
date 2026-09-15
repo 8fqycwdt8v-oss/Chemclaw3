@@ -814,3 +814,96 @@ def test_no_miner_mints_a_note_without_passing_the_corpus_derived_date() -> None
         f"{thin} mint notes the digest reads as open-ended, so they reach no subscriber who has a "
         "watermark. Every miner dates its note from the members its id is anchored on."
     )
+
+
+def test_a_mined_playbook_states_a_finding_and_asks_the_reader_for_nothing() -> None:
+    """The body went into `knowledge/` carrying a to-do, and `knowledge/` is what retrieval cites.
+
+    `_summary` used to end "Distil the transferable rule and conditions from the cited evidence",
+    and nothing in this repository ever did: `skills/playbook-distillation/SKILL.md` is loaded only
+    in a chat turn and no durable path invokes it. Measured on this fixture before the change, the
+    excerpt a chemist is shown for the term "recurring" carried that sentence verbatim, and
+    `Note.headline()` — which a digest now uses to announce new knowledge — rendered as
+    "Transformation recurring across 2 projects … Distil the…".
+
+    Asserted as the *absence of an instruction* rather than against the new wording, so the
+    sentence can be improved without this test having an opinion about prose. The imperatives are
+    the ones a to-do actually uses; a body that told a reader to go and do something would match
+    one of them.
+    """
+    units = build_playbook_notes(
+        [
+            _reaction("r1", ["CC(=O)O", "CCO"], ["CC(=O)OCC"], project="PRJ-1"),
+            _reaction("r2", ["CC(=O)O", "CCCO"], ["CC(=O)OCCC"], project="PRJ-2"),
+        ]
+    )
+    assert units, "the fixture mined no playbook, so this test asserts nothing"
+    body = units[0].note.body.lower()
+    for imperative in ("distil ", "distill ", "write the rule", "summarise the", "fill in"):
+        assert imperative not in body, (
+            f"a mined playbook's body tells its reader to {imperative.strip()!r}. It is written "
+            "into the corpus and cited to a chemist as evidence, so an instruction there reaches "
+            "them as the system's own words about a job it has not done"
+        )
+    assert "recurs across 2 projects" in body
+
+
+def test_a_mined_playbook_is_findable_as_undistilled_and_a_promoted_one_is_not() -> None:
+    """The epistemic status is a label the system can count, not prose in the body.
+
+    Both halves matter and only together. A tag on every playbook would say nothing; a tag on none
+    would leave the recurrence indistinguishable from a rule somebody wrote. The cluster miner
+    finds that a transformation recurs — real, deterministic, and not a transferable rule — while
+    `durable/observation_jobs.py` promotes an observation whose `statement` *is* a claim.
+    """
+    from chemclaw.kg.note import UNDISTILLED_TAG
+    from chemclaw.memory.playbook import playbook_note
+
+    units = build_playbook_notes(
+        [
+            _reaction("r1", ["CC(=O)O", "CCO"], ["CC(=O)OCC"], project="PRJ-1"),
+            _reaction("r2", ["CC(=O)O", "CCCO"], ["CC(=O)OCCC"], project="PRJ-2"),
+        ]
+    )
+    assert units
+    assert UNDISTILLED_TAG in units[0].note.tags, (
+        "a mined recurrence is indistinguishable from a distilled rule, so nothing can report "
+        "which playbooks are still waiting for one"
+    )
+    promoted = playbook_note("playbook-promoted", "Degas before adding Pd(0).", ["interaction-1"])
+    assert UNDISTILLED_TAG not in promoted.tags, (
+        "a promoted observation carries a real statement and must not be reported as awaiting one"
+    )
+
+
+def test_no_producer_claims_a_skill_layers_onto_its_note_automatically() -> None:
+    """Three docstrings said a skill refines these notes, and nothing invokes one.
+
+    All four skills named across `memory/` exist — this is not a dangling reference — but they are
+    loaded on demand in a chat turn and no durable path reaches any of them. Stated as "layered on
+    top" and "on top", that read as a pipeline: the same shape as
+    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`, where three docstrings
+    described a trail naming the agent while the column was empty on every row ever written.
+
+    An absence test, because the correction is prose and prose is what regresses. It fails whoever
+    re-asserts the layering without building it — and building it would be an ADR, not a sentence.
+
+    **The phrase is banned outright, including in prose explaining why it is banned**, and this
+    test caught its own first correction doing exactly that. A scan that exempted quotations would
+    be a scan an author defeats by adding quotation marks, and the next reader cannot tell a
+    retired claim being explained from a live one being made — which is the whole failure. So the
+    corrections describe the retired wording instead of reproducing it.
+    """
+    import re
+    from pathlib import Path
+
+    claim = re.compile(r"(layered on top|skills' judgment, on top|, layered on top)")
+    package = Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "memory"
+    offenders = [
+        path.name for path in sorted(package.rglob("*.py")) if claim.search(path.read_text("utf-8"))
+    ]
+    assert not offenders, (
+        f"{offenders} assert that a skill layers judgment onto a note automatically. No durable "
+        "path invokes any skill; if one now does, say which and delete this test with the ADR "
+        "that built it"
+    )

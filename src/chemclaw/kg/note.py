@@ -449,6 +449,22 @@ KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
     }
 )
 
+#: The tag a `playbook` carries while it records a recurrence and no rule has been distilled.
+#:
+#: **It is a tag rather than a note type, and the distinction is what keeps a chemist safe.** The
+#: cross-project miner finds a real, deterministic fact — this transformation recurs across these
+#: projects, here is the evidence — and that fact is knowledge the moment it is found
+#: (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). What it is *not* is a transferable
+#: rule, which is judgment over the cited runs and is the `playbook-distillation` skill's. A second
+#: note type would make the pattern unfindable by every reader that already asks for playbooks; a
+#: tag leaves it in the corpus, citable, and says what it is.
+#:
+#: Here rather than in `memory/` because two packages must agree on the string and only one of them
+#: may import the other: `memory/jobs.py` stamps it and `kg/analytics.py` counts it, and `kg` is
+#: layer 4 with no edge to `memory`. `tests/test_memory.py` and `tests/test_graph_analytics.py`
+#: both read it from here, so the producer and the reporter cannot drift apart.
+UNDISTILLED_TAG = "undistilled"
+
 
 def known_note_types() -> frozenset[str]:
     """Core's note types plus those the enabled connector bundles declare.

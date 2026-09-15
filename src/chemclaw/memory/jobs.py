@@ -11,7 +11,11 @@ learned, carrying `created_by: agent`, and is corrected rather than pre-approved
 runs each builder as one activity and fans each note out to its own write child (F10-D2), so a
 note that cannot be published does not take its siblings with it. The reaction set is injected, so
 every builder runs in-memory in tests. The factual note bodies are built here; the richer narrative
-/ distilled rule is the corresponding skill's judgment, layered on top.
+or distilled rule is the corresponding skill's judgment, and **nothing applies it automatically** —
+those skills are loaded on demand in a chat turn and no durable path invokes one. Every body built
+here therefore has to stand on its own as a factual statement, which is the bar
+`D-2026-09-15-a-note-that-asks-a-reader-to-finish-it-is-not-knowledge` found the cross-project
+playbook failing: it ended with an instruction to a reader who never came.
 """
 
 import logging
@@ -83,6 +87,10 @@ def build_playbook_notes(
                 _summary(candidate, by_id),
                 [f"reaction-{rid}" for rid in candidate.reaction_ids],
                 minted_on=supported_from(candidate.reaction_ids, by_id),
+                # This producer finds a recurrence; it does not generalise one. The other caller
+                # (`durable/observation_jobs.py`) promotes an observation whose `statement` is a
+                # real claim, and passes nothing here.
+                distilled=False,
             )
             for candidate in find_playbook_candidates(reactions)
         ],
@@ -261,14 +269,26 @@ def _units(notes: list[Note], *, corpus_complete: bool) -> list[SynthesisUnit]:
 
 
 def _summary(candidate: PlaybookCandidate, reactions: dict[str, OrdReaction]) -> str:
-    """A factual, deterministic placeholder summary; the skill distils the real rule.
+    """What the miner actually found: a recurrence, its projects and a representative reaction.
 
-    States what is objectively true — a transformation recurring across the named projects,
-    with a representative reaction — so even before the LLM refines it the note is honest.
+    **The sentence this used to end with was an instruction to a reader who never came.** It said
+    "Distil the transferable rule and conditions from the cited evidence", and nothing in this
+    repository ever did — `skills/playbook-distillation/SKILL.md` is loaded only in a chat turn and
+    no durable path invokes it. So the note went into `knowledge/` carrying a to-do, and
+    `knowledge/` is read by retrieval: measured on a two-project fixture, the excerpt a chemist is
+    shown for the term "recurring" contains that sentence verbatim, and `Note.headline()` — which
+    a digest now uses to announce new knowledge — renders as "Transformation recurring across 2
+    projects … Distil the…". A knowledge note asking its reader to finish it is worse than no note:
+    an absent playbook is discovered at once, and this one is discovered by acting on it.
+
+    What is left is the finding, which is real, deterministic and knowledge the moment it is made
+    (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). The epistemic status is carried by
+    `UNDISTILLED_TAG` on the note rather than by prose in its body, so a reader sees it as a label
+    and `kg.analytics` can count it — the difference between a state the system knows it is in and
+    one it merely wrote down.
     """
     representative = reactions[candidate.reaction_ids[0]].reaction_smiles()
     return (
-        f"Transformation recurring across {len(candidate.projects)} projects "
-        f"({', '.join(candidate.projects)}); representative reaction `{representative}`. "
-        f"Distil the transferable rule and conditions from the cited evidence."
+        f"This transformation recurs across {len(candidate.projects)} projects "
+        f"({', '.join(candidate.projects)}). Representative reaction: `{representative}`."
     )

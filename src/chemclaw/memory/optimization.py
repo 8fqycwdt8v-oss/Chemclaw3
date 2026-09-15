@@ -9,7 +9,14 @@ in the order they were performed, each row naming what it changed relative to th
 (`chemclaw.memory.progression`), and cites each via `[[reaction-<id>]]`, so a chemist — or the
 agent — can read what was tried, in what order, and what moved the result. The comparative
 skeleton is deterministic; the analysis (which change was the lever, what to try next) is the
-`optimization-campaign-synthesis` and `experiment-progression` skills' judgment, on top.
+`optimization-campaign-synthesis` and `experiment-progression` skills' judgment.
+
+**Nothing applies that judgment automatically.** Both skills are loaded on demand in a chat turn
+and no durable path invokes either, so this note stays the comparative table unless a model reaches
+for one — which is fine, because the table is a complete answer to "what was tried and what moved
+the result". The phrase this replaced read as a pipeline that does not exist; see
+`D-2026-09-15-a-note-that-asks-a-reader-to-finish-it-is-not-knowledge` for the sibling case where
+the body was not usable on its own.
 """
 
 from datetime import date

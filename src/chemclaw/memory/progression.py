@@ -12,8 +12,10 @@ This module supplies the two deterministic facts that make a series legible: the
 performed in, and, for each run, *what differs from the run before it*. Both are read straight
 off the record — `performed_at` and the recorded conditions — so nothing here is inference. The
 inference (which change was the lever, what to try next) is the `experiment-progression` skill's
-judgment, layered on top exactly as `optimization-campaign-synthesis` sits on the comparative
-table.
+judgment, which nothing applies automatically — it is loaded on demand in a chat turn, exactly as
+`optimization-campaign-synthesis` is over the comparative table. The two deterministic facts are a
+complete answer to "what was tried, in what order"; the judgment is a separate question a chemist
+or a model asks.
 
 **What is deliberately not here: causality.** `performed_at` proves that run B came after run A.
 It does not prove that B was run *because of* A, and the module never says it was — a `follows`

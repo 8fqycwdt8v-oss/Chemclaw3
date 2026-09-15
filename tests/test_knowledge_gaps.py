@@ -23,7 +23,7 @@ from chemclaw.ingest.eln.ord import Component, OrdReaction, OutcomeClass, Role
 from chemclaw.kg import analytics
 from chemclaw.kg.analytics import analyze
 from chemclaw.kg.graph import build_graph, load_notes
-from chemclaw.kg.note import KNOWN_NOTE_TYPES, Note, known_note_types
+from chemclaw.kg.note import KNOWN_NOTE_TYPES, UNDISTILLED_TAG, Note, known_note_types
 from chemclaw.kg.render import render_note
 from chemclaw.kg.validate import validate
 from chemclaw.memory.playbook import find_playbook_candidates
@@ -76,6 +76,43 @@ def test_a_tag_with_evidence_but_no_distillation_is_surfaced(corpus: Path) -> No
     """
     gaps = analyze(build_graph(corpus), load_notes(corpus))
     assert gaps.tags_without_distillation == ["amide-coupling"]
+
+
+def test_a_playbook_that_records_a_recurrence_and_states_no_rule_is_named(corpus: Path) -> None:
+    """The other half of "where is synthesis owed", and the two do not subsume each other.
+
+    `tags_without_distillation` asks which *topics* have evidence and no playbook.
+    This asks which *playbooks* record a recurrence nobody has generalised — the cross-project
+    miner's own output, which before
+    `D-2026-09-15-a-note-that-asks-a-reader-to-finish-it-is-not-knowledge` said so by ending its
+    body with "Distil the transferable rule…", an instruction to a reader inside a note retrieval
+    cites to a chemist.
+
+    The fixture makes the independence visible: `suzuki` carries a playbook, so it is *not* in
+    `tags_without_distillation`, and that playbook is nonetheless waiting for a rule. A report with
+    only the first field would say this corpus has no synthesis owed on `suzuki` at all.
+
+    Asserted with the distilled playbook present too, so it cannot pass by naming every playbook.
+    """
+    _write(
+        corpus,
+        Note(
+            id="playbook-recurrence",
+            type="playbook",
+            tags=["suzuki", UNDISTILLED_TAG],
+            created_by="agent",
+            body="This transformation recurs across 2 projects.",
+        ),
+    )
+    gaps = analyze(build_graph(corpus), load_notes(corpus))
+    assert gaps.undistilled_playbook_ids == ["playbook-recurrence"], (
+        "a playbook awaiting a rule is not reported, so the only way to find one is to read every "
+        "playbook in the corpus"
+    )
+    assert "hub" not in gaps.undistilled_playbook_ids, "a distilled playbook is not awaiting one"
+    assert "suzuki" not in gaps.tags_without_distillation, (
+        "the fixture no longer shows the two fields answering different questions"
+    )
 
 
 def test_the_gap_query_never_calls_a_tag_a_project(corpus: Path) -> None:
