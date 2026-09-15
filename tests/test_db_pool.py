@@ -659,3 +659,71 @@ def test_a_falsy_pool_size_does_not_mint_a_second_pool_of_the_default_width(
         "an omitted size, a falsy one and the default spelled out are one pool of one width; "
         "keying on the request rather than the resolution made them two"
     )
+
+
+def test_the_three_pool_gauges_read_one_instant_rather_than_three(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The saturation question is read across all three at once, so they must agree on a moment.
+
+    `METRICS.render()` reads every gauge by calling its own source, so three gauges bound to three
+    `pool_stats()` lambdas walked the pools three times per scrape. Harmless for a trend and wrong
+    for the one question D-119 introduced them to answer — *is the pool full **and** are callers
+    waiting* — which is exactly the reading a triple from three instants cannot support.
+
+    Driven with a walk that changes on every call, which is what makes this a test rather than a
+    restatement: under the old binding the three gauges come back from three different walks, and
+    the assertion is that they do not.
+    """
+    walks = iter(
+        [
+            {"pool_size": 10, "pool_available": 10, "requests_waiting": 0},
+            {"pool_size": 10, "pool_available": 0, "requests_waiting": 7},
+            {"pool_size": 3, "pool_available": 1, "requests_waiting": 99},
+        ]
+    )
+    monkeypatch.setattr(db, "pool_stats", lambda: next(walks))
+    db.reset_pool_snapshot()
+
+    first = db.coherent_pool_stats()
+    assert [db.coherent_pool_stats() for _ in range(2)] == [first, first], (
+        "three reads inside one coherence window came from different walks, so a scrape can "
+        "publish a pool_size, a pool_available and a requests_waiting that never held together"
+    )
+    # And the walk really would have moved: this is what the old binding published.
+    assert next(walks) != first
+
+
+def test_a_caller_cannot_mutate_the_snapshot_the_next_gauge_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shared dict handed out by reference is one gauge able to corrupt the next one's reading.
+
+    Cheap to get wrong and invisible when it is: the render loop would publish whatever the
+    previous gauge's source happened to leave behind, and every existing assertion about a single
+    gauge would still pass.
+    """
+    monkeypatch.setattr(
+        db, "pool_stats", lambda: {"pool_size": 5, "pool_available": 2, "requests_waiting": 1}
+    )
+    db.reset_pool_snapshot()
+
+    borrowed = db.coherent_pool_stats()
+    borrowed["pool_size"] = 999
+    assert db.coherent_pool_stats()["pool_size"] == 5
+
+
+def test_closing_the_pools_drops_the_window_they_were_measured_in() -> None:
+    """A process that has closed its pools must not answer a later scrape from the live window.
+
+    `pooling()`'s exit resets it, so the next read walks a pool set that is actually there. Without
+    this a shutdown publishes its last busy reading for up to a second after there is nothing to
+    be busy about — small, and exactly the interval an operator looks at when asking what the pod
+    was doing when it stopped.
+    """
+    db.reset_pool_snapshot()
+    assert db._POOL_SNAPSHOT is None
+    db.coherent_pool_stats()
+    assert db._POOL_SNAPSHOT is not None
+    db.reset_pool_snapshot()
+    assert db._POOL_SNAPSHOT is None

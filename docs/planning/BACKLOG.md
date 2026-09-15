@@ -369,14 +369,6 @@ topic).
       revisiting if psycopg gains a cancel that respects a deadline. Anchors:
       `api/routes/ops.py::_probe_database`, `core/db.py::connection`.
 
-- [ ] **Three pool gauges read three different instants of one scrape** — [S], found 2026-09-05.
-      `bind_pool_metrics` binds `pool_size`, `pool_available` and `requests_waiting` as three
-      lambdas that each call `pool_stats()`, so one `/metrics` scrape recomputes the walk three
-      times and publishes a triple that never existed together. Harmless for a trend, wrong for the
-      one question these gauges are read for together — is the pool full *and* are callers waiting
-      — which is exactly the saturation reading D-119 introduced them for. A single cached snapshot
-      per scrape, or one gauge family. Anchor: `core/db.py::bind_pool_metrics`.
-
 - [ ] **`BoCampaignWorkflow` runs four sequential activities under a ceiling that funds one** —
       [M], measured 2026-09-06. `connector_queue_wait_timeout`'s "fits by construction" argument is
       a bound on **one** `q + w`: at the shipped numbers 10,170 + 300 = 10,470 s against a 25,200 s
