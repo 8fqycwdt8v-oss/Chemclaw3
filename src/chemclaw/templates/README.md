@@ -92,6 +92,23 @@ makes a "simple config format" become a programming language with no debugger, a
 procedure needs them it wants an agent (a profile) or real code (a connector workflow), not more
 YAML.
 
+## Concurrency, which you do not write down
+
+Steps that do not read each other run at the same time. There is no `parallel:` key and there is
+nothing to opt into: a `${steps.<id>.result}` reference **is** a dependency edge, the validators
+above refuse a forward reference, so the declared order is already a topological order of a DAG and
+`templates/schedule.py` reads the waves straight off it. Two of the nine shipped templates —
+`degradant-triage` and `hazard-briefing` — turned out to be shaped this way and had been running
+one step after another for no reason anybody had written down.
+
+**This is not the fan-out `D-2026-08-25-the-loop-is-a-composite-not-a-template` declined.** That
+decision is about a *loop*: ranking N microstates, where N is known only once an earlier step has
+answered. A loop needs iteration and expressions and still lives in a composite. What runs together
+here is steps the file already declares.
+
+So the way to make a procedure faster is to stop making a step read something it does not need: a
+step that references an earlier result only to pass it through has just serialised itself.
+
 ## Running one
 
 Each template becomes a generated agent tool named `run_<name>`, so the model can start it exactly

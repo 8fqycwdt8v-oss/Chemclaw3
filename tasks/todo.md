@@ -1065,3 +1065,57 @@ would be resumed is the step that failed. `BACKLOG.md` carries that row and its 
 `D-2026-09-15-a-bound-that-stops-at-the-seam-is-not-a-bound` records both defects, both
 measurements and the three declines. Verified with the infrastructure up (`dockerd`, `make up`,
 `make db-migrate`) rather than against a suite that would have skipped the Postgres-backed half.
+
+## Wave E — the three declines, built (2026-09-15)
+
+Wave D declined three things on merged decisions. Asked again for all three, so they are built —
+and the two that collide with a decision are built so the decision still holds, rather than by
+ignoring it.
+
+### E1 — parallel steps, derived rather than declared
+
+- [ ] **This is not the thing D-2026-08-25 declined.** That ADR is about a *loop*: a fan-out over a
+      collection whose size is known only at run time, which needs iteration and expressions and is
+      why the loop lives in a composite. **Static parallelism is a different question** — which
+      already-declared steps may run at the same time — and the template already answers it:
+      `_step_references` is the dependency graph, and `_references_resolve_and_point_backwards`
+      guarantees it is a DAG by refusing a forward reference. So no new YAML key: concurrency is
+      *derived*, and a template that declares no dependency between two steps gets it for free.
+- [ ] Interaction with Wave D that must not be missed: `run_ceiling_problems` sums the step
+      ceilings because steps were sequential. With parallelism the bound is the **critical path**.
+      Sum is still correct-but-pessimistic; the fix is the longer path through the DAG.
+- [ ] Failure semantics: a sibling still running when one branch fails must be cancelled, not
+      orphaned, and the failure record must name the step that actually failed.
+
+### E2 — agent-authored workflows, without the escalation the exemption would grant
+
+- [ ] **The coupling is real and is closed rather than argued away.** `D-2026-08-12` exempts a
+      template `agent` step from the plan gate *because* a template is human-authored and
+      uncreatable at run time. So an agent-authored one **does not inherit that exemption**:
+      `author_kind` is on the template, the exemption keys on `human`, and `write_tools` is refused
+      outright on an agent-authored draft — the agent cannot grant itself a write path because the
+      field is rejected at validation, not filtered at run time.
+- [ ] One tool, not one per draft: `run_composed_workflow(name, inputs)`. Generating a `run_<name>`
+      launcher per draft would put an unbounded, agent-written schema into the prompt prefix, which
+      `tests/test_context_floor.py` exists to prevent.
+- [ ] Same `Template` model, same `step_problems`, same `run_ceiling_problems` — a draft that would
+      not pass `make template-validate` cannot be stored.
+- [ ] A draft may only name tools the composing actor is authorized for, checked at compose time
+      *and* again at run time, where `_acting_as` already decides against the real requester.
+
+### E3 — resume from a failed step
+
+- [ ] The completed steps are already recorded (`failed_template_record`) and never read. Read them.
+- [ ] Constraint that decides the shape: it is a database read, so it cannot be workflow code. An
+      activity, whose result enters history and so keeps replay deterministic.
+- [ ] The guard that makes it safe: a run's id is `hash([name, inputs])` and the *template* is
+      pinned per run, so an edited template relaunching under the same id must not resume against
+      step results produced by the old definition. Resume only on an exact template match.
+
+### Verify
+
+- [ ] `make lint type test` green, with the skip count stated.
+- [ ] Parallel: a template whose steps are independent runs them concurrently, measured, and one
+      whose steps chain still runs in order.
+- [ ] Authored: a draft naming a write tool is refused; a draft's agent step is plan-gated.
+- [ ] Resume: a run that failed at step N re-runs only from N.

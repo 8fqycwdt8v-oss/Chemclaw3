@@ -39,6 +39,7 @@ from chemclaw.connectors.registry import server_tools_module
 from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import registered_tools
 from chemclaw.templates.manifest import AgentStep, JobStep, Template, ToolStep
+from chemclaw.templates.schedule import schedule
 
 
 def available_tools() -> set[str]:
@@ -275,9 +276,12 @@ def run_ceiling_problems(template: Template) -> list[str]:
 
     No shipped template has two `job` steps, so this is latent rather than live — which is exactly
     when a bound is worth adding, because the first template that deepens one is the one that finds
-    out. It is the sum and not the max for the same reason: steps run strictly in sequence
-    (`durable/template_job.py` is one `await` per step, no fan-out), so the procedure's floor is
-    what its steps add up to.
+    out.
+
+    **Summed over waves rather than over steps**, because `templates/schedule.py` runs a wave's
+    steps concurrently: a wave costs its slowest member. A flat sum is still sound — it can only
+    over-state — but an over-stating bound here *refuses a template that would have finished*, so
+    it is not the conservative choice it looks like.
 
     Read by both `make template-validate` and `registry.unrunnable_reason`, so a file that cannot
     complete is refused at the gate *and* refused at launch rather than started and abandoned.
@@ -291,10 +295,20 @@ def run_ceiling_problems(template: Template) -> list[str]:
     ceilings = settings.template_step_ceilings()
     # `KeyError` rather than a default: a step kind nobody sized here would otherwise be counted as
     # free, which is the silent direction. `template_step_ceilings` says so from the other side.
-    needed = sum(ceilings[step.kind][0] for step in template.steps)
+    #
+    # **Over waves, not over steps**, since `templates/schedule.py` runs a wave's steps together: a
+    # wave costs its slowest member, and the run costs the waves added up. It was a flat sum while
+    # the sequencer was strictly sequential, which is still *sound* — a sum is never below a
+    # wave-sum — but it is the wrong bound now, and the wrong bound here refuses a template that
+    # would finish. Measured on the two shipped templates with a concurrent wave, this is the
+    # difference between counting `screen_hazards` and `similar_molecules` once and twice.
+    waves = schedule(template)
+    needed = sum(max(ceilings[step.kind][0] for step in wave) for wave in waves)
     if needed <= settings.template_run_timeout_seconds:
         return []
-    worst = ", ".join(f"{step.id}={ceilings[step.kind][0]:,.0f}s" for step in template.steps)
+    worst = "; ".join(
+        " + ".join(f"{step.id}={ceilings[step.kind][0]:,.0f}s" for step in wave) for wave in waves
+    )
     return [
         f"template {template.name!r} declares steps that cannot finish inside "
         f"template_run_timeout_seconds={settings.template_run_timeout_seconds:,.0f}: they may take "

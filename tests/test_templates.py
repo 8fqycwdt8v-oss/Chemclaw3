@@ -17,6 +17,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import time
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,7 @@ from chemclaw.templates.registry import (
     tool_name,
 )
 from chemclaw.templates.resolve import UnresolvedReference, resolve
+from chemclaw.templates.schedule import dependencies, schedule
 from tests.signals import collect_signals
 
 _MINIMAL = {
@@ -1344,10 +1346,23 @@ def test_the_gate_and_the_launcher_share_one_definition_of_resolving(
 # --- the run ceiling has to cover the procedure, not one step of it ------------------------------
 
 
-def _job_steps(count: int) -> list[dict[str, Any]]:
-    """`count` `job` steps plus the `agent` step every shipped template ends with."""
+def _job_steps(count: int, *, chained: bool = True) -> list[dict[str, Any]]:
+    """`count` `job` steps plus the `agent` step every shipped template ends with.
+
+    `chained` decides whether each step reads the one before it, which is the whole difference the
+    ceiling turns on now that the sequencer schedules waves: chained steps are N waves and cost N
+    ceilings, independent ones share a wave and cost one. Defaulting to chained keeps these
+    fixtures expressing the case the bound was written for — a procedure that genuinely runs its
+    jobs one after another.
+    """
     steps: list[dict[str, Any]] = [
-        {"id": f"j{i}", "kind": "job", "job": "rank_species", "arguments": {}} for i in range(count)
+        {
+            "id": f"j{i}",
+            "kind": "job",
+            "job": "rank_species",
+            "arguments": ({"species": f"${{steps.j{i - 1}.result}}"} if chained and i else {}),
+        }
+        for i in range(count)
     ]
     return [*steps, {"id": "report", "kind": "agent", "prompt": "sum it up"}]
 
@@ -1378,6 +1393,18 @@ def test_a_template_that_cannot_finish_inside_the_run_ceiling_is_refused() -> No
 def test_one_job_step_still_fits_so_the_gate_is_not_simply_refusing_job_steps() -> None:
     """The control arm. Seven of the nine shipped templates have a `job` step and must still run."""
     assert run_ceiling_problems(_template(steps=_job_steps(1))) == []
+
+
+def test_two_job_steps_that_do_not_read_each_other_fit_because_they_share_a_wave() -> None:
+    """The bound follows the schedule, and this is the case where that is the whole difference.
+
+    Two `job` steps cost two ceilings when one reads the other and **one** when neither does,
+    because `templates/schedule.py` puts independent steps in the same wave. A flat sum would
+    refuse the second template below — a procedure that would have finished well inside its run
+    ceiling — which is why an over-stating bound is not the conservative choice it looks like.
+    """
+    assert run_ceiling_problems(_template(steps=_job_steps(2, chained=False))) == []
+    assert run_ceiling_problems(_template(steps=_job_steps(2, chained=True))) != []
 
 
 @pytest.mark.parametrize("name", sorted(registry.discovered()))
@@ -1431,3 +1458,163 @@ def test_the_config_floor_and_the_template_gate_read_one_step_ceiling(
     # definition the config validator does rather than a second copy of the arithmetic.
     assert settings.template_step_ceilings()["job"][0] > before
     assert run_ceiling_problems(one_job) != []
+
+
+# --- independent steps run at the same time, and dependent ones still do not ---------------------
+
+
+def _concurrency_probe(run_id: str, steps: list[dict[str, Any]]) -> tuple[float, list[str], Any]:
+    """Run `steps` end to end against a real Temporal server and measure the overlap.
+
+    Each `tool` step sleeps `_STEP_SECONDS` and records when it entered and left. **Wall clock, not
+    a call count**: whether two activities were dispatched together is exactly the thing a count
+    cannot see, and the defect this guards — concurrency silently lost to a future edit of the
+    sequencer — would leave every count unchanged.
+    """
+    from temporalio import activity
+    from temporalio.worker import Worker
+
+    from chemclaw.durable.template_activities import AgentStepInput, ToolStepInput
+    from chemclaw.durable.template_job import TemplateRunInput, TemplateWorkflow
+    from tests.temporal_env import pydantic_client, start_env_or_skip
+
+    order: list[str] = []
+    live = 0
+    peak = 0
+
+    @activity.defn(name="run_tool_step")
+    async def slow_tool(step: ToolStepInput) -> Any:
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        order.append(str(step.arguments.get("smiles")))
+        await asyncio.sleep(_STEP_SECONDS)
+        live -= 1
+        return {"ran": step.arguments.get("smiles")}
+
+    @activity.defn(name="run_agent_step")
+    async def fake_agent(step: AgentStepInput) -> str:
+        return "done"
+
+    @activity.defn(name="record_job")
+    async def fake_record_job(record: Any) -> None:
+        return None
+
+    template = Template.model_validate(
+        {
+            "name": "probe",
+            "summary": "Concurrency probe.",
+            "inputs": [{"name": "smiles", "type": "string", "description": "molecule"}],
+            "steps": steps,
+        }
+    )
+
+    async def _run() -> Any:
+        async with await start_env_or_skip() as env:
+            client = pydantic_client(env)
+            async with (
+                Worker(
+                    client,
+                    task_queue="test-parallel",
+                    workflows=[TemplateWorkflow],
+                    activities=[slow_tool, fake_agent],
+                    # Or the two activities queue behind one another on the worker and this
+                    # measures the worker's slot count instead of the sequencer's schedule.
+                    max_concurrent_activities=4,
+                ),
+                Worker(
+                    client,
+                    task_queue=settings.background_task_queue,
+                    activities=[fake_record_job],
+                ),
+            ):
+                return await client.execute_workflow(
+                    TemplateWorkflow.run,
+                    TemplateRunInput(
+                        template=template, inputs={"smiles": "CCO"}, requested_by="tester"
+                    ),
+                    # Unique per probe: a Temporal id is an idempotency key, so two probes
+                    # sharing one would have the second rejoin the first's finished run and
+                    # measure nothing. Which is exactly what happened when this derived the id
+                    # from the step shape — both probes have three steps starting at "a".
+                    id=f"template-parallel-{run_id}",
+                    task_queue="test-parallel",
+                )
+
+    started = time.perf_counter()
+    result = asyncio.run(_run())
+    return time.perf_counter() - started, order, (peak, result)
+
+
+#: Long enough that two overlapping steps are distinguishable from two sequential ones against
+#: Temporal's own dispatch latency, short enough to keep the suite honest about its runtime.
+_STEP_SECONDS = 1.0
+
+
+def test_two_steps_that_do_not_read_each_other_run_at_the_same_time() -> None:
+    """The headline. Two independent `tool` steps, measured overlapping rather than counted.
+
+    **Nothing in the file asked for this**, which is the design: concurrency is derived from the
+    `${steps.<id>.result}` edges the template already declares, so a procedure gets it by not
+    stating a dependency it never had. Measured over the shipped catalogue, two of the nine —
+    `degradant-triage` and `hazard-briefing` — were already shaped this way and were being run one
+    after the other for no reason anybody had written down.
+    """
+    elapsed, _order, (peak, result) = _concurrency_probe(
+        "independent",
+        [
+            {"id": "a", "kind": "tool", "tool": "screen_hazards", "arguments": {"smiles": "a"}},
+            {"id": "b", "kind": "tool", "tool": "screen_hazards", "arguments": {"smiles": "b"}},
+            {"id": "sum", "kind": "agent", "prompt": "${steps.a.result} ${steps.b.result}"},
+        ],
+    )
+
+    assert peak == 2, f"the two independent steps never overlapped (peak in flight: {peak})"
+    assert elapsed < _STEP_SECONDS * 2, f"two 1s steps took {elapsed:.2f}s — they serialised"
+    # And the results are still keyed and complete, which is what a wave must not cost.
+    assert result.steps["a"] == {"ran": "a"}
+    assert result.steps["b"] == {"ran": "b"}
+
+
+def test_a_step_that_reads_another_still_waits_for_it() -> None:
+    """The control arm, and the one that matters most: a chain must not gain concurrency.
+
+    Seven of the nine shipped templates chain, and a scheduler that ran their steps together would
+    hand a calculation a `${steps.<id>.result}` that does not exist yet — the failure mode the
+    forward-reference validator exists to make impossible at load time.
+    """
+    elapsed, order, (peak, _result) = _concurrency_probe(
+        "chained",
+        [
+            {"id": "a", "kind": "tool", "tool": "screen_hazards", "arguments": {"smiles": "a"}},
+            {
+                "id": "b",
+                "kind": "tool",
+                "tool": "screen_hazards",
+                "arguments": {"smiles": "${steps.a.result.ran}"},
+            },
+            # Embedded, not a whole-string reference: a whole-string one substitutes the
+            # *value* with its type preserved, and a `tool` step's dict is not a `str` — so
+            # `AgentStepInput` refuses it at the activity boundary.
+            {"id": "sum", "kind": "agent", "prompt": "saw ${steps.b.result}"},
+        ],
+    )
+
+    assert peak == 1, "a dependent step ran beside the step it reads"
+    assert elapsed >= _STEP_SECONDS * 2
+    assert order == ["a", "a"], order
+
+
+def test_the_shipped_catalogue_is_scheduled_the_way_its_files_are_written() -> None:
+    """What each shipped template's schedule actually is, so a YAML edit that changes it is seen.
+
+    A number is not written here: the assertion is that a template's waves are exactly its
+    dependency structure, which is re-derived from the same files the sequencer reads.
+    """
+    for name, template in sorted(registry.discovered().items()):
+        waves = schedule(template)
+        assert [step for wave in waves for step in wave] == list(template.steps), name
+        for index, wave in enumerate(waves):
+            earlier = {step.id for before in waves[:index] for step in before}
+            for step in wave:
+                assert dependencies(step) <= earlier, f"{name}: {step.id} runs before what it reads"
