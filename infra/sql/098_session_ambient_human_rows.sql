@@ -34,6 +34,38 @@
 -- conditions verbatim or Postgres cannot prove the index covers the query.
 --
 -- `message->>'type'` is immutable, which is what makes it indexable at all.
+--
+-- **This build blocks every `session_messages` INSERT while it runs, and this is the hottest table
+-- in the schema.** `CREATE INDEX` takes a `SHARE` lock, which conflicts with the `ROW EXCLUSIVE`
+-- every INSERT needs, and a row is written here on *every turn* — so this table takes writes more
+-- often than `audit_events`, whose own index migration (059) carries this paragraph and whose
+-- stall figure is the one that has been quoted since. Measured on this repository's own Postgres
+-- image over a table with this one's shape and predicate, 1,000,000 rows / 311 MB, VACUUM ANALYZE,
+-- warm cache, four builds: **691 ms, 485 ms, 503 ms, 443 ms per million rows**, for a 10 MB index.
+-- Well under 059's 1.24 s/M, because the predicate is partial — but `session_messages` is the
+-- table that grows with conversation rather than with tool calls.
+--
+-- **What makes that a deploy failure rather than a stall is the lock timeout.** `core/migrate.py`
+-- sets `lock_timeout` from `pg_migration_lock_timeout_seconds`, which ships at 5.0 s, for all DDL
+-- in the set. On a deployment taking continuous turns this statement queues behind in-flight
+-- INSERTs, times out, and aborts the whole migration transaction — so the `pre-install`/
+-- `pre-upgrade` hook Job fails, and self-heals only within its `backoffLimit: 3`. The build being
+-- fast does not help: the wait for the lock is what expires, not the work.
+--
+-- `CONCURRENTLY` is not available *here*, for 059's reason: the runner applies the whole migration
+-- set in one transaction and Postgres refuses `CREATE INDEX CONCURRENTLY` inside a transaction
+-- block.
+--
+-- So, the same escape hatch, and it costs nothing. **On a deployment whose `session_messages` is
+-- already large or continuously written, build the index concurrently before deploying** —
+--
+--     CREATE INDEX CONCURRENTLY IF NOT EXISTS session_messages_ambient_human_idx
+--         ON session_messages (session_id, message_shape, id)
+--         WHERE message_original IS NULL AND message->>'type' = 'human';
+--
+-- — outside any transaction, on the live database. The `IF NOT EXISTS` below then finds it and
+-- does nothing, so the migration is a no-op and the deploy needs no window. Otherwise: apply this
+-- in a maintenance window, or accept that a busy deployment may need the hook Job to retry.
 CREATE INDEX IF NOT EXISTS session_messages_ambient_human_idx
     ON session_messages (session_id, message_shape, id)
     WHERE message_original IS NULL AND message->>'type' = 'human';

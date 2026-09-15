@@ -154,3 +154,137 @@ def test_the_shipped_backfill_batches_and_nothing_else_does() -> None:
         f"{users} construct a BatchingNoteWriter. Only the backfill command may: a batch is a "
         "queue, and a queued note is one a chemist cannot read yet."
     )
+
+
+def test_every_note_in_a_batch_is_counted_once_rather_than_once_per_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`chemclaw_notes_recorded_total` means "a note reached the graph", and batching broke that.
+
+    `kg/record.record_note` gates the counter on `outcome.written` and says so in as many words —
+    "the number means 'a note reached the graph' rather than 'we tried'". `BatchingNoteWriter.write`
+    returned `written=False` for every held note and `True` only for the one that filled a batch, so
+    at the shipped batch size of 50 a 10,000-note backfill moved the counter about 200 times; and
+    the notes landed by the trailing `flush()` never reach `record_note` at all, so they moved it
+    zero times.
+
+    Driven against the real metric over a real remote, at a batch size that makes the two readings
+    differ by a factor of three.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    clone = _notes_repo(tmp_path)
+    monkeypatch.setattr(settings, "note_repo_dir", str(clone))
+    inner = GitNoteWriter(repo_dir=str(clone), base_branch="main", remote="origin")
+
+    before = METRICS.value("chemclaw_notes_recorded_total")
+
+    async def _run_backfill() -> None:
+        writer = BatchingNoteWriter(inner, batch_size=3)
+        for index in range(7):
+            await record_note(_note(index), writer)
+        await writer.flush()
+
+    asyncio.run(_run_backfill())
+
+    assert _commits(clone) - 1 == 3, "seven at three to a commit is two full batches and a tail"
+    assert METRICS.value("chemclaw_notes_recorded_total") - before == 7, (
+        "the counter must count notes, not commits: it read 2 for these seven notes, because five "
+        "were held and the tail flushed outside record_note entirely"
+    )
+
+
+def test_a_backfill_that_dies_mid_run_still_commits_what_it_already_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The trailing flush is in a `finally`, because the pending batch is already reported written.
+
+    `cli/backfill_corpus` logs each note as written "(pending a batch)" and increments its own
+    `written` total *before* the batch commits, so a failure the loop's own `except
+    (AttachmentError, OSError)` does not catch — a git error, a psycopg error, a `KeyboardInterrupt`
+    on a long run — used to discard up to `batch_size - 1` notes that the operator had already been
+    told were written. An operator running this over a decade of documents cannot recover from a
+    silent tail.
+
+    Driven through the CLI's own `backfill` with a reader that raises a type it does not catch, so
+    the assertion is about the real control flow rather than `BatchingNoteWriter` in isolation.
+    """
+    import chemclaw.cli.backfill_corpus as module
+
+    clone = _notes_repo(tmp_path)
+    monkeypatch.setattr(settings, "note_repo_dir", str(clone))
+    monkeypatch.setattr(settings, "backfill_commit_batch_size", 50)
+    documents = tmp_path / "docs"
+    documents.mkdir()
+    for index in range(4):
+        (documents / f"doc-{index}.txt").write_text(f"document {index}\n", encoding="utf-8")
+    (documents / "zz-explodes.txt").write_text("boom\n", encoding="utf-8")
+
+    real = module.note_for_document
+
+    def _explode_on_the_last(path: Path, *args: object, **kwargs: object) -> Note:
+        if path.name == "zz-explodes.txt":
+            raise RuntimeError("the reader failed in a way the loop does not catch")
+        return real(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(module, "note_for_document", _explode_on_the_last)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(module.backfill(documents, tags=[], dry_run=False))
+
+    landed = sorted(p.stem for p in (clone / settings.knowledge_dir).rglob("*.md"))
+    assert len(landed) == 4, (
+        f"the four notes already counted as written were dropped with the batch: {landed}"
+    )
+
+
+def test_a_dependency_in_a_batch_does_not_overwrite_a_subject_written_earlier_in_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Batching must reproduce the sequence it replaces, and it did not.
+
+    `GitNoteWriter._write_and_commit` resolves every path and evaluates `if not file.overwrite and
+    note_path.exists()` in **one plan pass before any byte is written** — its own comment says
+    "every path is resolved and checked before any byte is written" — so merging N writes evaluates
+    all of them against the *pre-batch* tree, where N commits would each have seen the previous one.
+    The class docstring claimed the opposite ("applying them in order is exactly the sequence the
+    unbatched path would apply").
+
+    Driven both ways against a real remote: a subject note written first, then named as a stale
+    dependency by a later note in the same batch. Unbatched the subject's own body survives;
+    batched, before the fix, the dependency's copy won.
+    """
+    from chemclaw.kg.record import NoteFile, NoteWrite
+
+    clone = _notes_repo(tmp_path)
+    monkeypatch.setattr(settings, "note_repo_dir", str(clone))
+    inner = GitNoteWriter(repo_dir=str(clone), base_branch="main", remote="origin")
+    shared = f"{settings.knowledge_dir}/playbook-shared.md"
+
+    async def _run_batch() -> None:
+        writer = BatchingNoteWriter(inner, batch_size=10)
+        await writer.write(
+            NoteWrite(
+                files=[NoteFile(path=shared, content="THE REAL SUBJECT BODY.\n", overwrite=True)],
+                message="the subject",
+            )
+        )
+        await writer.write(
+            NoteWrite(
+                files=[
+                    NoteFile(
+                        path=shared, content="a stale dependency rendering.\n", overwrite=False
+                    )
+                ],
+                message="a later note's dependency copy",
+            )
+        )
+        await writer.flush()
+
+    asyncio.run(_run_batch())
+
+    body = (clone / shared).read_text(encoding="utf-8")
+    assert body == "THE REAL SUBJECT BODY.\n", (
+        "a do-not-clobber dependency copy overwrote the subject note written earlier in the same "
+        f"batch, which no sequence of unbatched writes would do: {body!r}"
+    )

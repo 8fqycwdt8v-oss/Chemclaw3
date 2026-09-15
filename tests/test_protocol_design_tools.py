@@ -1228,7 +1228,7 @@ def test_a_precedent_the_design_already_cites_is_not_reported_as_uncited(
         lambda store, smiles: _resolved(_search([_hit("ord-9f2"), _hit("ord-aaa")])),
     )
 
-    found = asyncio.run(tools._uncited_precedent(design))
+    found = asyncio.run(tools.uncited_precedent(design))
 
     assert [one.id for one in found] == ["ord-aaa"]
 
@@ -1248,7 +1248,7 @@ def test_a_design_with_no_reaction_smiles_does_not_search(
     monkeypatch.setattr(tools, "find_similar_reactions", _fail)
 
     found = asyncio.run(
-        tools._uncited_precedent(
+        tools.uncited_precedent(
             ExperimentDesign(request=ExperimentRequest(title="SM-3", goal="couple it"))
         )
     )
@@ -1276,7 +1276,7 @@ def test_an_unreachable_index_is_counted_rather_than_failing_the_draft(
     before = [line for line in METRICS.render().splitlines() if line.startswith(marker)]
 
     found = asyncio.run(
-        tools._uncited_precedent(
+        tools.uncited_precedent(
             ExperimentDesign(
                 request=ExperimentRequest(title="SM-3", goal="couple it", reaction_smiles="CC>>CCO")
             )

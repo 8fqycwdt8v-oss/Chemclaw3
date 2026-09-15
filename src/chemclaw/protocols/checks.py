@@ -114,10 +114,10 @@ def _structures(design: ExperimentDesign) -> list[tuple[str, str]]:
         for component in design.request.components
         if component.smiles
     ]
-    return [*asked, *_used_structures(design)]
+    return [*asked, *used_structures(design)]
 
 
-def _used_structures(design: ExperimentDesign) -> list[tuple[str, str]]:
+def used_structures(design: ExperimentDesign) -> list[tuple[str, str]]:
     """Every `(where, smiles)` the design *does*, as opposed to the ones the ask names.
 
     The same distinction `_structures` draws for `reaction_smiles`, one field further in — and
@@ -792,7 +792,7 @@ def forbidden_absent(design: ExperimentDesign) -> ProtocolCheck:
     # a structure where one is known, and the written names are still compared beside it for the
     # reagents the table does not carry.
     names = {n.strip().lower() for n in _used_species(design) if n.strip()}
-    structures = {_identity(value) for value in (*names, *(s for _, s in _used_structures(design)))}
+    structures = {_identity(value) for value in (*names, *(s for _, s in used_structures(design)))}
     hits = [
         term for term in forbidden if term.strip().lower() in names or _identity(term) in structures
     ]
@@ -820,7 +820,7 @@ def _identity(value: str) -> str:
 def _used_species(design: ExperimentDesign) -> list[str]:
     """Every human-readable species name the design *uses*.
 
-    Deliberately not the ask's own `components`: see `_used_structures` for the measured failure
+    Deliberately not the ask's own `components`: see `used_structures` for the measured failure
     that inclusion caused. What a chemist names in the ask is frequently the thing they are trying
     to get rid of.
 
@@ -979,7 +979,7 @@ def precedent_consulted(
     Args:
         design: The design being checked.
         precedent: Similar runs the record holds that this design does not cite, as
-            `agent.protocol_design_tools._uncited_precedent` reduced them.
+            `agent.protocol_design_tools.uncited_precedent` reduced them.
 
     Returns:
         A passing `note` when there is nothing to offer, and a failing one naming what to read.
@@ -1100,14 +1100,22 @@ def run_checks(
         no_documented_failure: failures,
         precedent_consulted: precedent,
     }
-    return [
-        check(design, supplied[check])
-        if check in supplied
-        else check(design)
-        if stage == "protocol" or check.__name__ in _REQUEST_STAGE
-        else _ok(check.__name__, "note", "not checked yet — this design holds only the ask")
-        for check in _CHECKS
-    ]
+    # **The stage gate is asked first, and that ordering is the whole reason `_REQUEST_STAGE`
+    # means anything.** It shipped the other way round — `check in supplied` tested before the
+    # stage — so a supplied check ran at both stages whatever `_REQUEST_STAGE` said, and the two
+    # names added to that set were dead configuration producing the right behaviour by accident.
+    # Driven: cutting `_REQUEST_STAGE` back to `{"components_resolve"}` left five tests green,
+    # including `test_the_failure_check_runs_at_the_request_stage_too`, which exists to pin exactly
+    # this. Gating first makes that set the mechanism its own comment claims it is.
+    def run_one(check: Callable[..., ProtocolCheck]) -> ProtocolCheck:
+        """One check, stage-gated first and only then dispatched."""
+        if stage != "protocol" and check.__name__ not in _REQUEST_STAGE:
+            return _ok(check.__name__, "note", "not checked yet — this design holds only the ask")
+        if check in supplied:
+            return check(design, supplied[check])
+        return check(design)
+
+    return [run_one(check) for check in _CHECKS]
 
 
 def blockers(checks: list[ProtocolCheck]) -> list[ProtocolCheck]:

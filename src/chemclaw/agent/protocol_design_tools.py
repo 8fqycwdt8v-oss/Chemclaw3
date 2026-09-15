@@ -40,7 +40,7 @@ from chemclaw.kg.graph import load_notes
 from chemclaw.kg.note import external_record_ref
 from chemclaw.memory.failure import failures_against, observation_of
 from chemclaw.protocols.checks import (
-    _used_structures,
+    used_structures,
     blockers,
     run_checks,
 )
@@ -341,7 +341,7 @@ async def _stored_status(store: DesignStore, design_id: str) -> DesignStatus:
     return header.status
 
 
-async def _recorded_failures(design: ExperimentDesign) -> list[RecordedFailure]:
+async def recorded_failures(design: ExperimentDesign) -> list[RecordedFailure]:
     """What the corpus already records as having failed, for the citations and reagents in `design`.
 
     **The seam between a pure check and a corpus, and it lives here because this is the layer that
@@ -362,7 +362,7 @@ async def _recorded_failures(design: ExperimentDesign) -> list[RecordedFailure]:
     returns every draft clean.
     """
     cited = [ref.ref for ref in design.evidence if ref.ref]
-    structures = [smiles for _, smiles in _used_structures(design)]
+    structures = [smiles for _, smiles in used_structures(design)]
     if not cited and not structures:
         return []
     try:
@@ -383,10 +383,10 @@ async def _recorded_failures(design: ExperimentDesign) -> list[RecordedFailure]:
     return [RecordedFailure(id=note.id, summary=observation_of(note)) for note in notes]
 
 
-async def _uncited_precedent(design: ExperimentDesign) -> list[UncitedPrecedent]:
+async def uncited_precedent(design: ExperimentDesign) -> list[UncitedPrecedent]:
     """Runs the record already holds that resemble this design and that it does not cite.
 
-    **The second caller of the seam `_recorded_failures` opened**, and deliberately the same shape:
+    **The second caller of the seam `recorded_failures` opened**, and deliberately the same shape:
     a check must stay pure over its arguments, `protocols` may import only `core` and `science`, so
     the lookup lives here and `precedent_consulted` decides. Two instances is what makes that a
     pattern rather than one function's arrangement — and it is why `run_checks` now dispatches
@@ -403,7 +403,7 @@ async def _uncited_precedent(design: ExperimentDesign) -> list[UncitedPrecedent]
     raw would report every citation the design *does* carry as uncited, which is the noisiest
     possible way to be wrong. `external_record_ref` is the inverse that already exists.
 
-    It never raises, for `_recorded_failures`' reason and one more: this search reaches Postgres,
+    It never raises, for `recorded_failures`' reason and one more: this search reaches Postgres,
     so an unreachable index is an ordinary condition of a laptop rather than a fault of the design.
     The cost of that is the same — a silent "nothing to offer" is indistinguishable from having
     looked — which is why the failure is counted through `degraded()` and why
@@ -502,8 +502,8 @@ async def structure_experiment_request(request: ExperimentRequest, salt: str = "
     checks = run_checks(
         design,
         stage="protocol" if design.has_protocol else "request",
-        failures=await _recorded_failures(design),
-        precedent=await _uncited_precedent(design),
+        failures=await recorded_failures(design),
+        precedent=await uncited_precedent(design),
     )
     revision = await store.append(
         design_id,
@@ -628,8 +628,8 @@ async def draft_experiment_protocol(
 
     checks = run_checks(
         design,
-        failures=await _recorded_failures(design),
-        precedent=await _uncited_precedent(design),
+        failures=await recorded_failures(design),
+        precedent=await uncited_precedent(design),
     )
     if failed := blockers(checks):
         raise ChemclawError(

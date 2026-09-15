@@ -41,7 +41,7 @@ import os
 import re
 import tempfile
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterable, Iterator
 from pathlib import Path
 
 from chemclaw.core.config import settings
@@ -1056,6 +1056,27 @@ class GitNoteWriter:
             )
 
 
+def _in_sequential_order(files: Iterable[NoteFile]) -> list[NoteFile]:
+    """Drop the batch files a sequential application would have skipped, keeping order.
+
+    `GitNoteWriter` evaluates `overwrite=False` against the tree in one plan pass *before* writing
+    anything, so a batch cannot see its own earlier files the way N separate commits would. This
+    replays that one property: a path written earlier in the batch counts as existing, so a later
+    do-not-clobber copy of it is dropped rather than winning over the subject note's own body.
+
+    Paths that already exist in the tree are untouched here — that check is the inner writer's and
+    is the same under batching as without it.
+    """
+    kept: list[NoteFile] = []
+    written: set[str] = set()
+    for file in files:
+        if not file.overwrite and file.path in written:
+            continue
+        kept.append(file)
+        written.add(file.path)
+    return kept
+
+
 class BatchingNoteWriter:
     """A `NoteWriter` that lands many notes in one commit — for a backfill, and only a backfill.
 
@@ -1080,15 +1101,38 @@ class BatchingNoteWriter:
     every note in the system takes. So this merges N `NoteWrite`s into one and hands it to the
     writer it wraps — the batch is one ordinary write.
 
-    **Files are concatenated and never deduplicated by path.** Two notes may name the same
-    dependency, and `NoteFile` carries `overwrite=False` for a dependency and `True` for a subject:
-    applying them in order is exactly the sequence the unbatched path would apply, and deduplicating
-    on the first entry would let a dependency's do-not-clobber copy win over the subject note's own
-    content.
+    **Files are concatenated, and `overwrite=False` is resolved against the batch as well as the
+    tree.** Two notes may name the same dependency, and `NoteFile` carries `overwrite=False` for a
+    dependency and `True` for a subject. This docstring used to say concatenating them "is exactly
+    the sequence the unbatched path would apply". It is not: `GitNoteWriter._write_and_commit`
+    resolves every path and evaluates `if not file.overwrite and note_path.exists()` in **one plan
+    pass before any byte is written**, so merging N writes evaluates all of them against the
+    pre-batch tree, where sequential application would have seen each previous commit. Driven
+    against a real bare remote, a subject note written first and then named as a stale dependency
+    by a later note came back as the dependency's copy under batching and as the subject's own body
+    without it.
+
+    So the batch simulates the sequential order it replaces: a path written earlier *in this batch*
+    counts as existing, and a later `overwrite=False` file naming it is dropped. Paths already in
+    the tree are still the inner writer's own check, unchanged. Latent when this shipped — the only
+    caller passes `dependencies=None` — but the docstring above actively invited the usage, and a
+    guard on the one write path is cheaper than the incident.
 
     A caller **must** `flush()`; `record_note`'s reference for a still-pending note is the empty
     string, which is why this is not a drop-in for the conversational path even leaving the product
     argument aside.
+
+    **`write` reports `written=True` for a note it accepts, and that is a deliberate reading of a
+    field whose usual meaning is narrower.** `record_note` gates
+    `chemclaw_notes_recorded_total` on `outcome.written` and documents the number as "a note
+    reached the graph" rather than "we tried". Returning `False` for a held note made that counter
+    count *commits*: at the shipped batch size a 10,000-note backfill moved it about 200 times, and
+    the notes landed by the trailing `flush()` — outside `record_note` entirely — moved it not at
+    all. An accepted note does reach the graph, so it is counted once, here. What is genuinely lost
+    is the narrower half of the field: a note byte-identical to what the tree already held is
+    indistinguishable from one that landed, because the batch cannot know which it was until it
+    commits and the counter has already fired. That is the honest trade and it is stated rather
+    than left in the metric.
     """
 
     def __init__(self, inner: NoteWriter, batch_size: int) -> None:
@@ -1100,22 +1144,23 @@ class BatchingNoteWriter:
         self._inner = inner
         self._batch_size = batch_size
         self._pending: list[NoteWrite] = []
-        self._notes = 0
 
     async def write(self, write: NoteWrite) -> WriteOutcome:
         """Hold this note; commit the batch when it is full. Returns an empty pending reference."""
         self._pending.append(write)
-        self._notes += 1
         if len(self._pending) >= self._batch_size:
-            return await self.flush()
-        return WriteOutcome(reference="", written=False)
+            await self.flush()
+        # `written=True` for every accepted note, once — see the class docstring. The flush's own
+        # outcome is not returned here, because then the note that happened to fill the batch would
+        # be the only one this counter ever saw.
+        return WriteOutcome(reference="", written=True)
 
     async def flush(self) -> WriteOutcome:
         """Commit and push everything held, as one write. A no-op when nothing is pending."""
         if not self._pending:
             return WriteOutcome(reference="", written=False)
         batch, self._pending = self._pending, []
-        files = [file for write in batch for file in write.files]
+        files = _in_sequential_order(file for write in batch for file in write.files)
         # The subject of a batch names the count rather than the notes: `NoteWrite` refuses a
         # message over its own length bound, and fifty note ids do not fit in one.
         outcome = await self._inner.write(

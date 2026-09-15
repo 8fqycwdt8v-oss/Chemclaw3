@@ -79,28 +79,44 @@ async def backfill(directory: Path, *, tags: list[str], dry_run: bool) -> tuple[
     # chemist cannot read yet — and that argument does not reach an operator command over a
     # directory of existing documents, where nobody is mid-turn and the wait is for the whole run.
     submitter = BatchingNoteWriter(default_writer(), settings.backfill_commit_batch_size)
-    for path in sorted(p for p in directory.rglob("*") if p.is_file()):
-        try:
-            note = note_for_document(path, path.read_bytes(), tags)
-        except (AttachmentError, OSError) as exc:
-            logger.warning("skipping %s: %s", path.name, exc)
-            skipped += 1
-            continue
-        if dry_run:
-            logger.info("would write %s from %s (%d chars)", note.id, path.name, len(note.body))
-        else:
-            reference = await record_note(note, submitter)
-            # A batched write's reference is empty until its commit lands, so the per-note line
-            # says what it can: the note, its source, and that the commit is still pending. The
-            # batch's own reference is logged when it flushes.
-            logger.info(
-                "wrote %s from %s -> %s", note.id, path.name, reference or "(pending a batch)"
-            )
-        written += 1
-    if not dry_run:
-        outcome = await submitter.flush()
-        if outcome.written:
-            logger.info("committed the final batch -> %s", outcome.reference)
+    # **The trailing flush is in a `finally`, because up to `batch_size - 1` notes are held in
+    # memory at every instant.** It shipped as a bare statement after the loop, so anything the
+    # `except` below does not catch — a `psycopg` error, a git failure, a `KeyboardInterrupt` on a
+    # long run — discarded the pending batch *after* `written` had already counted it and the log
+    # had already reported each note as written "(pending a batch)". A backfill is an operator
+    # command over a decade of documents; losing the tail silently and reporting it as written is
+    # the one failure mode that leaves nobody able to say which documents are missing.
+    try:
+        for path in sorted(p for p in directory.rglob("*") if p.is_file()):
+            try:
+                note = note_for_document(path, path.read_bytes(), tags)
+            except (AttachmentError, OSError) as exc:
+                logger.warning("skipping %s: %s", path.name, exc)
+                skipped += 1
+                continue
+            if dry_run:
+                logger.info("would write %s from %s (%d chars)", note.id, path.name, len(note.body))
+            else:
+                reference = await record_note(note, submitter)
+                # A batched write's reference is empty until its commit lands, so the per-note line
+                # says what it can: the note, its source, and that the commit is still pending. The
+                # batch's own reference is logged when it flushes.
+                logger.info(
+                    "wrote %s from %s -> %s", note.id, path.name, reference or "(pending a batch)"
+                )
+            written += 1
+    finally:
+        if not dry_run:
+            # Best-effort on the failure path: the run is already ending badly, and a flush that
+            # also raises would replace the original cause with this one. What must not happen is
+            # the batch being dropped in silence.
+            try:
+                outcome = await submitter.flush()
+            except Exception:
+                logger.exception("the final batch could not be committed; its notes are not in git")
+            else:
+                if outcome.written:
+                    logger.info("committed the final batch -> %s", outcome.reference)
     return written, skipped
 
 
