@@ -577,6 +577,28 @@ class AgentSettings(BaseSettings):
     harness_autonomy: HarnessAutonomy = "plan_only"
     harness_max_loop_iterations: int = Field(default=25, ge=1)
 
+    # **What one `write_todos` call may declare.** Both halves of a plan were unbounded, and each
+    # sizes something that outlives the call: the step count sizes the row
+    # `api/routes/plan.py::decide_plan` writes, and the per-step declaration sizes the union that
+    # lands in `plan_approvals.scope` (`TEXT[]`) and then the sentence
+    # `plan_gate.out_of_scope_refusal` builds out of it. Measured on the shipped schema: 50,000
+    # ten-character names in one step validated, and the refusal came back at **600,192
+    # characters** — bounded to 60,000 by `agent/tool_authz._refusal_message` before the model
+    # reads it, and unbounded everywhere before that (the exception, the log, the audit row).
+    # 20,000 steps validated too, which is the half the backlog row that found this did not name.
+    #
+    # **Not an escalation, which is why these are bounds rather than a gate.** The scope only ever
+    # *narrows* what a call may do, and a name no tool answers to is refused by `enforce_tool_authz`
+    # regardless. What it is is an unpriced write a model can repeat.
+    #
+    # Refused at the tool's own argument validation on purpose: that is the one place the model
+    # reads the error and can act on it by splitting the plan, rather than the call succeeding and
+    # a person meeting the consequence later. The defaults are generous against real use — a step
+    # declares nought to a handful of tools, and the whole bound surface is ~113 — and far below
+    # what motivated them.
+    plan_max_steps: int = Field(default=64, ge=1)
+    plan_max_tools_per_step: int = Field(default=32, ge=1)
+
     # What one turn may **bill** before the runaway guard stops it, counting every dimension the
     # provider reports (input, output and cache) across every model call of the turn, the
     # subagent's included.

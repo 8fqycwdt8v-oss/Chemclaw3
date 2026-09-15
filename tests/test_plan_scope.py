@@ -22,10 +22,15 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from chemclaw.agent import plan_approval_store as store_module
-from chemclaw.agent.authz import side_effecting_tools
+from chemclaw.agent.authz import memory_write_verbs, side_effecting_call, side_effecting_tools
 from chemclaw.agent.plan_approval_store import InMemoryPlanApprovalStore
 from chemclaw.agent.plan_gate import PlanNotApprovedError, enforce_plan_approval, plan_identity
-from chemclaw.agent.plan_scope import ScopedTodoListMiddleware, declared_scope
+from chemclaw.agent.plan_scope import (
+    ScopedTodoListMiddleware,
+    ScopedWriteTodosInput,
+    declared_scope,
+)
+from chemclaw.agent.scratchpad import MEMORY_ROOT
 from chemclaw.core.config import settings
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from tests.middleware import run_middleware, tool_request
@@ -66,15 +71,25 @@ async def _approve(
     await store.record(session_id, plan_hash, "chemist-1", True, declared_scope(steps))
 
 
-async def _ran(tool: str, session_id: str, steps: list[dict[str, Any]]) -> bool:
-    """Drive one call through the gate under `steps`; True when the tool body ran."""
+async def _ran(
+    tool: str,
+    session_id: str,
+    steps: list[dict[str, Any]],
+    arguments: dict[str, Any] | None = None,
+) -> bool:
+    """Drive one call through the gate under `steps`; True when the tool body ran.
+
+    `arguments` defaults to empty because for all but two tools the name settles whether the gate
+    applies. The exceptions are `authz.memory_write_verbs()`, where the *path* decides, and passing
+    them is the only way to drive that half.
+    """
     ran = False
 
     async def _handler(_request: Any) -> Any:
         nonlocal ran
         ran = True
 
-    request = tool_request(tool)
+    request = tool_request(tool, arguments or {})
     object.__setattr__(request, "state", {"todos": steps})
     token = set_current_session_id(session_id)
     try:
@@ -139,6 +154,116 @@ def test_the_surface_a_read_only_plans_approval_reaches(
     assert permitted == [], (
         f"a plan declaring no tools authorized {len(permitted)} of them: {permitted}"
     )
+
+
+def test_the_gate_also_reaches_the_half_of_the_surface_a_name_cannot_enumerate(
+    approvals: InMemoryPlanApprovalStore,
+) -> None:
+    """The ratchet above walks `side_effecting_tools()`, and that is not the whole gated surface.
+
+    `authz.side_effecting_call` is the union of two halves: the names a gate can enumerate, and the
+    calls whose gatedness is a function of their *arguments*. `memory_write_verbs()` is the second
+    half — one name serving two roots, `/scratch/` dying with the turn and `/memories/` outliving
+    the deployment — so the tools whose classification is hardest are precisely the ones the
+    enumeration walks past.
+
+    Measured before this existed: both verbs are outside the 49-name surface, and
+    `side_effecting_call(verb, {"file_path": "/memories/x.md"})` is `True` for each. So the gate did
+    refuse them and **nothing held that it would** — which is the shape `CLAUDE.md` names as a claim
+    that a control exists. The backlog row that found it named one verb; there are two.
+
+    Derived from `authz` and `scratchpad` rather than listing either name, for the reason the
+    ratchet above gives about bundles: a third argument-driven verb is covered the day it is added.
+    """
+
+    async def _run() -> tuple[list[str], list[str]]:
+        steps = [_step(line) for line in _READ_ONLY_PLAN]
+        await _approve(approvals, "argument-driven", steps)
+        durable, scratch = [], []
+        for verb in sorted(memory_write_verbs()):
+            if await _ran(verb, "argument-driven", steps, {"file_path": f"{MEMORY_ROOT}probe.md"}):
+                durable.append(verb)
+            if not await _ran(verb, "argument-driven", steps, {"file_path": "/scratch/probe.md"}):
+                scratch.append(verb)
+        return durable, scratch
+
+    durable, scratch = asyncio.run(_run())
+    assert memory_write_verbs(), "the argument-driven half is empty; this proves nothing"
+    assert durable == [], (
+        f"a plan declaring no tools authorized {durable} to write durable memory — these are gated "
+        "by `side_effecting_call` and the name-only ratchet above cannot see them"
+    )
+    # The other direction, and it is what stops this being a test that a blunt name-gate would pass:
+    # a turn's own scratchpad must stay reachable under an approval that declared nothing, or the
+    # gate has refused the agent its notepad rather than its memory.
+    assert scratch == [], (
+        f"{scratch} were refused for a `/scratch/` write, so the gate is matching on the name "
+        "rather than the path and a turn cannot put down intermediate work"
+    )
+    for verb in memory_write_verbs():
+        assert side_effecting_call(verb, {"file_path": f"{MEMORY_ROOT}probe.md"}), (
+            f"{verb} is no longer classified as a durable write by its arguments, so the arms "
+            "above pass for a reason other than the one this test is about"
+        )
+        assert verb not in side_effecting_tools(), (
+            f"{verb} is now in the name-enumerable half, so the ratchet above covers it and this "
+            "test is measuring the same thing twice — move it or delete it deliberately"
+        )
+
+
+def test_a_plan_is_bounded_in_both_directions_at_argument_validation() -> None:
+    """An unpriced write a model can repeat, refused where the model can read why.
+
+    Both halves were unbounded and each sizes something that outlives the call. Measured on the
+    shipped schema before this: **50,000** ten-character names in one step validated, and
+    `plan_gate.out_of_scope_refusal` built a **600,192-character** sentence out of the union —
+    bounded to 60,000 by `agent/tool_authz._refusal_message` before the model reads it, and
+    unbounded everywhere before that (the exception, the log, the audit row). **20,000 steps
+    validated too**, which is the half the backlog row that found this did not name.
+
+    Not an escalation: the scope only ever *narrows* what a call may do, and a name no tool answers
+    to is refused by `enforce_tool_authz` regardless.
+
+    Both numbers are read off `settings` rather than written here, so the assertion is that the
+    bound *binds* rather than that it is 32 — a deployment that raises either is still tested.
+    """
+    over_steps = [_step("x") for _ in range(settings.plan_max_steps + 1)]
+    with pytest.raises(ValidationError, match=r"at most \d+ are accepted"):
+        ScopedWriteTodosInput(todos=over_steps)  # type: ignore[arg-type]
+
+    wide = _step("x", *[f"tool-{i}" for i in range(settings.plan_max_tools_per_step + 1)])
+    with pytest.raises(ValidationError, match=r"at most \d+ are accepted per step"):
+        ScopedWriteTodosInput(todos=[_step("first"), wide])  # type: ignore[arg-type]
+
+
+def test_the_refusal_names_the_step_so_the_model_can_split_the_plan() -> None:
+    """Refused at argument validation is the whole point, and a message it cannot act on wastes it.
+
+    The alternative designs both fail here rather than in principle: a bound in the `TypedDict`
+    could only carry a literal (its annotations are evaluated at class definition, so no setting
+    reaches it) and pydantic's own `too_long` message names neither the step nor what to do about
+    it. So the assertion is on the two things a model needs — *which* step, and the instruction.
+    """
+    wide = _step("x", *[f"tool-{i}" for i in range(settings.plan_max_tools_per_step + 1)])
+    with pytest.raises(ValidationError) as raised:
+        ScopedWriteTodosInput(todos=[_step("first"), _step("second"), wide])  # type: ignore[arg-type]
+    message = raised.value.errors()[0]["msg"]
+    assert "step 3" in message, f"the refusal does not say which step is too broad: {message}"
+    assert "Split it" in message
+
+
+def test_an_ordinary_plan_is_nowhere_near_either_bound() -> None:
+    """The half that decides whether these defaults are a control or an obstacle.
+
+    A step declares nought to a handful of tools and a plan a person approves runs to a handful of
+    steps, so the bounds have to be far enough above real use that nobody meets them. Asserted as
+    the *ratio* rather than by accepting one plan, because "an eight-step plan validates" would
+    stay true at a bound of nine.
+    """
+    ordinary = [_step(f"step {i}", "gather_evidence", "expand_note") for i in range(8)]
+    assert ScopedWriteTodosInput(todos=ordinary).todos  # type: ignore[arg-type]
+    assert settings.plan_max_steps >= 4 * len(ordinary)
+    assert settings.plan_max_tools_per_step >= 8 * 2
 
 
 def test_widening_a_step_after_approval_does_not_widen_the_approval(

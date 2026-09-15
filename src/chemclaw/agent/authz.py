@@ -367,6 +367,22 @@ def side_effecting_tools() -> frozenset[str]:
 _MEMORY_WRITE_VERBS: frozenset[str] = frozenset({"write_file", "edit_file"})
 
 
+def memory_write_verbs() -> frozenset[str]:
+    """The tools whose gatedness is a function of their *arguments* rather than their name.
+
+    `side_effecting_tools()` is the set a gate can enumerate; this is the set it cannot, and the two
+    together are the whole gated surface. Exposed because a ratchet that walks only the first proves
+    nothing about the second, and the alternative — a test naming `write_file` — would be a third
+    declaration of a partition that already has two owners
+    (`D-2026-09-15-a-ratchet-that-enumerates-one-half-of-a-partition-proves-nothing-about-the-other`).
+
+    A reader wanting "is this call gated" wants `side_effecting_call`, which composes both halves.
+    This exists for the callers that need to *enumerate* the second half, of which the ratchet in
+    `tests/test_plan_scope.py` is the first.
+    """
+    return _MEMORY_WRITE_VERBS
+
+
 def writes_durable_memory(name: str, arguments: Mapping[str, Any]) -> bool:
     """Whether this *call* writes a person's durable memories, as opposed to the turn's scratchpad.
 

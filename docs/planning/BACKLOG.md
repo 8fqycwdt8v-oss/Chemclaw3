@@ -63,31 +63,6 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
-- [ ] **A plan step's `tools` declaration is unbounded, and it sizes both a durable row and a
-  refusal** — [S]. `agent/plan_scope.ScopedTodo.tools` is `list[str]` with no constraint, so a
-  `write_todos` declaring 50,000 names validates, the union lands in `plan_approvals.scope`
-  (`TEXT[]`, written by `api/routes/plan.py::decide_plan`), and
-  `plan_gate.out_of_scope_refusal` sorts and joins the whole set into one sentence — measured at
-  **600,192 characters** over ten-character names, bounded to 60,000 by
-  `agent/tool_authz._refusal_message` before the model reads it and unbounded everywhere before
-  that (the exception, the log, the audit row). Not an escalation: the scope
-  only ever *narrows* what a call may do, and a name no tool answers to is refused by
-  `enforce_tool_authz` regardless. What it is is an unpriced write a model can repeat, and the
-  natural fix is a `Field(max_length=...)` on the declaration plus a setting, which is a config
-  decision rather than an edit — a low ceiling refuses a legitimately broad plan at the tool's own
-  argument validation, where the model can read the error and split the plan.
-- [ ] **The 0/49 plan-scope ratchet cannot see the argument-driven gated call** — [S].
-  `tests/test_plan_scope.py::test_the_surface_a_read_only_plans_approval_reaches` drives every name
-  in `authz.side_effecting_tools()` through the gate under an approval that declared nothing, and
-  requires every one to be refused. `write_file` is not in that set: `authz.side_effecting_call`
-  classifies it on its *arguments* — durable under `/memories/`, turn-local under `/scratch/` — so
-  the one tool whose gatedness is a function of the call is the one the ratchet enumerates past.
-  Measured: `side_effecting_call("write_file", {"file_path": "/memories/x.md", ...})` is `True` and
-  `"write_file" in side_effecting_tools()` is `False`, so the gate does refuse it and nothing holds
-  that it will.
-  The fix is one more arm over the argument-driven cases rather than a change to the partition, and
-  it should derive them from `authz` rather than listing `write_file` by name.
-
 - [ ] **A helper spawn costs 20,712 kB of checkpoint rows and nothing yet explains where they
   go** — [M]. The cost is real and measured on a real `AsyncPostgresSaver` with incompressible
   text: one helper writing 2 MB costs **20,712 kB** above a 296 kB baseline (10.4x), and
