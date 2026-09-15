@@ -2811,3 +2811,27 @@ Postgres set — the same discipline applies to the git-history set, which has n
 
 **Rule: when a check's skip reason names a property of the *checkout* rather than of the
 environment, fix the checkout and re-run before pushing.**
+
+
+## Run the gate's command, not your own approximation of it
+
+**2026-09-15.** CI's `static` job went red on `mypy` errors in tests I had just written, after I had
+run `uv run mypy --strict src/chemclaw` and reported it clean. `make type` is
+`uv run mypy src examples tests` — **880 files**. Mine was 472, and the 408 it skipped were exactly
+where the new code was.
+
+The same shape as the two entries above, and the third instance in one session: I ran a *narrower*
+check than the gate and read its green as the gate's. The other two were a narrower *test set*; this
+one was a narrower *file set*, reached by hand-writing an invocation instead of using the target
+that exists.
+
+**Rule: never hand-roll a gate step.** `make lint`, `make type`, `make test` are what CI runs, and
+`CLAUDE.md` says so in as many words — *"Use them rather than raw invocations — CI runs exactly
+these, so a green `make` locally means a green CI."* A hand-written `mypy`/`pytest`/`ruff` line is
+fine for a fast inner loop and is never the evidence that something is ready to push.
+
+The fix was worth more than the silencing, too: four call sites carried `# type: ignore[arg-type]`,
+and mypy actually raises `arg-type` for a list *variable* and `list-item` for a list *literal* — so
+two of the four ignores named the wrong code and the other two were load-bearing. One `_plan()`
+helper that states the conversion once replaced all four. **An ignore that has to be spelled two
+ways for one mismatch is a sign the ignore is the wrong tool.**

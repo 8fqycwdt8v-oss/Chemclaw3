@@ -16,7 +16,7 @@ them writes a count.
 
 import asyncio
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -26,6 +26,7 @@ from chemclaw.agent.authz import memory_write_verbs, side_effecting_call, side_e
 from chemclaw.agent.plan_approval_store import InMemoryPlanApprovalStore
 from chemclaw.agent.plan_gate import PlanNotApprovedError, enforce_plan_approval, plan_identity
 from chemclaw.agent.plan_scope import (
+    ScopedTodo,
     ScopedTodoListMiddleware,
     ScopedWriteTodosInput,
     declared_scope,
@@ -104,6 +105,18 @@ async def _ran(
 def _step(content: str, *tools: str) -> dict[str, Any]:
     """One plan step as `write_todos` writes it, declaring `tools`."""
     return {"content": content, "status": "pending", "tools": list(tools)}
+
+
+def _plan(*steps: dict[str, Any]) -> list[ScopedTodo]:
+    """`_step` output as the `ScopedTodo` list the argument schema takes.
+
+    One cast, stated once, rather than a `# type: ignore` per call site — and the ignores were the
+    wrong tool twice over: mypy raises `arg-type` when the list is a variable and `list-item` when
+    it is a literal, so four call sites needed two codes for one conceptual mismatch, and CI caught
+    the two that guessed wrong. The mismatch itself is real and narrow: `_step` returns the loose
+    dict `write_todos` is actually called with, which is the shape these tests want to drive.
+    """
+    return cast(list[ScopedTodo], list(steps))
 
 
 def test_an_approval_for_one_tool_does_not_authorize_another(
@@ -227,13 +240,13 @@ def test_a_plan_is_bounded_in_both_directions_at_argument_validation() -> None:
     Both numbers are read off `settings` rather than written here, so the assertion is that the
     bound *binds* rather than that it is 32 — a deployment that raises either is still tested.
     """
-    over_steps = [_step("x") for _ in range(settings.plan_max_steps + 1)]
+    over_steps = _plan(*(_step("x") for _ in range(settings.plan_max_steps + 1)))
     with pytest.raises(ValidationError, match=r"at most \d+ are accepted"):
-        ScopedWriteTodosInput(todos=over_steps)  # type: ignore[arg-type]
+        ScopedWriteTodosInput(todos=over_steps)
 
     wide = _step("x", *[f"tool-{i}" for i in range(settings.plan_max_tools_per_step + 1)])
     with pytest.raises(ValidationError, match=r"at most \d+ are accepted per step"):
-        ScopedWriteTodosInput(todos=[_step("first"), wide])  # type: ignore[arg-type]
+        ScopedWriteTodosInput(todos=_plan(_step("first"), wide))
 
 
 def test_the_refusal_names_the_step_so_the_model_can_split_the_plan() -> None:
@@ -246,7 +259,7 @@ def test_the_refusal_names_the_step_so_the_model_can_split_the_plan() -> None:
     """
     wide = _step("x", *[f"tool-{i}" for i in range(settings.plan_max_tools_per_step + 1)])
     with pytest.raises(ValidationError) as raised:
-        ScopedWriteTodosInput(todos=[_step("first"), _step("second"), wide])  # type: ignore[arg-type]
+        ScopedWriteTodosInput(todos=_plan(_step("first"), _step("second"), wide))
     message = raised.value.errors()[0]["msg"]
     assert "step 3" in message, f"the refusal does not say which step is too broad: {message}"
     assert "Split it" in message
@@ -260,8 +273,8 @@ def test_an_ordinary_plan_is_nowhere_near_either_bound() -> None:
     the *ratio* rather than by accepting one plan, because "an eight-step plan validates" would
     stay true at a bound of nine.
     """
-    ordinary = [_step(f"step {i}", "gather_evidence", "expand_note") for i in range(8)]
-    assert ScopedWriteTodosInput(todos=ordinary).todos  # type: ignore[arg-type]
+    ordinary = _plan(*(_step(f"step {i}", "gather_evidence", "expand_note") for i in range(8)))
+    assert ScopedWriteTodosInput(todos=ordinary).todos
     assert settings.plan_max_steps >= 4 * len(ordinary)
     assert settings.plan_max_tools_per_step >= 8 * 2
 
