@@ -705,8 +705,8 @@ spec:
            above conditional on something no rule stated: **every one of them alerts on an
            application counter, so a process that is gone emits silence** — and silence is what a
            healthy quiet system also emits. (The sentence here used to say "all sixteen", and by the
-           time it was read the file held thirty-seven rules, of which the two below are the only
-           ones that read anything but a first-party series. `tests/test_deploy_chart.py` derives
+           time it was read the file held thirty-seven rules, of which only the handful in this
+           group read anything but a first-party series. `tests/test_deploy_chart.py` derives
            that split from the rendered rules rather than restating it here, for the reason
            `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` gives.) A CrashLooping, evicted, unschedulable or simply un-scraped pod
            produced no alert of any kind. `up` is the only series that inverts that: it is

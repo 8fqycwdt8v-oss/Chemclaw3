@@ -3098,9 +3098,11 @@ def test_only_the_fleet_group_alerts_on_a_series_this_system_does_not_emit() -> 
     Its header argued that every rule reads an application counter — "so a process that is gone
     emits silence" — which is what makes `up` and `absent()` necessary. The sentence carried a
     count ("all sixteen") that was thirty-seven by the time anyone read it, and the count was never
-    the interesting half: the *split* is. Two rules read Prometheus's own synthesised `up` and
-    every other rule reads a series this registry declares, and that is what the header now says
-    and this asserts.
+    the interesting half: the *split* is. A short list of rules read Prometheus's own synthesised
+    `up` and every other rule reads a series this registry declares, and that is what the header
+    now says and this asserts. The list is enumerated below rather than counted here, for the
+    reason the count it replaced failed: a number in this docstring is stale the next time somebody
+    adds a rule, while a set that must match exactly is not.
 
     A third rule written against a series nothing here emits would be green forever, which reads
     exactly like the condition never occurring — the same failure
@@ -3131,9 +3133,15 @@ def test_only_the_fleet_group_alerts_on_a_series_this_system_does_not_emit() -> 
     # `monitoring.temporalSdkMetrics.enabled`, which is the same flag that renders the port the
     # exporter would bind, so it is absent from every shipped configuration rather than green
     # forever in one. The panels were unconditional.
+    # `ChemclawNoBackgroundWorkerIsScraped` is the fourth and belongs to the same fleet group as
+    # the first two: the shared-endpoint `absent()` beside it cannot see a background worker that
+    # is missing, because connectors and the front door serve the same `metrics` port and keep it
+    # satisfied. It reads `up` for exactly the reason the other two do — a pod that never became a
+    # target emits no first-party series to alert on.
     assert on_up == {
         "ChemclawTargetDown",
         "ChemclawNoWorkerIsScraped",
+        "ChemclawNoBackgroundWorkerIsScraped",
         "ChemclawWorkerNotPolling",
     }, (
         f"the rules that read something other than a first-party series are {sorted(on_up)}; the "
