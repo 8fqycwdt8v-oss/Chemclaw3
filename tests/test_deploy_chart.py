@@ -5565,3 +5565,82 @@ def test_every_declared_ecosystem_is_audited_or_accepted() -> None:
         f"(and name its target in _AUDITED_ECOSYSTEMS) or write the `{_ACCEPTED_RISK}` line "
         "naming it — an updater without either is a control a reader will assume exists."
     )
+
+
+def test_the_background_worker_has_an_alert_the_shared_endpoint_cannot_give_it() -> None:
+    """The shared-endpoint alert cannot see a background worker that is missing entirely.
+
+    `Recreate` is what makes that state reachable.
+
+    `deployment-workers.yaml` is the only Deployment in this chart carrying a `strategy:` block,
+    and it is `Recreate` — deliberately, because two background workers racing on one corpus clone
+    is what `D-2026-08-27-what-a-second-background-worker-would-race-on` pins the replica count to
+    prevent. The cost is that the old pod is gone before the new one is tried, so a worker that
+    cannot start leaves the release with none.
+
+    `ChemclawNoWorkerIsScraped` does not cover that, and its own comment used to claim it did:
+    connector workers serve the same `metrics` port (`deployment-connectors.yaml` says so), as do
+    the front door and mcp-face, so its `absent()` is false whenever any of them is up. The
+    distinguishing label has to be in the expression, not in the reasoning about it.
+    """
+    rules = (CHART / "templates" / "prometheusrule.yaml").read_text()
+    assert "ChemclawNoBackgroundWorkerIsScraped" in rules
+
+    expr = _alert_expression(rules, "ChemclawNoBackgroundWorkerIsScraped")
+    assert "absent(" in expr, "only absent() alerts on no series existing at all"
+    assert 'app_kubernetes_io_component="background-worker"' in expr, (
+        "without the component label this is the shared-endpoint alert again, which any connector "
+        "or front-door pod keeps satisfied while no background worker exists"
+    )
+
+    # The other direction, which is what makes the first assertion mean something: the alert this
+    # one supplements must still NOT carry that label, or the two are the same rule twice.
+    shared = _alert_expression(rules, "ChemclawNoWorkerIsScraped")
+    assert "app_kubernetes_io_component" not in shared, (
+        "ChemclawNoWorkerIsScraped now scopes to a component, so the new alert is redundant and "
+        "one of the two should go"
+    )
+
+
+def test_the_component_label_the_worker_alert_reads_is_one_the_podmonitor_stamps() -> None:
+    """An alert label the scrape config does not produce is a rule that is green forever.
+
+    This is the same failure the fleet group's own comment records for `kube_pod_status_ready`, one
+    label instead of one metric: `podTargetLabels` is what turns a pod label into a sample label,
+    so an alert selecting on `app_kubernetes_io_component` is only meaningful while the PodMonitor
+    copies it. Held in both directions so neither side can be edited alone.
+    """
+    monitor = (CHART / "templates" / "podmonitor.yaml").read_text()
+    assert "app.kubernetes.io/component" in monitor.split("podTargetLabels:")[1][:200], (
+        "the PodMonitor stopped copying the component label, so the background-worker alert now "
+        "selects on a label no sample carries and can never fire"
+    )
+    workers = (CHART / "templates" / "deployment-workers.yaml").read_text()
+    assert "app.kubernetes.io/component: background-worker" in workers, (
+        "the worker Deployment's component label changed; the alert's selector no longer matches it"
+    )
+
+
+def test_no_alert_reads_a_series_this_prometheus_cannot_see() -> None:
+    """kube-state-metrics is platform monitoring; these rules are evaluated by user-workload.
+
+    The fleet group's comment already argues this for `kube_pod_status_ready`, and a backlog row
+    nevertheless proposed `kube_deployment_status_replicas_unavailable` for a stuck rollout — the
+    obvious expression, and one that would have been permanently empty here. Green forever reads
+    exactly like "the condition never occurred", which is the failure mode this whole file is
+    arranged against.
+
+    So the constraint is asserted rather than left in a comment for the next person to miss. If a
+    deployment ever federates those series, this test is the one place that has to change, and it
+    says why.
+    """
+    rules = (CHART / "templates" / "prometheusrule.yaml").read_text()
+    expressions = "\n".join(
+        block.split("for:")[0] for block in rules.split("- alert: ")[1:] if "for:" in block
+    )
+    for series in ("kube_deployment_", "kube_pod_", "kube_statefulset_", "kube_daemonset_"):
+        assert series not in expressions, (
+            f"an alert expression reads `{series}*`, which kube-state-metrics publishes to the "
+            "*platform* Prometheus in `openshift-monitoring`. A user-workload PrometheusRule "
+            "cannot see those series, so this rule is green forever."
+        )

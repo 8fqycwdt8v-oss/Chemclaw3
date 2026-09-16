@@ -651,22 +651,6 @@ topic).
       **Anchors:** `src/chemclaw/kg/graph.py`, `deploy/helm/chemclaw/values.yaml`,
       `deploy/helm/chemclaw/templates/poddisruptionbudget.yaml`.
 
-- [ ] **A background-worker rollout that never becomes Ready is invisible until someone looks** —
-      [S], the detection `8b23067` named as missing after measuring the review's proposed fix as
-      worse than the status quo, and which was never written down as a row. `deployment-workers.yaml`
-      ships `Recreate` because the singleton underneath it forbids two replicas, so the old process
-      is gone before the new one starts; a new pod that never becomes Ready therefore leaves the
-      `background-jobs` queue with no consumer while the release reports deployed. `--atomic` is
-      not the fix and is refused elsewhere for its own reason (`migrate-job.yaml`). What is missing
-      is an alert, expressible from what is already scraped —
-      `kube_deployment_status_replicas_unavailable` on that Deployment, or the staleness of the
-      worker's own `chemclaw_jobs_in_flight` — and it belongs beside `ChemclawWorkerNotPolling` in
-      `prometheusrule.yaml`.
-
----
-
-## 5 — Where the field moved past us
-
 - [ ] **`GET /check-ins` is served and no surface reads it** — [S], `Chemclaw3_ui`. `D-2026-09-15-the-requester-hears-nothing-until-it-is-too-late` added the sweep that tells a requester which of their own questions are still waiting, and the route that serves the mailbox it writes (`api/routes/streams.read_check_ins`, claiming `CHECK_IN_KIND`). The UI has no card for it, so with `CHECK_IN_ENABLED` set a deployment sees check-ins only through a configured outbound channel — and `CHEMCLAW_DELIVERY_CHANNELS` is empty in every shipped deployment. **This is not the `/schedules` case**, which the BFF refuses by name as operator surface a chemist has no business reaching (`D-2026-09-14-two-gaps-the-code-had-already-argued-shut`): a check-in is addressed to the chemist. The shape is `/digests`' `/review` card one kind over, and the response model is `CheckInOut`. Own PR against `Chemclaw3_ui`.
 
 Filed by the 2026-08-25 field benchmark — see
