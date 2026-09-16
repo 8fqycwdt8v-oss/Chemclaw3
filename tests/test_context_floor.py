@@ -826,7 +826,34 @@ SERVED_ELSEWHERE_ALLOWANCE = 11_000
 #:
 #: `SERVED_ELSEWHERE_ALLOWANCE` did not move for the third time, and for the third time because
 #: this tree declares no such bundle.
-FLEET_PUBLISHED_ALLOWANCE = 28_500
+#:
+#: **A fourth, and this one was caught by a dependency review rather than by a fleet change of its
+#: own.** `Chemclaw3-mcp` merged two pull requests while this repository's own adoption work was in
+#: flight: one added the `unitops` server, the other took six library adoptions across the fleet.
+#: Measured against that merged `main`, the published directory is **33,048 over 55 tools**
+#: (`chem` 5,577 / 12, `kinetics` 3,389 / 6, `props` 2,936 / 6, `pyexec` 1,142 / 1, `rxnpredict`
+#: 2,784 / 6, `safety` 1,632 / 3, `suitability` 4,471 / 7, `thermalsafety` 3,764 / 7, `unitops`
+#: 7,353 / 7), 4,548 over the 28,500 that stood. Raised to 36,700, the same ~11% headroom.
+#:
+#: **The whole breach is `unitops`.** Subtract it and the fleet is 25,695 — the exact figure the
+#: paragraph above recorded, so the six adoptions next door moved this number by **zero**. That is
+#: worth stating rather than glossing: a review that replaced a periodic table, an optimizer and a
+#: set of physical constants across seven servers changed no tool's schema, which is what a
+#: dependency swap behind a stable surface is supposed to look like and is not what anybody could
+#: have asserted without measuring it here.
+#:
+#: The cost again stated rather than absorbed: 7,353 more tokens on every model call for a
+#: deployment that mounts that directory. At 1,050 tokens a tool `unitops` is **well outside** the
+#: band its siblings occupy (`suitability` 639, `kinetics` 565, `thermalsafety` 538, `safety` 544,
+#: `props` 489, `chem` 465) — nearly double the next dearest. Nothing in this tree can say whether
+#: that is a composite paying for itself the way `system_suitability_report` argues it does, or a
+#: surface nobody has priced; that question belongs in a pull request over there, and this comment
+#: is the only place it is currently asked.
+#:
+#: `SERVED_ELSEWHERE_ALLOWANCE` did not move for the fourth time, and for the fourth time because
+#: this tree declares no such bundle — there is no `connectors/unitops/` here, so no chart
+#: deployment binds it and only the e2e lane that mounts the whole directory pays.
+FLEET_PUBLISHED_ALLOWANCE = 36_700
 
 #: The whole static prefix a shipped `default` turn may cost, as a bound: this file's ceiling plus
 #: the allowance for what it cannot see.
