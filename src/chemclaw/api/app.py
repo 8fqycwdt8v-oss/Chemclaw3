@@ -46,7 +46,7 @@ from chemclaw.agent.plan_approval_store import plan_approval_store
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.session_events import stream_new_events
 from chemclaw.agent.verifier import require_verifier_capability
-from chemclaw.api.budget import BudgetTracker
+from chemclaw.api.budget import BudgetTracker, drain_pending
 from chemclaw.api.deps import CurrentUser
 from chemclaw.api.detach import RunningTurns
 from chemclaw.api.events import event_schemas
@@ -301,6 +301,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             # its checkpoint, its transcript and its cost row through all three.
             running_turns: RunningTurns = app.state.running_turns
             await running_turns.drain(settings.service_turn_timeout_seconds)
+            # After the turns, because a draining turn books its own spend on the way out, and
+            # before the pool closes, because the booking needs it. A budget booking is scheduled
+            # off the hot path (`api/budget._schedule`, which is synchronous by D-130), so without
+            # this wait an ordinary rollout cancels the last booking of every in-flight principal
+            # and hands each of them that much allowance back.
+            await drain_pending()
             # One call, not two. `close_checkpointer` drops the memory store itself, in the order
             # the store's dependency on its pool requires — see the paragraph above.
             await close_checkpointer()

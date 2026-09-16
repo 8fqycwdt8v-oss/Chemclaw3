@@ -38,10 +38,21 @@ from chemclaw.core.config import settings
 #: Book one turn against a principal, resetting the window first if it has rolled over.
 #:
 #: The `CASE` arms are repeated rather than factored into a CTE because all three test the same
-#: predicate against `budget_usage.window_start` — the row's value *before* this statement — and
-#: Postgres evaluates every `ON CONFLICT DO UPDATE` assignment against that same pre-image. So the
-#: three arms cannot disagree with each other, and a CTE would buy a name at the cost of making the
-#: reset a second statement another connection could interleave with.
+#: predicate against `budget_usage.window_start`, and every assignment in one `ON CONFLICT DO
+#: UPDATE` sees the same `budget_usage` row. So the three arms cannot disagree with each other, and
+#: a CTE would buy a name at the cost of making the reset a second statement another connection
+#: could interleave with.
+#:
+#: **That row is the latest *committed* one, not this statement's snapshot**, which is the part
+#: that makes this safe under concurrency and which this comment previously got wrong: a conflicting
+#: writer blocks on the row lock and then re-evaluates its arms against what the first writer
+#: committed (Postgres re-checks the conflicting row rather than reusing the command's own
+#: snapshot). Measured with two real connections — 32 concurrent bookings on a fresh actor give
+#: exactly (32, 320), 32 on a 25-hour-old row give (32, 320) with the reset applied *once*, and a
+#: booking made while another transaction holds the row survives that transaction's commit. Under
+#: the snapshot reading this comment used to assert, every one of those would have lost updates.
+#: `tests/test_budget_window.py` pins it, because the whole design rests on it and nothing in this
+#: repository owns the behaviour.
 _BOOK = """
     INSERT INTO budget_usage (actor, window_start, turns, tokens)
     VALUES (%(actor)s, now(), 1, %(tokens)s)

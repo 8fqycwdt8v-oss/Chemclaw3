@@ -99,7 +99,8 @@ things did not, and each was found by building rather than by reading:
   coincidence; the first rule without one read a metric named in prose as alerted.
 - `budget_usage` reaching `session_store._ACTOR_SCOPED_ONLY` surfaced that a `session_id` predicate
   there would have made "delete the conversation" a free quota reset.
-- My own absence test for D scanned 18% of the file it was guarding. Rewritten over the AST and
+- My own absence test for D scanned a sixth of the file it was guarding (16.6%; it shipped here
+  saying 18%, measured against the file mid-development). Rewritten over the AST and
   proven by planting a violation where the first version could not see.
 
 **Two mistakes of mine worth recording.** A `git checkout` meant to revert a probe reverted an

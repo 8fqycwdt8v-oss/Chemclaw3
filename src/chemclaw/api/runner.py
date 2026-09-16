@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import psycopg
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 
 from chemclaw.agent.audit import default_audit_sink
 from chemclaw.agent.authz import (
@@ -438,66 +438,145 @@ async def run_turn(
                     carry=cap_carry,
                 ):
                     yield event
-            capped = _loop_cap_event(session, ledger)
-            if capped is not None:
-                yield capped
-            overspent = _spend_cap_event(session, ledger)
-            if overspent is not None:
-                yield overspent
-            silent = _empty_answer_event(session, tool_trace, ledger)
-            if silent is not None:
-                yield silent
-                # **`return`, not fall through**, which is what this did. `events.py` names the
-                # two cap errors as the ones that share their turn with an answer, and
-                # falling through broke that for `empty_answer` in three ways at once: the client
-                # got an `AnswerEvent` whose text is `""` (the reference page renders it as an empty
-                # assistant bubble), `build_answer_event` spent a judge call under
-                # `verifier_enabled` grading an empty string, and `answered = True` reached
-                # `record_turn_cost(completed=answered)` — so the cost ledger booked "the user got
-                # an answer for the money" for precisely the silent-death turn that branch exists to
-                # name. The teardown below still books the spend and the duration, which is right:
-                # the turn cost what it cost.
-                return
-            # Before the answer, because the answer is the turn's final event: a chemist reading
-            # "review the plan and approve it" in the answer text used to have nothing to act on —
-            # the decision routes and the surface's approval card both existed, and no turn ever
-            # emitted the event that connects them.
-            if plan_gated:
-                pending = await _pending_plan_approval(session.session_id)
-                if pending is not None:
-                    yield pending
-            answer = await build_answer_event(
-                ledger.answer_text,
-                tool_trace.outputs,
-                tool_trace.called_tools,
-            )
-            # **The flagged answer goes back for another pass, and nothing used to do that.**
-            # `agent/verifier.py` marks an answer `review_required` and
-            # `D-2026-08-16-a-second-judge-is-a-second-answer-about-the-same-answer` concedes what
-            # happened next: "Nothing routes a flagged answer back for another pass." Looped here
-            # rather than in a middleware because the verdict is produced *outside* the graph — the
-            # graph has returned by this line — and because the rounds must be bounded by something
-            # a chemist's own follow-up resets, which a per-turn local is and a state channel is
-            # not. Off at `answer_review_max_rounds = 0`.
-            rounds = 0
-            while answer.review_required and rounds < settings.answer_review_max_rounds:
-                rounds += 1
-                async for event in _revise_answer(
-                    graph,
-                    config=graph_config,
-                    trace=tool_trace,
-                    ledger=ledger,
-                    carry=cap_carry,
-                    answer=answer,
-                ):
+                # **Everything from here to the end of the revision loop is inside the stack**, and
+                # that is a fix rather than a layout choice. `_open_turn_surface` entered one
+                # `HeldConnectorSession` per bundle *on this stack*, so the block's end is where
+                # every MCP tool dies — and the revision loop sat below it. Measured on a turn with
+                # one connector bound: `session OPENED -> tokens -> session CLOSED -> [revision] ->
+                # ToolFailedEvent`. In-process tools kept working, which is what made a pass whose
+                # entire purpose is to *re-ground* an answer fail silently at exactly the tools that
+                # hold the evidence.
+                for event in _cap_events(session, ledger):
                     yield event
-                answer = await build_answer_event(
+                silent = _empty_answer_event(session, tool_trace, ledger)
+                if silent is not None:
+                    yield silent
+                    # **`return`, not fall through**, which is what this did. `events.py` names
+                    # the two cap errors as the ones that share their turn with an answer, and
+                    # falling through broke that for `empty_answer` in three ways at once: the
+                    # client got an `AnswerEvent` whose text is `""` (the reference page renders it
+                    # as an empty assistant bubble), `build_answer_event` spent a judge call under
+                    # `verifier_enabled` grading an empty string, and `answered = True` reached
+                    # `record_turn_cost(completed=answered)` — so the cost ledger booked "the user
+                    # got an answer for the money" for precisely the silent-death turn that branch
+                    # exists to name. The teardown below still books the spend and the duration,
+                    # which is right: the turn cost what it cost.
+                    return
+                # Before the answer, because the answer is the turn's final event: a chemist reading
+                # "review the plan and approve it" in the answer text used to have nothing to act on
+                # — the decision routes and the surface's approval card both existed, and no turn
+                # ever emitted the event that connects them.
+                if plan_gated:
+                    pending = await _pending_plan_approval(session.session_id)
+                    if pending is not None:
+                        yield pending
+                answer, review = await build_answer_event(
                     ledger.answer_text,
                     tool_trace.outputs,
                     tool_trace.called_tools,
                 )
-            if rounds:
-                _record_review_rounds(session, answer, rounds)
+                # **The flagged answer goes back for another pass, and nothing used to do
+                # that.** `agent/verifier.py` marks an answer `review_required` and
+                # `D-2026-08-16-a-second-judge-is-a-second-answer-about-the-same-answer`
+                # concedes what happened next: "Nothing routes a flagged answer back for another
+                # pass." Looped here rather than in a middleware because the verdict is produced
+                # *outside* the graph — the run has returned by this line, even though its
+                # connector sessions are deliberately still open — and because the rounds must be
+                # bounded by something a chemist's own follow-up resets, which a per-turn local is
+                # and a state channel is not. Off at `answer_review_max_rounds = 0`.
+                #
+                # **`review.unsupported`, not `answer.unsupported_claims`.** The wire's list also
+                # carries the notes saying which check spoke, and a round driven by one of those is
+                # a round driven by nothing the model can act on: "verification did not run" quoted
+                # back as a claim to drop, every round, until the allowance is gone — so a judge
+                # outage multiplied every flagged turn's model spend by `max_rounds + 1` fleet-wide.
+                # The other shape is a low-confidence answer whose every claim *is* supported, which
+                # framed an empty block: the "just try again" prompt `_revision_message` exists to
+                # avoid. A verdict with nothing actionable in it ships marked, as it did before this
+                # loop existed.
+                rounds = 0
+                while (
+                    answer.review_required
+                    and review.unsupported
+                    and rounds < settings.answer_review_max_rounds
+                ):
+                    rounds += 1
+                    # **What the turn already has in hand, held across the round.** A revision
+                    # *replaces* an answer, so `_revise_answer` clears `answer_parts` before it
+                    # runs — and a round that then produces nothing (the model returns no text, or
+                    # the spend cap jumps the graph `to end`) used to leave the turn shipping `""`
+                    # booked as `outcome='answered', completed=True`: a blank bubble where the
+                    # un-looped turn shipped a usable flagged answer, with
+                    # `chemclaw_turn_empty_answers_total` flat because the emptiness guard had
+                    # already run against the *flagged* text one screen above.
+                    kept = list(ledger.answer_parts)
+                    # The message the thread ends on right now: the answer this round is out to
+                    # replace, and the mark everything the round adds sits after.
+                    retracted = await _thread_tip(graph, graph_config)
+                    try:
+                        async for event in _revise_answer(
+                            graph,
+                            config=graph_config,
+                            trace=tool_trace,
+                            ledger=ledger,
+                            carry=cap_carry,
+                            claims=review.unsupported,
+                        ):
+                            yield event
+                    except (GeneratorExit, asyncio.CancelledError):
+                        raise
+                    except Exception:
+                        # **A revision that raises must not cost the turn the answer it had.** The
+                        # round was unwrapped, so a gateway 503 on the *second* call propagated to
+                        # the handler below and the chemist got a generic internal error instead of
+                        # the complete, already-graded answer sitting in `answer` — and
+                        # `_record_review_rounds` never ran, so the exhaustion counter was blind to
+                        # the whole class. Logged with the traceback, counted as an exhausted round,
+                        # and the held answer ships.
+                        logger.exception(
+                            "revision %d for session %s failed; the answer held from before the "
+                            "round goes out unchanged",
+                            rounds,
+                            session.session_id,
+                        )
+                        ledger.answer_parts[:] = kept
+                        # The run that produced the answer being shipped *did* return, so the
+                        # rollback gate must not read this turn as half-written on a later
+                        # teardown; `_revise_answer` cleared the flag and never reached its reset.
+                        ledger.run_complete = True
+                        replaced = False
+                    else:
+                        replaced = bool(ledger.answer_text.strip())
+                        if not replaced:
+                            logger.warning(
+                                "revision %d for session %s produced no text; the previous answer "
+                                "is restored and the loop stops",
+                                rounds,
+                                session.session_id,
+                            )
+                            ledger.answer_parts[:] = kept
+                    # After the outcome is known, because what the thread must end on is the answer
+                    # that ships — which is this round's only when the round produced one.
+                    await _settle_revision_thread(
+                        graph, graph_config, retracted=retracted, replaced=replaced
+                    )
+                    if not replaced:
+                        break
+                    answer, review = await build_answer_event(
+                        ledger.answer_text,
+                        tool_trace.outputs,
+                        tool_trace.called_tools,
+                    )
+                if rounds:
+                    _record_review_rounds(session, answer, rounds)
+            # **Asked again, because a cap can fire inside a revision.** Both guards were evaluated
+            # once, above the loop, so a turn whose second model call tripped the loop or spend cap
+            # emitted no `ErrorEvent` at all and booked `outcome='answered', completed=True`. The
+            # caps always *enforced* through the shared `cap_carry`; what they could not do is
+            # report. Each event is announced once — `_cap_events` reads the ledger flag the first
+            # ask set, so the pre-loop ask and this one cannot both speak.
+            for event in _cap_events(session, ledger):
+                yield event
             await _record_transcript(
                 history, session, user_message, ledger.answer_text, ledger.exchanges
             )
@@ -1089,7 +1168,7 @@ async def _revise_answer(
     trace: ToolCallTrace,
     ledger: _TurnLedger,
     carry: dict[str, Any],
-    answer: AnswerEvent,
+    claims: Sequence[str],
 ) -> AsyncIterator[Event]:
     """Run one revision pass over an answer the verifier flagged, in the same turn.
 
@@ -1111,6 +1190,23 @@ async def _revise_answer(
     verdict, but they quote the model's prose back at it, and prose that reaches a model inside an
     instruction is prose that can instruct — the discipline `_job_results_message` follows for the
     same reason one line over.
+
+    **What this round leaves on the checkpointed thread is the caller's to settle**, because only
+    the caller knows whether the round was worth anything — see `_settle_revision_thread`. This
+    function deliberately does not clean up after itself: a round that raises leaves its prompt
+    behind exactly as one that succeeds does, and the two want opposite withdrawals.
+
+    Args:
+        graph: This turn's compiled graph — the *same* one, so the revision sees the conversation
+            it is revising.
+        config: The turn's graph config, carrying the thread id and the step ceiling.
+        trace: The turn's tool-call trace, so a tool the revision runs is announced and scored
+            like any other.
+        ledger: The turn's ledger; its `answer_parts` are replaced by this pass.
+        carry: The caps' per-turn carry, so a revision spends the turn's allowance rather than a
+            fresh one.
+        claims: The unsupported claims to name — `TurnReview.unsupported`, never the wire's merged
+            `unsupported_claims`, which also carries notes about which check spoke.
     """
     ledger.run_complete = False
     ledger.answer_parts.clear()
@@ -1118,7 +1214,7 @@ async def _revise_answer(
     async for event in _stream_into(
         graph_events(
             graph,
-            _revision_message(answer),
+            _revision_message(claims),
             config=config,
             trace=trace,
             # A no-op for the reason the resume gives: a revision that fed its own job ids back into
@@ -1134,20 +1230,97 @@ async def _revise_answer(
     ledger.run_complete = True
 
 
-def _revision_message(answer: AnswerEvent) -> str:
+async def _thread_tip(graph: Any, config: dict[str, Any]) -> str | None:
+    """The id of the message this thread currently ends on, or `None` off a durable thread.
+
+    `None` covers the deployment that keeps no checkpointer (`_turn_checkpointer` returns one only
+    on the Postgres store): there is no persisted thread to leave anything on, so there is nothing
+    for `_forget_revision_prompt` to withdraw either.
+    """
+    if getattr(graph, "checkpointer", None) is None:
+        return None
+    state = await graph.aget_state(config)
+    messages = state.values.get("messages", []) if state.values else []
+    return str(messages[-1].id) if messages else None
+
+
+async def _settle_revision_thread(
+    graph: Any, config: dict[str, Any], *, retracted: str | None, replaced: bool
+) -> None:
+    """Leave the checkpointed thread ending on the answer that ships, and on nothing fabricated.
+
+    A revision is this system talking to itself. `turn_input` makes `_revision_message` a
+    `("user", …)` message and the checkpointer persists it, so without this the chemist's *next*
+    turn opened on the retracted `ai` claim, then a `human` message they never wrote, then their
+    real question — while `ledger.exchanges` collects only tool-bearing messages, so
+    `session_messages` had neither. The transcript and the model's own record of one conversation
+    disagreed, uncounted, and the claim this system had just rejected stayed restatable for the
+    rest of the conversation.
+
+    **Two withdrawals, because a round that bought nothing is the opposite case.** When the round
+    produced an answer, that answer is what ships and the retracted one plus the prompt come off.
+    When it did not — the model returned no text, the spend cap jumped the graph `to end`, or the
+    call raised — the *retracted* answer is what ships, so everything the round added comes off
+    instead and the thread is exactly what it was before the round. Either way the invariant is the
+    same: the thread ends on the answer the chemist was given, and carries no message they did not
+    write. Removing the round's additions as a whole contiguous run is also what keeps the thread
+    legal — an `AIMessage` carrying `tool_calls` whose `ToolMessage` had been dropped is a thread
+    no provider accepts.
+
+    Removal rather than counting the divergence: `chemclaw_transcript_thread_divergence_total`
+    exists for a teardown landing between two writes, which is an accident nobody can undo. This is
+    a divergence this code creates on purpose and can therefore simply not create.
+
+    Args:
+        graph: The turn's compiled graph, whose checkpointer holds the thread.
+        config: The turn's graph config, naming the thread to withdraw from.
+        retracted: The message the thread ended on before the round, from `_thread_tip`. `None`
+            means there is no durable thread and nothing to do.
+        replaced: Whether the round produced the answer that is about to ship.
+    """
+    if retracted is None:
+        return
+    state = await graph.aget_state(config)
+    messages = list(state.values.get("messages", []) if state.values else [])
+    ids = [str(message.id) for message in messages]
+    if retracted not in ids:
+        # The tip moved out from under us — a compaction, or a thread this turn does not own.
+        # Withdrawing by position from here would take somebody else's message, so nothing is.
+        logger.warning("the revised thread no longer carries %s; nothing is withdrawn", retracted)
+        return
+    added = messages[ids.index(retracted) + 1 :]
+    if replaced:
+        # The one `human` message the round adds is the prompt `_revision_message` wrote: a real
+        # user message cannot arrive mid-turn on this thread.
+        prompt = [str(message.id) for message in added if message.type == "human"]
+        drop = [retracted, *prompt]
+    else:
+        drop = [str(message.id) for message in added]
+    if not drop:
+        return
+    await graph.aupdate_state(config, {"messages": [RemoveMessage(id=dropped) for dropped in drop]})
+
+
+def _revision_message(claims: Sequence[str]) -> str:
     """What the model is told about its own flagged answer, worded and framed.
 
     A function of its own for the reason `_job_results_message` is one: this text is the decision
     the revision carries. It names the claims rather than saying "try again", because a revision
     prompt with no specifics measures nothing and licenses the model to reword instead of reground.
+
+    Takes the claims rather than the `AnswerEvent` they came from, because that event's
+    `unsupported_claims` is the *merged* list a reviewer reads — findings plus notes saying which
+    check spoke — and a note about the check is not a claim the model can drop. The caller passes
+    `TurnReview.unsupported` and enters the loop only when it is non-empty, so this is never handed
+    an empty block.
     """
-    claims = "\n".join(f"- {claim}" for claim in answer.unsupported_claims)
+    named = "\n".join(f"- {claim}" for claim in claims)
     return (
         "Your previous answer was checked against the evidence this turn actually retrieved, and "
         "the claims below are not supported by it. Answer again: drop or correct each one, cite "
         "the evidence for what you keep, and say plainly what the evidence does not settle rather "
         "than filling the gap. Do not restate the previous answer.\n"
-        + frame_untrusted(claims, note_id="unsupported-claims")
+        + frame_untrusted(named, note_id="unsupported-claims")
     )
 
 
@@ -1161,7 +1334,15 @@ def _record_review_rounds(session: TurnSession, answer: AnswerEvent, rounds: int
     `D-2026-08-16` found `RubricMiddleware` lacking: its `_finalize_evaluation` rewrites the result
     to `max_iterations_reached` and mutates no message, so a grader outage ships every answer
     ungraded with a log line nothing reads.
+
+    **The denominator lives here, not at the call site**, so it cannot drift from the numerator it
+    is divided by: this function runs exactly once per turn that entered the loop — including the
+    turns that broke out because a round raised or produced nothing, which still tried and still
+    spent — and `chemclaw_answer_review_exhausted_total` is incremented from inside it. Dividing
+    exhaustions by `chemclaw_answer_revisions_total` compared a per-turn count with a per-*pass*
+    one, which went silent at total failure for every `answer_review_max_rounds` above 1.
     """
+    METRICS.increment("chemclaw_answer_review_turns_total")
     if answer.review_required:
         METRICS.increment("chemclaw_answer_review_exhausted_total")
         logger.warning(
@@ -1178,6 +1359,24 @@ def _record_review_rounds(session: TurnSession, answer: AnswerEvent, rounds: int
         )
 
 
+def _cap_events(session: TurnSession, ledger: _TurnLedger) -> Iterator[ErrorEvent]:
+    """Whichever of the turn's two guards has fired and not already been announced.
+
+    Asked twice per turn — once when the graph run returns, once after the revision loop — because
+    a cap can trip in either, and the second ask is the one a revision needs: the guards were
+    evaluated only before the loop, so a cap tripped by the *second* model call emitted nothing and
+    the turn booked `outcome='answered', completed=True`. Enforcement was never the gap (both caps
+    run in-graph off the shared `cap_carry`); reporting was.
+
+    The two helpers below return `None` once they have spoken, so "asked twice" cannot become "said
+    twice" — which is what a surface reading two `loop_cap_reached` events for one turn would have
+    to reconcile.
+    """
+    for event in (_loop_cap_event(session, ledger), _spend_cap_event(session, ledger)):
+        if event is not None:
+            yield event
+
+
 def _loop_cap_event(session: TurnSession, ledger: _TurnLedger) -> ErrorEvent | None:
     """Say out loud that the runaway guard fired, or `None` if it did not.
 
@@ -1191,7 +1390,9 @@ def _loop_cap_event(session: TurnSession, ledger: _TurnLedger) -> ErrorEvent | N
     completed. `loop_cap_reached` is one of the two errors `events.py` names as sharing its turn
     with an answer; `_spend_cap_event` is the other.
     """
-    if not loop_hit_cap():
+    # Already announced by an earlier ask: `_cap_events` runs before the revision loop and again
+    # after it, and one firing is one event.
+    if ledger.loop_capped or not loop_hit_cap():
         return None
     # Marked on the ledger as well as counted, because the teardown reads it after
     # `_turn_ambient` has torn the watch down — `loop_hit_cap()` would answer False by then.
@@ -1233,7 +1434,9 @@ def _spend_cap_event(session: TurnSession, ledger: _TurnLedger) -> ErrorEvent | 
 
     Not retryable unchanged, for `_loop_cap_event`'s reason: the same request spends the same way.
     """
-    if not spend_hit_cap():
+    # `_loop_cap_event`'s guard, for its reason: asked once before the revision loop and once
+    # after, and a cap that has already spoken says nothing more.
+    if ledger.spend_capped or not spend_hit_cap():
         return None
     # Marked on the ledger as well as counted, because the teardown reads it after `_turn_ambient`
     # has torn the watch down — `spend_hit_cap()` would answer False by then.
