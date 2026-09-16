@@ -471,23 +471,6 @@ topic).
       `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability`, which deleted 1,442 lines of
       exactly this.
 
-- [ ] **A third reducer sits above the compaction group and no prose mentions it** — [S], found
-      2026-09-04 while measuring the context-window row. deepagents' `FilesystemMiddleware`
-      silently offloads oversized *message content*: probed, a 500,001-character `HumanMessage`
-      reached the model as a 1,293-character pointer reading "Message content too large and was
-      saved to the filesystem at: /conversation_history/….md". `agent/compaction.py` describes two
-      reducers — upstream's `ClearToolUsesEdit` for tool results and this repository's conversation
-      window — and this is a third, above both, that none of its prose names.
-      Two consequences worth separating before anything is built. It means a single oversized
-      group can no longer be the unreducible shape, so `chemclaw_context_unreducible_total`'s
-      reading depends on a mechanism nobody here decided on. And an offloaded message becomes a
-      *file*, which is the surface
-      `D-2026-09-04-a-helpers-file-crosses-back-and-stays` just finished defanging on read — worth
-      checking whether the pointer's own path and the offloaded body round-trip through that
-      treatment, since the content is a chemist's message rather than a helper's notes.
-      One probe, not a measurement pass: what is owed first is the threshold, whether it is
-      configurable, and whether it fires on any real turn.
-
 - [ ] **A corpus read is ~40 kB of memory per entry, and only 25 kB of it is boundable** — [M],
       measured 2026-09-14
       (`D-2026-09-14-the-memory-corpus-is-a-memory-bound-not-a-time-bound`), and it replaces the
