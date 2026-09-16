@@ -2992,3 +2992,24 @@ all.** That header now records what was observed with the date it was observed, 
 `Chemclaw3-mcp/CLAUDE.md` records this family's port assignments — because a status in a file no
 test here can read goes stale on somebody else's merge schedule, and the present tense claims
 otherwise.
+
+## A subagent that mutation-tests shares my working tree, and its restore is a `git checkout`
+
+**2026-09-16.** I fanned out three fresh-context reviewers over one branch and kept editing while
+they ran. One of them was doing mutation testing on `durable/template_job.py` — plant a defect, run
+the suite, restore from a `.orig` copy it had taken at spawn time. Its restore ran over the edits I
+had made since, and `git status` showed the file as modified, so nothing looked wrong: the change I
+had just written, ruff-formatted and type-checked had simply stopped existing, and I only noticed
+because a `mypy` error named a field the file no longer declared. When I stopped the agent it had
+been interrupted mid-restore, leaving `if False:  # MUTATION` in the shipped file — a planted defect
+one commit away from being merged.
+
+**A subagent is not isolated from my working tree.** It has the same filesystem and the same git
+index. Its scratch copy, its `git checkout`, its `git stash` are all operations on *my* files.
+
+**Rules.** A reviewer asked to drive or mutate code gets a worktree of its own, or I do not edit the
+files it was given while it runs. If neither is arranged, the files under review are read-only for
+me until every reviewer has handed back. And when a reviewer is stopped mid-flight, `git diff` the
+files it was scoped to before doing anything else — a mutation left behind is indistinguishable from
+my own work in a `git status` listing, and it is the one kind of leftover that is *designed* to make
+the tests pass while the code is wrong.

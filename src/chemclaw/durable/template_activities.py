@@ -801,9 +801,19 @@ async def run_agent_step(step: AgentStepInput) -> AgentStepResult | str:
 
     **So the step is ungated and the step is read-only by default**, which is the same sentence from
     both ends. The plan gate exists to put a human between an autonomously-chosen write and its
-    execution; a template already has that human — the author of a reviewed, git-committed file that
-    nothing at run time can produce — so gating it again would only ask for an approval of a plan
-    nobody wrote. What the gate *also* did was bound the blast radius of a model improvising inside
+    execution; a template already has that human — the author of a reviewed, git-committed file — so
+    gating it again would only ask for an approval of a plan nobody wrote.
+
+    **The premise this used to name is gone and the exemption is not.** `D-2026-08-12` rested it on
+    "nothing at run time can produce one", and `agent/workflow_tools.compose_workflow` produces one
+    — so this activity, which is where an agent step actually executes, was arguing from a false
+    premise. What holds it up now is `templates/composed.py::authored_problems`: an agent-authored
+    document may name no side-effecting tool and no `write_tools`, ever, and no approval lifts
+    either, so it cannot contain the write the gate exists to catch. A durable `job` step is the one
+    thing a person can add to it, and `templates/composed.unapproved_jobs` is where that is decided
+    — outside this activity, before anything is queued.
+
+    What the gate *also* did was bound the blast radius of a model improvising inside
     the step, and that half is kept structurally: `step_profile` hands this turn a surface with
     every side-effecting tool the step did not declare removed from it, so the graph is built
     without them.

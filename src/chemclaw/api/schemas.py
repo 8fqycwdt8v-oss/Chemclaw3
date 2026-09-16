@@ -203,15 +203,53 @@ class WorkflowListOut(BaseModel):
     truncated: bool = False
 
 
+class WorkflowStepOut(BaseModel):
+    """One step of a composed workflow, as the person approving it needs to see it.
+
+    Ids alone are what this used to be, and they are not a procedure: a person shown
+    `["rank", "say"]` and asked to authorize real compute has approved a name the model chose.
+    That is `D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool` one layer over —
+    an approval that names no job authorizes every job — and it contradicted the sentence the
+    widening rests on, that "the job's name and its arguments are in the document they approved".
+    """
+
+    id: str
+    kind: str
+    # The tool or job this step calls, empty for a reasoning step. **The field that makes an
+    # approval an approval**: it is what the run will actually invoke.
+    calls: str = ""
+    # The arguments as written, `${…}` references and all, so a reader sees what is passed and
+    # what is carried from an earlier step.
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    # An agent step's prompt. Shown because a reasoning step is where the model's judgment enters
+    # a procedure a person is being asked to stand behind.
+    prompt: str = ""
+
+
 class WorkflowApprovalOut(BaseModel):
-    """What a person is being asked to approve: the steps, and which of them launch jobs."""
+    """What a person is being asked to approve: the procedure, not a list of names."""
 
     name: str
     summary: str = ""
-    # Every step id in order, so the caller renders the procedure rather than a name.
-    steps: list[str] = Field(default_factory=list)
-    # The subset that costs compute — what approving this actually authorizes.
+    description: str = ""
+    # The whole procedure in order, each step naming what it calls and with what.
+    steps: list[WorkflowStepOut] = Field(default_factory=list)
+    # The ids of the subset that costs compute — what approving this actually releases.
     job_steps: list[str] = Field(default_factory=list)
+    # Whether *this* version's job steps may run. Derived like `WorkflowSummaryOut.approved`, and
+    # for a sharper reason here: `approved_by` and `approved_at` describe whichever version
+    # `approved_fingerprint` names, which a re-composed document no longer is. A client rendering
+    # the two person-fields on their own would show "approved by Alice" over a document Alice never
+    # saw — so the comparison ships as a field rather than as something every client re-derives.
+    approved: bool = False
+    # Which conversation this procedure was composed in, so an approver looking at steps they did
+    # not write can find the exchange that asked for them. Empty off the service path, where there
+    # is no session.
+    composed_in_session: str = ""
+    # Who approved that version and when, kept beside `approved_fingerprint` rather than alone.
+    # Read at all so the audit the row *is* has a reader: a column written and never selected is an
+    # attribution nothing can see.
+    approved_at: datetime | None = None
     # What to post back. The approval binds to this, so a client that renders one version and posts
     # another gets a 409 rather than a silent approval of the version it did not show.
     fingerprint: str = ""

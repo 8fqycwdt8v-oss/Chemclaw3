@@ -68,7 +68,7 @@ _PLAN_COMMANDS = {"/plan", "/approve"}
 # strings in a dev deployment (`admin@localhost`, `dev-user`, `service-account`), so a workflow
 # composed at this prompt was invisible to the HTTP route and its job steps could never be
 # released. Driven before this command existed: compose here, `GET /workflows/{name}` answers 404.
-_WORKFLOW_COMMANDS = {"/workflows", "/approve-workflow"}
+_WORKFLOW_COMMANDS = {"/workflows", "/approve-workflow", "/forget-workflow"}
 
 # The session id every CLI run uses. A fixed name, not a fresh uuid: it is the checkpointer's
 # `thread_id`, so under `session_store=postgres` it makes a terminal session resumable across
@@ -393,26 +393,45 @@ async def _workflow_command(prompt: str, actor: str) -> str:
     invisible to the HTTP route, and its job steps could never be released. Driven before this
     existed: compose here, then `GET /workflows/{name}` answers 404.
 
-    `/approve-workflow` binds to the document as it stands *now*, the way `/approve` binds to the
-    current plan: there is no fingerprint to mistype at a terminal, and no window for the document
-    to change between being read and being approved, because the person doing both is this terminal.
+    **`/approve-workflow` is read-then-approve, in two typed lines, and the second binds to what
+    the first showed.** It used to approve the document as it stands *now*, argued from "the person
+    reading it and the person approving it are the same terminal" — which is how `/approve` binds to
+    a plan and is false here. The **agent** also acts in this terminal, under this same owner,
+    between the two commands: driven, one turn re-composed `triage` between `/workflows` and
+    `/approve-workflow triage`, and the chemist who read `rank_species(${inputs.smiles})` authorised
+    `sample_conformers("something-else-entirely")`. So the fingerprint the HTTP route requires is
+    required here too, and typing it is the act of having read what it names.
+
+    **And what the first line prints is the procedure, not its step ids**, which is the same
+    correction `GET /workflows/{name}` needed: `D-2026-09-12-an-approval-that-names-no-tool-
+    authorizes-every-tool` one layer over. Before it, the only screen this surface had was
+    `/workflows` — counts and ids — so a person could authorise real compute without the call ever
+    having been displayed. `/workflows` still prints counts and ids, deliberately: it is how you
+    choose one, the way `WorkflowSummaryOut` is, and the approval screen is the other command.
+
+    `/forget-workflow <name>` is the other half of the cap: at `MAX_PER_OWNER` the only way to make
+    room was to re-compose over a name, which destroys the document anyway and leaves a row whose
+    name lies about its contents.
 
     Args:
-        prompt: The typed line — `/workflows`, or `/approve-workflow <name>`.
+        prompt: The typed line — `/workflows`, `/approve-workflow <name> [<fingerprint>]`, or
+            `/forget-workflow <name>`.
         actor: This session's ambient actor. Required and never defaulted, for the reason
             `_plan_command`'s `actor` is: it is recorded as *who approved*, and an anonymous
             approval is not a safe fallback but one that must never be written.
 
     Returns:
-        The line to print on stderr.
+        The lines to print on stderr.
     """
     from chemclaw.durable.template_job import template_fingerprint
     from chemclaw.templates.composed import default_composed_store, job_steps, unapproved_jobs
 
     store = default_composed_store()
     command, _, argument = prompt.partition(" ")
-    name = argument.strip()
-    if command.lower() == "/workflows":
+    name, _, posted = argument.strip().partition(" ")
+    posted = posted.strip()
+    command = command.lower()
+    if command == "/workflows":
         rows = await store.list_for(actor)
         if not rows:
             return "(no composed workflows)"
@@ -427,22 +446,74 @@ async def _workflow_command(prompt: str, actor: str) -> str:
             lines.append(f"{row.name}  [{state}]  {len(row.document.steps)} step(s){detail}")
         return "\n".join(lines)
     if not name:
-        return "usage: /approve-workflow <name>  (see /workflows)"
+        return f"usage: {command} <name>  (see /workflows)"
     workflow = await store.get(actor, name)
     if workflow is None:
         available = [row.name for row in await store.list_for(actor)]
         return f"no composed workflow called {name!r}" + (
             f"; you have {available}" if available else ""
         )
+    if command == "/forget-workflow":
+        if not await store.forget(actor, name):
+            return f"no composed workflow called {name!r}"
+        return f"forgot {name!r}."
     fingerprint = template_fingerprint(workflow.document)
-    if not await store.approve(actor, name, fingerprint, actor):
-        return f"no composed workflow called {name!r}"
     jobs = job_steps(workflow.document)
+    if not posted:
+        # The read half. Every step is rendered, not just the ones that launch jobs: what an
+        # approval authorises is the *procedure*, and a reader shown only its job steps cannot see
+        # what feeds their arguments.
+        return "\n".join(
+            [
+                f"{name!r} — {workflow.summary or '(no summary)'}",
+                *_workflow_steps(workflow.document),
+            ]
+            + [
+                (
+                    f"approving releases job step(s) {jobs}."
+                    if jobs
+                    else "it has no job steps, so there is nothing to release."
+                ),
+                f"to approve exactly this: /approve-workflow {name} {fingerprint}",
+            ]
+        )
+    if posted != fingerprint:
+        # The 409 this surface did not have. A workflow that changed between being shown and being
+        # approved is a different procedure, and the person typed the old one's hash.
+        return (
+            f"{name!r} changed since it was shown — you typed {posted!r} and it is now "
+            f"{fingerprint!r}. Read it again with `/approve-workflow {name}` before approving."
+        )
+    if not await store.approve(actor, name, fingerprint):
+        return f"no composed workflow called {name!r}"
     return (
-        f"approved {name!r} as it stands"
+        f"approved {name!r} at {fingerprint}"
         + (f" — job step(s) {jobs} may now run" if jobs else " (it has no job steps to release)")
         + ". Composing it again needs approving again."
     )
+
+
+def _workflow_steps(document: Any) -> list[str]:
+    """One line per step, naming what it calls and with what.
+
+    Through `composed.step_call`, the same reading `api/routes/workflows._step_out` renders the
+    HTTP approval screen from — one definition, so the two surfaces of one approval cannot come to
+    show a person different things.
+
+    Args:
+        document: The resolved template being approved.
+
+    Returns:
+        The step lines, in declared order.
+    """
+    from chemclaw.templates.composed import step_call
+
+    lines = []
+    for step in document.steps:
+        calls, arguments, prompt = step_call(step)
+        detail = f"{calls}({arguments})" if calls else prompt
+        lines.append(f"  {step.id}  [{step.kind}]  {detail}")
+    return lines
 
 
 async def _plan_command(prompt: str, actor: str, saver: Any) -> str:

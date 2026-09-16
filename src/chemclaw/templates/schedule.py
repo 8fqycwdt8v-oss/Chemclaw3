@@ -59,6 +59,11 @@ def dependencies(step: Step) -> frozenset[str]:
 def schedule(template: Template) -> tuple[tuple[Step, ...], ...]:
     """`template`'s steps grouped into waves that may each run concurrently.
 
+    **May, not will.** How much of a wave is actually in flight is
+    `TemplateRunInput.max_parallel_steps` — `TemplateWorkflow._run_wave` dispatches a wave in
+    batches of that width, and `agent/template_surface.run_ceiling_problems` sizes it the same way.
+    This module says which steps *could* run together; it does not decide how many do.
+
     Wave *k* is every step all of whose dependencies completed in waves before *k*. A template
     whose steps chain — which is seven of the nine shipped ones — yields one step per wave and runs
     exactly as it did before this module existed, which is the property that makes this safe to
@@ -88,9 +93,12 @@ def schedule(template: Template) -> tuple[tuple[Step, ...], ...]:
 
 
 def widest(template: Template) -> int:
-    """How many steps this template ever has in flight at once.
+    """How wide this template's widest wave is.
 
     Read by the tests that assert a chained template did not silently gain concurrency, and by the
-    ceiling arithmetic's own explanation of why a sum over waves is not a sum over steps.
+    ceiling arithmetic's own explanation of why a sum over waves is not a sum over steps. **Not
+    "how many it has in flight at once"**, which is what this said and is the same optimism the
+    ceiling arithmetic carried: a wave of 501 has at most `max_parallel_steps` in flight, and the
+    difference is exactly what `ceil(width / limit)` counts.
     """
     return max((len(wave) for wave in schedule(template)), default=0)

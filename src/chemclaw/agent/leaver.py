@@ -272,6 +272,16 @@ _ERASE: tuple[tuple[str, str], ...] = (
     # reach it (the store resolves `(owner, name)` against the caller). So it goes with the
     # conversation rather than staying as an attribution — the same tier, and the same
     # argument, as the preference row beside it.
+    #
+    # **`approved_by` names a person too, and this predicate reaches it**, which is a claim worth
+    # making explicitly rather than leaving to the table-level match the completeness test uses.
+    # That column can only ever hold the *owner*: `ComposedStore.approve` takes no approver, and
+    # `POST /workflows/{name}/approval` resolves the workflow against the caller's own rows, so a
+    # name that is not yours is a 404 and there is no third party to record. A departing approver
+    # is therefore a departing owner, and `WHERE owner = ANY(...)` takes their approval with their
+    # workflow. It had a fourth parameter once, and with it this comment would have been a position
+    # taken by omission — a person in a column an erase predicate could not see, exactly the
+    # `note_proposals.decided_by` defect `tests/test_leaver.py` was written for.
     ("composed_workflows", "DELETE FROM composed_workflows WHERE owner = ANY(%(actors)s)"),
     ("session_owners", "DELETE FROM session_owners WHERE owner = ANY(%(actors)s)"),
 )

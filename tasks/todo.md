@@ -1221,3 +1221,58 @@ Also worth recording because it cost time and was not mine:
 `test_no_adr_cites_a_commit_a_squash_will_strand` fails on a **shallow** checkout, naming nine ADRs
 nobody touched. `git fetch --unshallow` turns it green. Its sibling in the same file skips with that
 exact reason; this one has no such guard.
+
+## Wave G — four fresh-context reviews of everything waves D–F built (2026-09-16)
+
+Three reviewers were run against the composed-workflow seam with Docker, Postgres and Temporal up,
+each asked to drive rather than read; a fourth pass swept the declarations. Two ADRs record the
+result: `D-2026-09-16-a-wave-costs-its-slowest-member-once-per-batch` and
+`D-2026-09-16-an-approval-binds-to-the-version-that-was-shown-on-every-surface`.
+
+**The security argument held.** Nothing broke the gate: the `unapproved_jobs` check is strictly
+before `start_template_run` with no TOCTOU, the fingerprint covers every field including
+`write_tools`, a step naming both a tool and a job produces a `JobStep` and drops the tool, both
+composition tools are themselves side-effecting so no composed workflow can contain either, SQL
+owner scoping is exact, and an irreversible effect still fails closed inside an approved job.
+
+**What did not hold was the *surfaces*.** The same property was enforced on one path and merely
+described on another, three times over:
+
+- [x] The CLI approved "as it stands", argued from a premise the agent falsifies by acting in the
+      same terminal under the same owner. Read-then-bind now, with the procedure rendered.
+- [x] Two store backends disagreed about what a save may touch. Aligned on carrying an approval
+      forward: the agent's write must not erase the record of a person's decision, and the lapse is
+      the fingerprint's job. `GET` returns a derived `approved` so nothing renders a stale approver.
+- [x] Only one of two launchers validated its inputs. Moved into `start_template_run`.
+- [x] `run_ceiling_problems` sized a wave at one slow step however wide it is — 501 independent
+      steps passed the ceiling. `_batches` bounds the wave and `ceil(width / limit)` sizes it, from
+      one pinned number.
+- [x] `authored_problems` failed open on an unrecognised step kind.
+- [x] `approve` took an `approver` both callers satisfied with the owner, which left `leaver.py` a
+      person-column its predicate could not reach. Parameter removed.
+- [x] No delete: `DELETE /workflows/{name}` and `/forget-workflow`.
+- [x] The cap's guard read its own page size; `list_for` fetches one past the cap.
+- [x] `composed_workflows.session_id` had no reader in code; the approval screen is one now.
+- [x] Eight stale present-tense claims, each falsified by its own pull request, including the
+      plan-gate exemption argued from "nothing at run time can produce one" at the two places a
+      reader would look, and probe `ws-19` scoring the shipped behaviour as a fabrication.
+- [x] The wave scheduler and the resume path had no ADR at all, while the one merged decision that
+      discusses them declines both.
+
+### Review
+
+**What the reviewers got wrong, and it matters.** One reported that a departing *approver* who is
+not the owner is neither erased nor counted — a real gap in the shape of `note_proposals.decided_by`.
+It is unreachable: both callers of `approve` resolve against the caller's own rows, so `approved_by`
+can only be the owner. The finding was still worth acting on, because the *store* permitted the
+state the write path cannot produce. Removing the parameter is what turns "unreached" into
+"unrepresentable", and that is the difference the register test could not see.
+
+**The measurement that changed a design.** The 501-step case looked like a missing
+`MAX_COMPOSED_STEPS`. It is not: once a wave's cost stops assuming unbounded parallelism, the run
+ceiling that was already there refuses it, and a second number would have been a magic one. Fixing
+the arithmetic fixed the class; capping the document would have fixed the example.
+
+**The process failure is in `tasks/lessons.md`.** A reviewer mutation-testing `template_job.py`
+restored it from its own scratch copy over my edits, and when stopped mid-restore left
+`if False:  # MUTATION` in the file. A subagent shares this working tree.

@@ -30,7 +30,8 @@ Read-only; touches nothing.
 
 import importlib
 import inspect
-from typing import NamedTuple
+from math import ceil
+from typing import Any, NamedTuple
 
 from chemclaw.agent.profiles import registered_profile_names
 from chemclaw.connectors.registry import discovered as discovered_connectors
@@ -258,6 +259,46 @@ def step_problems(template: Template, surface: TemplateSurface | None = None) ->
     return problems
 
 
+def _wave_ceiling(
+    wave: tuple[Any, ...], ceilings: dict[str, tuple[float, str]], limit: int
+) -> float:
+    """What one wave may cost: its slowest member, once for each batch it takes.
+
+    Args:
+        wave: The steps that run together, in declared order.
+        ceilings: `settings.template_step_ceilings()`, one `(seconds, why)` per step kind.
+        limit: How many of a wave may be in flight at once — `orchestrator_max_parallel_children`,
+            which is also what `TemplateRunInput.max_parallel_steps` pins into the run.
+
+    Returns:
+        The wave's ceiling in seconds.
+    """
+    slowest = max(ceilings[step.kind][0] for step in wave)
+    return ceil(len(wave) / limit) * slowest
+
+
+def _wave_reason(wave: tuple[Any, ...], ceilings: dict[str, tuple[float, str]], limit: int) -> str:
+    """One wave, spelled so a reader adding the printed numbers gets the printed total.
+
+    The members used to be joined with `" + "`, which reads as addition and is wrong for a wave:
+    a two-`job` wave printed `survey=39,330s + survey2=39,330s` beside a total that counted one of
+    them. Concurrent members are joined with `" | "` inside brackets carrying the wave's own cost;
+    a wave of one prints as the bare step it is.
+
+    Args:
+        wave: The steps that run together, in declared order.
+        ceilings: `settings.template_step_ceilings()`.
+        limit: The per-wave concurrency bound.
+
+    Returns:
+        The wave as one term of the total.
+    """
+    members = " | ".join(f"{step.id}={ceilings[step.kind][0]:,.0f}s" for step in wave)
+    if len(wave) == 1:
+        return members
+    return f"[{_wave_ceiling(wave, ceilings, limit):,.0f}s: {members}]"
+
+
 def run_ceiling_problems(template: Template) -> list[str]:
     """Check that this deployment's run ceiling covers every step this template declares.
 
@@ -279,9 +320,20 @@ def run_ceiling_problems(template: Template) -> list[str]:
     out.
 
     **Summed over waves rather than over steps**, because `templates/schedule.py` runs a wave's
-    steps concurrently: a wave costs its slowest member. A flat sum is still sound — it can only
-    over-state — but an over-stating bound here *refuses a template that would have finished*, so
-    it is not the conservative choice it looks like.
+    steps concurrently: a wave costs its slowest member, once for each batch it takes. A flat sum
+    over steps is still sound — it can only over-state — but an over-stating bound here *refuses a
+    template that would have finished*, so it is not the conservative choice it looks like.
+
+    **And a wave does not cost one slow step however wide it is**, which is what this said until a
+    501-step document passed the ceiling as though the whole procedure cost 900 s. That arithmetic
+    is true only if every member is really in flight together, and no worker promises it. A wave is
+    dispatched in batches of `TemplateRunInput.max_parallel_steps` and sized as
+    `ceil(width / limit)` slow steps — the same number, pinned at launch from
+    `orchestrator_max_parallel_children`, so the bound the run enforces and the bound the launch
+    was checked against cannot drift apart. For a
+    reviewed `data/templates/` file the reviewer is the bound on width; an agent-authored document
+    reaches this arithmetic with nobody having looked at it
+    (`D-2026-09-16-a-wave-costs-its-slowest-member-once-per-batch`).
 
     Read by both `make template-validate` and `registry.unrunnable_reason`, so a file that cannot
     complete is refused at the gate *and* refused at launch rather than started and abandoned.
@@ -296,23 +348,30 @@ def run_ceiling_problems(template: Template) -> list[str]:
     # `KeyError` rather than a default: a step kind nobody sized here would otherwise be counted as
     # free, which is the silent direction. `template_step_ceilings` says so from the other side.
     #
-    # **Over waves, not over steps**, since `templates/schedule.py` runs a wave's steps together: a
-    # wave costs its slowest member, and the run costs the waves added up. It was a flat sum while
-    # the sequencer was strictly sequential, which is still *sound* — a sum is never below a
-    # wave-sum — but it is the wrong bound now, and the wrong bound here refuses a template that
-    # would finish. Measured on the two shipped templates with a concurrent wave, this is the
-    # difference between counting `screen_hazards` and `similar_molecules` once and twice.
+    # **Over waves, not over steps**, since `templates/schedule.py` runs a wave's steps together:
+    # the run costs the waves added up. It was a flat sum while the sequencer was strictly
+    # sequential, which is still *sound* — a sum is never below a wave-sum — but it is the wrong
+    # bound now, and the wrong bound here refuses a template that would finish. Measured on the two
+    # shipped templates with a concurrent wave, this is the difference between counting
+    # `screen_hazards` and `similar_molecules` once and twice.
     waves = schedule(template)
-    needed = sum(max(ceilings[step.kind][0] for step in wave) for wave in waves)
+    # **The same bound the run enforces, not an assumption about the worker.** A wave costs its
+    # slowest member *once per batch*, because `TemplateWorkflow._run_wave` runs it in batches of
+    # `max_parallel_steps` — pinned from this very setting at launch. Sizing a wave at one slow step
+    # regardless of width was optimistic in the direction that matters: a 501-step wave passed this
+    # ceiling as if it cost 900s, and no worker anywhere promises 501 activities at once.
+    limit = max(1, settings.orchestrator_max_parallel_children)
+    needed = sum(_wave_ceiling(wave, ceilings, limit) for wave in waves)
     if needed <= settings.template_run_timeout_seconds:
         return []
-    worst = "; ".join(
-        " + ".join(f"{step.id}={ceilings[step.kind][0]:,.0f}s" for step in wave) for wave in waves
-    )
     return [
         f"template {template.name!r} declares steps that cannot finish inside "
         f"template_run_timeout_seconds={settings.template_run_timeout_seconds:,.0f}: they may take "
-        f"{needed:,.0f}s in total ({worst}). A run that outlives that ceiling is terminated by "
+        f"{needed:,.0f}s in total "
+        f"({' + '.join(_wave_reason(wave, ceilings, limit) for wave in waves)}). Waves are added "
+        f"up; the steps inside one `[…]` run together at most "
+        f"{limit} at a time, so that wave costs its slowest member once per batch, not the sum of "
+        "its members. A run that outlives that ceiling is terminated by "
         "Temporal without its workflow code running, so the chemist is told nothing and no failure "
         "row is written. Raise template_run_timeout_seconds above the total, or shorten the "
         "procedure."

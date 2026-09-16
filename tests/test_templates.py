@@ -15,6 +15,7 @@ here; everything above it is sandbox-safe and always runs.
 
 import asyncio
 import json
+import re
 import subprocess
 import sys
 import time
@@ -324,12 +325,20 @@ def test_launching_validates_rather_than_passing_the_object_through(client: _Fak
 
     Without this the fix could be a `dict(params)`, which would forward whatever arrived and let a
     wrong-typed input reach a durable run that has already spent compute.
+
+    **Framed rather than raw**, since the validation moved into `start_template_run` so both
+    launchers share it: a raw `ValidationError` reaching a model is an unexpected-error result, and
+    what a caller needs is the declared inputs by name. The refusal is asserted by what it says, so
+    the message cannot quietly become useless while the test stays green.
     """
     tool = build_template_tool(
         _template(inputs=[{"name": "smiles", "type": "string", "description": "The molecule."}])
     )
-    with pytest.raises(ValidationError):
+    with pytest.raises(TemplateError) as raised:
         asyncio.run(tool(params={"wrong_field": "CCO"}))
+    assert "smiles" in str(raised.value)
+    assert "['smiles']" in str(raised.value), "the refusal has to name what the template declares"
+    assert not client.calls, "nothing may be queued for a launch that does not type-check"
 
 
 def test_launching_survives_the_frameworks_own_invocation_path(client: _FakeClient) -> None:
@@ -1400,6 +1409,108 @@ def test_a_template_that_cannot_finish_inside_the_run_ceiling_is_refused() -> No
     assert "j1=39,330s" in problems[0]
 
 
+def test_the_refusals_printed_terms_add_up_to_the_printed_total() -> None:
+    """A message explaining a ceiling must not invite arithmetic that contradicts its own total.
+
+    A wave's members were joined with `" + "`, which reads as addition and is wrong for steps that
+    run together: a two-`job` wave printed `survey=39,330s + survey2=39,330s` beside a total that
+    counted one of them, so a reader adding the printed numbers got 80,460 where the message said
+    79,560. Concurrent members are `" | "` inside brackets carrying the wave's own cost; a wave of
+    one prints as the bare step it is. Driven by adding up what the message actually prints.
+    """
+    # Two independent `job` steps (one wave) and a third reading the first (a second wave): wide
+    # enough to bracket, long enough to overflow. `_job_steps` gives one shape or the other.
+    steps = [
+        {"id": "j0", "kind": "job", "job": "rank_species", "arguments": {}},
+        {"id": "j1", "kind": "job", "job": "rank_species", "arguments": {}},
+        {
+            "id": "j2",
+            "kind": "job",
+            "job": "rank_species",
+            "arguments": {"species": "${steps.j0.result}"},
+        },
+        {"id": "report", "kind": "agent", "prompt": "sum it up"},
+    ]
+    problems = run_ceiling_problems(_template(steps=steps))
+    one_job = settings.template_step_ceilings()["job"][0]
+
+    assert len(problems) == 1
+    assert "j0=39,330s | j1=39,330s | report=900s" in problems[0], (
+        "concurrent members must not be joined with a separator that reads as addition"
+    )
+    assert f"[{one_job:,.0f}s: j0" in problems[0], "a wave has to state its own cost"
+    # **The arithmetic a reader would do, done here.** The breakdown is the bracketed expression;
+    # its `+`-separated terms are a wave's stated cost or a lone step's, and adding those has to
+    # give the stated total. Under the old separator it did not, which is the whole finding.
+    breakdown_match = re.search(r"take ([\d,]+)s in total \((.+?)\)\. Waves", problems[0])
+    assert breakdown_match is not None, f"the refusal no longer states a breakdown: {problems[0]}"
+    stated, breakdown = breakdown_match.groups()
+    # The first figure of a term is what that term costs: a bracketed wave states its own cost
+    # first, and a lone step's is its only figure.
+    terms = [
+        int(re.search(r"([\d,]+)s", term).group(1).replace(",", ""))  # type: ignore[union-attr]
+        for term in breakdown.split(" + ")
+    ]
+    assert sum(terms) == int(stated.replace(",", "")), (
+        f"the printed terms {terms} have to add up to the printed total {stated}"
+    )
+
+
+def test_a_wave_wider_than_the_deployment_runs_at_once_costs_more_than_one_step() -> None:
+    """A wave's ceiling is its slowest member *per batch*, not once however wide it is.
+
+    The old arithmetic sized any wave at one slow step, which is only true if every member is
+    really in flight together — and no worker promises that. Measured before this: 501 independent
+    `tool` steps passed the run ceiling as if the whole procedure cost 900s. A reviewed file's bound
+    is its reviewer; an agent-authored one reaches this arithmetic with nobody having looked.
+
+    The number that bounds it is the number that sizes it: `TemplateWorkflow._run_wave` runs a wave
+    in batches of `TemplateRunInput.max_parallel_steps`, pinned at launch from this same setting.
+    """
+    limit = settings.orchestrator_max_parallel_children
+    fits = [
+        {"id": f"t{i}", "kind": "tool", "tool": "enumerate_tautomers", "arguments": {}}
+        for i in range(limit)
+    ]
+    assert run_ceiling_problems(_template(steps=fits)) == [], (
+        "a wave no wider than the deployment runs at once still costs one step"
+    )
+
+    # Wide enough that `ceil(width / limit)` slow steps cannot fit, where one step trivially would.
+    batches_needed = int(settings.template_run_timeout_seconds // 900) + 2
+    wide = [
+        {"id": f"t{i}", "kind": "tool", "tool": "enumerate_tautomers", "arguments": {}}
+        for i in range(limit * batches_needed)
+    ]
+    problems = run_ceiling_problems(_template(steps=wide))
+
+    assert len(problems) == 1, "a wave nobody could run in one batch has to be refused"
+    assert f"at most {limit} at a time" in problems[0]
+
+
+def test_a_wave_is_dispatched_in_batches_of_the_bound_it_was_sized_with() -> None:
+    """The workflow enforces the width the ceiling assumed — otherwise the arithmetic is a wish.
+
+    `_batches` is the whole mechanism, and it is asserted directly because the alternative is a
+    Temporal environment per case. A fixed-size batch rather than a semaphore, for `fan_out`'s
+    reason: it does not depend on lock-acquisition order, so it is deterministic under replay.
+    """
+    from chemclaw.durable.template_job import _batches
+
+    wave = tuple(range(9))
+
+    assert _batches(wave, 4) == ((0, 1, 2, 3), (4, 5, 6, 7), (8,))
+    assert [step for batch in _batches(wave, 4) for step in batch] == list(wave), (
+        "flattening the batches must reproduce the wave, or a step is dropped or reordered"
+    )
+    # `0` is what an input predating the field declares, and every archived history is pre-wave —
+    # so it has to mean "one batch", which over a one-step wave is the sequential shape byte for
+    # byte.
+    assert _batches(wave, 0) == (wave,)
+    assert _batches(wave, 99) == (wave,)
+    assert _batches((0,), 0) == ((0,),)
+
+
 def test_one_job_step_still_fits_so_the_gate_is_not_simply_refusing_job_steps() -> None:
     """The control arm. Seven of the nine shipped templates have a `job` step and must still run."""
     assert run_ceiling_problems(_template(steps=_job_steps(1))) == []
@@ -1799,3 +1910,56 @@ def test_a_first_run_with_nothing_to_resume_is_what_it_always_was() -> None:
 
     assert ran == ["CCO", "two", "three"], ran
     assert result.result == "final"
+
+
+# --- a run id is an identity, and a composed workflow's name is not one --------------------------
+
+
+def test_two_documents_sharing_a_name_do_not_share_a_run() -> None:
+    """The collision that returned somebody else's finished work, driven.
+
+    A run id is an idempotency key and the launcher *rejoins* an id already started. For a
+    `data/templates/` file that is right: the name is the procedure, reviewed and the same for
+    everybody, so two people asking the same question share one run
+    (`D-2026-08-01-a-running-job-has-no-owner`). A composed workflow breaks both halves — the name
+    is one chemist's, and its steps change when they re-compose.
+
+    Measured before `scope` existed: two documents with nothing in common but the name `triage`
+    both produced `template-triage-65f5e26304a2c36c`, so running the second returned the first's
+    completed result and its step outputs, under a summary that reads correct. A second chemist was
+    denied their own workflow for as long as the first's run was retained.
+    """
+    first = _template(name="triage", steps=[{"id": "x", "kind": "agent", "prompt": "one"}])
+    second = _template(name="triage", steps=[{"id": "x", "kind": "agent", "prompt": "different"}])
+    inputs = {"smiles": "CCO"}
+
+    assert registry.run_workflow_id(first, inputs) == registry.run_workflow_id(second, inputs)
+    scoped = {
+        registry.run_workflow_id(first, inputs, "alice:fp-1"),
+        registry.run_workflow_id(second, inputs, "alice:fp-2"),
+        registry.run_workflow_id(first, inputs, "bob:fp-1"),
+    }
+    assert len(scoped) == 3, "a scope must separate owners and versions"
+
+
+def test_a_file_templates_run_id_is_exactly_what_it_was() -> None:
+    """The control arm, and it is why `scope` defaults to empty rather than to something.
+
+    A file template's id appears in archived histories, in Temporal's own retention and in tests.
+    Changing it would orphan every in-flight run and every fixture, to fix a collision that cannot
+    happen for a document whose name *is* its identity.
+    """
+    template = _template(name="triage", steps=[{"id": "x", "kind": "agent", "prompt": "one"}])
+
+    assert registry.run_workflow_id(template, {"smiles": "CCO"}) == (
+        "template-triage-65f5e26304a2c36c"
+    )
+
+
+def test_a_composed_run_says_so_on_the_sessions_started_jobs_list() -> None:
+    """Provenance a reader can see: a composed run is not a reviewed file with the same name."""
+    assert registry.run_workflow_id(
+        _template(name="triage", steps=[{"id": "x", "kind": "agent", "prompt": "one"}]),
+        {},
+        "alice:fp",
+    ).startswith("composed-")

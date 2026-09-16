@@ -12,7 +12,6 @@ to the caller's own workflows** (a name that is not yours is not found).
 """
 
 import asyncio
-from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -22,6 +21,7 @@ from chemclaw.api.app import create_app
 from chemclaw.api.auth import Principal, require_principal
 from chemclaw.core.config import settings
 from chemclaw.durable.template_job import template_fingerprint
+from chemclaw.templates import composed
 from chemclaw.templates.composed import ComposedWorkflow, default_composed_store
 from chemclaw.templates.manifest import Template
 
@@ -62,8 +62,16 @@ def _document(name: str = "ranking") -> Template:
 
 @pytest.fixture(autouse=True)
 def _memory_store(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The in-memory backend, which is a real one, so these tests need no database."""
+    """A *fresh* in-memory backend per test — a real backend, so these tests need no database.
+
+    `composed._IN_MEMORY` is a process singleton, which is correct for a CLI or dev process and
+    wrong for a test module where every test stores `(u-alice, "ranking")`. It did not show while a
+    `save` replaced the whole row: each test overwrote the last one's approval. Now that a save
+    carries an approval forward — because the agent's write must not erase a person's decision —
+    the leak is visible, and one test's approval would authorize the next one's document.
+    """
     monkeypatch.setattr(settings, "session_store", "memory")
+    monkeypatch.setattr(composed, "_IN_MEMORY", composed.InMemoryComposedStore())
 
 
 def _store(owner: str, document: Template, name: str = "ranking") -> None:
@@ -87,10 +95,22 @@ def test_the_read_shows_what_approving_would_authorize() -> None:
 
     body = _client(_app(), _ALICE).get("/workflows/ranking").json()
 
-    assert body["steps"] == ["rank", "say"]
+    assert [step["id"] for step in body["steps"]] == ["rank", "say"]
     assert body["job_steps"] == ["rank"]
     assert body["fingerprint"] == template_fingerprint(document)
     assert body["approved_fingerprint"] == ""
+    # **The step ids are not the procedure**, and returning them alone is an approval that names no
+    # job. What the widening's own justification promises the approver is the job's *name* and its
+    # *arguments*, so those are what the screen has to carry.
+    job = next(step for step in body["steps"] if step["id"] == "rank")
+    assert job["calls"] == "rank_species"
+    assert job["kind"] == "job"
+    reasoning = next(step for step in body["steps"] if step["id"] == "say")
+    assert "which one" in reasoning["prompt"]
+    # And where it came from. The column existed from migration 100 and nothing in `src/` selected
+    # it, so "a workflow that later looks wrong can be traced back to the conversation that
+    # produced it" was a promise only somebody holding a psql prompt could keep.
+    assert "composed_in_session" in body
 
 
 def test_approving_the_version_that_was_shown_authorizes_it() -> None:
@@ -110,6 +130,10 @@ def test_approving_the_version_that_was_shown_authorizes_it() -> None:
     # is written by any route, and the domain row is the record (`plan_approvals.actor`,
     # `pending_requests.answered_by`, `effects.approved_by` are each the same shape).
     assert stored.approved_by == _ALICE.oid
+    # And it is readable: a column written and never selected is an attribution nothing can see,
+    # which is the mirror of the defect D-2026-08-26 names. The GET is that reader.
+    assert stored.approved_at is not None
+    assert client.get("/workflows/ranking").json()["approved_at"] is not None
 
 
 def test_approving_a_version_that_is_no_longer_current_is_a_409() -> None:
@@ -242,11 +266,20 @@ def test_the_approval_column_is_not_writable_through_the_compose_path() -> None:
     assert "approved_fingerprint" in PostgresComposedStore._APPROVE
 
 
-def test_saving_a_revision_does_not_carry_the_approval_forward(monkeypatch: Any) -> None:
-    """The in-memory backend must lapse an approval exactly as the SQL one does.
+def test_saving_a_revision_lapses_the_approval_without_erasing_who_gave_it() -> None:
+    """A re-compose stops the approval working and leaves the record of it standing.
 
-    Both are real backends, so a property that held in only one of them is a property this
-    deployment does not have.
+    **Two properties, and the earlier version of this test asserted the wrong one.** It required the
+    in-memory backend to *clear* `approved_fingerprint` on save and called that "lapsing exactly as
+    the SQL one does" — which the SQL one does not do: `_UPSERT` names no approval column, so the
+    stored row keeps it and the lapse comes from the fingerprint no longer matching. Driven against
+    both backends, the same call sequence left Postgres approved-by-Alice-at-the-old-hash and memory
+    blank, which is the divergence that sentence denied.
+
+    What the two must agree on, and now do: the *effect* lapses (`approved` is derived and goes
+    false), and the person's recorded decision is not erased — an agent's write must not be able to
+    delete the audit of a human's. What a reader must therefore not do is render `approved_by`
+    alone, which is why `approved` ships as a field.
     """
     _store(_ALICE.oid, _document())
     client = _client(_app(), _ALICE)
@@ -254,13 +287,36 @@ def test_saving_a_revision_does_not_carry_the_approval_forward(monkeypatch: Any)
         "/workflows/ranking/approval",
         json={"fingerprint": client.get("/workflows/ranking").json()["fingerprint"]},
     )
+    approved = client.get("/workflows/ranking").json()
+    assert approved["approved"] is True
+    assert approved["approved_by"] == _ALICE.oid
 
-    # A save is the agent's write; it carries no approval, so the stored one is whatever it was.
-    _store(_ALICE.oid, _document("ranking"))
+    # A save is the agent's write. It carries no approval and cannot clear one either. A genuinely
+    # different document, because the earlier version of this test re-saved a byte-identical one —
+    # which has the same fingerprint, so it could only ever have been asserting the clearing.
+    _store(
+        _ALICE.oid,
+        Template.model_validate(
+            {
+                "name": "ranking",
+                "summary": "Now it does something else.",
+                "inputs": [{"name": "smiles", "type": "string", "description": "the molecule"}],
+                "steps": [
+                    {"id": "rank", "kind": "job", "job": "sample_conformers", "arguments": {}},
+                    {"id": "say", "kind": "agent", "prompt": "which one: ${steps.rank.result}"},
+                ],
+            }
+        ),
+    )
     stored = asyncio.run(default_composed_store().get(_ALICE.oid, "ranking"))
+    after = client.get("/workflows/ranking").json()
 
     assert stored is not None
-    assert stored.approved_fingerprint == ""
+    assert stored.approved_fingerprint == approved["fingerprint"], (
+        "the agent's write must not erase the record of a person's decision"
+    )
+    assert after["approved"] is False, "and it must not leave that decision in force either"
+    assert after["approved_fingerprint"] != after["fingerprint"]
 
 
 def test_the_listing_is_how_a_chemist_finds_a_workflow_they_forgot() -> None:

@@ -9,10 +9,16 @@
 -- exemption assumes cannot exist.
 --
 -- What makes this table safe is therefore not the table. It is that an agent-authored workflow may
--- name **no side-effecting tool, no durable job and no `write_tools`** — checked when it is stored
--- and checked again when it is run, by `templates/composed.py::authored_problems`. The exemption
--- is about writes; a document that cannot contain one does not reach it. A hand-written template
--- in `data/templates/` is unaffected and keeps every capability it had.
+-- name **no side-effecting tool and no `write_tools`** — checked when it is stored and checked
+-- again when it is run, by `templates/composed.py::authored_problems`, and no approval lifts
+-- either. The exemption is about writes; a document that cannot contain one does not reach it. A
+-- hand-written template in `data/templates/` is unaffected and keeps every capability it had.
+--
+-- **A durable `job` step is the one thing on the other side of that line**, and migration 103 is
+-- where it is decided: a job's name and arguments are in the document a person read, so a person
+-- can approve them, and `approved_fingerprint` records which version they approved. This header
+-- said "no durable job" in the present tense for as long as that was true and one migration longer
+-- — read 103 next, not this paragraph, for what a job step costs.
 --
 -- `document` is the whole `Template` as validated JSON, pinned the way a run pins its template:
 -- what ran is what was stored, and a later edit is a new row rather than a rewrite of history that
@@ -31,6 +37,11 @@ CREATE TABLE IF NOT EXISTS composed_workflows (
     summary     TEXT        NOT NULL DEFAULT '',
     -- The session and turn it was composed in, so a workflow that later looks wrong can be traced
     -- back to the conversation that produced it — the same join every audit row already supports.
+    -- `session_id` is selected by the store and shown on the approval screen, so an approver
+    -- looking at steps they did not write can find the exchange that asked for them.
+    -- `correlation_id` is the turn, and is deliberately an operator's column: nothing in `src/`
+    -- selects it, because what a reader wants of one turn is the `audit_events` rows that share
+    -- the id, which is a query rather than a field on this row.
     session_id      TEXT    NOT NULL DEFAULT '',
     correlation_id  TEXT    NOT NULL DEFAULT '',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),

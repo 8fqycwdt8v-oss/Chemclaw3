@@ -78,6 +78,16 @@ class TemplateRunInput(BaseModel):
     roles: list[str] = Field(default_factory=list)
     # The chat to wake on completion; empty off the service path, where there is none.
     session_id: str = ""
+    # How many of one wave's steps may be in flight at once. **Pinned at launch for the same
+    # reason the template is**, and for one more: `agent/template_surface.run_ceiling_problems`
+    # sizes a wave as `ceil(width / limit)` slow steps, so the number that *bounds* the run and the
+    # number the launch was *checked against* have to be one number. A live settings read inside
+    # workflow code would be neither — nondeterministic on replay, and not what the ceiling saw.
+    #
+    # `0` means "no bound", which is what an input predating this field declares: every archived
+    # history is pre-wave, so its waves are one step wide and an unbounded gather over one step is
+    # the sequential shape byte for byte.
+    max_parallel_steps: int = Field(default=0, ge=0)
 
 
 class TemplateRunResult(BaseModel):
@@ -109,6 +119,32 @@ class _StepFailed(Exception):
         super().__init__(f"template step {getattr(step, 'id', '?')!r} failed")
         self.step = step
         self.cause = cause
+
+
+def _batches(wave: tuple[Any, ...], limit: int) -> tuple[tuple[Any, ...], ...]:
+    """One wave split into runs of at most `limit` steps, in declared order.
+
+    **A fixed-size batch rather than a semaphore**, the reason `durable/orchestrator.fan_out` gives
+    for the same choice: a batch is deterministic under Temporal's replay because it does not depend
+    on lock-acquisition order, and it bounds concurrency just the same.
+
+    The bound is not throughput management. A wave of 501 independent steps passed
+    `run_ceiling_problems` because a wave was sized at *one* slow step — arithmetic that is only
+    true if every member really is in flight together, which no worker promises. Bounding the width
+    here is what makes `ceil(width / limit)` an honest cost rather than an optimistic one, and an
+    agent-authored document is the surface that can reach a wave no reviewer ever looked at.
+
+    Args:
+        wave: The steps to run together, in the file's order.
+        limit: The most that may be in flight at once. `0` — or a limit no narrower than the wave —
+            means one batch, which is the unbounded gather this replaced.
+
+    Returns:
+        The batches, in declared order; flattening them reproduces `wave` exactly.
+    """
+    if limit < 1 or limit >= len(wave):
+        return (wave,)
+    return tuple(wave[index : index + limit] for index in range(0, len(wave), limit))
 
 
 # On the light queue: the sequencer only substitutes references and dispatches. Whatever
@@ -341,7 +377,9 @@ class TemplateWorkflow:
             if not wave:
                 continue
             try:
-                finished = await self._run_wave(wave, scope, identity, timeout, run.template.name)
+                finished = await self._run_wave(
+                    wave, scope, identity, timeout, run.template.name, run.max_parallel_steps
+                )
             except _StepFailed as failure:
                 step, exc = failure.step, failure.cause
                 # The completion push-back below had no counterpart, so a template that failed at
@@ -539,6 +577,7 @@ class TemplateWorkflow:
         identity: StepIdentity,
         timeout: timedelta,
         template: str,
+        limit: int,
     ) -> list[tuple[Any, Any]]:
         """Run one wave's steps together and return `(step, result)` in the wave's declared order.
 
@@ -572,6 +611,8 @@ class TemplateWorkflow:
             identity: Who the run acts for.
             timeout: One step's `start_to_close` budget.
             template: The run's template name, for the prompt-truncation label.
+            limit: How many steps may be in flight at once; `0` for no bound. See `_batches`, and
+                `TemplateRunInput.max_parallel_steps` for why the number is pinned, not read.
 
         Returns:
             `(step, result)` for each step, in the wave's declared order.
@@ -587,18 +628,23 @@ class TemplateWorkflow:
             except BaseException as exc:
                 raise _StepFailed(step, exc) from exc
 
-        settled = await asyncio.gather(
-            *(self._run_step(step, scope, identity, timeout, template) for step in wave),
-            return_exceptions=True,
-        )
-        # `gather` returns in argument order, which is the wave's declared order — the property
-        # `fan_out` relies on too, and the reason nothing here has to sort or match by id.
-        for step, outcome in zip(wave, settled, strict=True):
-            if isinstance(outcome, asyncio.CancelledError):
-                raise outcome
-            if isinstance(outcome, BaseException):
-                raise _StepFailed(step, outcome) from outcome
-        return [(step, outcome) for step, outcome in zip(wave, settled, strict=True)]
+        done: list[tuple[Any, Any]] = []
+        for batch in _batches(wave, limit):
+            settled = await asyncio.gather(
+                *(self._run_step(step, scope, identity, timeout, template) for step in batch),
+                return_exceptions=True,
+            )
+            # `gather` returns in argument order, which is the batch's declared order — the property
+            # `fan_out` relies on too, and the reason nothing here has to sort or match by id.
+            # Batches run in declared order as well, so the failure this reports is still the first
+            # in the file whichever worker was busier, exactly as it was for one gather.
+            for step, outcome in zip(batch, settled, strict=True):
+                if isinstance(outcome, asyncio.CancelledError):
+                    raise outcome
+                if isinstance(outcome, BaseException):
+                    raise _StepFailed(step, outcome) from outcome
+            done.extend(zip(batch, settled, strict=True))
+        return done
 
     async def _run_step(
         self,
