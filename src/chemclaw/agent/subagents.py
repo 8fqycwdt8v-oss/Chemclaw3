@@ -225,7 +225,7 @@ def general_purpose_helper(runnable: Any) -> dict[str, Any]:
 
 
 def refuse_an_unknown_roster(known: Iterable[str]) -> None:
-    """Raise if `CHEMCLAW_HELPER_ROSTER` names a profile that does not exist.
+    """Raise if `CHEMCLAW_AGENT_HELPER_ROSTER` names a profile that does not exist.
 
     **The loud half of a deliberate split.** `_subagents` skips an unknown name with a WARNING,
     because a turn must not die because a deployment misspelled a roster entry — the cost of
@@ -248,8 +248,8 @@ def refuse_an_unknown_roster(known: Iterable[str]) -> None:
     unknown = sorted(set(settings.helper_roster) - set(known))
     if unknown:
         raise ChemclawError(
-            f"CHEMCLAW_HELPER_ROSTER names unknown agent profile(s) {unknown}, so each would be "
-            f"silently absent from the task roster; known: {sorted(known)}"
+            f"CHEMCLAW_AGENT_HELPER_ROSTER names unknown agent profile(s) {unknown}, so "
+            f"each would be silently absent from the task roster; known: {sorted(known)}"
         )
 
 

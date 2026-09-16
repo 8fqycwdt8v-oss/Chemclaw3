@@ -606,7 +606,8 @@ def _subagents(
         connectors: This turn's already-open connector tools, shared with the helper rather than
             reopened. Narrowed to the read-only half by the helper's own build.
 
-    **One unnamed helper plus whatever `CHEMCLAW_HELPER_ROSTER` names**, and the roster half is new
+    **One unnamed helper plus whatever `CHEMCLAW_AGENT_HELPER_ROSTER` names**, and the roster
+    half is new
     (`D-2026-09-16-a-roster-varies-the-two-dimensions-that-carry-no-authority`). Every entry is
     built by this same function with a `specialist=`, so each is an *intersection* of the caller's
     surface rather than a profile of its own: a name can make a helper narrower and never wider.

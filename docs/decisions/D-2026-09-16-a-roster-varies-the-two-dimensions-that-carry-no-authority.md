@@ -34,7 +34,7 @@ is not taken here.**
 A roster of named helpers, where **every entry is still an attenuation**, and the two dimensions a
 name varies are the two that carry no authority: its **instructions** and its **model route**.
 
-`CHEMCLAW_HELPER_ROSTER` names agent profiles. A rostered helper's surface is
+`CHEMCLAW_AGENT_HELPER_ROSTER` names agent profiles. A rostered helper's surface is
 
     what the caller holds  ∩  what the specialist names  −  everything that acts
 
