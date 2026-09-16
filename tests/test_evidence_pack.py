@@ -447,9 +447,7 @@ def test_a_section_is_built_from_its_columns_by_name_and_not_by_their_order() ->
             "the column order must not be able to decide which field a value lands in"
         )
         with pytest.raises(pydantic.ValidationError, match="surplus"):
-            await _section(
-                PackJob, f"SELECT {columns}, connector AS surplus{where}", (SESSION, 10)
-            )
+            await _section(PackJob, f"SELECT {columns}, connector AS surplus{where}", (SESSION, 10))
 
     asyncio.run(_run())
     asyncio.run(_clear())

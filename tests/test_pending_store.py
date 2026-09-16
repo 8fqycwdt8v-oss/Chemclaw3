@@ -489,11 +489,14 @@ def test_a_request_is_built_from_the_columns_by_name_and_keeps_its_iso_stamps(
         assert await store.get_request("pending-by-name") == straight, (
             "the column order must not be able to decide which field a value lands in"
         )
-        page = await store.open_requests(limit=5)
-        assert [row.request_id for row in page.requests] == ["pending-by-name"]
-        assert page.total_waiting == 1, (
-            "the count is read on a second cursor now that the page has a row factory, and it must "
-            "still be the same transaction's answer"
+        # The inbox is global — other files leave waiting rows behind — so this asserts membership
+        # and the count's relationship to the page rather than an exact roster. What it is here to
+        # prove is that the page and its count survived being split across two cursors, which they
+        # had to be: a row factory belongs to a cursor and `count(*)` is not a `PendingRequest`.
+        page = await store.open_requests(limit=store._MAX_PAGE)
+        assert "pending-by-name" in [row.request_id for row in page.requests]
+        assert page.total_waiting >= len(page.requests) >= 1, (
+            "the count must still be read, and it is the population the page is a page of"
         )
 
         monkeypatch.setattr(store, "_COLUMNS", f"{', '.join(columns)}, kind AS surplus")

@@ -117,9 +117,15 @@ class BatchingCursor(Protocol):
     async def executemany(self, sql: str, params_seq: Sequence[Sequence[Any]]) -> None:
         """Run `sql` once per entry in `params_seq`, binding each positionally.
 
-        The same statement every time — this is a bulk *bind*, not a bulk statement. Semantics are
-        a loop over `execute`: nothing here promises the set is atomic, and on this seam's
-        autocommit connections it is not.
+        The same statement every time — this is a bulk *bind*, not a bulk statement.
+
+        **What a failed set leaves behind is the driver's, and this Protocol does not settle it.**
+        Measured for psycopg, which is the implementation that matters here: `executemany` runs the
+        set inside one implicit transaction *even on an autocommit connection*, so a four-entry set
+        failing on its third leaves none of the four. A driver that loops `execute` on an
+        autocommit connection leaves the entries before the failure. Both are correct for a caller
+        whose statement is an idempotent upsert, which is the only kind of caller this has — and a
+        caller for whom the difference matters must not use this method.
         """
         ...
 

@@ -327,11 +327,12 @@ class SqlResultSink:
                 # per-row message this seam has always raised names the offending table *and*
                 # `calc_ref`, and that is what an operator acts on: a group that merely said "one
                 # of these 300 property_value rows" would move the diagnosis into somebody's SQL
-                # client. Replaying is safe for two reasons and needs only the first: a refused
-                # `executemany` is rolled back whole (measured — see `deliver`), and every statement
-                # here is an upsert onto a content-addressed key anyway, which is the same property
-                # `durable/publish_results._drain_one` relies on for its own per-record replay one
-                # level up.
+                # client. Replaying is safe because every statement here is an upsert onto a
+                # content-addressed key, so a row that did land is re-applied as a no-op — the same
+                # property `durable/publish_results._drain_one` relies on for its own per-record
+                # replay one level up. It is what makes the replay safe for *any* driver; on
+                # psycopg specifically nothing landed at all (see `deliver`), so the replay writes
+                # the group's good rows for the first time.
                 await self._row_at_a_time(warehouse, table, statement, rows, exc)
             except Exception as exc:
                 # The same widening as the connect arm, for the same reason: the driver's
