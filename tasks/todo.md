@@ -58,4 +58,48 @@ stays LangChain/LangGraph-native.
 - [ ] ADR
 
 ## Review
-(filled in as phases land)
+
+### Phase 1 — landed
+
+Shipped: `chemclaw_skill_loads_total{skill}`, `AgentProfile.skill_names` with the
+`ProfileScopedSkills` narrowing, a `skill-validate` check for it, and
+`data/evals/profiles/skills-removed.yaml`. No behaviour change on any shipped profile —
+`skill_names` is `None` everywhere.
+
+**Two things measurement changed before they shipped.**
+
+- The fan-out/compaction defect this plan listed for phase 2 is **already fixed**:
+  `ClearOlderToolResultsEdit` makes `keep` the larger of the configured floor and the newest
+  batch's size, so the batch survives structurally. Nothing was owed; a "fix" would have been a
+  change to working code.
+- The self-confirmation guard stays in phase 5 rather than moving earlier, because its caller is
+  the distiller. Built now it would be a guard with no caller kept alive by its own test — the
+  `reject_widening` shape this repository deleted once already.
+
+**What a fresh-context review caught, and it was the same failure twice.** The first version of the
+counter's clamp was asserted in a docstring, a metric HELP string and the ADR, and the shipped tree
+falsified it: `skills/README.md` resolves, so the counter booked a skill called `README.md` — in
+the one series whose stated purpose is deciding which skills to promote and retire. `limit=0`
+booked a load of zero bytes under a paragraph claiming the count is taken on the bytes. Both are
+fixed with the argument recorded rather than the prose quietly corrected, and both now have tests
+asserting the *property* rather than the filename that exposed them. Three smaller findings went
+with them: the validator tracebacked instead of reporting when a profile file was malformed, two
+tests leaked the shipped profiles into a module-global registry, and the control arm's "what it
+still carries" paragraph named the listing and missed the larger residual — the deployment's prose
+still orders the model to load skills the arm cannot reach, which makes a delta measured there a
+lower bound rather than an unbiased estimate.
+
+### Phase 2 — what the measurement decided before any code
+
+Three of the six shipped profiles are **unusable as helpers**, because `helper_profile` subtracts
+`side_effecting_tools()` and their job is writing: `reporting` keeps 3 of 8, `property-lookup` 1 of
+5, and `design` keeps 4 of 8 but loses `suggest_next_experiment`, which is the whole specialist.
+What survives coherently is `evidence` (14 of 15), `computation` (12 of 41) and `safety` (4 of 6).
+So the roster is those three plus `general-purpose`, which is a measured choice and a much smaller
+prefix cost than the six this plan assumed.
+
+`computation`'s surviving 12 are the enumeration family, topology, the calibration ledger and
+calculation lookup — a real capability, and **not** "compute things". So a roster description is a
+human-written purpose sentence *plus the tool list derived from the compiled helper*, which makes
+`D-2026-08-12`'s measured defect — five specialists whose descriptions were identical and carried
+no capability information — structurally unrepeatable rather than fixed by hand.

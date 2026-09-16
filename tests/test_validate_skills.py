@@ -234,6 +234,10 @@ def test_an_unknown_skill_name_in_a_profile_is_reported(
     so this is a deployment's typo as readily as a shipped one.
     """
     root = _skill(tmp_path, "probe", "Guidance.")
+    # `load_profiles` too, not only the two readers: it registers the six shipped profiles into a
+    # module-global registry and this test has no cleanup, which is the leak
+    # `tests/test_profile_discovery.py`'s own fixture exists to prevent.
+    monkeypatch.setattr("chemclaw.cli.validate_skills.load_profiles", lambda: None)
     monkeypatch.setattr("chemclaw.cli.validate_skills.registered_profile_names", lambda: ["narrow"])
     monkeypatch.setattr(
         "chemclaw.cli.validate_skills.get_profile",
@@ -251,6 +255,7 @@ def test_a_profile_naming_only_real_skills_is_clean(
 ) -> None:
     """The negative arm: the check must not fire on the configuration it exists to permit."""
     root = _skill(tmp_path, "probe", "Guidance.")
+    monkeypatch.setattr("chemclaw.cli.validate_skills.load_profiles", lambda: None)
     monkeypatch.setattr("chemclaw.cli.validate_skills.registered_profile_names", lambda: ["narrow"])
     monkeypatch.setattr(
         "chemclaw.cli.validate_skills.get_profile",
@@ -288,3 +293,28 @@ def test_a_profile_file_on_disk_is_read_rather_than_assumed_registered(
 
     assert len(problems) == 1
     assert "porbe" in problems[0] and "narrow" in problems[0]
+
+
+def test_a_malformed_profile_is_reported_rather_than_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate lists problems; it does not traceback about a profile out of the skill validator.
+
+    Same treatment `_problems_for` gives a malformed `SKILL.md`, and for the same reason: CI goes
+    red either way, and what differs is whether the operator is told what to fix.
+    """
+    root = _skill(tmp_path / "tree", "probe", "Guidance.")
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    # `extra="forbid"`, so a singular `instruction:` is a validation error rather than a no-op.
+    (profiles / "broken.yaml").write_text("instruction: oops\n", encoding="utf-8")
+    monkeypatch.setattr("chemclaw.core.config.settings.profiles_dir", str(profiles))
+    before = set(registered_profile_names())
+    try:
+        problems = validate_skills([str(root)])
+    finally:
+        for name in set(registered_profile_names()) - before:
+            _REGISTRY.pop(name, None)
+
+    assert len(problems) == 1
+    assert "could not be loaded" in problems[0] and "broken.yaml" in problems[0]

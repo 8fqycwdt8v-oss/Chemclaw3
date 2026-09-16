@@ -47,7 +47,7 @@ from pydantic import ValidationError
 # real set.
 from chemclaw.agent import chemclaw_agent as _agent  # noqa: F401 — imported for tool registration
 from chemclaw.agent.chemclaw_agent import available_tool_names
-from chemclaw.agent.profile_discovery import load_profiles
+from chemclaw.agent.profile_discovery import ProfileError, load_profiles
 from chemclaw.agent.profiles import get_profile, registered_profile_names
 from chemclaw.agent.skill_manifest import SKILL_FILENAME, SkillManifest
 from chemclaw.cli.validate_prose_contract import taught_tool_names
@@ -219,8 +219,20 @@ def _profile_skill_problems(found_names: set[str]) -> list[str]:
     holds `default` alone and this check would pass by having looked at nothing — the shape of
     failure this gate exists to prevent, inside the gate (see `main`'s own docstring for the last
     time that happened here).
+
+    **And a malformed profile is a problem to report, not a traceback**, which is the same
+    treatment `_problems_for` already gives a malformed `SKILL.md`. `load_profiles` raises
+    `ProfileError` on an `extra="forbid"` typo or two files claiming one name, and uncaught it
+    would replace this gate's promised list of problems with a stack trace about a *profile* file
+    out of the *skill* validator. CI still goes red either way; what differs is whether the
+    operator is told what to fix.
     """
-    load_profiles()
+    try:
+        load_profiles()
+    except ProfileError as error:
+        return [
+            f"agent profiles could not be loaded, so no profile's skill_names was checked: {error}"
+        ]
     problems: list[str] = []
     for name in registered_profile_names():
         declared = get_profile(name).skill_names

@@ -748,11 +748,12 @@ _COUNTERS: dict[str, str] = {
         "Skill bodies the model actually read, by skill — the other half of the denial counter "
         "above, and the only persisted signal that a skill is used at all. Before it, which "
         "procedure a turn opened was reconstructible from an INFO log line on a live pod and from "
-        "nowhere else, so no skill could be ranked, promoted or retired on evidence. Counted on "
-        "the bytes rather than on the ask, which is what clamps the label to directories that "
-        "exist: the skill name is the first segment of a model-written path, and the visibility "
-        "predicate only ever narrows, so an unconfigured deployment permits every string a model "
-        "can invent."
+        "nowhere else, so no skill could be ranked, promoted or retired on evidence. Counted on a "
+        "skill body that was actually delivered — the read resolved, the path lies inside a skill "
+        "directory rather than beside the tree, and lines were requested. The label needs all "
+        "three because the skill name is the first segment of a model-written path and the "
+        "visibility predicate only ever narrows, so an unconfigured deployment permits every "
+        "string a model can invent, and `skills/README.md` resolves."
     ),
     # --- the turn ------------------------------------------------------------------------------
     "chemclaw_turns_finished_total": (

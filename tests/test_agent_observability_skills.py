@@ -164,12 +164,14 @@ def test_a_refused_read_is_not_counted_as_a_load(tree: Path) -> None:
 
 
 def test_a_name_no_directory_backs_mints_no_series(tree: Path) -> None:
-    """The label's clamp, driven rather than argued.
+    """The label's clamp against an invented name, driven rather than argued.
 
     `skill` is the first segment of a path the *model* wrote, and `permits` only ever narrows — so
     in a deployment configuring none of the three gates it returns True for any string. Counting
-    beside the ask would therefore mint a series per invented name. Counting the bytes clamps the
-    label to a directory that exists, because a path that resolved is one inside `root_dir`.
+    beside the ask would therefore mint a series per invented name.
+
+    This is the case a resolved-path check already handles, and it is **not** the whole clamp —
+    see the two tests below for the ones it could not see.
     """
     before = METRICS.value("chemclaw_skill_loads_total")
     backend = NarrowedSkillsBackend(str(tree), lambda _name: True)
@@ -178,3 +180,59 @@ def test_a_name_no_directory_backs_mints_no_series(tree: Path) -> None:
 
     assert METRICS.value("chemclaw_skill_loads_total") == before
     assert "not-a-skill-anybody-wrote" not in METRICS.render()
+
+
+def test_a_file_beside_the_tree_is_not_a_skill(tree: Path) -> None:
+    """The clamp's real hole, and the one "the path resolved" cannot close.
+
+    `skills/README.md` exists on the shipped tree, `ls("/")` lists it to the model, and it resolves
+    — so the first version of this counter booked a skill named `README.md`. Resolving proves the
+    first segment is inside `root_dir`; it does not prove the first segment is a *skill*, and the
+    difference is the whole value of a series that exists to rank, promote and retire skills. Any
+    future top-level document lands the same way, which is why this asserts the property rather
+    than the one filename.
+    """
+    (tree / "README.md").write_text("what this tree holds\n", encoding="utf-8")
+    before = METRICS.value("chemclaw_skill_loads_total")
+    backend = NarrowedSkillsBackend(str(tree), lambda _name: True)
+
+    # It reads fine — this is a narrowing of what counts as evidence, not of what may be read.
+    assert backend.read("/README.md").error is None
+
+    assert METRICS.value("chemclaw_skill_loads_total") == before
+    # The *series*, not the exposition: this counter's HELP text names `skills/README.md` as the
+    # example it was written for, so a whole-render search matches the documentation and passes
+    # nothing.
+    assert 'chemclaw_skill_loads_total{skill="README.md"}' not in METRICS.render()
+
+
+def test_a_read_that_asks_for_no_lines_is_not_a_load(tree: Path) -> None:
+    """`limit=0` returns empty content with **no error**, so "it resolved" over-counts.
+
+    Upstream clamps the limit and answers `no_lines_requested=True` rather than refusing, so a
+    model-controllable argument would otherwise book a load of zero bytes under a docstring saying
+    the count is taken on the bytes.
+    """
+    before = METRICS.value("chemclaw_skill_loads_total")
+    backend = NarrowedSkillsBackend(str(tree), lambda _name: True)
+
+    result = backend.read("/solvent-selection/SKILL.md", limit=0)
+
+    assert result.error is None and result.no_lines_requested
+    assert METRICS.value("chemclaw_skill_loads_total") == before
+
+
+def test_a_supporting_document_inside_a_skill_counts_for_that_skill(tree: Path) -> None:
+    """The negative arm of the clamp: narrowing to `SKILL.md` alone would lose real reads.
+
+    A skill is a *directory*, so a reference table or a worked example beside its `SKILL.md` is
+    that skill being used. The clamp is "inside a skill directory", not "is the manifest".
+    """
+    (tree / "solvent-selection" / "hansen.md").write_text("a table\n", encoding="utf-8")
+    before = METRICS.value("chemclaw_skill_loads_total")
+    backend = NarrowedSkillsBackend(str(tree), lambda _name: True)
+
+    assert backend.read("/solvent-selection/hansen.md").error is None
+
+    assert METRICS.value("chemclaw_skill_loads_total") == before + 1
+    assert 'chemclaw_skill_loads_total{skill="solvent-selection"}' in METRICS.render()

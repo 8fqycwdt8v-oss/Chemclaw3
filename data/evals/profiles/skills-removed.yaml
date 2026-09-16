@@ -14,13 +14,28 @@
 # untouched because that gating is a function of the *tool* surface. So the only thing that differs
 # between this arm and `default` is whether the 28-odd `SKILL.md` bodies are reachable and listed.
 #
-# **What it still carries, stated because a control arm that overstates itself is worse than none.**
+# **What it still carries, stated because a control arm that overstates itself is worse than none.
+# There are two things, and the first draft of this paragraph named only the smaller one.**
+#
 # The skills *listing* is what `deepagents.SkillsMiddleware` publishes into the system prompt, and
 # with none permitted this arm carries the middleware's own empty-listing text rather than no text
 # at all — the shipped override in `agent/langgraph_agent.py`, because upstream's default invites
-# the model to create skills in a tree that refuses every write. That is a small, fixed prose
-# difference in the arm's favour-neutral direction, and it is the honest residual: this measures
-# "the skills' content", not "the existence of a skills mechanism".
+# the model to create skills in a tree that refuses every write. That much is a small, fixed prose
+# difference.
+#
+# The larger one is that **the deployment's own prose still orders the model to load skills this
+# arm cannot reach**, because those sentences are `PromptBlock`s gated on *tools* and this arm
+# keeps every tool. Measured on a compiled graph, the arm's system message still contains "Load the
+# deep-research skill for how to run this loop, and the calculation/search skills for which tool
+# fits and how far to trust it" (`agent/chemclaw_agent.py`, ungated) and "Load the safety-screening
+# skill for how to act on a flag" (gated on `screen_hazards`, which this arm holds). Following
+# either produces a `Refused:` tool result, a WARNING and a `chemclaw_skill_reads_denied_total`
+# tick. So this arm can spend turns on instructions it cannot satisfy, which is a cost *against*
+# the treatment rather than a neutral one — a delta measured here is a lower bound on what skills
+# are worth, not an unbiased estimate. Reporting a negative result from this arm therefore needs
+# the refusal counter read alongside it.
+#
+# Both are why this measures "the skills' content", not "the existence of a skills mechanism".
 #
 # **`skill_names: []` is empty, not absent**, and the distinction is the whole arm. `None` means
 # "do not narrow" and would give this profile every skill, i.e. `default` under another name —

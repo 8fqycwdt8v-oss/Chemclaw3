@@ -525,7 +525,8 @@ live-turn-cost:  ## Score `turn_cost_ratio` over turns this system really ran (e
 # The first number in this repository somebody else can also produce. Everything `make eval` gates
 # is first-party; this asks 100 expert-written, keyed ChemBench questions of a running front door
 # and scores them by comparison rather than by a judge. `ARGS="--profile tools-removed"` is the arm
-# that varies only the tools; `ARGS="--profile no-tools"` swaps the system prompt as well and so
+# that varies only the tools and `ARGS="--profile skills-removed"` the one that varies only the
+# skills; `ARGS="--profile no-tools"` swaps the system prompt as well and so
 # answers a different question (`D-2026-09-14-tools-were-never-the-variable`).
 # Live-lane, never `ci`: it needs a front door and a model gateway, and it is not a gate —
 # a closed-book chemistry score is a property of the deployment's model, not of a commit.

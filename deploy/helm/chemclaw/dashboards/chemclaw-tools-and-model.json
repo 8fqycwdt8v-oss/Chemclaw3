@@ -470,8 +470,8 @@
           "refId": "J"
         },
         {
-          "expr": "topk(10, sum by (skill) (rate(chemclaw_skill_loads_total[24h])))",
-          "legendFormat": "skill loaded: {{skill}}",
+          "expr": "topk(10, sum by (skill) (increase(chemclaw_skill_loads_total[30d])))",
+          "legendFormat": "skill loaded (30d): {{skill}}",
           "refId": "K"
         }
       ]
