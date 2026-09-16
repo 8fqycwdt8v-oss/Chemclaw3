@@ -20,6 +20,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -31,6 +32,7 @@ from chemclaw.agent.context_budget import (
     _MAX_REPORTED_FLOORS,
     _SCHEMA_TOKENS,
     MeasureRequestPrefix,
+    _baked_cache_dir,
     _Calibration,
     _encoding,
     _message_tokens,
@@ -1148,11 +1150,17 @@ def test_an_encoding_nobody_baked_costs_accuracy_and_nothing_else(
 def test_the_cache_directory_this_module_asks_about_is_the_one_tiktoken_reads() -> None:
     """An upstream shape, pinned: `_baked_cache_dir` transcribes `read_file_cached`'s resolution.
 
-    That function takes a blob path rather than answering "where would you look", so the three
-    steps — `TIKTOKEN_CACHE_DIR`, then `DATA_GYM_CACHE_DIR`, then `data-gym-cache` under the
-    system temp directory — are copied into this module. A bump that renames or reorders them
-    would leave `_baked_cache_dir` pointing at a directory nothing bakes into, and the only symptom
-    would be a budget quietly counting with chars/4 again.
+    That function takes a blob path rather than answering "where would you look", so the steps are
+    copied into this module. A bump that renames or reorders them would leave `_baked_cache_dir`
+    pointing at a directory nothing bakes into, and the only symptom would be a budget quietly
+    counting with chars/4 again.
+
+    **Two of the five strings below are the ones this test used to be missing**, and their absence
+    is the whole of the defect the test beside it now drives: upstream decides on *presence*
+    (`"TIKTOKEN_CACHE_DIR" in os.environ`) and treats an empty value as *caching disabled — fetch
+    every time* (`cache_dir == ""`), where this module asked `os.environ.get(...) or ...` and so
+    read an empty value as "not set". Pinning the three directory names could not see that,
+    because the three names were never the part that was wrong.
     """
     import inspect
 
@@ -1160,8 +1168,145 @@ def test_the_cache_directory_this_module_asks_about_is_the_one_tiktoken_reads() 
 
     source = inspect.getsource(tiktoken.load.read_file_cached)
 
-    for expected in ('"TIKTOKEN_CACHE_DIR"', '"DATA_GYM_CACHE_DIR"', '"data-gym-cache"'):
+    for expected in (
+        '"TIKTOKEN_CACHE_DIR"',
+        '"DATA_GYM_CACHE_DIR"',
+        '"data-gym-cache"',
+        '"TIKTOKEN_CACHE_DIR" in os.environ',
+        'cache_dir == ""',
+    ):
         assert expected in source, (
             f"tiktoken.load.read_file_cached no longer mentions {expected}: "
             "`context_budget._baked_cache_dir` transcribes that resolution and is now wrong"
         )
+
+
+def test_the_baked_cache_question_is_answered_the_way_tiktoken_answers_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any, _clean_encoding: None
+) -> None:
+    """Every arm of the resolution, driven — because the string pin above agreed with a dial.
+
+    `_baked_cache_dir` is the whole air-gap precondition: `_resolve_encoding` calls `tiktoken` only
+    where this says a table is baked, so a `Path` returned here is this module saying "loading is
+    safe, nothing will be fetched". The assertion that used to stand behind that claim read three
+    string literals out of upstream's source, which is evidence about upstream and none at all
+    about this function. Measured with `TIKTOKEN_CACHE_DIR=""` and a populated
+    `/tmp/data-gym-cache`, with that assertion green: this returned `/tmp/data-gym-cache`,
+    `tiktoken` ignored it exactly as upstream documents, and the resolve dialled `127.0.0.1` — the
+    guard was the reason the fetch happened.
+
+    So the arms are driven instead. The empty-string one is the regression, and it is driven
+    through `_encoding()` as well as through the return value, because what the return value is
+    *for* is deciding whether a socket is opened.
+
+    **The egress guard is not what asserts that here, and the reason is worth recording.**
+    `core/netguard.py` is armed in this process, and it did not see the dial above: a proxy
+    variable moved the destination to loopback, which `_check` exempts by construction and must
+    keep exempting. So `_refused` stayed 0 through the defect it exists to catch, and the sentinel
+    below — which fails on *any* host, loopback included — is the assertion that holds.
+    """
+    import socket
+    import tempfile
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the context budget reached the network to resolve an encoding")
+
+    for target, name in (
+        (socket, "getaddrinfo"),
+        (socket, "gethostbyname"),
+        (socket, "create_connection"),
+        (socket.socket, "connect"),
+        (socket.socket, "connect_ex"),
+    ):
+        monkeypatch.setattr(target, name, refuse)
+
+    baked = tmp_path / "baked"
+    baked.mkdir()
+    (baked / "fb374d419588a4632f3f557e76b4b70aebbca790").write_bytes(b"a merge table")
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    # The no-variable arm resolves through `tempfile.gettempdir()`, so the temp directory is moved
+    # under the fixture rather than the host's — otherwise this arm answers with whatever the
+    # machine running the suite happens to have cached, which is exactly how the defect hid.
+    temp = tmp_path / "tmp"
+    (temp / "data-gym-cache").mkdir(parents=True)
+    (temp / "data-gym-cache" / "blob").write_bytes(b"a merge table")
+    monkeypatch.setattr(tempfile, "tempdir", str(temp))
+
+    monkeypatch.delenv("DATA_GYM_CACHE_DIR", raising=False)
+
+    # An empty value is upstream's "caching disabled", never "fall through to the next spelling".
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", "")
+    assert _baked_cache_dir() is None, (
+        "an empty TIKTOKEN_CACHE_DIR is tiktoken's 'caching disabled, fetch every time'; reading "
+        "it as 'unset' hands `_resolve_encoding` a directory tiktoken will not read and a fetch "
+        "it will make"
+    )
+    assert _encoding() is None
+    reset_encoding()
+
+    # …and it still means that when the next spelling is populated, because upstream branches on
+    # presence and never reaches `DATA_GYM_CACHE_DIR` at all.
+    monkeypatch.setenv("DATA_GYM_CACHE_DIR", str(baked))
+    assert _baked_cache_dir() is None
+    monkeypatch.delenv("DATA_GYM_CACHE_DIR")
+
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(baked))
+    assert _baked_cache_dir() == baked
+
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(bare))
+    assert _baked_cache_dir() is None, "an empty directory holds no merge table to load"
+
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path / "never-created"))
+    assert _baked_cache_dir() is None
+
+    monkeypatch.delenv("TIKTOKEN_CACHE_DIR")
+    assert _baked_cache_dir() == temp / "data-gym-cache", (
+        "with neither variable set the cache is `data-gym-cache` under the system temp directory, "
+        "which is where a `tiktoken` that has ever run puts it"
+    )
+
+
+def test_the_encoding_the_image_bakes_is_the_encoding_the_config_asks_for() -> None:
+    """The one declaration that decides whether a shipped pod ever reaches the network.
+
+    Two files name this encoding and nothing joined them: `deploy/Containerfile` bakes a merge
+    table under `TIKTOKEN_CACHE_DIR` as a literal, and `llm_token_encoding` is what
+    `_resolve_encoding` then asks for. They agreeing is not a tidiness property — it is the
+    residual `_baked_cache_dir` cannot close, because a *populated* cache that does not hold the
+    configured encoding is precisely the case where this module says "safe to load" and `tiktoken`
+    fetches. On a dropping network that fetch has no timeout (`tiktoken.load.read_file` calls
+    `requests.get` with none), so changing the config default alone would put every pod on that
+    path at its first model call, with the only symptom a slow one.
+
+    The cache *directory* is asserted for the same reason and in the same breath: a bake into one
+    path and an `ENV` naming another leaves the image with a table no runtime reads, which is the
+    same fetch by a different route.
+    """
+    import re
+
+    containerfile = (Path(__file__).resolve().parents[1] / "deploy" / "Containerfile").read_text(
+        encoding="utf-8"
+    )
+
+    baked = re.search(r"tiktoken\.get_encoding\(['\"]([^'\"]+)['\"]\)", containerfile)
+    assert baked, (
+        "deploy/Containerfile no longer bakes a tiktoken merge table, so every pod resolves its "
+        "encoding over the network on its first model call — or, air-gapped, never resolves one"
+    )
+    configured = cast(str, type(settings).model_fields["llm_token_encoding"].default)
+    assert baked.group(1) == configured, (
+        f"deploy/Containerfile bakes {baked.group(1)!r} and llm_token_encoding defaults to "
+        f"{configured!r}: a shipped pod would find a populated cache without the table it wants "
+        "and fetch it, which the air-gapped posture turns into a hang with no timeout"
+    )
+
+    bake_dir = re.search(r"TIKTOKEN_CACHE_DIR=(\S+) ", containerfile)
+    run_dir = re.search(r"^\s+TIKTOKEN_CACHE_DIR=(\S+)\s*$", containerfile, flags=re.MULTILINE)
+    assert bake_dir and run_dir, (
+        "deploy/Containerfile no longer both bakes into and exports a cache dir"
+    )
+    assert bake_dir.group(1) == run_dir.group(1), (
+        f"the image bakes the merge table into {bake_dir.group(1)} and runs with "
+        f"TIKTOKEN_CACHE_DIR={run_dir.group(1)}: the baked table is never read"
+    )

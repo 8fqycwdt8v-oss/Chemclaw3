@@ -293,6 +293,26 @@ def test_a_non_finite_gauge_reading_renders_as_prometheus_spells_it() -> None:
         assert f"chemclaw_turns_in_flight {expected}" in metrics.render()
 
 
+def test_a_bool_reading_renders_as_a_number_rather_than_as_the_word_true() -> None:
+    """The scrape-killer `_sample` shipped with, defended by a comment that had it backwards.
+
+    `bool` is a subclass of `int`, so the original `if isinstance(value, int): return str(value)`
+    arm rendered `True` — not `1` — for any gauge whose source returned a flag. Its comment said
+    "includes bool, which is an int and renders 0/1 — correct here", which is the whole defect
+    stated as the reason it is safe. `True` is not a sample Prometheus can parse, and an
+    unparseable sample loses the *entire* exposition, so this is the same total outage as the
+    `inf` case above reached by a much more ordinary mistake: binding a gauge to a predicate.
+
+    It was dead code as well as wrong — every shipped emission site hands `_sample` a float — so
+    the fix is the coercion rather than a narrower `isinstance`. Pinned here because the next
+    person to bind a gauge to `lambda: some_flag` has no reason to expect this to matter.
+    """
+    for reading, expected in ((True, "1.0"), (False, "0.0")):
+        metrics = Metrics()
+        metrics.bind_gauge("chemclaw_egress_guard_armed", lambda reading=reading: reading)  # type: ignore[misc]
+        assert f"chemclaw_egress_guard_armed {expected}\n" in metrics.render()
+
+
 def test_a_counter_past_a_million_is_rendered_exactly() -> None:
     """`:g` carries six significant digits, so this was the point every counter stopped being true.
 

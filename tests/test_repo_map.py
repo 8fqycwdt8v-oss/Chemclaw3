@@ -20,6 +20,7 @@ Deliberately about *presence*, not content: whether a README is any good is a re
 test that graded prose would be gamed by padding.
 """
 
+import ast
 import re
 import subprocess
 from pathlib import Path
@@ -696,10 +697,25 @@ def test_both_maps_of_data_name_every_corpus_that_exists() -> None:
 # (`D-2026-09-12-an-assert-is-a-control-with-an-off-switch`). This repository had no equivalent, and
 # the one assert that carried a consequence — `operations/activity.py`'s guard on SQL built by
 # `str.replace()` — sat among these three looking exactly like them.
+#
+# **The key is the assert's own source text, not its file, and the first version got that wrong.**
+# Keyed by file, an allowlisted module could gain any number of further asserts — enforcing ones
+# included — and this test stayed green, which re-creates the exact failure the paragraph above
+# describes one file narrower: a consequential assert hiding among narrowing ones. The text is what
+# was reviewed, so the text is what is allowed; editing one of these lines fails this test and asks
+# for the argument again.
 _NARROWING_ASSERTS = {
-    "science/labels/store.py": "row.labelled_at is not None — the caller's query filtered on it",
-    "agent/chemclaw_agent.py": "profile.tool_names is not None — only when a profile narrows",
-    "cli/live_data.py": "dataset.dataset_id is not None — set by the request that just created it",
+    "science/labels/store.py": {
+        "assert row.labelled_at is not None  # the caller filtered on it": "narrows for mypy",
+    },
+    "agent/chemclaw_agent.py": {
+        "assert profile.tool_names is not None  # only called when the profile narrows": (
+            "narrows for mypy"
+        ),
+    },
+    "cli/live_data.py": {
+        "assert dataset.dataset_id is not None": "set by the request that just created it",
+    },
 }
 
 
@@ -708,22 +724,41 @@ def test_no_assert_in_src_enforces_an_invariant() -> None:
 
     This does not ban `assert` outright, because the three that remain genuinely narrow a type for
     mypy and nothing depends on them running. It bans a *fourth* appearing without an argument: a
-    new file in this list has to be justified in the same commit, which is the moment to notice the
-    statement should have been `if ...: raise`.
+    new one has to be justified in the same commit, which is the moment to notice the statement
+    should have been `if ...: raise`.
+
+    **Parsed rather than grepped**, and the allowlist is keyed by the statement's own text. The
+    line regex this started as had both failure directions: a docstring line beginning with the
+    word `assert` was a false positive, and `if x: assert y` or an `assert` after a `;` was a false
+    negative. `ast` has neither, and it hands over the exact line for the message. Both of those
+    were benign on the tree as it stood — which is the reason to fix them now rather than after a
+    commit makes one of them matter.
     """
-    offenders: dict[str, list[int]] = {}
+    found: dict[str, dict[str, int]] = {}
     for path in sorted((_ROOT / "src").rglob("*.py")):
         relative = path.relative_to(_ROOT / "src" / "chemclaw").as_posix()
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-            if re.match(r"\s*assert\b", line):
-                offenders.setdefault(relative, []).append(number)
+        source = path.read_text(encoding="utf-8")
+        lines = source.splitlines()
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Assert):
+                found.setdefault(relative, {})[lines[node.lineno - 1].strip()] = node.lineno
 
-    unargued = {name: lines for name, lines in offenders.items() if name not in _NARROWING_ASSERTS}
+    unargued = {
+        name: {text: line for text, line in statements.items() if text not in argued}
+        for name, statements in found.items()
+        for argued in [_NARROWING_ASSERTS.get(name, {})]
+    }
+    unargued = {name: statements for name, statements in unargued.items() if statements}
     assert not unargued, (
         "an `assert` in src/ that is not in _NARROWING_ASSERTS: "
-        f"{unargued}. `python -O` deletes it. If it narrows a type, add it to the list with the "
-        "reason; if it enforces anything at all, write `if ...: raise` instead."
+        f"{unargued}. `python -O` deletes it. If it narrows a type, add its exact text to the list "
+        "with the reason; if it enforces anything at all, write `if ...: raise` instead."
     )
 
-    stale = sorted(set(_NARROWING_ASSERTS) - set(offenders))
-    assert not stale, f"_NARROWING_ASSERTS names files with no assert left: {stale}"
+    stale = sorted(
+        f"{name}: {text}"
+        for name, statements in _NARROWING_ASSERTS.items()
+        for text in statements
+        if text not in found.get(name, {})
+    )
+    assert not stale, f"_NARROWING_ASSERTS names asserts that are no longer in src/: {stale}"

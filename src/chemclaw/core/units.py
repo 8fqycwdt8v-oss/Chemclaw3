@@ -80,6 +80,7 @@ from dataclasses import dataclass, replace
 from typing import Literal, get_args
 
 import pint
+from scipy import constants as _constants
 
 #: The base dimensions this domain writes down. Deliberately short: current, luminous intensity and
 #: angle have no caller here, and a dimension nothing uses is a row nobody checks.
@@ -151,25 +152,49 @@ class UnitError(ValueError):
     """
 
 
-#: The thermochemical calorie in joules — **exact by definition**, not a measurement, so there is
-#: no precision to lose and nothing to update when CODATA does.
-JOULE_PER_CALORIE = 4.184
+# **The three constants below are read from `scipy.constants`, not transcribed.** The transcription
+# is what this module's history is made of: `HARTREE_TO_KCAL` was written out three times — here as
+# a truncated 2625.4996 kJ/mol, in `science/calc/thermo.py` and again in `publish/properties.py` —
+# and two of the three were short enough to disagree, leaving the registry's derived kcal/mol
+# 1.5e-08 relative low. A literal cannot be wrong loudly; a sourced value can.
+#
+# **What that costs, measured, because it is a real change to two numbers.** `scipy` 1.17.1 carries
+# CODATA **2022** where the comment here said 2018, so `E_h` is 4.359744722206e-18 J rather than
+# 4.3597447222071e-18 and `HARTREE_TO_KCAL` moves 627.5094740631 -> 627.5094740628974, a relative
+# 3.3e-13. `ELECTRONVOLT_TO_KJ` moves 96.48533212331 -> 96.48533212331002, one ULP, because `e` and
+# `N_A` are both exact under SI-2019 and only the division is inexact. `JOULE_PER_CALORIE` is
+# unchanged and `==` to the literal, the thermochemical calorie being a definition rather than a
+# measurement.
+#
+# **Neither move reaches the calculation cache**, which is the question that decides whether this
+# is safe: `CALCULATION_EPOCH` rides in the key, these constants do not, and what the cache stores
+# is hartrees. Every use here is a *presentation* conversion applied after a lookup
+# (`science/calc/thermo.py`, `connectors/calc/compose.py`, `publish/properties.py`), so no stored
+# row's identity or payload depends on them and nothing is invalidated. The change is also two
+# orders of magnitude inside GFN2-xTB's error bar, so it changes no chemistry — it is taken for
+# provenance, not for accuracy.
+#
+# **A sourced constant that can move on a dependency bump needs a pin, or the sourcing is the
+# defect.** `tests/test_units.py` asserts each of these against its literal with `==`, so the next
+# CODATA release that scipy ships fails the gate and is adopted deliberately, with whatever cache
+# or report consequence gets argued at that point, rather than arriving inside a lockfile bump.
 
-#: One hartree in kcal/mol (CODATA 2018: E_h = 4.3597447222071e-18 J, N_A = 6.02214076e23 /mol).
+#: The thermochemical calorie in joules — **exact by definition**, not a measurement, so there is
+#: no precision to lose and nothing to update when CODATA does. Read from `scipy.constants` anyway,
+#: so that all three come from one place and none of them is the one somebody retypes.
+JOULE_PER_CALORIE = _constants.calorie
+
+#: One hartree in kcal/mol, from CODATA's `E_h` by way of `N_A` and the calorie above.
 #:
 #: **This is the one definition, and it is here because `core` is the layer everything may import.**
-#: It was written out three times — here as a truncated 2625.4996 kJ/mol, in
-#: `science/calc/thermo.py` and again in `publish/properties.py` — and two of the three were short
-#: enough to disagree: the registry's derived kcal/mol came out 1.5e-08 relative low, which is
-#: nothing today and is one caller away from being a chemist's number. Restating a constant is how
-#: three copies drift, so `science/calc/thermo.py` imports this name rather than repeating its
-#: digits. `publish/properties.py` still spells it out and should import it too — that file belongs
-#: to another change, and this comment says so rather than implying all three copies are gone.
-HARTREE_TO_KCAL = 627.5094740631
+#: `science/calc/thermo.py` and `publish/properties.py` both import this name; neither spells the
+#: digits any more, which is what makes "one definition" a checkable claim rather than an intention.
+HARTREE_TO_KCAL = _constants.value("Hartree energy") * _constants.N_A / 1000.0 / JOULE_PER_CALORIE
 
-#: One electronvolt in kJ/mol. N_A·e with both factors exact under SI-2019, so the full value is
-#: exact too — the registry carried 96.485_332, truncated at the seventh digit for no reason.
-ELECTRONVOLT_TO_KJ = 96.485_332_123_31
+#: One electronvolt in kJ/mol — `N_A·e`, with both factors exact under SI-2019, so the only
+#: inexactness is the division into kilo. The registry used to carry `96.485_332`, truncated at the
+#: seventh digit for no reason anybody recorded.
+ELECTRONVOLT_TO_KJ = _constants.e * _constants.N_A / 1000.0
 
 
 @dataclass(frozen=True, slots=True)

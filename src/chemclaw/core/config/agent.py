@@ -713,10 +713,20 @@ class AgentSettings(BaseSettings):
     # `chemclaw_audit_sink_failures_total` on purpose, because "the database is unreachable" and
     # "the database cannot keep up" have different remedies and would be indistinguishable pooled.
     #
-    # 50,000 is about 555 turns of backlog at the measured ~90 rows a turn, and a few tens of MB at
-    # this row shape — large enough that an ordinary slow patch never reaches it, small enough that
-    # it cannot be the thing that ends the process. 0 removes the bound and restores the old
-    # unbounded behaviour for a deployment that would rather have the OOM than the gap.
+    # 50,000 is about 555 turns of backlog at the measured ~90 rows a turn — large enough that an
+    # ordinary slow patch never reaches it, small enough that it cannot be the thing that ends the
+    # process. 0 removes the bound and restores the old unbounded behaviour for a deployment that
+    # would rather have the OOM than the gap.
+    #
+    # **The memory figure is measured, because the sentence here first said "a few tens of MB" and
+    # that was wrong by 4x in the reassuring direction.** At the realistic row — `arguments` cut to
+    # `agent_audit_max_arg_chars`, i.e. 200 — 50,000 events is **1,672 B each, 80 MB**, which is 8%
+    # of the 1 GiB the chart gives a pod that is also holding the model context. That is the number
+    # this default is chosen against, and it is only 80 rather than 160 because `_shed_to_bound`
+    # charges the in-flight batch too: before that fix `_flush_all` swapped the list out and
+    # `record` refilled a fresh one the bound could not see, so the real ceiling was twice whatever
+    # this field said. Raising this field past ~150,000 puts the buffer alone over a quarter of the
+    # pod, which is the point at which it stops being a backstop and becomes the risk.
     agent_audit_buffer_max_events: int = Field(default=50_000, ge=0)
 
     # How many times one turn may call a tool with the *identical* arguments before the call is

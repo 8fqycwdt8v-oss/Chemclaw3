@@ -100,6 +100,16 @@ class PostgresAuditSink:
         self._dsn = dsn if dsn is not None else settings.postgres_dsn
         self._buffer: list[AuditEvent] = []
         self._flusher: asyncio.Task[None] | None = None
+        # Events handed to a batch that is still awaiting its round trip. The bound is charged
+        # against buffered *plus* in-flight, because `_flush_all` swaps the list out and `record`
+        # immediately starts refilling a fresh one: bounding only what `_shed_to_bound` can see
+        # left the real ceiling at twice the configured number. Measured at a bound of 10, 400
+        # records: peak resident 20.
+        self._in_flight = 0
+        # How many have been shed since the buffer last came off its bound, and whether it is on
+        # it now. Both exist to make the WARNING one-per-episode instead of one-per-event.
+        self._shed_since_full = 0
+        self._at_bound = False
 
     async def record(self, event: AuditEvent) -> None:
         """Buffer one audit event and return; the flusher task persists it.
@@ -124,23 +134,61 @@ class PostgresAuditSink:
         The oldest go because an operator reading this trail is asking what just happened, and
         every event has already reached the stdlib log before it is buffered — so what is lost here
         is durability and ordering, not the record itself.
+
+        **Two things here are corrections to the version that first shipped**, both measured. The
+        bound is charged against the in-flight batch as well as the buffer, because `_flush_all`
+        takes the list away and `record` refills a fresh one that this method bounds on its own —
+        so the real ceiling was `2 * bound`, and every statement of it, here and in the config
+        comment and the runbook, was half the truth.
+
+        And the WARNING is one per *episode* rather than one per event. Once the bound is reached
+        `shed` is exactly 1 on every subsequent `record`, so at the ~90 rows a turn this module
+        measures a slow database produced one WARNING per tool call, each one reading "shed 1" —
+        log amplification at precisely the moment an operator is reading logs, and a marker that
+        could never name the total the runbook promised it named. It is now logged on entering the
+        bound and again in `_drained_notice` on leaving it, where the running total is known.
         """
         bound = settings.agent_audit_buffer_max_events
-        if not bound or len(self._buffer) <= bound:
+        if not bound:
+            return
+        resident = len(self._buffer) + self._in_flight
+        if resident <= bound:
             return
         from functools import partial
 
         from chemclaw.core.metrics_bridge import record_metric
 
-        shed = len(self._buffer) - bound
+        shed = min(resident - bound, len(self._buffer))
+        if not shed:  # The whole overage is in flight; the next completed batch releases it.
+            return
         del self._buffer[:shed]
         record_metric(partial(_count_shed, float(shed)))
+        self._shed_since_full += shed
+        if not self._at_bound:
+            self._at_bound = True
+            logger.warning(
+                "audit_buffer_full: the audit buffer reached its %d-event bound and is dropping "
+                "the oldest events; the durable trail will have a gap and the stdlib log above "
+                "still carries each. The running total is chemclaw_audit_events_shed_total, and "
+                "audit_buffer_drained reports it when the sink catches up",
+                bound,
+            )
+
+    def _drained_notice(self) -> None:
+        """Close a shedding episode, naming the total — the number an operator actually needs.
+
+        Called when a batch lands with nothing left behind, which is the only moment the buffer is
+        demonstrably off its bound. Silent unless there was something to report.
+        """
+        if not self._at_bound:
+            return
         logger.warning(
-            "audit_buffer_full: shed %d oldest buffered audit event(s) at the %d-event bound; "
-            "the durable trail has a gap and the stdlib log above still carries each",
-            shed,
-            bound,
+            "audit_buffer_drained: the audit sink caught up after dropping %d audit event(s); "
+            "the durable trail has a gap of that size and the stdlib log carries each",
+            self._shed_since_full,
         )
+        self._at_bound = False
+        self._shed_since_full = 0
 
     async def flush(self) -> None:
         """Wait until everything recorded so far has been written (or failed and been logged).
@@ -168,6 +216,10 @@ class PostgresAuditSink:
         """
         while self._buffer:
             batch, self._buffer = self._buffer, []
+            # The batch is still resident memory until the round trip returns, and `record` is
+            # free to run throughout it — so it stays charged against the bound. Without this the
+            # ceiling is `2 * bound`, which is what every statement of the bound used to mean.
+            self._in_flight += len(batch)
             try:
                 async with db.connection(self._dsn) as conn:
                     async with conn.cursor() as cur:
@@ -185,3 +237,6 @@ class PostgresAuditSink:
                     "are lost to the durable trail (the stdlib log above still carries each)",
                     len(batch),
                 )
+            finally:
+                self._in_flight -= len(batch)
+        self._drained_notice()

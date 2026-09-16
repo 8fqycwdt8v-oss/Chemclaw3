@@ -468,21 +468,40 @@ def _baked_cache_dir() -> Path | None:
     the network and recover; it is not to reach it. Asking whether a cache has been baked at all
     means the common misconfiguration — an image built without one — never makes the call.
 
+    **The resolution below is `tiktoken.load.read_file_cached`'s own, and it is transcribed rather
+    than paraphrased because a paraphrase of it was wrong in the direction that dials.** That
+    function decides on *presence* (`"TIKTOKEN_CACHE_DIR" in os.environ`) and treats an empty value
+    as *caching disabled — fetch every time*. This function asked `os.environ.get(...) or ...`,
+    which is truthiness: an empty `TIKTOKEN_CACHE_DIR` fell through to `DATA_GYM_CACHE_DIR` and
+    then to the temp-directory default, and where that default happened to be populated — which it
+    is on any host that has ever loaded an encoding — this function answered "a table is baked
+    here, it is safe to load". Measured with `TIKTOKEN_CACHE_DIR=""` and a populated
+    `/tmp/data-gym-cache`: this returned that directory, `tiktoken.get_encoding("o200k_base")`
+    then ignored it exactly as upstream says it will, and the resolve dialled. A guard that says
+    "no network will be reached" and is then the reason one is reached is worse than no guard, so
+    the two spellings are now the same spelling. Nothing else here may be loosened the same way:
+    upstream compares `cache_dir == ""` exactly, so a value of `" "` is a directory named `" "`
+    and is not stripped here either.
+
     What it does not close, said rather than implied: a *populated* cache that does not hold the
     configured encoding still attempts one fetch per process, which is the deployment that changed
-    `llm_token_encoding` without re-baking. That attempt is bounded by `_resolve_encoding`'s
-    swallow rather than by this function, and it happens once.
-
-    The three-step resolution is `tiktoken.load.read_file_cached`'s own, transcribed because the
-    function that holds it takes the blob path rather than answering the question. That is an
-    upstream shape, and `tests/test_context_budget.py` pins it against the installed package.
+    `llm_token_encoding` without re-baking. `_resolve_encoding` says what bounds that and what
+    does not.
 
     Returns:
-        The directory, or `None` when there is nothing baked there to read.
+        The directory, or `None` when there is nothing baked there to read — including the
+        deliberate "no cache" that an empty value is.
     """
-    named = os.environ.get("TIKTOKEN_CACHE_DIR") or os.environ.get("DATA_GYM_CACHE_DIR")
-    directory = Path(named) if named else Path(tempfile.gettempdir()) / "data-gym-cache"
+    if "TIKTOKEN_CACHE_DIR" in os.environ:
+        named = os.environ["TIKTOKEN_CACHE_DIR"]
+    elif "DATA_GYM_CACHE_DIR" in os.environ:
+        named = os.environ["DATA_GYM_CACHE_DIR"]
+    else:
+        named = str(Path(tempfile.gettempdir()) / "data-gym-cache")
+    if named == "":
+        return None
     try:
+        directory = Path(named)
         return directory if any(directory.iterdir()) else None
     except OSError:
         return None
@@ -501,6 +520,30 @@ def _resolve_encoding() -> Any | None:
     therefore a statement by the deployment about its own endpoint, and where that endpoint fronts
     a non-OpenAI vendor the count is a *closer approximation* rather than the bill: the residual is
     what `_Calibration` above measures and divides out, which is why it stays.
+
+    **The swallow below bounds an exception and the residual is a hang, so what bounds the hang is
+    stated here rather than assumed.** `tiktoken.load.read_file` calls `requests.get(blobpath)`
+    with no timeout at all, so on a network that *drops* rather than refuses there is no exception
+    to catch and this function does not return. Three things are true about that, measured rather
+    than reasoned:
+
+    - **`_baked_cache_dir` closes the common path**, and after the transcription above it closes it
+      for the empty-value spelling too: with nothing baked — or with caching deliberately disabled
+      — `tiktoken` is never imported and never called, so no fetch exists to hang. Measured on the
+      arm that used to dial (`TIKTOKEN_CACHE_DIR=""`, a populated `/tmp/data-gym-cache`): hosts
+      dialled went from `['127.0.0.1']` to none.
+    - **The residual is bounded one layer down, at the resolver rather than at a timeout.**
+      `core/netguard.py` arms at `chemclaw.core.config` import, which this module's own import
+      chain makes, and `requests` is pure Python so the patched `socket.getaddrinfo` sees it.
+      Measured with the guard armed and no proxy variable set: a fetch of `o200k_base` is refused
+      in **0.003 s** as `requests.ConnectionError`, which the `except Exception` here then turns
+      into the degradation this function already reports. What is *not* bounded is named rather
+      than glossed: a deployment running `CHEMCLAW_EGRESS_GUARD_ENABLED=false`, and an ambient
+      proxy variable whose proxy is loopback or allowlisted — the guard must exempt loopback, so it
+      sees a legitimate dial. That second case is how the defect above was measured dialling
+      `127.0.0.1` with the guard armed and reporting no refusal.
+    - **Moving the lock is not one of the three, and that is a measurement rather than a
+      preference** — see `_encoding`.
     """
     name = settings.llm_token_encoding
     if not name:
@@ -549,6 +592,23 @@ def _encoding() -> Any | None:
     Under the lock for the whole resolution rather than around a memo read: loading `o200k_base`
     from a warm cache measures **357 ms** and builds a 3.6 MB table, and two turns racing a cold
     process should wait for one load rather than each do their own.
+
+    **It stays there, and the reason is that releasing it bounds nothing.** The worry it answers is
+    real — `_resolve_encoding`'s fetch has no timeout, so a dropping network makes the resolution
+    never return — but the lock is not what turns one stall into many. Driven with a 3.0 s stall
+    standing in for that fetch and four concurrent prefix measurements: **lock held, 1 fetch, wall
+    3.00 s, every thread 3.0 s; lock released, 4 fetches, wall 3.02 s, every thread 3.0 s.** Nobody
+    waits any less without it, because the thing they are waiting for is the fetch and the memo is
+    still empty until it returns — so a fifth turn arriving at second 2 blocks either way. All
+    releasing it buys is one hung socket per concurrent turn instead of one per process, which is
+    the wrong direction on an air-gapped estate.
+
+    So the bound is `_baked_cache_dir` declining to call at all, and the egress guard refusing the
+    residual at the resolver in 0.003 s; both are in `_resolve_encoding`'s docstring with their
+    measurements, including the two postures neither covers. A `concurrent.futures` future with a
+    join timeout was the obvious third option and is declined: it stops the *waiting* without
+    stopping the socket or the thread, which is a control that reads as one and is not — the same
+    trade `Chemclaw3-mcp` records for a per-tool-call wall clock over `asyncio.to_thread`.
     """
     with _ENCODING_LOCK:
         if not _ENCODING:

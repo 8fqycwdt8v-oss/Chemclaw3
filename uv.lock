@@ -493,6 +493,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "anyio" },
     { name = "hypothesis" },
     { name = "mutmut" },
     { name = "mypy" },
@@ -555,6 +556,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "anyio", specifier = ">=4.5" },
     { name = "hypothesis", specifier = ">=6.100" },
     { name = "mutmut", specifier = ">=3.0" },
     { name = "mypy", specifier = ">=1.11" },

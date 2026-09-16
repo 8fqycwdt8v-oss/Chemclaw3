@@ -78,11 +78,23 @@ def _sample(value: float) -> str:
     which a long-running pod's numbers stop being worth reading. `chemclaw_tool_calls_total` on the
     shipped fleet crosses that in days. Histogram `_sum` and `_count` had the same defect.
 
-    `repr` is the fix for the float case because it is the shortest string that round-trips, and
-    `int` is rendered exactly rather than through float at all, so a count is never approximated.
+    `repr` is the fix, because it is the shortest string that round-trips a float exactly.
+
+    **The coercion on the first line is load-bearing and this function shipped without it.** It
+    opened with `if isinstance(value, int): return str(value)`, whose comment claimed bool "renders
+    0/1 — correct here". It does not: `bool` is an `int`, so `str(True)` is `True`, and a gauge
+    that ever handed this a flag would emit `chemclaw_x True` and take the whole scrape with it —
+    the same total loss the `inf` paragraph above is about. The branch was also dead: instrumented
+    across every emission site, `render` hands this `float` and nothing else, because `_counts` is
+    seeded `0.0`, labelled series start at `0.0`, histogram slots are `[0.0] * n` and both gauge
+    paths already call `float(...)`. So it defended nothing and risked everything.
+
+    Coercing is not a narrowing, either, which is why the "exact int" claim went with it rather
+    than being repaired: a Prometheus sample **is** a float64, so an integer past 2**53 cannot be
+    stored by the server whatever this function prints. Rendering what Prometheus can hold is the
+    honest answer, and it is what `prometheus_client` does.
     """
-    if isinstance(value, int):  # includes bool, which is an int and renders 0/1 — correct here
-        return str(value)
+    value = float(value)
     if value != value:  # NaN is the only value unequal to itself
         return "NaN"
     if value == float("inf"):

@@ -179,6 +179,28 @@ _STACKS: dict[str, str] = {
     # `llm` rows license *building a model client* and counting tokens is the opposite question —
     # `agent/context_budget.py` measures a request without dialling anything.
     "tiktoken": "tokenizer",
+    # The three roots the same review wave added and then did **not** map, found by two independent
+    # readers of the commit that wrote the blind-spot comment four lines above. That is the comment
+    # being right about `httpx_sse` and `pint` and blind about its own diff: `flexparser` and
+    # `flexcache`, which no first-party module imports, were mapped, while `pathspec` and
+    # `charset_normalizer` — real module-scope imports in `ingest/documents/` — were not, so the
+    # walk skipped them entirely and the ADR's "every new root mapped to a stack" held nothing
+    # about two of its own six adoptions.
+    #
+    # `share` rather than a stack of their own, and one label for both, because they carry the same
+    # single layering meaning: **only the document-share reader decides what a file on a mounted
+    # share is.** A `pathspec` import outside `ingest/` would be a second answer to "is this path
+    # excluded" and a `charset_normalizer` one would be a second answer to "what encoding is this",
+    # and the share is the only place in this tree that may ask either.
+    "pathspec": "share",
+    "charset_normalizer": "share",
+    # `numpy` stays deliberately unmapped for the reason the docstring gives — it is arithmetic, and
+    # every layer may do arithmetic. `scipy` is not that: its submodules are separate capabilities
+    # (`sparse` a data structure, `linalg` an eigensolver, `constants` the CODATA tables), and each
+    # one is a thing a layer either may or may not reach for. One label rather than three, because
+    # `_STACKS` is keyed by *root* and a submodule split would be a distinction this walk cannot
+    # make; the per-row reasons below are where the difference is written down.
+    "scipy": "scipy",
 }
 
 Edge = tuple[str, str]  # (chemclaw package, stack)
@@ -190,6 +212,21 @@ Site = tuple[str, str]  # (path relative to the repo root, stack or target modul
 
 # One row per (package, stack) the architecture states is that package's job.
 _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
+    # --- `scipy`, four rows, and three of them are older than the row that declares them. ------
+    # Mapping `scipy` made the walk see imports it had skipped since they were written: only
+    # `memory/similarity.py` is this review wave's. The other two are pre-existing and were
+    # unpoliced, which is the blind spot stated for new roots turning out to apply to old ones too.
+    ("chemclaw.memory", "scipy"): (
+        "similarity clustering: one `csr @ csr.T` and one `connected_components` in place of an "
+        "O(n^2) Python pairwise loop over the same fingerprints"
+    ),
+    ("chemclaw.analytical", "scipy"): "stability regression over the analytical series",
+    ("chemclaw.science", "scipy"): "the RRHO arithmetic's eigenproblem, in `calc/thermo.py`",
+    ("chemclaw.core", "scipy"): (
+        "`core/units.py` reads the calorie, the hartree and the electronvolt out of "
+        "`scipy.constants` instead of transcribing them — the kernel is the one layer that may "
+        "hold a physical constant, for the same reason it is the one that may hold a unit registry"
+    ),
     # core: the shared kernel every layer builds on. `core/README.md` names exactly these.
     ("chemclaw.core", "postgres"): "core/db.py is the one connection pool",
     ("chemclaw.core", "httpx"): "core/http.py is the one HTTP client factory",
@@ -296,6 +333,12 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.publish", "httpx"): "the shipped HTTP driver POSTs records to a results service",
     ("chemclaw.protocols", "postgres"): (
         "a design and its append-only revision history are two tables (migration 073)"
+    ),
+    ("chemclaw.ingest", "share"): (
+        "the mounted share reader is the one place that decides what a path on a share is and "
+        "what encoding its bytes are in — `crawl.py` and `binding.py` for the exclusion patterns, "
+        "`parse.py` for the decode. Both were module-scope imports the walk could not see until "
+        "their roots were mapped, which is why this row arrives after the code did"
     ),
     ("chemclaw.ingest", "postgres"): "the document chunk index",
     ("chemclaw.ingest", "rdkit"): "an ELN row's structure is canonicalised on the way in",
@@ -432,6 +475,29 @@ _KNOWN_PRIVATE_IMPORTS: dict[Site, str] = {
         "*asserted*: `tests/test_upstream_surface.py` drives the real function so a rename or a "
         "changed output turns red there, which is this repository's answer to a coupling upstream "
         "never promised."
+    ),
+    ("src/chemclaw/evals/live.py", "httpx_sse._decoders"): (
+        "**The public surface here is the defect, not the parser.** `httpx_sse` exports the "
+        "*driver* — `aconnect_sse` and `EventSource.aiter_sse` — and keeps the line-to-event state "
+        "machine (`SSEDecoder`, `SSELineDecoder`) private. That driver drops the final event of "
+        "any stream that ends without a trailing blank line, because `SSEDecoder` emits only when "
+        "it is handed an empty line and `_aiter_sse_lines` flushes the *line* buffer and never the "
+        "*event* one: measured on a two-frame stream whose second `data:` line has no blank line "
+        "behind it, one event where the three "
+        "hand-written readers it replaced yielded two. `cli/live_storm` is a chaos harness whose "
+        "whole subject is turns cut off mid-stream, so that is the frame nearest every fault it is "
+        "run to observe. It also raises `SSEError` from inside the iterator on a 200 that is not a "
+        "stream, which ends a whole `cli/live_benchmark` run rather than costing it one question. "
+        "The alternative to this row is a fourth hand-written reader of the SSE grammar — which is "
+        "exactly what adopting this dependency deleted, and what the multi-line `data:`, the "
+        "comment, the `id:`/`retry:` and the CRLF cases in `tests/test_live_probes.py` each cost "
+        "when a harness remembers the format instead of parsing it. So the grammar stays "
+        "upstream's and only the end of the stream is ours. A rename breaks `chemclaw.evals.live` "
+        "at import, "
+        "which is process start of the probe runner, the storm and the benchmark — loud, and "
+        "none of them is a serving path. Asserted rather than believed: "
+        '`tests/test_upstream_surface.py` drives both classes, including the `decode("")` flush '
+        "this repository leans on."
     ),
 }
 

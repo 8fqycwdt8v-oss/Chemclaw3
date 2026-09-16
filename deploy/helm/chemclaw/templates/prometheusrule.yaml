@@ -37,8 +37,13 @@
        claim it did.** `increase(c[10m]) > 0` keeps returning a sample for the whole ten minutes
        after a *single* increment, so any `for:` shorter than the range window is satisfied by one
        blip: the alert is not suppressed, only late. Where a rule means "more than the odd blip",
-       the count is the threshold and `for:` is `0m`. The three `increase(...) > 0` + `for: 0m`
-       alerts are correct as written — their intent *is* the first increment. */ -}}
+       the count is the threshold and `for:` is `0m`. An `increase(...) > 0` rule with `for: 0m` is
+       correct as written wherever its intent *is* the first increment, which is most of them.
+
+       No count of them is written here. The sentence this replaced said "the three", and `main`
+       already carried nineteen `increase(` rules before this branch made it twenty — the same
+       failure the rest of this tree refuses a number in prose for. `grep -c 'expr: increase(' `
+       on this file answers, and the answer is right on the day it is asked. */ -}}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:

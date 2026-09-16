@@ -14,6 +14,7 @@ is the wiring: the ledger's unit and the reported unit have to meet somewhere, a
 import pytest
 
 from chemclaw.core.units import (
+    ELECTRONVOLT_TO_KJ,
     HARTREE_TO_KCAL,
     JOULE_PER_CALORIE,
     Measurement,
@@ -431,3 +432,26 @@ def test_no_exception_from_the_unit_library_reaches_a_caller() -> None:
             probe()
         assert not isinstance(caught.value, pint.PintError)
         assert isinstance(caught.value, ValueError)
+
+
+def test_the_three_physical_constants_are_pinned_against_the_codata_release_scipy_ships() -> None:
+    """A sourced constant that can move on a dependency bump needs a pin, or sourcing is the defect.
+
+    `core/units.py` reads these from `scipy.constants` rather than transcribing them, which is the
+    right trade — a literal is what let one hartree be written out three times and disagree twice.
+    But it hands a third party the value: `scipy` 1.17.1 carries CODATA **2022** where this module's
+    comment used to say 2018, and adopting it moved `HARTREE_TO_KCAL` by a relative 3.3e-13 on its
+    own. That move was argued; the next one would arrive inside a lockfile bump with nobody asked.
+
+    So the literals here are the pin, compared with `==` rather than a tolerance: a CODATA release
+    *is* a new number, however small, and the point is to be told. The consequences to weigh when
+    this fails are in `core/units.py`'s comment — measured, none of them reaches the calculation
+    cache, because `CALCULATION_EPOCH` rides in the key and these do not.
+
+    `JOULE_PER_CALORIE` is here for a different reason and cannot fail for the same one: the
+    thermochemical calorie is exact by definition, so this arm is a guard against `scipy.constants`
+    renaming or re-basing the attribute rather than against a measurement improving.
+    """
+    assert JOULE_PER_CALORIE == 4.184
+    assert HARTREE_TO_KCAL == 627.5094740628974
+    assert ELECTRONVOLT_TO_KJ == 96.48533212331002
