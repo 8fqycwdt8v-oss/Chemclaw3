@@ -29,7 +29,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from chemclaw.core.units import HARTREE_TO_KCAL
+from chemclaw.core.units import ELECTRONVOLT_TO_KJ, HARTREE_TO_KCAL, JOULE_PER_CALORIE
 
 # What kind of value a property carries. `PropertyFact` enforces that exactly one of its three
 # value columns is filled; this says which one is correct for a given name, so a projection that
@@ -95,11 +95,16 @@ def _d(
 UNIT_CONVERSIONS: dict[tuple[str, str], float] = {
     ("hartree", "kcal/mol"): HARTREE_TO_KCAL,
     ("kcal/mol", "hartree"): 1.0 / HARTREE_TO_KCAL,
-    ("kj/mol", "kcal/mol"): 1.0 / 4.184,
-    ("kcal/mol", "kj/mol"): 4.184,
-    ("cal/(mol*K)", "j/(mol*K)"): 4.184,
-    ("j/(mol*K)", "cal/(mol*K)"): 1.0 / 4.184,
-    ("ev", "kcal/mol"): 23.060547830619026,
+    ("kj/mol", "kcal/mol"): 1.0 / JOULE_PER_CALORIE,
+    ("kcal/mol", "kj/mol"): JOULE_PER_CALORIE,
+    ("cal/(mol*K)", "j/(mol*K)"): JOULE_PER_CALORIE,
+    ("j/(mol*K)", "cal/(mol*K)"): 1.0 / JOULE_PER_CALORIE,
+    # Derived rather than written, for the reason the paragraph above gives and this line used to
+    # be the counter-example to: `96.48533212331 / 4.184` is **exactly** the literal that stood
+    # here, `23.060547830619026`, difference 0.0 — so nothing published moves, and the way the two
+    # could ever disagree is now gone rather than merely absent today. The thermochemical calorie
+    # is `JOULE_PER_CALORIE`, which four of these entries were also spelling as a bare `4.184`.
+    ("ev", "kcal/mol"): ELECTRONVOLT_TO_KJ / JOULE_PER_CALORIE,
     # A gradient's unit is the *reciprocal* of a length, so this factor is the bohr radius itself
     # and not its reciprocal: one Hartree/Angstrom is 0.529 Hartree/bohr, because a bohr is the
     # shorter step. Here because both calculators that report a gradient report it per Angstrom

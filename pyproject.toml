@@ -54,6 +54,16 @@ dependencies = [
     # launcher. Declared explicitly: four first-party modules import it directly, so it is a
     # direct dependency, not merely transitive (via fastapi/mcp).
     "httpx>=0.28",
+    # The SSE *client* half, declared for the same reason `httpx` above it is. Already resolved in
+    # `uv.lock` as a requirement of `mcp`, so this costs the image nothing — what it buys is that
+    # three first-party decoders stop disagreeing. `cli/live_storm.py` sliced `[6:]` off
+    # `"data: "`, `cli/live_benchmark.py` sliced `[5:].strip()` off `"data:"`, and `evals/live.py`
+    # did it a third way; none handled a multi-line `data:`, an `id:` or a `retry:`, and all three
+    # discarded the `event:` name `api/events.sse_frame` deliberately sets, re-reading `type` out
+    # of the JSON body instead. Latent rather than broken — `sse_starlette` emits
+    # `model_dump_json()`, which carries no raw newline — so what was being paid for was three
+    # spellings drifting, not a live fault.
+    "httpx-sse>=0.4.3",
     # **The second HTTP stack, declared rather than left transitive** (see
     # `docs/decisions/D-2026-08-14-two-http-stacks-is-the-price-of-the-openai-major.md`). `openai` 3
     # makes httpx2 its default client and stops installing `httpx`; `starlette` 1.6's test client
@@ -143,8 +153,24 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "pydantic-settings>=2.5",
     "pyjwt[crypto]>=2.8",
+    # Gitwildmatch path matching for the mounted share's `exclude:` globs
+    # (`ingest/documents/crawl.py`). Already in `uv.lock` through `mypy`, promoted to a runtime
+    # dependency because `fnmatch` gives `**` no special meaning: the crawler tried every pattern
+    # three ways — bare, `/`-prefixed and basename — and a top-level `Archive/` still shipped as an
+    # indexed, citable defect. Measured, the three-way form is *also* `False` for every spelling of
+    # a directory, so `**/Archive/**` never matched `Projects/Archive` and the walk descended the
+    # whole subtree to exclude it one file at a time — on a share this module's own docstring sizes
+    # in terabytes.
+    "pathspec>=0.12",
     "pypdf>=6.15.0",
     "python-docx>=1.2.0",
+    # Encoding detection for the mounted share (`ingest/documents/parse.py`), already in `uv.lock`
+    # through `requests`. The parser decoded a decade-old Windows/CIFS share as UTF-8 with
+    # `errors="replace"`: measured, cp1252 `60 °C` became mojibake that was parsed, chunked,
+    # embedded and citable with nothing counted, a BOM broke the first CSV header cell, and UTF-16
+    # was filed `skipped_unreadable` with a misleading reason. Strict UTF-8 is still tried first, so
+    # every file that decodes correctly today is byte-identical after this.
+    "charset-normalizer>=3.4",
     "python-frontmatter>=1.3.0",
     "python-pptx>=1.0.2",
     "pyyaml>=6.0",
