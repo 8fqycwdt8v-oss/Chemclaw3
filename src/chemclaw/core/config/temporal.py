@@ -211,11 +211,24 @@ class TemporalSettings(BaseSettings):
     # written to exactly once, on expiry — so with `awaiting_max_days` at 90 they can hear
     # nothing about their own suspended campaign for three months and then hear it failed.
     #
-    # Off by default, because it delivers to a mailbox and an outbound channel: a deployment
-    # that has configured neither would be running a sweep to write somewhere nobody reads,
-    # which is what `digest_enabled` shipping off for the wrong reason already cost once
-    # (`D-2026-09-15-a-watch-that-nothing-evaluates-is-a-promise-a-deployment-cannot-keep`).
-    check_in_enabled: bool = False
+    # **On by default, and the reason it was off is worth keeping because half of it was real.**
+    # It shipped off because the sweep delivers to a mailbox and an outbound channel, and a
+    # deployment that had configured neither would be writing where nobody reads — the mistake
+    # `D-2026-09-15-a-watch-that-nothing-evaluates-is-a-promise-a-deployment-cannot-keep` records.
+    #
+    # Two things changed. The mailbox now has a reader that ships: `GET /check-ins`
+    # (`api/routes/streams.py`), whose absence was the original defect and is asserted end to end.
+    # And the sweep no longer accumulates: it supersedes the unread notices of the page it is about
+    # to write, so a requester holds **one** row rather than one per night — measured before that
+    # fix at ~87 unprunable rows per requester over a 90-day wait, which is what made "writes
+    # somewhere nobody reads" a storage problem as well as a pointless one.
+    #
+    # What has *not* changed, and is the honest residual: `Chemclaw3_ui` does not call
+    # `GET /check-ins` yet (`docs/planning/BACKLOG.md` §5), so today a check-in reaches a chemist
+    # through the API or an outbound channel and not through the app. That is a surfacing gap with
+    # an owner, not a reason for the sweep to stay silent — the requester whose campaign is
+    # suspended is worse served by nothing at all than by a notice their client has yet to render.
+    check_in_enabled: bool = True
     # How long a question must have been open before it is worth mentioning. A question asked
     # this morning is not news to the person who asked it, and a check-in that said so on the
     # first night would train its reader to ignore the second.

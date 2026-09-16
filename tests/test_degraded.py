@@ -128,6 +128,14 @@ _EXPECTED_SUBSYSTEMS = {
     # it parsed" need different operator actions, and both had a bare `logger.warning` and no
     # counter, so from outside they were the same silence as a genuinely empty portfolio.
     "commitment_export",
+    # `api/runner.py::_escalate_exhausted_review`, on a review request that could not be opened —
+    # no broker, a refusing task queue, anything. The answer still ships, exactly as it did before
+    # the escalation existed, which is what makes this a degradation rather than an error: nothing
+    # a chemist waited for is lost. What *is* lost is silent and is the whole point of the
+    # feature — the rounds were spent, `chemclaw_answer_review_exhausted_total` moved, and the
+    # answer went out marked for review with nobody asked to read it, which from outside is
+    # indistinguishable from a deployment that never turned the escalation on.
+    "answer_review_escalation",
     "plan_approval",
     # `agent/protocol_design_tools.uncited_precedent`, on a reaction index that cannot be reached.
     # The same shape as `failure_memory` one function over and counted for the same reason, with
