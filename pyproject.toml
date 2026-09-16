@@ -148,6 +148,17 @@ dependencies = [
     "openinference-instrumentation-langchain>=0.1.70",
     "opentelemetry-exporter-otlp-proto-grpc>=1.44.0",
     "opentelemetry-sdk>=1.44.0",
+    # The unit registry behind `core/units.py`, built from a **restricted definitions file** rather
+    # than `pint.UnitRegistry()` bare — this is a chemistry registry and the "0.5 furlongs" refusal
+    # that module argues for is the product, not a limitation of it.
+    #
+    # It replaces ~200 lines of hand-built registry whose own history is three instances of one
+    # bug, each a prefix rung existing on one ladder and not the other: `nM` missing so nanomolar
+    # folded to nanometre; `pM` added without its length twin so **picometre resolved to
+    # picomolar**; `µm` aliased to micromolar so a particle size was accepted as a concentration.
+    # A registry that *derives* SI prefixes cannot have that class of defect, and pint is
+    # case-sensitive by default, which is the other half (`M` molar against `m` metre).
+    "pint>=0.25.3",
     "pandas>=2.2",
     "psycopg-pool>=3.2",
     "psycopg[binary]>=3.2",
