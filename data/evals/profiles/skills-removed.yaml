@@ -1,0 +1,48 @@
+# The arm that varies **only** the skills, and it could not be written until
+# `AgentProfile.skill_names` existed.
+#
+# `no-tools.yaml` varies prompt-and-tools and `tools-removed.yaml` varies tools alone. Neither can
+# answer "does the judgment in `skills/` help", and the reason is a coupling rather than an
+# omission: `ToolScopedSkills` drops a skill whose every declared tool is absent, so an arm that
+# removes tools removes skills with them, and an arm that keeps tools had no way to move the skills.
+# Every delta either arm could report is a delta about tools that *also* moved the skills, which is
+# `D-2026-09-14-tools-were-never-the-variable` one field over — the same defect, in the dimension
+# nobody had a knob for.
+#
+# This profile declares `skill_names: []` and **nothing else**. The tool surface is `default`'s
+# entire set, the prose is the deployment's own, and `instructions_for`'s `PromptBlock` gating is
+# untouched because that gating is a function of the *tool* surface. So the only thing that differs
+# between this arm and `default` is whether the 28-odd `SKILL.md` bodies are reachable and listed.
+#
+# **What it still carries, stated because a control arm that overstates itself is worse than none.
+# There are two things, and the first draft of this paragraph named only the smaller one.**
+#
+# The skills *listing* is what `deepagents.SkillsMiddleware` publishes into the system prompt, and
+# with none permitted this arm carries the middleware's own empty-listing text rather than no text
+# at all — the shipped override in `agent/langgraph_agent.py`, because upstream's default invites
+# the model to create skills in a tree that refuses every write. That much is a small, fixed prose
+# difference.
+#
+# The larger one is that **the deployment's own prose still orders the model to load skills this
+# arm cannot reach**, because those sentences are `PromptBlock`s gated on *tools* and this arm
+# keeps every tool. Measured on a compiled graph, the arm's system message still contains "Load the
+# deep-research skill for how to run this loop, and the calculation/search skills for which tool
+# fits and how far to trust it" (`agent/chemclaw_agent.py`, ungated) and "Load the safety-screening
+# skill for how to act on a flag" (gated on `screen_hazards`, which this arm holds). Following
+# either produces a `Refused:` tool result, a WARNING and a `chemclaw_skill_reads_denied_total`
+# tick. So this arm can spend turns on instructions it cannot satisfy, which is a cost *against*
+# the treatment rather than a neutral one — a delta measured here is a lower bound on what skills
+# are worth, not an unbiased estimate. Reporting a negative result from this arm therefore needs
+# the refusal counter read alongside it.
+#
+# Both are why this measures "the skills' content", not "the existence of a skills mechanism".
+#
+# **`skill_names: []` is empty, not absent**, and the distinction is the whole arm. `None` means
+# "do not narrow" and would give this profile every skill, i.e. `default` under another name —
+# a control that silently compares the shipped agent with itself, which is the failure mode
+# `no-tools.yaml`'s own header warns about for `tool_names`. `ProfileScopedSkills._narrows` is
+# written around keeping the two distinguishable.
+#
+# Kept out of `data/profiles/` for the reason the other two controls are: a measurement instrument
+# is not a capability a session may pick by name.
+skill_names: []

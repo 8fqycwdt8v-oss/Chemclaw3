@@ -20,6 +20,8 @@ import pytest
 
 from chemclaw.agent.chemclaw_agent import _capability_tools
 from chemclaw.agent.profile_discovery import _load
+from chemclaw.agent.profiles import DEFAULT_PROFILE
+from chemclaw.agent.skill_access import skill_permits
 from chemclaw.core.config import settings
 from chemclaw.evals.live_judge import Judgement
 from chemclaw.evals.probe import Probe
@@ -32,6 +34,11 @@ from chemclaw.evals.tool_utility import (
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _CONTROL_PROFILE = _REPO_ROOT / "data/evals/profiles/no-tools.yaml"
+
+#: The shipped skill names, read off the tree so a new skill is covered the day it lands.
+_SHIPPED_SKILL_NAMES = sorted(
+    path.parent.name for path in (_REPO_ROOT / "skills").glob("*/SKILL.md")
+)
 
 
 def _probe(probe_id: str, bucket: Literal["A", "B", "C"] = "A") -> Probe:
@@ -350,3 +357,45 @@ def test_the_control_arm_labels_itself_as_a_prompt_contrast() -> None:
         "the paragraph that exists so the control arm does not overstate itself still omits the "
         "system prompt, which is the largest thing this arm changes"
     )
+
+
+_SKILLS_CONTROL_PROFILE = _REPO_ROOT / "data/evals/profiles/skills-removed.yaml"
+
+
+def test_the_skills_arm_keeps_every_tool_and_reaches_no_skill() -> None:
+    """The arm that isolates the skills, driven on both halves of the claim it makes.
+
+    Both assertions matter and neither implies the other. *Reaches no skill* is the treatment, and
+    *keeps every tool* is what makes the delta attributable — it is the property `no-tools.yaml` and
+    `tools-removed.yaml` cannot have, because `ToolScopedSkills` drops a skill whose every declared
+    tool went with the tools, so neither of those arms can move skills without moving tools.
+
+    Asserted against the permit predicate `skills_backend` composes rather than against the YAML:
+    the file saying `skill_names: []` is the claim, and this is the thing the claim is about.
+    """
+    profile = _load(_SKILLS_CONTROL_PROFILE)
+    permits = skill_permits(
+        enabled=None, declared={}, available=[], gates=None, names=profile.skill_names
+    )
+    unnarrowed = skill_permits(
+        enabled=None, declared={}, available=[], gates=None, names=DEFAULT_PROFILE.skill_names
+    )
+
+    assert profile.name == "skills-removed"
+    assert profile.skill_names == frozenset()
+    # Every discovered skill is refused, whatever it is called.
+    assert [name for name in _SHIPPED_SKILL_NAMES if permits(name)] == []
+    # And the same predicate with `skill_names` unset refuses none of them — which is what makes
+    # the empty set the narrowing rather than the default. `None` here would be `default` renamed.
+    assert [name for name in _SHIPPED_SKILL_NAMES if not unnarrowed(name)] == []
+    # The tool surface is untouched: this arm narrows nothing a tool gate can see.
+    assert profile.tool_names is None
+    assert _capability_tools(profile) == _capability_tools(DEFAULT_PROFILE)
+
+
+def test_the_skills_arm_is_not_in_the_shipped_profile_set() -> None:
+    """A measurement instrument, like the two controls beside it — not a capability to pick."""
+    shipped = {path.stem for path in (_REPO_ROOT / "data/profiles").glob("*.yaml")}
+
+    assert "skills-removed" not in shipped
+    assert _SKILLS_CONTROL_PROFILE.exists()

@@ -27,6 +27,9 @@ run time:
   that matters: `RoleScopedSkills` reads "absent from the map" as "ungated", so a typo'd key
   leaves the skill it was meant to restrict visible to every caller. A gate that fails open is
   worth a CI failure.
+- every registered profile's `skill_names` — an unknown name silently removes a skill the profile's
+  author meant to keep, and a profile is a file a deployment may drop in
+  (`chemclaw.agent.profile_discovery`), so the typo is as likely to be a site's as a shipped one.
 
 This is the `make skill-validate` gate: it exits non-zero listing the problems, so CI catches skill
 drift like `kg-validate` catches note drift. Read-only; touches nothing.
@@ -44,6 +47,8 @@ from pydantic import ValidationError
 # real set.
 from chemclaw.agent import chemclaw_agent as _agent  # noqa: F401 — imported for tool registration
 from chemclaw.agent.chemclaw_agent import available_tool_names
+from chemclaw.agent.profile_discovery import ProfileError, load_profiles
+from chemclaw.agent.profiles import get_profile, registered_profile_names
 from chemclaw.agent.skill_manifest import SKILL_FILENAME, SkillManifest
 from chemclaw.cli.validate_prose_contract import taught_tool_names
 from chemclaw.connectors.registry import skills_dirs as connector_skills_dirs
@@ -78,6 +83,7 @@ def validate_skills(skills_dirs: list[str]) -> list[str]:
             problems.extend(_problems_for(skill_file))
     problems.extend(_enable_list_problems(found_names))
     problems.extend(_role_gate_problems(found_names))
+    problems.extend(_profile_skill_problems(found_names))
     return problems
 
 
@@ -196,6 +202,49 @@ def _role_gate_problems(found_names: set[str]) -> list[str]:
         f"visible to every caller; discovered: {sorted(found_names)}"
         for name in unknown
     ]
+
+
+def _profile_skill_problems(found_names: set[str]) -> list[str]:
+    """Every name in a registered profile's `skill_names` must be a skill some directory provides.
+
+    The third configured map, and it fails the same quiet way the other two do:
+    `ProfileScopedSkills`
+    narrows rather than raising, so a typo removes a skill the profile's author meant to keep and
+    nothing at run time can say so — the profile simply offers one fewer skill than its author
+    reads in the file. A profile is discovered from disk (`agent/profile_discovery.py`), so this is
+    a deployment's typo as readily as a shipped one, and this gate is where a deployment finds it.
+
+    **Profiles are loaded here rather than assumed registered.** `validate_skills` is a CLI, not a
+    turn, so nothing else in this process has called `load_profiles()`; without it the registry
+    holds `default` alone and this check would pass by having looked at nothing — the shape of
+    failure this gate exists to prevent, inside the gate (see `main`'s own docstring for the last
+    time that happened here).
+
+    **And a malformed profile is a problem to report, not a traceback**, which is the same
+    treatment `_problems_for` already gives a malformed `SKILL.md`. `load_profiles` raises
+    `ProfileError` on an `extra="forbid"` typo or two files claiming one name, and uncaught it
+    would replace this gate's promised list of problems with a stack trace about a *profile* file
+    out of the *skill* validator. CI still goes red either way; what differs is whether the
+    operator is told what to fix.
+    """
+    try:
+        load_profiles()
+    except ProfileError as error:
+        return [
+            f"agent profiles could not be loaded, so no profile's skill_names was checked: {error}"
+        ]
+    problems: list[str] = []
+    for name in registered_profile_names():
+        declared = get_profile(name).skill_names
+        if declared is None:
+            continue
+        for unknown in sorted(declared - found_names):
+            problems.append(
+                f"agent profile {name!r} names unknown skill {unknown!r} in skill_names, so that "
+                f"profile silently offers one fewer skill than it declares; "
+                f"discovered: {sorted(found_names)}"
+            )
+    return problems
 
 
 def main(argv: Sequence[str] | None = None) -> int:

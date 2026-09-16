@@ -57,11 +57,11 @@ log = logging.getLogger(__name__)
 class NoteRecord(BaseModel):
     """One indexed note: its id, the text that was embedded/tokenized, and its dense embedding.
 
-    `fingerprint` is the stat signature (`chemclaw.kg.graph.note_file_fingerprints`) the note's file
-    had when this record was embedded — empty when the caller does not track one (every offline test
-    that builds a `NoteRecord` directly). `reindex_notes` is the only writer that fills it in for
-    real, and it is what makes an incremental rebuild possible: a note whose fingerprint has not
-    moved needs no fresh embedding call.
+    `fingerprint` is the content digest (`chemclaw.kg.graph.note_file_fingerprints`) the note's
+    file had when this record was embedded — empty when the caller does not track one (every
+    offline test that builds a `NoteRecord` directly). `reindex_notes` is the only writer that
+    fills it in for real, and it is what makes an incremental rebuild possible: a note whose
+    fingerprint has not moved needs no fresh embedding call.
     """
 
     note_id: str = Field(min_length=1)
@@ -684,11 +684,12 @@ def _needs_embedding(note_id: str, current: dict[str, str], stored: dict[str, st
     """Whether `note_id` must be (re-)embedded: its file fingerprint differs from the stored one.
 
     A note the fingerprint scan does **not** know is always re-embedded rather than compared. The
-    two sides are keyed differently by construction — the scan keys on the file's stem (stat-only,
-    it never parses), the note list keys on the id inside the frontmatter — so a note whose filename
-    disagrees with its id is missing from `current`, was missing from `stored` too, and `None !=
-    None` is False: it read as "unchanged" forever and was never indexed at all, with `full=True`
-    no help because it takes the same branch. Absent means unknown, and unknown means embed it.
+    two sides are keyed differently by construction — the scan keys on the file's stem (it hashes
+    the bytes, it never parses), the note list keys on the id inside the frontmatter — so a note
+    whose filename disagrees with its id is missing from `current`, was missing from `stored`
+    too, and `None != None` is False: it read as "unchanged" forever and was never indexed at
+    all, with `full=True` no help because it takes the same branch. Absent means unknown, and
+    unknown means embed it.
 
     Said at WARNING because the only way to be here is that mismatch (or a file deleted between the
     two scans, which is transient): the note is indexed, but it costs an embedding on every run
@@ -748,15 +749,22 @@ async def reindex_notes(
     """(Re)build `index` from the notes on disk; return how many notes were (re-)embedded.
 
     Incremental by default (D-2026-08-02-embed-only-what-changed): a note whose file fingerprint
-    (`chemclaw.kg.graph.note_file_fingerprints`, stat-only — no read/parse) matches what `index`
+    (`chemclaw.kg.graph.note_file_fingerprints`, a hash of the file's bytes) matches what `index`
     already has stored is left alone, so a scheduled run against an unchanged corpus embeds nothing.
     Before this, every run — hourly by default (`durable/note_index.py`) — re-embedded every note in
     the knowledge graph regardless of whether anything had changed, one LLM-endpoint call per note
     per hour forever.
 
+    **"Unchanged" is a property of the note's content, and it has to be, because `index` is shared
+    between pods while the checkout each pass reads is not**
+    (`D-2026-09-16-a-fingerprint-that-names-a-checkout-is-not-a-fingerprint-of-a-note`). While the
+    fingerprint was `mtime_ns:size` this incremental rebuild was incremental for exactly one pod:
+    driven over two clones of one commit, every pass after the first re-embedded the whole corpus,
+    40 of 40 notes on the corpus this repository ships.
+
     **A model change is detected too, and needs no flag**
     (D-2026-08-08-a-derived-index-must-record-what-derived-it).
-    The file fingerprint cannot see one — swapping the embedding model moves no mtime —
+    The file fingerprint cannot see one — swapping the embedding model changes no note's bytes —
     so the index also stores which configuration embedded each row (`note_index.embedding_key`,
     migration 039), and `fingerprints()` only reports rows made by the current one. A row from a
     superseded configuration therefore has no stored fingerprint to match and is re-embedded here,
@@ -818,8 +826,11 @@ async def reindex_notes(
     # alone made a *transient* parse failure a *deletion* from the derived index. Measured: 40 of
     # 100 notes made unparseable retired 40 index rows, and repairing them cost one embedding call
     # each, over an hour in which both index-backed legs answered as though those notes did not
-    # exist. `note_file_fingerprints` is stat-only and keyed by the same id, so it holds an entry
+    # exist. `note_file_fingerprints` never parses and is keyed by the same id, so it holds an entry
     # for a file whose frontmatter is broken — which is exactly the population that must survive.
+    # It holds one for a file that will not *open* either (`graph.UNREADABLE`), which is the wider
+    # window hashing opened and which would otherwise have reintroduced this defect through a door
+    # the `keep` union was not watching.
     # The graph leg already degrades this way (skip, WARNING, counter); the derived legs now do too.
     on_disk = set(current_fingerprints)
     unparsed = await asyncio.to_thread(

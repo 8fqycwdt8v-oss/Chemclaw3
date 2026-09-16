@@ -744,6 +744,17 @@ _COUNTERS: dict[str, str] = {
         "Skill body reads refused by the role gate. The gate lives on the skills backend because "
         "that is the enforcement point, and a refusal there was entirely silent."
     ),
+    "chemclaw_skill_loads_total": (
+        "Skill bodies the model actually read, by skill — the other half of the denial counter "
+        "above, and the only persisted signal that a skill is used at all. Before it, which "
+        "procedure a turn opened was reconstructible from an INFO log line on a live pod and from "
+        "nowhere else, so no skill could be ranked, promoted or retired on evidence. Counted on a "
+        "skill body that was actually delivered — the read resolved, the path lies inside a skill "
+        "directory rather than beside the tree, and lines were requested. The label needs all "
+        "three because the skill name is the first segment of a model-written path and the "
+        "visibility predicate only ever narrows, so an unconfigured deployment permits every "
+        "string a model can invent, and `skills/README.md` resolves."
+    ),
     # --- the turn ------------------------------------------------------------------------------
     "chemclaw_turns_finished_total": (
         "Turns that ended, by outcome — the one series that separates `answered` from "
@@ -1122,6 +1133,9 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # *health* is, and the endpoint is now singular.
     "chemclaw_model_calls_total": ("outcome",),
     "chemclaw_tool_calls_total": ("tool", "outcome"),
+    # A directory name under a configured skills tree, clamped by the read having succeeded rather
+    # than by the visibility predicate, which is inert in a deployment that configures no gate.
+    "chemclaw_skill_loads_total": ("skill",),
     "chemclaw_tool_refusals_total": ("reason",),
     "chemclaw_invalid_tool_calls_total": ("tool",),
     "chemclaw_turns_finished_total": ("outcome",),
