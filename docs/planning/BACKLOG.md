@@ -345,25 +345,6 @@ topic).
       costs the alert its series during a database outage. That trade is the decision.
       Anchors: `core/config/__init__.py::pg_endpoint`, `core/db.py::_session_store_max_connections`.
 
-- [ ] **The fleet's published manifests are 895 tokens over the allowance this repository holds
-      them to** — [S], found 2026-09-16 by cloning `Chemclaw3-mcp` and actually running the check.
-      `tests/test_context_floor.py::test_the_whole_directory_the_e2e_lane_mounts_is_bounded_too`
-      measures 25,695 tokens over eight published bundles (chem 5,577/12, kinetics 3,389/6, props
-      2,936/6, pyexec 1,142/1, rxnpredict 2,784/6, safety 1,632/3, suitability 4,471/7,
-      thermalsafety 3,764/7) against `FLEET_PUBLISHED_ALLOWANCE = 24,800`. Every deployment that
-      points `CHEMCLAW_CONNECTORS_DIR` at that directory — `infra/live/e2e-full-stack/up.sh` does —
-      pays the overage on **every model call**, on top of what that file's own ceiling bounds.
-      **Deliberately not fixed by raising the allowance**: the number exists to make the fleet's
-      growth a decision, and re-baselining it on discovery, inside a PR about something else, is
-      the self-agreeing ratchet `D-2026-09-05-a-ratchet-that-re-derives-half-its-basis-bounds-half-a-request`
-      is about. The work is deciding whether the two newest bundles (`suitability`,
-      `thermalsafety` — 8,235 tokens between them, and both post-date the allowance) earn their
-      prefix, or whether the allowance should move and say why.
-      **It is invisible in CI**, which has no sibling checkout, so this skips there and has never
-      once been enforced; `tests/conftest.py::_report_sibling_skips` is what says so, and a green
-      local run does not cover it unless `CHEMCLAW_MCP_REPO` is set. Anchors:
-      `tests/test_context_floor.py`, `tests/siblings.py`, `infra/live/e2e-full-stack/up.sh`.
-
 - [ ] **A front door scaled to zero renders a release in which every pod refuses to start** — [S],
       found 2026-09-05 by a fresh-context chart review. `service_fleet_replicas` is
       `Field(default=1, gt=0)` and `config.yaml` renders `service.replicas` straight into the shared
