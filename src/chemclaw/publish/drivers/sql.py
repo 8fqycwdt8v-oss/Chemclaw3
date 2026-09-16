@@ -273,9 +273,11 @@ class SqlResultSink:
         statements `upsert_statement` would have generated anyway, and `execute_many` sends each one
         with all of its parameter sets, which psycopg runs in pipeline mode. Measured against a live
         Postgres on the shipped `schema/result-store/`, a full drain pass of 100 solvent-comparison
-        records: **1 500 round trips and 5.6 s row-at-a-time, 9 and 0.41 s batched** — 13.7x, and
-        the round-trip count is the cause rather than a proxy for it. Nine, not nine hundred,
-        because the grouping is table-major across the whole batch: see `_batches`.
+        records, three runs each: **1 500 round trips and 5.55-5.68 s row-at-a-time, 9 round trips
+        and 0.34-0.48 s batched** — 12-17x, and the round-trip count is the cause rather than a
+        proxy for it. Nine, not nine hundred, because the grouping is table-major across the whole
+        batch: see `_batches`. The stored rows are identical either way, which
+        `tests/test_publish_end_to_end.py` asserts beside the counts rather than leaving implied.
 
         **A group is atomic and a row was not, which is a change and an improvement.** psycopg runs
         `executemany` inside one implicit transaction even on an autocommit connection — driven,

@@ -513,9 +513,9 @@ def test_a_batch_is_one_statement_per_table_and_column_set_not_one_per_row(
     **The round-trip counts are the measurement and the assertion.** Twenty records here are 300
     statements row-at-a-time and 9 batched — nine because `_batches` groups table-major across the
     *whole* batch rather than per record, which is the difference between 9 and 180. On the full
-    `result_publish_batch_size` of 100 the same shape measured 1 500 round trips and 5.6 s
-    row-at-a-time against 9 and 0.41 s batched, on this server; twenty is used here because the
-    point is the ratio and a test is not a benchmark.
+    `result_publish_batch_size` of 100 the same shape measured, over three runs each, 1 500 round
+    trips and 5.55-5.68 s row-at-a-time against 9 and 0.34-0.48 s batched on this server; twenty is
+    used here because the point is the ratio and a test is not a benchmark.
 
     Asserted as a bound rather than as an equality, because the exact count is a function of how
     many distinct column sets the projector emits and a new optional column would move it without
