@@ -90,6 +90,42 @@ class _PostgresCursor:
         except psycopg.Error as exc:
             raise WarehouseQueryError(f"{exc.__class__.__name__}: {exc}") from exc
 
+    async def executemany(self, sql: str, params_seq: Sequence[Sequence[Any]]) -> None:
+        """Run `sql` once per parameter set in psycopg's pipeline mode — one round trip, not N.
+
+        The optional half of the cursor seam (`warehouse.driver.BatchingCursor`), and the reason a
+        publication drain is nine statements per pass rather than fifteen hundred. Measured against
+        a live server over a full `result_publish_batch_size` pass of 100 records: **1,500 round
+        trips and 5.6 s row-at-a-time against 9 and 0.41 s here**, with identical stored rows.
+
+        **Optional on purpose, and this method is why the seam needed a second Protocol rather than
+        a wider one.** `D-2026-08-26-the-driver-s-signature-is-the-schema` lets a site bring its own
+        driver, and `runtime_checkable` `isinstance` tests member *presence* — so requiring this on
+        `WarehouseCursor` would have made every site-written driver fail the check `_connect`
+        already does, for what is only an optimisation. A driver without it takes the loop.
+
+        The adaptation and the error mapping are `execute`'s, unchanged and for its reasons.
+
+        **One property moved, and it is narrower than the seam's docstrings have promised.**
+        psycopg wraps the whole parameter set in a single implicit transaction *even here, where the
+        connection is autocommit* — driven, a four-row set failing on its third leaves **none** of
+        the four, and the connection stays usable. So "a batch that fails halfway leaves a partial
+        but correct state" still holds in kind, but the grain of "partial" is now a statement rather
+        than a row. `SqlResultSink` relies on exactly that when it replays a refused group singly to
+        recover which row the server objected to.
+        """
+        adapted = [
+            [Jsonb(value) if isinstance(value, dict | list) else value for value in params]
+            for params in params_seq
+        ]
+        try:
+            await self._cursor.executemany(sql, adapted)
+        except psycopg.OperationalError:
+            # The server went away. Retryable, so it must not be flattened into a query error.
+            raise
+        except psycopg.Error as exc:
+            raise WarehouseQueryError(f"{exc.__class__.__name__}: {exc}") from exc
+
     async def fetchall(self) -> list[dict[str, Any]]:
         """Every remaining row, keyed by column name."""
         rows = await self._cursor.fetchall()

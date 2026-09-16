@@ -20,6 +20,7 @@ used elsewhere for heartbeat timing.
 """
 
 import asyncio
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
 
@@ -38,6 +39,36 @@ async def _reset(conn: Any) -> None:
     await conn.execute("DELETE FROM job_records")
     await conn.execute("DELETE FROM result_publications")
     await conn.commit()
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _leave_the_corpus_as_it_was_found() -> Iterator[None]:
+    """Empty the three tables again when this module finishes.
+
+    Every test here calls `_reset` on the way *in*, which makes the file self-consistent and lets
+    its rows escape to every file that runs after it. Measured:
+    `pytest tests/test_publish_backfill.py tests/test_job_record_postgres.py -p no:randomly` failed
+    `test_a_past_run_is_found_by_the_reason_it_was_run`, which asserts an **exact** roster for
+    `connector='calc'` and got `['pg-qm-barrier-1', 'n2', 'n1']` — two rows this module left behind.
+
+    It survived because the suite runs in random order and the two files rarely land adjacent in
+    that direction, so the failure looked like flake rather than like the deterministic corpus
+    difference it is. Resetting on the way in cannot fix it: by then the damage is to somebody
+    else's assertion, and `tests/pg.py` gives every run its own schema but not every *file* one.
+    """
+    yield
+
+    async def _clean() -> None:
+        # Defensive rather than gated on `migrated_db_or_skip`: this runs in teardown, where a skip
+        # would be raised at the wrong moment, and on a run with no database there is nothing to
+        # clean and nothing to say about it.
+        try:
+            async with db.connection(settings.postgres_dsn) as conn:
+                await _reset(conn)
+        except Exception:
+            return
+
+    asyncio.run(_clean())
 
 
 async def _insert_cached(conn: Any, key: str, created_at: datetime, calc_type: str = "pka") -> None:
