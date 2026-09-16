@@ -69,6 +69,28 @@ spec:
               trail is incomplete. Tool calls keep succeeding, which is why this is invisible
               without an alert. Check the `audit_sink_failure` log marker for the affected trail.
 
+        {{- /* The same hole from the other cause, and the reason it is a second alert rather than
+               a second contributor to the one above: that one means the database refused a batch,
+               this one means it could not keep up with the producer and the oldest buffered rows
+               were dropped to bound memory. Unreachable and cannot-keep-up have different
+               remedies — one is a connection, the other is capacity — and pooled they would read
+               as one incident. This arm also has no exception to log, so an operator following
+               the sink-failure runbook would find no traceback and conclude the alert was wrong. */}}
+        - alert: ChemclawAuditTrailShedding
+          expr: increase(chemclaw_audit_events_shed_total[10m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawaudittrailshedding
+            summary: Audit records are being dropped because the write buffer is full
+            description: >-
+              The audit write buffer reached `CHEMCLAW_AGENT_AUDIT_BUFFER_MAX_EVENTS` and shed its
+              oldest records, so the trail has a gap. The database is reachable but slower than the
+              producer — check write latency and pool saturation rather than connectivity. Every
+              shed event still reached the stdlib log; the `audit_buffer_full` marker names how
+              many and at what bound.
+
         {{- /* Outbound delivery, which shipped with no signal at all: no logger and no metric
                anywhere in `chemclaw.deliver`, a per-channel failure swallowed so one broken
                webhook is not everyone's outage, and a caller that discarded the return value. A

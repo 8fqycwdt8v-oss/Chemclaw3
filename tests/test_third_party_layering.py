@@ -173,6 +173,12 @@ _STACKS: dict[str, str] = {
     "pint": "units",
     "flexparser": "units",
     "flexcache": "units",
+    # The BPE tokenizer, mapped although the import is lazy and inside one function: an *unmapped*
+    # root is skipped by the walk entirely, which is this file's own stated blind spot and is how
+    # `httpx_sse` and `pint` both reached the tree unpoliced. Its own stack, not `llm`, because the
+    # `llm` rows license *building a model client* and counting tokens is the opposite question —
+    # `agent/context_budget.py` measures a request without dialling anything.
+    "tiktoken": "tokenizer",
 }
 
 Edge = tuple[str, str]  # (chemclaw package, stack)
@@ -332,6 +338,11 @@ _ALLOWED_LAZY_STACKS: dict[Edge, str] = {
     # out against the OTel SDK directly, so the kernel names no conversation framework at any
     # scope, and the row went with the import: this file's own rule is that a declared row must
     # still be observed in the tree, or it re-blesses the edge for the next author.
+    ("chemclaw.agent", "tokenizer"): (
+        "agent/context_budget.py resolves the encoding inside `_encoding()`, so a deployment "
+        "with no baked merge table never imports it at all — the fallback to the chars/4 "
+        "estimator is the shipped path until `TIKTOKEN_CACHE_DIR` names a cache"
+    ),
     ("chemclaw.core", "llm"): (
         "core/embeddings builds the OpenAI-compatible client inside `_openai_client`, same reason"
     ),

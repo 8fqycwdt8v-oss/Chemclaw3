@@ -54,6 +54,7 @@ from chemclaw.agent.compaction import (
 )
 from chemclaw.agent.context_budget import (
     MeasureRequestPrefix,
+    _message_tokens,
     effective_trigger,
     estimate_tool_schemas,
     reset_calibration,
@@ -70,6 +71,22 @@ from chemclaw.core.metrics import METRICS
 def _count(messages: Any) -> int:
     """The estimator the middleware uses, so a test's trigger arithmetic matches production's."""
     return count_tokens_approximately(messages)
+
+
+def _measured_prefix(system: list[Any]) -> int:
+    """The prefix as production measures it, through production's own two functions.
+
+    **Not `_count(system) + estimate_tool_schemas(...)`, which is what this file used to write.**
+    `MeasureRequestPrefix._measure` counts the system message with `_message_tokens` — the
+    configured BPE encoding where one is baked — and the estimator over the same prompt measures
+    ~15% higher. A budget written here as "the prefix plus n" is wrong by that whole difference:
+    measured, the lossless edit stopped firing at all in
+    `test_the_lossless_edit_fires_alone_between_its_trigger_and_the_budget`, because its trigger
+    was ~1,200 tokens above the thread it was written to sit under. The same re-derivation defect
+    `_graph_prefix`'s own docstring records one file over, arriving through the counter instead of
+    through the tool surface.
+    """
+    return sum(_message_tokens(message) for message in system) + estimate_tool_schemas(_BOUND)
 
 
 def _group(index: int, *, with_tool_call: bool = False, filler: str = "") -> list[AnyMessage]:
@@ -394,7 +411,7 @@ def _graph_prefix() -> int:
         )
         asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="hello")]}))
         system = [m for m in _RECEIVED if isinstance(m, SystemMessage)]
-        _PREFIX.append(_count(system) + estimate_tool_schemas(_BOUND))
+        _PREFIX.append(_measured_prefix(system))
     return _PREFIX[0]
 
 
@@ -964,7 +981,7 @@ def _drive(window: int, thread: list[AnyMessage]) -> tuple[int, int, float]:
     asyncio.run(graph.ainvoke({"messages": list(thread)}))
     system = [m for m in _RECEIVED if isinstance(m, SystemMessage)]
     rest = [m for m in _RECEIVED if not isinstance(m, SystemMessage)]
-    prefix = _count(system) + estimate_tool_schemas(_BOUND)
+    prefix = _measured_prefix(system)
     delta = METRICS.value("chemclaw_context_unreducible_total") - before
     return prefix, _count(rest), delta
 
@@ -1557,7 +1574,7 @@ def test_a_calibrated_process_does_not_bill_past_its_budget(
             asyncio.run(graph.ainvoke({"messages": list(thread)}))
         billed = _BILLED[-1]
         system = [m for m in _RECEIVED if isinstance(m, SystemMessage)]
-        prefix = _count(system) + estimate_tool_schemas(_BOUND)
+        prefix = _measured_prefix(system)
         sent = _count([m for m in _RECEIVED if not isinstance(m, SystemMessage)])
     finally:
         reset_calibration()

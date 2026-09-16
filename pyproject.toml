@@ -199,6 +199,16 @@ dependencies = [
     # vibrations from its translations and rotations.
     "scipy>=1.11",
     "sse-starlette>=3.4.5",
+    # Declared rather than left transitive, and this one had a measurable failure mode.
+    # `agent/context_budget.py` imports it to count the request prefix exactly, and it arrives today
+    # only as a requirement of `langchain-openai` — so a bump over there that drops it would degrade
+    # the budget to its chars/4 estimator **in silence**, since the fallback is by design never an
+    # error. Nothing else in this tree holds an import against the manifest.
+    #
+    # The merge table is baked into the image at build time (`deploy/Containerfile`,
+    # `TIKTOKEN_CACHE_DIR`); the package must never fetch one at request time, which is what
+    # `core/netguard.py` would refuse and what the no-egress posture forbids.
+    "tiktoken>=0.13",
     "temporalio[pydantic]>=1.30.0",
     "uvicorn>=0.51.0",
 ]

@@ -487,6 +487,7 @@ dependencies = [
     { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "sse-starlette" },
     { name = "temporalio", extra = ["pydantic"] },
+    { name = "tiktoken" },
     { name = "uvicorn" },
 ]
 
@@ -548,6 +549,7 @@ requires-dist = [
     { name = "scipy", specifier = ">=1.11" },
     { name = "sse-starlette", specifier = ">=3.4.5" },
     { name = "temporalio", extras = ["pydantic"], specifier = ">=1.30.0" },
+    { name = "tiktoken", specifier = ">=0.13" },
     { name = "uvicorn", specifier = ">=0.51.0" },
 ]
 
