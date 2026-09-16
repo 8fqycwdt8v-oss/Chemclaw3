@@ -1697,7 +1697,9 @@ def test_an_excluded_directory_is_never_listed_at_all(
         listed.append(str(path))
         return real_scandir(path)
 
-    monkeypatch.setattr(crawl_module.os, "scandir", recording)
+    # Patched through the module rather than `crawl_module.os`: mypy refuses the attribute on
+    # a module that does not re-export `os`, and the string form patches the same object.
+    monkeypatch.setattr("chemclaw.ingest.documents.crawl.os.scandir", recording)
 
     binding = load_binding(
         {

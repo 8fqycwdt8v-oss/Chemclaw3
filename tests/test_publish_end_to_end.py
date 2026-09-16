@@ -426,7 +426,8 @@ class _CountingCursor:
 
     async def fetchall(self) -> list[dict[str, Any]]:
         """Every remaining row of the last statement."""
-        return await self._inner.fetchall()
+        rows: list[dict[str, Any]] = await self._inner.fetchall()
+        return rows
 
 
 class _BatchingCursor(_CountingCursor):
