@@ -1157,3 +1157,67 @@ discovered.
       whose steps chain still runs in order.
 - [x] Authored: a draft naming a write tool is refused; a draft's agent step is plan-gated.
 - [x] Resume: a run that failed at step N re-runs only from N.
+
+## Wave F — a composed workflow may launch a job, once a human has said so (2026-09-15)
+
+`D-2026-09-15-an-agent-authored-workflow-is-read-only-by-construction` refuses a `job` step in an
+agent-composed workflow, and named the cost in the same breath: every durable job launcher is
+state-changing, so the rankings and conformer searches these procedures exist to sequence are
+exactly what a composed one may not contain. Asked to widen it.
+
+**What is approved is one version of one workflow, not an actor.** The phrase that opened this was
+"a standing per-actor approval for job launches", and per-actor is the broader reading and the wrong
+one: it never lapses, so a workflow re-composed into something else inherits the permission granted
+to what it used to be. The approval is keyed on `template_fingerprint(document)` — the same hash
+resume already uses — so **re-composing lapses it automatically**, with no clearing logic to forget.
+That is `plan_approvals`' own shape one layer up: the human approves a *plan hash*, and a rewritten
+plan is a different key.
+
+**The human must be the one who approves, and the agent must not be able to reach the path.** So it
+is a REST write on the front door, not a tool. A tool would be the agent approving its own
+composition, which is the whole trap — `agent/skill_backend.SkillsReadOnlyRefusal` refuses for the
+same reason one seam over.
+
+- [x] **F1** Migration: `composed_workflows` gains `approved_fingerprint`, `approved_by`,
+      `approved_at`. Declared in all five registers the last wave learned about.
+- [x] **F2** `composed.authored_problems` splits. The always-refused set stays exactly as it is —
+      a side-effecting `tool` step and `write_tools` are refused *approved or not*, and that is the
+      line: a `job` step is bounded compute the approver read in the document, while `write_tools`
+      is a permission the model spends later on a call nobody has seen.
+- [x] **F3** Composing a workflow with `job` steps is allowed and stored **unapproved**; running it
+      is refused until an approval stands, with a refusal that says who must approve and how.
+- [x] **F4** `POST /workflows/{name}/approval` — authenticated human, owner only, approves the
+      fingerprint it is shown. Audited.
+- [x] **F5** Checked at run time against the run's own deployment, as the existing rule is.
+
+### Verify
+
+- [x] A composed workflow with a `job` step: composes, refuses to run, runs after approval, and
+      refuses again after it is re-composed.
+- [x] No agent path can approve: asserted, not assumed.
+- [x] `make lint type test` green with the infrastructure up, skip count stated.
+
+### Review
+
+Built as planned, with two corrections the recon forced and one the suite did.
+
+**The audit is the row, not an `AuditEvent`.** The first version wrote one from the route; no route
+in this tree does, because that trail is the tool-call middleware's and is shaped around a tool, an
+outcome and a latency. A human decision is audited here by being a row naming who made it —
+`plan_approvals.actor`, `pending_requests.answered_by`, `effects.approved_by` are each that shape,
+and `approved_by`/`approved_at` join them.
+
+**One approver and not two.** `api/routes/pending.py`'s `SECOND_PERSON_KINDS` forbids the requester
+of an irreversible effect from approving it, and the question was whether that applies. It does not,
+and the difference is not a convenience: there the requester is a human and the second human *is*
+the control; here the composer is the agent, so the approver is already the second party. This is
+`decide_plan`'s shape.
+
+**The self-approval scan had to be narrowed from reads to writes.** It first flagged
+`run_composed_workflow` for reading `approved_fingerprint` — which is the enforcement. A scan that
+forbade the read would be asking the gate not to look at the thing it gates on.
+
+Also worth recording because it cost time and was not mine:
+`test_no_adr_cites_a_commit_a_squash_will_strand` fails on a **shallow** checkout, naming nine ADRs
+nobody touched. `git fetch --unshallow` turns it green. Its sibling in the same file skips with that
+exact reason; this one has no such guard.

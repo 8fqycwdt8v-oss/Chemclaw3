@@ -167,6 +167,34 @@ class PlanDecisionIn(BaseModel):
     plan_hash: str
 
 
+class WorkflowApprovalIn(BaseModel):
+    """A person's Yes to the durable jobs one composed workflow may launch, bound to its version.
+
+    `fingerprint` is required and is not defaulted to "whatever the workflow is now", for the
+    reason `PlanDecisionIn.plan_hash` is not: the binding is the whole control. A workflow that
+    changed after being displayed is a different procedure, and approving it because it happens to
+    share a name is approving something nobody read.
+    """
+
+    fingerprint: str = Field(min_length=1)
+
+
+class WorkflowApprovalOut(BaseModel):
+    """What a person is being asked to approve: the steps, and which of them launch jobs."""
+
+    name: str
+    summary: str = ""
+    # Every step id in order, so the caller renders the procedure rather than a name.
+    steps: list[str] = Field(default_factory=list)
+    # The subset that costs compute — what approving this actually authorizes.
+    job_steps: list[str] = Field(default_factory=list)
+    # What to post back. The approval binds to this, so a client that renders one version and posts
+    # another gets a 409 rather than a silent approval of the version it did not show.
+    fingerprint: str = ""
+    approved_fingerprint: str = ""
+    approved_by: str = ""
+
+
 class PendingRequestOut(BaseModel):
     """One held-open question, as an inbox renders it."""
 
