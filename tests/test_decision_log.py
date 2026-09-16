@@ -458,6 +458,17 @@ def test_the_topic_cursor_is_not_ahead_of_the_record() -> None:
 # different claim — "this guarantee is enforced right now, here" — which is why it is checked here
 # and there rather than exempted with the paths.
 _RETIRED_TEST_CITATIONS: dict[str, str] = {
+    # Renamed because its name asserted a *default* and the default changed. The flagged-answer ADR
+    # cites it while the revision loop shipped at 0 rounds;
+    # `D-2026-09-16-a-setting-that-ships-off-is-a-feature-nobody-has` turned it on, so a test called
+    # "off by default" would name a configuration nobody runs. What it pinned — that the off path is
+    # a *complete* no-op, no extra model call and no record — is worth keeping, and is now driven
+    # under a monkeypatch rather than off the default.
+    "test_the_loop_is_off_by_default": (
+        "replaced by `test_the_loop_turned_off_is_a_complete_no_op` "
+        "(tests/test_answer_revision.py), which pins the same no-op against an explicitly "
+        "disabled loop rather than against a default"
+    ),
     # Renamed because the name asserted the opposite of what the test pinned. It said "once" and
     # drove a single call, over a branch that returned `True` unconditionally — so what it actually
     # held was "every time, forever", which is the DARK-7 failure it was written to prevent
