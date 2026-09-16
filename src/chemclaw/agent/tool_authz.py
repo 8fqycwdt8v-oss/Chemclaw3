@@ -29,6 +29,7 @@ from chemclaw.agent.authz import (
     side_effecting_tools,
 )
 from chemclaw.agent.framing import SYSTEM_SPEECH_MARK, defang
+from chemclaw.agent.refusal_route import routed, sentence_of
 from chemclaw.agent.tool_result_size import bounded_for_batch
 from chemclaw.connectors.transport import transport_failure
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
@@ -104,8 +105,17 @@ def dry_run_refusal(name: str, arguments: Mapping[str, Any]) -> DryRunRefusal | 
     """
     if is_dry_run() and side_effecting_call(name, arguments):
         return DryRunRefusal(
-            f"DRY RUN — {name} changes stored data or starts work, so it was not called. "
-            "Nothing was started; re-ask without dry-run to do it."
+            routed(
+                f"DRY RUN — {name} changes stored data or starts work, so it was not called. "
+                "Nothing was started; re-ask without dry-run to do it.",
+                code="dry_run",
+                boundary="this turn's dry-run flag",
+                who_can_act="the chemist, by asking again without dry run",
+                sanctioned_path=(
+                    "every read-only tool still runs — look up what the real call would need, and "
+                    "say what you would have done"
+                ),
+            )
         )
     return None
 
@@ -143,18 +153,34 @@ def undeclared_write_refusal(name: str, held: frozenset[str]) -> UndeclaredWrite
         return None
     if name in side_effecting_tools():
         return UndeclaredWriteRefusal(
-            f"{name} changes stored data or starts work, and this agent was not given it, so it "
-            "was not called. Nothing was started; say what you could not do and continue with "
-            "what you can."
+            routed(
+                f"{name} changes stored data or starts work, and this agent was not given it, so "
+                "it was not called. Nothing was started; say what you could not do and continue "
+                "with what you can.",
+                code="tool_withheld_write",
+                boundary="the tools this agent was built with",
+                who_can_act="an agent holding the full set; this one was narrowed on purpose",
+                sanctioned_path=(
+                    "continue with the tools you do hold, and name this one in what you report back"
+                ),
+            )
         )
     if name in SPEAKS_TO_THE_CHEMIST:
         # A second sentence, because for this one the name is not the reason: it changes nothing,
         # so "changes stored data or starts work" would be false, and a refusal that misstates its
         # own reason is worse than the library message it replaces.
         return UndeclaredWriteRefusal(
-            f"{name} reaches the chemist directly, and this agent was not given it, so it was not "
-            "called. Nothing was asked; answer from what you have, or say in your own answer what "
-            "you would have needed to ask."
+            routed(
+                f"{name} reaches the chemist directly, and this agent was not given it, so it was "
+                "not called. Nothing was asked; answer from what you have, or say in your own "
+                "answer what you would have needed to ask.",
+                code="tool_withheld_reaches_the_chemist",
+                boundary="the tools this agent was built with",
+                who_can_act="whatever this agent reports back to, which does reach the chemist",
+                sanctioned_path=(
+                    "answer from what you have, naming in that answer what you would have asked"
+                ),
+            )
         )
     return None
 
@@ -180,8 +206,15 @@ def domain_error_result(exc: BaseException) -> str:
 
 
 def failure_detail(exc: BaseException) -> str:
-    """What the *chemist's* transcript is told a tool raised, bounded so it cannot flood."""
-    return f"{type(exc).__name__}: {exc}"[:_FAILURE_CHARS]
+    """What the *chemist's* transcript is told a tool raised, bounded so it cannot flood.
+
+    `sentence_of` drops a refusal's routing footer, because this channel's reader is the chemist
+    and that footer is written for the model — in the model's second person, with two machine
+    fields. It is also the channel where the bound bites: the footer pushed four of the eleven
+    refusals past `_FAILURE_CHARS`, so a chemist read the sentence followed by a footer cut
+    mid-word. Anything without a footer is returned unchanged, so no other failure is affected.
+    """
+    return f"{type(exc).__name__}: {sentence_of(str(exc))}"[:_FAILURE_CHARS]
 
 
 def returned_failure_detail(message: ToolMessage) -> str:

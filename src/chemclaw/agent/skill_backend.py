@@ -68,6 +68,7 @@ from deepagents.backends.protocol import (
 
 from chemclaw.agent.audit import bounded_repr
 from chemclaw.agent.authz import AuthorizationError
+from chemclaw.agent.refusal_route import routed
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
 
@@ -84,9 +85,13 @@ REFUSED = "This path is not part of the skills available to you."
 # for a log: it says nothing was changed (so there is nothing to undo or retry) and names the root a
 # turn's own working notes belong under, since wanting to write a skill is usually wanting to write
 # something down.
-_READ_ONLY = (
+_READ_ONLY = routed(
     "the skills tree is read-only — a skill is reviewed judgment, not something a turn may "
-    "rewrite. Nothing was changed; keep working notes under /scratch/ instead."
+    "rewrite. Nothing was changed; keep working notes under /scratch/ instead.",
+    code="skills_read_only",
+    boundary="the skills tree, which is read-only to every turn in every deployment",
+    who_can_act="nobody at run time — a skill changes only by a reviewed commit to skills/",
+    sanctioned_path="write the same content under /scratch/, which this turn owns",
 )
 
 
