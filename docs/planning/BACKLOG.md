@@ -320,15 +320,6 @@ topic).
       starts one as well (`ingest/documents/sync.py`). Anchor: `isolate.parse_context`,
       `deploy/helm/chemclaw/values.yaml`.
 
-- [ ] **`JsonCommitmentExport` cannot run a destructive sweep, and the grant for one already
-      exists** — [S], the row `ingest/commitments/json_export.py`'s `snapshot` attribute says is
-      queued and which was never written. It is hard-coded `False`, so a commitment withdrawn at
-      the site is never withdrawn here; the `DELETE` privilege was granted ahead of it
-      deliberately, so the enabling half is the only part unbuilt. Not a flag flip: `snapshot`
-      licenses deleting every commitment a pass did not see, so it is the operator's assertion
-      that the export directory was complete — which makes it a `datasource.yaml` key defaulting
-      to false, not a class attribute.
-
 - [ ] **Neither net sees one Postgres server that two DSNs spell differently** — [M], found
       2026-09-05 by a fresh-context review of `D-2026-09-05-a-pool-count-is-not-a-connection-count`,
       whose own "what this does not do" says a measured cluster identity is a row and then did not
