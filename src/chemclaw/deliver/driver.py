@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from chemclaw.core.config import PG_LOOPBACK_HOSTS, settings
+from chemclaw.core.http import default_ssl_context
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import register_secret_env
 from chemclaw.deliver.message import Attachment, Message
@@ -363,6 +364,20 @@ class WebhookDeliveryDriver:
         headers["Idempotency-Key"] = identity
         async with httpx.AsyncClient(
             timeout=self.timeout_seconds,
+            # **One process-wide trust store, for the reason `core.http.default_ssl_context`
+            # measures: httpx builds a fresh `ssl.SSLContext` and parses the whole certifi bundle
+            # per client, at ~22 ms each.** This driver is rebuilt per delivery on purpose —
+            # `registry.build` is uncached so a driver cannot outlive a credential rotation — so it
+            # constructs a client per *message*, and it was the one httpx client in this tree
+            # reaching a real dependency that paid full price for it. The cost is blocking CPU on
+            # the loop that serves every stream on the pod, not await time, which is what made it
+            # invisible.
+            #
+            # A shared *connection pool* is the other half and is deliberately not taken here: it
+            # would have to be cached per event loop, which is the shape `core/db.py` already
+            # carries a measured bug and a `_forget_pools_of_ended_loops` sweep for. Deliveries are
+            # low-frequency and the handshake is per destination; the context was the measured part.
+            verify=default_ssl_context(),
             # Never inherit an ambient proxy — the same flag, and the same reason, every other
             # *httpx* client in this tree that reaches a real dependency carries. Not every client:
             # `api/auth.py`'s `PyJWKClient` fetches the tenant key set through

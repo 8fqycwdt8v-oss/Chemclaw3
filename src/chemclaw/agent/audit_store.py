@@ -27,6 +27,15 @@ same reason and documents in the same words: telemetry booked off the hot path c
 process dies with rows still buffered, and failing a tool call that already answered in order to
 record it would be the tail wagging the dog. `flush()` is the seam that bounds the window — the
 runner awaits it at turn end, and a test awaits it before asserting rows.
+
+**The buffer is bounded on the write side too, and it was not for a reason worth naming.**
+`_flush_all`'s docstring argues that a *failed* batch must be dropped rather than re-queued,
+"because re-queueing it would make a broken database grow the buffer without bound" — which reads
+as though the buffer were bounded, and covers only a database that is **down**. A database that is
+merely **slow** is the case neither half saw: `record` appends and returns while the drain crawls,
+in a pod the chart limits to 1 GiB, at the ~90 rows a turn this module's own first paragraph
+measures. `agent_audit_buffer_max_events` bounds it by shedding the oldest and counting the shed on
+its own series, because "unreachable" and "cannot keep up" have different remedies.
 """
 
 import asyncio
@@ -56,6 +65,11 @@ _INSERT = """
 def _count_lost(lost: float, metrics: Any) -> None:
     """Increment the sink-failure counter by the size of a dropped batch."""
     metrics.increment("chemclaw_audit_sink_failures_total", lost)
+
+
+def _count_shed(shed: float, metrics: Any) -> None:
+    """Increment the buffer-shed counter by the number of events dropped to stay in bound."""
+    metrics.increment("chemclaw_audit_events_shed_total", shed)
 
 
 def _row(event: AuditEvent) -> tuple[object, ...]:
@@ -95,8 +109,38 @@ class PostgresAuditSink:
         tool call's latency.
         """
         self._buffer.append(event)
+        self._shed_to_bound()
         if self._flusher is None or self._flusher.done():
             self._flusher = asyncio.create_task(self._flush_all(), name="audit-flush")
+
+    def _shed_to_bound(self) -> None:
+        """Drop the oldest buffered events once the buffer passes its configured bound.
+
+        `_flush_all` already refuses to re-queue a *failed* batch, which bounds the buffer against
+        a database that is **down**. This bounds it against one that is merely **slow**: `record`
+        returns without awaiting, so a producer running at ~90 rows a turn outruns a drain that has
+        started taking seconds, and nothing else in this class ever shrinks the list.
+
+        The oldest go because an operator reading this trail is asking what just happened, and
+        every event has already reached the stdlib log before it is buffered — so what is lost here
+        is durability and ordering, not the record itself.
+        """
+        bound = settings.agent_audit_buffer_max_events
+        if not bound or len(self._buffer) <= bound:
+            return
+        from functools import partial
+
+        from chemclaw.core.metrics_bridge import record_metric
+
+        shed = len(self._buffer) - bound
+        del self._buffer[:shed]
+        record_metric(partial(_count_shed, float(shed)))
+        logger.warning(
+            "audit_buffer_full: shed %d oldest buffered audit event(s) at the %d-event bound; "
+            "the durable trail has a gap and the stdlib log above still carries each",
+            shed,
+            bound,
+        )
 
     async def flush(self) -> None:
         """Wait until everything recorded so far has been written (or failed and been logged).

@@ -696,6 +696,29 @@ class AgentSettings(BaseSettings):
     # tuned it reads the same number.
     agent_max_promoted_invalid_calls: int = Field(default=20, ge=0)
 
+    # How many audit events `PostgresAuditSink` may hold before it starts shedding the oldest.
+    #
+    # **The buffer had no write-side bound at all, and its docstring is why that looked safe.** It
+    # argues — correctly — that a *failed* batch must be dropped rather than re-queued, "because
+    # re-queueing it would make a broken database grow the buffer without bound". That covers a
+    # database which is **down**. It says nothing about one which is merely **slow**: `record()`
+    # appends and returns while `_flush_all` drains at whatever rate the connection allows, so a
+    # database answering in seconds instead of milliseconds grows the list on the producer side,
+    # inside a pod the chart limits to 1 GiB, at roughly ninety rows a turn.
+    #
+    # Shedding the **oldest** is deliberate. Both ends lose a row, and the end worth keeping is the
+    # recent one: an operator reaching for this trail is asking what just happened. Nothing is lost
+    # silently either way — every event has already gone to the stdlib log by the time it is
+    # buffered, and `chemclaw_audit_events_shed_total` is a separate series from
+    # `chemclaw_audit_sink_failures_total` on purpose, because "the database is unreachable" and
+    # "the database cannot keep up" have different remedies and would be indistinguishable pooled.
+    #
+    # 50,000 is about 555 turns of backlog at the measured ~90 rows a turn, and a few tens of MB at
+    # this row shape — large enough that an ordinary slow patch never reaches it, small enough that
+    # it cannot be the thing that ends the process. 0 removes the bound and restores the old
+    # unbounded behaviour for a deployment that would rather have the OOM than the gap.
+    agent_audit_buffer_max_events: int = Field(default=50_000, ge=0)
+
     # How many times one turn may call a tool with the *identical* arguments before the call is
     # refused (`agent.repeat_guard`). The loop cap above bounds the harness's iterations and says
     # nothing about this: a live run called `find_past_jobs` 7-8 times in a single turn, with

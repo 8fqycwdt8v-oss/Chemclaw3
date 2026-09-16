@@ -14,6 +14,7 @@ so there is no ordering to get wrong — only the arrival, which is what is asse
 import asyncio
 
 import psycopg
+import pytest
 
 from chemclaw.agent.audit import AuditEvent
 from chemclaw.agent.audit_store import PostgresAuditSink
@@ -117,5 +118,53 @@ def test_concurrent_appends_all_arrive() -> None:
             row = await cursor.fetchone()
         assert row is not None
         assert row[0] == _WRITERS, f"{row[0]} of {_WRITERS} concurrent appends survived"
+
+    asyncio.run(_run())
+
+
+def test_the_write_buffer_sheds_the_oldest_rather_than_growing_without_bound(
+    monkeypatch: "pytest.MonkeyPatch",
+) -> None:
+    """A slow database must not be able to grow this buffer until the pod dies.
+
+    `_flush_all` already refuses to re-queue a failed batch, which bounds the buffer against a
+    database that is **down**. Nothing bounded it against one that is merely **slow** — `record`
+    appends and returns, so at the ~90 rows a turn this module measures, a drain taking seconds
+    loses the race on the producer side inside a 1 GiB pod.
+
+    Driven without a database on purpose: no flusher can make progress here, which is exactly the
+    shape being bounded. The assertions are that the buffer stops at the bound and that the events
+    it kept are the *newest* — an operator reading this trail is asking what just happened.
+    """
+    monkeypatch.setattr(settings, "agent_audit_buffer_max_events", 10)
+
+    async def _run() -> None:
+        sink = PostgresAuditSink(dsn="postgresql://nobody@127.0.0.1:1/none")
+        for index in range(25):
+            await sink.record(_race_event(index))
+        buffered = list(sink._buffer)
+        assert len(buffered) <= 10, f"buffer grew past its bound: {len(buffered)}"
+        assert [event.latency_ms for event in buffered] == [float(i) for i in range(15, 25)], (
+            "the buffer shed the newest events; the oldest are the ones that may go"
+        )
+
+    asyncio.run(_run())
+
+
+def test_a_zero_bound_restores_the_unbounded_buffer(
+    monkeypatch: "pytest.MonkeyPatch",
+) -> None:
+    """0 is the escape hatch for a deployment that would rather have the OOM than the gap.
+
+    Asserted because a bound whose disable path is untested is a bound nobody can opt out of, and
+    the setting's own comment promises this.
+    """
+    monkeypatch.setattr(settings, "agent_audit_buffer_max_events", 0)
+
+    async def _run() -> None:
+        sink = PostgresAuditSink(dsn="postgresql://nobody@127.0.0.1:1/none")
+        for index in range(25):
+            await sink.record(_race_event(index))
+        assert len(sink._buffer) == 25
 
     asyncio.run(_run())

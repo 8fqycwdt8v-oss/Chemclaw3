@@ -684,3 +684,46 @@ def test_both_maps_of_data_name_every_corpus_that_exists() -> None:
         named = {match.rstrip("/") for match in re.findall(r"`([a-z0-9][a-z0-9-]*/)`", text)}
         gone = sorted(named - on_disk - {"data"})
         assert not gone, f"{document} names corpora that are not there: {gone}"
+
+
+# The `assert` statements in `src/` that are **type narrowing** rather than invariant enforcement,
+# each with the reason a reader needs to agree it belongs here. The distinction is the whole point:
+# `python -O` deletes every `assert`, so one that *enforces* something is a control conditional on
+# how an operator started the process, while one that merely tells mypy a value is not `None` loses
+# nothing when it vanishes — the code after it was already correct or already broken.
+#
+# `Chemclaw3-mcp` states this rule outright for its serving code and holds it with a test
+# (`D-2026-09-12-an-assert-is-a-control-with-an-off-switch`). This repository had no equivalent, and
+# the one assert that carried a consequence — `operations/activity.py`'s guard on SQL built by
+# `str.replace()` — sat among these three looking exactly like them.
+_NARROWING_ASSERTS = {
+    "science/labels/store.py": "row.labelled_at is not None — the caller's query filtered on it",
+    "agent/chemclaw_agent.py": "profile.tool_names is not None — only when a profile narrows",
+    "cli/live_data.py": "dataset.dataset_id is not None — set by the request that just created it",
+}
+
+
+def test_no_assert_in_src_enforces_an_invariant() -> None:
+    """An invariant enforced by `assert` is a control with an off switch, and `-O` is the switch.
+
+    This does not ban `assert` outright, because the three that remain genuinely narrow a type for
+    mypy and nothing depends on them running. It bans a *fourth* appearing without an argument: a
+    new file in this list has to be justified in the same commit, which is the moment to notice the
+    statement should have been `if ...: raise`.
+    """
+    offenders: dict[str, list[int]] = {}
+    for path in sorted((_ROOT / "src").rglob("*.py")):
+        relative = path.relative_to(_ROOT / "src" / "chemclaw").as_posix()
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if re.match(r"\s*assert\b", line):
+                offenders.setdefault(relative, []).append(number)
+
+    unargued = {name: lines for name, lines in offenders.items() if name not in _NARROWING_ASSERTS}
+    assert not unargued, (
+        "an `assert` in src/ that is not in _NARROWING_ASSERTS: "
+        f"{unargued}. `python -O` deletes it. If it narrows a type, add it to the list with the "
+        "reason; if it enforces anything at all, write `if ...: raise` instead."
+    )
+
+    stale = sorted(set(_NARROWING_ASSERTS) - set(offenders))
+    assert not stale, f"_NARROWING_ASSERTS names files with no assert left: {stale}"
