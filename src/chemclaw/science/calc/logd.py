@@ -39,18 +39,37 @@ from chemclaw.core.config import settings
 from chemclaw.science.calc.models import LogdResult, PkaResult
 from chemclaw.science.calc.uncertainty import CalculationDomainError
 
-# Heavy atoms whose O-H/S-H protons count as acidic sites.
-_ACIDIC_HEAVY = (8, 16)  # O, S
-# Nitrogen valence at which there is no lone pair left to protonate.
-_SATURATED_NITROGEN = 4
-# Sigma bonds at which an *aromatic* nitrogen's lone pair has gone into the ring's pi system instead
-# of staying in an in-plane orbital: pyrrole-type rather than pyridine-type.
-_PYRROLE_TYPE_SIGMA_BONDS = 3
-# Atoms that drain an adjacent nitrogen's lone pair when they carry a double bond to a chalcogen:
-# carbon (amide, carbamate, urea) and sulfur (sulfonamide, sulfinamide).
-_ELECTRON_WITHDRAWING = (6, 16)  # C, S
-# The chalcogen on the far end of that double bond.
-_CHALCOGEN = (8, 16)  # O, S
+# The two site patterns, as SMARTS over the **hydrogen-explicit** molecule (`Chem.AddHs`), which is
+# what makes `X`/`D` in them mean the same thing the hand-written typing meant by `GetDegree()`
+# plus `GetTotalNumHs()`. One declarative table in place of ~80 lines of `GetBonds()` walking; the
+# partition is unchanged, and `tests/test_logd.py` proves that over every molecule it can reach.
+#
+# **An acidic site is one O-H or S-H proton**, counted per hydrogen rather than per heavy atom, so
+# a diol contributes two and water contributes two — the arithmetic `_require_a_single_equilibrium`
+# reads. The bond is spelled `-` because an explicit hydrogen's bond always is.
+_ACIDIC_SITE = Chem.MolFromSmarts("[#1;D1]-[#8,#16]")
+
+# **A basic site is a neutral nitrogen with a free valence whose lone pair is actually available.**
+# The first three primitives are the availability of a *valence* — nitrogen, uncharged, not already
+# four-connected — and the three recursive exclusions are the availability of the *pair*. Each
+# exclusion is a delocalized or unavailable lone pair, never a convenience:
+#
+# - `$([#7]#*)` — **nitrile** (any sp nitrogen). pKaH ~ -10; no aqueous pH protonates it.
+# - `$([n;!X1;!X2])` — **pyrrole-type aromatic nitrogen**: aromatic with three or more connections,
+#   so its lone pair is the ring's aromatic sextet rather than an in-plane orbital. The
+#   **pyridine-type** nitrogen beside it has two and *is* basic — imidazole's two nitrogens are one
+#   of each, which is why counting both put imidazole (pKaH 6.95) outside the single-equilibrium
+#   domain when it has exactly one basic centre.
+# - `$([#7]-[#6,#16]=[#8,#16])` — **amide, carbamate, urea, sulfonamide**: a nitrogen
+#   *single*-bonded to a carbon or sulfur that carries a double bond to O or S. The pair is
+#   conjugated into that C=O/S=O, and the consequence is not a shifted pKa but a different
+#   molecule: protonated acetamide has pKaH ~ -0.5 **and protonates on the oxygen**. The single
+#   bond is what keeps aniline out of it — aniline's bond to the ring is aromatic, and aniline is
+#   a weak base (pKaH 4.6) the calibration covers — and `=` likewise matches a double bond only,
+#   never an aromatic one.
+_BASIC_SITE = Chem.MolFromSmarts(
+    "[#7;+0;X1,X2,X3;!$([#7]#*);!$([n;!X1;!X2]);!$([#7]-[#6,#16]=[#8,#16])]"
+)
 
 
 class IonisableSites(NamedTuple):
@@ -79,52 +98,6 @@ class IonisableSites(NamedTuple):
         return self.acidic + self.basic
 
 
-def _lone_pair_is_available(atom: Chem.Atom) -> bool:
-    """Whether this nitrogen's lone pair can actually accept a proton in water.
-
-    Free valence says a lone pair *exists*; it does not say the pair is available, and three common
-    classes have one that is not. Each exclusion is a delocalized or unavailable lone pair, never a
-    convenience.
-
-    - **Amide, carbamate, urea, sulfonamide** — a nitrogen single-bonded to a carbon or sulfur that
-      carries a double bond to O or S. The lone pair is conjugated into that C=O/S=O, and the
-      consequence is not a shifted pKa but a different molecule: protonated acetamide has pKaH
-      ~ -0.5 **and protonates on the oxygen**.
-    - **Nitrile** — an sp nitrogen (a triple bond). pKaH ~ -10; there is no aqueous pH at which any
-      of it is protonated.
-    - **Pyrrole-type aromatic nitrogen** — an aromatic nitrogen with three sigma bonds, so its lone
-      pair is the ring's aromatic sextet rather than an in-plane orbital. The **pyridine-type**
-      nitrogen beside it in the same ring has two sigma bonds and an in-plane lone pair, and *is*
-      basic — imidazole's two nitrogens are one of each, which is why counting both put imidazole
-      (pKaH 6.95) outside this module's single-equilibrium domain when it has exactly one basic
-      centre.
-
-    Only a **single** bond from the nitrogen counts for the amide rule, which is what keeps aniline
-    out of it: aniline's bond to the ring is aromatic, not the C=O single bond this looks for, and
-    aniline is genuinely a weak base (pKaH 4.6) the calibration covers.
-    """
-    if any(bond.GetBondType() == Chem.BondType.TRIPLE for bond in atom.GetBonds()):
-        return False
-    if (
-        atom.GetIsAromatic()
-        and atom.GetDegree() + atom.GetTotalNumHs() >= _PYRROLE_TYPE_SIGMA_BONDS
-    ):
-        return False
-    for bond in atom.GetBonds():
-        if bond.GetBondType() != Chem.BondType.SINGLE:
-            continue
-        neighbor = bond.GetOtherAtom(atom)
-        if neighbor.GetAtomicNum() not in _ELECTRON_WITHDRAWING:
-            continue
-        if any(
-            other.GetBondType() == Chem.BondType.DOUBLE
-            and other.GetOtherAtom(neighbor).GetAtomicNum() in _CHALCOGEN
-            for other in neighbor.GetBonds()
-        ):
-            return False
-    return True
-
-
 def ionisable_sites(smiles: str) -> IonisableSites:
     """Count the acidic O-H/S-H protons and the protonatable nitrogens of a neutral molecule.
 
@@ -137,22 +110,14 @@ def ionisable_sites(smiles: str) -> IonisableSites:
     if parsed is None:
         raise ValueError(f"invalid SMILES: {smiles!r}")
     mol = Chem.AddHs(parsed)
-    acidic = sum(
-        1
-        for atom in mol.GetAtoms()
-        if atom.GetAtomicNum() == 1
-        and atom.GetDegree() == 1
-        and atom.GetNeighbors()[0].GetAtomicNum() in _ACIDIC_HEAVY
+    # Every match is keyed by one distinct atom — a hydrogen for an acid, a nitrogen for a base —
+    # so the atom count is the tightest honest ceiling on how many there can be, and passing it
+    # replaces RDKit's silent default of 1,000 with a bound that cannot truncate a real molecule.
+    cap = mol.GetNumAtoms()
+    return IonisableSites(
+        acidic=len(mol.GetSubstructMatches(_ACIDIC_SITE, maxMatches=cap)),
+        basic=len(mol.GetSubstructMatches(_BASIC_SITE, maxMatches=cap)),
     )
-    basic = sum(
-        1
-        for atom in mol.GetAtoms()
-        if atom.GetAtomicNum() == 7
-        and atom.GetFormalCharge() == 0
-        and atom.GetTotalNumHs() + atom.GetDegree() < _SATURATED_NITROGEN
-        and _lone_pair_is_available(atom)
-    )
-    return IonisableSites(acidic=acidic, basic=basic)
 
 
 def _require_a_single_equilibrium(result: PkaResult, ph: float, ionised_ratio: float) -> None:
