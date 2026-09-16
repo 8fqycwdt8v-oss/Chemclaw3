@@ -316,7 +316,7 @@ class AgentSettings(BaseSettings):
     # derived *upwards* from the ceiling, so it moves with the prefix and keeps the whole thread
     # allowance intact. The budget below cannot follow, because it is derived downwards from the
     # model's window — which is why a ceiling raise costs the budget's thread and never this one's.
-    agent_tool_result_clear_trigger: int = Field(default=110_800, ge=1)
+    agent_tool_result_clear_trigger: int = Field(default=111_600, ge=1)
     # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
     # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
     # dependent in one direction. Re-measured 2026-09-06 against real BPE encodings, on the observed
@@ -813,7 +813,11 @@ class AgentSettings(BaseSettings):
         Read through this property, never raw, for the reason `skills_dirs` states: the delimited
         string is the ENV shape and the list is what every caller wants.
         """
-        return [name for name in self.agent_helper_roster.split(os.pathsep) if name]
+        # Stripped, unlike the other pathsep lists here, because this one is the first whose typo
+        # is fatal: `refuse_an_unknown_roster` raises at startup, so `"evidence: computation"` —
+        # spaced the way a person writes a list — would not start the front door. Elsewhere a stray
+        # space makes an entry inert; here it makes the deployment dead.
+        return [name.strip() for name in self.agent_helper_roster.split(os.pathsep) if name.strip()]
 
     @property
     def skills_enabled_list(self) -> list[str]:
