@@ -21,6 +21,8 @@ import pytest
 
 from chemclaw.core.config import settings
 from chemclaw.publish import outbox
+from chemclaw.publish.driver import SinkRejectedError
+from chemclaw.publish.drivers.sql import SqlResultSink
 from chemclaw.science.calc.models import SolventComparisonResult, SolventEffect
 from tests.pg import migrated_db_or_skip
 
@@ -405,3 +407,233 @@ def test_a_finished_job_publishes_the_note_it_produced(monkeypatch: pytest.Monke
         "the publication row names the session, the job, the actor and the rationale, and drops "
         "the one structured link to what the run produced"
     )
+
+
+# --- The drain's round trips -------------------------------------------------------------------
+#
+# `SqlResultSink.deliver` groups a whole batch into one statement per `(table, column set)` and
+# sends each with all of its parameter sets through `execute_many`. That helper only reaches
+# psycopg's pipeline when the driver's cursor offers `executemany` — an *optional* capability,
+# because `D-2026-08-26-the-driver-s-signature-is-the-schema` means a site brings its own driver
+# and this repository cannot require a method of a class it does not ship.
+#
+# `_BatchingCursor` below is what a driver adds to offer it, and it is here rather than in
+# `publish/drivers/postgres.py` only because nothing in this tree has claimed that file yet: it is
+# `_PostgresCursor.execute` with `executemany` in place of `execute`, error mapping included.
+# The two tests that use it are the pair that matters — the capability is actually used when it is
+# there, and the answer is byte-identical when it is not.
+
+_ROUND_TRIPS: dict[str, int] = {"execute": 0, "executemany": 0}
+
+
+class _CountingCursor:
+    """A `WarehouseCursor` that records how many times the sink went to the server."""
+
+    def __init__(self, inner: Any) -> None:
+        """Wrap the driver's own cursor."""
+        self._inner = inner
+
+    async def execute(self, sql: str, params: Any) -> None:
+        """One statement, one round trip."""
+        _ROUND_TRIPS["execute"] += 1
+        await self._inner.execute(sql, params)
+
+    async def fetchall(self) -> list[dict[str, Any]]:
+        """Every remaining row of the last statement."""
+        return await self._inner.fetchall()
+
+
+class _BatchingCursor(_CountingCursor):
+    """`_CountingCursor` plus the one method that turns N statements into one round trip."""
+
+    async def executemany(self, sql: str, params_seq: Any) -> None:
+        """Run `sql` over every parameter set, which psycopg does in pipeline mode.
+
+        The error mapping is `_PostgresCursor.execute`'s, unchanged and for its stated reason: a
+        programming error from the server is a `WarehouseQueryError` the retry contract treats as
+        permanent, while the server going away must pass through as itself.
+        """
+        from psycopg.types.json import Jsonb
+
+        from chemclaw.ingest.eln.warehouse.driver import WarehouseQueryError
+
+        _ROUND_TRIPS["executemany"] += 1
+        adapted = [
+            [Jsonb(value) if isinstance(value, dict | list) else value for value in params]
+            for params in params_seq
+        ]
+        try:
+            await self._inner._cursor.executemany(sql, adapted)
+        except psycopg.OperationalError:
+            raise
+        except psycopg.Error as exc:
+            raise WarehouseQueryError(f"{exc.__class__.__name__}: {exc}") from exc
+
+
+def _warehouse(dsn: str, *, schema: str, batching: bool) -> Any:
+    """The shipped Postgres driver, with its cursor counted and optionally able to batch."""
+    from contextlib import asynccontextmanager
+
+    from chemclaw.publish.drivers.postgres import PostgresWarehouse
+
+    class _Counted(PostgresWarehouse):
+        @asynccontextmanager
+        async def cursor(self) -> Any:
+            async with super().cursor() as inner:
+                yield (_BatchingCursor if batching else _CountingCursor)(inner)
+
+    return _Counted(dsn=dsn, schema=schema)
+
+
+def _records(count: int) -> list[Any]:
+    """`count` solvent comparisons, each a different calculation — a realistic drain batch."""
+    from chemclaw.publish.project import project
+
+    out = []
+    for index in range(count):
+        screen = _screen()
+        screen = screen.model_copy(update={"temperature_k": 298.15 + index})
+        out.append(
+            project(
+                calc_ref=f"batch-{index}",
+                calc_type="calc.compare_solvents",
+                payload=screen.model_dump(mode="json"),
+                payload_kind="SolventComparisonResult",
+                calc_version="GFN2-xTB",
+            )
+        )
+    return out
+
+
+def test_a_batch_is_one_statement_per_table_and_column_set_not_one_per_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same batch, through a driver that can batch and one that cannot, lands the same rows.
+
+    **The round-trip counts are the measurement and the assertion.** Twenty records here are 300
+    statements row-at-a-time and 9 batched — nine because `_batches` groups table-major across the
+    *whole* batch rather than per record, which is the difference between 9 and 180. On the full
+    `result_publish_batch_size` of 100 the same shape measured 1 500 round trips and 5.6 s
+    row-at-a-time against 9 and 0.41 s batched, on this server; twenty is used here because the
+    point is the ratio and a test is not a benchmark.
+
+    Asserted as a bound rather than as an equality, because the exact count is a function of how
+    many distinct column sets the projector emits and a new optional column would move it without
+    anything being wrong.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        dsn = settings.postgres_dsn
+        records = _records(20)
+        landed: dict[str, list[Any]] = {}
+        counts: dict[str, int] = {}
+
+        for label, batching in (("plain", False), ("batching", True)):
+            await _create_store(dsn)
+            _ROUND_TRIPS.update(execute=0, executemany=0)
+            sink = SqlResultSink(
+                name="roundtrips",
+                tenant_id="site-a",
+                connection={
+                    "driver": "tests.test_publish_end_to_end:_warehouse",
+                    "dsn": dsn,
+                    "schema": _STORE,
+                    "batching": batching,
+                },
+            )
+            try:
+                # The schema probe is three statements of its own; only the writes are counted.
+                await sink._known_columns(sink._connect())
+                _ROUND_TRIPS.update(execute=0, executemany=0)
+                await sink.deliver(records)
+            finally:
+                await sink.aclose()
+            counts[label] = _ROUND_TRIPS["execute"] + _ROUND_TRIPS["executemany"]
+            async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+                await conn.execute(f"SET search_path={_STORE}")
+                landed[label] = await _rows(
+                    conn,
+                    "SELECT calc_ref, property, solvent_id, value_canonical FROM property_value "
+                    "ORDER BY calc_ref, property, solvent_id",
+                )
+
+        assert landed["plain"], "the fixture must actually publish something"
+        assert landed["batching"] == landed["plain"], (
+            "an optional capability that changes what is stored is not an optimisation; the "
+            "batched path must be indistinguishable from the row-at-a-time one in the database"
+        )
+        assert counts["plain"] >= 20 * 10, (
+            "the row-at-a-time path is one round trip per row and must stay measured as one, or "
+            "the ratio below is a claim about nothing"
+        )
+        assert counts["batching"] <= 40, (
+            f"20 records took {counts['batching']} round trips; the whole point of grouping "
+            "table-major across the batch is that the statement count is a function of the "
+            "projector's column sets and not of the number of records"
+        )
+        assert counts["batching"] * 5 < counts["plain"], (
+            f"batched {counts['batching']} vs row-at-a-time {counts['plain']}: a drain pass is "
+            "order 10^3 round trips and this is the whole reason the change exists"
+        )
+
+    asyncio.run(_run())
+
+
+def test_a_refused_row_inside_a_batch_is_still_named_with_its_table_and_calc_ref() -> None:
+    """A batch shares a failure; the error must not. Driven with one poisoned row in a group.
+
+    `SinkRejectedError` naming the table and the `calc_ref` is what an operator acts on, and it is
+    also a retry contract: `durable/publish.py` marks it non-retryable **by class name**, and
+    `_drain_one` reads anything that is not a `SinkUnavailableError` as one record's fault and
+    replays the batch a record at a time. A group-level message would have kept both behaviours
+    and lost the only part of them that identifies the row.
+
+    The poison is a CHECK constraint the test adds, because that is the shape of the real fault
+    this arm exists for — a site whose store refuses a value this release writes — and it fails one
+    row of a group whose other rows are perfectly good.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        dsn = settings.postgres_dsn
+        await _create_store(dsn)
+        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+            await conn.execute(
+                f"ALTER TABLE {_STORE}.calculation "
+                "ADD CONSTRAINT no_poison CHECK (calc_ref <> 'batch-1')"
+            )
+
+        records = _records(3)
+        for batching in (True, False):
+            sink = SqlResultSink(
+                name="poison",
+                tenant_id="site-a",
+                connection={
+                    "driver": "tests.test_publish_end_to_end:_warehouse",
+                    "dsn": dsn,
+                    "schema": _STORE,
+                    "batching": batching,
+                },
+            )
+            try:
+                with pytest.raises(SinkRejectedError) as raised:
+                    await sink.deliver(records)
+            finally:
+                await sink.aclose()
+            message = str(raised.value)
+            assert "calculation" in message and "batch-1" in message, (
+                f"the refusal must name the table and the record that caused it; got {message!r}"
+            )
+
+        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+            await conn.execute(f"SET search_path={_STORE}")
+            kept = await _rows(conn, "SELECT calc_ref FROM calculation ORDER BY calc_ref")
+            assert kept == [("batch-0",)], (
+                "the row-at-a-time replay must write the group's good rows up to the poison, so "
+                "the partial state a retry completes is the same one the row-at-a-time writer "
+                "left — psycopg rolls a refused `executemany` back whole, which is why the replay "
+                "is what puts them there"
+            )
+
+    asyncio.run(_run())

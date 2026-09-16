@@ -569,3 +569,53 @@ def test_no_operator_surface_serves_the_unsettled_set_without_saying_so() -> Non
         "`durable/effect_ledger.py`'s docstring still says none does. Rewrite the sentence in the "
         "same change that serves it."
     )
+
+
+def test_an_effect_is_built_from_the_columns_by_name_and_keeps_its_iso_stamps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reversing `_COLUMNS` must change nothing, and the two timestamps must stay ISO strings.
+
+    Fourteen positional subscripts used to restate this SELECT's order in Python, nine of them
+    adjacent `TEXT` columns — `requested_by`, `session_id`, `correlation_id`, `approved_by`,
+    `state`, `external_ref`, `detail` among them — so an edit to `_COLUMNS` renamed every value
+    silently. The stamps are asserted beside it because they are the one thing a row factory does
+    *not* do: `attempted_at` and `settled_at` are `TIMESTAMPTZ` and this model has always exposed
+    them as `datetime.isoformat()`, which is now a `BeforeValidator` rather than a line in a
+    hand-written builder — and a SQL-side `::text` would have spelled them differently.
+    """
+    from chemclaw.durable import effect_ledger
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await begin_effect(
+            EffectRecord(
+                effect_id="eff-by-name",
+                connector="effects-test",
+                job="file_deviation",
+                system="the QMS",
+                reversal="idempotent",
+                requested_by="u-1",
+            )
+        )
+        await settle_effect("eff-by-name", state="applied", external_ref="DEV-1")
+        straight = await get_effect("eff-by-name")
+        assert straight is not None
+        assert straight.attempted_at.count("T") == 1 and straight.settled_at.count("T") == 1, (
+            "these reach callers as `datetime.isoformat()` spells them, not as the server's "
+            "`::text` would"
+        )
+
+        columns = [name.strip() for name in effect_ledger._COLUMNS.split(",")]
+        monkeypatch.setattr(effect_ledger, "_COLUMNS", ", ".join(reversed(columns)))
+        assert await get_effect("eff-by-name") == straight, (
+            "the column order must not be able to decide which field a value lands in"
+        )
+
+        monkeypatch.setattr(
+            effect_ledger, "_COLUMNS", f"{', '.join(columns)}, connector AS surplus"
+        )
+        with pytest.raises(ValidationError, match="surplus"):
+            await get_effect("eff-by-name")
+
+    asyncio.run(_run())

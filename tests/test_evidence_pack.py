@@ -11,6 +11,8 @@ happened", and refusals are part of the record rather than a list of faults.
 
 import asyncio
 
+import pytest
+
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from chemclaw.operations.evidence_pack import LIMITS, assemble
@@ -409,3 +411,73 @@ def test_the_packs_own_headline_reaches_the_model_and_not_only_its_tests() -> No
         )
 
     asyncio.run(_run())
+
+
+def test_a_section_is_built_from_its_columns_by_name_and_not_by_their_order() -> None:
+    """Reversing a SELECT list must change nothing about the section it builds.
+
+    **This is the failure the pack could least afford and had.** `PackJob` was assembled by
+    unpacking a ten-element tuple whose first nine columns are all `TEXT` — `job_id`, `connector`,
+    `job`, `rationale`, `requested_by`, `summary`, `state`, `failure_reason`, `note_id` — so
+    editing the SELECT list swapped fields silently, passed `mypy --strict`, and produced a
+    plausible-looking evidence pack: a run attributed to the wrong person, with somebody else's
+    reason, in the one document a reader is told to treat as the record.
+
+    Both directions are driven, because only the pair is a control: the hostile order returns the
+    same section, and a column the model has no field for raises naming it rather than being
+    dropped.
+    """
+    import pydantic
+
+    from chemclaw.operations.evidence_pack import PackJob, _section
+
+    columns = (
+        "job_id, connector, job, rationale, requested_by, summary, state, failure_reason, "
+        "note_id, completed_at"
+    )
+    reversed_list = ", ".join(reversed([name.strip() for name in columns.split(",")]))
+    where = " FROM job_records WHERE session_id = %s ORDER BY completed_at LIMIT %s"
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _seed()
+        straight = await _section(PackJob, f"SELECT {columns}{where}", (SESSION, 10))
+        scrambled = await _section(PackJob, f"SELECT {reversed_list}{where}", (SESSION, 10))
+        assert straight and scrambled == straight, (
+            "the column order must not be able to decide which field a value lands in"
+        )
+        with pytest.raises(pydantic.ValidationError, match="surplus"):
+            await _section(
+                PackJob, f"SELECT {columns}, connector AS surplus{where}", (SESSION, 10)
+            )
+
+    asyncio.run(_run())
+    asyncio.run(_clear())
+
+
+def test_a_hallucinated_tool_name_is_bounded_on_the_field_rather_than_by_its_reader() -> None:
+    """`audit_events.tool` is the model's own string, so the bound belongs on `ToolCall.tool`.
+
+    It used to be applied in the comprehension that built the section, and the comment beside it
+    recorded the reason that is not enough: "the sanitisation went into one reader of this column
+    and not its sibling in the same package". A row factory removes the comprehension altogether —
+    `class_row` builds the model straight out of the row and calls nothing of this module's on the
+    way — so a bound that lived in the reader would simply have been deleted by the conversion.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _seed()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute(
+                "INSERT INTO audit_events (correlation_id, session_id, actor, tool, arguments,"
+                " outcome, detail, latency_ms) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                ("c-9", SESSION, "u-1", "drop table; --", "{}", "error", "", 1.0),
+            )
+            await conn.commit()
+        pack = await assemble(SESSION)
+        assert "drop table; --" not in [call.tool for call in pack.tool_calls]
+        assert "(unrecognised)" in [call.tool for call in pack.tool_calls]
+
+    asyncio.run(_run())
+    asyncio.run(_clear())

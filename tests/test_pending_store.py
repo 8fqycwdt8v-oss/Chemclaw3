@@ -15,6 +15,9 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
+from pydantic import ValidationError
+
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from chemclaw.durable import pending_store
@@ -454,5 +457,48 @@ def test_the_inbox_query_says_how_much_it_did_not_return() -> None:
         # The ordinary case must read as complete, or the marker means nothing.
         whole = await pending_store.open_requests(limit=200)
         assert not whole.truncated
+
+    asyncio.run(_run())
+
+
+def test_a_request_is_built_from_the_columns_by_name_and_keeps_its_iso_stamps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reversing `_COLUMNS` must change nothing, and the three timestamps stay ISO strings.
+
+    `_COLUMNS` and `PendingRequest`'s field list are now one declaration — fifteen positional
+    subscripts used to be the second copy, over seven adjacent `TEXT` columns. The stamps are
+    asserted alongside because a row factory converts nothing: `due_at`, `answered_at` and
+    `created_at` are `TIMESTAMPTZ` and reach `GET /pending` as `datetime.isoformat()` spells them,
+    which is now a `BeforeValidator` and deliberately not a SQL `::text` that would spell them
+    otherwise.
+    """
+    from chemclaw.durable import pending_store as store
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clean()
+        await _open("pending-by-name")
+        straight = await store.get_request("pending-by-name")
+        assert straight is not None
+        assert straight.due_at.count("T") == 1 and straight.created_at.count("T") == 1
+        assert straight.answered_at == "", "a NULL answered_at reads as 'still waiting'"
+
+        columns = [name.strip() for name in store._COLUMNS.split(",")]
+        monkeypatch.setattr(store, "_COLUMNS", ", ".join(reversed(columns)))
+        assert await store.get_request("pending-by-name") == straight, (
+            "the column order must not be able to decide which field a value lands in"
+        )
+        page = await store.open_requests(limit=5)
+        assert [row.request_id for row in page.requests] == ["pending-by-name"]
+        assert page.total_waiting == 1, (
+            "the count is read on a second cursor now that the page has a row factory, and it must "
+            "still be the same transaction's answer"
+        )
+
+        monkeypatch.setattr(store, "_COLUMNS", f"{', '.join(columns)}, kind AS surplus")
+        with pytest.raises(ValidationError, match="surplus"):
+            await store.get_request("pending-by-name")
+        await _clean()
 
     asyncio.run(_run())

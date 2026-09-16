@@ -8,6 +8,8 @@ past run by the words a chemist would actually remember — the *reason* it was 
 
 import asyncio
 
+import pytest
+
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.durable.job_record import JobRecord
@@ -429,5 +431,68 @@ def test_a_search_that_fits_is_not_reported_as_truncated() -> None:
         assert len(found.hits) == 3
         assert found.hits_truncated is False
         assert "floor" not in found.verdict
+
+    asyncio.run(_run())
+
+
+def test_the_record_is_built_from_the_columns_by_name_and_not_by_their_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reversing the SELECT list must change nothing about the record it returns.
+
+    This was nineteen `row[n]` subscripts restating `_SELECT_ONE`'s order a second time in Python,
+    over a projection whose first five columns and whose `note_id`/`payload_kind`/`state`/
+    `failure_reason` are all `TEXT` — so an edit to the column list moved every value one field
+    along, type-checked, and returned a record that reads as a record. `class_row` passes each
+    column as a keyword argument, which is what this test drives: the same row, read through a
+    deliberately hostile column order, must be the same `JobRecord`.
+    """
+    from chemclaw.durable import job_record_store
+
+    async def _run() -> None:
+        sink = await _sink_or_skip()
+        await sink.record(_CAMPAIGN)
+        straight = await read_job_record("pg-bo-campaign-1")
+
+        columns = [name.strip() for name in job_record_store._COLUMNS.split(",")]
+        reversed_list = ", ".join(reversed([*columns, "completed_at"]))
+        monkeypatch.setattr(
+            job_record_store,
+            "_SELECT_ONE",
+            f"SELECT {reversed_list} FROM job_records WHERE job_id = %s",
+        )
+        scrambled = await read_job_record("pg-bo-campaign-1")
+
+        assert straight is not None and scrambled == straight, (
+            "the column order must not be able to decide which field a value lands in"
+        )
+
+    asyncio.run(_run())
+
+
+def test_a_column_the_record_has_no_field_for_is_an_error_at_the_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`JobRecord` is `extra="forbid"`, so the SELECT and the model cannot drift apart quietly.
+
+    The failure this converts: a migration adds a column, somebody adds it to `_COLUMNS` and not to
+    the model. Ignored, that value is simply absent from every record anybody reads; forbidden, the
+    read raises naming the column, which is the only version a caller can act on.
+    """
+    import pydantic
+
+    from chemclaw.durable import job_record_store
+
+    async def _run() -> None:
+        sink = await _sink_or_skip()
+        await sink.record(_CAMPAIGN)
+        monkeypatch.setattr(
+            job_record_store,
+            "_SELECT_ONE",
+            f"SELECT {job_record_store._COLUMNS}, completed_at, session_id AS surplus "
+            "FROM job_records WHERE job_id = %s",
+        )
+        with pytest.raises(pydantic.ValidationError, match="surplus"):
+            await read_job_record("pg-bo-campaign-1")
 
     asyncio.run(_run())
