@@ -30,13 +30,64 @@ true. This one is a physical quantity. `ARCHITECTURE.md` records the pair.
 
 Every other unit here converts by a factor. Celsius does not, and a factor-only registry would
 convert 25 °C to 25 K silently — the class of error that reaches a chemist as a plausible number.
+
+## Why the ladder is generated, and why the generator is `pint`
+
+**This module's whole history is one bug, three times, and every instance is a prefix rung present
+on one ladder and absent from the other.** `M` is molar and `m` is metre, so the two families
+differ only by case and a spelling only one of them registers resolves silently to that one:
+`nM` was missing, so nanomolar — the working unit of potency — folded to the *nanometre*; `pM` was
+then added without its length twin, so **picometre resolved to picomolar** and a 154 pm bond length
+was accepted as a concentration; `µm` was registered as an exact alias of micromolar, so a particle
+size was read as a concentration and did not even reach the ambiguity guard. Each fix introduced
+the next, because each was a row typed by hand into a table of 48 rows and 181 spellings.
+
+A hand-typed rung can be missing. A **generated** one cannot, which is the entire argument for what
+replaced it: the prefixed rungs are a cross product of `_LADDER` with the two base units, so
+concentration and length are prefixed from **one tuple, written once and read twice** — the pairing
+the old table asserted in a test is now a property of the code that builds it. `pint` supplies the
+prefix factors, resolves each generated spelling, and computes every conversion factor from the
+definition it was given, so no factor in this module is typed by a person any more.
+
+**It is built from a restricted definition list and never from `pint.UnitRegistry()`.** A default
+registry knows furlongs, and the refusal in `parse_unit` is this module's product rather than an
+inconvenience: `pint.UnitRegistry(None)` starts empty and `_PREFIX_DEFINITIONS` and `_DEFS` are
+everything it is ever told. Measured against the registry this builds: `furlong`, `m/g`, `m**2`
+and `2*m` are all refused.
+
+**Every generated spelling is checked against `UnitRegistry.get_name`, which resolves a prefix and
+an alias and nothing else.** `UnitRegistry.Unit` is the obvious call and is the wrong one —
+measured, `Unit("m/g")` *builds* metre-per-gram and `Unit("m**2")` square metres, which is the
+derived-unit algebra two paragraphs up says has no caller here. `get_name` refuses all three, and
+`Unit` is called only on a canonical name this module itself wrote. `parse_unit` reaches the
+registry not at all: it is a lookup over the spellings the build generated, because the registry
+pint builds from these definitions answers to every prefix on every unit — `kpKa` and `centimole`
+included — and "the units this domain writes down" is the narrower of the two sets.
+
+**Four things `pint` is deliberately not asked to do.** Its `Measurement` needs the `uncertainties`
+package, which is not a dependency, so `uncertainty` stays a field here — and the field's one
+subtlety is not pint's either: a spread converts by the factor and never by the offset. It has no
+concept of a `basis`, because `area%` against `% w/w` is a question about the sample rather than
+about units. Its registry is case-sensitive, which is half of what this domain needs and not the
+convenience half, so `_FOLDED` below is still first-party. And the conversion arithmetic is the two
+lines in `Measurement.to`, over factors pint computed at import: doing it through `pint.Quantity`
+per call would put the refusal — `pint.DimensionalityError`, whose message names pint's internal
+unit names rather than the chemist's spelling — on the path every caller's `except UnitError`
+guards.
 """
 
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Literal, get_args
+
+import pint
 
 #: The base dimensions this domain writes down. Deliberately short: current, luminous intensity and
 #: angle have no caller here, and a dimension nothing uses is a row nobody checks.
+#:
+#: **Every one of these is a `pint` *base* dimension**, declared as `[name]` in `_DEFS` below and
+#: checked against this tuple at import. Nothing is derived from anything else, which is what makes
+#: `mg/mL` and `M` incomparable (see `mass_concentration`) and what keeps the registry incapable of
+#: the derived-unit algebra this module refuses.
 Dimension = Literal[
     "dimensionless",
     "mass",
@@ -54,7 +105,8 @@ Dimension = Literal[
     # "dimensionless" in the sense that they carry no units, and treating them that way would make
     # them interconvertible with each other and with `%` — so a chemist reporting a pKa into the
     # solubility ledger would be accepted silently. Nothing converts into a log scale, which is
-    # exactly what a dimension of its own expresses.
+    # exactly what a dimension of its own expresses, and declaring them to pint as their own base
+    # dimensions is what makes that true of the generator as well as of the table.
     "log_solubility",
     "acidity",
     # Mass per volume is **not** the same dimension as molarity here, deliberately. Converting
@@ -71,9 +123,13 @@ class Unit:
     """One unit: what it measures, and how it relates to this dimension's reference unit.
 
     `factor` and `offset` convert *to* the reference: `reference = value * factor + offset`. The
-    reference unit of each dimension is the one with `factor == 1.0` and `offset == 0.0`, and it is
-    an implementation detail rather than a claim about SI — `fraction`'s reference is the bare
+    reference unit of each dimension is the one declared `[dimension]` in `_DEFS`, and it is an
+    implementation detail rather than a claim about SI — `fraction`'s reference is the bare
     fraction, and `energy_per_amount`'s is kJ/mol, because those are what this system stores.
+
+    **Neither number is written down.** Both are read out of the restricted `pint` registry at
+    import, so a rung's factor is whatever its definition says it is rather than whatever was typed
+    beside it.
     """
 
     symbol: str
@@ -82,62 +138,148 @@ class Unit:
     offset: float = 0.0
 
 
-# The registry, and the reason there are two of them.
-#
-# **Unit symbols are case-sensitive, and folding them is a real hazard rather than a pedantry.**
-# `M` is molar and `m` is metre; `mM` is millimolar and `mm` is millimetre. A case-insensitive
-# lookup makes each of those pairs one spelling and picks whichever was registered first — so a
-# limit stated in `mM` would be read as millimetres, refuse nothing, and compare against a
-# concentration as though it were a length. Measured while building this: a folded registry could
-# not hold molarity and length at once.
-#
-# So `_UNITS` is exact and `_FOLDED` is the convenience layer, holding a lowercase spelling **only
-# while it is unambiguous**. A fold claimed by two different units maps to `None`, and `parse_unit`
-# refuses it by name rather than guessing — which is how `mm` behaves once both are registered.
-_UNITS: dict[str, Unit] = {}
-_FOLDED: dict[str, Unit | None] = {}
+class UnitError(ValueError):
+    """A unit was unknown, or two quantities could not be compared.
+
+    A `ValueError`, so it travels the same non-retryable path every other bad-data refusal here
+    takes: a wrong unit is not a transient fault and retrying it will produce the same answer.
+
+    **Every refusal this module makes is this type**, including the ones a `pint` call raises
+    underneath: `UndefinedUnitError` and `DimensionalityError` are translated where they arise and
+    never leave this module, because a caller's `except UnitError` is what decides whether a bad
+    unit reaches a chemist as a message or as a traceback.
+    """
 
 
-def _register(unit: Unit, *aliases: str) -> None:
-    """Add a unit under its exact symbol and every spelling that means it."""
-    for name in (unit.symbol, *aliases):
-        key = name.strip()
-        if key in _UNITS:  # pragma: no cover - a programming error, caught at import
-            raise ValueError(
-                f"unit spelling {key!r} (for {unit.symbol!r}) is already registered for "
-                f"{_UNITS[key].symbol!r}"
-            )
-        _UNITS[key] = unit
-        folded = key.lower()
-        # Claimed by a *different* unit already: neither may answer for it.
-        existing = _FOLDED.get(folded, unit)
-        _FOLDED[folded] = unit if existing is unit else None
+#: The thermochemical calorie in joules — **exact by definition**, not a measurement, so there is
+#: no precision to lose and nothing to update when CODATA does.
+JOULE_PER_CALORIE = 4.184
+
+#: One hartree in kcal/mol (CODATA 2018: E_h = 4.3597447222071e-18 J, N_A = 6.02214076e23 /mol).
+#:
+#: **This is the one definition, and it is here because `core` is the layer everything may import.**
+#: It was written out three times — here as a truncated 2625.4996 kJ/mol, in
+#: `science/calc/thermo.py` and again in `publish/properties.py` — and two of the three were short
+#: enough to disagree: the registry's derived kcal/mol came out 1.5e-08 relative low, which is
+#: nothing today and is one caller away from being a chemist's number. Restating a constant is how
+#: three copies drift, so `science/calc/thermo.py` imports this name rather than repeating its
+#: digits. `publish/properties.py` still spells it out and should import it too — that file belongs
+#: to another change, and this comment says so rather than implying all three copies are gone.
+HARTREE_TO_KCAL = 627.5094740631
+
+#: One electronvolt in kJ/mol. N_A·e with both factors exact under SI-2019, so the full value is
+#: exact too — the registry carried 96.485_332, truncated at the seventh digit for no reason.
+ELECTRONVOLT_TO_KJ = 96.485_332_123_31
 
 
-# Dimensionless, and the two that are dimensionless but *scaled* — which is the distinction that
-# makes "0.15% versus 1500 ppm" answerable rather than a coin toss.
-_register(Unit("", "dimensionless"), "none", "unitless", "-")
-_register(Unit("fraction", "fraction"), "frac")
-_register(
-    Unit("%", "fraction", 0.01),
-    "percent",
-    "pct",
-    "% w/w",
-    "%w/w",
-    "w/w%",
-    "area%",
-    "% area",
-    "%area",
-    "mol%",
-    "% mol",
+@dataclass(frozen=True, slots=True)
+class _Def:
+    """One unprefixed unit: what to tell `pint`, what to call it here, and which rungs it has.
+
+    `definition` is a `pint` definition line and the **only** place a conversion factor appears.
+    `symbol` is what a chemist writes and what `__str__` prints, which is not always what pint can
+    be told: a pint name may not contain a space, so `log S` is `logs` to the registry and `log S`
+    here. `spellings` are the further spellings pint cannot hold — every one with a space in it,
+    for that same rule.
+    """
+
+    definition: str
+    symbol: str
+    spellings: tuple[str, ...] = ()
+    prefixes: tuple[str, ...] = ()
+
+
+#: The prefixes, as `pint` definition lines. The factor lives here and nowhere else.
+_PREFIX_DEFINITIONS: tuple[str, ...] = (
+    "centi- = 1e-2 = c-",
+    "milli- = 1e-3 = m-",
+    # Both micro signs, because the micro sign (U+00B5) and the Greek mu (U+03BC) are different
+    # code points and a chemist may type either.
+    "micro- = 1e-6 = u- = µ- = μ-",
+    "nano- = 1e-9 = n-",
+    "pico- = 1e-12 = p-",
+    "kilo- = 1e3 = k-",
 )
-# **`% w/v` is not a fraction and was registered as one.** It is grams per 100 mL *by definition*,
-# so it belongs in `mass_concentration` where the conversion is exact and needs no density —
-# 1 % w/v is 10 mg/mL. As a `fraction` with factor 0.01 it silently asserted rho = 1.000 g/mL:
-# a 2 % w/v stock read 20000 ppm and compared equal to a bare 2 %, when in ethanol it is 2.53 % w/w
-# and in DMSO 1.82 %. `origin/main` refused the spelling as unknown; this branch introduced the
-# alias and the error with it.
-_register(Unit("% w/v", "mass_concentration", 10.0), "%w/v", "w/v%")
+
+#: **The one tuple the concentration and length ladders are both built from.** Written once and
+#: read twice, five lines apart in `_DEFS`, because every defect in this module's history was a
+#: rung on one of those two ladders and not the other — and `M`/`m` differ only by case, so the
+#: ladder that has the rung answers for the spelling of the ladder that does not. A rung cannot go
+#: missing from one side of a cross product.
+_LADDER: tuple[str, ...] = ("centi", "milli", "micro", "nano", "pico")
+
+#: Every unit this domain writes down. One row per *unprefixed* unit: the prefixed rungs are
+#: generated, which is why `nM`, `pM` and `µm` are not rows here and cannot be forgotten.
+_DEFS: tuple[_Def, ...] = (
+    # Dimensionless, and the ones that are dimensionless but *scaled* — which is the distinction
+    # that makes "0.15% versus 1500 ppm" answerable rather than a coin toss. `fraction` is its own
+    # pint base dimension rather than pint's `dimensionless`, so a bare number and a percentage stay
+    # incomparable: `reconcile(0.15, "%", "")` refuses, which is what it did before pint and what a
+    # column holding "0.15" rather than "0.15%" deserves.
+    _Def("fraction = [fraction] = frac", "fraction"),
+    # **A percent is one unit and several facts**, and `_BASIS_SPELLINGS` below is what keeps the
+    # facts apart. The spellings with a space in them are first-party for the reason `_Def` gives.
+    _Def(
+        "percent = 0.01 fraction = % = pct = %w/w = w/w% = area% = %area = mol%",
+        "%",
+        ("% w/w", "% area", "% mol"),
+    ),
+    _Def("ppm = 1e-6 fraction", "ppm"),
+    _Def("ppb = 1e-9 fraction", "ppb"),
+    _Def("gram = [mass] = g = grams", "g", prefixes=("kilo", "milli", "micro", "nano")),
+    _Def("mole = [amount] = mol = moles", "mol", prefixes=("milli", "micro")),
+    _Def("liter = [volume] = L = litre", "L", prefixes=("milli", "micro")),
+    _Def("second = [time] = s = sec = seconds", "s"),
+    _Def("minute = 60 second = min = minutes", "min"),
+    _Def("hour = 3600 second = h = hr = hours", "h"),
+    _Def("day = 86400 second = d = days", "d"),
+    # The reference is kelvin, and the offset below is the reason `offset` exists at all.
+    _Def("kelvin = [temperature] = K", "K"),
+    _Def("degC = kelvin; offset: 273.15 = degreec = celsius = °c = c", "degC"),
+    _Def("pascal = [pressure] = Pa", "Pa", prefixes=("kilo",)),
+    _Def("bar = 1e5 pascal", "bar", prefixes=("milli",)),
+    # kJ/mol is this dimension's reference, and the hartree and the electronvolt are derived from
+    # the two constants above rather than restated as a third and fourth number — which is the
+    # whole point of those constants. `f"{...!r}"` round-trips a float exactly, so the registry's
+    # factor is bit-for-bit the product, which `tests/test_units.py` asserts with `==`.
+    _Def("kJ_per_mol = [energy_per_amount] = kJ/mol = kjmol", "kJ/mol", ("kj mol-1",)),
+    _Def(
+        f"kcal_per_mol = {JOULE_PER_CALORIE!r} kJ_per_mol = kcal/mol = kcalmol",
+        "kcal/mol",
+        ("kcal mol-1",),
+    ),
+    _Def(f"hartree = {HARTREE_TO_KCAL * JOULE_PER_CALORIE!r} kJ_per_mol = eh = ha = au", "hartree"),
+    _Def(f"electronvolt = {ELECTRONVOLT_TO_KJ!r} kJ_per_mol = eV", "eV"),
+    # The two ladders that differ only by case, prefixed from the one `_LADDER` tuple. **Read those
+    # two `prefixes=_LADDER` arguments as a pair**: the module's three historical defects are all
+    # the case where they were not.
+    _Def("molar = [concentration] = M = mol/L", "M", prefixes=_LADDER),
+    _Def("meter = [length] = m = metre", "m", prefixes=_LADDER),
+    _Def("angstrom = 1e-10 meter = Å = ang", "angstrom"),
+    # **`% w/v` is not a fraction.** It is grams per 100 mL *by definition*, so it belongs in
+    # `mass_concentration` where the conversion is exact and needs no density — 1 % w/v is
+    # 10 mg/mL. As a `fraction` with factor 0.01 it silently asserted rho = 1.000 g/mL: a 2 % w/v
+    # stock read 20000 ppm and compared equal to a bare 2 %, when in ethanol it is 2.53 % w/w and
+    # in DMSO 1.82 %.
+    _Def("mg_per_mL = [mass_concentration] = mg/mL = g/L", "mg/mL"),
+    _Def("ug_per_mL = 1e-3 mg_per_mL = ug/mL = µg/mL = μg/mL = mg/L", "ug/mL"),
+    _Def("percent_wv = 10 mg_per_mL = %w/v = w/v%", "% w/v", ("% w/v",)),
+    _Def("g_per_mol = [molar_mass] = g/mol = da = dalton", "g/mol", ("g mol-1",)),
+    # The two calibrated properties' own scales, spelled exactly as `_CALIBRATED` spells them in
+    # `connectors/calc/server/tools.py`, because the ledger's unit column and this registry have to
+    # agree on the string or the check is a no-op.
+    _Def("log_solubility = [log_solubility] = logs = log10(mol/l)", "log S", ("log S",)),
+    _Def("pKa = [acidity]", "pKa"),
+)
+
+#: Spellings that attach to a *generated* rung rather than to a unit `_DEFS` declares, keyed by the
+#: rung's symbol. A pint alias attaches to a base unit and is inherited by every prefix, so there is
+#: nowhere to put "the micrometre is also called a micron" — these two are that, and the build
+#: refuses a key no rung generated, so deleting a rung cannot leave one dangling.
+_RUNG_SPELLINGS: dict[str, tuple[str, ...]] = {
+    "um": ("micron",),
+    "ug": ("mcg",),
+}
 
 #: Spellings that state their own basis. **A percent is one unit and several facts**, and these are
 #: the spellings in which a chemist says which: an HPLC area percent, a weight percent, a molar
@@ -161,123 +303,152 @@ _BASIS_SPELLINGS: dict[str, str] = {
     "mol%": "mol",
     "% mol": "mol",
 }
-_register(Unit("ppm", "fraction", 1e-6))
-_register(Unit("ppb", "fraction", 1e-9))
 
-_register(Unit("g", "mass"), "gram", "grams")
-_register(Unit("kg", "mass", 1e3), "kilogram")
-_register(Unit("mg", "mass", 1e-3), "milligram")
-_register(Unit("ug", "mass", 1e-6), "µg", "μg", "microgram", "mcg")
-_register(Unit("ng", "mass", 1e-9), "nanogram")
 
-_register(Unit("mol", "amount"), "mole", "moles")
-_register(Unit("mmol", "amount", 1e-3), "millimole")
-_register(Unit("umol", "amount", 1e-6), "µmol", "μmol", "micromole")
-
-_register(Unit("L", "volume"), "litre", "liter")
-_register(Unit("mL", "volume", 1e-3), "millilitre", "milliliter")
-_register(Unit("uL", "volume", 1e-6), "µl", "μl", "microlitre", "microliter")
-
-_register(Unit("s", "time"), "sec", "second", "seconds")
-_register(Unit("min", "time", 60.0), "minute", "minutes")
-_register(Unit("h", "time", 3600.0), "hr", "hour", "hours")
-_register(Unit("d", "time", 86_400.0), "day", "days")
-
-# The reference is kelvin, and the two offsets below are the reason `offset` exists at all.
-_register(Unit("K", "temperature"), "kelvin")
-_register(Unit("degC", "temperature", 1.0, 273.15), "°c", "c", "celsius", "degreec")
-
-_register(Unit("Pa", "pressure"), "pascal")
-_register(Unit("kPa", "pressure", 1e3))
-_register(Unit("bar", "pressure", 1e5))
-_register(Unit("mbar", "pressure", 1e2), "millibar")
-
-#: The thermochemical calorie in joules — **exact by definition**, not a measurement, so there is
-#: no precision to lose and nothing to update when CODATA does.
-JOULE_PER_CALORIE = 4.184
-
-#: One hartree in kcal/mol (CODATA 2018: E_h = 4.3597447222071e-18 J, N_A = 6.02214076e23 /mol).
-#:
-#: **This is the one definition, and it is here because `core` is the layer everything may import.**
-#: It was written out three times — here as a truncated 2625.4996 kJ/mol, in
-#: `science/calc/thermo.py` and again in `publish/properties.py` — and two of the three were short
-#: enough to disagree: the registry's derived kcal/mol came out 1.5e-08 relative low, which is
-#: nothing today and is one caller away from being a chemist's number. Restating a constant is how
-#: three copies drift, so `science/calc/thermo.py` imports this name rather than repeating its
-#: digits. `publish/properties.py` still spells it out and should import it too — that file belongs
-#: to another change, and this comment says so rather than implying all three copies are gone.
-HARTREE_TO_KCAL = 627.5094740631
-
-#: One electronvolt in kJ/mol. N_A·e with both factors exact under SI-2019, so the full value is
-#: exact too — the registry carried 96.485_332, truncated at the seventh digit for no reason.
-ELECTRONVOLT_TO_KJ = 96.485_332_123_31
-
-_register(Unit("kJ/mol", "energy_per_amount"), "kjmol", "kj mol-1")
-_register(Unit("kcal/mol", "energy_per_amount", JOULE_PER_CALORIE), "kcalmol", "kcal mol-1")
-# Derived from the two constants above rather than restated as a third number, which is the whole
-# point of them: kJ/mol is this dimension's reference unit, so the hartree's factor is exactly what
-# `HARTREE_TO_KCAL` says a hartree is, expressed in the reference.
-_register(
-    Unit("hartree", "energy_per_amount", HARTREE_TO_KCAL * JOULE_PER_CALORIE), "eh", "ha", "au"
-)
-_register(Unit("eV", "energy_per_amount", ELECTRONVOLT_TO_KJ), "electronvolt")
-
-# **The concentration and length ladders are registered in step, deliberately.** Case is what
-# separates molarity from length here (`M` molar, `m` metre), and a fold claimed by both is poisoned
-# to `None` so the ambiguous spelling is refused rather than silently resolved. That only works
-# where *both* families register the prefix: `M`/`m` and `mM`/`mm` were both present and correct,
-# and the very next rung down was not — `nM` was absent, so nanomolar folded to the *nanometre*
-# already there and `Measurement.of(50, "nM").compare(Measurement.of(1, "mm"))` answered instead of
-# refusing, while `nM` and `uM` came out as different dimensions and a legitimate 50 nM against a
-# 0.1 µM limit was refused with "cannot compare length with concentration".
+# The registry, and the reason there are two of them.
 #
-# So every rung either exists on both sides or on neither — and "or on neither" is not a figure of
-# speech. The first version of this fix registered `pM` with the note that it "has no length twin
-# and
-# is therefore unambiguous", which had it exactly backwards: the missing twin left the fold `"pm"`
-# unpoisoned, so **picometre — the unit of a bond length — resolved to picomolar**, and
-# `reconcile(154, "pm", "M")` returned 1.54e-10 where `origin/main` had refused it as unknown. A
-# fix that converts a safe refusal into a silent wrong dimension is worse than the defect it
-# replaces, and it is the same defect: one rung further down, made while fixing the rung above.
-_register(Unit("M", "concentration"), "mol/L", "molar")
-_register(Unit("mM", "concentration", 1e-3), "mmol/l", "millimolar")
-# `µM`/`μM` are registered as *exact* spellings (both the micro sign and the Greek mu), because
-# exact lookup runs before the case fold and the fold of "µm" is claimed by micrometre below.
-# Without them the correct spelling of micromolar resolved to a length.
-_register(Unit("uM", "concentration", 1e-6), "µM", "μM", "umol/l", "micromolar")
-_register(Unit("nM", "concentration", 1e-9), "nmol/l", "nanomolar")
-_register(Unit("pM", "concentration", 1e-12), "pmol/l", "picomolar")
-_register(Unit("mg/mL", "mass_concentration"), "g/L")
-_register(Unit("ug/mL", "mass_concentration", 1e-3), "µg/mL", "μg/mL", "mg/L")
+# **Unit symbols are case-sensitive, and folding them is a real hazard rather than a pedantry.**
+# `M` is molar and `m` is metre; `mM` is millimolar and `mm` is millimetre. A case-insensitive
+# lookup makes each of those pairs one spelling and picks whichever was registered first — so a
+# limit stated in `mM` would be read as millimetres, refuse nothing, and compare against a
+# concentration as though it were a length. pint is case-sensitive by default, which is why it can
+# hold both ladders at once; what it has no answer for is the chemist who writes `Area%` on a
+# chromatography printout.
+#
+# So `_UNITS` is exact and `_FOLDED` is the convenience layer, holding a lowercase spelling **only
+# while it is unambiguous**. A fold claimed by two different units maps to `None`, and `parse_unit`
+# refuses it by name rather than guessing — which is how `mm` behaves once both ladders exist.
+_UNITS: dict[str, Unit] = {}
+_FOLDED: dict[str, Unit | None] = {}
 
-_register(Unit("g/mol", "molar_mass"), "g mol-1", "da", "dalton")
-
-# The two calibrated properties' own scales, spelled exactly as `_CALIBRATED` spells them in
-# `connectors/calc/server/tools.py`, because the ledger's unit column and this registry have to
-# agree on the string or the check is a no-op.
-_register(Unit("log S", "log_solubility"), "logs", "log10(mol/l)")
-_register(Unit("pKa", "acidity"))
-
-_register(Unit("m", "length"), "metre", "meter")  # `mm`/`cm`/`um`/`nm` follow below
-_register(Unit("cm", "length", 1e-2), "centimetre", "centimeter")
-_register(Unit("mm", "length", 1e-3), "millimetre", "millimeter")
-# **`µm` is a micrometre.** It was registered as an exact alias of micromolar, which did not even
-# reach the ambiguity guard — micrometre was absent from this family, so nothing poisoned the fold
-# and `reconcile(50, "µm", "mM")` accepted a particle size as a concentration and returned 0.05.
-# The correct spelling `µM` still reaches micromolar through the fold, which is all that alias was
-# ever needed for.
-_register(Unit("um", "length", 1e-6), "µm", "μm", "micrometre", "micrometer", "micron")
-_register(Unit("nm", "length", 1e-9), "nanometre", "nanometer")
-_register(Unit("pm", "length", 1e-12), "picometre", "picometer")
-_register(Unit("angstrom", "length", 1e-10), "å", "ang")
+#: **`None` is the whole argument**: `pint.UnitRegistry()` loads pint's own definition file and
+#: knows furlongs. This one starts empty and is told `_PREFIX_DEFINITIONS` and `_DEFS`, and nothing
+#: else, ever.
+_UREG: pint.UnitRegistry[float] = pint.UnitRegistry(None)
 
 
-class UnitError(ValueError):
-    """A unit was unknown, or two quantities could not be compared.
+def _forms(definition: str) -> tuple[str, tuple[str, ...]]:
+    """`('micro', ('u', 'µ', 'μ'))` — a definition line's name and its symbol and aliases.
 
-    A `ValueError`, so it travels the same non-retryable path every other bad-data refusal here
-    takes: a wrong unit is not a transient fault and retrying it will produce the same answer.
+    Parsed out of the line this module hands pint rather than declared beside it, so the two cannot
+    disagree. The second field is the value and is skipped; a prefix's trailing `-` is dropped.
     """
+    parts = [part.strip().rstrip("-") for part in definition.split("=")]
+    return parts[0], tuple(parts[2:])
+
+
+def _is_word(form: str) -> bool:
+    """Whether a spelling takes a prefix's *name* (`millimolar`) or its *symbol* (`mM`).
+
+    A word is spelled out, so it pairs with the prefix spelled out. `mol/L` is not a word and pairs
+    with `m` to make `mmol/L`; `mol` is three letters and would read as one, which is why a unit's
+    own symbol always takes the symbol form as well.
+    """
+    return form.isalpha() and form.islower() and len(form) > 2
+
+
+def _dimension_of(name: str) -> Dimension:
+    """The `Dimension` pint derived for a unit, refusing anything this module has not declared.
+
+    Read off the registry rather than declared beside each row, so a definition line reading
+    `[concentation]` cannot quietly mint a dimension that converts with nothing. pint would accept
+    it; this does not.
+    """
+    derived = str(_UREG.get_dimensionality(_UREG.Unit(name))).strip("[]")
+    if derived not in get_args(Dimension):
+        raise UnitError(f"unit {name!r} has dimension {derived!r}, which this domain does not use")
+    return derived  # type: ignore[return-value]
+
+
+def _add(unit: Unit, spellings: tuple[str, ...]) -> None:
+    """Register one unit under every spelling that means it, refusing a spelling claimed twice."""
+    for name in spellings:
+        key = name.strip()
+        if key in _UNITS and _UNITS[key] is not unit:  # pragma: no cover - caught at import
+            raise UnitError(
+                f"unit spelling {key!r} (for {unit.symbol!r}) is already registered for "
+                f"{_UNITS[key].symbol!r}"
+            )
+        _UNITS[key] = unit
+        folded = key.lower()
+        # Claimed by a *different* unit already: neither may answer for it.
+        existing = _FOLDED.get(folded, unit)
+        _FOLDED[folded] = unit if existing is unit else None
+
+
+def _build() -> None:
+    """Load the restricted registry and generate every rung of every ladder from it.
+
+    Runs once at import. Everything it writes — the dimension, the factor, the offset and the set of
+    spellings — comes out of `_PREFIX_DEFINITIONS` and `_DEFS`, so a rung is a cross product rather
+    than a row somebody remembered to type.
+    """
+    for line in _PREFIX_DEFINITIONS:
+        _UREG.define(line)
+    for definition in _DEFS:
+        _UREG.define(definition.definition)
+
+    prefixes = dict(_forms(line) for line in _PREFIX_DEFINITIONS)
+    # The unit each dimension is measured against: the one declared `[dimension]`.
+    references = {
+        _dimension_of(_forms(d.definition)[0]): _forms(d.definition)[0]
+        for d in _DEFS
+        if d.definition.split("=")[1].strip().startswith("[")
+    }
+
+    # Taken as a copy and emptied as rungs claim their entries, so what is left over at the end
+    # names a rung that stopped being generated. `_RUNG_SPELLINGS` itself still reads as the map it
+    # documents afterwards.
+    unplaced = dict(_RUNG_SPELLINGS)
+
+    # A bare number is not a unit pint can be told about, and it must not become pint's
+    # `dimensionless` — that is one dimension with `fraction`, and `0.15` would then be a `0.15 %`.
+    _add(Unit("", "dimensionless"), ("", "none", "unitless", "-"))
+
+    for definition in _DEFS:
+        name, pint_forms = _forms(definition.definition)
+        dimension = _dimension_of(name)
+        reference = references[dimension]
+        symbol_forms = (definition.symbol, *(f for f in pint_forms if not _is_word(f)))
+        # A pint name is a spelling here only when a chemist would write it. `kJ_per_mol` and
+        # `mg_per_mL` are not: they exist because a pint name may hold neither a slash nor a space,
+        # and `parse_unit` advertising them would put this module's implementation in a chemist's
+        # error message.
+        word_forms = (*([name] if "_" not in name else []), *(f for f in pint_forms if _is_word(f)))
+        rungs: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+            (name, definition.symbol, (*symbol_forms, *word_forms, *definition.spellings)),
+            *(
+                (
+                    prefix + name,
+                    prefixes[prefix][0] + definition.symbol,
+                    tuple(p + f for p in prefixes[prefix] for f in symbol_forms)
+                    + tuple(prefix + f for f in word_forms),
+                )
+                for prefix in definition.prefixes
+            ),
+        )
+        for pint_name, symbol, spellings in rungs:
+            offset = float(_UREG.Quantity(0.0, pint_name).to(reference).magnitude)
+            factor = float(_UREG.Quantity(1.0, pint_name).to(reference).magnitude) - offset
+            unit = Unit(symbol, dimension, factor, offset)
+            _add(unit, (*spellings, *unplaced.pop(symbol, ())))
+            # Every spelling pint can hold must reach this unit *through pint*, or the generator
+            # and the registry it generated from disagree — which is the state this module was in
+            # three times, each time as a spelling that resolved to the wrong ladder.
+            for spelling in spellings:
+                if " " in spelling:
+                    continue  # a pint name may not contain one; `_Def.spellings` says so
+                if _UREG.get_name(spelling) != pint_name:
+                    raise UnitError(  # pragma: no cover - caught at import
+                        f"{spelling!r} means {pint_name!r} here and "
+                        f"{_UREG.get_name(spelling)!r} to the registry"
+                    )
+
+    if unplaced:  # pragma: no cover - caught at import
+        raise UnitError(f"no rung was generated for {sorted(unplaced)}")
+
+
+_build()
 
 
 def parse_unit(symbol: str) -> Unit:
@@ -286,6 +457,10 @@ def parse_unit(symbol: str) -> Unit:
     **Refuses rather than defaulting to dimensionless.** An unknown unit silently treated as bare
     would put "0.5 furlongs" in the same column as "0.5", and every comparison downstream would
     then be arithmetic on a number whose meaning nobody can recover.
+
+    A lookup rather than a call into pint, deliberately: the registry pint builds from these
+    definitions accepts every prefix on every unit, so it answers to `kpKa` and `centimole`, and
+    "the units this domain writes down" is a narrower set than "the units that registry can spell".
     """
     key = symbol.strip()
     if key in _UNITS:

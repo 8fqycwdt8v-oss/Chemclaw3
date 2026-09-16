@@ -161,6 +161,18 @@ _STACKS: dict[str, str] = {
     # dependency rather than as a directory. There is no allowed `(package, "xtb")` row below, so
     # any such import fails this file rather than needing to be noticed in review.
     "tblite": "xtb",
+    # The unit registry behind `core/units.py`, with the two roots its own distribution pulls in.
+    # All three carry one layering meaning and so share one label: **only the kernel may hold a
+    # unit registry.** A `pint` import in `science/`, `connectors/` or `publish/` would be a second
+    # answer to "how many kJ/mol is a hartree" — the failure `core/units.py` exists to end, arriving
+    # as a dependency rather than as a literal, and the one it already had three times when the
+    # constant was written out in three files. `flexparser` and `flexcache` are `pint`'s definition
+    # parser and its cache: no first-party module imports either, and mapping them is what makes
+    # that a checked fact rather than an assumption — an unmapped root is invisible to this walk,
+    # so the policy would pass a module that imported one directly to reach pint's internals.
+    "pint": "units",
+    "flexparser": "units",
+    "flexcache": "units",
 }
 
 Edge = tuple[str, str]  # (chemclaw package, stack)
@@ -178,6 +190,13 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.core", "temporal"): "core/temporal_client.py is the one client-per-process",
     ("chemclaw.core", "http"): "core/asgi.py + core/worker_http.py are the shared ASGI primitives",
     ("chemclaw.core", "rdkit"): "core/chem.py canonicalises SMILES for every layer",
+    ("chemclaw.core", "units"): (
+        "core/units.py is the one unit registry, and it is in the kernel because every layer "
+        "compares quantities against it — `analytical/`, `science/calc/` and `connectors/calc/` "
+        "all reconcile through it. It is the only module that may hold one: the registry is built "
+        "restricted (`pint.UnitRegistry(None)` plus a declared definition list), and a second one "
+        "built anywhere else would be a second registry with a different idea of what a percent is"
+    ),
     # `core/mcp_session.py` is the one *outbound* MCP client session, beside `core/db.py`'s pool and
     # `core/http.py`'s client factory. It is here rather than in `connectors/` because the second
     # caller is `ingest/labels/labeller.py`, and `ingest -> connectors` is not an edge this tree

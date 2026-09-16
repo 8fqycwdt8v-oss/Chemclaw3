@@ -258,17 +258,19 @@ def test_no_prefix_is_registered_on_one_ladder_and_not_the_other() -> None:
     `reconcile(154, "pm", "M")` returned 1.54e-10 where `origin/main` had refused it outright. Both
     times the test enumerated spellings by hand and stopped one rung short.
 
-    So this asks the registry. `_EXEMPT_FOLDS` is two entries and each states why the other reading
-    is not a unit anybody writes — an allowlist that short is readable, which is the condition
-    `CLAUDE.md` puts on one.
+    So this asks the registry. The allowlist is one entry now, and the entry it lost is the point:
+    see the comment on it.
     """
     from chemclaw.core.units import _UNITS
 
-    #: Folds that exist on one ladder because the other reading is not a real unit. `cM`
-    #: (centimolar) and an "angstrom-molar" are not written by anybody; every other rung of both
-    #: ladders has a counterpart a chemist does use, which is why the pairing is the rule and these
-    #: are the exceptions rather than the other way round.
-    exempt_folds = {"cm", "angstrom"}
+    #: Folds that exist on one ladder because the other reading is not a real unit. An
+    #: "angstrom-molar" is not written by anybody; every other rung of both ladders now has a
+    #: counterpart, because the two ladders are prefixed from one tuple rather than from two lists.
+    #: **`cm` used to be the second entry here** and is not any more: centimolar is indeed not
+    #: written by anybody, but its absence is what made `parse_unit("cM")` answer *centimetre* —
+    #: a fourth instance of this module's one defect, sitting inside the allowlist written to
+    #: excuse it. A rung that costs nothing to generate is cheaper than an argument for omitting it.
+    exempt_folds = {"angstrom"}
 
     def folds(dimension: str) -> set[str]:
         return {
@@ -338,3 +340,94 @@ def test_the_energy_ladder_carries_the_full_codata_value_and_one_definition() ->
     assert Measurement.of(1.0, "hartree").to("kcal/mol").value == pytest.approx(
         HARTREE_TO_KCAL, rel=1e-15
     )
+
+
+def test_the_two_ladders_that_differ_only_by_case_are_prefixed_from_one_tuple() -> None:
+    """The mechanism, not another example of it — because examples are what kept missing a rung.
+
+    Every defect in this module's history is one shape: a prefix rung present on the concentration
+    ladder and absent from the length one, or the reverse. `M` and `m` differ only by case, so the
+    ladder that has the rung answers for the spelling of the ladder that does not, and the answer is
+    a plausible number in the wrong dimension.
+
+    The test above this one asks the built registry whether the ladders agree, which is a statement
+    about the current table. This one asks *why they cannot disagree*: both rows hold the same tuple
+    object, so a rung added to one is added to the other in the same keystroke. Identity rather than
+    equality on purpose — two equal tuples written out separately are exactly the arrangement that
+    failed three times, and `is` is what makes copying one of them fail here.
+    """
+    from chemclaw.core.units import _DEFS, _LADDER, _UNITS
+
+    ladders = {row.symbol: row.prefixes for row in _DEFS if row.prefixes is _LADDER}
+    assert ladders.keys() == {"M", "m"}, (
+        "the concentration and length ladders are the pair that differ only by case; "
+        f"_LADDER is shared by {sorted(ladders)} instead"
+    )
+    # And the rungs really are that tuple applied to both symbols, rather than a table that happens
+    # to agree with it today.
+    for symbol, dimension in (("M", "concentration"), ("m", "length")):
+        rungs = {unit.symbol for unit in _UNITS.values() if unit.dimension == dimension}
+        assert {f"{prefix[0]}{symbol}" for prefix in _LADDER} | {symbol} <= rungs
+
+
+def test_the_three_defects_this_registry_was_rebuilt_to_make_impossible() -> None:
+    """`nM`, `pm` and `µm`, each of which once resolved to the other ladder.
+
+    Stated as the three original bug reports rather than as a sweep, because the sweep is the test
+    above and this is the record of what it is sweeping for. Each of these shipped: `nM` folded to
+    the nanometre, `pm` — the unit of a bond length — resolved to picomolar once `pM` was added
+    without its twin, and `µm` was registered as an exact alias of micromolar, so a particle size
+    was accepted as a concentration without even reaching the ambiguity guard.
+    """
+    assert parse_unit("nM").dimension == "concentration"
+    assert parse_unit("nm").dimension == "length"
+    assert parse_unit("pM").dimension == "concentration"
+    assert parse_unit("pm").dimension == "length"
+    for micro in ("µm", "μm", "um"):
+        assert parse_unit(micro).dimension == "length", micro
+    for micro in ("µM", "μM", "uM"):
+        assert parse_unit(micro).dimension == "concentration", micro
+    # The fourth instance, found by generating the ladders instead of listing them: `cM` reached
+    # the *centimetre* through the case fold, because centimolar was the rung nobody wrote down.
+    assert parse_unit("cM").dimension == "concentration"
+    with pytest.raises(UnitError, match="ambiguous"):
+        parse_unit("CM")
+
+
+def test_the_registry_is_this_domains_and_not_the_unit_librarys() -> None:
+    """A chemistry registry, built from a restricted definition list rather than from the default.
+
+    The refusal in `parse_unit` is this module's product. `pint.UnitRegistry()` would accept
+    furlongs, nautical miles and everything else — so the registry is `pint.UnitRegistry(None)`,
+    which starts empty, plus exactly what `_PREFIX_DEFINITIONS` and `_DEFS` say.
+
+    The second half is the one a unit library makes easy to lose: **there is no algebra over derived
+    units here**, because nothing in this system multiplies a mass by a length, and a registry that
+    could would be an abstraction with no caller. `UnitRegistry.Unit("m/g")` builds metre-per-gram
+    and `Unit("m**2")` builds square metres, which is why resolution goes through `get_name` — a
+    prefix-and-alias lookup that builds nothing.
+    """
+    for unknown in ("furlong", "nautical_mile", "psi", "degF", "mol/kg"):
+        with pytest.raises(UnitError, match="unknown unit"):
+            parse_unit(unknown)
+    for expression in ("m/g", "m**2", "2*m", "kg*m", "mol/L/s"):
+        with pytest.raises(UnitError):
+            parse_unit(expression)
+
+
+def test_no_exception_from_the_unit_library_reaches_a_caller() -> None:
+    """Every refusal is `UnitError`, or every caller's `except` clause means something else.
+
+    `pint.UndefinedUnitError` is an **`AttributeError`** and `pint.DimensionalityError` is a
+    `TypeError`; `UnitError` is a `ValueError`, which is the non-retryable bad-data path the rest of
+    this tree takes. Letting either through would not merely change a type — an `AttributeError`
+    escaping into `chemclaw.analytical` is the kind `hasattr` and a bare `except AttributeError`
+    swallow somewhere far away from the wrong unit that caused it.
+    """
+    import pint
+
+    for probe in (lambda: parse_unit("furlong"), lambda: Measurement.of(1.0, "mg").to("mL")):
+        with pytest.raises(UnitError) as caught:
+            probe()
+        assert not isinstance(caught.value, pint.PintError)
+        assert isinstance(caught.value, ValueError)
