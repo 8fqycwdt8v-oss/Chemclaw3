@@ -6,8 +6,11 @@ argues that exemption from a premise: the file was authored by a person, committ
 reviewed, and *"nothing at run time can produce one"*. This module produces one at run time. So the
 premise has to be restored some other way, and `authored_problems` is that way:
 
-**An agent-authored workflow may name no side-effecting tool, no durable job, and no
-`write_tools`.**
+**An agent-authored workflow may name no side-effecting tool and no `write_tools`. Ever — no
+approval lifts either.** A durable `job` step is the one thing a person *can* authorize, and
+`unapproved_jobs` is where that is decided (`D-2026-09-15-an-approval-is-for-one-version-of-one-
+workflow`); `authored_problems` takes no approval argument at all, which is how the first sentence
+is enforced rather than remembered.
 
 The exemption is about *writes*. A document that cannot contain one never reaches the question, so
 nothing about the plan gate changes and a hand-written template in `data/templates/` keeps every
@@ -21,12 +24,13 @@ sake. The two happen at different times against possibly different deployments, 
 `side_effecting_tools()` grows: a bundle enabled between composing and running can turn a name that
 was a read into a write, and the run-time check is what notices.
 
-**What it costs is stated rather than discovered.** A composed workflow cannot rank species, run a
-conformer search or write a knowledge note — every durable job is state-changing by classification,
-so the expensive computation these procedures exist to sequence is exactly what an *agent-authored*
-one may not contain. It composes reads: enumerate, look up, retrieve, screen, then reason over the
-results in an `agent` step. A procedure that needs a calculation is a template a person writes,
-which is the same answer `skills/` gives for judgment that must be reviewed.
+**Where the line falls, and why a job is on the other side of it from a write.** A `job` step is
+bounded compute *whose call the approver read*: the job's name and its arguments are in the
+document a person approved, and running it produces a result. `write_tools` is not a call at all —
+it is a permission handed to a model turn, spent later on a call nobody has seen, chosen by the
+model inside the step. A person can meaningfully approve the first and cannot meaningfully approve
+the second. A side-effecting `tool` step sits nearer the first and stays refused with it anyway,
+because the reachable set is every write in the tree and that case has not been made.
 
 Keyed by `(owner, name)`. A composed workflow is one chemist's working procedure, not a
 deployment's catalogue, and resolving against the caller's own rows is what stops a name reaching

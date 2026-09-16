@@ -179,6 +179,30 @@ class WorkflowApprovalIn(BaseModel):
     fingerprint: str = Field(min_length=1)
 
 
+class WorkflowSummaryOut(BaseModel):
+    """One composed workflow in a listing: enough to choose one, not enough to approve it."""
+
+    name: str
+    summary: str = ""
+    step_count: int = 0
+    # The subset that costs compute, so a listing can show what still needs a decision without a
+    # second request per row.
+    job_steps: list[str] = Field(default_factory=list)
+    # Whether this version's job steps may run. Derived, not stored: a row whose document changed
+    # after approval is not approved, and a listing that reported the stored flag would say it was.
+    approved: bool = False
+
+
+class WorkflowListOut(BaseModel):
+    """A caller's own composed workflows, most recently changed first."""
+
+    workflows: list[WorkflowSummaryOut] = Field(default_factory=list)
+    # Says this is a page rather than the whole set, the way `PendingRequestsOut` does: the store
+    # clamps at `composed.MAX_PER_OWNER`, and a caller that could not tell would report a truncated
+    # list as a complete one.
+    truncated: bool = False
+
+
 class WorkflowApprovalOut(BaseModel):
     """What a person is being asked to approve: the steps, and which of them launch jobs."""
 

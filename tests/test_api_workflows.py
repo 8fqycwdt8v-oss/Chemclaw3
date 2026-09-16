@@ -261,3 +261,73 @@ def test_saving_a_revision_does_not_carry_the_approval_forward(monkeypatch: Any)
 
     assert stored is not None
     assert stored.approved_fingerprint == ""
+
+
+def test_the_listing_is_how_a_chemist_finds_a_workflow_they_forgot() -> None:
+    """Discovery, which the feature shipped without and a `BACKLOG.md` row recorded.
+
+    The only way to find a name was the refusal `run_composed_workflow` gives an unknown one, which
+    works once you have already guessed wrong. A listing was deferred because a third *tool* costs
+    prompt prefix on every model call; a route costs none, which is why it belongs here.
+    """
+    _store(_ALICE.oid, _document(), "ranking")
+    _store(_ALICE.oid, _document("reads"), "reads")
+
+    body = _client(_app(), _ALICE).get("/workflows").json()
+
+    assert {row["name"] for row in body["workflows"]} == {"ranking", "reads"}
+    assert body["truncated"] is False
+    assert all(row["job_steps"] == ["rank"] for row in body["workflows"])
+
+
+def test_the_listing_reports_approval_as_it_would_be_enforced_not_as_it_is_stored() -> None:
+    """A row re-composed after approval is not approved, and the listing must not say it is.
+
+    The stored column still holds the old fingerprint — that is what makes the lapse automatic — so
+    a listing that reported the column would call a workflow approved while the next run refuses it.
+    """
+    _store(_ALICE.oid, _document())
+    client = _client(_app(), _ALICE)
+    client.post(
+        "/workflows/ranking/approval",
+        json={"fingerprint": client.get("/workflows/ranking").json()["fingerprint"]},
+    )
+    assert client.get("/workflows").json()["workflows"][0]["approved"] is True
+
+    # Re-composed into a different procedure under the same name.
+    widened = Template.model_validate(
+        {
+            "name": "ranking",
+            "summary": "Now it does two.",
+            "inputs": [{"name": "smiles", "type": "string", "description": "the molecule"}],
+            "steps": [
+                {"id": "rank", "kind": "job", "job": "rank_species", "arguments": {}},
+                {"id": "more", "kind": "job", "job": "rank_species", "arguments": {}},
+                {"id": "say", "kind": "agent", "prompt": "${steps.more.result}"},
+            ],
+        }
+    )
+    _store(_ALICE.oid, widened)
+
+    assert client.get("/workflows").json()["workflows"][0]["approved"] is False
+
+
+def test_the_listing_is_owner_scoped_like_everything_else_here() -> None:
+    """A listing that leaked names would leak the procedures a colleague is working on."""
+    _store(_ALICE.oid, _document())
+
+    assert _client(_app(), _BOB).get("/workflows").json()["workflows"] == []
+
+
+def test_the_bare_listing_path_is_not_matched_as_a_workflow_named_workflows() -> None:
+    """Registration order is load-bearing: Starlette matches routes in the order they are added.
+
+    Registered the other way round, `GET /workflows` resolves to `get_workflow(name="workflows")`
+    and answers 404 for every caller — a listing that exists and can never be reached.
+    """
+    _store(_ALICE.oid, _document())
+
+    response = _client(_app(), _ALICE).get("/workflows")
+
+    assert response.status_code == 200
+    assert "workflows" in response.json()

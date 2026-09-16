@@ -29,11 +29,58 @@ from fastapi import FastAPI, HTTPException
 from starlette.responses import Response
 
 from chemclaw.api.deps import CurrentUser
-from chemclaw.api.schemas import WorkflowApprovalIn, WorkflowApprovalOut
+from chemclaw.api.schemas import (
+    WorkflowApprovalIn,
+    WorkflowApprovalOut,
+    WorkflowListOut,
+    WorkflowSummaryOut,
+)
 from chemclaw.durable.template_job import template_fingerprint
-from chemclaw.templates.composed import default_composed_store, job_steps
+from chemclaw.templates.composed import (
+    MAX_PER_OWNER,
+    default_composed_store,
+    job_steps,
+    unapproved_jobs,
+)
 
 logger = logging.getLogger(__name__)
+
+
+async def list_workflows(principal: CurrentUser) -> WorkflowListOut:
+    """This caller's composed workflows, most recently changed first.
+
+    **Discovery, which the feature shipped without.** The only way to find a workflow's name was
+    the refusal `run_composed_workflow` gives an unknown one — which works once you have already
+    guessed wrong, and not at all for a surface that wants to show a chemist what they have. A
+    listing was deferred on the grounds that a third *tool* costs prompt prefix on every model call;
+    a route costs none, which is why it belongs here rather than there.
+
+    `approved` is derived and never the stored flag: a workflow re-composed after approval has a
+    fingerprint that no longer matches, and a listing reporting the column would call it approved
+    when the next run will refuse it.
+
+    Args:
+        principal: The authenticated person. Their oid is the owner this resolves against.
+
+    Returns:
+        The caller's workflows, and whether the page was clamped.
+    """
+    rows = await default_composed_store().list_for(principal.oid)
+    return WorkflowListOut(
+        workflows=[
+            WorkflowSummaryOut(
+                name=row.name,
+                summary=row.summary,
+                step_count=len(row.document.steps),
+                job_steps=job_steps(row.document),
+                approved=not unapproved_jobs(
+                    row.document, row.approved_fingerprint, template_fingerprint(row.document)
+                ),
+            )
+            for row in rows
+        ],
+        truncated=len(rows) >= MAX_PER_OWNER,
+    )
 
 
 async def get_workflow(name: str, principal: CurrentUser) -> WorkflowApprovalOut:
@@ -119,5 +166,8 @@ def register(app: FastAPI) -> None:
     `register` gives: since FastAPI 0.139 `include_router` is lazy, and the route table this
     repository walks by type would hold opaque nodes instead of routes.
     """
+    # Before the parameterised path, so `/workflows` is not matched as a workflow named
+    # "workflows" — Starlette matches in registration order.
+    app.get("/workflows")(list_workflows)
     app.get("/workflows/{name}")(get_workflow)
     app.post("/workflows/{name}/approval", status_code=204)(approve_workflow)

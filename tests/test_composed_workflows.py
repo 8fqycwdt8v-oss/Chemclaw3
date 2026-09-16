@@ -4,8 +4,10 @@ The security argument is the subject of this file, not the storage. `D-2026-08-1
 the-plan-so-the-step-is-read-only` exempts a template's `agent` step from the plan gate because the
 file *"is authored by a person, committed to git and reviewed, and nothing at run time can produce
 one"*. `compose_workflow` produces one at run time, so either the exemption has to be re-argued or
-the premise restored. It is restored: an agent-authored workflow may name no side-effecting tool,
-no durable job and no `write_tools`, so the exemption is never reached.
+the premise restored. It is restored: an agent-authored workflow may name no side-effecting tool and
+no `write_tools`, so the exemption is never reached. A durable `job` step is the one thing a person
+can authorize (`D-2026-09-15-an-approval-is-for-one-version-of-one-workflow`), and the tests below
+hold both halves — what an approval releases, and what no approval touches.
 
 **Both directions**, always. A refusal that also refuses the legitimate case is not a control, it
 is an outage with a good docstring — so every refusal below is paired with the composition it must
@@ -471,3 +473,99 @@ def test_a_workflow_with_a_job_composes_but_will_not_run_until_it_is_approved() 
             monkey.undo()
 
     assert started == ["ranking"]
+
+
+# --- the terminal's approver, which is the only one that surface had ------------------------------
+
+
+def test_the_cli_can_approve_what_the_cli_composed() -> None:
+    """**The journey that had no ending**, driven rather than assumed.
+
+    A composed workflow is keyed `(owner, name)` on the ambient actor. That is the request
+    principal's oid at the front door and `cli_admin_actor` at this prompt — the same person's oid
+    once identity is enforced, and three different strings in a dev deployment (`admin@localhost`,
+    `dev-user`, `service-account`). So a workflow composed in the terminal was invisible to
+    `GET /workflows/{name}`, and its job steps could never be released by anybody: measured before
+    this command existed, the route answered 404 for a workflow the CLI had just stored.
+
+    The fix is the shape `/approve` already has for plans — each surface's person approves on that
+    surface — and not a change to what an actor is called, which would move identity semantics to
+    fix a feature.
+    """
+    from chemclaw.agent.workflow_tools import WorkflowStep, run_composed_workflow
+    from chemclaw.cli.chat import _workflow_command
+    from chemclaw.templates.composed import ComposedWorkflowError
+
+    # A distinct actor per test: `InMemoryComposedStore` is a process singleton (deliberately —
+    # a process has one store), so tests that shared an owner would see each other's rows.
+    actor = "cli-approves"
+    with _as(actor):
+        _compose(
+            name="ranking",
+            summary="Rank and report.",
+            inputs=[],
+            steps=[
+                WorkflowStep(id="rank", job="rank_species", arguments={}),
+                WorkflowStep(id="say", prompt="which: ${steps.rank.result}"),
+            ],
+        )
+        listing = asyncio.run(_workflow_command("/workflows", actor))
+        assert "needs approval" in listing
+        assert "['rank']" in listing
+
+        with pytest.raises(ComposedWorkflowError, match="not approved to run"):
+            asyncio.run(run_composed_workflow(name="ranking", inputs={}))
+
+        answer = asyncio.run(_workflow_command("/approve-workflow ranking", actor))
+        assert "approved 'ranking'" in answer
+        assert asyncio.run(_workflow_command("/workflows", actor)).count("ready") == 1
+
+
+def test_the_cli_listing_answers_the_question_a_refusal_could_not() -> None:
+    """Discovery across sessions, which was a `BACKLOG.md` row until this command existed.
+
+    `run_composed_workflow`'s refusal names the workflows an owner has, which works only once you
+    have already guessed a name wrong. `/workflows` is the question asked directly.
+    """
+    from chemclaw.cli.chat import _workflow_command
+
+    fresh = "cli-has-nothing"
+    with _as(fresh):
+        assert "no composed workflows" in asyncio.run(_workflow_command("/workflows", fresh))
+
+
+def test_approving_a_name_the_caller_does_not_have_says_what_they_do_have() -> None:
+    """A terminal refusal has to be actionable, because there is no UI to fall back on."""
+    from chemclaw.agent.workflow_tools import WorkflowStep
+    from chemclaw.cli.chat import _workflow_command
+
+    actor = "cli-one-workflow"
+    with _as(actor):
+        _compose(name="mine", summary="s", inputs=[], steps=[WorkflowStep(id="say", prompt="hi")])
+        answer = asyncio.run(_workflow_command("/approve-workflow theirs", actor))
+
+    assert "no composed workflow called 'theirs'" in answer
+    assert "['mine']" in answer
+
+
+def test_the_cli_approval_names_the_person_and_not_the_agent() -> None:
+    """`approved_by` is the record, so it must be the typist rather than whatever composed it."""
+    from chemclaw.agent.workflow_tools import WorkflowStep
+    from chemclaw.cli.chat import _workflow_command
+
+    actor = "cli-records-approver"
+    with _as(actor):
+        _compose(
+            name="ranking",
+            summary="s",
+            inputs=[],
+            steps=[
+                WorkflowStep(id="rank", job="rank_species", arguments={}),
+                WorkflowStep(id="say", prompt="x"),
+            ],
+        )
+        asyncio.run(_workflow_command("/approve-workflow ranking", actor))
+        stored = asyncio.run(default_composed_store().get(actor, "ranking"))
+
+    assert stored is not None
+    assert stored.approved_by == actor

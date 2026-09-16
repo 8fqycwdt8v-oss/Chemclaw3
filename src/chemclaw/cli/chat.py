@@ -58,6 +58,18 @@ _EXIT_WORDS = {"exit", "quit", ":q"}
 # to `GET /sessions/{id}/plan` and `POST /sessions/{id}/plan/decision`.
 _PLAN_COMMANDS = {"/plan", "/approve"}
 
+# The terminal's counterpart to `GET /workflows/{name}` and `POST /workflows/{name}/approval`, and
+# it exists for the reason those two are routes rather than tools: a workflow must not be able to
+# approve itself, so the approval is typed by a person on whatever surface that person is using.
+#
+# **Without this the CLI had no approver at all.** A composed workflow is keyed `(owner, name)` and
+# the owner is the ambient actor — `resolve_identity`'s `cli_admin_actor` here, the request
+# principal's oid at the front door. Those agree once identity is enforced and are three different
+# strings in a dev deployment (`admin@localhost`, `dev-user`, `service-account`), so a workflow
+# composed at this prompt was invisible to the HTTP route and its job steps could never be
+# released. Driven before this command existed: compose here, `GET /workflows/{name}` answers 404.
+_WORKFLOW_COMMANDS = {"/workflows", "/approve-workflow"}
+
 # The session id every CLI run uses. A fixed name, not a fresh uuid: it is the checkpointer's
 # `thread_id`, so under `session_store=postgres` it makes a terminal session resumable across
 # invocations, which is the CLI's actual use — and the CLI is single-user admin by construction
@@ -345,6 +357,9 @@ async def _repl(agent: Any, actor: str, saver: Any) -> None:
             if prompt.lower() in _PLAN_COMMANDS:
                 print(await _plan_command(prompt, actor, saver), file=sys.stderr)
                 continue
+            if prompt.split(" ", 1)[0].lower() in _WORKFLOW_COMMANDS:
+                print(await _workflow_command(prompt, actor), file=sys.stderr)
+                continue
             turn = await converse(agent, prompt, earlier=said)
             # Recorded only once the turn answered, which is the front door's rule rather than a
             # convenience: `api.runner._record_transcript` writes nothing for a turn that produced
@@ -358,6 +373,76 @@ async def _repl(agent: Any, actor: str, saver: Any) -> None:
             print(turn.answer.strip())
         except Exception as exc:  # keep the session alive across a single failed turn
             print(f"error: {exc}", file=sys.stderr)
+
+
+async def _workflow_command(prompt: str, actor: str) -> str:
+    """Run `/workflows` or `/approve-workflow <name>`, returning the line to show the operator.
+
+    **The CLI's half of an approval that only a person may give.** A composed workflow's durable
+    `job` steps do not run until somebody approves that exact document
+    (`D-2026-09-15-an-approval-is-for-one-version-of-one-workflow`), and the approval is
+    deliberately not an agent tool — a workflow must not approve itself, which is `decide_plan`'s
+    rule one seam over. The front door serves that for an HTTP caller; this serves it for a
+    terminal, exactly as `/approve` is the terminal's counterpart to
+    `POST /sessions/{id}/plan/decision`.
+
+    **It is not a convenience, it is the only approver this surface had.** A workflow is keyed
+    `(owner, name)` on the ambient actor, which is `cli_admin_actor` here and the request
+    principal's oid at the front door. Those are the same person's oid once identity is enforced
+    and three different strings in a dev deployment — so a workflow composed at this prompt was
+    invisible to the HTTP route, and its job steps could never be released. Driven before this
+    existed: compose here, then `GET /workflows/{name}` answers 404.
+
+    `/approve-workflow` binds to the document as it stands *now*, the way `/approve` binds to the
+    current plan: there is no fingerprint to mistype at a terminal, and no window for the document
+    to change between being read and being approved, because the person doing both is this terminal.
+
+    Args:
+        prompt: The typed line — `/workflows`, or `/approve-workflow <name>`.
+        actor: This session's ambient actor. Required and never defaulted, for the reason
+            `_plan_command`'s `actor` is: it is recorded as *who approved*, and an anonymous
+            approval is not a safe fallback but one that must never be written.
+
+    Returns:
+        The line to print on stderr.
+    """
+    from chemclaw.durable.template_job import template_fingerprint
+    from chemclaw.templates.composed import default_composed_store, job_steps, unapproved_jobs
+
+    store = default_composed_store()
+    command, _, argument = prompt.partition(" ")
+    name = argument.strip()
+    if command.lower() == "/workflows":
+        rows = await store.list_for(actor)
+        if not rows:
+            return "(no composed workflows)"
+        lines = []
+        for row in rows:
+            jobs = job_steps(row.document)
+            withheld = unapproved_jobs(
+                row.document, row.approved_fingerprint, template_fingerprint(row.document)
+            )
+            state = "needs approval" if withheld else "ready"
+            detail = f", jobs: {jobs}" if jobs else ""
+            lines.append(f"{row.name}  [{state}]  {len(row.document.steps)} step(s){detail}")
+        return "\n".join(lines)
+    if not name:
+        return "usage: /approve-workflow <name>  (see /workflows)"
+    workflow = await store.get(actor, name)
+    if workflow is None:
+        available = [row.name for row in await store.list_for(actor)]
+        return f"no composed workflow called {name!r}" + (
+            f"; you have {available}" if available else ""
+        )
+    fingerprint = template_fingerprint(workflow.document)
+    if not await store.approve(actor, name, fingerprint, actor):
+        return f"no composed workflow called {name!r}"
+    jobs = job_steps(workflow.document)
+    return (
+        f"approved {name!r} as it stands"
+        + (f" — job step(s) {jobs} may now run" if jobs else " (it has no job steps to release)")
+        + ". Composing it again needs approving again."
+    )
 
 
 async def _plan_command(prompt: str, actor: str, saver: Any) -> str:
