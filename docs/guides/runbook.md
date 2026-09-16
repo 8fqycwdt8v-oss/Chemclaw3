@@ -1106,7 +1106,7 @@ Two things to know before reading any of them:
   pod that is not the one doing the work: a durable job launched from the front door increments the
   front door's registry and its *activity* increments the worker's. Scrape both before concluding a
   number is missing.
-- **Only `ChemclawTargetDown` and `ChemclawNoWorkerIsScraped` fire for a process that is gone.**
+- **Only `ChemclawTargetDown`, `ChemclawNoWorkerIsScraped` and `ChemclawNoBackgroundWorkerIsScraped` fire for a process that is gone.**
   Everything else reads an application counter, and a process that is not running emits no counters
   — which looks exactly like a healthy quiet system.
 
@@ -1424,6 +1424,32 @@ narrow `monitoring.alerts.targetJobPattern`.
 cannot be scheduled, a PodMonitor whose selector no longer matches, or user-workload monitoring
 turned off cluster-wide — in which case every alert here is inert and this is the only one that says
 so. Start at §(x-b) step 1.
+
+#### ChemclawNoBackgroundWorkerIsScraped
+`critical`, and the one the alert above cannot give you. `ChemclawNoWorkerIsScraped` is
+`absent(up{endpoint="metrics"})` over *every* pod in the release, and connectors, the front door and
+mcp-face all serve that same port — so it stays silent while the background worker specifically is
+gone. This one carries `app_kubernetes_io_component="background-worker"`.
+
+It means **nothing in this release is polling `background-jobs`**: sync, re-index, reports and the
+connector-job wrapper are all stopped, and none of them emits a counter when it is not running, so
+no other alert will say so. That Deployment uses `Recreate` (deliberately — two background workers
+racing on one corpus clone is what `D-2026-08-27-what-a-second-background-worker-would-race-on`
+pins the replica count to prevent), which means the old pod was taken down *before* the new one was
+tried: there is no previous generation still serving.
+
+Usual causes are a pod that cannot be scheduled, an image that will not pull, or a container that
+exits before it serves. Start at §(x-b) step 1, then `kubectl -n <ns> describe deploy
+<release>-worker` for the scheduling reason.
+
+The `for:` is long on purpose and is derived rather than chosen: `Recreate` waits out the old pod's
+whole `terminationGracePeriodSeconds`, then the new pod gets its startup budget, then the same
+margin `ChemclawTargetDown` allows. If it fires, the window has already passed — this is not a
+rollout in progress.
+
+**What it does not catch**: a worker that serves `/metrics` and never passes `/readyz`. A PodMonitor
+scrapes unready pods, so `up` is 1 and this stays silent. That case is `ChemclawWorkerNotPolling`
+below, which renders only when the Temporal SDK exporter is enabled.
 
 #### ChemclawWorkerNotPolling
 `critical`, and rendered only when `monitoring.temporalSdkMetrics.enabled` is on. A worker is up and

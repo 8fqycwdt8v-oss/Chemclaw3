@@ -33,6 +33,37 @@ cut itself is `langchain_core`'s `trim_messages`. Re-deriving "which suffix of a
 a token budget without splitting a tool call from its result" is somebody else's tested code, and
 the first version of this edit is what re-deriving it costs (see its docstring).
 
+**There is a third reducer, it sits *above* both, and this docstring did not name it.**
+`deepagents.FilesystemMiddleware` offloads an oversized `HumanMessage` to a file and leaves the
+model a pointer — a reduction, taken before either edit here, by a middleware this module's prose
+described only as a slot-naming analogy. Measured against the installed distribution (deepagents
+0.7.8) rather than read off its documentation: the threshold is `NUM_CHARS_PER_TOKEN` (4) times
+`human_message_token_limit_before_evict` (50,000) = **200,000 characters**, strictly greater, and
+it inspects `messages[-1]` alone and only when that is an untagged `HumanMessage`. The tool-result
+arm of the same middleware is 20,000 tokens = 80,000 chars, which `tool_result_shape.py` already
+cites. It is configurable — `None` disables it — and `langgraph_agent` passes neither limit, so
+this deployment takes both defaults.
+
+**No shipped path reaches it, and that is what makes the raw preview harmless.** The notice the
+model reads interpolates a head-and-tail `{content_sample}` that is *not* defanged. It grants
+nothing new, because it is a strict substring of a `HumanMessage` that sat in the model's context
+verbatim one call earlier — a chemist's own message is not framed as untrusted data. What the
+offload writes is read back through `read_file`, which `tool_framing.py` routes by stamp first, so
+the offloaded body *is* defanged on the way back in
+(`D-2026-09-04-a-helpers-file-crosses-back-and-stays`). Every producer of a `HumanMessage` here is
+bounded below the threshold: the front door at `service_max_message_chars` (100,000, a 422),
+template steps at `agent_max_tool_result_chars` (60,000, via `bounded_prompt`), and `cli/chat.py`
+unbounded — an operator's own paste, not a deployment surface. **That inequality holds by the
+coincidence of three separate settings and nothing asserted it**, so
+`tests/test_compaction.py::test_no_shipped_producer_of_a_human_message_reaches_the_offload_threshold`
+does; raising any one of them past 200,000 now fails rather than silently routing a chemist's
+message through an offload nobody designed for.
+
+**It changes how often `chemclaw_context_unreducible_total` ticks and not what it means.** That
+counter is measured on the *outgoing request* — `sent <= effective_trigger(...)` after every edit —
+rather than attributed to a mechanism, so a reducer above the group is simply one more thing that
+may already have run. It counts "still over budget after everything".
+
 **Nothing here is destructive, and that is a change from D-025.** Both edits run inside
 `wrap_model_call`, so they narrow the list *this model call* is sent and leave graph state
 untouched; the next turn re-derives the same reduction from the full thread. D-025 also ran its

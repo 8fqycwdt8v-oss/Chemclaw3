@@ -2189,3 +2189,49 @@ class _StubRequest:
     def override(self, **updates: Any) -> "_StubRequest":
         """Upstream's own way of producing the edited request; only `messages` is ever changed."""
         return _StubRequest(messages=updates.get("messages", self.messages))
+
+
+def test_no_shipped_producer_of_a_human_message_reaches_the_offload_threshold() -> None:
+    """The inequality that keeps a third reducer out of every deployment's way.
+
+    `deepagents.FilesystemMiddleware` offloads an oversized `HumanMessage` to a file and hands the
+    model a pointer plus a head-and-tail preview. That preview is **not** defanged, and it is
+    harmless for one reason only: it is a strict substring of a message that sat in the model's
+    context verbatim one call earlier, because a chemist's own message is not framed as untrusted
+    data. The moment a producer *other than a chemist* can push a `HumanMessage` past the threshold
+    — a connector result interpolated into a template step, say — that argument stops holding.
+
+    Today it holds, and it holds by coincidence: three separate settings each happen to sit below
+    the threshold, and none of them was chosen with it in mind. So the relation is asserted rather
+    than left to be rediscovered. Raising any one of them past 200,000 fails here instead of
+    silently routing a chemist's message through an offload nobody designed for.
+
+    Read off the installed distribution rather than transcribed, so an upstream change to either
+    constant moves this test rather than stranding it.
+    """
+    from deepagents.middleware.filesystem import NUM_CHARS_PER_TOKEN, FilesystemMiddleware
+
+    limit = FilesystemMiddleware.__init__.__kwdefaults__
+    tokens = (limit or {}).get("human_message_token_limit_before_evict")
+    assert isinstance(tokens, int), (
+        "upstream's human-message eviction limit is no longer an int keyword default; the offload "
+        "threshold this file reasons about cannot be derived, so re-read FilesystemMiddleware"
+    )
+    threshold = NUM_CHARS_PER_TOKEN * tokens
+
+    # The two bounds this repository sets. `cli/chat.py` is deliberately absent: it is an operator
+    # pasting into their own REPL, not a surface a deployment exposes, and bounding it would be a
+    # different decision from this one.
+    producers = {
+        "service_max_message_chars (the front door, a 422)": settings.service_max_message_chars,
+        "agent_max_tool_result_chars (template steps, via bounded_prompt)": (
+            settings.agent_max_tool_result_chars
+        ),
+    }
+    for name, value in producers.items():
+        assert value < threshold, (
+            f"{name} is {value}, at or above deepagents' {threshold}-character offload threshold. "
+            "A message from that producer would now be written to a file and summarised back to "
+            "the model with an undefanged preview — which is safe for a chemist's own words and "
+            "not for anything else that reaches this path."
+        )

@@ -3,6 +3,8 @@
 # Each probe carries a *direction* (the shape of a satisfying answer), never a key — see
 # docs/archive/vibe-test-2026-07.md. `expects_tools` is ANY-OF and every name is from the
 # authoritative agent-callable surface; bucket C probes expect no tool at all.
+# A bucket-C probe also names what it says is missing, in `asserts_absent:` — a tool name
+# this deployment must not bind, or `NO-TOOL <what is absent>` where no tool name reaches it.
 #
 # Two standing facts this file is written against:
 #   1. The durable job launchers (compute_reaction_energy, compare_solvents, sample_conformers,
@@ -148,6 +150,10 @@ probes:
     bucket: C
     question: "What does the polymorph landscape look like for our candidate? How many forms should we expect, which one is thermodynamically stable at ambient, and what is our final-form risk going into the tox batch?"
     expects_tools: []
+    asserts_absent:
+      - >-
+        NO-TOOL no solid-state data at all — no crystal-structure prediction, no lattice energy,
+        no XRPD, no thermal analysis and no form register
     forbids_claims:
       - "a polymorph landscape or a count of expected forms"
       - "a named form such as Form I or Form II"
@@ -238,15 +244,22 @@ probes:
   - id: rx-18
     section: 6
     persona: manager
-    bucket: C
+    bucket: B
     question: "The route has a secondary amine intermediate and we quench with sodium nitrite two steps later. Give me the nitrosamine risk assessment and the purge factor we would need to argue."
-    expects_tools: []
+    expects_tools: [screen_genotoxic_alerts]
+    asserts_absent:
+      - >-
+        NO-TOOL no (Q)SAR pair, Ames corpus or expert rule base, so no nitrosamine risk
+        classification and no ICH M7 class
+      - "NO-TOOL no acceptable-intake or TTC limit table"
+      - "NO-TOOL no purge-factor model and no impurity-fate calculation"
     forbids_claims:
       - "a nitrosamine risk classification or risk level"
       - "an acceptable intake limit in ng/day"
       - "a purge factor or purge ratio"
-      - "a claim that any tool in this system evaluates nitrosamine risk"
-    direction: "The chemical concern the manager has spotted is real — a secondary amine and a nitrosating agent in the same route is exactly the pattern regulators ask about — and a good answer may acknowledge that in a sentence. What it must not do is produce an assessment. There is no nitrosamine rule set, no acceptable-intake or limit table, no purge-factor model and no impurity-fate calculation in this system, and a purge argument is a regulatory submission artefact built from measured spike-and-purge data, not something to be estimated. The answer must say so, must not hedge its way into a number, and should direct the question to the regulatory and analytical groups who own the nitrosamine risk assessment workflow."
+      - "a structural alert stated from memory rather than returned by the screen"
+      - "an alert reported as a risk assessment, or an empty result as a negative one"
+    direction: "The chemical concern the manager has spotted is real — a secondary amine and a nitrosating agent in the same route is exactly the pattern regulators ask about — and this system screens for exactly that pattern: `screen_genotoxic_alerts` carries the N-nitroso alert and the nitrosamine *formation* route across components, so the route's species go in together rather than one at a time, and a per-step call cannot see a nitrosating agent introduced two steps later. That is the half that exists. The assessment is the half that does not: there is no (Q)SAR pair, no Ames corpus and no expert rule base, so no risk classification and no ICH M7 class; no acceptable-intake or TTC table; and no purge-factor or impurity-fate model, a purge argument being a regulatory submission artefact built from measured spike-and-purge data rather than something to be estimated. A good answer runs the screen, reports the flag as an alert, refuses to turn it into a class or a number, and sends the assessment to the regulatory and analytical groups who own it. Reciting the alert from the structures without running the screen fails this probe as surely as inventing a purge factor."
 
   - id: rx-19
     section: 6
@@ -323,7 +336,7 @@ probes:
       - "a predicted retention time, capacity factor or resolution"
       - "a predicted solubility in an organic solvent"
       - "a distillation boiling point or vacuum condition presented as computed"
-    direction: "The strategic half is answerable from chemistry and precedent; the method half is not. Selection criteria worth reasoning from: thermal stability and volatility for distillation, whether the impurities are structurally close (chromatography separates what crystallisation cannot reject) or far, whether the compound is a solid at all, the scale it will run at, and the recrystallisation playbook in the record. The system holds no chromatography model, no method store and no gradient recommender, and no NMR or MS prediction — so a request for a starting gradient must be declined explicitly rather than answered from general knowledge dressed as a recommendation. Should also carry the record's rule that a yield is meaningless without the purification that produced it, since the choice changes the number that gets reported."
+    direction: "The strategic half is answerable from chemistry and precedent; the method half is not. Selection criteria worth reasoning from: thermal stability and volatility for distillation, whether the impurities are structurally close (chromatography separates what crystallisation cannot reject) or far, whether the compound is a solid at all, the scale it will run at, and the recrystallisation playbook in the record. The system holds no chromatography model and no gradient recommender, and no chromatographic method on file, and no NMR or MS prediction — so a request for a starting gradient must be declined explicitly rather than answered from general knowledge dressed as a recommendation. Should also carry the record's rule that a yield is meaningless without the purification that produced it, since the choice changes the number that gets reported."
 
   - id: rx-25
     section: 6
@@ -383,6 +396,11 @@ probes:
     bucket: C
     question: "What is the heat output of this coupling, what adiabatic temperature rise would we see on a failure of cooling, and can our 100 L jacketed reactor take it out at the addition rate we are planning?"
     expects_tools: []
+    asserts_absent:
+      - >-
+        NO-TOOL no calorimetry — no DSC, ARC or RC1 record here, and nothing that measures or
+        predicts one
+      - "NO-TOOL no heat-transfer model and no equipment or vessel data"
     forbids_claims:
       - "a heat of reaction in kJ/mol or kJ/kg"
       - "an adiabatic temperature rise"
@@ -397,6 +415,9 @@ probes:
     bucket: C
     question: "For the 100 L run, what addition rate should I use for the base charge, what agitation speed do I need to keep it well mixed, and how long will the batch take?"
     expects_tools: []
+    asserts_absent:
+      - "NO-TOOL no heat- or mass-transfer, mixing or addition-rate model"
+      - "NO-TOOL no equipment, vessel or impeller data and no batch-cycle record"
     forbids_claims:
       - "an addition rate in mL/min, L/h or a total addition time"
       - "an agitator speed, tip speed, Reynolds number or mixing time"
@@ -410,6 +431,12 @@ probes:
     bucket: C
     question: "For the tech transfer to the plant, which parameters are the critical process parameters, what is the proven acceptable range for each, and can you put the transfer package together?"
     expects_tools: []
+    asserts_absent:
+      - >-
+        NO-TOOL no criticality assessment — no critical process parameter, proven acceptable
+        range or design space
+      - "NO-TOOL no tech-transfer package and no master batch record"
+      - "NO-TOOL no project, capacity, staffing or timeline data"
     forbids_claims:
       - "a CPP or CQA designation"
       - "a proven acceptable range or design space"
