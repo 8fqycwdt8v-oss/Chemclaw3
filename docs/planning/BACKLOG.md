@@ -263,7 +263,7 @@ topic).
       watermark** — [M], found 2026-09-15 in the review of the wave 2/4/7 merge.
       `durable/digest._is_new` reads an absent `valid_from` as *open-ended* — true for as long as
       anyone has known — and therefore as not news, which is correct about the field and wrong
-      about the question a digest asks. Measured on the shipped corpus: **32 of 39 notes carry no
+      about the question a digest asks. Measured on the shipped corpus: **33 of 40 notes carry no
       `valid_from`**, across ten types (`compound` 9, `playbook` 5, `campaign` 3, `interaction` 3,
       `job-result` 3, `bo-candidate` 2, `failure-mode` 2, `optimization-campaign` 2, `report` 2,
       `experiment-proposal` 1). Two producers are closed —
@@ -284,7 +284,7 @@ topic).
       `evals/delegation.py` is a pure comparison over `ArmRun`s, and **nothing constructs one**:
       `grep -rn "ArmRun" src/ tests/ data/ Makefile` finds the module and its own test, nothing
       records `delegated`, and no profile, prompt or runner builds the `no-helper` arm
-      (`data/evals/profiles/` holds `no-tools.yaml` alone). The module docstring called this "the
+      (`data/evals/profiles/` holds `no-tools.yaml` and `tools-removed.yaml`). The module docstring called this "the
       run half is what needs [a gateway]", which reads as a runner waiting on a credential. What it
       owes: a `no-helper` profile whose system prompt asks the model not to call `task`, a runner
       that records `delegated` per repeat off the turn's own trace, and `MINIMUM_REPEATS` repeats
@@ -449,27 +449,6 @@ topic).
       `AgentProfile.model_route` exists — and evidence that the self-critique gap
       `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability` named as real is closed by
       consulting rather than by thinking longer at higher `effort`. Measure the cheaper lever first.
-
-- [ ] **A second roster name is not the change it was before the helper was narrowed**
-      — [S], and the recommendation is to leave it closed.
-      The case for a second name used to be a read-only reader beside a full-capability helper.
-      `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller` made the *only* helper
-      read-only, so that difference no longer exists: what a second name could still vary is its
-      model route and its prompt, and `task` already tells the model to launch several helpers
-      concurrently when their tasks are independent, so fan-out needs no partition either.
-      A named partition remains a routing hypothesis, and this repository has measured routing twice
-      without learning anything transferable. The trigger is unchanged and it is a number, not an
-      argument: the row above, showing that helpers pay *and* that a single brief is what limits
-      them. Note also what a second name costs on a path that is otherwise free —
-      `governed_roster` is the guard, and upstream's `create_sub_agent` builds a declarative
-      `SubAgent` from `spec["middleware"]` alone.
-      **Revisited 2026-08-29 and confirmed to have no implementable part**, which is recorded here
-      so the next reader does not go looking for one: everything a second name would need already
-      exists (`AgentProfile.model_route` for its model, `helper_profile` for its surface,
-      `governed_roster` for its governance), so what is missing is the reason, and a name added to
-      be ready for one is the capability that ships off and stays off —
-      `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability`, which deleted 1,442 lines of
-      exactly this.
 
 - [ ] **A corpus read is ~40 kB of memory per entry, and only 25 kB of it is boundable** — [M],
       measured 2026-09-14
@@ -673,7 +652,10 @@ only holds defects can only ever restore the system to what it already intended 
       **Every absolute above is a lower bound, and the case is stronger rather than weaker for it.**
       All of them were measured on a basis the 2026-08-29 re-baseline corrected: the ratchet counted
       the registry's callables, not the tools the graph binds, and under-measured `default` by
-      **8,126 tokens (24%)** — 34,379 reported against 42,505 paid, ceiling now 44,500. So 28,114
+      **8,126 tokens (24%)** — 34,379 reported against 42,505 paid. (That paragraph also said
+      "ceiling now 44,500" and the live ceiling is `CEILINGS["__default__"]` in
+      `tests/test_context_floor.py`, which has since moved well past it — read the constant, not a
+      figure here, for the reason that file's own header gives.) So 28,114
       and −5,787 both understate what this narrowing is worth, and the eleven names should be
       re-measured on the bound basis when the row is worked. What does not change is why it is
       blocked: the saving is still partly in endpoint tools no offline floor can see, and it still
@@ -737,7 +719,7 @@ only holds defects can only ever restore the system to what it already intended 
       ChemRAG measured **+17.4% average relative gain** from a chemistry corpus and — the design input
       that matters — that corpus choice is task-dependent: reaction prediction wants literature,
       nomenclature wants structured databases. A process chemist asking "has anyone run this coupling
-      on a deactivated aryl chloride" currently gets whatever those 39 notes happen to say.
+      on a deactivated aryl chloride" currently gets whatever those 40 notes happen to say.
 
 - [ ] **A profile should be able to supply prompt *blocks*, not only a string** — [M], and this is
       the general form of `D-2026-09-14-a-profiles-prose-is-text-this-repository-wrote`. The default
@@ -788,7 +770,7 @@ only holds defects can only ever restore the system to what it already intended 
       whatever is chosen arrives through an injected callable (`ResultSink` is already one) rather
       than an import.
 
-- [ ] **Three subsystems want one missing column: who wrote this** — [M]. `Note.created_by` is
+- [ ] **Three subsystems want one missing column: who wrote this** — [M]. `src/chemclaw/kg/note.py`'s `Note.created_by` is
       `Literal["human", "agent"]` and `Note.source` is the ingest source, so **a note names no
       person** — found while scoping the conflict notice
       (`D-2026-09-14-a-contradiction-only-a-querier-sees-is-not-a-warning`, which addressed the
@@ -1142,7 +1124,8 @@ often `run_composed_workflow` refuses on an unknown name against how often it su
 near zero says discovery is not the problem.
 
 Anchors: `agent/workflow_tools.run_composed_workflow`'s refusal branch;
-`templates/composed.ComposedStore.list_for`, which already answers the question and has one caller.
+`templates/composed.ComposedStore.list_for`, which already answers the question and is called
+twice in that file — once to compose and once in the refusal.
 
 ## Template step roles cross the durable boundary on an unsigned payload
 
