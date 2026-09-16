@@ -14,12 +14,13 @@ all — the same "the cursor is a position in a total order" trick the ELN sync 
 no code path in this package that opens a file for writing, creates one, or removes one.
 """
 
-import fnmatch
 import logging
 import os
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+
+import pathspec
 
 from chemclaw.ingest.documents.binding import DocumentShareBinding, DocumentShareError, RootBinding
 
@@ -77,28 +78,47 @@ class CrawlResult:
     skipped_unsupported: Counter[str] = field(default_factory=Counter)
 
 
-def _is_excluded(relative: str, patterns: list[str]) -> bool:
-    """Whether a mount-relative path matches any exclusion glob (also matched per basename).
+def _is_excluded(relative: str, spec: pathspec.GitIgnoreSpec, *, directory: bool = False) -> bool:
+    """Whether a mount-relative path is excluded — asked of a *directory* as well as of a file.
 
-    Each pattern is tried against the path, the path with a leading `/`, and the basename. The
-    leading-slash form is what makes `**/Archive/**` — the pattern the shipped manifest carries and
-    the one anybody would write — exclude a **top-level** `Archive/` as well as a nested one.
-    `fnmatch` gives `**` no special meaning, so it translates to `.*?/Archive/`, which requires a
-    separator *before* `Archive`; measured, `fnmatch("Archive/old.pdf", "**/Archive/**")` is False.
-    An operator who excluded a folder to keep it out of the corpus got it indexed and cited.
+    Gitignore semantics (`binding.exclude_spec`), because that is what the patterns a deployment
+    writes already assume: the shipped manifest's `~$*`, `**/Archive/**` and `*.tmp` are gitignore
+    lines. What stood here before was three `fnmatch` calls per pattern — the bare path, the path
+    with a leading `/`, and the basename — each compensating for something `fnmatch` does not do.
+    Gitignore does all three natively: a pattern with no separator matches at every depth (that is
+    the basename arm), and one with a separator is anchored at the mount (that is the `/`-prefixed
+    arm, added because `fnmatch` translates `**/Archive/**` to `.*?/Archive/`, which demands a
+    separator *before* `Archive` and so left a **top-level** `Archive/`'s files indexed and cited).
+
+    **The half the three-way try could not reach is the directory, and that is the cost.** Measured:
+    `fnmatch(p, "**/Archive/**")` is False for `Projects/Archive`, `/Projects/Archive` and `Archive`
+    — all three arms — so no directory ever matched, and `descend` listed the whole archive subtree
+    to reject it one file at a time, in the module whose own docstring says the cost model of a TB
+    share lives here. Gitignore matches a directory when it is presented as one, which is all
+    `directory=True` does: `Archive/` matches `**/Archive/**` and the subtree is never opened.
+
+    **This is not a change to what a deployment excludes**, which was checked rather than assumed
+    before the swap: over the three shipped patterns and a path set holding the cases that separate
+    the two policies, old and new agree on every **file** path
+    (`tests/test_document_share.py::test_the_shipped_exclusions_mean_the_same_under_gitignore_semantics`
+    is that measurement, kept runnable). The one semantic the swap does drop is basename-matching a
+    pattern that *contains* a separator: `Foo/Bar` used to exclude a file named `Bar` anywhere and
+    now excludes only `Foo/Bar`. No shipped pattern is of that shape, and the fnmatch behaviour was
+    an artefact of the fallback rather than anything a manifest could have meant.
 
     Still case-sensitive, which is a real mismatch with CIFS (`Archive`, `ARCHIVE` and `archive`
     are one folder to the file server and three strings here) — recorded in
-    `docs/planning/BACKLOG.md` rather than silently changed, because case-folding every pattern
-    would quietly widen exclusions a deployment already relies on.
+    `docs/archive/findings-2026-08.md` rather than silently changed, because case-folding every
+    pattern would quietly widen exclusions a deployment already relies on. (That citation said
+    `docs/planning/BACKLOG.md` and the row has never been there.)
+
+    Args:
+        relative: The mount-relative POSIX path of the entry.
+        spec: The binding's compiled exclusions.
+        directory: True when the entry is a directory, so it is offered in the form gitignore
+            recognises as one.
     """
-    name = relative.rsplit("/", 1)[-1]
-    return any(
-        fnmatch.fnmatch(relative, pattern)
-        or fnmatch.fnmatch(f"/{relative}", pattern)
-        or fnmatch.fnmatch(name, pattern)
-        for pattern in patterns
-    )
+    return spec.match_file(f"{relative}/" if directory else relative)
 
 
 def _extension_of(name: str) -> str:
@@ -255,9 +275,10 @@ class _Walk:
         """
         with os.scandir(directory) as entries:
             listing = sorted(entries, key=self._order)
+        spec = self.binding.exclude_spec
         for entry in listing:
             relative = PurePosixPath(entry.path).relative_to(self.mount).as_posix()
-            if _is_excluded(relative, self.binding.exclude):
+            if _is_excluded(relative, spec):
                 continue
             if entry.is_symlink() and not self.binding.follow_symlinks:
                 continue
@@ -265,6 +286,16 @@ class _Walk:
                 logger.warning("%s links outside the mount; skipping", relative)
                 continue
             if entry.is_dir(follow_symlinks=self.binding.follow_symlinks):
+                # **The prune, and the reason the exclusion check is asked twice.** The check above
+                # is the file form; a directory only matches a pattern like `**/Archive/**` when it
+                # is offered as `Archive/`. Without this the walk descended into every excluded
+                # folder and rejected it one file at a time — the exclusion was correct and the
+                # saving it exists for was not taken. Asked here rather than by giving the first
+                # check an `is_dir` argument, so `entry.is_dir` keeps raising `OSError` out of
+                # `descend` exactly as it did: that escape is what marks the root failed and stops
+                # the sweep, and swallowing it would let a half-readable share prune the index.
+                if _is_excluded(relative, spec, directory=True):
+                    continue
                 if not self.enter(Path(entry.path), relative):
                     continue
                 if not self.descend(Path(entry.path), root):

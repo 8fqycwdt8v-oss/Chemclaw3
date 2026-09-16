@@ -16,7 +16,9 @@ The two properties worth reading the file for:
 """
 
 import asyncio
+import fnmatch
 import logging
+import os
 import shutil
 import threading
 import time
@@ -27,7 +29,9 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pathspec
 import pytest
+import yaml
 
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
@@ -38,6 +42,7 @@ from chemclaw.core.identity_context import (
     set_current_identity,
 )
 from chemclaw.core.metrics import METRICS
+from chemclaw.ingest.documents import crawl as crawl_module
 from chemclaw.ingest.documents import retriever as retriever_module
 from chemclaw.ingest.documents import sync as sync_module
 from chemclaw.ingest.documents.binding import DocumentShareError, load_binding
@@ -1606,6 +1611,153 @@ def test_a_top_level_archive_is_excluded_by_the_pattern_that_says_so(tmp_path: P
         }
     )
     assert {ref.path for ref in crawl_share(binding).files} == {"Projects/live.txt"}
+
+
+def test_the_shipped_exclusions_mean_the_same_under_gitignore_semantics() -> None:
+    """The compatibility check that licensed replacing three `fnmatch` calls with one spec.
+
+    `_is_excluded` used to try every pattern three ways — the bare path, the path with a leading
+    `/`, and the basename — each compensating for something `fnmatch` does not do. Gitignore does
+    all three natively, but not *identically*: it drops basename-matching for a pattern that
+    contains a separator. So "this is additive" is a claim about what a deployment already excludes,
+    and the only honest way to hold it is to run both policies over the patterns that actually ship.
+
+    The old policy is transcribed here rather than imported, deliberately — the point is to compare
+    against what was deleted, and a comparison against the code that replaced it would agree with
+    itself forever. Every path below is a case that separates the two candidate semantics in some
+    way: depth, anchoring, basename position, and a near-miss (`Archived/`) that must stay indexed.
+    """
+    manifest = (
+        Path(__file__).resolve().parent.parent
+        / "src/chemclaw/ingest/sources/sharedrive/datasource.yaml"
+    )
+    patterns = yaml.safe_load(manifest.read_text(encoding="utf-8"))["config"]["binding"]["exclude"]
+    # Read off the shipped manifest rather than typed here, so a deployment-shaped pattern added to
+    # it lands in this comparison instead of beside it. Pinned as well, because a pattern that
+    # arrives *after* this measurement has not been measured by it.
+    assert patterns == ["~$*", "**/Archive/**", "*.tmp"], "the shipped patterns moved; re-measure"
+
+    def by_fnmatch(relative: str) -> bool:
+        name = relative.rsplit("/", 1)[-1]
+        return any(
+            fnmatch.fnmatch(relative, pattern)
+            or fnmatch.fnmatch(f"/{relative}", pattern)
+            or fnmatch.fnmatch(name, pattern)
+            for pattern in patterns
+        )
+
+    spec = pathspec.GitIgnoreSpec.from_lines(patterns)
+    files = [
+        "Projects/acme-17/2024/report.pdf",
+        "Projects/acme-17/~$notes.docx",
+        "~$toplevel.docx",
+        "Projects/acme-17/notes~$.docx",
+        "Archive/ancient.pdf",
+        "Archive/1998/ancient.pdf",
+        "Projects/Archive/old.pdf",
+        "Projects/acme-17/Archive/deep/old.pdf",
+        "Projects/Archived/keep.pdf",
+        "Projects/scratch.tmp",
+        "scratch.tmp",
+        "SOPs/handling.xlsx",
+        "Projects/tmp",
+    ]
+    diverged = [path for path in files if by_fnmatch(path) != spec.match_file(path)]
+    assert not diverged, f"gitignore semantics change what these files do: {diverged}"
+
+    # And the half that *is* a change, stated as one: no directory matched under the old policy in
+    # any of its three arms, which is why `descend` walked every excluded folder in full.
+    directories = ["Archive", "Projects/Archive", "Projects/acme-17/Archive"]
+    assert not any(by_fnmatch(path) for path in directories)
+    assert all(spec.match_file(f"{path}/") for path in directories)
+    assert not spec.match_file("Projects/acme-17/")
+
+
+def test_an_excluded_directory_is_never_listed_at_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The prune, measured where it pays: the archive subtree is not `scandir`'d.
+
+    Excluding a folder already kept its files out of the index — one rejected entry at a time,
+    after listing every directory under it. On a share whose whole cost model is the `scandir` pass
+    that is the saving the exclusion was written for, and it was not being taken. Counted rather
+    than asserted, because "it is excluded" was true before this change and after it, and the only
+    thing that differs is how much of the share the walk opened.
+    """
+    mount = tmp_path / "mount"
+    (mount / "Archive" / "1998" / "q1").mkdir(parents=True)
+    (mount / "Projects").mkdir(parents=True)
+    (mount / "Archive" / "1998" / "q1" / "old.txt").write_text("decade-old")
+    (mount / "Projects" / "live.txt").write_text("current")
+
+    listed: list[str] = []
+    real_scandir = os.scandir
+
+    def recording(path: Any) -> Any:
+        listed.append(str(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(crawl_module.os, "scandir", recording)
+
+    binding = load_binding(
+        {
+            "mount": str(mount),
+            "roots": [{"path": "."}],
+            "public": True,
+            "exclude": ["**/Archive/**"],
+        }
+    )
+    assert {ref.path for ref in crawl_share(binding).files} == {"Projects/live.txt"}
+    assert not any("Archive" in entry for entry in listed), listed
+
+
+def test_a_pattern_gitignore_cannot_parse_is_refused_at_load_not_mid_crawl() -> None:
+    """An exclusion nobody can compile is a manifest error, and it says which pattern.
+
+    The compile moved onto the binding, so it had to move into the *load*: left to first use it
+    would surface as a library exception from inside a bounded crawl chunk — a deterministic
+    failure outside the `DocumentShareError` family `chemclaw.durable.publish` registers as
+    non-retryable, so the sync would retry it forever and index nothing.
+    """
+    with pytest.raises(DocumentShareError) as refusal:
+        load_binding(
+            {"mount": "/mnt/x", "roots": [{"path": "."}], "public": True, "exclude": ["!"]}
+        )
+    assert "gitignore pattern" in str(refusal.value)
+
+
+def test_a_utf16_document_on_the_share_is_indexed_instead_of_counted_unreadable(
+    tmp_path: Path,
+) -> None:
+    """The decode fix where it matters to an operator: the corpus, and the number beside it.
+
+    A file Notepad saved as "Unicode" kept its NUL bytes through the old single-encoding decode, so
+    `_read_and_parse`'s NUL guard refused it — correctly for the guard's own purpose, and with a
+    reason (`a Postgres text column cannot hold a NUL`) that told nobody what was actually wrong.
+    It landed in `skipped_unreadable` and the document was simply missing from the share.
+    """
+    mount = tmp_path / "mount"
+    (mount / "SOPs").mkdir(parents=True)
+    text = "Handling: hold the reactor at 60 °C for two hours before sampling.\n"
+    (mount / "SOPs" / "handling.txt").write_bytes(text.encode("utf-16"))
+
+    binding = load_binding(
+        {
+            "mount": str(mount),
+            "roots": [{"path": "SOPs"}],
+            "public": True,
+            "extensions": [".txt"],
+        }
+    )
+    index = InMemoryDocumentIndex()
+    report = _drain(binding, index)
+    assert report.skipped_unreadable == 0, report
+    assert report.indexed == 1, report
+
+    hits = asyncio.run(index.search_lexical(SOURCE, "reactor sampling", 5, DocumentFilter()))
+    assert hits, "the document should be retrievable"
+    assert "60 °C" in hits[0].content
+    assert "\x00" not in hits[0].content
 
 
 # --- the durable backend, against the real database ---------------------------------------------

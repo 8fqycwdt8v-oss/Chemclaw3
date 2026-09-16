@@ -161,7 +161,13 @@ dependencies = [
     # a directory, so `**/Archive/**` never matched `Projects/Archive` and the walk descended the
     # whole subtree to exclude it one file at a time — on a share this module's own docstring sizes
     # in terabytes.
-    "pathspec>=0.12",
+    # `>=1.1`, not `>=0.12`: a floor is a claim, and this one's claim is that it is the generation
+    # every assertion in `tests/test_document_share.py` was measured against. 1.x is a different
+    # pattern implementation from 0.12, and the code uses `GitIgnoreSpec` rather than
+    # `PathSpec.from_lines("gitwildmatch", ...)` because 1.1 deprecates the latter — 72
+    # DeprecationWarnings on one run of that file — while `GitIgnoreSpec` exists and warns on
+    # neither generation. Portable either way; the floor says which one was tested.
+    "pathspec>=1.1",
     "pypdf>=6.15.0",
     "python-docx>=1.2.0",
     # Encoding detection for the mounted share (`ingest/documents/parse.py`), already in `uv.lock`
