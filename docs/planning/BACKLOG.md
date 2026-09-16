@@ -1072,6 +1072,37 @@ one question per row: *does upstream now do this, and better?* A row that change
 ADR, not an edit here. A capability upstream ships that this table does not mention is the gap this
 register exists to catch — add the row in the same pull request that notices it.
 
+#### Everything that is not the agent framework
+
+*Added 2026-09-16 by a dependency audit across all three repositories.* The two blocks above watch
+four Python distributions and one protocol. That is the axis this project revises most often, and it
+is **not** where the hand-written code was: an audit that read every package for "is this a library's
+job" found its results in units, encodings, path matching, tokenizers, substructure search, row
+mapping and table rendering — none of which any row above could ever have mentioned.
+
+The standing question is the same one, so the discipline is the same: *does a library already do
+this, and better?* What the audit added is the shape of a good answer, because three of its own
+proposals came back wrong on contact with the code.
+
+| Adopted | Standing |
+| --- | --- |
+| `httpx-sse`, `pathspec`, `charset-normalizer`, `pint`, `tiktoken` (prefix only), `bisect`, `networkx.utils.UnionFind`, `psycopg` `class_row`/`executemany`, `rdkit.rdSubstructLibrary`, numpy+scipy clustering | **adopted**, `D-2026-09-16-a-library-already-in-the-closure-is-a-declaration-not-a-dependency`. All but pint already resolved in `uv.lock`, so the cost was a declaration line rather than image bytes |
+| ruff `TID253` as a second layering belt | **declined here, adopted in `Chemclaw3-mcp`**, `D-2026-09-16-a-flat-ban-cannot-express-a-matrix` — a flat ban cannot express 51 `(package, stack)` edges, and sees one of three scopes |
+| deleting the second lexical ranker | **declined on measurement.** The duplication is real and *inverted* — the Postgres leg strictly dominates — but `note_reindex_effective` makes the index conditional on sources the default does not enable, so the survivor is unreachable. `graph` meaning "the leg that reads the index" is a `data_sources` decision, not a retriever edit |
+| `tabulate`, `detect-secrets`, `rank_bm25`, `dimorphite-dl`, `yoyo`/`alembic`, `slowapi`, `secure`, `asgi-correlation-id`, `pytest-postgresql`, `testcontainers`, `respx`, `ase`/`cclib`, `RestrictedPython`, `pebble`, `EnsembleRetriever` | **declined**, each with a measurement, in the audit report and the ADR above. Re-proposing one is the failure this register exists to prevent |
+
+**Three findings worth more than the adoptions**, because they generalise:
+
+1. **An adopted API's defaults are part of its surface.** `GetMatches` defaults `useChirality=True`
+   where `HasSubstructMatch` defaults it `False` — 514 matching molecules became 0, which reaches a
+   chemist as "no precedent exists". Diff the defaults, not the semantics you assume they share.
+2. **A number quoted from a row is not the row.** The audit cited a 3.69 mean gold rank against 4.69
+   to justify deleting a retrieval leg; that configuration finds **three fewer gold notes**, which is
+   what `retrieval_recall` gates on. A better mean over a smaller found-set is not a better retriever.
+3. **A cache key is a claim about what changes.** `molecule_fingerprints` has no revision column and
+   `_upsert` rewrites in place, so count, max id and max `created_at` are all unchanged when a
+   structure string changes. The honest key was a digest of the data already fetched.
+
 ---
 
 ## The turn-time comparison cannot diff what the ELN gives structured
