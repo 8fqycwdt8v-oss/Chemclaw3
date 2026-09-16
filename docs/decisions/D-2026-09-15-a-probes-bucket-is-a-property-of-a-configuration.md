@@ -73,6 +73,30 @@ checkout it cannot tell a fleet tool from a typo at all, so it skips with `SIBLI
 `tests/conftest.py::_report_sibling_skips` counts it. A check that quietly shrinks is worse than one
 that says what it did not look at.
 
+## The invariant had two definitions, and the second was already the weaker
+
+The full gate found a third assertion of the same rule, in a file this work had not touched:
+`tests/test_live_probes.py::test_every_expected_tool_in_the_shipped_corpus_exists_on_the_agent_surface`.
+It asserts exactly what `test_no_probe_expects_a_tool_that_does_not_exist` asserts, over the live
+runner's own loader — and it went red on pc-06 while the file that had been taught about
+`needs_bundle:` went green.
+
+**It had already drifted, before this change and independently of it.** It reads
+`load_probes(str(PROBE_DIR))`, which does not recurse, so it covers **336** probes where the other
+covers **338**: the `m12/` suites are outside it. Two copies of one invariant, and the second was
+quietly the smaller — which is the shape this repository keeps deleting one document over, where a
+second declaration nothing reconciles is forbidden for a manifest and a port.
+
+So the exemption has one definition and the second copy imports it, rather than being patched to
+match. Restating it there would have put the fleet rule in two files, and a rule in two files shortly
+means two things. The *loader* gap is left alone and named: it is a separate question about whether
+the live runner should run the `m12/` suites at all, and merging the two checks would have hidden it
+rather than answered it.
+
+Driven both ways: deleting pc-06's `needs_bundle:` line fails **both** assertions, and restoring it
+passes both — so the import did not make the second one vacuous, which is the failure mode of
+sharing a helper between two tests.
+
 ## Only the tool expectation is conditional, never `forbids_claims`
 
 A claim worth forbidding is worth forbidding in both lanes, and the corpus's own good wording is
@@ -123,5 +147,8 @@ The two that ship are the two whose inputs are fully present:
   — three arms over a real `ProbeOutcome`, the middle one asserting that a *bound* tool that was not
   called is still a miss, so a gate that always returned `False` would fail rather than silence the
   corpus.
+- `tests/test_live_probes.py::test_every_expected_tool_in_the_shipped_corpus_exists_on_the_agent_surface`
+  — the second copy of the rule, importing `fleet_expected_tools` rather than restating it, and
+  driven against the same defect so the import cannot have silenced it.
 - `tests/siblings.py::fleet_published_tool_names` — one resolution of the sibling checkout, the
   shell's, shared with the context floor and the manifest agreement.

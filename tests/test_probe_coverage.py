@@ -104,7 +104,7 @@ def test_no_probe_expects_a_tool_that_does_not_exist() -> None:
     surface — so the probe stops testing while still counting toward the corpus. Measured zero on
     2026-08-25, and worth keeping at zero.
     """
-    phantom = sorted(_expected_tools() - available_tool_names() - _fleet_expected_tools())
+    phantom = sorted(_expected_tools() - available_tool_names() - fleet_expected_tools())
     assert not phantom, (
         f"these probes expect tools that no longer exist: {phantom}. Either the tool was renamed "
         "and the probe was not, or the probe outlived its capability. A tool the fleet serves and "
@@ -113,8 +113,12 @@ def test_no_probe_expects_a_tool_that_does_not_exist() -> None:
     )
 
 
-def _fleet_expected_tools() -> set[str]:
+def fleet_expected_tools() -> set[str]:
     """Expected tool names that a probe declared a fleet bundle for and this tree cannot resolve.
+
+    Public because `tests/test_live_probes.py` asserts the same rule over the live runner's own
+    loader and must not restate this one — two definitions of one invariant is how the second
+    becomes the weaker, and it already had: that file's copy covered 336 probes to this file's 338.
 
     Surface-aware on purpose. A probe is allowed to mix the two — an-04 pastes six injections and
     wants `replicate_precision` from the fleet's `suitability` *and* `predict_pka` from this tree —

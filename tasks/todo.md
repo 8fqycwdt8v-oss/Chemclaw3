@@ -97,6 +97,13 @@ deleting the `needs_bundle:` line makes the same name a phantom again. The scori
 arm asserting a *bound* uncalled tool is still a miss, so a gate stuck at `False` fails rather than
 silently stops measuring.
 
+**The gate found a third copy of the invariant, which is why running it mattered.**
+`tests/test_live_probes.py::test_every_expected_tool_in_the_shipped_corpus_exists_on_the_agent_surface`
+asserts the same rule over the live runner's own loader, and went red on pc-06. It had already
+drifted before this change: `load_probes` does not recurse, so it covered 336 probes to the other's
+338. The exemption now has one definition and that file imports it; the loader gap is named rather
+than merged away. Driven both ways — deleting pc-06's `needs_bundle:` fails both assertions.
+
 **What this deliberately does not do.** It does not declare the three bundles — measured at 11,624
 tokens over 20 tools into `PREFIX_BOUND`, which both compaction defaults derive from — and it does
 not touch the five under-specified probes, which want "name the tool, ask for its inputs" and need
