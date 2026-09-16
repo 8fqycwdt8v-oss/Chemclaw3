@@ -1908,3 +1908,101 @@ def test_the_task_tool_still_closes_over_its_roster_as_subagent_graphs() -> None
         "the roster is no longer keyed by subagent name, so `_helper_of` cannot name the one "
         "helper `agent/subagents.py` compiles"
     )
+
+
+def test_pyjwt_still_fetches_its_key_set_through_fetch_data() -> None:
+    """`api/auth.py` overrides `PyJWKClient.fetch_data`, which upstream never published as a seam.
+
+    PyJWT's own client reaches the tenant with `urllib.request.urlopen` — no `trust_env`, so it
+    follows an ambient `HTTPS_PROXY`, and the key set every bearer token is validated against would
+    come from whatever answered. `api/auth._HttpxJwkClient` closes that by overriding one method,
+    which is the narrowest available seam and also an undocumented one: `fetch_data` is a method of
+    a concrete class, not an interface, and nothing obliges upstream to keep routing the fetch
+    through it.
+
+    **The failure if it moves is silent and total**, which is why this is asserted rather than
+    trusted. A `get_jwk_set` that fetched inline, or a second helper the override does not cover,
+    would leave every assertion in `tests/test_auth.py` and `tests/test_entra_end_to_end.py` green —
+    they drive the client, and the client would still work — while the traffic went back through
+    `urlopen` and the proxy posture stopped holding. So this drives it: a subclass that overrides
+    only `fetch_data` must be able to serve a whole key-set lookup with no network at all.
+    """
+    from jwt import PyJWKClient
+
+    assert "fetch_data" in vars(PyJWKClient), (
+        "`PyJWKClient.fetch_data` is no longer defined on the class; "
+        "api/auth.py::_HttpxJwkClient overrides exactly that name to keep the JWKS fetch off the "
+        "ambient proxy"
+    )
+
+    calls = 0
+
+    class _Offline(PyJWKClient):
+        def fetch_data(self) -> Any:
+            nonlocal calls
+            calls += 1
+            data = {
+                "keys": [
+                    {
+                        "kty": "oct",
+                        "kid": "kid-a",
+                        "use": "sig",
+                        "k": "c2VjcmV0LWtleS1tYXRlcmlhbA",
+                    }
+                ]
+            }
+            if self.jwk_set_cache is not None:
+                self.jwk_set_cache.put(data)
+            return data
+
+    client = _Offline("https://tenant.invalid/discovery/v2.0/keys")
+    assert [key.key_id for key in client.get_signing_keys()] == ["kid-a"], (
+        "a `PyJWKClient` no longer serves its signing keys from `fetch_data`'s return value; "
+        "api/auth.py::_HttpxJwkClient's override is the only thing keeping the tenant fetch on "
+        "httpx with `trust_env=False`"
+    )
+    assert calls == 1, (
+        f"resolving one key set called `fetch_data` {calls} times; api/auth.py replaces that "
+        "method, so a fetch upstream makes by another route is a fetch through `urlopen` and the "
+        "ambient proxy"
+    )
+
+
+def test_a_pyjwt_client_still_fills_its_key_set_cache_from_fetch_data() -> None:
+    """The half of upstream's `fetch_data` that `api/auth.py` has to *reproduce*, not replace.
+
+    Upstream's implementation does two things: the HTTP call, and `self.jwk_set_cache.put(...)` of
+    what came back. The override replaces the first and copies the second, because `get_jwk_set`
+    reads that cache *before* it calls `fetch_data` — so an override that returned the key set
+    without filling it would turn PyJWT's five-minute cache off and make every single token
+    validation an outbound request to the tenant. That is a performance and amplification failure
+    with no functional symptom, so no other test in this tree would catch it.
+
+    Driven rather than read off the attribute: the second lookup must cost no fetch.
+    """
+    from jwt import PyJWKClient
+
+    calls = 0
+
+    class _Counting(PyJWKClient):
+        def fetch_data(self) -> Any:
+            nonlocal calls
+            calls += 1
+            data = {"keys": [{"kty": "oct", "kid": "kid-a", "use": "sig", "k": "c2VjcmV0"}]}
+            # Exactly what `api/auth._HttpxJwkClient.fetch_data` does with its response.
+            if self.jwk_set_cache is not None:
+                self.jwk_set_cache.put(data)
+            return data
+
+    client = _Counting("https://tenant.invalid/discovery/v2.0/keys")
+    assert client.jwk_set_cache is not None, (
+        "a `PyJWKClient` no longer caches its key set by default; api/auth.py's override writes "
+        "`jwk_set_cache` by hand and would be filling something nothing reads"
+    )
+    client.get_signing_keys()
+    client.get_signing_keys()
+    assert calls == 1, (
+        f"two key-set lookups cost {calls} fetches; `jwk_set_cache.put` in "
+        "api/auth.py::_HttpxJwkClient.fetch_data is no longer what makes the second one free, so "
+        "every token validation is an outbound request to the tenant"
+    )

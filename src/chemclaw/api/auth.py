@@ -16,17 +16,14 @@ apply here — this is a user-scoped resource access, so it is fully Entra-scope
 
 import asyncio
 import logging
-import os
-import threading
 import time
 from typing import Any
-from urllib.parse import urlsplit
-from urllib.request import proxy_bypass
 
+import httpx
 import jwt
 from fastapi import HTTPException, Request
 from jwt import PyJWKClient
-from jwt.exceptions import PyJWKClientConnectionError, PyJWKClientError
+from jwt.exceptions import PyJWKClientError
 from pydantic import BaseModel, Field
 
 from chemclaw.api.middleware import (
@@ -39,6 +36,7 @@ from chemclaw.api.middleware import (
 from chemclaw.api.rate_limit import RateLimited, enforce_request_budget
 from chemclaw.api.state import state
 from chemclaw.core.config import settings
+from chemclaw.core.http import default_ssl_context
 from chemclaw.core.identity_context import GROUP_ROLE_PREFIX
 from chemclaw.core.metrics_bridge import record_metric
 
@@ -76,21 +74,111 @@ class IdentityProviderUnavailable(Exception):
     """
 
 
+class _HttpxJwkClient(PyJWKClient):
+    """PyJWT's JWKS client with its one network call moved onto `httpx`.
+
+    **`fetch_data` is not a documented extension point** — it is a method of a concrete upstream
+    class, and PyJWT promises nothing about it staying the single place the key set is fetched.
+    That dependency is pinned in `tests/test_upstream_surface.py` rather than believed here,
+    because the failure if upstream restructures is silent: a `urlopen` would come back, and the
+    proxy posture below would quietly stop holding.
+
+    **Why it is worth the coupling.** `PyJWKClient.fetch_data` reaches the tenant through
+    `urllib.request.urlopen`, which resolves proxies from the process-global default opener and
+    takes no `trust_env` — so on a pod with `HTTPS_PROXY` set, the fetch of *the key set every
+    bearer token is validated against* went to the proxy, which could answer it with a key set of
+    its own choosing. Measured with a loopback recorder standing in for the proxy: it received
+    `GET http://<tenant-host>/…/discovery/v2.0/keys`.
+
+    What stood here before was `no_proxy` surgery: append the tenant host to both spellings of a
+    **process-global** environment variable on every client build, under a lock, because that
+    read-modify-write races on the `asyncio.to_thread` validation pool (measured with the window
+    widened: five concurrent writers of five distinct hosts left one of the five in `no_proxy`).
+    `trust_env=False` is the same decision taken on this one request instead of on the process, so
+    there is no shared state to race over, nothing left behind for the next `urlopen` caller in the
+    process, and no dependence on `proxy_bypass` agreeing with `getproxies_environment` about what
+    a host suffix is. It is the flag every other httpx client in this tree that reaches a real
+    dependency already carries, and this endpoint is the one where following the environment is a
+    *trust* decision rather than a routing one.
+
+    `verify=` is the process's one trust store (`core/http.default_ssl_context`) rather than
+    httpx's per-client default, for the reason that function measures: httpx parses the whole
+    certifi bundle into a fresh `SSLContext` per client, and `httpx.get` is a client per fetch.
+    It is also the same trust store every connector call uses, which is what makes "the tenant" and
+    "a bundle" one decision about CAs instead of two.
+    """
+
+    def fetch_data(self) -> Any:
+        """The tenant's key set, fetched off the environment's proxy and mapped onto our split.
+
+        **The 401/503 split is decided here, at the raise**, because this is the frame that knows
+        the difference between "the caller's `kid` is unknown" (not reachable from this method at
+        all) and "we could not get a usable key set to decide with". Every failure of the *fetch*
+        is `IdentityProviderUnavailable` — a 503 — for the reason that class exists: answering 401
+        would tell a user holding a perfectly good token that it was rejected. Three arms, because
+        httpx's taxonomy distinguishes three things the operator reads differently:
+
+        * `httpx.TransportError` — refused, blackholed, DNS-less, or past `timeout`; also the
+          malformed-endpoint case, since `UnsupportedProtocol` is one of these.
+        * `httpx.HTTPStatusError` — the tenant answered, and said no. A 404 from a wrong tenant id
+          and a 500 from the IdP are both deployment faults, and neither is a bad credential.
+        * `ValueError` — a 200 whose body is not JSON, which is what an intercepting proxy's error
+          page looks like. This is the arm that used to live in `_signing_key` as a workaround for
+          PyJWT letting `json.load`'s `ValueError` escape `PyJWKClientError`; it is not a
+          workaround any more, it is this method's own decode failing.
+
+        **A redirect is refused rather than followed, and that is the one behaviour this move
+        changes.** `urlopen` followed 3xx by default and httpx does not, so the choice had to be
+        made rather than inherited — and refused is the right way round for exactly the reason
+        `trust_env=False` is: a redirect moves the key set's origin out of the address the
+        deployment declared, past `core/netguard.py`'s allowlist, which is derived from
+        `entra_jwks_endpoint` and cannot see where a `Location` header points. Real Entra does not
+        redirect this endpoint. Said explicitly instead of left to the decode, because an
+        unfollowed 3xx has an empty body and would otherwise surface as "unusable" — a true
+        statement about the wrong fault.
+
+        Raising this module's own exception rather than `PyJWKClientConnectionError` is deliberate:
+        PyJWT catches nothing around `fetch_data`, so the type that reaches `require_principal` is
+        the one chosen here, and a second translation in `_signing_key` could only lose fidelity.
+
+        The cache write is upstream's, reproduced rather than inherited: `get_jwk_set` reads
+        `jwk_set_cache` before it calls this, so skipping the `put` would turn PyJWT's five-minute
+        key-set cache off and make every validation a fetch. Pinned in
+        `tests/test_upstream_surface.py` beside the method itself.
+        """
+        try:
+            response = httpx.get(
+                self.uri,
+                headers=self.headers,
+                timeout=self.timeout,
+                # Never inherit an ambient proxy — the whole reason this class exists.
+                trust_env=False,
+                verify=default_ssl_context(),
+            )
+            response.raise_for_status()
+            if response.is_redirect:
+                raise IdentityProviderUnavailable(
+                    f"tenant JWKS endpoint redirected ({response.status_code}); the key set must "
+                    "come from the declared address"
+                )
+            jwk_set = response.json()
+        except httpx.HTTPStatusError as exc:
+            raise IdentityProviderUnavailable(
+                f"tenant JWKS endpoint answered {exc.response.status_code}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise IdentityProviderUnavailable(f"tenant JWKS unreachable: {exc}") from exc
+        except ValueError as exc:
+            raise IdentityProviderUnavailable(f"tenant JWKS unusable: {exc}") from exc
+        if self.jwk_set_cache is not None:
+            self.jwk_set_cache.put(jwk_set)
+        return jwk_set
+
+
 # One JWKS client per endpoint, cached: `PyJWKClient` keeps its own key cache, so rebuilding it per
 # request would re-fetch the tenant JWKS on the hot path and amplify under a token flood (review
 # finding). Keyed by endpoint so a config change is still picked up.
 _jwks_clients: dict[str, PyJWKClient] = {}
-
-# `_client_for` runs on concurrent worker threads — `validate_token` is dispatched through
-# `asyncio.to_thread`, so two requests bearing tokens from two tenants genuinely build their clients
-# at the same moment. Its body is a read-modify-write of `os.environ` followed by a
-# check-then-insert into the dict above, and the first of those is the one that loses data rather
-# than merely duplicating work: measured with the window widened, five concurrent writers of five
-# distinct hosts left **one** of the five in `no_proxy`, and the loser's key set is then fetched
-# through the ambient proxy — exactly what `_bypass_ambient_proxy` exists to prevent. A dict
-# insertion racing itself only builds a second client, which is why this lock is stated as being
-# about the environment.
-_client_lock = threading.Lock()
 
 # When an unknown `kid` was last allowed to force a JWKS re-fetch, per endpoint. Caching the client
 # — the earlier fix above — bounds the *warm* path but not this one: `PyJWKClient.get_signing_key`
@@ -100,75 +188,36 @@ _client_lock = threading.Lock()
 _last_forced_refresh: dict[str, float] = {}
 
 
-def _bypass_ambient_proxy(host: str) -> None:
-    """Put `host` beyond the reach of an ambient proxy variable, for this process.
-
-    `PyJWKClient.fetch_data` calls `urllib.request.urlopen`, which resolves proxies from the
-    process-global default opener and takes no `trust_env` — so on a pod with `HTTPS_PROXY` set,
-    the fetch of **the key set every bearer token is validated against** goes to the proxy, which
-    could answer it with a key set of its own choosing. Measured with a loopback recorder standing
-    in for the proxy: it received `GET http://<tenant-host>/…/discovery/v2.0/keys`.
-
-    The fix is host-scoped rather than process-wide. `ProxyHandler.proxy_open` consults
-    `proxy_bypass` **per request**, so naming the host in `no_proxy` diverts this one destination
-    and leaves every other `urlopen` caller in the process exactly as it was — where
-    `urllib.request.install_opener` would have re-pointed all of them. It also keeps working after
-    the default opener has been built and cached, which is what makes it safe to do lazily here.
-    Driven both ways in `tests/test_auth.py::test_the_jwks_fetch_does_not_follow_an_ambient_proxy`.
-
-    It is `core/netguard.py`'s own vocabulary: the boot refusal's message already tells an operator
-    to "add these destinations to NO_PROXY", and both sides ask `proxy_bypass` the question, so the
-    refusal and this bypass cannot disagree about whether the JWKS host is still carried.
-
-    Two details are load-bearing and both are measured rather than reasoned:
-
-    * **The form.** `proxy_bypass_environment` compares the bare host, or a dotted suffix of it —
-      never a substring. `login.microsoftonline.com:443` and the full URL both leave the fetch
-      proxied; the bare host is what it honours.
-    * **The existing value.** An operator's `no_proxy` is appended to, never replaced, and every
-      spelling already in the environment is extended — writing lowercase `no_proxy` while the
-      operator set `NO_PROXY` makes `getproxies_environment` prefer ours and silently drops theirs.
-
-    Called per client build rather than once at arming time because the endpoint is a *setting*: a
-    process that never validates a token never touches the environment, and a reconfigured endpoint
-    is diverted by the same call that builds its client.
-    """
-    if not host or proxy_bypass(host):
-        return
-    names = [name for name in ("no_proxy", "NO_PROXY") if name in os.environ] or ["no_proxy"]
-    for name in names:
-        current = os.environ.get(name, "").strip()
-        os.environ[name] = f"{current},{host}" if current else host
-    logger.info("JWKS host %s added to no_proxy: its key set must not come from a proxy", host)
-
-
 def _client_for(endpoint: str) -> PyJWKClient:
-    """The cached `PyJWKClient` for `endpoint`, built on first use with our configured timeout.
+    """The cached JWKS client for `endpoint`, built on first use with our configured timeout.
 
-    The endpoint's host is taken out of the ambient proxy's reach first — see
-    `_bypass_ambient_proxy` for why that is the whole seam PyJWT leaves us.
-
-    **Serialised**, because this runs on the validation thread pool and its body writes a process
-    global that is read back in the same breath. See `_client_lock`. The lock covers the whole body
-    rather than the environment write alone: the cheapest correct scope, and holding it across a
-    `PyJWKClient` construction costs nothing, since that constructor performs no I/O — the key set
-    is fetched lazily on the first `get_signing_key`.
+    **No lock, and that is a change rather than an omission.** This runs on the validation thread
+    pool — `validate_token` is dispatched through `asyncio.to_thread`, so two requests bearing
+    tokens from two tenants genuinely build their clients at the same moment — and the body used to
+    be a read-modify-write of `os.environ` (the `no_proxy` bypass `_HttpxJwkClient` replaced) that
+    lost four writers in five when it raced. What is left is a check-then-insert into a dict, which
+    cannot lose data: `setdefault` is atomic, so a race builds a second client and then discards
+    it, and every caller leaves with the *stored* one rather than with a private copy whose key
+    cache nobody else would warm. The constructor performs no I/O — the key set is fetched lazily
+    on the first `get_signing_key` — so a discarded client costs nothing.
     """
-    with _client_lock:
-        client = _jwks_clients.get(endpoint)
-        if client is None:
-            _bypass_ambient_proxy(urlsplit(endpoint).hostname or "")
-            client = PyJWKClient(endpoint, timeout=settings.entra_http_timeout_seconds)
-            _jwks_clients[endpoint] = client
-        return client
+    client = _jwks_clients.get(endpoint)
+    if client is None:
+        client = _jwks_clients.setdefault(
+            endpoint, _HttpxJwkClient(endpoint, timeout=settings.entra_http_timeout_seconds)
+        )
+    return client
 
 
 def _match_kid(signing_keys: list[Any], kid: str) -> Any | None:
     """The key in `signing_keys` whose id is `kid`, or `None`.
 
     Written here rather than borrowed from `PyJWKClient.match_kid` so key resolution does not
-    depend on a class attribute — the lookup is three lines of pure data matching, and reaching
-    into the client for it couples this module to a surface it does not otherwise use.
+    depend on a class attribute — the lookup is one line of pure data matching over two attributes
+    of a `PyJWK`, and calling upstream's static method for it would be a second undocumented
+    dependency to pin. That reason is *narrower* than the one it replaced, which said this module
+    does not otherwise use the client's surface: since `_HttpxJwkClient` it plainly does. One
+    override that has to exist is a coupling; a convenience wrapper around `next()` is a choice.
     """
     return next((key for key in signing_keys if key.key_id == kid), None)
 
@@ -189,10 +238,10 @@ def _forced_refresh_allowed(endpoint: str, now: float) -> bool:
 def _signing_key(token: str) -> Any:
     """Resolve the RSA signing key for `token` from the tenant JWKS (indirected for tests).
 
-    The JWKS fetch is synchronous network I/O (PyJWT's urllib), so callers on the event loop must
-    run validation in a worker thread (`require_principal` does); the client is built with the
-    configured `entra_http_timeout_seconds` so a slow/blackholed IdP is bounded by our config, not
-    PyJWT's 30s default.
+    The JWKS fetch is synchronous network I/O (`_HttpxJwkClient`'s `httpx.get`), so callers on the
+    event loop must run validation in a worker thread (`require_principal` does); the client is
+    built with the configured `entra_http_timeout_seconds` so a slow/blackholed IdP is bounded by
+    our config, not PyJWT's 30s default.
 
     A `kid` that matches the cached key set costs no network at all. A `kid` that does not is
     rate-limited by `entra_jwks_refresh_cooldown_seconds` rather than refetching per request, and
@@ -213,22 +262,31 @@ def _signing_key(token: str) -> Any:
         if not _forced_refresh_allowed(endpoint, time.monotonic()):
             raise AuthError(f"no signing key matches kid {kid!r} (refresh on cooldown)")
         return client.get_signing_key(kid).key
-    # Order matters: the connection error is a subclass of the general client error.
-    except PyJWKClientConnectionError as exc:
-        raise IdentityProviderUnavailable(f"tenant JWKS unreachable: {exc}") from exc
     except PyJWKClientError as exc:
         # Not an `InvalidTokenError` — this is the class that used to escape every handler here
-        # and surface as a 500.
+        # and surface as a 500. **There is no `PyJWKClientConnectionError` arm above it any
+        # more**, and the ordering note that used to be here went with it: upstream raises that
+        # class in exactly one place, `fetch_data`, which `_HttpxJwkClient` overrides — so after
+        # the httpx move nothing in this process can produce one, and a handler for it would be a
+        # claim that a control exists. An unreachable tenant is now `IdentityProviderUnavailable`
+        # raised at the fetch, and it passes through this frame untouched.
         raise AuthError(f"no signing key matches kid {kid!r}: {exc}") from exc
     except (ValueError, jwt.PyJWTError) as exc:
-        # **The IdP answered, and what it said is unusable.** The two arms above cover a refused
-        # connection and a key set we could read but not match; neither covers a *successful* HTTP
-        # response carrying something other than a JWKS — an intercepting proxy's HTML error page
-        # (`json.load` raises `json.JSONDecodeError`, a `ValueError`, which PyJWT's client does not
-        # convert) or a tenant answering JSON that is not a key set (`PyJWKSet.from_dict` raises
-        # `PyJWKSetError`, a `PyJWTError` that is neither a `PyJWKClientError` nor an
-        # `InvalidTokenError`). Both escaped every handler in this module and became HTTP 500s for
-        # callers holding perfectly valid tokens.
+        # **The IdP answered, and what it said is unusable.** The arm above covers a key set we
+        # could read but not match; it does not cover a *successful* HTTP response carrying
+        # something other than a JWKS — a tenant answering JSON that is not a key set, where
+        # `PyJWKSet.from_dict` raises `PyJWKSetError`, a `PyJWTError` that is neither a
+        # `PyJWKClientError` nor an `InvalidTokenError`. That escaped every handler in this module
+        # and became an HTTP 500 for callers holding perfectly valid tokens.
+        #
+        # **Only half of what this arm was written for is still reached here**, and saying so is
+        # the point: the other half — an intercepting proxy's HTML error page, where PyJWT let
+        # `json.load`'s `ValueError` escape `PyJWKClientError` — is now decoded and refused inside
+        # `_HttpxJwkClient.fetch_data`, because that is where the decode happens.
+        # `PyJWKSet.from_dict` runs in `get_jwk_set` on data that was fetched perfectly well, so
+        # moving the fetch did nothing for it and the class still escapes; measured on PyJWT 2.13.0,
+        # `PyJWKSet.from_dict({"error": "tenant not found"})` raises `PyJWKSetError`. `ValueError`
+        # is kept beside it for the same fail-into-503 reason rather than for a named shape.
         #
         # `IdentityProviderUnavailable`, not `AuthError`, for the reason that class exists: we
         # could not reach a usable tenant to decide, so it is our outage and a 503 — answering 401
