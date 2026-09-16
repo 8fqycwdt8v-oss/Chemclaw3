@@ -35,6 +35,7 @@ from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.evals.live import ProbeOutcome, _score_citations, load_probes, run_probe
 from chemclaw.evals.probe import Probe, ProbeSet
 from chemclaw.kg.note import mentioned_ids
+from tests.test_probe_coverage import fleet_expected_tools
 
 PROBE_DIR = Path(__file__).resolve().parent.parent / "data" / "evals" / "probes"
 
@@ -428,10 +429,21 @@ def test_every_expected_tool_in_the_shipped_corpus_exists_on_the_agent_surface()
 
     The same declaration-versus-surface check `skill-validate` and `template-validate` already
     apply, for the same reason: without it a typo in the corpus reports as a defect in the system.
+
+    **The fleet exemption is imported rather than restated**, from the file whose whole subject is
+    this check in both directions. This assertion and
+    `tests/test_probe_coverage.py::test_no_probe_expects_a_tool_that_does_not_exist` are one
+    invariant written twice, and the second copy had already drifted into being the weaker: it
+    reads `load_probes`, which does not recurse, so it covers 336 probes where the other covers 338
+    (the `m12/` suites are outside it). Keeping the *exemption* in one place is what stops that gap
+    widening into a disagreement — a probe naming a tool `Chemclaw3-mcp` serves is legitimate under
+    `needs_bundle:`, and a rule about it that lives in two files will shortly mean two things.
     """
     surface = available_tool_names()
     unknown = {t for p in load_probes(str(PROBE_DIR)) for t in p.expects_tools if t not in surface}
-    assert unknown == set(), f"probes expect tools that do not exist: {sorted(unknown)}"
+    assert unknown - fleet_expected_tools() == set(), (
+        f"probes expect tools that do not exist: {sorted(unknown - fleet_expected_tools())}"
+    )
 
 
 def test_a_bucket_c_probe_expects_no_tool() -> None:

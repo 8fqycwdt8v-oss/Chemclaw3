@@ -480,7 +480,11 @@ _ALLOWED_LAZY_EDGES: dict[Edge, str] = {
         "`live_judge` read `llm_base_url` and ignored `llm_tls_ca_bundle`, so grading against "
         "exactly the internal gateway that setting exists for died at TLS. Lazy so that importing "
         "the eval package costs neither a model client nor a connection pool - and because a "
-        "graded run is the only thing in `evals` that needs the agent's provider seam at all"
+        "graded run is the only thing in `evals` that needs the agent's provider seam at all. "
+        "A second use rides the same edge and is not the provider seam: `live._tool_expectation_"
+        "applies` reads `available_tool_names()` to decide whether a probe's `expects_tools` could "
+        "have been met, so a question about a tool the fleet serves and this tree does not declare "
+        "scores as untested rather than as a miss"
     ),
     ("chemclaw.kg", "chemclaw.connectors"): (
         "known_note_types/known_relations union core's closed vocabulary with what the enabled "

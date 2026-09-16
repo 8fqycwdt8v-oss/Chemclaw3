@@ -40,6 +40,7 @@ import yaml
 from chemclaw.agent.chemclaw_agent import available_tool_names
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.evals.probe import Probe, ProbeSet
+from tests.siblings import SIBLING_SKIP, fleet_published_tool_names, sibling_root
 
 PROBE_DIR = Path(__file__).resolve().parents[1] / "data" / "evals" / "probes"
 
@@ -103,10 +104,100 @@ def test_no_probe_expects_a_tool_that_does_not_exist() -> None:
     surface — so the probe stops testing while still counting toward the corpus. Measured zero on
     2026-08-25, and worth keeping at zero.
     """
-    phantom = sorted(_expected_tools() - available_tool_names())
+    phantom = sorted(_expected_tools() - available_tool_names() - fleet_expected_tools())
     assert not phantom, (
         f"these probes expect tools that no longer exist: {phantom}. Either the tool was renamed "
-        "and the probe was not, or the probe outlived its capability."
+        "and the probe was not, or the probe outlived its capability. A tool the fleet serves and "
+        "this tree declares no bundle for is not a phantom — say so with `needs_bundle:` on the "
+        "probe, which is checked against the fleet's own manifests separately."
+    )
+
+
+def fleet_expected_tools() -> set[str]:
+    """Expected tool names that a probe declared a fleet bundle for and this tree cannot resolve.
+
+    Public because `tests/test_live_probes.py` asserts the same rule over the live runner's own
+    loader and must not restate this one — two definitions of one invariant is how the second
+    becomes the weaker, and it already had: that file's copy covered 336 probes to this file's 338.
+
+    Surface-aware on purpose. A probe is allowed to mix the two — an-04 pastes six injections and
+    wants `replicate_precision` from the fleet's `suitability` *and* `predict_pka` from this tree —
+    so forgiving every name on a `needs_bundle:` probe would quietly exempt the local ones from the
+    phantom check too, and a renamed in-process tool would stop being caught on the probes that
+    need catching most.
+
+    Read from the probes rather than from a list beside this test, so the declaration lives on the
+    question that depends on it. What this returns is only "the corpus says these come from a bundle
+    we do not declare"; whether that is *true* is
+    `test_every_fleet_served_expectation_names_a_tool_that_bundle_declares`'s question, and it needs
+    the sibling checkout to answer.
+    """
+    surface = available_tool_names()
+    return {
+        name
+        for probe in _probes()
+        if probe.needs_bundle is not None
+        for name in probe.expects_tools
+        if name not in surface
+    }
+
+
+def test_every_fleet_served_expectation_names_a_tool_that_bundle_declares() -> None:
+    """The cross-repository half: a `needs_bundle:` pairing is checked against the fleet's manifest.
+
+    `needs_bundle` is what lets a probe name a tool this checkout cannot resolve, so on its own it
+    is an assertion with nothing behind it — exactly the shape
+    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` is about. This is what
+    puts something behind it: the fleet's published `manifests/` are read off disk, and every name a
+    `needs_bundle:` probe expects has to be either on this tree's own surface or declared by the
+    bundle it named. Both halves, because a probe may legitimately mix them.
+
+    Reading YAML from a shallow clone rather than running the fleet's servers, deliberately — the
+    cheap tier `tests/test_sibling_manifest_agreement.py` uses, so this is plausible in CI where the
+    schema measurement in `tests/test_context_floor.py` is not. What the fleet *declares* and what
+    it *serves* are held to each other on that side, by `assert_manifest_matches` against a running
+    server, so a declared-but-unserved name fails there rather than passing quietly here.
+
+    **It does less in the lane that mounts the fleet, and that is worth saying rather than
+    discovering.** With `CHEMCLAW_CONNECTORS_DIR` pointed at the fleet's `manifests/`, every name is
+    already on the surface and this passes without consulting the manifest at all. That lane is not
+    unguarded — it is the lane where `test_every_agent_callable_tool_is_probed_or_exempt` has 121
+    tools to account for instead of 114 — but the guard against a *typo in a fleet name* is this
+    one, and it is the bare checkout that runs it.
+
+    **A skip, loudly, rather than a green line.** With no sibling checkout this cannot tell a fleet
+    tool from a typo, and `tests/conftest.py::_report_sibling_skips` counts the skip so the run says
+    what it did not look at.
+    """
+    declaring = [probe for probe in _probes() if probe.needs_bundle is not None]
+    if not declaring:
+        pytest.skip("no probe declares `needs_bundle:`, so there is no pairing to check")
+    surface = available_tool_names()
+    unresolved = {
+        (str(probe.needs_bundle), name)
+        for probe in declaring
+        for name in probe.expects_tools
+        if name not in surface
+    }
+    if not unresolved:
+        return
+    root, reason = sibling_root("CHEMCLAW_MCP_REPO", "Chemclaw3-mcp")
+    if root is None:
+        pytest.skip(
+            f"{SIBLING_SKIP} the {len(unresolved)} fleet-served tool expectations in the probe "
+            f"corpus were NOT checked against the fleet's own manifests: {reason}. Nothing in this "
+            "run is evidence about whether those probes name tools that exist."
+        )
+    declared = fleet_published_tool_names(root)
+    missing = sorted(
+        f"{bundle}::{tool}"
+        for bundle, tool in unresolved
+        if tool not in declared.get(bundle, frozenset())
+    )
+    assert not missing, (
+        f"these probes declare a fleet bundle that does not serve the tool they name: {missing}. "
+        f"The fleet publishes {sorted(declared)}. Either the tool was renamed in Chemclaw3-mcp and "
+        "the probe was not, or the probe names the wrong bundle."
     )
 
 
@@ -267,3 +358,57 @@ def test_the_corpus_is_not_concentrated_on_one_tool() -> None:
         "rather than raising this bound: a suite that mostly measures one tool reports coverage it "
         "does not have."
     )
+
+
+def test_a_tool_the_deployment_does_not_bind_is_not_scored_as_a_miss() -> None:
+    """The scoring half of `needs_bundle:`, driven rather than trusted.
+
+    `test_every_fleet_served_expectation_names_a_tool_that_bundle_declares` above proves the corpus
+    may *name* a fleet tool. This proves the other half does not then punish it: a probe whose tools
+    are absent from the surface the run was launched against is not measuring the model, and scoring
+    it as a miss is how a corpus comes to penalise capability that exists somewhere else — the same
+    defect as the six probes in
+    `D-2026-09-15-a-probe-that-forbids-the-answer-a-bound-tool-serves-measures-nothing`, arriving
+    from the other direction.
+
+    Three arms, because the middle one is what makes the first mean anything: a name nothing binds
+    is not scored, a name that *is* bound and was not called **is** scored as a miss, and a bound
+    name that was called passes.
+    """
+    from chemclaw.evals.live import ProbeOutcome, _tool_expectation_applies
+
+    def probe(tools: list[str], bundle: str | None = None) -> Probe:
+        return Probe(
+            id="x",
+            section=11,
+            persona="lab_leader",
+            bucket="B",
+            question="q",
+            direction="d",
+            expects_tools=tools,
+            needs_bundle=bundle,
+        )
+
+    def outcome(degraded: list[str] | None = None) -> ProbeOutcome:
+        """A real `ProbeOutcome`, not a stand-in — the gate reads `degraded` off the model."""
+        return ProbeOutcome(
+            probe_id="x",
+            section=11,
+            persona="lab_leader",
+            bucket="B",
+            question="q",
+            degraded=degraded or [],
+        )
+
+    bound = sorted(available_tool_names())[0]
+
+    assert not _tool_expectation_applies(
+        probe(["a_tool_no_deployment_here_binds"], "thermalsafety"), outcome()
+    ), "a name absent from the surface must not be scored: the fleet's capability reads as a miss"
+    assert _tool_expectation_applies(probe([bound]), outcome()), (
+        "a bound tool must still be scored — without this arm the first one would pass even if "
+        "the gate always returned False, which would silence the corpus rather than correct it"
+    )
+    assert not _tool_expectation_applies(
+        probe([bound], "thermalsafety"), outcome(["thermalsafety"])
+    ), "a bundle whose server did not answer this turn is the deployment's failure, not the model's"
