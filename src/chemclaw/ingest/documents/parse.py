@@ -120,15 +120,25 @@ def _decode(raw: bytes) -> str:
     re-labelled. The one deliberate difference is the BOM it strips, which is the second defect
     above. `tests/test_document_formats.py` asserts that identity over every text format.
 
-    **Detection is heuristic, and it is worst on short files.** Said that way rather than claiming
-    detection is reliable: measured over one cp1252 sentence repeated to length,
-    `charset_normalizer` answers `gb18030` at 75, 150 and 225 bytes and round-trips *wrong* there
-    (`60 °C` comes back as one CJK character, so the unit is lost as well as the degree sign), and
-    answers `cp1250` from 300 bytes on, where it round-trips that sentence exactly. A short
-    mislabelled file is therefore not fixed by this. What bounds the risk is the *ordering* rather
-    than the detector: a file a detector can damage is a file strict UTF-8 already refused, where
-    the answer today is a replacement character in the same place — so the trade is one wrong
-    reading for another on short files, and a right reading for a wrong one on everything longer.
+    **Detection is heuristic, and what it is worst on is byte *variety*, not length.** Said that way
+    because the first version of this paragraph said "worst on short files" and measured it over one
+    cp1252 sentence repeated to length — which is the most degenerate input there is, and reads as a
+    multi-byte encoding at any size. Re-measured on the pinned `charset-normalizer` with that same
+    repeated sentence: `big5` at 75, 150 and 225 bytes, `cp949` from 300 bytes to 50 kB, and it
+    never round-trips at any length. Length does not rescue it, and neither codec named here before
+    was one the detector actually produced.
+
+    On realistic mixed prose the same detector is reliable and short is not the problem: a 311-byte
+    cp1252 ELN paragraph carrying `°`, `±`, an em dash and curly quotes is answered `cp1250` from
+    about 70 bytes on and decodes **exactly** — cp1250 and cp1252 agree on every high byte that text
+    uses, so the label is wrong and the characters are right, which is the only property this
+    function is asked for. German accented prose behaves the same way. One 36-byte line on its own
+    does not: too few distinct bytes, and it goes to `big5`.
+
+    So the residual risk is a short, low-variety, non-UTF-8 file, and what bounds it is the
+    *ordering* rather than the detector: a file a detector can damage is a file strict UTF-8 already
+    refused, where the answer today is a replacement character in the same place — so the trade is
+    one wrong reading for another on those, and a right reading for a wrong one on ordinary prose.
 
     Args:
         raw: The document's bytes, as read off the share or off an upload.

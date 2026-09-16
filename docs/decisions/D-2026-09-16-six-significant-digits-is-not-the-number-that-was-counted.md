@@ -50,8 +50,18 @@ literally rather than formatted. A later sweep "finishing the job" now has to ar
 It is not the `prometheus_client` question. The library would have made both defects impossible, and
 that is an argument on the other side of a decision this ADR does not take — but it is worth
 recording here that the defects are the kind a maintained exposition library does not have, and that
-the refusal on record (`D-084`, and the module docstring) rests on a line count that has since moved
-by 3.5x and on a "counters and gauges only, no labels" premise the module has outgrown.
+the refusal on record (`D-084`, and the module docstring) rests on two premises the module has
+outgrown: "counters and gauges only, no labels", and a line count.
+
+**The line count is worth re-measuring rather than transcribing, and the basis is the whole of it.**
+The docstring's "~80 lines of text formatting" names the text formatting — `_escape`, `_sample` and
+`render`, and nothing else. A first attempt at this sentence charged the *module* against that
+figure and reported 3.5x, but `core/metrics.py` is over 1,700 lines of which some 1,200 are
+module-level metric declarations, which is not text formatting and was never what the ~80 described.
+Measured against the three functions the docstring is actually about, the renderer has not yet
+doubled — a different claim, and one that argues far less strongly for the swap than 3.5x did.
+Nothing asserts either number, so whoever revisits `D-084` measures those three functions rather
+than reading a figure here.
 
 ## What keeps it true
 

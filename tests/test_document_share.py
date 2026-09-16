@@ -1664,6 +1664,15 @@ def test_the_shipped_exclusions_mean_the_same_under_gitignore_semantics() -> Non
     diverged = [path for path in files if by_fnmatch(path) != spec.match_file(path)]
     assert not diverged, f"gitignore semantics change what these files do: {diverged}"
 
+    # And the width of that claim, pinned, because the docstring above states it narrowly on
+    # purpose. As *predicates* the two policies do diverge — gitignore excludes everything under a
+    # matched directory and the three fnmatch arms did not — and the list above simply contains no
+    # instance. What made the old walk reach the same corpus anyway is the basename arm firing on
+    # the directory itself, which `descend` skipped before its files were ever offered here.
+    assert not by_fnmatch("scratch.tmp/report.pdf")
+    assert spec.match_file("scratch.tmp/report.pdf")
+    assert by_fnmatch("scratch.tmp")
+
     # And the half that *is* a change, stated as one: no directory matched under the old policy in
     # any of its three arms, which is why `descend` walked every excluded folder in full.
     directories = ["Archive", "Projects/Archive", "Projects/acme-17/Archive"]

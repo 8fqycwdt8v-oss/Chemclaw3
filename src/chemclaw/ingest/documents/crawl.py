@@ -97,14 +97,27 @@ def _is_excluded(relative: str, spec: pathspec.GitIgnoreSpec, *, directory: bool
     share lives here. Gitignore matches a directory when it is presented as one, which is all
     `directory=True` does: `Archive/` matches `**/Archive/**` and the subtree is never opened.
 
-    **This is not a change to what a deployment excludes**, which was checked rather than assumed
-    before the swap: over the three shipped patterns and a path set holding the cases that separate
-    the two policies, old and new agree on every **file** path
+    **This is not a change to what a deployment indexes**, which was checked rather than assumed
+    before the swap — but the claim has to be stated at the width that is true, because the obvious
+    wider one is false. Over the three shipped patterns and a path set holding the cases that
+    separate the two policies, old and new agree on every path in that set
     (`tests/test_document_share.py::test_the_shipped_exclusions_mean_the_same_under_gitignore_semantics`
-    is that measurement, kept runnable). The one semantic the swap does drop is basename-matching a
-    pattern that *contains* a separator: `Foo/Bar` used to exclude a file named `Bar` anywhere and
-    now excludes only `Foo/Bar`. No shipped pattern is of that shape, and the fnmatch behaviour was
-    an artefact of the fallback rather than anything a manifest could have meant.
+    is that measurement, kept runnable). They do **not** agree as predicates in general: gitignore
+    excludes everything under a matched directory, and the three fnmatch arms did not, so
+    `_is_excluded("scratch.tmp/report.pdf", ["*.tmp"])` was False before and is True now. The probed
+    set holds no file under a `*.tmp` directory, which is why nothing in it diverges.
+
+    **The corpus is unchanged anyway, by a different route, and that is the part worth knowing.**
+    The old `descend` asked `_is_excluded` of *every* entry including directories, and the basename
+    arm matched `scratch.tmp` there — so the directory was skipped and its files were never offered
+    to the predicate at all. Same corpus, different mechanism: the old walk pruned that subtree and
+    could not prune `Archive/`, the new one prunes both. A path-level comparison therefore under-
+    describes the swap in both directions, and neither half is visible without the walk.
+
+    The one semantic the swap does drop is basename-matching a pattern that *contains* a separator:
+    `Foo/Bar` used to exclude a file named `Bar` anywhere and now excludes only `Foo/Bar`. No
+    shipped pattern is of that shape, and the fnmatch behaviour was an artefact of the fallback
+    rather than anything a manifest could have meant.
 
     Still case-sensitive, which is a real mismatch with CIFS (`Archive`, `ARCHIVE` and `archive`
     are one folder to the file server and three strings here) — recorded in

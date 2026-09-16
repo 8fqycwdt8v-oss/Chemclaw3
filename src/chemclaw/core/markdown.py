@@ -1,13 +1,15 @@
 r"""The one Markdown table this system renders, and the rules it renders by.
 
-**Twenty** places in this tree rendered a Markdown table before this module existed, across eleven
-modules — every live probe report, the soak and leak fits, the eval report and its baseline
-comparison, the run sheet, the campaign note and the turn-time protocol comparison. Two of the
-twenty were named renderers (`memory/comparison.render_table`, `protocols/render._table`); the other
-eighteen were f-strings written where they were used. They agreed on the pipe character and on
-almost nothing else: **three of the twenty escaped a cell's content and seventeen did not**, one
-spelled the delimiter row `|---|` against nineteen `| --- |`, and "the record is silent here" was
-spelled `—`, `""` or nothing at all depending on which file you were reading. What is here is the
+Every Markdown table this system renders came through a per-site f-string before this module
+existed — every live probe report, the soak and leak fits, the eval report and its baseline
+comparison, the run sheet, the campaign note and the turn-time protocol comparison. Two were named
+renderers (`memory/comparison.render_table`, `protocols/render._table`); the rest were written where
+they were used. They agreed on the pipe character and on almost nothing else: **a small minority
+escaped a cell's content and the rest did not**, one spelled the delimiter row `|---|` against the
+others' `| --- |`, and "the record is silent here" was spelled `—`, `""` or nothing at all depending
+on which file you were reading. A count is deliberately not written here: the figure that used to
+open this paragraph described the tree *before* this module landed while reading as a claim about it
+after, and `grep -rn 'render_table(' src/chemclaw` answers for the present. What is here is the
 arithmetic of putting cells in a grid plus the honesty rules `memory/comparison.py` argued for and
 had only to itself, because each of them exists where getting it wrong produced a table that read as
 evidence while being an artifact.

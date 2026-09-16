@@ -163,10 +163,11 @@ Each of these reverses or reopens something. Each gets an ADR.
 
 ## D. Duplication with no library answer
 
-- [ ] **D1 — one Markdown table helper.** ~21 emitters across `cli/`, `evals/`, `memory/`,
-      `protocols/`, `ingest/`, each with its own escaping and empty-cell convention. **Not `tabulate`**:
-      `memory/comparison.py` is right that its three "honesty rules" are the part worth having in one
-      place, and a library that renders cells uniformly pushes them back out to 21 call sites.
+- [x] **D1 — one Markdown table helper.** Landed as `core/markdown.py`; the emitters across `cli/`,
+      `evals/`, `memory/` and `protocols/` now go through it, and `grep -rn 'render_table(' src/chemclaw`
+      is what counts them rather than a figure here. **Not `tabulate`**: `memory/comparison.py` is
+      right that its three "honesty rules" are the part worth having in one place, and a library that
+      renders cells uniformly pushes them back out to every call site.
 - [ ] **D2 — the electronvolt constant has one definition.** `publish/properties.py:102` writes
       `23.060547830619026` while `core/units.py:213` holds `ELECTRONVOLT_TO_KJ`. Verified equal today
       (`96.48533212331 / 4.184` is *exactly* that literal, difference 0.0) — latent drift, not a live

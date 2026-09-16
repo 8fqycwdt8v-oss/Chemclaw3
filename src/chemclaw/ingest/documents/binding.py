@@ -198,9 +198,14 @@ class DocumentShareBinding(BaseModel):
 
         `GitIgnoreSpec` rather than `PathSpec.from_lines("gitwildmatch", ...)`, which is the form
         the library's own docs call subtly wrong for negation precedence — and which `pathspec` 1.x
-        deprecates, at 36 warnings per run of the fixture share. Both spellings resolve on
-        `pathspec>=0.12`, the declared floor, and measured over the shipped patterns they agree on
-        every probed path; this one is the spelling that warns on neither generation.
+        deprecates, at two `DeprecationWarning`s per pattern per compile. How loud that is on a run
+        of `tests/test_document_share.py` is therefore a fact about that file's fixtures and about
+        the active warning filter rather than about this line — measured on one commit it was 76
+        under pytest's defaults and 262 under `-W always`, which is why no number is stated here and
+        why the two that were, in this docstring and in `pyproject.toml`, disagreed. `GitIgnoreSpec`
+        warns on neither generation. Measured over the shipped patterns the two spellings agree on
+        every probed path; the declared floor is `pathspec>=1.1` and `pyproject.toml` carries why —
+        a floor is a claim about the generation these assertions were measured against.
 
         Raises:
             ValueError: A pattern gitignore cannot parse (`pathspec` raises a subclass of it).

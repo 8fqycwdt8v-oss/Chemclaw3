@@ -31,6 +31,32 @@ a regression is the mistake that invites.
 Every millisecond above is a millisecond only a *cached* index can save, so the cache below is not
 an optimisation on top of this adoption: it is the adoption.
 
+**An optimisation that cannot be had must therefore be *skipped*, never fatal — and the first
+version of this module got that exactly backwards.** The build was charged against
+`substructure_match_timeout_seconds`, the bound on *matching*, and an abandoned build caches
+nothing: measured on 19,996 NCI records at the shipped 5.0 s, the build ran out of that budget at
+11,776, 13,440 and 14,976 molecules on three successive attempts and the search **failed every
+time**, where the per-record loop it replaced answered the same query in 2.01 s with 2,684 hits. A
+corpus past roughly 20,000 rows could never produce an index and so could never produce an answer,
+and the code's own advice was how you got there: `search.py` logs "raise
+CHEMCLAW_SUBSTRUCTURE_SCAN_MAX_RECORDS" when the cap truncates, and doing so turned a
+truncated-but-useful answer into a permanent refusal.
+
+Two changes, and they are one idea. **The build has its own budget**
+(`substructure_index_build_timeout_seconds`), because how long an index may take to *build* and how
+long a chemist may wait for an *answer* are different questions that were sharing one number. And
+**`index_for` returns `None` rather than raising** when there is no index to be had, so the scan
+falls back to the per-record loop this module replaced — which is the floor this adoption has to
+beat and is therefore also the floor it must fall back to. The same call now answers the 19,996-row
+corpus in ~2 s instead of failing, for the same reason the old code could: it matches record by
+record.
+
+The budget is spent as a *projection* rather than as a stopwatch run to exhaustion: every
+`_BUILD_CHECK_STRIDE` records the build extrapolates its own measured rate over the whole corpus
+and gives up the moment that projection exceeds the budget. So a corpus that cannot be indexed
+costs the query tens of milliseconds to find that out, not the whole budget, and no memory of the
+refusal is needed to keep the cost off later queries.
+
 **The cache is keyed on the corpus it was built from, because the store offers no revision to key
 it on.** `molecule_fingerprints` carries `created_at` and nothing else that moves — an upsert
 rewrites `label` and `bits` in place (`store.py`'s `_upsert`), so neither `count()` nor a max id
@@ -84,8 +110,9 @@ _FIRST_CHUNK = 1
 # scan's step size within 4x of a cost it has actually seen.
 _CHUNK_GROWTH = 4
 
-# How many records a build parses between clock checks. See `_build`.
-_BUILD_DEADLINE_STRIDE = 64
+# How many records a build parses between checks on its own budget and the caller's deadline.
+# See `_build`.
+_BUILD_CHECK_STRIDE = 64
 
 
 class CorpusIndex:
@@ -248,64 +275,152 @@ _INDEXES: BoundedLru[bytes, CorpusIndex] = BoundedLru(
     lambda: settings.substructure_index_cache_entries
 )
 
+
+class _BuildSlot:
+    """The lock one corpus's build is single-flighted on, and how many callers hold a reference.
+
+    **One lock per corpus rather than one for the module**, because the two things a caller waits
+    for are not the same thing. "Is *this* corpus already being built" must make a second caller
+    wait rather than repeat ~1.2 s of CPU on the executor that also validates every bearer token;
+    "is *some other* corpus being built" must not make it wait at all. A single module-wide lock
+    answered both with the second, and it was taken on every call, hit or miss: driven, a query
+    whose own index was **already in the map** refused at its 1.0 s bound while an unrelated
+    5,000-molecule corpus was being indexed, where before this module existed the two ran
+    concurrently in separate `to_thread` workers. It is worse under ingest than that sounds,
+    because the key is a digest of the labels — one new molecule invalidates it, so every
+    concurrent query would serialize behind one build.
+
+    `waiters` is what keeps the map bounded, and a digest is why it needs to be: a key is a corpus
+    *generation*, so an ingest that rewrites one row mints a new one on every pass, and a lock per
+    key kept forever is the unbounded-growth shape `core/bounded.py` exists for. The slot is
+    dropped when the last caller holding it leaves, so the map holds one entry per build actually
+    in flight.
+    """
+
+    def __init__(self) -> None:
+        """A free lock nobody is waiting on yet."""
+        self.lock = threading.Lock()
+        self.waiters = 0
+
+
 # `BoundedLru` documents itself as not thread-safe, and this map is reached from worker threads
-# (`asyncio.to_thread`), so it needs a lock. The same lock is held across the *build*, which is
-# what makes concurrent misses single-flight: two coroutines that miss together would otherwise
-# each pay ~1.2 s of CPU for the same index, on the loop's default executor. The waiter blocks on
-# the lock rather than duplicating the work, and it blocks only until its own deadline — see
-# `index_for`.
-_LOCK = threading.Lock()
+# (`asyncio.to_thread`), so it needs a lock — this one, held for a map operation and never across a
+# build. What a build is single-flighted on is `_BUILDS[key].lock`, for the reason `_BuildSlot`
+# gives.
+_GUARD = threading.Lock()
+_BUILDS: dict[bytes, _BuildSlot] = {}
 
 
-def index_for(records: list[FingerprintRecord], deadline: float) -> CorpusIndex:
-    """Return the index for exactly these records, building and caching it on a miss.
+def index_for(records: list[FingerprintRecord], deadline: float) -> CorpusIndex | None:
+    """Return the index for exactly these records, or None when the scan must do without one.
 
     Synchronous on purpose: every caller is already inside `asyncio.to_thread`, so the build —
     which is CPU, and the most expensive thing in this module — happens off the event loop without
     this function knowing anything about it. Running it in-loop would stall every streamed session
     for the duration of a rebuild, which is the same argument that put the matching in a thread.
 
-    **Concurrent misses build once.** The lock is held across the build, so the second caller waits
-    and then finds the entry rather than repeating it. It waits only until its *own* deadline: a
-    scan that would have to sit out a rebuild it cannot afford refuses with the same `TimeoutError`
-    the scan itself raises, instead of returning a partial answer or blocking a thread past the
-    bound the caller was promised.
+    **`None` is a normal answer and never an error.** An index is an optimisation over a scan that
+    works without one, so every way of not having one — the caller is already out of time, the
+    corpus is too large to index inside `substructure_index_build_timeout_seconds`, another
+    thread's build for this same corpus is still running when this caller's own bound expires —
+    returns `None` and lets `_scan_for_matches` answer record by record. Raising instead is what
+    made a corpus past ~20,000 rows unanswerable; the module docstring has the measurement.
+
+    **Concurrent misses on one corpus build once.** The second caller waits on that corpus's own
+    slot and then finds the entry rather than repeating the build. It waits only until its *own*
+    deadline, and a caller that cannot afford the wait takes the loop instead of blocking a thread
+    past the bound it was promised.
 
     Args:
         records: The capped corpus slice, in store order.
-        deadline: `time.monotonic()` value past which building or waiting is abandoned.
+        deadline: `time.monotonic()` value past which this caller stops waiting and stops building.
 
     Returns:
-        The cached or freshly built index over those records.
-
-    Raises:
-        TimeoutError: The deadline passed while waiting for another thread's build, or during this
-            one's.
+        The cached or freshly built index over those records, or None if there is none to be had
+        within this caller's bounds.
     """
     labels = [record.label for record in records]
     key = _corpus_digest(labels)
-    if not _LOCK.acquire(timeout=max(0.0, deadline - time.monotonic())):
-        raise TimeoutError(f"substructure scan gave up waiting to index {len(labels)} molecule(s)")
-    try:
+    with _GUARD:
         held = _INDEXES.get(key)
         if held is not None:
             return held
-        built = _build(labels, deadline)
-        _INDEXES.put(key, built)
-        return built
+        if time.monotonic() >= deadline:
+            # The caller has no time left to build *or* to scan. Let the scan say so: it is the one
+            # that knows how much of the corpus it examined, which is what the refusal has to name.
+            return None
+        slot = _BUILDS.setdefault(key, _BuildSlot())
+        slot.waiters += 1
+    try:
+        if not slot.lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            log.info(
+                "another thread is still indexing these %d molecule(s); scanning without an index",
+                len(labels),
+            )
+            return None
+        try:
+            with _GUARD:
+                held = _INDEXES.get(key)
+            return held if held is not None else _build_and_cache(key, labels, deadline)
+        finally:
+            slot.lock.release()
     finally:
-        _LOCK.release()
+        with _GUARD:
+            slot.waiters -= 1
+            if not slot.waiters:
+                del _BUILDS[key]
 
 
-def _build(labels: list[str], deadline: float) -> CorpusIndex:
+def _build_and_cache(key: bytes, labels: list[str], deadline: float) -> CorpusIndex | None:
+    """Build the index for `labels` under its own budget, cache it, and return it — or None.
+
+    **The budget is `substructure_index_build_timeout_seconds` and not the caller's match bound**,
+    which is the whole of `D-2026-09-16`'s first defect: charging a build to the budget for matching
+    made a corpus that could not be indexed a corpus that could not be *searched*, permanently,
+    because nothing is cached when a build is abandoned and every retry therefore started from
+    zero. The caller's deadline still applies on top of it — a build must not outlive the query
+    that wanted it — so the build stops at whichever comes first, and either way the caller gets
+    `None` and scans without it.
+    """
+    budget = settings.substructure_index_build_timeout_seconds
+    try:
+        built = _build(labels, budget, min(time.monotonic() + budget, deadline))
+    except TimeoutError as exc:
+        log.warning(
+            "not indexing %d molecule(s): %s; scanning record by record instead "
+            "(raise CHEMCLAW_SUBSTRUCTURE_INDEX_BUILD_TIMEOUT_SECONDS to index a corpus this "
+            "large, or lower CHEMCLAW_SUBSTRUCTURE_SCAN_MAX_RECORDS)",
+            len(labels),
+            exc,
+        )
+        return None
+    with _GUARD:
+        _INDEXES.put(key, built)
+    return built
+
+
+def _build(labels: list[str], budget: float, deadline: float) -> CorpusIndex:
     """Parse every label once, hold it pre-parsed, and screen it with a pattern fingerprint.
 
-    The deadline is checked during the build for the reason it is checked during the scan: this
-    runs in the loop's default executor, and an abandoned caller must not leave a thread indexing
-    thousands of molecules behind it. Checked every `_BUILD_DEADLINE_STRIDE` records rather than
-    every one, because a `time.monotonic()` per record would be a measurable share of a ~0.24 ms
-    step — the stride is in records rather than in time because, unlike matching, per-molecule cost
-    here varies by a factor of ten rather than of ten thousand.
+    **The budget is spent as a projection, not as a stopwatch run to exhaustion.** Every
+    `_BUILD_CHECK_STRIDE` records the build extrapolates its own measured rate over the whole
+    corpus, and gives up the moment that projection exceeds `budget` — so a corpus too large to
+    index costs the query that discovered it tens of milliseconds rather than the entire budget,
+    and the caller can fall back to the per-record loop with almost all of its own bound intact.
+    Measured on 19,996 NCI records with the shipped 3.0 s budget, that refusal lands in ~0.05 s and
+    the loop then answers inside the 5.0 s match bound; run to exhaustion it would have cost 3.0 s
+    of the 5.0 s before the loop even started. It also means an unbuildable corpus needs no
+    remembering: repeating a refusal that cheap is cheaper than a second cache to avoid it.
+
+    The projection subsumes a plain wall-clock check, since a projection over the whole corpus is
+    never less than the time already spent.
+
+    The caller's `deadline` is checked in the same place, for the reason it is checked during the
+    scan: this runs in the loop's default executor, and an abandoned caller must not leave a thread
+    indexing thousands of molecules behind it. Both are checked every `_BUILD_CHECK_STRIDE` records
+    rather than every one, because a `time.monotonic()` per record would be a measurable share of a
+    ~0.24 ms step — the stride is in records rather than in time because, unlike matching,
+    per-molecule cost here varies by a factor of ten rather than of ten thousand.
 
     **The pattern fingerprints are computed in this loop rather than by `AddPatterns` afterwards,
     and that is what makes the check above cover the whole build.** `AddPatterns` is one
@@ -327,6 +442,18 @@ def _build(labels: list[str], deadline: float) -> CorpusIndex:
     An index is *not* cached when the build is abandoned: a half-built library would answer later
     queries over a fraction of the corpus with no flag saying so, which is the failure this whole
     module is arranged against.
+
+    Args:
+        labels: Every stored SMILES of the corpus slice, in store order.
+        budget: How many seconds the whole build may take before it is not worth having.
+        deadline: `time.monotonic()` value past which the build is abandoned whatever it projects.
+
+    Returns:
+        The built index over the labels that parsed.
+
+    Raises:
+        TimeoutError: The build projects past `budget`, or `deadline` passed. `_build_and_cache`
+            turns either into a `None` index and a scan that runs without one.
     """
     molecules = rdSubstructLibrary.CachedMolHolder()
     patterns = rdSubstructLibrary.PatternHolder()
@@ -334,10 +461,19 @@ def _build(labels: list[str], deadline: float) -> CorpusIndex:
     unreadable = 0
     began = time.monotonic()
     for examined, label in enumerate(labels):
-        if examined % _BUILD_DEADLINE_STRIDE == 0 and time.monotonic() >= deadline:
-            raise TimeoutError(
-                f"substructure scan gave up indexing after {examined} of {len(labels)} molecule(s)"
-            )
+        if examined % _BUILD_CHECK_STRIDE == 0:
+            elapsed = time.monotonic() - began
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"indexing gave up after {examined} of {len(labels)} molecule(s): the query "
+                    "that asked for the index has run out of time"
+                )
+            projected = elapsed * len(labels) / examined if examined else 0.0
+            if projected > budget:
+                raise TimeoutError(
+                    f"indexing {len(labels)} molecule(s) projects to {projected:.1f}s at the rate "
+                    f"its first {examined} took, past the {budget}s build budget"
+                )
         molecule = Chem.MolFromSmiles(label)
         if molecule is None:
             unreadable += 1

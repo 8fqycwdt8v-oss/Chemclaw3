@@ -1277,6 +1277,7 @@ def test_a_chiral_query_is_matched_the_way_the_loop_matched_it(
     assert [hit.smiles for hit in outcome.hits] == expected
 
     index = substructure_index.index_for(records, time.monotonic() + 600)
+    assert index is not None, "the fixture corpus is small enough to index inside the budget"
     at_upstream_default = index.library.GetMatches(pattern, maxResults=100_000)
     assert len(at_upstream_default) != len(expected), (
         "GetMatches and HasSubstructMatch now agree on useChirality; the explicit argument in "
@@ -1293,9 +1294,11 @@ def _count_builds(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     built = [0]
     real = substructure_index._build
 
-    def _counting(labels: list[str], deadline: float) -> substructure_index.CorpusIndex:
+    def _counting(
+        labels: list[str], budget: float, deadline: float
+    ) -> substructure_index.CorpusIndex:
         built[0] += 1
-        return real(labels, deadline)
+        return real(labels, budget, deadline)
 
     monkeypatch.setattr(substructure_index, "_build", _counting)
     return built
@@ -1313,6 +1316,7 @@ def _clear_the_substructure_index_cache() -> Iterator[None]:
     substructure_index._INDEXES = BoundedLru(
         lambda: settings.substructure_index_cache_entries,
     )
+    substructure_index._BUILDS.clear()
     yield
 
 
@@ -1452,22 +1456,27 @@ async def test_an_unreadable_row_is_counted_even_when_the_result_cap_stops_the_s
     assert "repair the index" in result.verdict
 
 
-def test_a_build_past_its_deadline_gives_up_and_caches_nothing() -> None:
-    """The deadline has to reach the *build*, and a half-built index must never be kept.
+def test_a_caller_with_no_time_left_builds_nothing_and_is_told_what_ran_out() -> None:
+    """A bound that has already passed must not start a build, and must not cache half of one.
 
     Building is the most expensive thing on this path — 1,560 ms for 5,000 molecules — and it runs
     in the same worker thread the scan does, which is the loop's default executor. A caller whose
     bound has passed must not leave that thread parsing thousands of molecules behind it, for
     exactly the reason `find_substructure_matches` gives about the matching half.
 
-    The second assertion is the one that matters: an abandoned build is not cached, because a
-    library holding a fraction of the corpus would answer every later query over that fraction with
-    no flag saying so.
+    Two assertions, and both were defects. An abandoned build is not cached, because a library
+    holding a fraction of the corpus would answer every later query over that fraction with no flag
+    saying so. And the refusal names **the scan that actually ran** — this used to say "indexing",
+    correctly, while the message the chemist was handed one frame up said the *match* had exceeded
+    its bound over a pattern that had never been matched once.
     """
     records = [record_for(f"{index:04d}", "CCO") for index in range(400)]
     pattern = substructure_pattern("CO")
-    with pytest.raises(TimeoutError, match="indexing after"):
+    with pytest.raises(TimeoutError, match="gave up after 0 of 400 molecule\\(s\\)") as raised:
         search._scan_for_matches(records, pattern, time.monotonic() - 1)
+    assert "one at a time" in str(raised.value), (
+        "the refusal must say which of the two scans ran out of time; the remedies differ"
+    )
     assert len(substructure_index._INDEXES) == 0
 
     # And the same records index fine once there is time for them, so the refusal above was the

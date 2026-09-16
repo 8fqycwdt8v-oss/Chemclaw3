@@ -175,9 +175,12 @@ dependencies = [
     # `>=1.1`, not `>=0.12`: a floor is a claim, and this one's claim is that it is the generation
     # every assertion in `tests/test_document_share.py` was measured against. 1.x is a different
     # pattern implementation from 0.12, and the code uses `GitIgnoreSpec` rather than
-    # `PathSpec.from_lines("gitwildmatch", ...)` because 1.1 deprecates the latter — 72
-    # DeprecationWarnings on one run of that file — while `GitIgnoreSpec` exists and warns on
-    # neither generation. Portable either way; the floor says which one was tested.
+    # `PathSpec.from_lines("gitwildmatch", ...)` because 1.1 deprecates the latter, while
+    # `GitIgnoreSpec` exists and warns on neither generation. A warning *count* is deliberately not
+    # written here: the deprecated form warns twice per pattern per compile, so the figure is about
+    # that file's fixtures and the active warning filter, and the two counts this comment and
+    # `ingest/documents/binding.py` each carried were measured under different filters and
+    # disagreed. Portable either way; the floor says which generation was tested.
     "pathspec>=1.1",
     "pypdf>=6.15.0",
     "python-docx>=1.2.0",

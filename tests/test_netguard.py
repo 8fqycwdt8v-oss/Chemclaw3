@@ -643,9 +643,14 @@ def _proxy_settings(**overrides: object) -> Settings:
 
 
 def _entra_settings(**overrides: object) -> Settings:
-    """A deployment in the enforced identity posture, whose JWKS fetch goes out through urllib."""
+    """A deployment in the enforced identity posture — `entra_required`, tenant, loopback infra.
+
+    `entra_required` is poppable like the other defaults because it is the *gate* the ambient arm
+    of `refuse_proxied_egress` turns on, so an arm that measures the gate has to be able to flip it
+    on this fixture rather than on a differently-shaped one.
+    """
     return _proxy_settings(
-        entra_required=True,
+        entra_required=bool(overrides.pop("entra_required", True)),
         # Loopback, because `entra_required` refuses a plaintext broker channel and this fixture is
         # about the JWKS fetch rather than about Temporal's transport.
         temporal_address="127.0.0.1:7233",
@@ -810,29 +815,97 @@ def test_a_bare_host_port_otlp_endpoint_is_not_dropped(monkeypatch: pytest.Monke
     assert _refuses(settings)
 
 
-def test_the_jwks_fetch_is_no_longer_a_charged_destination(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_the_jwks_fetch_is_no_longer_a_charged_destination() -> None:
     """An *absence* test, because the destination that used to be here is now immune.
 
     `api/auth.py` fetched the tenant key set through `urllib.request.urlopen`, which takes no
     `trust_env` and was measured following `HTTP_PROXY` — on the anchor every bearer token is
-    validated against — so `_env_reading_destinations` charged it and the enforced identity posture
-    refused to boot behind a proxy. `_HttpxJwkClient` now fetches it with httpx and
-    `trust_env=False`, so there is nothing left to charge.
+    validated against — so `_env_reading_destinations` charged it. `_HttpxJwkClient` now fetches it
+    with httpx and `trust_env=False`, so there is nothing left to charge, and a row for it would
+    refuse a pod over a hazard that no longer exists.
 
-    Written as an absence rather than deleted with the destination, because what this function
-    feeds is a **refusal**, and a refusal for a reason that is no longer true is a pod that will not
-    start — which `_env_reading_destinations`' own docstring names as its worst failure mode. This
-    fails whoever re-adds the row without first re-adding a reader that ignores `trust_env`.
+    **The positive control is the second half of this test rather than `_assert_live`.** This arm
+    is about *charging*, not about refusing, so the helper — which re-runs a refusal with the
+    bypass removed — structurally cannot serve it: `_env_reading_destinations` with its body
+    deleted returns `[]`, and the version of this test that shipped asserted `charged == []` and
+    "not refused", both of which a gutted function passes. So the control is a configuration that
+    must charge something through the same call: with `otel_enabled` on, the OTLP exporter's row
+    has to come back, and an emptied function fails here instead of quietly agreeing.
+
+    What used to be this test's second assertion — an enforced-identity deployment behind a proxy
+    boots — is now false for a reason that is not the JWKS fetch, and
+    `test_the_enforced_posture_is_refused_behind_an_undeclared_proxy` below is where it lives.
     """
-    settings = _entra_settings(otel_enabled=False)
-    charged = [reason for _, reason, _ in netguard._env_reading_destinations(settings)]
+    charged = [reason for _, reason, _ in netguard._env_reading_destinations(_entra_settings())]
     assert charged == [], f"the enforced posture charges a destination nothing proxies: {charged}"
-    _proxy_env(monkeypatch, HTTPS_PROXY="http://sidecar.internal:15001")
-    assert not _refuses(settings), (
-        "an enforced-identity deployment behind a proxy is refused over the JWKS fetch, which now "
-        "passes trust_env=False and cannot be carried by it"
+    control = [
+        reason
+        for _, reason, _ in netguard._env_reading_destinations(_entra_settings(otel_enabled=True))
+    ]
+    assert control == ["the OTLP span exporter"], (
+        f"the positive control charged {control}, so the empty result above is evidence about "
+        "this function having a body, not about the JWKS row being absent from it"
+    )
+
+
+def test_the_enforced_posture_is_refused_behind_an_undeclared_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deleting the JWKS row emptied the charge sheet for a whole class of deployment.
+
+    Measured on the commit that removed it, with `entra_required=True`, `otel_enabled=False` and
+    `HTTPS_PROXY=http://sidecar.internal:15001`: `charged: []`, boot proceeds — where the same
+    settings refused the day before. The premise of the removal is sound and is asserted above; the
+    consequence was that `entra_required` charged **nothing**, so the only thing still refusing in
+    the shipped OpenShift topology was the chart's unrelated `CHEMCLAW_OTEL_ENABLED: "true"`, and
+    `make chat`, `make connectors`, CI and a hand-started worker in the enforced posture all booted
+    proxied.
+
+    What is refused is not the JWKS fetch — that destination is immune and must stay uncharged.
+    It is the carriers with no derivable destination, measured rather than argued:
+    `kg/git_writer._git_child_env` keeps every proxy variable in the `git` child's environment on
+    purpose (verified: `HTTPS_PROXY` survives it while `CHEMCLAW_LLM_API_KEY` is scrubbed), and a
+    `git ls-remote` behind a loopback recorder standing in for a sidecar sent it
+    `CONNECT notes.example.invalid:443`. The `git` destination is explicitly not on the allowlist's
+    derivation, and the LD_PRELOAD interposer exempts loopback by construction, so for a loopback
+    sidecar no layer below this one sees that push or its credential.
+    """
+    settings = _entra_settings()
+    for proxy in ("http://sidecar.internal:15001", "http://127.0.0.1:15001"):
+        _proxy_env(monkeypatch, HTTPS_PROXY=proxy)
+        assert netguard.proxied_destinations(settings) == {}, (
+            "the premise: nothing is charged here, so this refusal is the ambient arm rather than "
+            "the JWKS row having come back"
+        )
+        assert _refuses(settings), f"the enforced posture booted with {proxy} carrying its git push"
+
+
+def test_the_ambient_arm_is_the_enforced_posture_and_not_a_proxy_ban(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every way out of the arm above, because a refusal with no escape is an outage.
+
+    The three that must work, and the one that must not. `egress_allow` naming the proxy is the
+    operator saying the mesh is intended — the same escape the charged arm takes. `NO_PROXY=*` is
+    honoured because it is measured to work on the carrier this arm is about: with it set, the same
+    `git ls-remote` resolved the host directly and the loopback recorder saw nothing. And with
+    identity off — a developer's checkout, `make chat`, CI — an ambient corporate proxy is expected
+    and says nothing about undeclared egress, so nothing is refused; that arm is
+    `test_the_shipped_defaults_start_behind_a_corporate_proxy`, re-run here against the enforced
+    fixture so the gate itself is what is measured rather than the fixture's other fields.
+    """
+    proxy = "http://sidecar.internal:15001"
+    _proxy_env(monkeypatch, HTTPS_PROXY=proxy)
+    assert not _refuses(_entra_settings(egress_allow="sidecar.internal"))
+    assert not _refuses(_entra_settings(entra_required=False))
+    _proxy_env(monkeypatch, HTTPS_PROXY=proxy, NO_PROXY="*")
+    assert not _refuses(_entra_settings())
+    _proxy_env(monkeypatch)
+    assert not _refuses(_entra_settings()), "no proxy at all must stay the silent case"
+    _proxy_env(monkeypatch, HTTPS_PROXY=proxy)
+    assert _refuses(_entra_settings()), (
+        "the positive control did not fire, so the four negative arms above prove nothing about "
+        "whether the enforced posture is checked at all"
     )
 
 
@@ -904,12 +977,31 @@ def test_two_readers_on_one_host_do_not_collapse(monkeypatch: pytest.MonkeyPatch
         GRPC_PROXY="http://undeclared.corp:3128",
         HTTPS_PROXY="http://declared.corp:3128",
     )
-    carried = netguard.proxied_destinations(_proxy_settings())
+    settings = _proxy_settings(egress_allow="gateway.internal,declared.corp")
+    carried = netguard.proxied_destinations(settings)
     assert len(carried) == 2, f"one reader's entry was overwritten by the other's: {carried}"
     proxies = {proxy for proxy, _ in carried.values()}
     assert proxies == {"undeclared.corp", "declared.corp"}, (
         f"both readers' proxies must survive into the comparison, got {proxies}"
     )
+
+    # **And the invariant is about the refusal, not about this dict.** The rebuilt version of this
+    # test stopped at `proxied_destinations`, which means it held the keying and nothing else:
+    # `refuse_proxied_egress` filters `carried` down to the entries whose proxy is *undeclared*,
+    # and that filter is where a collapsed key would actually do the damage — the declared proxy
+    # wins the comparison and the undeclared one carries the traffic, silently. Driven to the
+    # raise: one proxy declared, one not, and the refusal must fire and name the undeclared one.
+    with pytest.raises(RuntimeError, match="SECURITY: a proxy is configured") as refusal:
+        netguard.refuse_proxied_egress(settings)
+    assert "undeclared.corp" in str(refusal.value)
+    assert "declared.corp" not in str(refusal.value).replace("undeclared.corp", ""), (
+        "the declared proxy is the operator's decision and must not be reported as the offender"
+    )
+
+    # The control that makes the raise above mean something: declare both and it goes silent, so
+    # what fired was the `undeclared` filter rather than "two entries exist".
+    both = _proxy_settings(egress_allow="gateway.internal,declared.corp,undeclared.corp")
+    netguard.refuse_proxied_egress(both)
 
 
 def test_no_proxy_configured_is_the_silent_case(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1210,8 +1302,52 @@ def test_the_environment_store_is_read_the_way_httpx_reads_it(
         )
 
 
+#: The module-level request verbs. Each builds a throwaway `Client` internally and takes the same
+#: `trust_env`, defaulting to True — so `httpx.get(url)` is a client construction wearing a
+#: different name, and a scan that matched only the class names could not see one.
+_HTTPX_VERBS = (
+    "get",
+    "post",
+    "put",
+    "patch",
+    "delete",
+    "head",
+    "options",
+    "request",
+    "stream",
+)
+
+
+def _httpx_module_names(tree: ast.Module) -> tuple[set[str], set[str]]:
+    """This module's aliases for `httpx` itself, and its names imported *from* `httpx`.
+
+    The verbs need qualifying and the classes do not: `Client` is distinctive enough to match on
+    the bare name anywhere, while `get` is `dict.get`, `os.environ.get` and a hundred other things.
+    So the verbs are matched only as `<httpx alias>.<verb>` or as a name imported straight out of
+    `httpx`, which is what these two sets are for.
+    """
+    aliases: set[str] = set()
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            aliases |= {a.asname or a.name for a in node.names if a.name == "httpx"}
+        elif isinstance(node, ast.ImportFrom) and node.module == "httpx":
+            imported |= {a.asname or a.name for a in node.names if a.name in _HTTPX_VERBS}
+    return aliases, imported
+
+
 def _httpx_client_constructions() -> list[tuple[str, int, bool]]:
-    """Every `httpx.Client`/`AsyncClient` construction in `src/`, and whether it refuses the env.
+    """Every httpx client construction in `src/`, class and verb, and whether it refuses the env.
+
+    **The verbs are here because this ratchet was blind to the call shape the tree had just grown.**
+    It matched `Client`/`AsyncClient` only, and `api/auth.py` is this tree's first module-level
+    `httpx.get(...)` — the tenant JWKS fetch, on the anchor every bearer token is validated against,
+    and the whole argument for deleting that destination's row from `core/netguard.py`
+    rests on its `trust_env=False`. Measured against the scan as it stood: that line was invisible
+    to it, so the property the deletion depends on was held by a keyword nobody was watching and a
+    second such call would have arrived exempt. `httpx.get` builds a `Client` per call and defaults
+    `trust_env` to True exactly as the class does, so nothing about the narrow reading was safer —
+    it was the same decay by omission one name further out.
 
     A `**gateway_client_kwargs(...)` unpacking counts as compliant, whether inline or through a
     local name bound to that call: that mapping's whole point is that `trust_env=False` is
@@ -1230,6 +1366,7 @@ def _httpx_client_constructions() -> list[tuple[str, int, bool]]:
     found: list[tuple[str, int, bool]] = []
     for path in sorted(src.rglob("*.py")):
         tree = ast.parse(path.read_text())
+        aliases, imported = _httpx_module_names(tree)
         bound = {
             target.id
             for node in ast.walk(tree)
@@ -1266,7 +1403,12 @@ def _httpx_client_constructions() -> list[tuple[str, int, bool]]:
                 continue
             func = node.func
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-            if name not in ("Client", "AsyncClient"):
+            qualified = (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id in aliases
+            ) or (isinstance(func, ast.Name) and func.id in imported)
+            if name not in ("Client", "AsyncClient") and not (name in _HTTPX_VERBS and qualified):
                 continue
             found.append(
                 (

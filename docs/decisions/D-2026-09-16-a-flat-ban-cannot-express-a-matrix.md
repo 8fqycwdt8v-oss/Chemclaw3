@@ -12,32 +12,55 @@ propose it again.
 
 ## What was measured
 
-The sibling's policy is a **flat list**: `no_egress.FORBIDDEN_MODULES`, fifteen network roots, banned
-everywhere, with two argued exemptions in `src/`. `TID253` expresses that exactly — one config block,
-one banned list, two `noqa`s carrying their reason at the import.
+The sibling's policy is a **flat list**: one set of network roots, banned everywhere, with two argued
+exemptions in `src/`. `TID253` expresses that exactly — one config block, one banned list, two
+`noqa`s carrying their reason at the import. How long that list is is deliberately not written here:
+it lives in `Chemclaw3-mcp`'s `mcp_server_kit.no_egress.FORBIDDEN_MODULES`, mirrored into that
+repository's own `banned-module-level-imports`, and this repository neither builds it nor watches it
+— the same reason `SERVED_ELSEWHERE_ALLOWANCE` exists rather than a transcribed token count. A first
+draft of this line said fifteen and the list held sixteen, which is that rule earning itself again.
 
-This repository's policy is a **matrix**. Measured on `tests/test_third_party_layering.py`:
+This repository's policy is a **matrix**, and the shape rather than any one figure is what decides
+this. Read off `tests/test_third_party_layering.py`, which is where the live numbers are:
 
-| | |
-| --- | --- |
-| third-party roots mapped to a stack | 32 |
-| distinct stacks | 15 |
-| declared `(package, stack)` edges | **51** |
-| first-party packages appearing in those rows | 15 |
+- `_STACKS` maps each third-party root to a stack — several dozen roots onto seventeen stacks.
+- `_ALLOWED_MODULE_STACKS` holds one row per `(first-party package, stack)` permitted at **module
+  scope**; `_ALLOWED_LAZY_STACKS` holds the rows permitted only at function scope. The two sets
+  overlap, so their union is smaller than their sum, and a cost argued against the union is argued
+  against a basis `TID253` cannot see.
+- Two first-party packages under `src/chemclaw/` appear in no row at all, which is the strongest
+  form the matrix takes: for them every mapped root is banned.
 
-`postgres` is reachable by 11 packages, `httpx` by 8, `langgraph` by 8, `rdkit` by 4 — and `units`,
-`token`, `ml`, `tokenizer` and `warehouse` by exactly one each. The rule is not "nobody imports X", it
-is "these eleven may import X and the other four may not".
+The distribution is the point. `postgres` is reachable by eleven packages and `langgraph` and `httpx`
+by eight, while `units`, `token`, `ml`, `tokenizer`, `warehouse` and `share` are reachable by exactly
+one each. The rule is never "nobody imports X"; it is "these eleven may import X and the rest may
+not", with a different eleven per stack.
 
 ## Why that cannot be a second belt here
 
-`TID253` bans globally and is narrowed by `per-file-ignores`. Expressing the matrix therefore means
-**51 glob rows restating the 51 declared edges**, in a different syntax, in a different file. That is
-precisely the shape `D-2026-09-13-the-rule-that-would-have-caught-it-was-not-the-one-asked-for`
+**The obvious objection is that the matrix is expensive to restate, and the real one is that it
+cannot be restated at all.** The first draft of this section said the belt would cost "51 glob rows
+restating the 51 declared edges", and both halves were wrong. The basis was wrong — `TID253` bans at
+module scope only, so what it could ever restate is `_ALLOWED_MODULE_STACKS` alone, not its union
+with the lazy rows. And the mechanism does not exist: ruff's `per-file-ignores` maps a glob to **rule
+codes**, and `TID253` is one code covering the entire banned list. Ignoring it for a path switches
+the whole ban off there — a package permitted `postgres` would be permitted every other banned root
+in the same breath. A per-`(package, stack)` exemption is not expressible in 51 rows, or in any
+number of them.
+
+The mechanism that *does* vary a banned list by path is ruff's hierarchical configuration — a nested
+`ruff.toml` per directory, `extend`-ing the root and restating the setting. Driven on this ruff to
+check rather than assume: it works. What it costs is the matrix **transposed into its complement**,
+because a nested config declares what that package may not import: one config file per first-party
+package under `src/chemclaw/`, each listing every mapped root minus that package's own stacks —
+measured against the tree this decision was taken on, an order of magnitude more entries than the
+dict they duplicate, spread over eighteen files instead of one.
+
+Either way it is the shape `D-2026-09-13-the-rule-that-would-have-caught-it-was-not-the-one-asked-for`
 refused for `S101`: *a second declaration of one rule with nothing reconciling the two*. It could be
-reconciled — a test comparing the ruff config against `_ALLOWED_MODULE_STACKS` in both directions —
-but then the belt costs a duplicated table **plus** the machinery that proves the duplicate is honest,
-to buy editor feedback.
+reconciled — a test generating the ruff configs from `_ALLOWED_MODULE_STACKS` and failing when they
+drift — but then the belt costs a duplicated table **plus** the machinery that proves the duplicate
+is honest, to buy editor feedback.
 
 And it would only ever be a *partial* belt, which is the argument that actually settles it. This
 policy distinguishes **three** import scopes deliberately — module, function (`_ALLOWED_LAZY_STACKS`)
@@ -47,12 +70,19 @@ states completely in one place.
 
 ## What is taken instead
 
-The half that genuinely was missing is **coverage of the roots themselves**, and it was missing three
-times in one week. An *unmapped* root is skipped by the walk entirely, so a package could import it
-freely and the policy would say nothing: `httpx_sse`, `pint` (with `flexparser` and `flexcache`) and
-`tiktoken` all entered this tree during this review and all three were invisible until they were
-mapped. Two of the three were mapped by the agent that introduced them only because the gap had just
-been found by the first.
+The half that genuinely was missing is **coverage of the roots themselves**. An *unmapped* root is
+skipped by the walk entirely, so a package could import it freely and the policy would say nothing.
+Five libraries entered this tree during this review — `httpx_sse`, `pint` (with `flexparser` and
+`flexcache`), `tiktoken`, `pathspec` and `charset_normalizer` — and every one of them was invisible
+to the policy until it was mapped.
+
+**Three were mapped and two were not, and the first version of this paragraph named only the three.**
+`pathspec` and `charset_normalizer` are module-scope imports in `ingest/documents/`, added by this
+same wave, absent from the map, and absent from the sentence whose subject is *a new root was never
+banned from anything* — the argument happening to its own record while it was being written down.
+Mapping them then turned up `scipy`, which no wave introduced: a root imported by three packages
+since long before this review and never mapped, so the blind spot stated for new roots was never
+only about new ones.
 
 That is the real failure mode — not "a banned import slipped through module scope", which the test
 already catches, but "a new root was never banned from anything". It is answered where the policy

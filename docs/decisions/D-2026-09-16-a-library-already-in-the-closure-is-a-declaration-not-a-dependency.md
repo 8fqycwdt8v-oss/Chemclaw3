@@ -5,11 +5,23 @@ library already does better? Most of the answers were no, and the tree said so i
 This records the ones where the answer was yes, and — more usefully — what each turned out to be once
 it was measured rather than proposed.
 
-The unifying property: **every library adopted here already resolved in `uv.lock`.** `httpx-sse` via
-`mcp`, `pathspec` via `mypy`, `charset-normalizer` via `requests`, `tiktoken` via `langchain-openai`.
-Adopting them added zero bytes to any image; what it cost was a declaration line, and this
-repository's rule that a directly-imported library is declared rather than left transitive is the
-whole of the change on the manifest side. `tiktoken` had already demonstrated why that rule exists:
+The unifying property is **resolved in `uv.lock` already**, and that is not the same property as
+*in the image* — which is the correction this paragraph needed, because its first draft claimed the
+second while the sentence beside it named the reason the second is false. `httpx-sse` (via `mcp`),
+`charset-normalizer` (via `requests`) and `tiktoken` (via `langchain-openai`) arrive through
+requirers that are themselves runtime dependencies, so adopting them cost a declaration line and
+nothing else. **`pathspec` did not.** Its only requirer in the lock is `mypy`, which lives in
+`[dependency-groups]`, and `deploy/Containerfile` installs `uv sync --frozen --no-dev` — so it was
+resolved and absent from every shipped image, and declaring it puts a wheel in one. The check is
+`uv export --frozen --no-dev`, which answers for whatever the lock says today; a figure transcribed
+here would not.
+
+Naming the requirer and then calling the adoption free, in two consecutive sentences of one commit,
+is `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` arriving a sentence earlier than usual
+— the claim was falsified by the line above it rather than by a later merge.
+
+What the declaration line itself buys is this repository's rule that a directly-imported library is
+declared rather than left transitive. `tiktoken` had already demonstrated why that rule exists:
 nothing here holds imports against the manifest, so a `langchain-openai` bump dropping it would have
 degraded the token budget to its estimator **in silence**, the fallback being by design never an
 error.
@@ -73,4 +85,8 @@ rather than leaving an unjustifiable argument in the call.
 - `tests/test_context_budget.py`, `tests/test_compaction.py` — the exact prefix and the refused thread
 - `tests/test_agent_observability_model.py`, `tests/test_message_pairing.py`
 - `tests/test_molfp.py::test_a_chiral_query_is_matched_the_way_the_loop_matched_it`
-- `tests/test_third_party_layering.py` — every new root mapped to a stack
+- `tests/test_third_party_layering.py` — every new root mapped to a stack. Cited here before it was
+  true: this wave added five roots and mapped three, so `pathspec` and `charset_normalizer` — real
+  module-scope imports in `ingest/documents/` — were skipped by the walk entirely while this line
+  read as their guard. Mapping them then exposed `scipy`, unmapped since long before this wave. The
+  citation stands now because the map was finished, not because it was right when it was written
