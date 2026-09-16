@@ -13,8 +13,10 @@ survives this.
 
 A durable `job` step is the one thing on the other side of that line, and it is withheld rather
 than refused: `templates/composed.unapproved_jobs` keeps it from running until the workflow's owner
-has approved *that version* of the document, on a front-door route, because a model must never
-authorize its own plan.
+has approved *that version* of the document — at whichever surface they are on, never through a
+tool, because a model must never authorize its own plan. The front door's route and the terminal's
+`/approve-workflow` are the two, and naming only the first was a real defect while it stood: a
+workflow is keyed on the ambient actor, so one composed at the terminal is a 404 at the route.
 
 Two tools and not three. A listing of one owner's workflows is the third thing the model needs and
 it rides on the refusal `run_composed_workflow` gives an unknown name, which names what does exist
@@ -151,8 +153,9 @@ async def compose_workflow(
     approve a plan in — ask for the change in the conversation, where a person can see it.
 
     **A durable job step is allowed and will not run until a person approves this workflow.** Say so
-    when you hand the name back: its owner approves it on the front door, and the approval covers
-    the steps exactly as they stand, so composing it again needs approving again. Two jobs that do
+    when you hand the name back: its owner approves it where they are — `/approve-workflow` at a
+    terminal, the workflow screen on the front door — and it covers the steps exactly as they
+    stand, so composing it again needs approving again. Two jobs that do
     not read each other are fine; one that waits for another will not fit, because a job's budget is
     most of the whole run's — split that into two workflows.
 
@@ -199,8 +202,13 @@ async def compose_workflow(
     store = default_composed_store()
     existing = await store.list_for(owner)
     if len(existing) >= MAX_PER_OWNER and not any(row.name == name for row in existing):
+        # **`MAX_PER_OWNER`, never `len(existing)`.** The store fetches one past the cap so the
+        # guard can tell a full page from a clamped one, which means `existing` can read 51 — and
+        # the message said "you already have 51 … which is the limit" over a limit of 50, quoting
+        # a number that is neither the count nor the cap. The names are the page, and the page is
+        # what `not any(...)` above resolved against, so both are stated as the page they are.
         raise ComposedWorkflowError(
-            f"you already have {len(existing)} composed workflows, which is the limit: "
+            f"you are at the limit of {MAX_PER_OWNER} composed workflows. The most recent are: "
             f"{sorted(row.name for row in existing)}. Re-compose one of them under its own name, "
             "or ask the chemist to forget one they no longer use."
         )
@@ -212,10 +220,11 @@ async def compose_workflow(
         # learn something that was knowable when they asked.
         return (
             f"Saved the {name!r} workflow, {len(document.steps)} steps — but it will not run yet. "
-            f"Step(s) {jobs} launch durable jobs, so its owner has to approve this version first "
-            "(on the front door; there is no tool for it, because a workflow may not approve "
-            "itself). Approving covers these steps exactly, so composing it again needs approving "
-            "again."
+            f"Step(s) {jobs} launch durable jobs, so its owner has to approve this version first. "
+            "There is no tool for that, because a workflow may not approve itself: they do it "
+            "where they are — `/approve-workflow` at the terminal, or the workflow screen on the "
+            "front door. Approving covers these steps exactly, so composing it again needs "
+            "approving again."
         )
     return (
         f"Saved the {name!r} workflow, {len(document.steps)} steps. "

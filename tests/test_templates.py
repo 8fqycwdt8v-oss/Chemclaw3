@@ -1488,27 +1488,141 @@ def test_a_wave_wider_than_the_deployment_runs_at_once_costs_more_than_one_step(
     assert f"at most {limit} at a time" in problems[0]
 
 
-def test_a_wave_is_dispatched_in_batches_of_the_bound_it_was_sized_with() -> None:
-    """The workflow enforces the width the ceiling assumed — otherwise the arithmetic is a wish.
+def test_a_wave_is_charged_what_its_batches_cost_and_not_its_slowest_step_per_batch() -> None:
+    """The cost model, which is the half a shared `limit` does not make shared.
 
-    `_batches` is the whole mechanism, and it is asserted directly because the alternative is a
-    Temporal environment per case. A fixed-size batch rather than a semaphore, for `fan_out`'s
-    reason: it does not depend on lock-acquisition order, so it is deterministic under replay.
+    Sizing a wave as `ceil(width / limit) x the whole wave's slowest member` charges the slow step
+    to every batch, including batches holding nothing slow — and that form passed every test here,
+    because the ones that existed used waves narrow enough to fit in one batch. Driven with a
+    document where the two disagree: one `job` step (39,330 s) beside eight `tool` steps (900 s)
+    is one wave of nine, two batches, so it costs 39,330 + 900 and not 2 x 39,330.
+
+    An over-stating bound is not the conservative choice it looks like: it refuses a procedure that
+    would have finished. This one fits its run ceiling with 4,200 s to spare and was refused by
+    34,230 s.
     """
-    from chemclaw.durable.template_job import _batches
+    limit = settings.orchestrator_max_parallel_children
+    one_job = settings.template_step_ceilings()["job"][0]
+    one_tool = settings.template_step_ceilings()["tool"][0]
+    steps: list[dict[str, Any]] = [{"id": "j0", "kind": "job", "job": "rank_species"}]
+    steps += [
+        {"id": f"t{index}", "kind": "tool", "tool": "enumerate_tautomers", "arguments": {}}
+        for index in range(limit)
+    ]
+    steps.append({"id": "say", "kind": "agent", "prompt": "sum it up: ${steps.j0.result}"})
+    template = _template(steps=steps)
+
+    # One wave of `limit + 1`, so exactly two batches: [job + limit-1 tools] then [one tool].
+    (wave, second) = schedule(template)
+    assert len(wave) == limit + 1 and len(second) == 1
+    charged = one_job + one_tool
+    assert charged + one_tool <= settings.template_run_timeout_seconds, (
+        "the fixture has to be a procedure that genuinely fits, or this asserts nothing"
+    )
+
+    assert run_ceiling_problems(template) == [], (
+        f"a wave costing {charged:,.0f}s must not be charged {2 * one_job:,.0f}s"
+    )
+
+
+def test_a_wave_is_split_into_batches_of_the_bound_it_was_sized_with() -> None:
+    """The split itself: declared order kept, nothing dropped, `0` meaning one batch.
+
+    A fixed-size batch rather than a semaphore, for `fan_out`'s reason: it does not depend on
+    lock-acquisition order, so it is deterministic under replay.
+    """
+    from chemclaw.templates.schedule import batches
 
     wave = tuple(range(9))
 
-    assert _batches(wave, 4) == ((0, 1, 2, 3), (4, 5, 6, 7), (8,))
-    assert [step for batch in _batches(wave, 4) for step in batch] == list(wave), (
+    assert batches(wave, 4) == ((0, 1, 2, 3), (4, 5, 6, 7), (8,))
+    assert [step for batch in batches(wave, 4) for step in batch] == list(wave), (
         "flattening the batches must reproduce the wave, or a step is dropped or reordered"
     )
     # `0` is what an input predating the field declares, and every archived history is pre-wave —
     # so it has to mean "one batch", which over a one-step wave is the sequential shape byte for
     # byte.
-    assert _batches(wave, 0) == (wave,)
-    assert _batches(wave, 99) == (wave,)
-    assert _batches((0,), 0) == ((0,),)
+    assert batches(wave, 0) == (wave,)
+    assert batches(wave, 99) == (wave,)
+    assert batches((0,), 0) == ((0,),)
+
+
+def test_the_run_dispatches_a_wave_in_batches_rather_than_all_at_once() -> None:
+    """**The enforcing half**, which was asserted nowhere while the checking half was.
+
+    `run_ceiling_problems` sizes a wave by the batches `_run_wave` will dispatch, so a `_run_wave`
+    that ignored the bound would make the whole arithmetic a wish. Driven: mutating the dispatch
+    loop to `for batch in (wave,)` — restoring the unbounded gather this exists to stop — left every
+    template, workflow-replay and composed-workflow test green, which is this repository's own
+    definition of a claim that a control exists.
+
+    Driven against `_run_wave` directly with an injected `_run_step`, because the alternative is a
+    Temporal environment per case and what is under test is the dispatch shape, not the broker.
+    """
+    from chemclaw.durable.template_activities import StepIdentity
+    from chemclaw.durable.template_job import TemplateWorkflow
+
+    in_flight = 0
+    high_water = 0
+
+    # `self` explicitly: patched onto the class, so the descriptor binds it as the first argument
+    # and a signature starting at `step` silently receives the workflow instead.
+    async def _step(_self: Any, step: Any, *_args: Any, **_kwargs: Any) -> str:
+        nonlocal in_flight, high_water
+        in_flight += 1
+        high_water = max(high_water, in_flight)
+        await asyncio.sleep(0)
+        in_flight -= 1
+        return f"ran-{step}"
+
+    workflow = TemplateWorkflow()
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(TemplateWorkflow, "_run_step", _step)
+        wave = tuple(f"s{index}" for index in range(9))
+        done = asyncio.run(
+            workflow._run_wave(
+                wave,
+                {},
+                StepIdentity(actor="tester", roles=[], correlation_id="wave-probe"),
+                timedelta(seconds=1),
+                "probe",
+                4,
+            )
+        )
+    finally:
+        monkey.undo()
+
+    assert high_water == 4, f"at most 4 may be in flight at once, saw {high_water}"
+    assert [step for step, _ in done] == list(wave), "results come back in the wave's own order"
+    assert [result for _, result in done] == [f"ran-{step}" for step in wave]
+
+
+def test_a_launch_pins_the_bound_the_ceiling_checked_it_against(client: _FakeClient) -> None:
+    """**The other enforcing half**: the run carries the number, it does not read it later.
+
+    Driven, because mutating `max_parallel_steps=settings.orchestrator_max_parallel_children` to
+    `0` — every run unbounded — left the template, composed-workflow and API suites green. A live
+    settings read inside workflow code would be nondeterministic on replay *and* would not be the
+    value `run_ceiling_problems` sized the launch with; pinning it is what makes them one number.
+    """
+    from chemclaw.templates.registry import build_template_tool
+
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(settings, "orchestrator_max_parallel_children", 3)
+        tool = build_template_tool(
+            _template(inputs=[{"name": "smiles", "type": "string", "description": "the molecule"}])
+        )
+        asyncio.run(tool(params={"smiles": "CCO"}))
+    finally:
+        monkey.undo()
+
+    (call,) = client.calls
+    assert call["input"].max_parallel_steps == 3, (
+        "the launch has to pin the deployment's bound into the run, or the ceiling sized it with a "
+        "number the run never sees"
+    )
 
 
 def test_one_job_step_still_fits_so_the_gate_is_not_simply_refusing_job_steps() -> None:

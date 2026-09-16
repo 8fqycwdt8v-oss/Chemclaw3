@@ -332,14 +332,20 @@ async def _repl(agent: Any, actor: str, saver: Any) -> None:
     is not what this docstring said, and D-2026-09-13 making the harness the default turned a
     harmless overstatement into one a reader would act on.
     """
+    # **Every operator command is named here, because there is no `/help`.** `/approve-workflow`
+    # is a two-step ritual — read the procedure, then type back the fingerprint it prints — and an
+    # operator who does not know it exists cannot discover it from a prompt that lists two of five.
     print(
-        "Chemclaw CLI — type a question, '/plan', '/approve', or 'exit' to quit.",
+        "Chemclaw CLI — type a question, or: /plan · /approve · /workflows · "
+        "/approve-workflow <name> [<fingerprint>] · /forget-workflow <name> · exit",
         file=sys.stderr,
     )
     # What the operator has typed at this prompt, in order — this CLI's stand-in for the session
-    # transcript the front door reads back. The two operator commands are not in it: `/plan` and
-    # `/approve` are instructions to the terminal rather than words said to the agent, and a
-    # `basis="stated"` slot quoting `'/approve'` would attribute a UI action to a chemist. Kept
+    # transcript the front door reads back. The operator commands are not in it — those named in
+    # the banner above, and a count is deliberately not repeated here, because the one that was
+    # said "two" over five. They are instructions to the terminal rather than words said to the
+    # agent, and a `basis="stated"` slot quoting `'/approve'` would attribute a UI action to a
+    # chemist. Kept
     # whole rather than trimmed here, because the window belongs to `core.turn_text` and a second
     # copy of a bound is a bound that can disagree with itself.
     said: list[str] = []
@@ -424,19 +430,34 @@ async def _workflow_command(prompt: str, actor: str) -> str:
         The lines to print on stderr.
     """
     from chemclaw.durable.template_job import template_fingerprint
-    from chemclaw.templates.composed import default_composed_store, job_steps, unapproved_jobs
+    from chemclaw.templates.composed import (
+        MAX_PER_OWNER,
+        default_composed_store,
+        job_steps,
+        unapproved_jobs,
+    )
 
     store = default_composed_store()
-    command, _, argument = prompt.partition(" ")
-    name, _, posted = argument.strip().partition(" ")
-    posted = posted.strip()
+    # Split on whitespace rather than on the first space twice over: `/approve-workflow x <fp> junk`
+    # used to arrive as a fingerprint of `"<fp> junk"` and be reported as *"the workflow changed
+    # since it was shown"*, diagnosing a change that never happened. A third word is a typo, and
+    # saying so is the honest answer.
+    command, *words = prompt.split()
     command = command.lower()
+    name = words[0] if words else ""
+    posted = words[1] if len(words) > 1 else ""
+    if len(words) > 2:
+        return f"usage: {command} <name> [<fingerprint>] — I do not know what {words[2]!r} means."
     if command == "/workflows":
         rows = await store.list_for(actor)
         if not rows:
             return "(no composed workflows)"
+        # Clamped here as well as in the store, and announced: `list_for` fetches one past
+        # `MAX_PER_OWNER` so a caller can tell a full page from a clamped one, and a listing that
+        # printed the spare row would report a clamped set as a complete one. That is the defect
+        # `GET /workflows` reports with `truncated`; a terminal reports it by saying so.
         lines = []
-        for row in rows:
+        for row in rows[:MAX_PER_OWNER]:
             jobs = job_steps(row.document)
             withheld = unapproved_jobs(
                 row.document, row.approved_fingerprint, template_fingerprint(row.document)
@@ -444,6 +465,11 @@ async def _workflow_command(prompt: str, actor: str) -> str:
             state = "needs approval" if withheld else "ready"
             detail = f", jobs: {jobs}" if jobs else ""
             lines.append(f"{row.name}  [{state}]  {len(row.document.steps)} step(s){detail}")
+        if len(rows) > MAX_PER_OWNER:
+            lines.append(
+                f"(showing the {MAX_PER_OWNER} most recent; you are over the limit, so "
+                "/forget-workflow one before composing another)"
+            )
         return "\n".join(lines)
     if not name:
         return f"usage: {command} <name>  (see /workflows)"

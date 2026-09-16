@@ -19,7 +19,7 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError, create_model
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
@@ -192,6 +192,12 @@ def _params_model(template: Template) -> type[BaseModel]:
     camel = "".join(part.capitalize() for part in template.name.replace("-", "_").split("_"))
     return create_model(
         f"{camel}Inputs",
+        # **`forbid`, because the silent direction here is a run that quietly does something else.**
+        # pydantic's default is `ignore`, so `solvant="MeCN"` for a declared `solvent` was
+        # accepted, dropped, and the procedure ran gas-phase — a misspelling of an *optional*
+        # input is invisible in a way a missing required one is not. The published schema names
+        # exactly these fields, so a caller sending anything else is already wrong.
+        __config__=ConfigDict(extra="forbid"),
         __doc__=f"Inputs for the {template.name!r} template.",
         **fields,
     )
@@ -372,10 +378,14 @@ async def start_template_run(
 
     **Validation belongs here too, and did not**, which is the same drift this extraction exists to
     stop. `build_template_tool.launch` validated against the template's own params model — the
-    D-138 fix — and `run_composed_workflow` called this with a raw dict, so a composed run accepted
-    an undeclared key verbatim and accepted a *missing required* one, failing on `${inputs.x}` deep
-    inside a durable run rather than at the launch `unrunnable_reason` exists to refuse. A check one
-    of two callers performs is a check this seam does not have.
+    D-138 fix — and `run_composed_workflow` called this with a raw dict, so a composed run carried
+    an undeclared key verbatim into the run's scope and accepted a *missing required* one, failing
+    on `${inputs.x}` deep inside a durable run rather than at the launch `unrunnable_reason` exists
+    to refuse. A check one of two callers performs is a check this seam does not have.
+
+    The params model is `extra="forbid"`, so a misspelled *optional* input is refused too. That is
+    the half a required-field check cannot reach: `solvant` for `solvent` was dropped in silence and
+    the procedure ran gas-phase.
 
     Args:
         template: The resolved template to run. Pinned into the workflow input, so an edit

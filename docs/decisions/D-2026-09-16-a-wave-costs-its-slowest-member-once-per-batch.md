@@ -9,8 +9,10 @@ request then built.
 
 Two behaviour changes shipped with no ADR at all, and the only merged decision that discusses them
 declines them — in a section headed "What this deliberately does not do", written two commits
-before the commits that did them. `docs/decisions/README.md`'s ledger row for that ADR likewise
-still says `run_ceiling_problems` *"sums a file's steps"*, which it stopped doing in the same PR.
+before the commits that did them. `docs/decisions/README.md`'s ledger row for that ADR said
+`run_ceiling_problems` *"sums a file's steps"*, which it stopped doing in the same PR, and is
+corrected here — a ledger row is not an ADR and is editable, so leaving it would have been a second
+false present tense rather than a respected immutability.
 A merged ADR is immutable here, so the remedy is this one.
 
 What actually shipped:
@@ -44,11 +46,22 @@ reaches this arithmetic with nobody having looked at it.
 
 **A wave is dispatched in batches, and its ceiling is its slowest member once per batch.**
 
-`_batches(wave, limit)` splits a wave into runs of at most `limit` steps in declared order, and
-`run_ceiling_problems` sizes a wave as `ceil(width / limit)` slow steps. The two use the same
-number, which is the point: `orchestrator_max_parallel_children` is pinned into
-`TemplateRunInput.max_parallel_steps` at launch, so the bound the run *enforces* and the bound the
-launch was *checked against* cannot be two numbers.
+`templates/schedule.batches(wave, limit)` splits a wave into runs of at most `limit` steps in
+declared order. `TemplateWorkflow._run_wave` dispatches those batches; `run_ceiling_problems` sizes
+the wave as `sum(max(batch) for batch in batches(wave, limit))`. **One function, read by both**, and
+the limit is `orchestrator_max_parallel_children` pinned into `TemplateRunInput.max_parallel_steps`
+at launch — so the bound the run *enforces* and the bound the launch was *checked against* cannot be
+two numbers.
+
+**The cost model is part of that, and the first attempt got it wrong.** It charged
+`ceil(width / limit) x the whole wave's slowest member`, which shares the limit and not the model:
+the slow step is charged to every batch, including batches holding nothing slow. Measured — one
+39,330 s `job` step beside eight 900 s `tool` steps is a 40,230 s wave charged at 78,660 s, so a
+procedure with 4,200 s of headroom is refused by 34,230 s. That is exactly the over-stating bound
+this arithmetic exists to avoid, reintroduced by the commit that was fixing it, and at
+`orchestrator_max_parallel_children=1` — a legal value — it refused a three-step composed workflow
+that fits. `batches` lives in `templates/schedule.py` rather than beside the dispatcher so that
+re-deriving it is not something a reader has to do.
 
 - **A batch and not a semaphore**, the reason `durable/orchestrator.fan_out` gives for the same
   choice: a fixed-size batch does not depend on lock-acquisition order, so it is deterministic
@@ -58,9 +71,12 @@ launch was *checked against* cannot be two numbers.
   is what an input predating the field declares, and every archived history is pre-wave: its waves
   are one step wide, so an unbounded gather over one step is the sequential shape byte for byte.
   No new patch marker is needed for the same reason.
-- **No `MAX_COMPOSED_STEPS`.** With the arithmetic honest, the run ceiling already bounds both
-  width and length, and a second number with its own argument would be a magic one. A wave wider
-  than `ceil(width / limit)` slow steps can fit is refused by the bound that was already there.
+- **No `MAX_COMPOSED_STEPS`.** With the arithmetic honest, the run ceiling bounds both width and
+  length, and a second number with its own argument would be a magic one. What that bound actually
+  is, measured by binary search at the shipped defaults: **400** `tool` steps in one wave
+  (`ceil(400 / 8) x 900 = 45,000 <= 45,330`), or 50 chained ones. Stated rather than left as "the
+  ceiling handles it", because 400 is a real number and somebody may decide it is too high — that
+  would be a new decision about `template_run_timeout_seconds`, not a second cap.
 
 ## The refusal message
 
@@ -77,8 +93,10 @@ printed terms up and compares them to the printed total, rather than asserting a
 
 - All nine shipped templates are unaffected: the two with a concurrent wave have width 2, and
   `ceil(2 / 8) = 1`.
-- A composed document whose fan-out no deployment could run in one batch is refused at compose time
-  and at launch, by the ceiling that already existed, with a message naming the width.
+- A composed document whose fan-out cannot finish is refused at compose time and at launch, by the
+  ceiling that already existed, with a message naming the width and the batch count. It names the
+  first four members and then the width: listing all of them made the ADR's own 501-step example a
+  6,435-character refusal with 502 `=` terms in which the number 501 never appeared.
 - `docs/planning/BACKLOG.md`'s row for the resume path is deleted in this commit, as the rule for
   that file requires; it was closed by `d08f770` two commits after it was written and outlived its
   closure by a PR.

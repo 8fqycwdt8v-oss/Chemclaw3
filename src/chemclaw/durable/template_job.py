@@ -53,7 +53,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from chemclaw.templates.manifest import AgentStep, JobStep, Template, ToolStep
     from chemclaw.templates.resolve import resolve
-    from chemclaw.templates.schedule import schedule
+    from chemclaw.templates.schedule import batches, schedule
 
 from chemclaw.core.ids import stable_hash
 from chemclaw.durable.publish import (
@@ -119,32 +119,6 @@ class _StepFailed(Exception):
         super().__init__(f"template step {getattr(step, 'id', '?')!r} failed")
         self.step = step
         self.cause = cause
-
-
-def _batches(wave: tuple[Any, ...], limit: int) -> tuple[tuple[Any, ...], ...]:
-    """One wave split into runs of at most `limit` steps, in declared order.
-
-    **A fixed-size batch rather than a semaphore**, the reason `durable/orchestrator.fan_out` gives
-    for the same choice: a batch is deterministic under Temporal's replay because it does not depend
-    on lock-acquisition order, and it bounds concurrency just the same.
-
-    The bound is not throughput management. A wave of 501 independent steps passed
-    `run_ceiling_problems` because a wave was sized at *one* slow step — arithmetic that is only
-    true if every member really is in flight together, which no worker promises. Bounding the width
-    here is what makes `ceil(width / limit)` an honest cost rather than an optimistic one, and an
-    agent-authored document is the surface that can reach a wave no reviewer ever looked at.
-
-    Args:
-        wave: The steps to run together, in the file's order.
-        limit: The most that may be in flight at once. `0` — or a limit no narrower than the wave —
-            means one batch, which is the unbounded gather this replaced.
-
-    Returns:
-        The batches, in declared order; flattening them reproduces `wave` exactly.
-    """
-    if limit < 1 or limit >= len(wave):
-        return (wave,)
-    return tuple(wave[index : index + limit] for index in range(0, len(wave), limit))
 
 
 # On the light queue: the sequencer only substitutes references and dispatches. Whatever
@@ -611,8 +585,9 @@ class TemplateWorkflow:
             identity: Who the run acts for.
             timeout: One step's `start_to_close` budget.
             template: The run's template name, for the prompt-truncation label.
-            limit: How many steps may be in flight at once; `0` for no bound. See `_batches`, and
-                `TemplateRunInput.max_parallel_steps` for why the number is pinned, not read.
+            limit: How many steps may be in flight at once; `0` for no bound. See
+                `templates/schedule.batches`, and `TemplateRunInput.max_parallel_steps` for why the
+                number is pinned rather than read.
 
         Returns:
             `(step, result)` for each step, in the wave's declared order.
@@ -625,11 +600,20 @@ class TemplateWorkflow:
             step = wave[0]
             try:
                 return [(step, await self._run_step(step, scope, identity, timeout, template))]
+            except asyncio.CancelledError:
+                # **Re-raised, not wrapped**, which is what the paragraph above says and what this
+                # branch did not do. `except BaseException` caught it too, so a cancelled run of a
+                # chained template — seven of the nine shipped ones, and every pre-marker history by
+                # construction — was recorded by `failed_template_record` and announced to the
+                # chemist as having failed at a named step. The wide branch below already got this
+                # right, so the two halves of one function disagreed about whether cancellation is
+                # a failure.
+                raise
             except BaseException as exc:
                 raise _StepFailed(step, exc) from exc
 
         done: list[tuple[Any, Any]] = []
-        for batch in _batches(wave, limit):
+        for batch in batches(wave, limit):
             settled = await asyncio.gather(
                 *(self._run_step(step, scope, identity, timeout, template) for step in batch),
                 return_exceptions=True,

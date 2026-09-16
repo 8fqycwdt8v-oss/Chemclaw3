@@ -233,8 +233,10 @@ def unapproved_jobs(template: Template, approved_fingerprint: str, fingerprint: 
         return []
     return [
         f"it launches the durable job(s) at step(s) {jobs}, and a job costs real compute on a "
-        "procedure nobody has reviewed. Ask the chemist who owns this workflow to approve it — "
-        "`POST /workflows/{name}/approval` on the front door, which only a person can call — and "
+        "procedure nobody has reviewed. Ask the chemist who owns this workflow to approve it, at "
+        "whichever surface they are on — `/approve-workflow <name>` at a terminal, "
+        "`POST /workflows/{name}/approval` on the front door; both are a person's and neither is "
+        "a tool — and "
         + (
             "it will run then."
             if not approved_fingerprint
@@ -328,8 +330,16 @@ class InMemoryComposedStore:
         return self._rows.get((owner, name))
 
     async def list_for(self, owner: str) -> Sequence[ComposedWorkflow]:
-        """This owner's workflows, most recently saved first."""
-        return [self._rows[key] for key in self._order if key[0] == owner]
+        """This owner's workflows, most recently saved first, clamped one past `MAX_PER_OWNER`.
+
+        The same page the SQL backend's `LIMIT` gives, because every caller of this is written
+        against one page size: `compose_workflow`'s cap guard counts what it returns, and the two
+        listings clamp what they print. Unclamped here, a dev deployment and a Postgres one
+        answered differently — which is the divergence `save` was aligned for, in the one direction
+        where the weaker deployment is the one a CLI runs.
+        """
+        mine = [self._rows[key] for key in self._order if key[0] == owner]
+        return mine[: MAX_PER_OWNER + 1]
 
     async def forget(self, owner: str, name: str) -> bool:
         """Drop one workflow, answering False when this owner has no such name."""
