@@ -42,7 +42,6 @@ from chemclaw.core.identity_context import (
     set_current_identity,
 )
 from chemclaw.core.metrics import METRICS
-from chemclaw.ingest.documents import crawl as crawl_module
 from chemclaw.ingest.documents import retriever as retriever_module
 from chemclaw.ingest.documents import sync as sync_module
 from chemclaw.ingest.documents.binding import DocumentShareError, load_binding
@@ -1697,8 +1696,8 @@ def test_an_excluded_directory_is_never_listed_at_all(
         listed.append(str(path))
         return real_scandir(path)
 
-    # Patched through the module rather than `crawl_module.os`: mypy refuses the attribute on
-    # a module that does not re-export `os`, and the string form patches the same object.
+    # Patched by dotted path rather than through an imported module object: `crawl` does not
+    # re-export `os`, so mypy refuses the attribute form under `make type`. Same object.
     monkeypatch.setattr("chemclaw.ingest.documents.crawl.os.scandir", recording)
 
     binding = load_binding(
