@@ -174,21 +174,35 @@ mcpFace:
 
 workers:
   background:
-    # Keep at 1 — but no longer for the checkout lock. That reason is closed: submissions to one
-    # remote are serialized across pods by a Postgres advisory lock
-    # (`kg/git_writer.py::_cluster_lock`), and the host-local `flock` now only guards this pod's
-    # own worktree sweep.
+    # Keep at 1 — and **the reason is now that nobody has driven two, not that two are known to
+    # break.** Saying which of those it is matters, because the two read identically in a values
+    # file and only one of them is a defect somebody can go and close.
     #
-    # The reason that is still live is `NoteReindexWorkflow`
-    # (`D-2026-08-27-what-a-second-background-worker-would-race-on`): the reindex retires
-    # `note_index` rows for every note missing from *this pod's* knowledge checkout, and that
-    # checkout is an emptyDir refreshed by the pod's own sidecar every
-    # `knowledge.sync.intervalSeconds`. Two pods are two views of the corpus, so a freshly merged
-    # note is indexed by one and retired by the other, alternating, while each run logs that it
-    # retired a note that exists. Nothing else on this queue needs the pin: the periodic jobs are
-    # Temporal Schedules under `SKIP` (server-enforced, so worker count is irrelevant to them), the
-    # ELN cursor has exactly one writer, retention re-checks every predicate inside its own DELETE,
-    # and the result outbox claims rows with `FOR UPDATE SKIP LOCKED`.
+    # Both reasons this comment used to give are closed. The D-069 checkout lock: submissions to one
+    # remote are serialized across pods by a Postgres advisory lock
+    # (`kg/git_writer.py::_cluster_lock`), and the host-local `flock` only guards this pod's own
+    # worktree sweep, which is per-pod by construction. And `NoteReindexWorkflow`'s disagreement
+    # about the corpus (`D-2026-08-27-what-a-second-background-worker-would-race-on`), in both its
+    # halves: a prune is bounded by the corpus revision a row was built from
+    # (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`), and a note's fingerprint is
+    # a hash of its bytes rather than the mtime its own checkout wrote
+    # (`D-2026-09-16-a-fingerprint-that-names-a-checkout-is-not-a-fingerprint-of-a-note`), so two
+    # pods holding one commit now agree about every note — driven over two real clones against one
+    # index, where every note was re-embedded on every pass before and none is now. The rate was
+    # one endpoint call per note per pass, so what it cost a release was that release's own corpus
+    # size; the probe's corpus is this repository's 40 notes and is not a figure to read as yours.
+    #
+    # What is left is an *unmeasured* claim rather than a known race. The rest of this queue —
+    # periodic jobs as Temporal Schedules under `SKIP` (server-enforced, so worker count cannot
+    # reach them), one writer on the ELN cursor, retention re-checking every predicate inside its
+    # own DELETE, the result outbox claiming rows with `FOR UPDATE SKIP LOCKED` — is an argument
+    # that has never been run with two workers polling. It is a good argument and it is not
+    # evidence, which is the distinction this repository keeps having to relearn. `BACKLOG.md`
+    # carries what to drive before this becomes a 2.
+    #
+    # Note that `strategy: Recreate` in `deployment-workers.yaml` does **not** relax with this: its
+    # second justification — one code version replays any unfinished history — is independent of
+    # the replica count and still live.
     replicas: 1
 
 # A classical SMB/CIFS file share, mounted read-only on the background worker so its documents can

@@ -1633,14 +1633,23 @@ def test_the_singleton_worker_is_a_singleton_across_a_rollout_too() -> None:
     one is told to stop, and the old one then has up to its `terminationGracePeriodSeconds` (150) to
     finish. Two background workers poll `background-jobs` for that whole window.
 
-    That is exactly the interleaving `values.yaml` and
-    `D-2026-08-27-what-a-second-background-worker-would-race-on` pin the replica count to prevent.
-    `NoteReindexWorkflow` retires `note_index` rows for notes missing from *this pod's* knowledge
-    checkout — an `emptyDir` its own sidecar refreshes on an interval — so during the overlap the
-    new pod's clone is fresh and the old pod's is up to an interval stale, and a merge-webhook
-    reindex landing on the old one deletes the freshly merged notes' rows while logging that it
-    retired notes that exist. The ADR's "one pod's clone only ever moves forward" is true at steady
-    state and false during a rollout, which is the gap this closes.
+    **The reason this test was written is gone, and it is kept for the other one.** It was the
+    corpus interleaving `D-2026-08-27-what-a-second-background-worker-would-race-on` named: during
+    the overlap the new pod's clone is fresh and the old pod's is up to a sidecar interval stale, so
+    a reindex landing on the old one retired the freshly merged notes' rows and then re-embedded
+    everything on the way back. Both halves are closed — the prune is bounded by the corpus revision
+    a row was built from (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`) and the
+    fingerprint is a hash of the note's bytes rather than of the mtime its own checkout wrote
+    (`D-2026-09-16-a-fingerprint-that-names-a-checkout-is-not-a-fingerprint-of-a-note`), so two pods
+    holding one commit now agree about every note.
+
+    What still needs `Recreate` is replay: with no overlap every unfinished run on
+    `background-jobs` is resumed by exactly one code version, so the new image must be able to
+    replay the histories the old one wrote
+    (`D-2026-09-09-a-replay-control-needs-an-archived-history-not-a-patch`). That justification
+    never depended on the replica count, which is why this assertion outlives the race it was
+    written for — and why the premise assertion below is about `replicas` being *readable* rather
+    than about it still being the reason.
 
     `Recreate` rather than `maxSurge: 0`: a singleton worker has no availability to protect —
     Temporal redelivers an activity whose worker vanished — so the honest statement is that the old
@@ -1648,7 +1657,8 @@ def test_the_singleton_worker_is_a_singleton_across_a_rollout_too() -> None:
     """
     text = (CHART / "templates" / "deployment-workers.yaml").read_text()
     assert _values()["workers"]["background"]["replicas"] == 1, (
-        "the background worker is no longer pinned to one replica; this test's premise is gone"
+        "the background worker is no longer pinned to one replica — which is allowed now that the "
+        "corpus race is closed, but `Recreate` below then has to be re-argued for replay alone"
     )
     strategy = re.search(r"^  strategy:\n\s+type: (\w+)", text, flags=re.MULTILINE)
     assert strategy and strategy.group(1) == "Recreate", (

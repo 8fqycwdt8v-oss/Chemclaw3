@@ -590,50 +590,32 @@ topic).
       Anchors: `Makefile::ci`, `.github/dependabot.yml`,
       `tests/test_deploy_chart.py::test_every_declared_ecosystem_is_audited_or_accepted`.
 
-- [ ] **Two pods sharing one note index re-embed the whole corpus on every alternating pass** —
-      [M], measured 2026-09-14 while closing the prune half
-      (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`), and it is the *larger* of
-      the two defects that row described as one. `note_file_fingerprints` is `mtime_ns:size`, and
-      two clones of one commit carry different mtimes — git sets a file's mtime when it writes it —
-      so a note that has not changed reads as changed to whichever pod did not index it last.
-      Driven over two real clones against one index: pod B's pass re-embedded 2 of 2 notes it had
-      already seen, and pod A's next pass re-embedded 3 of 3. That is one endpoint call per note per
-      pass, for ever, which is precisely what `D-2026-08-02-embed-only-what-changed` exists to
-      prevent — it prevents it for one pod and for no more than one.
-      The fix is a content-derived fingerprint (a hash of the file's bytes), and it supersedes that
-      ADR's stat-only argument rather than extending it: a hash costs one read per note per scan
-      where a `stat` costs none, which is the trade D-2026-08-02 declined when the alternative was
-      an embedding call. It is now the cheaper side of the same trade. Anchors:
-      `kg/graph.py::note_file_fingerprints`, `retrieval/vector_index.py::_needs_embedding`.
-      Until it lands, `workers.background.replicas` stays 1 — the retirement half no longer gates
-      it, this half does.
-- [ ] **A second background worker would diverge on its corpus view, not on its writes** — [M].
-      `poddisruptionbudget.yaml` covers the front door alone and argues that correctly in the
-      template: `minAvailable: 1` over a one-replica Deployment makes the pod un-evictable and
-      blocks every node drain forever, which is worse than no policy. That half stands
-      (`deploy/helm/chemclaw/templates/poddisruptionbudget.yaml`).
+- [ ] **Nothing has ever run two background workers against one `background-jobs` queue** — [M].
+      `workers.background.replicas` is still 1, and as of
+      `D-2026-09-16-a-fingerprint-that-names-a-checkout-is-not-a-fingerprint-of-a-note` the reason
+      is that **nobody has driven two**, not that two are known to break. Every reason previously
+      written down is closed: the D-069 checkout lock became a Postgres advisory lock
+      (`kg/git_writer.py::_cluster_lock`), the reindex's *retirement* half became revision-bounded
+      (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`), and its *re-embedding*
+      half became a content hash — two clones of one commit now agree about every note, driven,
+      40 of 40 re-embedded per pass before and 0 after.
+      What is left is an argument nobody has run: `values.yaml` claims the rest of this queue is
+      indifferent to the worker count because the periodic jobs are Temporal Schedules under `SKIP`,
+      the ELN cursor has one writer, retention re-checks every predicate inside its own `DELETE`,
+      and the result outbox claims rows with `FOR UPDATE SKIP LOCKED`. Each is plausible and none
+      has been observed with two workers polling. **What would close this is a lane, not a reading**:
+      two workers on one broker against one database, driving each of those four, and an assertion
+      about what each one did rather than about whether it raised. It needs the live Temporal edge
+      that is open elsewhere in this file, which is why it is not a `[S]`.
+      Note that `strategy: Recreate` does not ride on this: its replay justification
+      (`D-2026-09-09-a-replay-control-needs-an-archived-history-not-a-patch`) is independent of the
+      replica count. Anchors: `deploy/helm/chemclaw/values.yaml`,
+      `deploy/helm/chemclaw/templates/deployment-workers.yaml`,
+      `tests/test_deploy_chart.py::test_the_singleton_worker_is_a_singleton_across_a_rollout_too`.
 
-      **The prescription this row used to carry is spent, checked 2026-09-15.** It said "what it
-      needs is a distributed checkout lock so a second replica is safe" — and that lock shipped:
-      `kg/git_writer.py:574`'s `_cluster_lock` is a Postgres advisory lock serialising submissions
-      to one remote across pods, `values.yaml:177-192` says in as many words that this reason is
-      closed, and `tests/test_datapath_review_db.py::test_the_submit_lock_names_the_thing_it_holds_a_connection_for`
-      holds it. Somebody working the row as written would build a lock that exists. Of the three
-      races it named, two are likewise closed by the chart's own note: the periodic jobs are
-      Temporal Schedules under `SKIP`, the ELN cursor has exactly one writer, retention re-checks
-      every predicate inside its own `DELETE`, and the result outbox claims rows with
-      `FOR UPDATE SKIP LOCKED`.
+---
 
-      **What is actually left is `NoteReindexWorkflow`, and its blocker is a corpus view rather
-      than a lock** (`D-2026-08-27-what-a-second-background-worker-would-race-on`). Two pods hold
-      independent emptyDir knowledge checkouts, so they can disagree about what the corpus *is*
-      while neither writes anything the other conflicts with — which is the same root as the
-      `note_file_fingerprints` row below, where the fingerprint is `mtime_ns:size`
-      (`kg/graph.py:230`) and a fresh checkout changes it for every unchanged file. Work the two
-      together or not at all.
-      **Anchors:** `src/chemclaw/kg/graph.py`, `deploy/helm/chemclaw/values.yaml`,
-      `deploy/helm/chemclaw/templates/poddisruptionbudget.yaml`.
-
+## 5 — Where the field moved past us
 - [ ] **`GET /check-ins` is served and no surface reads it** — [S], `Chemclaw3_ui`. `D-2026-09-15-the-requester-hears-nothing-until-it-is-too-late` added the sweep that tells a requester which of their own questions are still waiting, and the route that serves the mailbox it writes (`api/routes/streams.read_check_ins`, claiming `CHECK_IN_KIND`). The UI has no card for it, so with `CHECK_IN_ENABLED` set a deployment sees check-ins only through a configured outbound channel — and `CHEMCLAW_DELIVERY_CHANNELS` is empty in every shipped deployment. **This is not the `/schedules` case**, which the BFF refuses by name as operator surface a chemist has no business reaching (`D-2026-09-14-two-gaps-the-code-had-already-argued-shut`): a check-in is addressed to the chemist. The shape is `/digests`' `/review` card one kind over, and the response model is `CheckInOut`. Own PR against `Chemclaw3_ui`.
 
 Filed by the 2026-08-25 field benchmark — see
