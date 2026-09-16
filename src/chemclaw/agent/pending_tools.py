@@ -15,19 +15,15 @@ audit trail would record a human's question answered by nobody.
 from typing import Literal
 
 from pydantic import BaseModel, Field, computed_field
-from temporalio.common import WorkflowIDReusePolicy
-from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from chemclaw.agent.authz import authorize_trigger, require_actor
 from chemclaw.agent.framing import defang
-from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.session_context import get_current_session_id
-from chemclaw.core.temporal_client import connect
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_signals import record_job_started
 from chemclaw.durable import pending_store
-from chemclaw.durable.awaiting import AwaitAnswerWorkflow, AwaitRequest, request_id_for
+from chemclaw.durable.awaiting import AwaitRequest, open_wait
 from chemclaw.kg.premise import count_refusals, premise_breaks
 
 #: The kinds a *chemist-facing* ask may take. Narrower than `awaiting.KINDS`, which also carries
@@ -110,29 +106,19 @@ async def request_external_input(
             "usefully: " + "; ".join(item.describe() for item in broken) + ". Re-read the current "
             "evidence and ask again on what it says."
         )
-    request_id = request_id_for(request)
-    client = await connect()
-    try:
-        handle = await client.start_workflow(
-            AwaitAnswerWorkflow.run,
-            request.model_dump(mode="json"),
-            id=request_id,
-            task_queue=settings.background_task_queue,
-            # **The policy the deleted D-032 hold was missing.** `D-2026-08-25` recorded that a
-            # decided hold could be restarted under the same id because no policy was set. Neither
-            # obvious answer works: an *expired* wait completes normally, so both
-            # `REJECT_DUPLICATE` and `ALLOW_DUPLICATE_FAILED_ONLY` would make a lapsed question
-            # unaskable forever. `ALLOW_DUPLICATE` is correct here precisely because expiry is an
-            # ordinary ending — asking again after a deadline passed is a new ask — while the
-            # `WorkflowAlreadyStartedError` below still joins a *running* one.
-            id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
-        )
-    except WorkflowAlreadyStartedError:
+    # **The launch itself is `durable/awaiting.py`'s**, including the reuse policy this call site
+    # used to argue for in ten lines of comment: the id, the policy and the already-started catch
+    # are one decision with two callers now (the runner escalates an exhausted review the same
+    # way), and a second copy is how the two would come to disagree about what joins what. What
+    # stays here is what is this tool's own — the authorization, the premise refusal above, and the
+    # launch announcement below.
+    request_id, opened = await open_wait(request)
+    if not opened:
         # The same question is already open. Hand back its id rather than opening a second wait,
         # and announce nothing: this run already existed, so a start signal would be false.
         return request_id
-    record_job_started(handle.id, "awaiting")
-    return handle.id
+    record_job_started(request_id, "awaiting")
+    return request_id
 
 
 class PendingOverview(BaseModel):

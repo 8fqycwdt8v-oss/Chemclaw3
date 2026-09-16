@@ -112,10 +112,12 @@ def test_plan_covers_all_periodic_jobs() -> None:
     `test_a_watch_says_so_when_nothing_will_evaluate_it` is what holds the tool honest when it
     does; with no subscribers the run is one indexed read.
 
-    The fourth is the check-in, on by the same argument one step further along. `durable/awaiting.py`
-    re-notifies `asked_of` and writes to the *requester* exactly once, on expiry — so at
-    `awaiting_max_days = 90` a chemist can hear nothing about their own suspended campaign for three
-    months and then hear it failed. It shipped off because the sweep wrote to a mailbox with no
+    The fourth is the check-in, on by the same argument one step further along.
+    `durable/awaiting.py` re-notifies `asked_of` and writes to the *requester* exactly once, on
+    expiry — so at
+    `awaiting_max_days = 90` a chemist can hear nothing about their own suspended campaign for
+    three months and then hear it failed. It shipped off because the sweep wrote to a mailbox with
+    no
     reader and grew without bound; `GET /check-ins` is the reader, and the sweep now supersedes a
     requester's unread notice instead of adding to it, so both halves of that objection are spent.
     A deployment may still turn it off, and `tests/test_check_in.py`'s

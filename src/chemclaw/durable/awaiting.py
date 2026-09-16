@@ -47,12 +47,14 @@ from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 from temporalio import activity, workflow
-from temporalio.exceptions import ActivityError
+from temporalio.common import WorkflowIDReusePolicy
+from temporalio.exceptions import ActivityError, WorkflowAlreadyStartedError
 from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.ids import stable_hash
+    from chemclaw.core.temporal_client import connect
     from chemclaw.durable import pending_store
     from chemclaw.durable.deliver_message import OutboundMessage, deliver_best_effort
     from chemclaw.durable.notify import notify_session_best_effort
@@ -160,6 +162,57 @@ def request_id_for(request: AwaitRequest) -> str:
     return "await-" + stable_hash(
         {"kind": request.kind, "subject": request.subject, "asked_of": request.asked_of}
     )
+
+
+async def open_wait(request: AwaitRequest) -> tuple[str, bool]:
+    """Open the wait this question describes, or join the one already open for it.
+
+    **The launch idiom, once, in the layer that owns it.** Starting a wait from *outside* a
+    workflow is three coupled decisions — the deterministic id, the reuse policy, and the
+    already-started catch — and `tests/test_third_party_layering.py` records what happens when
+    each caller derives them itself: four copies of `temporalio` inside layers that are not
+    Temporal, filed as debt rather than design. There are exactly two callers here (the model's
+    `request_external_input` and the runner's review escalation, which reach for the same three
+    decisions and must not disagree about them), which is what makes this a shared function rather
+    than a premature one.
+
+    **`ALLOW_DUPLICATE` is the policy and it is not the obvious one.** A wait that nobody answers
+    *expires*, and expiry completes the workflow normally — so `REJECT_DUPLICATE` and
+    `ALLOW_DUPLICATE_FAILED_ONLY` would both make a lapsed question unaskable forever, which is why
+    the shared `start_job()` the backlog wants could not simply adopt `durable_tools`'. Asking
+    again after a deadline has passed is a new question; asking again while the first is still
+    open is the same one, and `WorkflowAlreadyStartedError` is what joins it.
+
+    Passed as it is stated rather than relying on the SDK's default, which is the same value: a
+    policy this function's whole docstring argues for should be visible at the call it governs.
+
+    Args:
+        request: The question to hold open. Its `subject`, `kind` and `asked_of` decide what joins
+            what, through `request_id_for`.
+
+    Returns:
+        The wait's id, and whether *this* call is what opened it. A caller announces a launch only
+        on `True`: a run that already existed did not start here, and saying it did would put a
+        second start notice in front of whoever is already being asked.
+
+    Raises:
+        Whatever the broker raises. Deliberately not swallowed here: the model-facing tool turns a
+        failure into a refusal it can report, and the runner's escalation degrades and ships the
+        answer anyway — two different right answers, and a swallow here would take both away.
+    """
+    request_id = request_id_for(request)
+    client = await connect()
+    try:
+        await client.start_workflow(
+            AwaitAnswerWorkflow.run,
+            request.model_dump(mode="json"),
+            id=request_id,
+            task_queue=settings.background_task_queue,
+            id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+        )
+    except WorkflowAlreadyStartedError:
+        return request_id, False
+    return request_id, True
 
 
 def _awaiting_message(request: AwaitRequest, payload: dict[str, Any]) -> OutboundMessage:

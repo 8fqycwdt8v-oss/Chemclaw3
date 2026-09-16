@@ -336,17 +336,12 @@ _KNOWN_LEAKS: dict[Site, str] = {
         "durable state lives here' is false for exactly that reason. The fix is one `start_job()` "
         "in `durable/`, which D-2026-08-08-an-outage-is-not-a-missing-job showed cannot be a "
         "single shared reuse policy: 'closed with a decision' and 'closed without one' need "
-        "different ones, and an earlier attempt to unify them had to be reverted. Tracked in "
-        "BACKLOG.md; until the helper exists this edge is debt, not design"
-    ),
-    ("src/chemclaw/agent/pending_tools.py", "temporal"): (
-        "the fourth instance of the same leak, and it arrived for the same reason: raising a "
-        "durable wait needs the launch idiom — a workflow id, a reuse policy, and the "
-        "already-started catch — and there is still no `start_job()` in `durable/` to call. The "
-        "reuse policy here is not the one `durable_tools.py` uses and could not be: a wait that "
-        "expires *completes*, so both `REJECT_DUPLICATE` and `ALLOW_DUPLICATE_FAILED_ONLY` would "
-        "make a lapsed question unaskable forever, which is the third distinct policy the shared "
-        "helper would have to carry. Debt on the same BACKLOG row, not design"
+        "different ones, and an earlier attempt to unify them had to be reverted. The *wait* half "
+        "of that helper now exists — `durable/awaiting.open_wait`, which is why "
+        "`agent/pending_tools.py` no longer has a row here and why the runner's review escalation "
+        "never needed one — and it carries a third policy again rather than this one's, since a "
+        "wait that expires *completes* and only `ALLOW_DUPLICATE` leaves a lapsed question "
+        "askable. Tracked in BACKLOG.md; until the job half exists this edge is debt, not design"
     ),
     ("src/chemclaw/templates/registry.py", "temporal"): (
         "the last copy of the launch idiom. `templates/` is core's own sequencer, so starting a "
