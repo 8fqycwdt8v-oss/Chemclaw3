@@ -143,21 +143,17 @@ def test_a_refusal_is_part_of_the_record_rather_than_a_fault() -> None:
     asyncio.run(_clear())
 
 
-def test_an_empty_pack_says_so_rather_than_reading_as_nothing_happened() -> None:
+async def test_an_empty_pack_says_so_rather_than_reading_as_nothing_happened() -> None:
     """The one thing a caller must check before presenting a pack.
 
     An empty pack is a statement about the *record* — a window outside retention reads identically
     to a session in which nothing was done — which is the same distinction `Coverage` exists to
     make one module over.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        pack = await assemble("pack-test-session-that-never-existed")
-        assert pack.is_empty
-        assert pack.tool_calls == [] and pack.effects == []
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    pack = await assemble("pack-test-session-that-never-existed")
+    assert pack.is_empty
+    assert pack.tool_calls == [] and pack.effects == []
 
 
 def test_the_far_sides_own_text_reaches_the_model_with_no_live_delimiter() -> None:
@@ -372,7 +368,7 @@ def test_a_session_whose_only_record_is_an_abandoned_turn_is_not_reported_as_emp
     asyncio.run(_clear())
 
 
-def test_the_packs_own_headline_reaches_the_model_and_not_only_its_tests() -> None:
+async def test_the_packs_own_headline_reaches_the_model_and_not_only_its_tests() -> None:
     """`degraded_turns` had no reader in `src/` at all — one grep hit, its own `def`.
 
     Its docstring calls it *"the pack's own headline"* and says *"a reader who checks nothing else
@@ -388,29 +384,25 @@ def test_the_packs_own_headline_reaches_the_model_and_not_only_its_tests() -> No
     degraded answer that reads as complete", and the pack is where that is supposed to stop being
     true. This test is the reader the docstring claimed to have.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clear()
-        async with await connect(settings.postgres_dsn) as conn:
-            await conn.execute(
-                "INSERT INTO audit_events (correlation_id, session_id, actor, tool, arguments,"
-                " outcome, detail, latency_ms) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                ("c-head", SESSION, "u-1", "gather_evidence", "{}", "ok", "", 12.0),
-            )
-            await conn.commit()
-        await _seed_turn(SESSION, "c-head", "loop_capped", context_unreducible=True)
-
-        from chemclaw.agent.evidence_tools import assemble_evidence_pack
-
-        payload = await assemble_evidence_pack(SESSION)
-
-        assert payload["degraded_turns"] == ["c-head"], (
-            "the pack's own headline is absent from the payload the model receives, so a reader "
-            f"who checks nothing else checks nothing: {sorted(payload)}"
+    await migrated_db_or_skip()
+    await _clear()
+    async with await connect(settings.postgres_dsn) as conn:
+        await conn.execute(
+            "INSERT INTO audit_events (correlation_id, session_id, actor, tool, arguments,"
+            " outcome, detail, latency_ms) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            ("c-head", SESSION, "u-1", "gather_evidence", "{}", "ok", "", 12.0),
         )
+        await conn.commit()
+    await _seed_turn(SESSION, "c-head", "loop_capped", context_unreducible=True)
 
-    asyncio.run(_run())
+    from chemclaw.agent.evidence_tools import assemble_evidence_pack
+
+    payload = await assemble_evidence_pack(SESSION)
+
+    assert payload["degraded_turns"] == ["c-head"], (
+        "the pack's own headline is absent from the payload the model receives, so a reader "
+        f"who checks nothing else checks nothing: {sorted(payload)}"
+    )
 
 
 def test_a_section_is_built_from_its_columns_by_name_and_not_by_their_order() -> None:

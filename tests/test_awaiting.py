@@ -207,39 +207,33 @@ def _worker(client: Client, projection: _Projection) -> Worker:
     )
 
 
-def test_a_wait_returns_the_answer_that_arrives() -> None:
+async def test_a_wait_returns_the_answer_that_arrives() -> None:
     """A signal releases the wait, and the outcome carries who answered and what they said."""
+    async with await start_env_or_skip() as env:
+        client = pydantic_client(env)
+        projection = _Projection()
+        async with _worker(client, projection):
+            request = AwaitRequest(
+                kind="measurement", subject="run four conditions", deadline_days=7
+            )
+            handle = await client.start_workflow(
+                AwaitAnswerWorkflow.run,
+                request.model_dump(mode="json"),
+                id="await-answered",
+                task_queue=settings.background_task_queue,
+            )
+            await handle.signal("provide", {"answered_by": "u-lab-1", "payload": {"yield": 0.71}})
+            outcome = AwaitOutcome.model_validate(await handle.result())
 
-    async def _run() -> None:
-        async with await start_env_or_skip() as env:
-            client = pydantic_client(env)
-            projection = _Projection()
-            async with _worker(client, projection):
-                request = AwaitRequest(
-                    kind="measurement", subject="run four conditions", deadline_days=7
-                )
-                handle = await client.start_workflow(
-                    AwaitAnswerWorkflow.run,
-                    request.model_dump(mode="json"),
-                    id="await-answered",
-                    task_queue=settings.background_task_queue,
-                )
-                await handle.signal(
-                    "provide", {"answered_by": "u-lab-1", "payload": {"yield": 0.71}}
-                )
-                outcome = AwaitOutcome.model_validate(await handle.result())
-
-        assert outcome.state == "answered"
-        assert outcome.answered_by == "u-lab-1"
-        assert outcome.payload == {"yield": 0.71}
-        # The projection is opened once and settled once, as `answered`, by the actor who signalled.
-        assert projection.opened == ["await-answered"]
-        assert projection.settled == [("await-answered", "answered", "u-lab-1")]
-
-    asyncio.run(_run())
+    assert outcome.state == "answered"
+    assert outcome.answered_by == "u-lab-1"
+    assert outcome.payload == {"yield": 0.71}
+    # The projection is opened once and settled once, as `answered`, by the actor who signalled.
+    assert projection.opened == ["await-answered"]
+    assert projection.settled == [("await-answered", "answered", "u-lab-1")]
 
 
-def test_the_first_answer_wins_and_later_ones_are_ignored() -> None:
+async def test_the_first_answer_wins_and_later_ones_are_ignored() -> None:
     """A second signal cannot overwrite a delivered answer.
 
     Ignored rather than rejected, and the reason is structural: a signal has no reply channel, so
@@ -247,98 +241,86 @@ def test_the_first_answer_wins_and_later_ones_are_ignored() -> None:
     `POST /pending/{id}/answer`, which reads the store — this asserts the half that has to hold even
     when somebody reaches the broker directly.
     """
+    async with await start_env_or_skip() as env:
+        client = pydantic_client(env)
+        projection = _Projection()
+        async with _worker(client, projection):
+            handle = await client.start_workflow(
+                AwaitAnswerWorkflow.run,
+                AwaitRequest(subject="approve the route change").model_dump(mode="json"),
+                id="await-twice",
+                task_queue=settings.background_task_queue,
+            )
+            await handle.signal("provide", {"answered_by": "first", "payload": {"ok": True}})
+            await handle.signal("provide", {"answered_by": "second", "payload": {"ok": False}})
+            outcome = AwaitOutcome.model_validate(await handle.result())
 
-    async def _run() -> None:
-        async with await start_env_or_skip() as env:
-            client = pydantic_client(env)
-            projection = _Projection()
-            async with _worker(client, projection):
-                handle = await client.start_workflow(
-                    AwaitAnswerWorkflow.run,
-                    AwaitRequest(subject="approve the route change").model_dump(mode="json"),
-                    id="await-twice",
-                    task_queue=settings.background_task_queue,
-                )
-                await handle.signal("provide", {"answered_by": "first", "payload": {"ok": True}})
-                await handle.signal("provide", {"answered_by": "second", "payload": {"ok": False}})
-                outcome = AwaitOutcome.model_validate(await handle.result())
-
-        assert outcome.answered_by == "first"
-        assert outcome.payload == {"ok": True}
-
-    asyncio.run(_run())
+    assert outcome.answered_by == "first"
+    assert outcome.payload == {"ok": True}
 
 
-def test_a_deadline_that_passes_is_an_outcome_and_not_a_failure() -> None:
+async def test_a_deadline_that_passes_is_an_outcome_and_not_a_failure() -> None:
     """An unanswered question ends `expired` — reported, not raised, and never retried.
 
     This is the property a project leader's world depends on: "nobody answered" is an answer, and a
     wait that raised would be retried by Temporal rather than reported to the person who asked.
     """
-
-    async def _run() -> None:
-        async with await start_env_or_skip() as env:
-            client = pydantic_client(env)
-            projection = _Projection()
-            async with _worker(client, projection):
-                outcome = AwaitOutcome.model_validate(
-                    await client.execute_workflow(
-                        AwaitAnswerWorkflow.run,
-                        AwaitRequest(
-                            subject="report the stability pull",
-                            # One day, chased every six hours: the time-skipping server runs this
-                            # in milliseconds, and the numbers are what a real ask looks like.
-                            deadline_days=1.0,
-                            reminder_hours=6.0,
-                        ).model_dump(mode="json"),
-                        id="await-expired",
-                        task_queue=settings.background_task_queue,
-                    )
+    async with await start_env_or_skip() as env:
+        client = pydantic_client(env)
+        projection = _Projection()
+        async with _worker(client, projection):
+            outcome = AwaitOutcome.model_validate(
+                await client.execute_workflow(
+                    AwaitAnswerWorkflow.run,
+                    AwaitRequest(
+                        subject="report the stability pull",
+                        # One day, chased every six hours: the time-skipping server runs this
+                        # in milliseconds, and the numbers are what a real ask looks like.
+                        deadline_days=1.0,
+                        reminder_hours=6.0,
+                    ).model_dump(mode="json"),
+                    id="await-expired",
+                    task_queue=settings.background_task_queue,
                 )
+            )
 
-        assert outcome.state == "expired"
-        assert outcome.answered_by == ""
-        # Chased on the way: four six-hour intervals inside one day, the last of which reaches the
-        # deadline rather than escalating again.
-        assert outcome.reminders == 3
-        assert projection.reminders == ["await-expired"] * 3
-        assert projection.settled == [("await-expired", "expired", "")]
-
-    asyncio.run(_run())
+    assert outcome.state == "expired"
+    assert outcome.answered_by == ""
+    # Chased on the way: four six-hour intervals inside one day, the last of which reaches the
+    # deadline rather than escalating again.
+    assert outcome.reminders == 3
+    assert projection.reminders == ["await-expired"] * 3
+    assert projection.settled == [("await-expired", "expired", "")]
 
 
-def test_an_answer_arriving_mid_interval_is_seen_immediately() -> None:
+async def test_an_answer_arriving_mid_interval_is_seen_immediately() -> None:
     """The reminder interval is a timeout on the wait, not a polling tick.
 
     Written because the obvious implementation — sleep for the interval, then check — would hold a
     delivered answer for up to a day before acting on it, and would look correct in every test that
     only asserted the final state.
     """
+    async with await start_env_or_skip() as env:
+        client = pydantic_client(env)
+        projection = _Projection()
+        async with _worker(client, projection):
+            handle = await client.start_workflow(
+                AwaitAnswerWorkflow.run,
+                AwaitRequest(
+                    subject="confirm the assignment",
+                    deadline_days=30.0,
+                    reminder_hours=24.0,
+                ).model_dump(mode="json"),
+                id="await-midinterval",
+                task_queue=settings.background_task_queue,
+            )
+            await handle.signal("provide", {"answered_by": "u-2", "payload": {}})
+            outcome = AwaitOutcome.model_validate(await handle.result())
 
-    async def _run() -> None:
-        async with await start_env_or_skip() as env:
-            client = pydantic_client(env)
-            projection = _Projection()
-            async with _worker(client, projection):
-                handle = await client.start_workflow(
-                    AwaitAnswerWorkflow.run,
-                    AwaitRequest(
-                        subject="confirm the assignment",
-                        deadline_days=30.0,
-                        reminder_hours=24.0,
-                    ).model_dump(mode="json"),
-                    id="await-midinterval",
-                    task_queue=settings.background_task_queue,
-                )
-                await handle.signal("provide", {"answered_by": "u-2", "payload": {}})
-                outcome = AwaitOutcome.model_validate(await handle.result())
-
-        assert outcome.state == "answered"
-        # Answered before the first daily chase, over a thirty-day deadline.
-        assert outcome.reminders == 0
-        assert projection.reminders == []
-
-    asyncio.run(_run())
+    assert outcome.state == "answered"
+    # Answered before the first daily chase, over a thirty-day deadline.
+    assert outcome.reminders == 0
+    assert projection.reminders == []
 
 
 def test_asking_the_same_question_of_the_same_people_is_one_wait() -> None:
@@ -415,7 +397,7 @@ def test_the_migration_refuses_an_unattributed_answer() -> None:
     assert "answered_at IS NOT NULL AND answered_by <> ''" in sql
 
 
-def test_the_deadline_ceiling_is_applied_by_the_activity_every_caller_goes_through() -> None:
+async def test_the_deadline_ceiling_is_applied_by_the_activity_every_caller_goes_through() -> None:
     """`awaiting_max_days` had no test, which is why the clamp reached two of three launch sites.
 
     It was first applied at each caller. `agent/pending_tools.py` and `connectors/jobs.py` got it;
@@ -434,45 +416,42 @@ def test_the_deadline_ceiling_is_applied_by_the_activity_every_caller_goes_throu
     )
     from tests.pg import migrated_db_or_skip
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        started = datetime(2026, 1, 1, tzinfo=UTC)
-        opened = await open_pending_request_activity(
-            _OpenInput(
-                request_id="req-clamp-probe",
-                request=AwaitRequest(
-                    kind="measurement",
-                    subject="a wildly optimistic deadline",
-                    requested_by="u-1",
-                    deadline_days=3650.0,
-                ),
-                started_at=started.isoformat(),
-                run_id="run-clamp",
-            )
+    await migrated_db_or_skip()
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    opened = await open_pending_request_activity(
+        _OpenInput(
+            request_id="req-clamp-probe",
+            request=AwaitRequest(
+                kind="measurement",
+                subject="a wildly optimistic deadline",
+                requested_by="u-1",
+                deadline_days=3650.0,
+            ),
+            started_at=started.isoformat(),
+            run_id="run-clamp",
         )
-        capped = datetime.fromisoformat(opened) - started
-        assert capped <= timedelta(days=settings.awaiting_max_days), (
-            f"a caller asked for 3650 days and got {capped.days}; the ceiling is "
-            f"{settings.awaiting_max_days}"
-        )
+    )
+    capped = datetime.fromisoformat(opened) - started
+    assert capped <= timedelta(days=settings.awaiting_max_days), (
+        f"a caller asked for 3650 days and got {capped.days}; the ceiling is "
+        f"{settings.awaiting_max_days}"
+    )
 
-        # And a deadline inside the ceiling is passed through untouched.
-        modest = await open_pending_request_activity(
-            _OpenInput(
-                request_id="req-clamp-probe-2",
-                request=AwaitRequest(
-                    kind="measurement",
-                    subject="an ordinary deadline",
-                    requested_by="u-1",
-                    deadline_days=2.0,
-                ),
-                started_at=started.isoformat(),
-                run_id="run-clamp",
-            )
+    # And a deadline inside the ceiling is passed through untouched.
+    modest = await open_pending_request_activity(
+        _OpenInput(
+            request_id="req-clamp-probe-2",
+            request=AwaitRequest(
+                kind="measurement",
+                subject="an ordinary deadline",
+                requested_by="u-1",
+                deadline_days=2.0,
+            ),
+            started_at=started.isoformat(),
+            run_id="run-clamp",
         )
-        assert datetime.fromisoformat(modest) - started == timedelta(days=2)
-
-    asyncio.run(_run())
+    )
+    assert datetime.fromisoformat(modest) - started == timedelta(days=2)
 
 
 def test_a_wait_started_as_a_child_settles_when_its_parent_dies() -> None:

@@ -244,7 +244,7 @@ async def _consumed_at(channel: str) -> list[object]:
         return [row[0] for row in await cur.fetchall()]
 
 
-def test_a_digest_is_read_by_its_owner_and_by_nobody_else() -> None:
+async def test_a_digest_is_read_by_its_owner_and_by_nobody_else() -> None:
     """`GET /digests` delivers the caller's own mailbox, once, and never another chemist's.
 
     The reproduction this closes (`D-2026-08-27-a-digest-nobody-can-read-is-not-delivered`): the
@@ -253,42 +253,38 @@ def test_a_digest_is_read_by_its_owner_and_by_nobody_else() -> None:
     makes returned `[]` against a real digest row and left it unconsumed, while
     `acknowledge_digest` had already moved the watermark past the notes it named.
     """
+    await migrated_db_or_skip()
+    alice, bob = "digest-alice", "digest-bob"
+    for owner in (alice, bob):
+        await claim_unconsumed(digest_channel(owner))  # start clean
+    await record_session_event(
+        digest_channel(alice), DIGEST_KIND, {"query": "suzuki", "note_ids": ["reaction-1"]}
+    )
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        alice, bob = "digest-alice", "digest-bob"
-        for owner in (alice, bob):
-            await claim_unconsumed(digest_channel(owner))  # start clean
-        await record_session_event(
-            digest_channel(alice), DIGEST_KIND, {"query": "suzuki", "note_ids": ["reaction-1"]}
-        )
+    with _digest_client(bob) as client:
+        assert client.get("/digests").json() == [], "bob read alice's digest"
+    # Not merely filtered out of bob's answer — untouched, so it is still alice's to read.
+    assert await _consumed_at(digest_channel(alice)) == [None]
 
-        with _digest_client(bob) as client:
-            assert client.get("/digests").json() == [], "bob read alice's digest"
-        # Not merely filtered out of bob's answer — untouched, so it is still alice's to read.
-        assert await _consumed_at(digest_channel(alice)) == [None]
-
-        with _digest_client(alice) as client:
-            first = client.get("/digests")
-            second = client.get("/digests")
-        # The two fields `D-2026-09-15-a-digest-that-names-an-id-names-nothing` added are part
-        # of the answer's shape, not decoration: written absent here, they must come back empty
-        # rather than missing, which is what a client renders against.
-        assert first.json() == [
-            {
-                "query": "suzuki",
-                "note_ids": ["reaction-1"],
-                "disputed": [],
-                "headlines": {},
-            }
-        ]
-        assert second.json() == [], "the claim is the consume; a digest must not re-deliver"
-        assert await _consumed_at(digest_channel(alice)) != [None], "the row was left unconsumed"
-
-    asyncio.run(_run())
+    with _digest_client(alice) as client:
+        first = client.get("/digests")
+        second = client.get("/digests")
+    # The two fields `D-2026-09-15-a-digest-that-names-an-id-names-nothing` added are part
+    # of the answer's shape, not decoration: written absent here, they must come back empty
+    # rather than missing, which is what a client renders against.
+    assert first.json() == [
+        {
+            "query": "suzuki",
+            "note_ids": ["reaction-1"],
+            "disputed": [],
+            "headlines": {},
+        }
+    ]
+    assert second.json() == [], "the claim is the consume; a digest must not re-deliver"
+    assert await _consumed_at(digest_channel(alice)) != [None], "the row was left unconsumed"
 
 
-def test_only_the_digest_kind_is_claimed_from_the_mailbox() -> None:
+async def test_only_the_digest_kind_is_claimed_from_the_mailbox() -> None:
     """The claim is destructive, so this route must scope it — job push-back is not its to consume.
 
     A digest mailbox is per *user* and a job's is per *session*, so today no row of another kind
@@ -296,24 +292,20 @@ def test_only_the_digest_kind_is_claimed_from_the_mailbox() -> None:
     here would destroy any future one silently, which is precisely how the mailbox's own docstring
     says a kind-selective consumer must not be written.
     """
+    await migrated_db_or_skip()
+    owner = "digest-mixed"
+    channel = digest_channel(owner)
+    await claim_unconsumed(channel)
+    await record_session_event(channel, DIGEST_KIND, {"query": "q", "note_ids": ["n-1"]})
+    await record_session_event(channel, "job_completed", {"job_id": "j-1"})
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        owner = "digest-mixed"
-        channel = digest_channel(owner)
-        await claim_unconsumed(channel)
-        await record_session_event(channel, DIGEST_KIND, {"query": "q", "note_ids": ["n-1"]})
-        await record_session_event(channel, "job_completed", {"job_id": "j-1"})
+    with _digest_client(owner) as client:
+        assert client.get("/digests").json() == [
+            {"query": "q", "note_ids": ["n-1"], "disputed": [], "headlines": {}}
+        ]
 
-        with _digest_client(owner) as client:
-            assert client.get("/digests").json() == [
-                {"query": "q", "note_ids": ["n-1"], "disputed": [], "headlines": {}}
-            ]
-
-        leftover = await claim_unconsumed(channel)
-        assert [event.kind for event in leftover] == ["job_completed"]
-
-    asyncio.run(_run())
+    leftover = await claim_unconsumed(channel)
+    assert [event.kind for event in leftover] == ["job_completed"]
 
 
 def test_a_read_digest_becomes_prunable_and_an_unread_one_does_not() -> None:
@@ -365,7 +357,7 @@ def test_a_read_digest_becomes_prunable_and_an_unread_one_does_not() -> None:
     assert unread_rows == [None], "an unread digest was destroyed before anyone could read it"
 
 
-def test_a_watch_is_owned_by_the_oid_the_route_reads() -> None:
+async def test_a_watch_is_owned_by_the_oid_the_route_reads() -> None:
     """The two ends of the mailbox address agree, and neither restates the other.
 
     `/digests` derives its channel from `principal.oid`; the digest job addresses one from
@@ -375,23 +367,17 @@ def test_a_watch_is_owned_by_the_oid_the_route_reads() -> None:
     rather than a paragraph, since a mismatch would leave every digest written to a mailbox the
     owner cannot name and would look exactly like the defect this route closes.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        oid = "digest-oid-8e1f"
-        tokens = set_current_identity(oid, frozenset())
-        try:
-            await watch_for("suzuki biaryl")
-        finally:
-            reset_current_identity(tokens)
-        saved = [s for s in await for_owner(oid) if s.query == "suzuki biaryl"]
-        assert [s.owner for s in saved] == [oid]
-        # And that owner is what the digest job would address, which is what the route reads.
-        assert digest_channel(saved[0].owner) == digest_channel(
-            Principal(oid=oid, upn="x@corp").oid
-        )
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    oid = "digest-oid-8e1f"
+    tokens = set_current_identity(oid, frozenset())
+    try:
+        await watch_for("suzuki biaryl")
+    finally:
+        reset_current_identity(tokens)
+    saved = [s for s in await for_owner(oid) if s.query == "suzuki biaryl"]
+    assert [s.owner for s in saved] == [oid]
+    # And that owner is what the digest job would address, which is what the route reads.
+    assert digest_channel(saved[0].owner) == digest_channel(Principal(oid=oid, upn="x@corp").oid)
 
 
 # --- the corpus disagreeing with itself ----------------------------------------------------------
@@ -497,7 +483,7 @@ def test_every_render_of_one_digest_says_the_same_thing() -> None:
     assert source.count("_digest_body(") == 3
 
 
-def test_the_route_carries_the_dispute_flag_the_job_computed() -> None:
+async def test_the_route_carries_the_dispute_flag_the_job_computed() -> None:
     """`disputed` reached the mailbox and stopped at the API model, on the only default-config path.
 
     `collect_digests` has computed which matches the corpus now disagrees with since
@@ -511,38 +497,34 @@ def test_the_route_carries_the_dispute_flag_the_job_computed() -> None:
     layer down. Driven here against a row written the way the job writes one, rather than against
     the model, because a model assertion would have been satisfied by the field being *declared*.
     """
+    await migrated_db_or_skip()
+    owner = "digest-disputed-route"
+    await claim_unconsumed(digest_channel(owner))
+    await record_session_event(
+        digest_channel(owner),
+        DIGEST_KIND,
+        {
+            "query": "biaryl",
+            "note_ids": ["playbook-a", "reaction-b"],
+            "disputed": ["reaction-b"],
+            "headlines": {"playbook-a": "Change the ligand before the temperature"},
+        },
+    )
+    with _digest_client(owner) as client:
+        answer = client.get("/digests").json()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        owner = "digest-disputed-route"
-        await claim_unconsumed(digest_channel(owner))
-        await record_session_event(
-            digest_channel(owner),
-            DIGEST_KIND,
-            {
-                "query": "biaryl",
-                "note_ids": ["playbook-a", "reaction-b"],
-                "disputed": ["reaction-b"],
-                "headlines": {"playbook-a": "Change the ligand before the temperature"},
-            },
-        )
-        with _digest_client(owner) as client:
-            answer = client.get("/digests").json()
-
-        assert answer == [
-            {
-                "query": "biaryl",
-                "note_ids": ["playbook-a", "reaction-b"],
-                "disputed": ["reaction-b"],
-                "headlines": {"playbook-a": "Change the ligand before the temperature"},
-            }
-        ], (
-            "the route dropped what the job computed; a subscriber reading this surface cannot "
-            "tell a contradiction from an ordinary find, which is the one thing in a digest that "
-            "changes what they should do next"
-        )
-
-    asyncio.run(_run())
+    assert answer == [
+        {
+            "query": "biaryl",
+            "note_ids": ["playbook-a", "reaction-b"],
+            "disputed": ["reaction-b"],
+            "headlines": {"playbook-a": "Change the ligand before the temperature"},
+        }
+    ], (
+        "the route dropped what the job computed; a subscriber reading this surface cannot "
+        "tell a contradiction from an ordinary find, which is the one thing in a digest that "
+        "changes what they should do next"
+    )
 
 
 def test_a_digest_names_what_it_found_and_not_only_its_id() -> None:
@@ -581,7 +563,9 @@ def test_a_digest_names_what_it_found_and_not_only_its_id() -> None:
         assert note_id in body, "the id must survive beside the headline; it is the handle"
 
 
-def test_a_watch_says_so_when_nothing_will_evaluate_it(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_watch_says_so_when_nothing_will_evaluate_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Off, `watch_for` used to answer "you'll be told" and no schedule existed to tell anyone.
 
     The two halves are separate failures and this pins the second. `digest_enabled` now defaults
@@ -594,27 +578,23 @@ def test_a_watch_says_so_when_nothing_will_evaluate_it(monkeypatch: pytest.Monke
     warns — which would be a different defect, telling every chemist on every deployment that their
     watch does not work.
     """
+    await migrated_db_or_skip()
+    tokens = set_current_identity("watch-truth", frozenset())
+    try:
+        monkeypatch.setattr(settings, "digest_enabled", False)
+        off = await watch_for("biaryl coupling")
+        monkeypatch.setattr(settings, "digest_enabled", True)
+        on = await watch_for("biaryl coupling")
+    finally:
+        reset_current_identity(tokens)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        tokens = set_current_identity("watch-truth", frozenset())
-        try:
-            monkeypatch.setattr(settings, "digest_enabled", False)
-            off = await watch_for("biaryl coupling")
-            monkeypatch.setattr(settings, "digest_enabled", True)
-            on = await watch_for("biaryl coupling")
-        finally:
-            reset_current_identity(tokens)
-
-        assert "turned off" in off and "nobody will be told" in off, (
-            "a deployment with digests off answered a watch with a promise it cannot keep; "
-            f"it said: {off!r}"
-        )
-        assert "turned off" not in on, (
-            f"every watch is told its deployment is broken, including working ones: {on!r}"
-        )
-        # The row is saved either way — an operator turning digests on must have something to
-        # deliver against, and `list_watches` must still show it.
-        assert any(w.query == "biaryl coupling" for w in await for_owner("watch-truth"))
-
-    asyncio.run(_run())
+    assert "turned off" in off and "nobody will be told" in off, (
+        "a deployment with digests off answered a watch with a promise it cannot keep; "
+        f"it said: {off!r}"
+    )
+    assert "turned off" not in on, (
+        f"every watch is told its deployment is broken, including working ones: {on!r}"
+    )
+    # The row is saved either way — an operator turning digests on must have something to
+    # deliver against, and `list_watches` must still show it.
+    assert any(w.query == "biaryl coupling" for w in await for_owner("watch-truth"))

@@ -272,7 +272,7 @@ def test_the_readiness_probes_pool_is_one_connection_wide(monkeypatch: pytest.Mo
     )
 
 
-def test_the_readiness_probe_never_holds_two_connections_at_once(
+async def test_the_readiness_probe_never_holds_two_connections_at_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One connection is enough only because `_shared_probe` collapses every concurrent caller.
@@ -311,19 +311,17 @@ def test_the_readiness_probe_never_holds_two_connections_at_once(
 
     monkeypatch.setattr(db, "connection", counting)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        from chemclaw.api.app import create_app
+    await migrated_db_or_skip()
+    from chemclaw.api.app import create_app
 
-        app = create_app()
-        async with app.router.lifespan_context(app):
-            async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=app), base_url="http://probe"
-            ) as client:
-                for _ in range(5):
-                    await asyncio.gather(*(client.get("/readyz") for _ in range(20)))
+    app = create_app()
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://probe"
+        ) as client:
+            for _ in range(5):
+                await asyncio.gather(*(client.get("/readyz") for _ in range(20)))
 
-    asyncio.run(_run())
     assert probes >= 2, (
         f"only {probes} probe(s) ran across five waves with the cache window off, so this run is "
         "not evidence about overlap"

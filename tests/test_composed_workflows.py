@@ -220,54 +220,46 @@ def test_a_composed_workflow_cannot_refer_forward() -> None:
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)
-def test_a_workflow_round_trips_and_re_composing_replaces_it(backend: str) -> None:
+async def test_a_workflow_round_trips_and_re_composing_replaces_it(backend: str) -> None:
     """Both real backends prove the same claim, which is what makes the switch below safe."""
+    store = await _backend(backend)
+    owner = f"chemist-{backend}"
+    first = ComposedWorkflow(
+        owner=owner, name="triage", summary="one", document=_document([_REASON_STEP], "triage")
+    )
+    await store.save(first)
 
-    async def _drive() -> None:
-        store = await _backend(backend)
-        owner = f"chemist-{backend}"
-        first = ComposedWorkflow(
-            owner=owner, name="triage", summary="one", document=_document([_REASON_STEP], "triage")
-        )
-        await store.save(first)
+    read = await store.get(owner, "triage")
+    assert read is not None
+    assert read.summary == "one"
+    # The document comes back as a `Template`, revalidated rather than trusted: the row may
+    # have been written by an earlier release, and a shape that no longer parses should refuse
+    # here rather than reach the sequencer half-understood.
+    assert isinstance(read.document, Template)
 
-        read = await store.get(owner, "triage")
-        assert read is not None
-        assert read.summary == "one"
-        # The document comes back as a `Template`, revalidated rather than trusted: the row may
-        # have been written by an earlier release, and a shape that no longer parses should refuse
-        # here rather than reach the sequencer half-understood.
-        assert isinstance(read.document, Template)
-
-        await store.save(first.model_copy(update={"summary": "two"}))
-        again = await store.get(owner, "triage")
-        assert again is not None and again.summary == "two"
-        assert [row.name for row in await store.list_for(owner)] == ["triage"]
-
-    asyncio.run(_drive())
+    await store.save(first.model_copy(update={"summary": "two"}))
+    again = await store.get(owner, "triage")
+    assert again is not None and again.summary == "two"
+    assert [row.name for row in await store.list_for(owner)] == ["triage"]
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)
-def test_one_owners_workflows_are_not_another_owners(backend: str) -> None:
+async def test_one_owners_workflows_are_not_another_owners(backend: str) -> None:
     """The reason the key is `(owner, name)`.
 
     Two chemists are each entitled to their own "triage", and a name that resolved across owners
     would let one silently run steps the other wrote — which is a worse failure than a collision,
     because nothing about the result would look wrong.
     """
+    store = await _backend(backend)
+    mine = f"a-{backend}"
+    theirs = f"b-{backend}"
+    await store.save(
+        ComposedWorkflow(owner=mine, name="t", document=_document([_REASON_STEP], "t"))
+    )
 
-    async def _drive() -> None:
-        store = await _backend(backend)
-        mine = f"a-{backend}"
-        theirs = f"b-{backend}"
-        await store.save(
-            ComposedWorkflow(owner=mine, name="t", document=_document([_REASON_STEP], "t"))
-        )
-
-        assert await store.get(theirs, "t") is None
-        assert await store.list_for(theirs) == []
-
-    asyncio.run(_drive())
+    assert await store.get(theirs, "t") is None
+    assert await store.list_for(theirs) == []
 
 
 def test_both_backends_satisfy_the_declared_protocol() -> None:

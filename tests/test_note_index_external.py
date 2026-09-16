@@ -14,11 +14,8 @@ harmless once a deleted note leaves a vector behind in a store that bills for it
 sweep reaches.
 """
 
-import asyncio
-import functools
 import subprocess
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -37,16 +34,6 @@ from chemclaw.retrieval.vectors.memory import InMemoryVectorStore
 from tests.pg import migrated_db_or_skip
 
 COLLECTION = "notes"
-
-
-def _sync(test: Any) -> Any:
-    """Run an `async def` test on its own loop; this repository has no async pytest plugin."""
-
-    @functools.wraps(test)
-    def runner(*args: Any, **kwargs: Any) -> None:
-        asyncio.run(test(*args, **kwargs))
-
-    return runner
 
 
 def _record(note_id: str, vector: list[float], text: str = "ester formation") -> NoteRecord:
@@ -70,7 +57,6 @@ def _write_note(directory: Path, note_id: str, title: str) -> None:
 # --- the prune, on the reference backend (no database needed) -----------------------------------
 
 
-@_sync
 async def test_retire_absent_removes_what_is_no_longer_on_disk() -> None:
     """The gap D-2026-08-25 closed: nothing in this system ever deleted a note vector."""
     index = InMemoryNoteIndex()
@@ -80,7 +66,6 @@ async def test_retire_absent_removes_what_is_no_longer_on_disk() -> None:
     assert set(await index.fingerprints("key-1")) == {"a"}
 
 
-@_sync
 async def test_an_empty_keep_set_retires_nothing() -> None:
     """A mis-pointed notes directory must not wipe an index that costs one call per note to rebuild.
 
@@ -94,7 +79,6 @@ async def test_an_empty_keep_set_retires_nothing() -> None:
     assert set(await index.fingerprints("key-1")) == {"a"}
 
 
-@_sync
 async def test_reindex_retires_a_deleted_note_even_when_nothing_changed(tmp_path: Path) -> None:
     """A run whose only news is a deletion has nothing to embed and must still remove it.
 
@@ -112,7 +96,6 @@ async def test_reindex_retires_a_deleted_note_even_when_nothing_changed(tmp_path
     assert set(await index.fingerprints(await _key())) == {"reaction-a"}
 
 
-@_sync
 async def test_an_empty_notes_directory_does_not_empty_the_index(tmp_path: Path) -> None:
     """`reindex_notes` returns before the prune when it loaded no notes at all."""
     _write_note(tmp_path, "reaction-a", "Ester A")
@@ -170,7 +153,6 @@ def test_the_external_index_satisfies_the_protocol() -> None:
 # --- the composition, against a real `note_index` table -----------------------------------------
 
 
-@_sync
 async def test_the_vectors_leave_and_the_catalogue_stays(tmp_path: Path) -> None:
     """The whole design in one assertion: `note_index.embedding` is NULL, the store has it.
 
@@ -197,7 +179,6 @@ async def test_the_vectors_leave_and_the_catalogue_stays(tmp_path: Path) -> None
     assert row is not None and row[0] is None, "the pgvector column is written NULL, not dropped"
 
 
-@_sync
 async def test_dense_search_ranks_in_the_store_and_returns_note_ids(tmp_path: Path) -> None:
     """A note is embedded whole, so the point id *is* the note id — no encoding, no resolve step."""
     store = InMemoryVectorStore()
@@ -210,7 +191,6 @@ async def test_dense_search_ranks_in_the_store_and_returns_note_ids(tmp_path: Pa
     assert [hit.note_id for hit in hits] == ["reaction-a"], "orthogonal notes are not hits"
 
 
-@_sync
 async def test_a_scope_narrows_before_the_cut_rather_than_after_it(tmp_path: Path) -> None:
     """Filtering after the top-k is how a narrow scope over a wide corpus returns nothing at all."""
     store = InMemoryVectorStore()
@@ -223,14 +203,12 @@ async def test_a_scope_narrows_before_the_cut_rather_than_after_it(tmp_path: Pat
     assert [hit.note_id for hit in hits] == ["reaction-1"]
 
 
-@_sync
 async def test_a_zero_query_vector_costs_no_round_trip(tmp_path: Path) -> None:
     """It has cosine 0 to everything, which is what the reference backend returns too."""
     index = await _fresh_index(InMemoryVectorStore())
     assert await index.search_dense([0.0, 0.0], 5) == []
 
 
-@_sync
 async def test_retiring_a_note_removes_its_point_too(tmp_path: Path) -> None:
     """The reason this class needed a prune at all: an orphaned vector has no other sweep."""
     store = InMemoryVectorStore()
@@ -246,7 +224,6 @@ async def test_retiring_a_note_removes_its_point_too(tmp_path: Path) -> None:
     )
 
 
-@_sync
 async def test_switching_provider_re_embeds_rather_than_returning_nothing(tmp_path: Path) -> None:
     """A deployment whose notes were in Postgres must not silently lose its dense leg on the move.
 
@@ -356,7 +333,6 @@ def test_a_corpus_outside_a_work_tree_has_no_revision(tmp_path: Path) -> None:
     assert corpus_revision(tmp_path) is None
 
 
-@_sync
 async def test_a_lagging_checkout_does_not_retire_a_note_it_has_not_fetched(tmp_path: Path) -> None:
     """The thrash, on the reference backend: one shared index, two differently-aged checkouts.
 
@@ -381,7 +357,6 @@ async def test_a_lagging_checkout_does_not_retire_a_note_it_has_not_fetched(tmp_
     }, "a pod one commit behind retired a note its own sidecar has not fetched yet"
 
 
-@_sync
 async def test_a_note_deleted_from_the_corpus_is_still_retired(tmp_path: Path) -> None:
     """The guard may only decline where it cannot judge; a real deletion still goes.
 
@@ -397,7 +372,6 @@ async def test_a_note_deleted_from_the_corpus_is_still_retired(tmp_path: Path) -
     assert set(await index.fingerprints(await _key())) == {"reaction-a", "reaction-c"}
 
 
-@_sync
 async def test_the_postgres_predicate_protects_a_row_from_a_newer_corpus(tmp_path: Path) -> None:
     """The same guard through the SQL, because the SQL is what a deployment runs.
 

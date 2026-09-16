@@ -1775,7 +1775,9 @@ async def _stored_cuttings() -> list[tuple[str, int]]:
             return [(row[0], row[1]) for row in await cur.fetchall()]
 
 
-def test_the_postgres_backend_gates_on_the_chunking_and_sweeps_only_unclaimed_cuttings() -> None:
+async def test_the_postgres_backend_gates_on_the_chunking_and_sweeps_only_unclaimed_cuttings() -> (
+    None
+):
     """The same rules as the in-memory reference, in SQL — and migrations 040/041 applied.
 
     The durable backend had no test at all, so its statements were only ever exercised in
@@ -1784,78 +1786,72 @@ def test_the_postgres_backend_gates_on_the_chunking_and_sweeps_only_unclaimed_cu
     share still claims stays. Before 041 the second half was false — the delete was `doc_id` plus
     an ordinal floor, and `doc_id` is content, so one share's re-chunk truncated the other's rows.
     """
+    await migrated_db_or_skip()
+    async with await connect(settings.postgres_dsn) as conn:
+        await conn.execute("TRUNCATE document_files, document_chunks")
+        await conn.commit()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with await connect(settings.postgres_dsn) as conn:
-            await conn.execute("TRUNCATE document_files, document_chunks")
-            await conn.commit()
-
-        index = PostgresDocumentIndex()
-        key = embedding_config_key()
-        (vector,) = await asyncio.to_thread(embed_texts, ["a chunk of a protocol"])
-        fine_file = FileRecord(
-            path="SOPs/protocol.txt",
-            source=SOURCE,
+    index = PostgresDocumentIndex()
+    key = embedding_config_key()
+    (vector,) = await asyncio.to_thread(embed_texts, ["a chunk of a protocol"])
+    fine_file = FileRecord(
+        path="SOPs/protocol.txt",
+        source=SOURCE,
+        doc_id="doc-1",
+        fingerprint="1:2",
+        chunking_key="400:40",
+    )
+    fine = [
+        ChunkRecord(
             doc_id="doc-1",
-            fingerprint="1:2",
             chunking_key="400:40",
+            ordinal=n,
+            content=f"piece {n} of a protocol",
+            embedding=vector,
         )
-        fine = [
-            ChunkRecord(
-                doc_id="doc-1",
-                chunking_key="400:40",
-                ordinal=n,
-                content=f"piece {n} of a protocol",
-                embedding=vector,
-            )
-            for n in range(3)
-        ]
-        await index.upsert([fine_file], fine, key)
+        for n in range(3)
+    ]
+    await index.upsert([fine_file], fine, key)
 
-        assert await index.fingerprints(SOURCE, [fine_file.path], "400:40") == {
-            fine_file.path: "1:2"
-        }
-        assert await index.fingerprints(SOURCE, [fine_file.path], "2000:200") == {}
-        assert await index.known_documents({"doc-1"}, key, "400:40") == {"doc-1"}
-        assert await index.known_documents({"doc-1"}, key, "2000:200") == set()
+    assert await index.fingerprints(SOURCE, [fine_file.path], "400:40") == {fine_file.path: "1:2"}
+    assert await index.fingerprints(SOURCE, [fine_file.path], "2000:200") == {}
+    assert await index.known_documents({"doc-1"}, key, "400:40") == {"doc-1"}
+    assert await index.known_documents({"doc-1"}, key, "2000:200") == set()
 
-        # A second share holding the same content and cutting it coarsely. Its write must not touch
-        # the first share's rows — this is the destruction 041 closes.
-        coarse_file = fine_file.model_copy(
-            update={"source": "sharedrive-2", "chunking_key": "2000:200"}
+    # A second share holding the same content and cutting it coarsely. Its write must not touch
+    # the first share's rows — this is the destruction 041 closes.
+    coarse_file = fine_file.model_copy(
+        update={"source": "sharedrive-2", "chunking_key": "2000:200"}
+    )
+    coarse = [
+        ChunkRecord(
+            doc_id="doc-1",
+            chunking_key="2000:200",
+            ordinal=0,
+            content="all of the protocol at once",
+            embedding=vector,
         )
-        coarse = [
-            ChunkRecord(
-                doc_id="doc-1",
-                chunking_key="2000:200",
-                ordinal=0,
-                content="all of the protocol at once",
-                embedding=vector,
-            )
-        ]
-        await index.upsert([coarse_file], coarse, key)
-        assert await _stored_cuttings() == [
-            ("2000:200", 0),
-            ("400:40", 0),
-            ("400:40", 1),
-            ("400:40", 2),
-        ]
-        assert await index.known_documents({"doc-1"}, key, "400:40") == {"doc-1"}
+    ]
+    await index.upsert([coarse_file], coarse, key)
+    assert await _stored_cuttings() == [
+        ("2000:200", 0),
+        ("400:40", 0),
+        ("400:40", 1),
+        ("400:40", 2),
+    ]
+    assert await index.known_documents({"doc-1"}, key, "400:40") == {"doc-1"}
 
-        # And each share searches its own cutting, never the other's.
-        hits = await index.search_dense(SOURCE, vector, 10, DocumentFilter())
-        assert {hit.ordinal for hit in hits} == {0, 1, 2}
-        assert [
-            hit.content
-            for hit in await index.search_dense("sharedrive-2", vector, 10, DocumentFilter())
-        ] == ["all of the protocol at once"]
+    # And each share searches its own cutting, never the other's.
+    hits = await index.search_dense(SOURCE, vector, 10, DocumentFilter())
+    assert {hit.ordinal for hit in hits} == {0, 1, 2}
+    assert [
+        hit.content
+        for hit in await index.search_dense("sharedrive-2", vector, 10, DocumentFilter())
+    ] == ["all of the protocol at once"]
 
-        # Now the first share is re-chunked coarsely too. Nothing claims 400:40 any more: it goes.
-        await index.upsert([fine_file.model_copy(update={"chunking_key": "2000:200"})], coarse, key)
-        assert await _stored_cuttings() == [("2000:200", 0)], "the superseded cutting was swept"
-
-    asyncio.run(_run())
+    # Now the first share is re-chunked coarsely too. Nothing claims 400:40 any more: it goes.
+    await index.upsert([fine_file.model_copy(update={"chunking_key": "2000:200"})], coarse, key)
+    assert await _stored_cuttings() == [("2000:200", 0)], "the superseded cutting was swept"
 
 
 async def _stored_keys(doc_id: str) -> list[tuple[str, int, str]]:
@@ -1870,7 +1866,7 @@ async def _stored_keys(doc_id: str) -> list[tuple[str, int, str]]:
             return [(row[0], row[1], row[2]) for row in await cur.fetchall()]
 
 
-def test_the_external_store_backend_carries_the_chunking_through_every_write() -> None:
+async def test_the_external_store_backend_carries_the_chunking_through_every_write() -> None:
     """The other `DocumentIndex`, against the real catalogue and the reference `VectorStore`.
 
     It had no live-Postgres test at all, and every method it overrides predates the chunking key —
@@ -1890,101 +1886,97 @@ def test_the_external_store_backend_carries_the_chunking_through_every_write() -
     4. `upsert` delegates to the base, which deletes unclaimed cuttings per write — and did so
        without naming them, so their points stayed in the store with nothing left to address them.
     """
+    await migrated_db_or_skip()
+    async with await connect(settings.postgres_dsn) as conn:
+        await conn.execute("TRUNCATE document_files, document_chunks")
+        await conn.commit()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with await connect(settings.postgres_dsn) as conn:
-            await conn.execute("TRUNCATE document_files, document_chunks")
-            await conn.commit()
+    store = InMemoryVectorStore()
+    index = ExternalVectorDocumentIndex(store, collection="chunks")
+    key = embedding_config_key()
+    fine_vector, coarse_vector = await asyncio.to_thread(
+        embed_texts, ["the fine cutting of a protocol", "the whole protocol at once"]
+    )
 
-        store = InMemoryVectorStore()
-        index = ExternalVectorDocumentIndex(store, collection="chunks")
-        key = embedding_config_key()
-        fine_vector, coarse_vector = await asyncio.to_thread(
-            embed_texts, ["the fine cutting of a protocol", "the whole protocol at once"]
-        )
-
-        fine_file = FileRecord(
-            path="SOPs/protocol.txt",
-            source=SOURCE,
+    fine_file = FileRecord(
+        path="SOPs/protocol.txt",
+        source=SOURCE,
+        doc_id="doc-1",
+        fingerprint="1:2",
+        chunking_key="400:40",
+    )
+    fine = [
+        ChunkRecord(
             doc_id="doc-1",
-            fingerprint="1:2",
             chunking_key="400:40",
+            ordinal=0,
+            content="the fine cutting of a protocol",
+            embedding=fine_vector,
         )
-        fine = [
-            ChunkRecord(
-                doc_id="doc-1",
-                chunking_key="400:40",
-                ordinal=0,
-                content="the fine cutting of a protocol",
-                embedding=fine_vector,
-            )
-        ]
-        coarse_file = fine_file.model_copy(
-            update={"source": "sharedrive-2", "chunking_key": "4000:400"}
+    ]
+    coarse_file = fine_file.model_copy(
+        update={"source": "sharedrive-2", "chunking_key": "4000:400"}
+    )
+    coarse = [
+        ChunkRecord(
+            doc_id="doc-1",
+            chunking_key="4000:400",
+            ordinal=0,
+            content="the whole protocol at once",
+            embedding=coarse_vector,
         )
-        coarse = [
-            ChunkRecord(
-                doc_id="doc-1",
-                chunking_key="4000:400",
-                ordinal=0,
-                content="the whole protocol at once",
-                embedding=coarse_vector,
-            )
-        ]
-        await index.upsert([fine_file], fine, key)
-        await index.upsert([coarse_file], coarse, key)
+    ]
+    await index.upsert([fine_file], fine, key)
+    await index.upsert([coarse_file], coarse, key)
 
-        # (1) One point per row rather than per `(doc_id, ordinal)`, and each share still answers
-        # with *its own* vector. The **score** is the assertion, not the content: querying with a
-        # chunk's own embedding must score 1.0, and under the collision it did not — the content
-        # still came back right, because `CITATION_SQL` dropped the other share's row on the way
-        # out, so only the score ever showed that the wrong vector had been searched.
-        (fine_hit,) = await index.search_dense(SOURCE, fine_vector, 5, DocumentFilter())
-        assert fine_hit.content == "the fine cutting of a protocol"
-        assert fine_hit.score == pytest.approx(1.0)
-        (coarse_hit,) = await index.search_dense("sharedrive-2", coarse_vector, 5, DocumentFilter())
-        assert coarse_hit.content == "the whole protocol at once"
-        assert coarse_hit.score == pytest.approx(1.0)
+    # (1) One point per row rather than per `(doc_id, ordinal)`, and each share still answers
+    # with *its own* vector. The **score** is the assertion, not the content: querying with a
+    # chunk's own embedding must score 1.0, and under the collision it did not — the content
+    # still came back right, because `CITATION_SQL` dropped the other share's row on the way
+    # out, so only the score ever showed that the wrong vector had been searched.
+    (fine_hit,) = await index.search_dense(SOURCE, fine_vector, 5, DocumentFilter())
+    assert fine_hit.content == "the fine cutting of a protocol"
+    assert fine_hit.score == pytest.approx(1.0)
+    (coarse_hit,) = await index.search_dense("sharedrive-2", coarse_vector, 5, DocumentFilter())
+    assert coarse_hit.content == "the whole protocol at once"
+    assert coarse_hit.score == pytest.approx(1.0)
 
-        # (2) Re-embedding one cutting marks that row and no other.
-        #
-        # The stored key is the caller's key namespaced by the store it went to
-        # (`retrieval/vectors/base.stored_embedding_key`), so that moving a corpus between backends
-        # cannot leave every row claiming a vector the new one has never held. What this step
-        # asserts is unchanged by that: *which* row got the new key, not how the key is spelled.
-        stored = partial(
-            stored_embedding_key,
-            provider=settings.vector_store_provider,
-            collection=index._collection,
+    # (2) Re-embedding one cutting marks that row and no other.
+    #
+    # The stored key is the caller's key namespaced by the store it went to
+    # (`retrieval/vectors/base.stored_embedding_key`), so that moving a corpus between backends
+    # cannot leave every row claiming a vector the new one has never held. What this step
+    # asserts is unchanged by that: *which* row got the new key, not how the key is spelled.
+    stored = partial(
+        stored_embedding_key,
+        provider=settings.vector_store_provider,
+        collection=index._collection,
+    )
+    await index.store_embeddings(fine, "key-of-the-next-model")
+    assert await _stored_keys("doc-1") == [
+        ("4000:400", 0, stored(key)),
+        ("400:40", 0, stored("key-of-the-next-model")),
+    ]
+
+    # (4) The fine share is re-chunked coarsely. The base's per-write cleanup deletes the row
+    # it superseded, and the point that addressed it goes with it — the obligation the subclass
+    # previously had no way to see.
+    await index.upsert([fine_file.model_copy(update={"chunking_key": "4000:400"})], coarse, key)
+    assert await _stored_cuttings() == [("4000:400", 0)]
+    # Asked of the store through its own interface: the fine cutting's point is gone and the
+    # coarse one is still there, which is what "the vectors went with the rows" means.
+    assert {m.id for m in await store.search("chunks", fine_vector, 10)} == {"doc-1@4000:400#0"}
+
+    # (3) And the sweep agrees with `CLAIMED_SQL` rather than a local spelling of it: a cutting
+    # no file row claims is an orphan even while the *document* still has one.
+    async with await connect(settings.postgres_dsn) as conn:
+        await conn.execute(
+            "UPDATE document_files SET chunking_key = '400:40' WHERE source = %s", (SOURCE,)
         )
-        await index.store_embeddings(fine, "key-of-the-next-model")
-        assert await _stored_keys("doc-1") == [
-            ("4000:400", 0, stored(key)),
-            ("400:40", 0, stored("key-of-the-next-model")),
-        ]
-
-        # (4) The fine share is re-chunked coarsely. The base's per-write cleanup deletes the row
-        # it superseded, and the point that addressed it goes with it — the obligation the subclass
-        # previously had no way to see.
-        await index.upsert([fine_file.model_copy(update={"chunking_key": "4000:400"})], coarse, key)
-        assert await _stored_cuttings() == [("4000:400", 0)]
-        # Asked of the store through its own interface: the fine cutting's point is gone and the
-        # coarse one is still there, which is what "the vectors went with the rows" means.
-        assert {m.id for m in await store.search("chunks", fine_vector, 10)} == {"doc-1@4000:400#0"}
-
-        # (3) And the sweep agrees with `CLAIMED_SQL` rather than a local spelling of it: a cutting
-        # no file row claims is an orphan even while the *document* still has one.
-        async with await connect(settings.postgres_dsn) as conn:
-            await conn.execute(
-                "UPDATE document_files SET chunking_key = '400:40' WHERE source = %s", (SOURCE,)
-            )
-            await conn.commit()
-        assert await index.prune_stale("sharedrive-2", await index.clock()) == 1
-        assert await _stored_cuttings() == [], "the unclaimed cutting was swept here, not later"
-        assert await store.search("chunks", coarse_vector, 10) == [], "and its point went with it"
-
-    asyncio.run(_run())
+        await conn.commit()
+    assert await index.prune_stale("sharedrive-2", await index.clock()) == 1
+    assert await _stored_cuttings() == [], "the unclaimed cutting was swept here, not later"
+    assert await store.search("chunks", coarse_vector, 10) == [], "and its point went with it"
 
 
 def test_a_chunked_document_can_be_read_back_whole(tmp_path: Path) -> None:
@@ -2068,77 +2060,73 @@ def test_an_oversized_document_comes_back_short_and_says_so(
     assert len(whole.text) == 100
 
 
-def test_both_backends_read_the_same_whole_document() -> None:
+async def test_both_backends_read_the_same_whole_document() -> None:
     """The reference backend and Postgres must agree, or a test proves nothing about production."""
+    await migrated_db_or_skip()
+    async with await connect(settings.postgres_dsn) as conn:
+        await conn.execute("TRUNCATE document_files, document_chunks")
+        await conn.commit()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with await connect(settings.postgres_dsn) as conn:
-            await conn.execute("TRUNCATE document_files, document_chunks")
-            await conn.commit()
-
-        (vector,) = await asyncio.to_thread(embed_texts, ["a chunk of a protocol"])
-        key = embedding_config_key()
-        file_row = FileRecord(
-            path="SOPs/protocol.txt",
-            source=SOURCE,
+    (vector,) = await asyncio.to_thread(embed_texts, ["a chunk of a protocol"])
+    key = embedding_config_key()
+    file_row = FileRecord(
+        path="SOPs/protocol.txt",
+        source=SOURCE,
+        doc_id="doc-1",
+        fingerprint="1:2",
+        chunking_key="400:40",
+    )
+    chunks = [
+        ChunkRecord(
             doc_id="doc-1",
-            fingerprint="1:2",
             chunking_key="400:40",
+            ordinal=n,
+            content=f"Step {n}: charge and hold.",
+            coordinate=f"page {n + 1}",
+            embedding=vector,
         )
-        chunks = [
-            ChunkRecord(
-                doc_id="doc-1",
-                chunking_key="400:40",
-                ordinal=n,
-                content=f"Step {n}: charge and hold.",
-                coordinate=f"page {n + 1}",
-                embedding=vector,
+        for n in range(4)
+    ]
+    # **Two copies with different modification times**, because a single file row with none
+    # holds constant the axis the two backends actually disagreed on: Postgres takes `max`
+    # across copies, and the reference backend used to take the cited path's own time.
+    # The cited copy is deliberately **not** the most recently touched one: `Archive/…` sorts
+    # first so it wins the citation, while `SOPs/…` carries the newer time. A fixture where the
+    # same row won both would pass against either rule and prove nothing about which is running.
+    cited_but_older = file_row.model_copy(
+        update={
+            "path": "Archive/protocol.txt",
+            "modified_at": datetime(2026, 1, 1, tzinfo=UTC),
+        }
+    )
+    newer_copy = file_row.model_copy(update={"modified_at": datetime(2026, 3, 4, 12, tzinfo=UTC)})
+
+    results = []
+    for index in (PostgresDocumentIndex(), InMemoryDocumentIndex()):
+        await index.upsert([cited_but_older, newer_copy], chunks, key)
+        stored = await index.stored_document(SOURCE, "doc-1", "400:40", 1_000_000)
+        assert stored is not None, f"{type(index).__name__} did not read the document back"
+        results.append(
+            (
+                stored.path,
+                stored.modified_at,
+                [(p.ordinal, p.content, p.coordinate) for p in stored.pieces],
             )
-            for n in range(4)
-        ]
-        # **Two copies with different modification times**, because a single file row with none
-        # holds constant the axis the two backends actually disagreed on: Postgres takes `max`
-        # across copies, and the reference backend used to take the cited path's own time.
-        # The cited copy is deliberately **not** the most recently touched one: `Archive/…` sorts
-        # first so it wins the citation, while `SOPs/…` carries the newer time. A fixture where the
-        # same row won both would pass against either rule and prove nothing about which is running.
-        cited_but_older = file_row.model_copy(
-            update={
-                "path": "Archive/protocol.txt",
-                "modified_at": datetime(2026, 1, 1, tzinfo=UTC),
-            }
         )
-        newer_copy = file_row.model_copy(
-            update={"modified_at": datetime(2026, 3, 4, 12, tzinfo=UTC)}
+        # The smallest path is the citation; the most recent copy is the time.
+        assert stored.path == "Archive/protocol.txt"
+        assert stored.modified_at == datetime(2026, 3, 4, 12, tzinfo=UTC), (
+            f"{type(index).__name__} reported {stored.modified_at}, not the newest copy"
         )
+        # A share that does not hold it reads as absent on both.
+        assert await index.stored_document("other-share", "doc-1", "400:40", 1_000_000) is None
 
-        results = []
-        for index in (PostgresDocumentIndex(), InMemoryDocumentIndex()):
-            await index.upsert([cited_but_older, newer_copy], chunks, key)
-            stored = await index.stored_document(SOURCE, "doc-1", "400:40", 1_000_000)
-            assert stored is not None, f"{type(index).__name__} did not read the document back"
-            results.append(
-                (
-                    stored.path,
-                    stored.modified_at,
-                    [(p.ordinal, p.content, p.coordinate) for p in stored.pieces],
-                )
-            )
-            # The smallest path is the citation; the most recent copy is the time.
-            assert stored.path == "Archive/protocol.txt"
-            assert stored.modified_at == datetime(2026, 3, 4, 12, tzinfo=UTC), (
-                f"{type(index).__name__} reported {stored.modified_at}, not the newest copy"
-            )
-            # A share that does not hold it reads as absent on both.
-            assert await index.stored_document("other-share", "doc-1", "400:40", 1_000_000) is None
-
-        assert results[0] == results[1], "the two backends disagree about the stored document"
-
-    asyncio.run(_run())
+    assert results[0] == results[1], "the two backends disagree about the stored document"
 
 
-def test_the_durable_backend_stores_the_documents_own_text_and_still_finds_the_number() -> None:
+async def test_the_durable_backend_stores_the_documents_own_text_and_still_finds_the_number() -> (
+    None
+):
     """A stored chunk is the document's text; only what feeds the tsvector is normalised.
 
     `upsert` bound one `normalize_search_text` result to both the `content` column and
@@ -2150,52 +2138,49 @@ def test_the_durable_backend_stores_the_documents_own_text_and_still_finds_the_n
     """
     raw = "The mixture was cooled to -78 C over -0.5 h; CAS 108-24-7 was charged."
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with await connect(settings.postgres_dsn) as conn:
-            await conn.execute("TRUNCATE document_files, document_chunks")
-            await conn.commit()
+    await migrated_db_or_skip()
+    async with await connect(settings.postgres_dsn) as conn:
+        await conn.execute("TRUNCATE document_files, document_chunks")
+        await conn.commit()
 
-        (vector,) = await asyncio.to_thread(embed_texts, [raw])
-        key = embedding_config_key()
-        file_row = FileRecord(
-            path="SOPs/cryo.txt",
-            source=SOURCE,
-            doc_id="doc-1",
-            fingerprint="1:2",
-            chunking_key="400:40",
-        )
-        chunk = ChunkRecord(
-            doc_id="doc-1",
-            chunking_key="400:40",
-            ordinal=0,
-            content=raw,
-            embedding=vector,
-        )
-        for index in (PostgresDocumentIndex(), InMemoryDocumentIndex()):
-            await index.upsert([file_row], [chunk], key)
-            stored = await index.stored_document(SOURCE, "doc-1", "400:40", 1_000_000)
-            assert stored is not None
-            assert stored.pieces[0].content == raw, (
-                f"{type(index).__name__} rewrote the document's own text"
-            )
-
-        durable = PostgresDocumentIndex()
-        hits = await durable.search_lexical(SOURCE, "cooled", 5, DocumentFilter())
-        assert [hit.content for hit in hits] == [raw], "the served excerpt is not the stored text"
-        # The normalisation is still doing its job on the derivation, which is the whole reason
-        # the two are bound separately rather than the parameter simply removed.
-        assert await durable.search_lexical(SOURCE, "78", 5, DocumentFilter()), (
-            "a cryogenic temperature is unreachable again"
-        )
-        assert await durable.search_lexical(SOURCE, "108-24-7", 5, DocumentFilter()), (
-            "the CAS number stopped matching"
+    (vector,) = await asyncio.to_thread(embed_texts, [raw])
+    key = embedding_config_key()
+    file_row = FileRecord(
+        path="SOPs/cryo.txt",
+        source=SOURCE,
+        doc_id="doc-1",
+        fingerprint="1:2",
+        chunking_key="400:40",
+    )
+    chunk = ChunkRecord(
+        doc_id="doc-1",
+        chunking_key="400:40",
+        ordinal=0,
+        content=raw,
+        embedding=vector,
+    )
+    for index in (PostgresDocumentIndex(), InMemoryDocumentIndex()):
+        await index.upsert([file_row], [chunk], key)
+        stored = await index.stored_document(SOURCE, "doc-1", "400:40", 1_000_000)
+        assert stored is not None
+        assert stored.pieces[0].content == raw, (
+            f"{type(index).__name__} rewrote the document's own text"
         )
 
-    asyncio.run(_run())
+    durable = PostgresDocumentIndex()
+    hits = await durable.search_lexical(SOURCE, "cooled", 5, DocumentFilter())
+    assert [hit.content for hit in hits] == [raw], "the served excerpt is not the stored text"
+    # The normalisation is still doing its job on the derivation, which is the whole reason
+    # the two are bound separately rather than the parameter simply removed.
+    assert await durable.search_lexical(SOURCE, "78", 5, DocumentFilter()), (
+        "a cryogenic temperature is unreachable again"
+    )
+    assert await durable.search_lexical(SOURCE, "108-24-7", 5, DocumentFilter()), (
+        "the CAS number stopped matching"
+    )
 
 
-def test_one_unstorable_document_costs_the_document_and_not_the_pass(tmp_path: Path) -> None:
+async def test_one_unstorable_document_costs_the_document_and_not_the_pass(tmp_path: Path) -> None:
     """A NUL byte on a share used to kill the whole crawl, permanently — against the real database.
 
     A NUL is valid UTF-8, so the decode keeps it and `.strip()` does not remove it, and Postgres
@@ -2205,34 +2190,30 @@ def test_one_unstorable_document_costs_the_document_and_not_the_pass(tmp_path: P
     `PostgresDocumentIndex` because that is the only backend the fault exists on — the in-memory
     reference stores anything, which is why no test could see this.
     """
+    await migrated_db_or_skip()
+    async with await connect(settings.postgres_dsn) as conn:
+        await conn.execute("TRUNCATE document_files, document_chunks")
+        await conn.commit()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with await connect(settings.postgres_dsn) as conn:
-            await conn.execute("TRUNCATE document_files, document_chunks")
-            await conn.commit()
+    root = tmp_path / "nul-share"
+    (root / "docs").mkdir(parents=True)
+    (root / "docs" / "good.txt").write_text("A report about amide couplings.")
+    (root / "docs" / "mid.txt").write_bytes(b"Batch record\x00 for lot 42, yield 88%.")
+    (root / "docs" / "zzz.txt").write_text("A report sorted after the bad one.")
+    binding = load_binding(
+        {
+            "mount": str(root),
+            "public": True,
+            "roots": [{"path": "docs"}],
+            "extensions": [".txt"],
+        }
+    )
 
-        root = tmp_path / "nul-share"
-        (root / "docs").mkdir(parents=True)
-        (root / "docs" / "good.txt").write_text("A report about amide couplings.")
-        (root / "docs" / "mid.txt").write_bytes(b"Batch record\x00 for lot 42, yield 88%.")
-        (root / "docs" / "zzz.txt").write_text("A report sorted after the bad one.")
-        binding = load_binding(
-            {
-                "mount": str(root),
-                "public": True,
-                "roots": [{"path": "docs"}],
-                "extensions": [".txt"],
-            }
-        )
+    report = await sync_share(SOURCE, binding, PostgresDocumentIndex(), limit=100)
 
-        report = await sync_share(SOURCE, binding, PostgresDocumentIndex(), limit=100)
-
-        assert report.scanned == 3
-        assert report.indexed == 2, "the readable documents did not survive the unstorable one"
-        assert report.skipped_unreadable == 1
-
-    asyncio.run(_run())
+    assert report.scanned == 3
+    assert report.indexed == 2, "the readable documents did not survive the unstorable one"
+    assert report.skipped_unreadable == 1
 
 
 def test_an_oversized_document_is_bounded_at_the_fetch_not_after_assembly(
@@ -2280,54 +2261,50 @@ def test_a_document_that_fits_is_never_reported_truncated(tmp_path: Path) -> Non
     assert "Step 0:" in whole.text and "Step 119:" in whole.text
 
 
-def test_both_backends_stop_at_the_same_piece() -> None:
+async def test_both_backends_stop_at_the_same_piece() -> None:
     """A bound applied differently on each side would make the agreement test assert two things."""
+    await migrated_db_or_skip()
+    async with await connect(settings.postgres_dsn) as conn:
+        await conn.execute("TRUNCATE document_files, document_chunks")
+        await conn.commit()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with await connect(settings.postgres_dsn) as conn:
-            await conn.execute("TRUNCATE document_files, document_chunks")
-            await conn.commit()
-
-        (vector,) = await asyncio.to_thread(embed_texts, ["a chunk of a protocol"])
-        key = embedding_config_key()
-        file_row = FileRecord(
-            path="SOPs/protocol.txt",
-            source=SOURCE,
+    (vector,) = await asyncio.to_thread(embed_texts, ["a chunk of a protocol"])
+    key = embedding_config_key()
+    file_row = FileRecord(
+        path="SOPs/protocol.txt",
+        source=SOURCE,
+        doc_id="doc-cap",
+        fingerprint="1:2",
+        chunking_key="400:40",
+    )
+    chunks = [
+        ChunkRecord(
             doc_id="doc-cap",
-            fingerprint="1:2",
             chunking_key="400:40",
+            ordinal=n,
+            content="x" * 100,
+            coordinate=f"page {n + 1}",
+            embedding=vector,
         )
-        chunks = [
-            ChunkRecord(
-                doc_id="doc-cap",
-                chunking_key="400:40",
-                ordinal=n,
-                content="x" * 100,
-                coordinate=f"page {n + 1}",
-                embedding=vector,
-            )
-            for n in range(10)
-        ]
-        seen = []
-        for index in (PostgresDocumentIndex(), InMemoryDocumentIndex()):
-            await index.upsert([file_row], chunks, key)
-            # 250 characters spans two 100-character pieces and crosses into the third.
-            stored = await index.stored_document(SOURCE, "doc-cap", "400:40", 250)
-            assert stored is not None
-            seen.append((len(stored.pieces), stored.truncated))
-            full = await index.stored_document(SOURCE, "doc-cap", "400:40", 10_000)
-            assert full is not None and full.truncated is False, (
-                f"{type(index).__name__} reported a complete document as truncated"
-            )
+        for n in range(10)
+    ]
+    seen = []
+    for index in (PostgresDocumentIndex(), InMemoryDocumentIndex()):
+        await index.upsert([file_row], chunks, key)
+        # 250 characters spans two 100-character pieces and crosses into the third.
+        stored = await index.stored_document(SOURCE, "doc-cap", "400:40", 250)
+        assert stored is not None
+        seen.append((len(stored.pieces), stored.truncated))
+        full = await index.stored_document(SOURCE, "doc-cap", "400:40", 10_000)
+        assert full is not None and full.truncated is False, (
+            f"{type(index).__name__} reported a complete document as truncated"
+        )
 
-        assert seen[0] == seen[1], f"the backends cut differently: {seen}"
-        assert seen[0] == (3, True)
-
-    asyncio.run(_run())
+    assert seen[0] == seen[1], f"the backends cut differently: {seen}"
+    assert seen[0] == (3, True)
 
 
-def test_moving_the_document_corpus_to_another_store_re_embeds_it() -> None:
+async def test_moving_the_document_corpus_to_another_store_re_embeds_it() -> None:
     """A provider switch must not leave every chunk claiming a vector the new store never held.
 
     The note index got this in D-2026-08-25; the document corpus did not, and it is the larger of
@@ -2338,54 +2315,50 @@ def test_moving_the_document_corpus_to_another_store_re_embeds_it() -> None:
 
     The catalogue is shared between backends by design, so the switch has to be visible in the row.
     """
+    await migrated_db_or_skip()
+    async with await connect(settings.postgres_dsn) as conn:
+        await conn.execute("TRUNCATE document_files, document_chunks")
+        await conn.commit()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with await connect(settings.postgres_dsn) as conn:
-            await conn.execute("TRUNCATE document_files, document_chunks")
-            await conn.commit()
-
-        key = embedding_config_key()
-        (vector,) = await asyncio.to_thread(embed_texts, ["a protocol worth finding"])
-        file_row = FileRecord(
+    key = embedding_config_key()
+    (vector,) = await asyncio.to_thread(embed_texts, ["a protocol worth finding"])
+    file_row = FileRecord(
+        doc_id="doc-1",
+        source="sharedrive",
+        path="a.md",
+        fingerprint="1:1",
+        chunking_key="400:40",
+        tags=[],
+        modified_at=None,
+    )
+    chunks = [
+        ChunkRecord(
             doc_id="doc-1",
-            source="sharedrive",
-            path="a.md",
-            fingerprint="1:1",
             chunking_key="400:40",
-            tags=[],
-            modified_at=None,
+            ordinal=0,
+            content="a protocol worth finding",
+            embedding=vector,
         )
-        chunks = [
-            ChunkRecord(
-                doc_id="doc-1",
-                chunking_key="400:40",
-                ordinal=0,
-                content="a protocol worth finding",
-                embedding=vector,
-            )
-        ]
+    ]
 
-        first = ExternalVectorDocumentIndex(InMemoryVectorStore(), collection="chunks")
-        await first.upsert([file_row], chunks, key)
-        assert await first.stale_chunks(key, 10, {"400:40"}) == [], "settled in its own store"
+    first = ExternalVectorDocumentIndex(InMemoryVectorStore(), collection="chunks")
+    await first.upsert([file_row], chunks, key)
+    assert await first.stale_chunks(key, 10, {"400:40"}) == [], "settled in its own store"
 
-        # The move: same catalogue, same model, a store that has never seen this corpus.
-        moved_to = InMemoryVectorStore()
-        with patch.object(settings, "vector_store_provider", "databricks"):
-            moved = ExternalVectorDocumentIndex(moved_to, collection="chunks")
-            stale = await moved.stale_chunks(key, 10, {"400:40"})
-            assert [(c.doc_id, c.ordinal) for c in stale] == [("doc-1", 0)], (
-                "every chunk must read as stale: its vector is in the store we just left"
-            )
-            await moved.store_embeddings(chunks, key)
-            assert await moved.stale_chunks(key, 10, {"400:40"}) == []
-
-        assert [m.id for m in await moved_to.search("chunks", vector, 5)], (
-            "and the vector landed in the new store, which is what search will ask"
+    # The move: same catalogue, same model, a store that has never seen this corpus.
+    moved_to = InMemoryVectorStore()
+    with patch.object(settings, "vector_store_provider", "databricks"):
+        moved = ExternalVectorDocumentIndex(moved_to, collection="chunks")
+        stale = await moved.stale_chunks(key, 10, {"400:40"})
+        assert [(c.doc_id, c.ordinal) for c in stale] == [("doc-1", 0)], (
+            "every chunk must read as stale: its vector is in the store we just left"
         )
+        await moved.store_embeddings(chunks, key)
+        assert await moved.stale_chunks(key, 10, {"400:40"}) == []
 
-    asyncio.run(_run())
+    assert [m.id for m in await moved_to.search("chunks", vector, 5)], (
+        "and the vector landed in the new store, which is what search will ask"
+    )
 
 
 def test_neither_backend_ranks_a_chunk_from_a_superseded_embedding_configuration() -> None:

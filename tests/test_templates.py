@@ -732,7 +732,9 @@ def test_a_template_run_executes_its_steps_in_order(monkeypatch: pytest.MonkeyPa
 # --- the agent step's retry is narrower than every other step's -------------------------------
 
 
-def test_only_the_agent_step_carries_the_narrowed_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_only_the_agent_step_carries_the_narrowed_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The dispatch, not the policy object — which branch actually got which bound.
 
     `tests/test_publish.py` proves `agent_step_retry()` is narrower than `BAD_DATA_RETRY`. That is
@@ -778,13 +780,10 @@ def test_only_the_agent_step_carries_the_narrowed_retry(monkeypatch: pytest.Monk
     )
     identity = StepIdentity(actor="tester", roles=[], correlation_id="run-1")
 
-    async def _dispatch() -> None:
-        for step in template.steps:
-            await template_job.TemplateWorkflow()._run_step(
-                step, {}, identity, timedelta(seconds=60), template.name
-            )
-
-    asyncio.run(_dispatch())
+    for step in template.steps:
+        await template_job.TemplateWorkflow()._run_step(
+            step, {}, identity, timedelta(seconds=60), template.name
+        )
 
     tool_policy, agent_policy = seen
     assert tool_policy.maximum_attempts == BAD_DATA_RETRY.maximum_attempts

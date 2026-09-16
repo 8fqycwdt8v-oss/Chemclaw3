@@ -13,7 +13,6 @@ Neither is wrong. Both are blind in the same direction, and this is the file tha
 standing in for a database this system does not own, and asks the questions in SQL.
 """
 
-import asyncio
 from typing import Any
 
 import psycopg
@@ -81,7 +80,7 @@ def _screen() -> SolventComparisonResult:
     )
 
 
-def test_a_composite_reaches_an_external_database_and_answers_a_question(
+async def test_a_composite_reaches_an_external_database_and_answers_a_question(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Enqueue a composite the way a finished job does, drain it, then query it back out.
@@ -98,102 +97,99 @@ def test_a_composite_reaches_an_external_database_and_answers_a_question(
     from chemclaw.publish.drivers.sql import SqlResultSink
     from chemclaw.publish.record import Publication
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        dsn = settings.postgres_dsn
-        await _create_store(dsn)
+    await migrated_db_or_skip()
+    dsn = settings.postgres_dsn
+    await _create_store(dsn)
 
-        monkeypatch.setattr(outbox, "publishing_enabled", lambda: True)
-        monkeypatch.setattr(outbox, "enabled_names", lambda: ["e2e"])
-        async with outbox._connect("test_fixture") as conn:
-            await conn.execute("DELETE FROM result_publications")
-            await conn.commit()
+    monkeypatch.setattr(outbox, "publishing_enabled", lambda: True)
+    monkeypatch.setattr(outbox, "enabled_names", lambda: ["e2e"])
+    async with outbox._connect("test_fixture") as conn:
+        await conn.execute("DELETE FROM result_publications")
+        await conn.commit()
 
-        queued = await outbox.enqueue_payload(
-            calc_ref="job-e2e-1",
-            calc_type="calc.compare_solvents",
-            payload_kind="SolventComparisonResult",
-            payload=_screen().model_dump(mode="json"),
-            publication=Publication(
-                actor="chemist@example.com",
-                job_id="job-e2e-1",
-                rationale="which solvent",
-                note_id="job-result-e2e",
-            ),
-        )
-        assert queued == 3, "the comparison and both of its parts must be queued"
+    queued = await outbox.enqueue_payload(
+        calc_ref="job-e2e-1",
+        calc_type="calc.compare_solvents",
+        payload_kind="SolventComparisonResult",
+        payload=_screen().model_dump(mode="json"),
+        publication=Publication(
+            actor="chemist@example.com",
+            job_id="job-e2e-1",
+            rationale="which solvent",
+            note_id="job-result-e2e",
+        ),
+    )
+    assert queued == 3, "the comparison and both of its parts must be queued"
 
-        # **No `writer_version`**, exactly as the shipped `sink.yaml` declares none: the column is
-        # asserted below to carry the deployment's revision rather than the empty string.
-        sink = SqlResultSink(
-            name="e2e",
-            tenant_id="site-a",
-            connection={
-                "driver": "chemclaw.publish.drivers.postgres:PostgresWarehouse",
-                "dsn": dsn,
-                "schema": _STORE,
-            },
-        )
-        outcome = await publish_results._drain_one("e2e", sink, 50)
-        assert outcome.failed == 0, f"delivery failed: {outcome.reason}"
-        assert outcome.delivered == 3
+    # **No `writer_version`**, exactly as the shipped `sink.yaml` declares none: the column is
+    # asserted below to carry the deployment's revision rather than the empty string.
+    sink = SqlResultSink(
+        name="e2e",
+        tenant_id="site-a",
+        connection={
+            "driver": "chemclaw.publish.drivers.postgres:PostgresWarehouse",
+            "dsn": dsn,
+            "schema": _STORE,
+        },
+    )
+    outcome = await publish_results._drain_one("e2e", sink, 50)
+    assert outcome.failed == 0, f"delivery failed: {outcome.reason}"
+    assert outcome.delivered == 3
 
-        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
-            await conn.execute(f"SET search_path={_STORE}")
-            rows = await _rows(
-                conn,
-                """
+    async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+        await conn.execute(f"SET search_path={_STORE}")
+        rows = await _rows(
+            conn,
+            """
                 SELECT pv.solvent_id, pv.value_canonical
                 FROM property_value pv
                 WHERE pv.property = 'reaction_delta_g'
                 ORDER BY pv.value_canonical
                 """,
-            )
-            assert [(row[0], row[1]) for row in rows] == [("toluene", -28.9), ("thf", -24.0)], (
-                "both parts must be answerable on their own, and the THF row must have been "
-                "resolved from the alias it was submitted under"
-            )
+        )
+        assert [(row[0], row[1]) for row in rows] == [("toluene", -28.9), ("thf", -24.0)], (
+            "both parts must be answerable on their own, and the THF row must have been "
+            "resolved from the alias it was submitted under"
+        )
 
-            edges = await _rows(
-                conn,
-                "SELECT calc_ref, depends_on_calc_ref FROM calculation_input ORDER BY calc_ref",
-            )
-            assert [row[1] for row in edges] == ["job-e2e-1", "job-e2e-1"], (
-                "each part must edge back to the aggregate, or the verdict is untraceable"
-            )
+        edges = await _rows(
+            conn,
+            "SELECT calc_ref, depends_on_calc_ref FROM calculation_input ORDER BY calc_ref",
+        )
+        assert [row[1] for row in edges] == ["job-e2e-1", "job-e2e-1"], (
+            "each part must edge back to the aggregate, or the verdict is untraceable"
+        )
 
-            stamped = await _rows(conn, "SELECT DISTINCT writer_version FROM calculation")
-            assert stamped == [(settings.deployment_revision,)], (
-                "which ChemClaw3 wrote the row is what makes 'why is in_domain null for "
-                "everything before March' answerable; nothing computed it, so every row said '' "
-                "— recorded, and blank"
-            )
+        stamped = await _rows(conn, "SELECT DISTINCT writer_version FROM calculation")
+        assert stamped == [(settings.deployment_revision,)], (
+            "which ChemClaw3 wrote the row is what makes 'why is in_domain null for "
+            "everything before March' answerable; nothing computed it, so every row said '' "
+            "— recorded, and blank"
+        )
 
-            publication = await _rows(
-                conn, "SELECT actor, tenant_id, note_id FROM calculation_publication LIMIT 1"
-            )
-            assert publication[0] == ("chemist@example.com", "site-a", "job-result-e2e"), (
-                "who ran it, under which deployment, and what note it produced belong on the "
-                "publication row rather than on the calculation — two chemists running one "
-                "calculation share its calc_ref. The note is the one *structured* link back to "
-                "the work, and the seam carried four weaker ones without it "
-                "(D-2026-09-13-a-publication-carries-the-link-the-system-already-holds)"
-            )
+        publication = await _rows(
+            conn, "SELECT actor, tenant_id, note_id FROM calculation_publication LIMIT 1"
+        )
+        assert publication[0] == ("chemist@example.com", "site-a", "job-result-e2e"), (
+            "who ran it, under which deployment, and what note it produced belong on the "
+            "publication row rather than on the calculation — two chemists running one "
+            "calculation share its calc_ref. The note is the one *structured* link back to "
+            "the work, and the seam carried four weaker ones without it "
+            "(D-2026-09-13-a-publication-carries-the-link-the-system-already-holds)"
+        )
 
-        # Redelivery converges: every key is a content hash, so a second drain writes nothing new.
-        async with outbox._connect("test_fixture") as conn:
-            await conn.execute("UPDATE result_publications SET state='pending', attempts=0")
-            await conn.commit()
-        again = await publish_results._drain_one("e2e", sink, 50)
-        assert again.failed == 0
-        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
-            await conn.execute(f"SET search_path={_STORE}")
-            counted = await _rows(conn, "SELECT count(*) FROM calculation")
-            assert counted[0][0] == 3, "a redelivery must be a no-op, not a duplicate"
-        # The drain closes its sinks; this test drives `_drain_one` directly, so it closes its own.
-        await sink.aclose()
-
-    asyncio.run(_run())
+    # Redelivery converges: every key is a content hash, so a second drain writes nothing new.
+    async with outbox._connect("test_fixture") as conn:
+        await conn.execute("UPDATE result_publications SET state='pending', attempts=0")
+        await conn.commit()
+    again = await publish_results._drain_one("e2e", sink, 50)
+    assert again.failed == 0
+    async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+        await conn.execute(f"SET search_path={_STORE}")
+        counted = await _rows(conn, "SELECT count(*) FROM calculation")
+        assert counted[0][0] == 3, "a redelivery must be a no-op, not a duplicate"
+    # The drain closes its sinks; this test drives `_drain_one` directly, so it closes its own.
+    await sink.aclose()
 
 
 async def _rows(conn: psycopg.AsyncConnection[Any], sql: str) -> list[Any]:
@@ -202,7 +198,7 @@ async def _rows(conn: psycopg.AsyncConnection[Any], sql: str) -> list[Any]:
     return list(await cursor.fetchall())
 
 
-def test_a_same_named_table_in_another_schema_does_not_decide_the_columns(
+async def test_a_same_named_table_in_another_schema_does_not_decide_the_columns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The probe asks `information_schema` by table *name*; the writes go through `search_path`.
@@ -223,53 +219,50 @@ def test_a_same_named_table_in_another_schema_does_not_decide_the_columns(
 
     other = f"{_STORE}_archive"
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        dsn = settings.postgres_dsn
-        await _create_store(dsn)
-        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
-            # The site is one release behind: its `calculation` has no `compute_seconds`.
-            await conn.execute(f"ALTER TABLE {_STORE}.calculation DROP COLUMN compute_seconds")
-            # And an archive schema, visible to the same role, still does.
-            await conn.execute(f"DROP SCHEMA IF EXISTS {other} CASCADE")
-            await conn.execute(f"CREATE SCHEMA {other}")
-            await conn.execute(
-                f"CREATE TABLE {other}.calculation "
-                "(calc_ref VARCHAR(512) PRIMARY KEY, compute_seconds DOUBLE PRECISION)"
-            )
-
-        record = project(
-            calc_ref="probe-1",
-            calc_type="reaction.solvent_screen",
-            payload=_screen().model_dump(mode="json"),
-            payload_kind="SolventComparisonResult",
-            compute_seconds=12.5,
+    await migrated_db_or_skip()
+    dsn = settings.postgres_dsn
+    await _create_store(dsn)
+    async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+        # The site is one release behind: its `calculation` has no `compute_seconds`.
+        await conn.execute(f"ALTER TABLE {_STORE}.calculation DROP COLUMN compute_seconds")
+        # And an archive schema, visible to the same role, still does.
+        await conn.execute(f"DROP SCHEMA IF EXISTS {other} CASCADE")
+        await conn.execute(f"CREATE SCHEMA {other}")
+        await conn.execute(
+            f"CREATE TABLE {other}.calculation "
+            "(calc_ref VARCHAR(512) PRIMARY KEY, compute_seconds DOUBLE PRECISION)"
         )
-        sink = SqlResultSink(
-            name="probe",
-            tenant_id="site-a",
-            connection={
-                "driver": "chemclaw.publish.drivers.postgres:PostgresWarehouse",
-                "dsn": dsn,
-                "schema": _STORE,
-            },
-        )
-        try:
-            # Must not raise: the probe has to be qualified by the same schema the writes are.
-            await sink.deliver([record])
-        finally:
-            await sink.aclose()
 
-        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
-            await conn.execute(f"SET search_path={_STORE}")
-            landed = await _rows(conn, "SELECT calc_ref FROM calculation")
-            assert landed == [("probe-1",)]
-            await conn.execute(f"DROP SCHEMA IF EXISTS {other} CASCADE")
+    record = project(
+        calc_ref="probe-1",
+        calc_type="reaction.solvent_screen",
+        payload=_screen().model_dump(mode="json"),
+        payload_kind="SolventComparisonResult",
+        compute_seconds=12.5,
+    )
+    sink = SqlResultSink(
+        name="probe",
+        tenant_id="site-a",
+        connection={
+            "driver": "chemclaw.publish.drivers.postgres:PostgresWarehouse",
+            "dsn": dsn,
+            "schema": _STORE,
+        },
+    )
+    try:
+        # Must not raise: the probe has to be qualified by the same schema the writes are.
+        await sink.deliver([record])
+    finally:
+        await sink.aclose()
 
-    asyncio.run(_run())
+    async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+        await conn.execute(f"SET search_path={_STORE}")
+        landed = await _rows(conn, "SELECT calc_ref FROM calculation")
+        assert landed == [("probe-1",)]
+        await conn.execute(f"DROP SCHEMA IF EXISTS {other} CASCADE")
 
 
-def test_a_schema_cannot_smuggle_a_second_libpq_option_past_the_timeout_bound() -> None:
+async def test_a_schema_cannot_smuggle_a_second_libpq_option_past_the_timeout_bound() -> None:
     """The `schema:` a manifest writes reaches libpq's `options`, so it is an identifier or nothing.
 
     `PostgresWarehouse.__init__` range-checks `query_timeout_seconds` three lines before it builds
@@ -290,27 +283,24 @@ def test_a_schema_cannot_smuggle_a_second_libpq_option_past_the_timeout_bound() 
     from chemclaw.publish.connect import SinkConnectionError
     from chemclaw.publish.drivers.postgres import PostgresWarehouse
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        dsn = settings.postgres_dsn
+    await migrated_db_or_skip()
+    dsn = settings.postgres_dsn
 
-        with pytest.raises(SinkConnectionError, match="plain SQL identifier"):
-            PostgresWarehouse(dsn=dsn, schema="public -c statement_timeout=0")
+    with pytest.raises(SinkConnectionError, match="plain SQL identifier"):
+        PostgresWarehouse(dsn=dsn, schema="public -c statement_timeout=0")
 
-        # The legitimate path still reaches the server with the timeout the driver declared, which
-        # is what makes the refusal above a narrowing rather than a breakage.
-        benign = PostgresWarehouse(dsn=dsn, schema="public", query_timeout_seconds=60)
-        try:
-            async with benign.cursor() as cursor:
-                await cursor.execute("SHOW statement_timeout", [])
-                assert await cursor.fetchall() == [{"statement_timeout": "1min"}]
-        finally:
-            await benign.aclose()
-
-    asyncio.run(_run())
+    # The legitimate path still reaches the server with the timeout the driver declared, which
+    # is what makes the refusal above a narrowing rather than a breakage.
+    benign = PostgresWarehouse(dsn=dsn, schema="public", query_timeout_seconds=60)
+    try:
+        async with benign.cursor() as cursor:
+            await cursor.execute("SHOW statement_timeout", [])
+            assert await cursor.fetchall() == [{"statement_timeout": "1min"}]
+    finally:
+        await benign.aclose()
 
 
-def test_the_seeded_no_conditions_row_is_the_one_the_writer_points_at() -> None:
+async def test_the_seeded_no_conditions_row_is_the_one_the_writer_points_at() -> None:
     """The seed must name the id the projector derives, or it seeds a row nothing joins to.
 
     `condition_set` is content-addressed like every other key here: a calculator with no conditions
@@ -323,24 +313,23 @@ def test_the_seeded_no_conditions_row_is_the_one_the_writer_points_at() -> None:
     """
     from chemclaw.publish.record import Conditions
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        dsn = settings.postgres_dsn
-        await _create_store(dsn)
+    await migrated_db_or_skip()
+    dsn = settings.postgres_dsn
+    await _create_store(dsn)
 
-        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
-            await conn.execute(f"SET search_path={_STORE}")
-            seeded = await _rows(conn, "SELECT condition_id FROM condition_set ORDER BY 1")
+    async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+        await conn.execute(f"SET search_path={_STORE}")
+        seeded = await _rows(conn, "SELECT condition_id FROM condition_set ORDER BY 1")
 
-        assert [row[0] for row in seeded] == [Conditions().condition_id], (
-            "the seeded no-conditions row must carry the id `Conditions()` derives, or nothing "
-            "the writer publishes ever points at it"
-        )
-
-    asyncio.run(_run())
+    assert [row[0] for row in seeded] == [Conditions().condition_id], (
+        "the seeded no-conditions row must carry the id `Conditions()` derives, or nothing "
+        "the writer publishes ever points at it"
+    )
 
 
-def test_a_finished_job_publishes_the_note_it_produced(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_finished_job_publishes_the_note_it_produced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`calculation_publication` recorded four weak links to a run and dropped the structured one.
 
     That table exists to answer "what question was this meant to answer" — it carries the session,
@@ -368,39 +357,36 @@ def test_a_finished_job_publishes_the_note_it_produced(monkeypatch: pytest.Monke
         published.append(kwargs["publication"])
         return 1
 
-    async def _run() -> None:
-        from tests.fixtures.connectors.fixture.workflows import FixtureJobWorkflow
+    from tests.fixtures.connectors.fixture.workflows import FixtureJobWorkflow
 
-        await migrated_db_or_skip()
-        monkeypatch.setattr(outbox, "enqueue_payload", _capture)
-        async with await start_local_env_or_skip() as env:
-            client = pydantic_client(env)
-            wrapper = Worker(
-                client,
+    await migrated_db_or_skip()
+    monkeypatch.setattr(outbox, "enqueue_payload", _capture)
+    async with await start_local_env_or_skip() as env:
+        client = pydantic_client(env)
+        wrapper = Worker(
+            client,
+            task_queue=settings.background_task_queue,
+            workflows=[ConnectorJobWorkflow],
+            activities=[record_job, publish_job_result],
+            workflow_runner=UnsandboxedWorkflowRunner(),
+        )
+        bundle = Worker(client, task_queue="connector-fixture", workflows=[FixtureJobWorkflow])
+        async with wrapper, bundle:
+            handle = await client.start_workflow(
+                ConnectorJobWorkflow.run,
+                _JOB.model_copy(
+                    update={
+                        "workflow": "FixtureJobWorkflow",
+                        "task_queue": "connector-fixture",
+                        "payload": {"subject": "benzene"},
+                        "publish_to_graph": False,
+                        "session_id": "",
+                    }
+                ),
+                id="publish-note-probe",
                 task_queue=settings.background_task_queue,
-                workflows=[ConnectorJobWorkflow],
-                activities=[record_job, publish_job_result],
-                workflow_runner=UnsandboxedWorkflowRunner(),
             )
-            bundle = Worker(client, task_queue="connector-fixture", workflows=[FixtureJobWorkflow])
-            async with wrapper, bundle:
-                handle = await client.start_workflow(
-                    ConnectorJobWorkflow.run,
-                    _JOB.model_copy(
-                        update={
-                            "workflow": "FixtureJobWorkflow",
-                            "task_queue": "connector-fixture",
-                            "payload": {"subject": "benzene"},
-                            "publish_to_graph": False,
-                            "session_id": "",
-                        }
-                    ),
-                    id="publish-note-probe",
-                    task_queue=settings.background_task_queue,
-                )
-                await _until_not_running(handle, timeout=60.0)
-
-    asyncio.run(_run())
+            await _until_not_running(handle, timeout=60.0)
 
     assert published, "the job published nothing at all, so the assertion below proves nothing"
     assert published[0].note_id == "fixture-benzene", (
@@ -505,7 +491,7 @@ def _records(count: int) -> list[Any]:
     return out
 
 
-def test_a_batch_is_one_statement_per_table_and_column_set_not_one_per_row(
+async def test_a_batch_is_one_statement_per_table_and_column_set_not_one_per_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The same batch, through a driver that can batch and one that cannot, lands the same rows.
@@ -521,66 +507,62 @@ def test_a_batch_is_one_statement_per_table_and_column_set_not_one_per_row(
     many distinct column sets the projector emits and a new optional column would move it without
     anything being wrong.
     """
+    await migrated_db_or_skip()
+    dsn = settings.postgres_dsn
+    records = _records(20)
+    landed: dict[str, list[Any]] = {}
+    counts: dict[str, int] = {}
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        dsn = settings.postgres_dsn
-        records = _records(20)
-        landed: dict[str, list[Any]] = {}
-        counts: dict[str, int] = {}
-
-        for label, batching in (("plain", False), ("batching", True)):
-            await _create_store(dsn)
+    for label, batching in (("plain", False), ("batching", True)):
+        await _create_store(dsn)
+        _ROUND_TRIPS.update(execute=0, executemany=0)
+        sink = SqlResultSink(
+            name="roundtrips",
+            tenant_id="site-a",
+            connection={
+                "driver": "tests.test_publish_end_to_end:_warehouse",
+                "dsn": dsn,
+                "schema": _STORE,
+                "batching": batching,
+            },
+        )
+        try:
+            # The schema probe is three statements of its own; only the writes are counted.
+            await sink._known_columns(sink._connect())
             _ROUND_TRIPS.update(execute=0, executemany=0)
-            sink = SqlResultSink(
-                name="roundtrips",
-                tenant_id="site-a",
-                connection={
-                    "driver": "tests.test_publish_end_to_end:_warehouse",
-                    "dsn": dsn,
-                    "schema": _STORE,
-                    "batching": batching,
-                },
+            await sink.deliver(records)
+        finally:
+            await sink.aclose()
+        counts[label] = _ROUND_TRIPS["execute"] + _ROUND_TRIPS["executemany"]
+        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+            await conn.execute(f"SET search_path={_STORE}")
+            landed[label] = await _rows(
+                conn,
+                "SELECT calc_ref, property, solvent_id, value_canonical FROM property_value "
+                "ORDER BY calc_ref, property, solvent_id",
             )
-            try:
-                # The schema probe is three statements of its own; only the writes are counted.
-                await sink._known_columns(sink._connect())
-                _ROUND_TRIPS.update(execute=0, executemany=0)
-                await sink.deliver(records)
-            finally:
-                await sink.aclose()
-            counts[label] = _ROUND_TRIPS["execute"] + _ROUND_TRIPS["executemany"]
-            async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
-                await conn.execute(f"SET search_path={_STORE}")
-                landed[label] = await _rows(
-                    conn,
-                    "SELECT calc_ref, property, solvent_id, value_canonical FROM property_value "
-                    "ORDER BY calc_ref, property, solvent_id",
-                )
 
-        assert landed["plain"], "the fixture must actually publish something"
-        assert landed["batching"] == landed["plain"], (
-            "an optional capability that changes what is stored is not an optimisation; the "
-            "batched path must be indistinguishable from the row-at-a-time one in the database"
-        )
-        assert counts["plain"] >= 20 * 10, (
-            "the row-at-a-time path is one round trip per row and must stay measured as one, or "
-            "the ratio below is a claim about nothing"
-        )
-        assert counts["batching"] <= 40, (
-            f"20 records took {counts['batching']} round trips; the whole point of grouping "
-            "table-major across the batch is that the statement count is a function of the "
-            "projector's column sets and not of the number of records"
-        )
-        assert counts["batching"] * 5 < counts["plain"], (
-            f"batched {counts['batching']} vs row-at-a-time {counts['plain']}: a drain pass is "
-            "order 10^3 round trips and this is the whole reason the change exists"
-        )
-
-    asyncio.run(_run())
+    assert landed["plain"], "the fixture must actually publish something"
+    assert landed["batching"] == landed["plain"], (
+        "an optional capability that changes what is stored is not an optimisation; the "
+        "batched path must be indistinguishable from the row-at-a-time one in the database"
+    )
+    assert counts["plain"] >= 20 * 10, (
+        "the row-at-a-time path is one round trip per row and must stay measured as one, or "
+        "the ratio below is a claim about nothing"
+    )
+    assert counts["batching"] <= 40, (
+        f"20 records took {counts['batching']} round trips; the whole point of grouping "
+        "table-major across the batch is that the statement count is a function of the "
+        "projector's column sets and not of the number of records"
+    )
+    assert counts["batching"] * 5 < counts["plain"], (
+        f"batched {counts['batching']} vs row-at-a-time {counts['plain']}: a drain pass is "
+        "order 10^3 round trips and this is the whole reason the change exists"
+    )
 
 
-def test_a_refused_row_inside_a_batch_is_still_named_with_its_table_and_calc_ref() -> None:
+async def test_a_refused_row_inside_a_batch_is_still_named_with_its_table_and_calc_ref() -> None:
     """A batch shares a failure; the error must not. Driven with one poisoned row in a group.
 
     `SinkRejectedError` naming the table and the `calc_ref` is what an operator acts on, and it is
@@ -593,47 +575,43 @@ def test_a_refused_row_inside_a_batch_is_still_named_with_its_table_and_calc_ref
     this arm exists for — a site whose store refuses a value this release writes — and it fails one
     row of a group whose other rows are perfectly good.
     """
+    await migrated_db_or_skip()
+    dsn = settings.postgres_dsn
+    await _create_store(dsn)
+    async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+        await conn.execute(
+            f"ALTER TABLE {_STORE}.calculation "
+            "ADD CONSTRAINT no_poison CHECK (calc_ref <> 'batch-1')"
+        )
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        dsn = settings.postgres_dsn
-        await _create_store(dsn)
-        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
-            await conn.execute(
-                f"ALTER TABLE {_STORE}.calculation "
-                "ADD CONSTRAINT no_poison CHECK (calc_ref <> 'batch-1')"
-            )
+    records = _records(3)
+    for batching in (True, False):
+        sink = SqlResultSink(
+            name="poison",
+            tenant_id="site-a",
+            connection={
+                "driver": "tests.test_publish_end_to_end:_warehouse",
+                "dsn": dsn,
+                "schema": _STORE,
+                "batching": batching,
+            },
+        )
+        try:
+            with pytest.raises(SinkRejectedError) as raised:
+                await sink.deliver(records)
+        finally:
+            await sink.aclose()
+        message = str(raised.value)
+        assert "calculation" in message and "batch-1" in message, (
+            f"the refusal must name the table and the record that caused it; got {message!r}"
+        )
 
-        records = _records(3)
-        for batching in (True, False):
-            sink = SqlResultSink(
-                name="poison",
-                tenant_id="site-a",
-                connection={
-                    "driver": "tests.test_publish_end_to_end:_warehouse",
-                    "dsn": dsn,
-                    "schema": _STORE,
-                    "batching": batching,
-                },
-            )
-            try:
-                with pytest.raises(SinkRejectedError) as raised:
-                    await sink.deliver(records)
-            finally:
-                await sink.aclose()
-            message = str(raised.value)
-            assert "calculation" in message and "batch-1" in message, (
-                f"the refusal must name the table and the record that caused it; got {message!r}"
-            )
-
-        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
-            await conn.execute(f"SET search_path={_STORE}")
-            kept = await _rows(conn, "SELECT calc_ref FROM calculation ORDER BY calc_ref")
-            assert kept == [("batch-0",)], (
-                "the row-at-a-time replay must write the group's good rows up to the poison, so "
-                "the partial state a retry completes is the same one the row-at-a-time writer "
-                "left — psycopg rolls a refused `executemany` back whole, which is why the replay "
-                "is what puts them there"
-            )
-
-    asyncio.run(_run())
+    async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+        await conn.execute(f"SET search_path={_STORE}")
+        kept = await _rows(conn, "SELECT calc_ref FROM calculation ORDER BY calc_ref")
+        assert kept == [("batch-0",)], (
+            "the row-at-a-time replay must write the group's good rows up to the poison, so "
+            "the partial state a retry completes is the same one the row-at-a-time writer "
+            "left — psycopg rolls a refused `executemany` back whole, which is why the replay "
+            "is what puts them there"
+        )

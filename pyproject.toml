@@ -372,6 +372,20 @@ testpaths = ["tests"]
 # `timeout` leaves it on the global cap. There is nothing to register and nothing to migrate; the
 # flag simply makes the empty set enforced.
 addopts = "-ra --strict-markers"
+# Every `async def test_*` is run by anyio's bundled pytest plugin, on the backend
+# `tests/conftest.py::anyio_backend` pins. "auto" rather than a `@pytest.mark.anyio` per test: the
+# marker is real — the plugin registers it, so `--strict-markers` is satisfied — and it would be
+# seven hundred lines of it, one per test, all saying the same thing. What makes the marker
+# load-bearing in other repositories is the risk that an unmarked async test passes vacuously; on
+# pytest 9 it does not, an `async def` no plugin claims is a hard failure naming the plugins that
+# would run it, so "auto" gives up nothing that strict mode was buying.
+#
+# anyio is not a new distribution: httpx, starlette and the `mcp` SDK all require it, so it is
+# already resolved in `uv.lock` and installed wherever `chemclaw` can be imported. It is *not* in
+# `[dependency-groups] dev`, which is where a tool only the tests use belongs, and that is a real
+# gap rather than an argument — the suite would not run without it. Closing it is one line there
+# plus the two lines `uv lock` then writes (measured: no version moves, no new distributions).
+anyio_mode = "auto"
 # Deprecations aimed at *first-party* code are errors; everybody else's are left alone.
 #
 # The suite emits third-party deprecations today (torch's `jit.script`, bofire's class-based

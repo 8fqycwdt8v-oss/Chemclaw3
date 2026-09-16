@@ -73,123 +73,98 @@ def test_tanimoto_bounds() -> None:
     assert tanimoto("0" * 8, "0" * 8) == 0.0  # two empty fps: defined as 0
 
 
-def test_find_similar_ranks_by_tanimoto() -> None:
+async def test_find_similar_ranks_by_tanimoto() -> None:
     """A query returns neighbors most-similar-first, filtered by threshold and top_k."""
+    store = InMemoryFingerprintStore()
+    for cid, smiles in [
+        ("ethanol", "CCO"),
+        ("propanol", "CCCO"),
+        ("butanol", "CCCCO"),
+        ("benzene", "c1ccccc1"),
+    ]:
+        await store.add(record_for(cid, smiles))
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        for cid, smiles in [
-            ("ethanol", "CCO"),
-            ("propanol", "CCCO"),
-            ("butanol", "CCCCO"),
-            ("benzene", "c1ccccc1"),
-        ]:
-            await store.add(record_for(cid, smiles))
+    hits = (await find_similar_molecules(store, "CCO", threshold=0.1)).hits
+    found = [h.smiles for h in hits]
+    assert found[0] == "CCO"  # exact match ranks first
+    assert "c1ccccc1" not in found  # disjoint, below threshold
+    # Similarity is monotonically non-increasing down the list.
+    assert all(
+        (hits[i].similarity or 0.0) >= (hits[i + 1].similarity or 0.0) for i in range(len(hits) - 1)
+    )
 
-        hits = (await find_similar_molecules(store, "CCO", threshold=0.1)).hits
-        found = [h.smiles for h in hits]
-        assert found[0] == "CCO"  # exact match ranks first
-        assert "c1ccccc1" not in found  # disjoint, below threshold
-        # Similarity is monotonically non-increasing down the list.
-        assert all(
-            (hits[i].similarity or 0.0) >= (hits[i + 1].similarity or 0.0)
-            for i in range(len(hits) - 1)
-        )
-
-        # top_k truncates to the closest neighbors only.
-        assert len((await find_similar_molecules(store, "CCO", top_k=2, threshold=0.1)).hits) == 2
-
-    asyncio.run(_run())
+    # top_k truncates to the closest neighbors only.
+    assert len((await find_similar_molecules(store, "CCO", top_k=2, threshold=0.1)).hits) == 2
 
 
-def test_threshold_excludes_weak_matches() -> None:
+async def test_threshold_excludes_weak_matches() -> None:
     """Raising the threshold drops loosely related hits."""
-
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        await store.add(record_for("propanol", "CCCO"))
-        # Ethanol vs propanol ~0.56; a 0.9 threshold rejects it.
-        assert (await find_similar_molecules(store, "CCO", threshold=0.9)).hits == []
-        assert len((await find_similar_molecules(store, "CCO", threshold=0.5)).hits) == 1
-
-    asyncio.run(_run())
+    store = InMemoryFingerprintStore()
+    await store.add(record_for("propanol", "CCCO"))
+    # Ethanol vs propanol ~0.56; a 0.9 threshold rejects it.
+    assert (await find_similar_molecules(store, "CCO", threshold=0.9)).hits == []
+    assert len((await find_similar_molecules(store, "CCO", threshold=0.5)).hits) == 1
 
 
-def test_similarity_excludes_other_fingerprint_definitions() -> None:
+async def test_similarity_excludes_other_fingerprint_definitions() -> None:
     """A store bound to a definition ranks only records built under that same definition.
 
     This is the durable store's cross-definition guard (a changed Morgan radius yields
     equal-width but incomparable bits): a store pinned to the current definition must not
     return a record indexed under a different one, even if its raw bits look similar.
     """
+    store = InMemoryFingerprintStore(definition=molecule_definition())
+    await store.add(record_for("current", "CCO"))  # stamped with the current definition
+    # Same molecule, same width, but a different (stale) definition signature.
+    stale = FingerprintRecord(
+        id="stale", label="CCO", bits=ecfp_bitstring("CCO"), definition="ecfp:r9:b2048"
+    )
+    await store.add(stale)
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore(definition=molecule_definition())
-        await store.add(record_for("current", "CCO"))  # stamped with the current definition
-        # Same molecule, same width, but a different (stale) definition signature.
-        stale = FingerprintRecord(
-            id="stale", label="CCO", bits=ecfp_bitstring("CCO"), definition="ecfp:r9:b2048"
-        )
-        await store.add(stale)
-
-        hits = (await find_similar_molecules(store, "CCO", threshold=0.1)).hits
-        # Both rows carry the same structure, so the exclusion shows in the count: the
-        # stale-definition row is filtered out by the store, not ranked below the current one.
-        assert len(hits) == 1
-        assert hits[0].smiles == "CCO"
-
-    asyncio.run(_run())
+    hits = (await find_similar_molecules(store, "CCO", threshold=0.1)).hits
+    # Both rows carry the same structure, so the exclusion shows in the count: the
+    # stale-definition row is filtered out by the store, not ranked below the current one.
+    assert len(hits) == 1
+    assert hits[0].smiles == "CCO"
 
 
-def test_substructure_matches_fragment() -> None:
+async def test_substructure_matches_fragment() -> None:
     """Substructure search returns exactly the molecules containing the query fragment."""
+    store = InMemoryFingerprintStore()
+    for cid, smiles in [
+        ("aspirin", "CC(=O)Oc1ccccc1C(=O)O"),
+        ("benzene", "c1ccccc1"),
+        ("ethanol", "CCO"),
+        ("acetic_acid", "CC(=O)O"),
+    ]:
+        await store.add(record_for(cid, smiles))
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        for cid, smiles in [
-            ("aspirin", "CC(=O)Oc1ccccc1C(=O)O"),
-            ("benzene", "c1ccccc1"),
-            ("ethanol", "CCO"),
-            ("acetic_acid", "CC(=O)O"),
-        ]:
-            await store.add(record_for(cid, smiles))
+    ring = {r.smiles for r in (await find_substructure_matches(store, "c1ccccc1")).hits}
+    assert ring == {"CC(=O)Oc1ccccc1C(=O)O", "c1ccccc1"}  # only the aromatic molecules
 
-        ring = {r.smiles for r in (await find_substructure_matches(store, "c1ccccc1")).hits}
-        assert ring == {"CC(=O)Oc1ccccc1C(=O)O", "c1ccccc1"}  # only the aromatic molecules
-
-        acids = {r.smiles for r in (await find_substructure_matches(store, "C(=O)[OH]")).hits}
-        assert acids == {"CC(=O)Oc1ccccc1C(=O)O", "CC(=O)O"}  # carboxylic-acid SMARTS
-
-    asyncio.run(_run())
+    acids = {r.smiles for r in (await find_substructure_matches(store, "C(=O)[OH]")).hits}
+    assert acids == {"CC(=O)Oc1ccccc1C(=O)O", "CC(=O)O"}  # carboxylic-acid SMARTS
 
 
-def test_substructure_bad_query_raises() -> None:
+async def test_substructure_bad_query_raises() -> None:
     """An unparseable substructure query is a clear error (G4)."""
-
-    async def _run() -> None:
-        with pytest.raises(FingerprintError, match="substructure query"):
-            await find_substructure_matches(InMemoryFingerprintStore(), "%%%")
-
-    asyncio.run(_run())
+    with pytest.raises(FingerprintError, match="substructure query"):
+        await find_substructure_matches(InMemoryFingerprintStore(), "%%%")
 
 
-def test_substructure_empty_query_raises() -> None:
+async def test_substructure_empty_query_raises() -> None:
     """An empty query is an input error, not a silent empty result (G4).
 
     `MolFromSmarts("")` parses to a zero-atom pattern that matches nothing, so without
     the guard the tool reads as "no stored molecule contains the fragment".
     """
-
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        await store.add(record_for("ethanol", "CCO"))
-        with pytest.raises(FingerprintError, match="empty substructure query"):
-            await find_substructure_matches(store, "")
-
-    asyncio.run(_run())
+    store = InMemoryFingerprintStore()
+    await store.add(record_for("ethanol", "CCO"))
+    with pytest.raises(FingerprintError, match="empty substructure query"):
+        await find_substructure_matches(store, "")
 
 
-def test_substructure_oversized_query_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_substructure_oversized_query_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """A model-supplied query beyond the configured length bound is rejected (SEC-4).
 
     SMARTS matching is subgraph isomorphism run in-process over the scanned corpus, so a
@@ -197,14 +172,11 @@ def test_substructure_oversized_query_raises(monkeypatch: pytest.MonkeyPatch) ->
     """
     monkeypatch.setattr(settings, "substructure_query_max_length", 16)
 
-    async def _run() -> None:
-        with pytest.raises(FingerprintError, match="exceeds 16 characters"):
-            await find_substructure_matches(InMemoryFingerprintStore(), "C" * 17)
-
-    asyncio.run(_run())
+    with pytest.raises(FingerprintError, match="exceeds 16 characters"):
+        await find_substructure_matches(InMemoryFingerprintStore(), "C" * 17)
 
 
-def test_substructure_hits_are_lean_and_capped(
+async def test_substructure_hits_are_lean_and_capped(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Substructure hits carry only id + label, and a broad query is capped, not unbounded.
@@ -215,20 +187,17 @@ def test_substructure_hits_are_lean_and_capped(
     """
     monkeypatch.setattr(settings, "fingerprint_max_top_k", 2)
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        for cid, smiles in [("ethanol", "CCO"), ("propanol", "CCCO"), ("butanol", "CCCCO")]:
-            await store.add(record_for(cid, smiles))
-        with caplog.at_level("WARNING"):
-            hits = (await find_substructure_matches(store, "CO")).hits
-        assert len(hits) == 2  # three molecules match; the cap truncates to two
-        assert any("substructure result capped" in r.message for r in caplog.records)
-        assert not any(hasattr(h, "bits") for h in hits)  # lean shape: no fingerprint payload
-
-    asyncio.run(_run())
+    store = InMemoryFingerprintStore()
+    for cid, smiles in [("ethanol", "CCO"), ("propanol", "CCCO"), ("butanol", "CCCCO")]:
+        await store.add(record_for(cid, smiles))
+    with caplog.at_level("WARNING"):
+        hits = (await find_substructure_matches(store, "CO")).hits
+    assert len(hits) == 2  # three molecules match; the cap truncates to two
+    assert any("substructure result capped" in r.message for r in caplog.records)
+    assert not any(hasattr(h, "bits") for h in hits)  # lean shape: no fingerprint payload
 
 
-def test_a_truncated_scan_does_not_render_as_a_genuine_negative(
+async def test_a_truncated_scan_does_not_render_as_a_genuine_negative(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A scan the record cap cut short must not answer "we have no precedent for this".
@@ -240,23 +209,20 @@ def test_a_truncated_scan_does_not_render_as_a_genuine_negative(
     """
     monkeypatch.setattr(settings, "substructure_scan_max_records", 20)
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        for i in range(20):
-            await store.add(record_for(f"{100 + i}", "CCO"))
-        await store.add(record_for("900", "CC(=O)N=[N+]=[N-]"))  # last by id, never reached
-        result = await find_substructure_matches(store, "[N-]=[N+]=N")
-        assert result.hits == [] and result.index_empty is False
-        assert result.scan_truncated is True
-        payload = result.model_dump()
-        assert payload["scan_truncated"] is True
-        assert "genuine negative" not in payload["verdict"]
-        assert "SEARCH INCOMPLETE" in payload["verdict"]
-
-    asyncio.run(_run())
+    store = InMemoryFingerprintStore()
+    for i in range(20):
+        await store.add(record_for(f"{100 + i}", "CCO"))
+    await store.add(record_for("900", "CC(=O)N=[N+]=[N-]"))  # last by id, never reached
+    result = await find_substructure_matches(store, "[N-]=[N+]=N")
+    assert result.hits == [] and result.index_empty is False
+    assert result.scan_truncated is True
+    payload = result.model_dump()
+    assert payload["scan_truncated"] is True
+    assert "genuine negative" not in payload["verdict"]
+    assert "SEARCH INCOMPLETE" in payload["verdict"]
 
 
-def test_a_capped_hit_list_says_the_count_is_a_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_capped_hit_list_says_the_count_is_a_floor(monkeypatch: pytest.MonkeyPatch) -> None:
     """A hit count is not the total when the scan stopped at the result cap.
 
     The mirror of the truncated-scan case: `fingerprint_max_top_k` stops the scan at the
@@ -264,19 +230,18 @@ def test_a_capped_hit_list_says_the_count_is_a_floor(monkeypatch: pytest.MonkeyP
     """
     monkeypatch.setattr(settings, "fingerprint_max_top_k", 3)
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        for i in range(6):
-            await store.add(record_for(f"{100 + i}", "CCO"))
-        result = await find_substructure_matches(store, "CCO")
-        assert len(result.hits) == 3
-        assert result.hits_truncated is True and result.scan_truncated is False
-        assert "PARTIAL RESULT" in result.model_dump()["verdict"]
-
-    asyncio.run(_run())
+    store = InMemoryFingerprintStore()
+    for i in range(6):
+        await store.add(record_for(f"{100 + i}", "CCO"))
+    result = await find_substructure_matches(store, "CCO")
+    assert len(result.hits) == 3
+    assert result.hits_truncated is True and result.scan_truncated is False
+    assert "PARTIAL RESULT" in result.model_dump()["verdict"]
 
 
-def test_a_similarity_hit_list_cut_at_top_k_says_so_too(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_similarity_hit_list_cut_at_top_k_says_so_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The sibling entry point had the same silence, and a comment declaring it correct.
 
     `find_similar_molecules` returns at most `fingerprint_top_k` (default 10) of however many
@@ -291,26 +256,23 @@ def test_a_similarity_hit_list_cut_at_top_k_says_so_too(monkeypatch: pytest.Monk
     """
     monkeypatch.setattr(settings, "fingerprint_top_k", 10)
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        for i in range(18):
-            await store.add(record_for(f"m{i:02d}", "CCO"))  # all identical, so all qualify
-        cut = await find_similar_molecules(store, "CCO")
-        assert len(cut.hits) == 10 and cut.hits_truncated is True
-        assert "PARTIAL RESULT" in cut.model_dump()["verdict"]
+    store = InMemoryFingerprintStore()
+    for i in range(18):
+        await store.add(record_for(f"m{i:02d}", "CCO"))  # all identical, so all qualify
+    cut = await find_similar_molecules(store, "CCO")
+    assert len(cut.hits) == 10 and cut.hits_truncated is True
+    assert "PARTIAL RESULT" in cut.model_dump()["verdict"]
 
-        # Exactly the page size, nothing beyond it: a complete answer.
-        exact = InMemoryFingerprintStore()
-        for i in range(10):
-            await exact.add(record_for(f"m{i:02d}", "CCO"))
-        whole = await find_similar_molecules(exact, "CCO")
-        assert len(whole.hits) == 10 and whole.hits_truncated is False
-        assert whole.verdict == "10 indexed molecule(s) matched this query."
-
-    asyncio.run(_run())
+    # Exactly the page size, nothing beyond it: a complete answer.
+    exact = InMemoryFingerprintStore()
+    for i in range(10):
+        await exact.add(record_for(f"m{i:02d}", "CCO"))
+    whole = await find_similar_molecules(exact, "CCO")
+    assert len(whole.hits) == 10 and whole.hits_truncated is False
+    assert whole.verdict == "10 indexed molecule(s) matched this query."
 
 
-def test_a_corpus_holding_exactly_the_result_cap_is_not_reported_as_partial(
+async def test_a_corpus_holding_exactly_the_result_cap_is_not_reported_as_partial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Exactly `fingerprint_max_top_k` matches is a *complete* answer, not a lower bound.
@@ -327,32 +289,29 @@ def test_a_corpus_holding_exactly_the_result_cap_is_not_reported_as_partial(
     """
     monkeypatch.setattr(settings, "fingerprint_max_top_k", 3)
 
-    async def _run() -> None:
-        exact = InMemoryFingerprintStore()
-        for i in range(3):
-            await exact.add(record_for(f"{100 + i}", "CCO"))
-        result = await find_substructure_matches(exact, "CCO")
-        assert len(result.hits) == 3 and result.hits_truncated is False
-        assert result.verdict == "3 indexed molecule(s) matched this query."
+    exact = InMemoryFingerprintStore()
+    for i in range(3):
+        await exact.add(record_for(f"{100 + i}", "CCO"))
+    result = await find_substructure_matches(exact, "CCO")
+    assert len(result.hits) == 3 and result.hits_truncated is False
+    assert result.verdict == "3 indexed molecule(s) matched this query."
 
-        with_tail = InMemoryFingerprintStore()
-        for i in range(3):
-            await with_tail.add(record_for(f"{100 + i}", "CCO"))
-        await with_tail.add(record_for("900", "c1ccccc1"))  # scanned, does not match
-        tailed = await find_substructure_matches(with_tail, "CCO")
-        assert len(tailed.hits) == 3 and tailed.hits_truncated is False
-        assert "PARTIAL RESULT" not in tailed.verdict
+    with_tail = InMemoryFingerprintStore()
+    for i in range(3):
+        await with_tail.add(record_for(f"{100 + i}", "CCO"))
+    await with_tail.add(record_for("900", "c1ccccc1"))  # scanned, does not match
+    tailed = await find_substructure_matches(with_tail, "CCO")
+    assert len(tailed.hits) == 3 and tailed.hits_truncated is False
+    assert "PARTIAL RESULT" not in tailed.verdict
 
-        # One more match than the cap is the case the flag is *for*.
-        over = InMemoryFingerprintStore()
-        for i in range(4):
-            await over.add(record_for(f"{100 + i}", "CCO"))
-        assert (await find_substructure_matches(over, "CCO")).hits_truncated is True
-
-    asyncio.run(_run())
+    # One more match than the cap is the case the flag is *for*.
+    over = InMemoryFingerprintStore()
+    for i in range(4):
+        await over.add(record_for(f"{100 + i}", "CCO"))
+    assert (await find_substructure_matches(over, "CCO")).hits_truncated is True
 
 
-def test_a_corpus_holding_exactly_the_scan_cap_is_a_complete_scan(
+async def test_a_corpus_holding_exactly_the_scan_cap_is_a_complete_scan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A corpus of exactly `substructure_scan_max_records` was fully examined.
@@ -365,25 +324,22 @@ def test_a_corpus_holding_exactly_the_scan_cap_is_a_complete_scan(
     """
     monkeypatch.setattr(settings, "substructure_scan_max_records", 5)
 
-    async def _run() -> None:
-        exact = InMemoryFingerprintStore()
-        for i in range(5):
-            await exact.add(record_for(f"{100 + i}", "CCO"))
-        result = await find_substructure_matches(exact, "[N-]=[N+]=N")
-        assert result.hits == [] and result.scan_truncated is False
-        assert "genuine negative result" in result.verdict
+    exact = InMemoryFingerprintStore()
+    for i in range(5):
+        await exact.add(record_for(f"{100 + i}", "CCO"))
+    result = await find_substructure_matches(exact, "[N-]=[N+]=N")
+    assert result.hits == [] and result.scan_truncated is False
+    assert "genuine negative result" in result.verdict
 
-        over = InMemoryFingerprintStore()
-        for i in range(6):
-            await over.add(record_for(f"{100 + i}", "CCO"))
-        truncated = await find_substructure_matches(over, "[N-]=[N+]=N")
-        assert truncated.scan_truncated is True
-        assert "SEARCH INCOMPLETE" in truncated.verdict
-
-    asyncio.run(_run())
+    over = InMemoryFingerprintStore()
+    for i in range(6):
+        await over.add(record_for(f"{100 + i}", "CCO"))
+    truncated = await find_substructure_matches(over, "[N-]=[N+]=N")
+    assert truncated.scan_truncated is True
+    assert "SEARCH INCOMPLETE" in truncated.verdict
 
 
-def test_a_row_that_no_longer_parses_makes_the_scan_incomplete() -> None:
+async def test_a_row_that_no_longer_parses_makes_the_scan_incomplete() -> None:
     """A record the scan could not read is a record it did not examine, and that is the flag.
 
     `_scan_for_matches` skips an unparseable stored SMILES so one bad row cannot hide every real
@@ -392,38 +348,30 @@ def test_a_row_that_no_longer_parses_makes_the_scan_incomplete() -> None:
     is documented to rule out ("not every stored record was examined"), reached by the other of
     the two ways it can happen.
     """
-
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        await store.add(record_for("ok", "CCO"))
-        # Bypass `record_for`, which would refuse to fingerprint it — this is a row that parsed
-        # when it was indexed and does not now (a lenient canonicalization, a changed RDKit).
-        await store.add(FingerprintRecord(id="broken", label="not-a-molecule", bits="01"))
-        result = await find_substructure_matches(store, "[N-]=[N+]=N")
-        assert result.hits == [] and result.scan_truncated is True
-        assert "genuine negative" not in result.verdict
-        assert "SEARCH INCOMPLETE" in result.verdict
-
-    asyncio.run(_run())
+    store = InMemoryFingerprintStore()
+    await store.add(record_for("ok", "CCO"))
+    # Bypass `record_for`, which would refuse to fingerprint it — this is a row that parsed
+    # when it was indexed and does not now (a lenient canonicalization, a changed RDKit).
+    await store.add(FingerprintRecord(id="broken", label="not-a-molecule", bits="01"))
+    result = await find_substructure_matches(store, "[N-]=[N+]=N")
+    assert result.hits == [] and result.scan_truncated is True
+    assert "genuine negative" not in result.verdict
+    assert "SEARCH INCOMPLETE" in result.verdict
 
 
-def test_a_complete_substructure_scan_reports_no_truncation() -> None:
+async def test_a_complete_substructure_scan_reports_no_truncation() -> None:
     """The common case stays unchanged: both flags false, and the verdict keeps its wording.
 
     The counterfactual for the two tests above — without it they would also pass on a build
     that flagged every search as partial.
     """
-
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        await store.add(record_for("ethanol", "CCO"))
-        hit = await find_substructure_matches(store, "CCO")
-        assert hit.scan_truncated is False and hit.hits_truncated is False
-        assert hit.verdict == "1 indexed molecule(s) matched this query."
-        miss = await find_substructure_matches(store, "[N-]=[N+]=N")
-        assert miss.hits == [] and "genuine negative" in miss.verdict
-
-    asyncio.run(_run())
+    store = InMemoryFingerprintStore()
+    await store.add(record_for("ethanol", "CCO"))
+    hit = await find_substructure_matches(store, "CCO")
+    assert hit.scan_truncated is False and hit.hits_truncated is False
+    assert hit.verdict == "1 indexed molecule(s) matched this query."
+    miss = await find_substructure_matches(store, "[N-]=[N+]=N")
+    assert miss.hits == [] and "genuine negative" in miss.verdict
 
 
 def _sleeping_scan(seconds: float) -> Callable[..., ScanOutcome]:
@@ -440,7 +388,7 @@ def _sleeping_scan(seconds: float) -> Callable[..., ScanOutcome]:
     return _scan
 
 
-def test_slow_substructure_match_times_out_with_a_clear_error(
+async def test_slow_substructure_match_times_out_with_a_clear_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A pathological match is abandoned at the wall-clock bound, not run to completion.
@@ -453,16 +401,13 @@ def test_slow_substructure_match_times_out_with_a_clear_error(
     # it cannot kill the thread, and `asyncio.run` waits for the executor on shutdown.
     monkeypatch.setattr(search, "_scan_for_matches", _sleeping_scan(0.5))
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        await store.add(record_for("ethanol", "CCO"))
-        with pytest.raises(FingerprintError, match="exceeded 0.05s"):
-            await find_substructure_matches(store, "CO")
-
-    asyncio.run(_run())
+    store = InMemoryFingerprintStore()
+    await store.add(record_for("ethanol", "CCO"))
+    with pytest.raises(FingerprintError, match="exceeded 0.05s"):
+        await find_substructure_matches(store, "CO")
 
 
-def test_substructure_match_does_not_block_the_event_loop(
+async def test_substructure_match_does_not_block_the_event_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Other sessions keep making progress while a slow match runs (the property that matters).
@@ -480,12 +425,10 @@ def test_substructure_match_does_not_block_the_event_loop(
             await asyncio.sleep(0.01)
             ticks += 1
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        await store.add(record_for("ethanol", "CCO"))
-        await asyncio.gather(find_substructure_matches(store, "CO"), _tick())
+    store = InMemoryFingerprintStore()
+    await store.add(record_for("ethanol", "CCO"))
+    await asyncio.gather(find_substructure_matches(store, "CO"), _tick())
 
-    asyncio.run(_run())
     assert ticks == 20  # the concurrent task ran to completion during the blocking match
 
 
@@ -590,7 +533,7 @@ def test_a_timed_out_substructure_search_leaves_no_thread_matching_behind(
     )
 
 
-def test_agent_supplied_top_k_is_clamped(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_agent_supplied_top_k_is_clamped(monkeypatch: pytest.MonkeyPatch) -> None:
     """A large model-supplied `top_k` is clamped to `fingerprint_max_top_k` (SEC-4).
 
     The similarity tools take `top_k` from the model and it lands in a SQL `LIMIT`; clamp it
@@ -598,24 +541,21 @@ def test_agent_supplied_top_k_is_clamped(monkeypatch: pytest.MonkeyPatch) -> Non
     """
     monkeypatch.setattr(settings, "fingerprint_max_top_k", 2)
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        for cid, smiles in [
-            ("ethanol", "CCO"),
-            ("propanol", "CCCO"),
-            ("butanol", "CCCCO"),
-            ("pentanol", "CCCCCO"),
-        ]:
-            await store.add(record_for(cid, smiles))
+    store = InMemoryFingerprintStore()
+    for cid, smiles in [
+        ("ethanol", "CCO"),
+        ("propanol", "CCCO"),
+        ("butanol", "CCCCO"),
+        ("pentanol", "CCCCCO"),
+    ]:
+        await store.add(record_for(cid, smiles))
 
-        # Four records clear the threshold, but the clamp caps the returned neighbors at 2.
-        hits = (await find_similar_molecules(store, "CCO", top_k=1_000_000, threshold=0.1)).hits
-        assert len(hits) == 2
-
-    asyncio.run(_run())
+    # Four records clear the threshold, but the clamp caps the returned neighbors at 2.
+    hits = (await find_similar_molecules(store, "CCO", top_k=1_000_000, threshold=0.1)).hits
+    assert len(hits) == 2
 
 
-def test_agent_supplied_threshold_is_clamped() -> None:
+async def test_agent_supplied_threshold_is_clamped() -> None:
     """A model-supplied `threshold` is clamped to Tanimoto's [0, 1] range (SEC-4).
 
     `threshold` lands in the SQL similarity comparison exactly like `top_k` lands in
@@ -665,22 +605,19 @@ def test_agent_supplied_threshold_is_clamped() -> None:
         async def superseded_count(self) -> int:
             raise NotImplementedError
 
-    async def _run() -> None:
-        recording = _RecordingStore()
-        await find_matches(recording, "01", threshold=-5.0)
-        await find_matches(recording, "01", threshold=1.5)
-        assert recording.thresholds == [0.0, 1.0]
+    recording = _RecordingStore()
+    await find_matches(recording, "01", threshold=-5.0)
+    await find_matches(recording, "01", threshold=1.5)
+    assert recording.thresholds == [0.0, 1.0]
 
-        # End to end: an over-1 threshold still returns the exact match instead of [].
-        store = InMemoryFingerprintStore()
-        await store.add(record_for("ethanol", "CCO"))
-        hits = (await find_similar_molecules(store, "CCO", threshold=99.0)).hits
-        assert [h.smiles for h in hits] == ["CCO"]
-
-    asyncio.run(_run())
+    # End to end: an over-1 threshold still returns the exact match instead of [].
+    store = InMemoryFingerprintStore()
+    await store.add(record_for("ethanol", "CCO"))
+    hits = (await find_similar_molecules(store, "CCO", threshold=99.0)).hits
+    assert [h.smiles for h in hits] == ["CCO"]
 
 
-def test_agent_supplied_nan_threshold_is_refused_rather_than_emptying_the_search() -> None:
+async def test_agent_supplied_nan_threshold_is_refused_rather_than_emptying_the_search() -> None:
     """A NaN `threshold` is refused, because clamping it silently returned "no precedent".
 
     The clamp above is total only over *ordered* values. Every comparison with NaN is False, so
@@ -696,57 +633,46 @@ def test_agent_supplied_nan_threshold_is_refused_rather_than_emptying_the_search
     family to mean "a bad query is an empty answer", which would restore the silence), and that
     nothing but NaN was narrowed — a merely out-of-range threshold still answers.
     """
+    store = InMemoryFingerprintStore()
+    await store.add(record_for("ethanol", "CCO"))
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        await store.add(record_for("ethanol", "CCO"))
+    with pytest.raises(ValueError, match="NaN") as excinfo:
+        await find_similar_molecules(store, "CCO", threshold=float("nan"))
+    # Not the domain family: catching that one is how a caller says "answer this empty".
+    assert not isinstance(excinfo.value, FingerprintError)
 
-        with pytest.raises(ValueError, match="NaN") as excinfo:
-            await find_similar_molecules(store, "CCO", threshold=float("nan"))
-        # Not the domain family: catching that one is how a caller says "answer this empty".
-        assert not isinstance(excinfo.value, FingerprintError)
+    # ±inf has a nearest bound, so it still clamps rather than refusing...
+    for unbounded in (float("inf"), float("-inf")):
+        assert (await find_similar_molecules(store, "CCO", threshold=unbounded)).hits
 
-        # ±inf has a nearest bound, so it still clamps rather than refusing...
-        for unbounded in (float("inf"), float("-inf")):
-            assert (await find_similar_molecules(store, "CCO", threshold=unbounded)).hits
-
-        # ...and the ordinary out-of-range threshold keeps the behaviour merged before this.
-        hits = (await find_similar_molecules(store, "CCO", threshold=99.0)).hits
-        assert [h.smiles for h in hits] == ["CCO"]
-
-    asyncio.run(_run())
+    # ...and the ordinary out-of-range threshold keeps the behaviour merged before this.
+    hits = (await find_similar_molecules(store, "CCO", threshold=99.0)).hits
+    assert [h.smiles for h in hits] == ["CCO"]
 
 
-def test_all_records_limit_is_bounded_and_deterministic() -> None:
+async def test_all_records_limit_is_bounded_and_deterministic() -> None:
     """`all_records(limit=n)` returns the first n records in id order (bounded scan)."""
-
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        for cid in ["c", "a", "b"]:
-            await store.add(record_for(cid, "CCO"))
-        assert [r.id for r in await store.all_records(limit=2)] == ["a", "b"]
-        assert len(await store.all_records()) == 3  # unbounded still returns all
-
-    asyncio.run(_run())
+    store = InMemoryFingerprintStore()
+    for cid in ["c", "a", "b"]:
+        await store.add(record_for(cid, "CCO"))
+    assert [r.id for r in await store.all_records(limit=2)] == ["a", "b"]
+    assert len(await store.all_records()) == 3  # unbounded still returns all
 
 
-def test_substructure_scan_caps_and_warns(
+async def test_substructure_scan_caps_and_warns(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The substructure scan is bounded by config and warns (not silently) when it truncates."""
     monkeypatch.setattr(settings, "substructure_scan_max_records", 1)
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        for cid in ["aspirin", "benzene", "toluene"]:
-            await store.add(record_for(cid, "c1ccccc1" if cid != "aspirin" else "Cc1ccccc1"))
-        with caplog.at_level("WARNING"):
-            hits = (await find_substructure_matches(store, "c1ccccc1")).hits
-        # Only the one capped record is scanned, so at most one match is returned.
-        assert len(hits) <= 1
-        assert any("substructure scan hit" in r.message for r in caplog.records)
-
-    asyncio.run(_run())
+    store = InMemoryFingerprintStore()
+    for cid in ["aspirin", "benzene", "toluene"]:
+        await store.add(record_for(cid, "c1ccccc1" if cid != "aspirin" else "Cc1ccccc1"))
+    with caplog.at_level("WARNING"):
+        hits = (await find_substructure_matches(store, "c1ccccc1")).hits
+    # Only the one capped record is scanned, so at most one match is returned.
+    assert len(hits) <= 1
+    assert any("substructure scan hit" in r.message for r in caplog.records)
 
 
 class _NullConnection:
@@ -759,7 +685,7 @@ class _NullConnection:
         return None
 
 
-def test_postgres_store_applies_the_configured_statement_timeout(
+async def test_postgres_store_applies_the_configured_statement_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The Postgres backend must bound its (slow HNSW) queries like every other store (COR-5/CON-2).
@@ -782,11 +708,8 @@ def test_postgres_store_applies_the_configured_statement_timeout(
         "molecule_fingerprints", settings.ecfp_bits, molecule_definition()
     )
 
-    async def _enter() -> None:
-        async with store._connection():
-            pass
-
-    asyncio.run(_enter())
+    async with store._connection():
+        pass
 
     expected = int(settings.pg_statement_timeout_seconds * 1000)
     assert f"-c statement_timeout={expected}" in str(captured["options"])
@@ -800,49 +723,37 @@ def test_postgres_store_applies_the_configured_statement_timeout(
 # survives serialization, which is where the same fix failed before (`ScreenResult.verdict`).
 
 
-def test_an_empty_index_reports_that_the_search_was_not_run() -> None:
+async def test_an_empty_index_reports_that_the_search_was_not_run() -> None:
     """No records: the result says the question was not answered, not that the answer is no."""
-
-    async def _run() -> None:
-        search_result = await find_similar_molecules(InMemoryFingerprintStore(), "CCO")
-        assert search_result.hits == []
-        assert search_result.index_empty is True
-        assert "SEARCH NOT RUN" in search_result.verdict
-        assert "NOT evidence" in search_result.verdict
-
-    asyncio.run(_run())
+    search_result = await find_similar_molecules(InMemoryFingerprintStore(), "CCO")
+    assert search_result.hits == []
+    assert search_result.index_empty is True
+    assert "SEARCH NOT RUN" in search_result.verdict
+    assert "NOT evidence" in search_result.verdict
 
 
-def test_the_empty_index_signal_survives_model_dump() -> None:
+async def test_the_empty_index_signal_survives_model_dump() -> None:
     """The verdict must be *serialized*, or the model that writes the answer never sees it.
 
     This is the whole reason `verdict` is a `computed_field` and not a bare `property`: MCP ships
     `model_dump()`, and a plain property is dropped there — exactly how `ScreenResult.verdict`
     ended up with zero production callers while a chemist was told "no hazards detected".
     """
-
-    async def _run() -> None:
-        payload = (await find_similar_molecules(InMemoryFingerprintStore(), "CCO")).model_dump()
-        assert payload["index_empty"] is True
-        assert "SEARCH NOT RUN" in payload["verdict"]
-
-    asyncio.run(_run())
+    payload = (await find_similar_molecules(InMemoryFingerprintStore(), "CCO")).model_dump()
+    assert payload["index_empty"] is True
+    assert "SEARCH NOT RUN" in payload["verdict"]
 
 
-def test_a_populated_index_with_no_match_is_a_genuine_negative() -> None:
+async def test_a_populated_index_with_no_match_is_a_genuine_negative() -> None:
     """Records exist and none matched: the ordinary "no precedent" answer, clearly distinguished."""
-
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        await store.add(record_for("benzene", "c1ccccc1"))
-        # Ethanol vs benzene share no bits, so the search is real and finds nothing.
-        search_result = await find_similar_molecules(store, "CCO", threshold=0.5)
-        assert search_result.hits == []
-        assert search_result.index_empty is False
-        assert "SEARCH NOT RUN" not in search_result.verdict
-        assert "genuine negative" in search_result.verdict
-
-    asyncio.run(_run())
+    store = InMemoryFingerprintStore()
+    await store.add(record_for("benzene", "c1ccccc1"))
+    # Ethanol vs benzene share no bits, so the search is real and finds nothing.
+    search_result = await find_similar_molecules(store, "CCO", threshold=0.5)
+    assert search_result.hits == []
+    assert search_result.index_empty is False
+    assert "SEARCH NOT RUN" not in search_result.verdict
+    assert "genuine negative" in search_result.verdict
 
 
 def test_an_approximate_search_never_reports_a_genuine_negative() -> None:
@@ -887,7 +798,7 @@ def test_an_approximate_page_is_not_presented_as_the_definitive_set() -> None:
     assert "may exist" in approximate.verdict
 
 
-def test_the_in_memory_backend_is_exact_and_says_so() -> None:
+async def test_the_in_memory_backend_is_exact_and_says_so() -> None:
     """The reference backend answers the store contract's `approximate` question with "never".
 
     It scores every searchable record, which is exactly what makes it the reference the durable
@@ -895,21 +806,17 @@ def test_the_in_memory_backend_is_exact_and_says_so() -> None:
     labelled approximate, whatever the deployment sets, because the setting selects between two
     *SQL* statements and this backend has neither.
     """
-
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        await store.add(record_for("ethanol", "CCO"))
+    store = InMemoryFingerprintStore()
+    await store.add(record_for("ethanol", "CCO"))
+    assert store.approximate is False
+    settings.fingerprint_search_exactness = "approximate"
+    try:
         assert store.approximate is False
-        settings.fingerprint_search_exactness = "approximate"
-        try:
-            assert store.approximate is False
-            result = await find_similar_molecules(store, "CCO", threshold=0.1)
-        finally:
-            settings.fingerprint_search_exactness = "exact"
-        assert result.approximate is False
-        assert "APPROXIMATE" not in result.verdict
-
-    asyncio.run(_run())
+        result = await find_similar_molecules(store, "CCO", threshold=0.1)
+    finally:
+        settings.fingerprint_search_exactness = "exact"
+    assert result.approximate is False
+    assert "APPROXIMATE" not in result.verdict
 
 
 def test_the_durable_store_reports_the_configured_arm(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -926,60 +833,48 @@ def test_the_durable_store_reports_the_configured_arm(monkeypatch: pytest.Monkey
     assert store.approximate is True
 
 
-def test_a_hit_is_unaffected_by_the_emptiness_signal() -> None:
+async def test_a_hit_is_unaffected_by_the_emptiness_signal() -> None:
     """Regression guard: a real match still reports its hits, with the index not flagged empty."""
-
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        await store.add(record_for("ethanol", "CCO"))
-        search_result = await find_similar_molecules(store, "CCO", threshold=0.1)
-        assert [h.smiles for h in search_result.hits] == ["CCO"]
-        assert search_result.index_empty is False
-        assert search_result.verdict.startswith("1 indexed molecule(s) matched")
-
-    asyncio.run(_run())
+    store = InMemoryFingerprintStore()
+    await store.add(record_for("ethanol", "CCO"))
+    search_result = await find_similar_molecules(store, "CCO", threshold=0.1)
+    assert [h.smiles for h in search_result.hits] == ["CCO"]
+    assert search_result.index_empty is False
+    assert search_result.verdict.startswith("1 indexed molecule(s) matched")
 
 
-def test_an_index_of_only_stale_definitions_counts_as_empty() -> None:
+async def test_an_index_of_only_stale_definitions_counts_as_empty() -> None:
     """Rows the store cannot rank are not "records we searched" — they are nothing, honestly.
 
     A definition change orphans every row until it is re-indexed (runbook (vi)). Search returns
     none of them, so reporting the index as populated would produce exactly the defect this
     distinction exists to prevent, one config change further along.
     """
-
-    async def _run() -> None:
-        store = InMemoryFingerprintStore(definition=molecule_definition())
-        await store.add(
-            FingerprintRecord(
-                id="stale", label="CCO", bits=ecfp_bitstring("CCO"), definition="ecfp:r9:b2048"
-            )
+    store = InMemoryFingerprintStore(definition=molecule_definition())
+    await store.add(
+        FingerprintRecord(
+            id="stale", label="CCO", bits=ecfp_bitstring("CCO"), definition="ecfp:r9:b2048"
         )
-        search_result = await find_similar_molecules(store, "CCO", threshold=0.1)
-        assert search_result.index_empty is True
-        assert await store.count() == 0
+    )
+    search_result = await find_similar_molecules(store, "CCO", threshold=0.1)
+    assert search_result.index_empty is True
+    assert await store.count() == 0
 
-    asyncio.run(_run())
 
-
-def test_substructure_search_makes_the_same_distinction() -> None:
+async def test_substructure_search_makes_the_same_distinction() -> None:
     """The third tool over the same index has the same failure mode, so it gets the same answer."""
+    empty = await find_substructure_matches(InMemoryFingerprintStore(), "c1ccccc1")
+    assert empty.hits == [] and empty.index_empty is True
+    assert "SEARCH NOT RUN" in empty.model_dump()["verdict"]
 
-    async def _run() -> None:
-        empty = await find_substructure_matches(InMemoryFingerprintStore(), "c1ccccc1")
-        assert empty.hits == [] and empty.index_empty is True
-        assert "SEARCH NOT RUN" in empty.model_dump()["verdict"]
-
-        store = InMemoryFingerprintStore()
-        await store.add(record_for("ethanol", "CCO"))
-        populated = await find_substructure_matches(store, "c1ccccc1")
-        assert populated.hits == [] and populated.index_empty is False
-        assert "genuine negative" in populated.verdict
-
-    asyncio.run(_run())
+    store = InMemoryFingerprintStore()
+    await store.add(record_for("ethanol", "CCO"))
+    populated = await find_substructure_matches(store, "c1ccccc1")
+    assert populated.hits == [] and populated.index_empty is False
+    assert "genuine negative" in populated.verdict
 
 
-def test_the_emptiness_probe_is_skipped_when_the_search_found_hits() -> None:
+async def test_the_emptiness_probe_is_skipped_when_the_search_found_hits() -> None:
     """The probe may not become a per-call cost: a search with hits already proved the index full.
 
     `is_empty` runs on the durable backend as a real query; paying for it when the answer is
@@ -995,19 +890,16 @@ def test_the_emptiness_probe_is_skipped_when_the_search_found_hits() -> None:
             type(self).probes += 1
             return await super().is_empty()
 
-    async def _run() -> None:
-        store = _CountingStore()
-        await store.add(record_for("ethanol", "CCO"))
-        assert (await find_similar_molecules(store, "CCO", threshold=0.1)).hits  # a hit
-        assert _CountingStore.probes == 0
-        # Benzene shares no bits with the indexed ethanol, so this search legitimately finds none.
-        assert (await find_similar_molecules(store, "c1ccccc1", threshold=0.1)).hits == []
-        assert _CountingStore.probes == 1  # asked only once the result was empty
-
-    asyncio.run(_run())
+    store = _CountingStore()
+    await store.add(record_for("ethanol", "CCO"))
+    assert (await find_similar_molecules(store, "CCO", threshold=0.1)).hits  # a hit
+    assert _CountingStore.probes == 0
+    # Benzene shares no bits with the indexed ethanol, so this search legitimately finds none.
+    assert (await find_similar_molecules(store, "c1ccccc1", threshold=0.1)).hits == []
+    assert _CountingStore.probes == 1  # asked only once the result was empty
 
 
-def test_the_startup_report_warns_only_when_the_index_is_empty(
+async def test_the_startup_report_warns_only_when_the_index_is_empty(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The operator half: the owning connector says at startup what its index holds.
@@ -1015,21 +907,17 @@ def test_the_startup_report_warns_only_when_the_index_is_empty(
     WARNING for an empty index (actionable and wrong), INFO with the count otherwise — so a
     half-finished backfill is visible as a number rather than hidden behind a boolean.
     """
+    store = InMemoryFingerprintStore()
+    with caplog.at_level("INFO"):
+        await log_index_size(store, "molecule")
+        empty_records = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any("index is EMPTY" in r.getMessage() for r in empty_records)
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        with caplog.at_level("INFO"):
-            await log_index_size(store, "molecule")
-            empty_records = [r for r in caplog.records if r.levelname == "WARNING"]
-            assert any("index is EMPTY" in r.getMessage() for r in empty_records)
-
-            caplog.clear()
-            await store.add(record_for("ethanol", "CCO"))
-            await log_index_size(store, "molecule")
-            assert any("1 record(s) indexed" in r.getMessage() for r in caplog.records)
-            assert not [r for r in caplog.records if r.levelname == "WARNING"]
-
-    asyncio.run(_run())
+        caplog.clear()
+        await store.add(record_for("ethanol", "CCO"))
+        await log_index_size(store, "molecule")
+        assert any("1 record(s) indexed" in r.getMessage() for r in caplog.records)
+        assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
 
 def test_the_startup_report_never_takes_the_connector_down() -> None:
@@ -1055,7 +943,7 @@ def _superseded(record: FingerprintRecord) -> FingerprintRecord:
     )
 
 
-def test_one_rebuilt_row_does_not_make_a_stale_corpus_answerable() -> None:
+async def test_one_rebuilt_row_does_not_make_a_stale_corpus_answerable() -> None:
     """The state a definition bump walks every deployment through, and what it used to answer.
 
     `D-2026-09-09-a-map-number-is-not-a-molecule` moved `STANDARDIZATION_VERSION`, which retires
@@ -1070,61 +958,49 @@ def test_one_rebuilt_row_does_not_make_a_stale_corpus_answerable() -> None:
     the corpus. Nothing counted rows under a superseded definition — `count`, `is_empty` and
     `log_index_size` all filter to the current one — so no reader anywhere could see the other 98%.
     """
+    store = InMemoryFingerprintStore(molecule_definition())
+    for i, smiles in enumerate(["CCO", "CCCO", "CCCCO", "c1ccccc1", "CC(=O)O"]):
+        await store.add(_superseded(record_for(f"old-{i}", smiles)))
+    await store.add(record_for("rebuilt", "CCO"))
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore(molecule_definition())
-        for i, smiles in enumerate(["CCO", "CCCO", "CCCCO", "c1ccccc1", "CC(=O)O"]):
-            await store.add(_superseded(record_for(f"old-{i}", smiles)))
-        await store.add(record_for("rebuilt", "CCO"))
-
-        result = await find_similar_molecules(store, "CCO")
-        assert [hit.smiles for hit in result.hits] == ["CCO"]
-        assert result.index_empty is False, "one rebuilt row is not an empty index"
-        assert result.index_partial is True
-        assert result.verdict != "1 indexed molecule(s) matched this query."
-        assert "SUPERSEDED" in result.model_dump()["verdict"]
-
-    asyncio.run(_run())
+    result = await find_similar_molecules(store, "CCO")
+    assert [hit.smiles for hit in result.hits] == ["CCO"]
+    assert result.index_empty is False, "one rebuilt row is not an empty index"
+    assert result.index_partial is True
+    assert result.verdict != "1 indexed molecule(s) matched this query."
+    assert "SUPERSEDED" in result.model_dump()["verdict"]
 
 
-def test_the_instant_of_a_definition_bump_is_still_reported_as_a_search_not_run() -> None:
+async def test_the_instant_of_a_definition_bump_is_still_reported_as_a_search_not_run() -> None:
     """The state *before* the one above, which was already honest and had to stay so.
 
     Every row superseded and none rebuilt is an index with nothing searchable, and "SEARCH NOT
     RUN" is the right sentence for it — a partial-index notice must not displace it, because the
     reader's action differs: nothing here can be answered at all.
     """
+    store = InMemoryFingerprintStore(molecule_definition())
+    for i, smiles in enumerate(["CCO", "CCCO", "CCCCO"]):
+        await store.add(_superseded(record_for(f"only-old-{i}", smiles)))
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore(molecule_definition())
-        for i, smiles in enumerate(["CCO", "CCCO", "CCCCO"]):
-            await store.add(_superseded(record_for(f"only-old-{i}", smiles)))
-
-        result = await find_similar_molecules(store, "CCO")
-        assert result.hits == []
-        assert result.index_empty is True and result.index_partial is True
-        assert "SEARCH NOT RUN" in result.verdict
-
-    asyncio.run(_run())
+    result = await find_similar_molecules(store, "CCO")
+    assert result.hits == []
+    assert result.index_empty is True and result.index_partial is True
+    assert "SEARCH NOT RUN" in result.verdict
 
 
-def test_a_fully_rebuilt_index_is_not_flagged_partial() -> None:
+async def test_a_fully_rebuilt_index_is_not_flagged_partial() -> None:
     """The counterfactual: without it every assertion above passes on a build that always flags."""
+    store = InMemoryFingerprintStore(molecule_definition())
+    for i, smiles in enumerate(["CCO", "CCCO", "c1ccccc1"]):
+        await store.add(record_for(f"current-{i}", smiles))
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore(molecule_definition())
-        for i, smiles in enumerate(["CCO", "CCCO", "c1ccccc1"]):
-            await store.add(record_for(f"current-{i}", smiles))
-
-        result = await find_similar_molecules(store, "CCO", threshold=0.9)
-        assert result.index_partial is False
-        assert result.verdict == "1 indexed molecule(s) matched this query."
-        assert await store.superseded_count() == 0
-
-    asyncio.run(_run())
+    result = await find_similar_molecules(store, "CCO", threshold=0.9)
+    assert result.index_partial is False
+    assert result.verdict == "1 indexed molecule(s) matched this query."
+    assert await store.superseded_count() == 0
 
 
-def test_no_hits_over_a_partly_rebuilt_index_is_not_a_genuine_negative() -> None:
+async def test_no_hits_over_a_partly_rebuilt_index_is_not_a_genuine_negative() -> None:
     """The half that asserts absence, which is the sentence a chemist acts on.
 
     A populated index with no match says "every stored record was compared — so this is a genuine
@@ -1132,22 +1008,18 @@ def test_no_hits_over_a_partly_rebuilt_index_is_not_a_genuine_negative() -> None
     false, and it is the exact failure `FingerprintSearch` exists to prevent, reached through a
     definition change rather than through an unpopulated table.
     """
+    store = InMemoryFingerprintStore(molecule_definition())
+    await store.add(_superseded(record_for("old-azide", "CCCCN=[N+]=[N-]")))
+    await store.add(record_for("rebuilt-benzene", "c1ccccc1"))
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore(molecule_definition())
-        await store.add(_superseded(record_for("old-azide", "CCCCN=[N+]=[N-]")))
-        await store.add(record_for("rebuilt-benzene", "c1ccccc1"))
-
-        result = await find_similar_molecules(store, "CCCCN=[N+]=[N-]", threshold=0.5)
-        assert result.hits == [] and result.index_empty is False
-        assert "genuine negative" not in result.verdict
-        assert "SEARCH INCOMPLETE" in result.verdict
-        assert "SUPERSEDED" in result.verdict
-
-    asyncio.run(_run())
+    result = await find_similar_molecules(store, "CCCCN=[N+]=[N-]", threshold=0.5)
+    assert result.hits == [] and result.index_empty is False
+    assert "genuine negative" not in result.verdict
+    assert "SEARCH INCOMPLETE" in result.verdict
+    assert "SUPERSEDED" in result.verdict
 
 
-def test_a_substructure_scan_is_not_partial_because_it_reads_every_definition() -> None:
+async def test_a_substructure_scan_is_not_partial_because_it_reads_every_definition() -> None:
     """A substructure scan reads every definition, so it is never partial and must not say it is.
 
     `all_records` is unfiltered by definition on purpose, so this entry point searches the whole
@@ -1157,17 +1029,13 @@ def test_a_substructure_scan_is_not_partial_because_it_reads_every_definition() 
     correct substructure hit, so flagging this search partial would tell a chemist to distrust an
     answer that is complete.
     """
+    store = InMemoryFingerprintStore(molecule_definition())
+    await store.add(_superseded(record_for("old-ethanol", "CCO")))
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore(molecule_definition())
-        await store.add(_superseded(record_for("old-ethanol", "CCO")))
-
-        result = await find_substructure_matches(store, "CCO")
-        assert [hit.smiles for hit in result.hits] == ["CCO"]
-        assert result.index_partial is False
-        assert result.verdict == "1 indexed molecule(s) matched this query."
-
-    asyncio.run(_run())
+    result = await find_substructure_matches(store, "CCO")
+    assert [hit.smiles for hit in result.hits] == ["CCO"]
+    assert result.index_partial is False
+    assert result.verdict == "1 indexed molecule(s) matched this query."
 
 
 def test_the_two_notices_compose_instead_of_shadowing_each_other() -> None:
@@ -1194,7 +1062,7 @@ def test_the_two_notices_compose_instead_of_shadowing_each_other() -> None:
     assert "SUPERSEDED" in page.verdict and "may exist" in page.verdict
 
 
-def test_the_operator_log_names_the_rows_waiting_to_be_rebuilt(
+async def test_the_operator_log_names_the_rows_waiting_to_be_rebuilt(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The number is the operator's, and it is the half a boolean cannot give.
@@ -1212,52 +1080,48 @@ def test_the_operator_log_names_the_rows_waiting_to_be_rebuilt(
     read as "the searchable fraction of the corpus", and after a rebuild it is 50% of a corpus that
     is wholly searchable.
     """
+    store = InMemoryFingerprintStore(molecule_definition())
+    for i, smiles in enumerate(["CCO", "CCCO", "c1ccccc1"]):
+        await store.add(_superseded(record_for(f"log-old-{i}", smiles)))
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore(molecule_definition())
+    with caplog.at_level("INFO"):
+        await log_index_size(store, "molecule")
+        assert "is EMPTY" in caplog.text
+        assert "3 record(s) are stored under a superseded definition" in caplog.text
+
+        caplog.clear()
+        await store.add(record_for("log-new", "CCS"))
+        await log_index_size(store, "molecule")
+        assert "is PARTIAL" in caplog.text
+        assert "1 record(s) indexed under the current definition and 3 under a" in caplog.text
+        assert caplog.records[-1].levelname == "WARNING"
+
+        # The rebuild finishes — and since `094` the generation it superseded is *shelved*
+        # rather than overwritten, so the index still holds rows this deployment cannot
+        # compare and still says PARTIAL. What changed is what an operator must do about it,
+        # and the log is the only place that distinction is available: the searchable count is
+        # now the whole corpus, and what is left is a disposal under the owning principal
+        # rather than a rebuild to finish.
+        caplog.clear()
         for i, smiles in enumerate(["CCO", "CCCO", "c1ccccc1"]):
-            await store.add(_superseded(record_for(f"log-old-{i}", smiles)))
+            await store.add(record_for(f"log-old-{i}", smiles))
+        await log_index_size(store, "molecule")
+        assert "is PARTIAL" in caplog.text and "is EMPTY" not in caplog.text
+        assert "4 record(s) indexed under the current definition and 3 under a" in caplog.text
+        assert "dispos" in caplog.text and "owns the schema" in caplog.text
+        assert caplog.records[-1].levelname == "WARNING"
 
-        with caplog.at_level("INFO"):
-            await log_index_size(store, "molecule")
-            assert "is EMPTY" in caplog.text
-            assert "3 record(s) are stored under a superseded definition" in caplog.text
-
-            caplog.clear()
-            await store.add(record_for("log-new", "CCS"))
-            await log_index_size(store, "molecule")
-            assert "is PARTIAL" in caplog.text
-            assert "1 record(s) indexed under the current definition and 3 under a" in caplog.text
-            assert caplog.records[-1].levelname == "WARNING"
-
-            # The rebuild finishes — and since `094` the generation it superseded is *shelved*
-            # rather than overwritten, so the index still holds rows this deployment cannot
-            # compare and still says PARTIAL. What changed is what an operator must do about it,
-            # and the log is the only place that distinction is available: the searchable count is
-            # now the whole corpus, and what is left is a disposal under the owning principal
-            # rather than a rebuild to finish.
-            caplog.clear()
-            for i, smiles in enumerate(["CCO", "CCCO", "c1ccccc1"]):
-                await store.add(record_for(f"log-old-{i}", smiles))
-            await log_index_size(store, "molecule")
-            assert "is PARTIAL" in caplog.text and "is EMPTY" not in caplog.text
-            assert "4 record(s) indexed under the current definition and 3 under a" in caplog.text
-            assert "dispos" in caplog.text and "owns the schema" in caplog.text
-            assert caplog.records[-1].levelname == "WARNING"
-
-            # And the counterfactual the whole warning rests on: an index that never held a second
-            # generation says nothing at all.
-            caplog.clear()
-            fresh = InMemoryFingerprintStore(molecule_definition())
-            await fresh.add(record_for("log-fresh", "CCS"))
-            await log_index_size(fresh, "molecule")
-            assert "is PARTIAL" not in caplog.text and "is EMPTY" not in caplog.text
-            assert caplog.records[-1].levelname == "INFO"
-
-    asyncio.run(_run())
+        # And the counterfactual the whole warning rests on: an index that never held a second
+        # generation says nothing at all.
+        caplog.clear()
+        fresh = InMemoryFingerprintStore(molecule_definition())
+        await fresh.add(record_for("log-fresh", "CCS"))
+        await log_index_size(fresh, "molecule")
+        assert "is PARTIAL" not in caplog.text and "is EMPTY" not in caplog.text
+        assert caplog.records[-1].levelname == "INFO"
 
 
-def test_the_reference_shelves_a_superseded_generation_rather_than_evicting_it() -> None:
+async def test_the_reference_shelves_a_superseded_generation_rather_than_evicting_it() -> None:
     """The in-memory oracle keys by definition too, because it is what the SQL is asserted against.
 
     Every partial-index assertion in this file is made here and is only evidence about the
@@ -1269,30 +1133,26 @@ def test_the_reference_shelves_a_superseded_generation_rather_than_evicting_it()
     The shelf is scoped, not a second copy: a store pinned to one definition ranks only its own
     generation, which is the guard `D-031` added and this must not weaken.
     """
+    old_definition = molecule_definition() + "-previous"
+    old = InMemoryFingerprintStore(old_definition)
+    new = InMemoryFingerprintStore(molecule_definition())
+    was = record_for("shelved", "CCO").model_copy(update={"definition": old_definition})
+    now = record_for("shelved", "c1ccccc1")
+    for store in (old, new):
+        await store.add(was)
+        await store.add(now)
 
-    async def _run() -> None:
-        old_definition = molecule_definition() + "-previous"
-        old = InMemoryFingerprintStore(old_definition)
-        new = InMemoryFingerprintStore(molecule_definition())
-        was = record_for("shelved", "CCO").model_copy(update={"definition": old_definition})
-        now = record_for("shelved", "c1ccccc1")
-        for store in (old, new):
-            await store.add(was)
-            await store.add(now)
-
-        assert await old.count() == 1 and await new.count() == 1
-        assert [hit.label for hit in await old.find_similar(ecfp_bitstring("CCO"), 5, 0.99)] == [
-            "CCO"
-        ], "the newer definition's write evicted the generation it superseded"
-        assert [
-            hit.label for hit in await new.find_similar(ecfp_bitstring("c1ccccc1"), 5, 0.99)
-        ] == ["c1ccccc1"]
-        assert await new.find_similar(ecfp_bitstring("CCO"), 5, 0.99) == []
-        # And one molecule is one row to the substructure scan, whichever generation it came from.
-        assert [r.id for r in await new.all_records(limit=10)] == ["shelved"]
-        assert [r.definition for r in await new.all_records(limit=10)] == [molecule_definition()]
-
-    asyncio.run(_run())
+    assert await old.count() == 1 and await new.count() == 1
+    assert [hit.label for hit in await old.find_similar(ecfp_bitstring("CCO"), 5, 0.99)] == [
+        "CCO"
+    ], "the newer definition's write evicted the generation it superseded"
+    assert [hit.label for hit in await new.find_similar(ecfp_bitstring("c1ccccc1"), 5, 0.99)] == [
+        "c1ccccc1"
+    ]
+    assert await new.find_similar(ecfp_bitstring("CCO"), 5, 0.99) == []
+    # And one molecule is one row to the substructure scan, whichever generation it came from.
+    assert [r.id for r in await new.all_records(limit=10)] == ["shelved"]
+    assert [r.definition for r in await new.all_records(limit=10)] == [molecule_definition()]
 
 
 # --------------------------------------------------------------------------------------------
@@ -1456,7 +1316,7 @@ def _clear_the_substructure_index_cache() -> Iterator[None]:
     yield
 
 
-def test_the_index_is_built_once_and_reused_by_every_later_query(
+async def test_the_index_is_built_once_and_reused_by_every_later_query(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The adoption is a *loss* without this, which is why it is asserted and not assumed.
@@ -1468,22 +1328,20 @@ def test_the_index_is_built_once_and_reused_by_every_later_query(
     """
     built = _count_builds(monkeypatch)
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        for identifier, smiles in [("a", "CCO"), ("b", "c1ccccc1"), ("c", "CC(=O)O")]:
-            await store.add(record_for(identifier, smiles))
-        first = await find_substructure_matches(store, "CO")
-        second = await find_substructure_matches(store, "c1ccccc1")
-        third = await find_substructure_matches(store, "C(=O)O")
-        assert [h.smiles for h in first.hits] == ["CCO", "CC(=O)O"]  # both carry a C-O bond
-        assert [h.smiles for h in second.hits] == ["c1ccccc1"]
-        assert [h.smiles for h in third.hits] == ["CC(=O)O"]
+    store = InMemoryFingerprintStore()
+    for identifier, smiles in [("a", "CCO"), ("b", "c1ccccc1"), ("c", "CC(=O)O")]:
+        await store.add(record_for(identifier, smiles))
+    first = await find_substructure_matches(store, "CO")
+    second = await find_substructure_matches(store, "c1ccccc1")
+    third = await find_substructure_matches(store, "C(=O)O")
+    assert [h.smiles for h in first.hits] == ["CCO", "CC(=O)O"]  # both carry a C-O bond
+    assert [h.smiles for h in second.hits] == ["c1ccccc1"]
+    assert [h.smiles for h in third.hits] == ["CC(=O)O"]
 
-    asyncio.run(_run())
     assert built == [1], f"three queries over one corpus built {built[0]} indexes"
 
 
-def test_a_rewritten_label_invalidates_the_index_although_the_row_count_is_unchanged(
+async def test_a_rewritten_label_invalidates_the_index_although_the_row_count_is_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The reason the cache key is a digest of the labels and not a count, a max id or a timestamp.
@@ -1499,18 +1357,16 @@ def test_a_rewritten_label_invalidates_the_index_although_the_row_count_is_uncha
     """
     built = _count_builds(monkeypatch)
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        await store.add(record_for("only", "CCO"))
-        assert (await find_substructure_matches(store, "[N-]=[N+]=N")).hits == []
-        # The same id, so the store replaces the row rather than adding one: same count, same
-        # ordering, same everything the schema could offer as a revision signal.
-        await store.add(record_for("only", "CC(=O)N=[N+]=[N-]"))
-        assert await store.count() == 1
-        found = await find_substructure_matches(store, "[N-]=[N+]=N")
-        assert [h.smiles for h in found.hits] == ["CC(=O)N=[N+]=[N-]"]
+    store = InMemoryFingerprintStore()
+    await store.add(record_for("only", "CCO"))
+    assert (await find_substructure_matches(store, "[N-]=[N+]=N")).hits == []
+    # The same id, so the store replaces the row rather than adding one: same count, same
+    # ordering, same everything the schema could offer as a revision signal.
+    await store.add(record_for("only", "CC(=O)N=[N+]=[N-]"))
+    assert await store.count() == 1
+    found = await find_substructure_matches(store, "[N-]=[N+]=N")
+    assert [h.smiles for h in found.hits] == ["CC(=O)N=[N+]=[N-]"]
 
-    asyncio.run(_run())
     assert built == [2], "the rewritten corpus was answered from the index built for the old one"
 
 
@@ -1564,7 +1420,7 @@ def test_concurrent_misses_on_one_corpus_build_one_index(
     assert built == [1], f"four concurrent misses built {built[0]} indexes"
 
 
-def test_an_unreadable_row_is_counted_even_when_the_result_cap_stops_the_scan(
+async def test_an_unreadable_row_is_counted_even_when_the_result_cap_stops_the_scan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A deliberate, argued change of behaviour, in the conservative direction.
@@ -1581,22 +1437,19 @@ def test_an_unreadable_row_is_counted_even_when_the_result_cap_stops_the_scan(
     """
     monkeypatch.setattr(settings, "fingerprint_max_top_k", 2)
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        for index in range(4):
-            await store.add(record_for(f"{100 + index}", "CCO"))
-        # Bypass `record_for`, which would refuse to fingerprint it — a row that parsed when it was
-        # indexed and does not now. Last by id, so the capped scan never reached it.
-        await store.add(FingerprintRecord(id="900", label="not-a-molecule", bits="01"))
+    store = InMemoryFingerprintStore()
+    for index in range(4):
+        await store.add(record_for(f"{100 + index}", "CCO"))
+    # Bypass `record_for`, which would refuse to fingerprint it — a row that parsed when it was
+    # indexed and does not now. Last by id, so the capped scan never reached it.
+    await store.add(FingerprintRecord(id="900", label="not-a-molecule", bits="01"))
 
-        result = await find_substructure_matches(store, "CO")
-        assert len(result.hits) == 2 and result.hits_truncated is True
-        assert result.scan_truncated is True
-        # Both flags at once render as one sentence, and the half this test is about is the one
-        # telling the model an operator has an index to repair.
-        assert "repair the index" in result.verdict
-
-    asyncio.run(_run())
+    result = await find_substructure_matches(store, "CO")
+    assert len(result.hits) == 2 and result.hits_truncated is True
+    assert result.scan_truncated is True
+    # Both flags at once render as one sentence, and the half this test is about is the one
+    # telling the model an operator has an index to repair.
+    assert "repair the index" in result.verdict
 
 
 def test_a_build_past_its_deadline_gives_up_and_caches_nothing() -> None:

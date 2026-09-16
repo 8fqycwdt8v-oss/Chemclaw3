@@ -551,7 +551,7 @@ def test_a_failing_tool_is_announced_to_the_turn() -> None:
     assert signal.message.startswith("AttributeError: 'dict' object has no attribute")
 
 
-def test_the_failing_exception_still_propagates_untouched() -> None:
+async def test_the_failing_exception_still_propagates_untouched() -> None:
     """Announcing is observation: audit and the two converters must see exactly what they did."""
 
     async def _boom() -> None:
@@ -560,11 +560,8 @@ def test_the_failing_exception_still_propagates_untouched() -> None:
     async def _handler(_request: Any) -> Any:
         return await _boom()
 
-    async def _run() -> None:
-        with pytest.raises(ValueError, match="unrelated failure"):
-            await run_middleware(announce_tool_failures, _ctx("predict_pka"), _handler)
-
-    asyncio.run(_run())
+    with pytest.raises(ValueError, match="unrelated failure"):
+        await run_middleware(announce_tool_failures, _ctx("predict_pka"), _handler)
 
 
 def test_a_successful_call_announces_nothing() -> None:
@@ -725,7 +722,7 @@ async def _through_domain_errors(tool: Any, smiles: str) -> Any:
     return await run_middleware(surface_domain_errors, request, _handler)
 
 
-def test_a_connector_refusal_reaches_the_model_without_the_retry_flag() -> None:
+async def test_a_connector_refusal_reaches_the_model_without_the_retry_flag() -> None:
     """BACKLOG:317 — the policy `_refusal_message` states, applied to the kind that returns.
 
     `status="error"` reaches Anthropic as `is_error` on the tool_result block, which invites the
@@ -737,49 +734,41 @@ def test_a_connector_refusal_reaches_the_model_without_the_retry_flag() -> None:
     The premise is asserted first, on the untouched tool, so this test fails loudly rather than
     vacuously the day the adapter stops flagging a failed call.
     """
+    async with _connector_tools() as tools:
+        raw = await tools["refuse_smiles"].ainvoke(
+            {
+                "name": "refuse_smiles",
+                "args": {"smiles": "c1ccccc"},
+                "id": "call-1",
+                "type": "tool_call",
+            }
+        )
+        assert raw.status == "error", (
+            "the adapter no longer returns a flagged failure; this whole conversion is moot"
+        )
 
-    async def _go() -> None:
-        async with _connector_tools() as tools:
-            raw = await tools["refuse_smiles"].ainvoke(
-                {
-                    "name": "refuse_smiles",
-                    "args": {"smiles": "c1ccccc"},
-                    "id": "call-1",
-                    "type": "tool_call",
-                }
-            )
-            assert raw.status == "error", (
-                "the adapter no longer returns a flagged failure; this whole conversion is moot"
-            )
-
-            answered = await _through_domain_errors(tools["refuse_smiles"], "c1ccccc")
-            assert answered.status == "success", (
-                "a connector refusal still reaches the provider as a retryable error"
-            )
-            # The server's own sentence, verbatim — a refusal that arrives without its reason is
-            # no better than the flag it was carrying.
-            assert "c1ccccc has an unclosed ring" in answered.text
-            # And it still answers the call it was made for: an assistant tool_use block with no
-            # matching tool_result is a malformed exchange the provider rejects outright.
-            assert answered.tool_call_id == "call-1"
-
-    asyncio.run(_go())
+        answered = await _through_domain_errors(tools["refuse_smiles"], "c1ccccc")
+        assert answered.status == "success", (
+            "a connector refusal still reaches the provider as a retryable error"
+        )
+        # The server's own sentence, verbatim — a refusal that arrives without its reason is
+        # no better than the flag it was carrying.
+        assert "c1ccccc has an unclosed ring" in answered.text
+        # And it still answers the call it was made for: an assistant tool_use block with no
+        # matching tool_result is a malformed exchange the provider rejects outright.
+        assert answered.tool_call_id == "call-1"
 
 
-def test_a_working_connector_tool_is_handed_back_untouched() -> None:
+async def test_a_working_connector_tool_is_handed_back_untouched() -> None:
     """The mirror: nothing is rewritten for a call that worked.
 
     A predicate that fired on any returned `ToolMessage` rather than on a failed one would silently
     rewrite every successful connector result, which is the same defect mirrored.
     """
-
-    async def _go() -> None:
-        async with _connector_tools() as tools:
-            answered = await _through_domain_errors(tools["echo_smiles"], "CCO")
-            assert answered.status == "success"
-            assert "echoed CCO" in answered.text
-
-    asyncio.run(_go())
+    async with _connector_tools() as tools:
+        answered = await _through_domain_errors(tools["echo_smiles"], "CCO")
+        assert answered.status == "success"
+        assert "echoed CCO" in answered.text
 
 
 class _RecordingSink:

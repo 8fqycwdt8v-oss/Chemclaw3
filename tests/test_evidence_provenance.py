@@ -9,7 +9,6 @@ While everything readable is human-merged that is harmless. It stops being harml
 second, ungated tier exists, which is why this lands before that one and on its own.
 """
 
-import asyncio
 from pathlib import Path
 
 import yaml
@@ -39,68 +38,52 @@ def _write(directory: Path, note: Note) -> None:
     (directory / f"{note.id}.md").write_text("\n".join(lines), encoding="utf-8")
 
 
-def test_a_graph_chunk_carries_who_wrote_it_and_how_sure_they_were(tmp_path: Path) -> None:
+async def test_a_graph_chunk_carries_who_wrote_it_and_how_sure_they_were(tmp_path: Path) -> None:
     """The three fields the answer contract now reasons over, on the default retrieval path."""
-
-    async def _run() -> None:
-        _write(
-            tmp_path,
-            Note(
-                id="playbook-pd",
-                type="playbook",
-                created_by="agent",
-                source="distilled from 6 campaigns",
-                confidence=0.4,
-                body="Pd(OAc)2 with SPhos tends to hold at low loading.",
-            ),
-        )
-        chunks = await GraphRetriever(str(tmp_path)).retrieve("SPhos", {})
-        assert len(chunks) == 1
-        assert chunks[0].created_by == "agent"
-        assert chunks[0].source == "distilled from 6 campaigns"
-        assert chunks[0].confidence == 0.4
-
-    asyncio.run(_run())
+    _write(
+        tmp_path,
+        Note(
+            id="playbook-pd",
+            type="playbook",
+            created_by="agent",
+            source="distilled from 6 campaigns",
+            confidence=0.4,
+            body="Pd(OAc)2 with SPhos tends to hold at low loading.",
+        ),
+    )
+    chunks = await GraphRetriever(str(tmp_path)).retrieve("SPhos", {})
+    assert len(chunks) == 1
+    assert chunks[0].created_by == "agent"
+    assert chunks[0].source == "distilled from 6 campaigns"
+    assert chunks[0].confidence == 0.4
 
 
-def test_a_human_note_says_human(tmp_path: Path) -> None:
+async def test_a_human_note_says_human(tmp_path: Path) -> None:
     """The distinction only means something if both sides of it are actually reported."""
-
-    async def _run() -> None:
-        _write(
-            tmp_path,
-            Note(id="reaction-1", type="reaction", created_by="human", body="Ran SPhos at 2 mol%."),
-        )
-        chunks = await GraphRetriever(str(tmp_path)).retrieve("SPhos", {})
-        assert chunks[0].created_by == "human"
-
-    asyncio.run(_run())
+    _write(
+        tmp_path,
+        Note(id="reaction-1", type="reaction", created_by="human", body="Ran SPhos at 2 mol%."),
+    )
+    chunks = await GraphRetriever(str(tmp_path)).retrieve("SPhos", {})
+    assert chunks[0].created_by == "human"
 
 
-def test_provenance_is_not_a_filter(tmp_path: Path) -> None:
+async def test_provenance_is_not_a_filter(tmp_path: Path) -> None:
     """An agent-authored, low-confidence note is *returned* and qualified, never suppressed.
 
     Retrieval has no basis for deciding a merged note should not be seen — a human signed it off.
     Dropping it would be the same mistake `conflicts_with` was written to avoid: silently deciding
     on the reader's behalf which of two curated notes counts.
     """
-
-    async def _run() -> None:
-        _write(
-            tmp_path, Note(id="a", type="playbook", created_by="agent", confidence=0.1, body="XX")
-        )
-        _write(
-            tmp_path, Note(id="b", type="playbook", created_by="human", confidence=1.0, body="XX")
-        )
-        chunks = await GraphRetriever(str(tmp_path)).retrieve("XX", {})
-        assert {c.source_note_id for c in chunks} == {"a", "b"}
-        # ...but the trusted one is ranked first, so it survives truncation.
-        assert chunks[0].source_note_id == "b"
-
-    asyncio.run(_run())
+    _write(tmp_path, Note(id="a", type="playbook", created_by="agent", confidence=0.1, body="XX"))
+    _write(tmp_path, Note(id="b", type="playbook", created_by="human", confidence=1.0, body="XX"))
+    chunks = await GraphRetriever(str(tmp_path)).retrieve("XX", {})
+    assert {c.source_note_id for c in chunks} == {"a", "b"}
+    # ...but the trusted one is ranked first, so it survives truncation.
+    assert chunks[0].source_note_id == "b"
 
 
-def test_the_dense_index_path_carries_the_same_provenance(tmp_path: Path) -> None:
+async def test_the_dense_index_path_carries_the_same_provenance(tmp_path: Path) -> None:
     """One builder feeds both paths, because a partially-provenanced list is the worst state.
 
     Two retrievers fuse into one evidence list. If the graph path reported authorship and the
@@ -110,26 +93,23 @@ def test_the_dense_index_path_carries_the_same_provenance(tmp_path: Path) -> Non
     """
     from chemclaw.retrieval.retrievers import VectorRetriever
 
-    async def _run() -> None:
-        _write(
-            tmp_path,
-            Note(
-                id="playbook-pd",
-                type="playbook",
-                created_by="agent",
-                confidence=0.3,
-                body="Pd(OAc)2 with SPhos holds at low loading.",
-            ),
-        )
-        index = InMemoryNoteIndex()
-        await reindex_notes(index, notes_dir=str(tmp_path))
-        retriever = VectorRetriever(index, notes_dir=str(tmp_path))
+    _write(
+        tmp_path,
+        Note(
+            id="playbook-pd",
+            type="playbook",
+            created_by="agent",
+            confidence=0.3,
+            body="Pd(OAc)2 with SPhos holds at low loading.",
+        ),
+    )
+    index = InMemoryNoteIndex()
+    await reindex_notes(index, notes_dir=str(tmp_path))
+    retriever = VectorRetriever(index, notes_dir=str(tmp_path))
 
-        chunks = await retriever.retrieve("SPhos at low palladium loading", {})
-        assert [c.created_by for c in chunks] == ["agent"]
-        assert [c.confidence for c in chunks] == [0.3]
-
-    asyncio.run(_run())
+    chunks = await retriever.retrieve("SPhos at low palladium loading", {})
+    assert [c.created_by for c in chunks] == ["agent"]
+    assert [c.confidence for c in chunks] == [0.3]
 
 
 def test_unestablished_authorship_is_empty_not_human() -> None:
@@ -146,7 +126,7 @@ def test_unestablished_authorship_is_empty_not_human() -> None:
     assert bare.confidence is None
 
 
-def test_an_excerpt_windows_on_the_matched_term_rather_than_the_head_of_the_body(
+async def test_an_excerpt_windows_on_the_matched_term_rather_than_the_head_of_the_body(
     tmp_path: Path,
 ) -> None:
     """A reviewer must be able to see what a cited note was retrieved *for*.
@@ -163,43 +143,35 @@ def test_an_excerpt_windows_on_the_matched_term_rather_than_the_head_of_the_body
     purities and outcomes are in a table at the *end* of the body — which is the same failure
     `core/config/retrieval.py` already articulates for `protocol_digest_max_chars`.
     """
+    preamble = "Acetylation of salicylic acid with acetic anhydride. " * 8
+    _write(
+        tmp_path,
+        Note(
+            id="rxn-aspirin-acetylation",
+            type="reaction",
+            created_by="human",
+            body=f"{preamble}\n\nThe isolated yield was 87 percent after recrystallisation.",
+        ),
+    )
+    (chunk,) = await GraphRetriever(str(tmp_path)).retrieve("yield", {})
 
-    async def _run() -> None:
-        preamble = "Acetylation of salicylic acid with acetic anhydride. " * 8
-        _write(
-            tmp_path,
-            Note(
-                id="rxn-aspirin-acetylation",
-                type="reaction",
-                created_by="human",
-                body=f"{preamble}\n\nThe isolated yield was 87 percent after recrystallisation.",
-            ),
-        )
-        (chunk,) = await GraphRetriever(str(tmp_path)).retrieve("yield", {})
-
-        assert "yield" in chunk.content, (
-            f"the cited excerpt does not contain the term that matched: {chunk.content!r}"
-        )
-        assert len(chunk.content) <= settings.note_excerpt_chars
-
-    asyncio.run(_run())
+    assert "yield" in chunk.content, (
+        f"the cited excerpt does not contain the term that matched: {chunk.content!r}"
+    )
+    assert len(chunk.content) <= settings.note_excerpt_chars
 
 
-def test_an_excerpt_with_no_body_match_still_starts_at_the_beginning(tmp_path: Path) -> None:
+async def test_an_excerpt_with_no_body_match_still_starts_at_the_beginning(tmp_path: Path) -> None:
     """The control: a note matched on its id, type, tags or SMILES has no body offset to centre on.
 
     Windowing on nothing would be windowing on the first character anyway, so the head is the
     honest fallback rather than a special case — and it is what every excerpt was before.
     """
+    body = "Charge the vessel, hold at 80 degrees, then work up into ethyl acetate. " * 6
+    _write(tmp_path, Note(id="rxn-esterification", type="reaction", body=body))
+    (chunk,) = await GraphRetriever(str(tmp_path)).retrieve("esterification", {})
 
-    async def _run() -> None:
-        body = "Charge the vessel, hold at 80 degrees, then work up into ethyl acetate. " * 6
-        _write(tmp_path, Note(id="rxn-esterification", type="reaction", body=body))
-        (chunk,) = await GraphRetriever(str(tmp_path)).retrieve("esterification", {})
-
-        assert chunk.content == body.strip()[: settings.note_excerpt_chars]
-
-    asyncio.run(_run())
+    assert chunk.content == body.strip()[: settings.note_excerpt_chars]
 
 
 def test_the_conflict_marker_explains_itself_in_the_payload_the_model_reads() -> None:
@@ -287,7 +259,7 @@ def test_the_corpus_grades_whether_a_disputed_note_is_qualified_in_the_answer() 
     assert any("conflicts_with" in probe.direction for probe in graded)
 
 
-def test_the_window_follows_the_term_that_points_somewhere_not_the_first_one_it_finds(
+async def test_the_window_follows_the_term_that_points_somewhere_not_the_first_one_it_finds(
     tmp_path: Path,
 ) -> None:
     """One matched term in the opening line used to pin the excerpt to the head.
@@ -306,31 +278,26 @@ def test_the_window_follows_the_term_that_points_somewhere_not_the_first_one_it_
     points nowhere. Measured the same way that moved term visibility 84/110 → 92/110 and full
     coverage 13/30 → 17/30, with `isolated yield: 76%` inside the p01 excerpt.
     """
-
-    async def _run() -> None:
-        # `coupling` eight times in the head, `protodeboronation` once at the end: the earliest
-        # match is in the first line, the answer is not.
-        head = "Coupling notes on the coupling of the coupling partners. " * 5
-        _write(
-            tmp_path,
-            Note(
-                id="rxn-biaryl-run",
-                type="reaction",
-                created_by="human",
-                body=(
-                    f"{head}\n\nThe low run failed by competitive "
-                    "protodeboronation of the boronic acid."
-                ),
+    # `coupling` eight times in the head, `protodeboronation` once at the end: the earliest
+    # match is in the first line, the answer is not.
+    head = "Coupling notes on the coupling of the coupling partners. " * 5
+    _write(
+        tmp_path,
+        Note(
+            id="rxn-biaryl-run",
+            type="reaction",
+            created_by="human",
+            body=(
+                f"{head}\n\nThe low run failed by competitive "
+                "protodeboronation of the boronic acid."
             ),
-        )
-        (chunk,) = await GraphRetriever(str(tmp_path)).retrieve(
-            "did the coupling fail by protodeboronation", {}
-        )
+        ),
+    )
+    (chunk,) = await GraphRetriever(str(tmp_path)).retrieve(
+        "did the coupling fail by protodeboronation", {}
+    )
 
-        assert "protodeboronation" in chunk.content, (
-            "the excerpt shows the framing term and not the one carrying the answer: "
-            f"{chunk.content!r}"
-        )
-        assert len(chunk.content) <= settings.note_excerpt_chars
-
-    asyncio.run(_run())
+    assert "protodeboronation" in chunk.content, (
+        f"the excerpt shows the framing term and not the one carrying the answer: {chunk.content!r}"
+    )
+    assert len(chunk.content) <= settings.note_excerpt_chars

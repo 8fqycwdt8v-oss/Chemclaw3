@@ -184,7 +184,7 @@ def test_both_boundaries_are_actually_instrumented() -> None:
     assert "continue_trace(" in inspect.getsource(server), "a connector ignores the caller's trace"
 
 
-def test_a_real_turn_exports_a_turn_span(spans: object) -> None:
+async def test_a_real_turn_exports_a_turn_span(spans: object) -> None:
     """Driven through `run_turn` itself, because "the call exists" is not "the span is entered".
 
     Found by a mutation: replacing `stack.enter_context(...)` with a plain assignment builds the
@@ -193,7 +193,6 @@ def test_a_real_turn_exports_a_turn_span(spans: object) -> None:
     plausible refactor and a silent loss of every turn span, so the boundary is exercised for real
     with a fake agent rather than asserted about.
     """
-    import asyncio
     from collections.abc import AsyncIterator
 
     from chemclaw.agent.session import TurnSession
@@ -206,15 +205,10 @@ def test_a_real_turn_exports_a_turn_span(spans: object) -> None:
         async def stream(self, message: str) -> AsyncIterator[Piece]:
             yield "ok"
 
-    async def _drive() -> None:
-        session = TurnSession(session_id="s-trace")
-        turn = _Turn()
-        async for _event in run_turn(
-            session, "hello", connectors=[], graph_factory=turn.graph_factory
-        ):
-            pass
-
-    asyncio.run(_drive())
+    session = TurnSession(session_id="s-trace")
+    turn = _Turn()
+    async for _event in run_turn(session, "hello", connectors=[], graph_factory=turn.graph_factory):
+        pass
 
     assert "chemclaw.turn" in {span.name for span in spans()}, (  # type: ignore[operator]
         "a real turn exported no span, so the boundary the docs claim is still uninstrumented"

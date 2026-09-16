@@ -77,89 +77,83 @@ def test_default_retrievers_uses_the_configured_source_registry(
     assert any(r.name == "reaction-fingerprint" for r in retrievers)
 
 
-def test_report_workflow_drafts_and_pr_gates(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_report_workflow_drafts_and_pr_gates(monkeypatch: pytest.MonkeyPatch) -> None:
     """The workflow retrieves each section durably and proposes one cited report note."""
     fake = FakeWriter()
     monkeypatch.setattr(report_workflow, "default_retrievers", lambda: [_FakeRetriever()])
     monkeypatch.setattr(report_workflow, "default_writer", lambda: fake)
 
-    async def _run() -> None:
-        request = ReportRequest(
-            title="Widget development",
-            requested_by="chemist@corp",
-            sections=[
-                ReportSection(heading="Yield", query="yield trend", memory_layer="episodic"),
-                ReportSection(heading="Safety", query="hazard data", memory_layer="evidence"),
+    request = ReportRequest(
+        title="Widget development",
+        requested_by="chemist@corp",
+        sections=[
+            ReportSection(heading="Yield", query="yield trend", memory_layer="episodic"),
+            ReportSection(heading="Safety", query="hazard data", memory_layer="evidence"),
+        ],
+    )
+    async with await start_env_or_skip() as env:
+        client: Client = pydantic_client(env)
+        async with Worker(
+            client,
+            task_queue=settings.background_task_queue,
+            workflows=[DevelopmentReportWorkflow, ReportSectionWorkflow],
+            activities=[
+                retrieve_section,
+                record_report_note,
+                propose_report,
+                resolve_fan_out_limit,
             ],
-        )
-        async with await start_env_or_skip() as env:
-            client: Client = pydantic_client(env)
-            async with Worker(
-                client,
+        ):
+            result = await client.execute_workflow(
+                DevelopmentReportWorkflow.run,
+                request,
+                id="report-test",
                 task_queue=settings.background_task_queue,
-                workflows=[DevelopmentReportWorkflow, ReportSectionWorkflow],
-                activities=[
-                    retrieve_section,
-                    record_report_note,
-                    propose_report,
-                    resolve_fan_out_limit,
-                ],
-            ):
-                result = await client.execute_workflow(
-                    DevelopmentReportWorkflow.run,
-                    request,
-                    id="report-test",
-                    task_queue=settings.background_task_queue,
-                )
-        # The envelope, so `get_durable_job_status` can hand the finished report back in one call.
-        assert result.data["note_ref"].startswith("commit://1")
-        assert result.data["sections"] == 2
-        assert "Widget development" in result.summary
-        body = fake.writes[0].files[0].content
-        assert "[[reaction-a]]" in body  # the supported section cites its source
-        assert "No supporting data found" in body  # the safety section is marked, not invented
-
-    asyncio.run(_run())
+            )
+    # The envelope, so `get_durable_job_status` can hand the finished report back in one call.
+    assert result.data["note_ref"].startswith("commit://1")
+    assert result.data["sections"] == 2
+    assert "Widget development" in result.summary
+    body = fake.writes[0].files[0].content
+    assert "[[reaction-a]]" in body  # the supported section cites its source
+    assert "No supporting data found" in body  # the safety section is marked, not invented
 
 
-def test_failed_section_is_marked_not_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_failed_section_is_marked_not_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
     """A section whose retrieval errors is shown as failed in the draft, never silently missing."""
     fake = FakeWriter()
     monkeypatch.setattr(report_workflow, "default_retrievers", lambda: [_FailingRetriever()])
     monkeypatch.setattr(report_workflow, "default_writer", lambda: fake)
 
-    async def _run() -> None:
-        request = ReportRequest(
-            title="Widget development",
-            requested_by="chemist@corp",
-            sections=[
-                ReportSection(heading="Yield", query="yield trend", memory_layer="episodic"),
+    request = ReportRequest(
+        title="Widget development",
+        requested_by="chemist@corp",
+        sections=[
+            ReportSection(heading="Yield", query="yield trend", memory_layer="episodic"),
+        ],
+    )
+    async with await start_env_or_skip() as env:
+        client: Client = pydantic_client(env)
+        async with Worker(
+            client,
+            task_queue=settings.background_task_queue,
+            workflows=[DevelopmentReportWorkflow, ReportSectionWorkflow],
+            activities=[
+                retrieve_section,
+                record_report_note,
+                propose_report,
+                resolve_fan_out_limit,
             ],
-        )
-        async with await start_env_or_skip() as env:
-            client: Client = pydantic_client(env)
-            async with Worker(
-                client,
+        ):
+            await client.execute_workflow(
+                DevelopmentReportWorkflow.run,
+                request,
+                id="report-fail-test",
                 task_queue=settings.background_task_queue,
-                workflows=[DevelopmentReportWorkflow, ReportSectionWorkflow],
-                activities=[
-                    retrieve_section,
-                    record_report_note,
-                    propose_report,
-                    resolve_fan_out_limit,
-                ],
-            ):
-                await client.execute_workflow(
-                    DevelopmentReportWorkflow.run,
-                    request,
-                    id="report-fail-test",
-                    task_queue=settings.background_task_queue,
-                )
-        body = fake.writes[0].files[0].content
-        assert "## Yield" in body  # the section still appears (not dropped)
-        assert "Retrieval failed" in body  # and is explicitly marked incomplete
-
-    asyncio.run(_run())
+            )
+    body = fake.writes[0].files[0].content
+    assert "## Yield" in body  # the section still appears (not dropped)
+    assert "Retrieval failed" in body  # and is explicitly marked incomplete
 
 
 def test_background_worker_registers_report_workflow() -> None:
@@ -267,7 +261,7 @@ def test_canonicalising_a_report_id_does_not_reach_the_entitlement_key() -> None
     assert len(set(layers)) == 3, "two memory layers are two different reports"
 
 
-def test_a_report_carries_its_requester_into_retrieval() -> None:
+async def test_a_report_carries_its_requester_into_retrieval() -> None:
     """The gap: a gated source contributed nothing to a report, and the draft said so nowhere.
 
     `retrieve_section` runs in an activity, where no identity contextvar is set unless something
@@ -293,19 +287,17 @@ def test_a_report_carries_its_requester_into_retrieval() -> None:
             heading=section.heading, memory_layer=section.memory_layer, evidence=[]
         )
 
-    async def _run() -> None:
-        with mock.patch.object(report_workflow, "gather_section", _record):
-            await report_workflow.retrieve_section(
-                SectionRequest(
-                    section=ReportSection(
-                        heading="Scope", query="what is known", memory_layer="evidence"
-                    ),
-                    requested_by="alice@corp",
-                    requested_roles=["chemclaw.sharedrive.reader"],
-                )
+    with mock.patch.object(report_workflow, "gather_section", _record):
+        await report_workflow.retrieve_section(
+            SectionRequest(
+                section=ReportSection(
+                    heading="Scope", query="what is known", memory_layer="evidence"
+                ),
+                requested_by="alice@corp",
+                requested_roles=["chemclaw.sharedrive.reader"],
             )
+        )
 
-    asyncio.run(_run())
     # The *actor* crosses into the activity (so a gated source is not silently skipped for lack of
     # any identity, and the run is attributed), but the *roles* do NOT: a workflow payload is
     # relayed data, not a verified claim, and binding `requested_roles` from it would let anyone who
@@ -316,7 +308,7 @@ def test_a_report_carries_its_requester_into_retrieval() -> None:
     assert seen == [("alice@corp", frozenset())]
 
 
-def test_a_section_with_no_requester_stamps_no_identity() -> None:
+async def test_a_section_with_no_requester_stamps_no_identity() -> None:
     """Absent means absent — the fan-out payload must not acquire a synthetic actor.
 
     The counterweight to the test above: stamping a requester's roles widens what the run can read,
@@ -336,17 +328,15 @@ def test_a_section_with_no_requester_stamps_no_identity() -> None:
             heading=section.heading, memory_layer=section.memory_layer, evidence=[]
         )
 
-    async def _run() -> None:
-        with mock.patch.object(report_workflow, "gather_section", _record):
-            await report_workflow.retrieve_section(
-                SectionRequest(
-                    section=ReportSection(
-                        heading="Scope", query="what is known", memory_layer="evidence"
-                    )
+    with mock.patch.object(report_workflow, "gather_section", _record):
+        await report_workflow.retrieve_section(
+            SectionRequest(
+                section=ReportSection(
+                    heading="Scope", query="what is known", memory_layer="evidence"
                 )
             )
+        )
 
-    asyncio.run(_run())
     assert seen == ["<none>"]
 
 
@@ -415,7 +405,7 @@ def test_a_dropped_fan_out_child_still_appears_in_the_draft(
     assert "with 3 section(s)" in result.summary
 
 
-def test_forged_payload_roles_do_not_reach_the_gate() -> None:
+async def test_forged_payload_roles_do_not_reach_the_gate() -> None:
     """A privileged role named in the workflow payload does not satisfy authorization.
 
     The core of the durable privilege-escalation finding: `authz._has_required_role` reads the
@@ -433,17 +423,15 @@ def test_forged_payload_roles_do_not_reach_the_gate() -> None:
             heading=section.heading, memory_layer=section.memory_layer, evidence=[]
         )
 
-    async def _run() -> None:
-        with mock.patch.object(report_workflow, "gather_section", _record):
-            await report_workflow.retrieve_section(
-                SectionRequest(
-                    section=ReportSection(heading="H", query="q", memory_layer="evidence"),
-                    requested_by="mallory@evil.example",
-                    requested_roles=["Chemclaw.Admin", "Chemclaw.Privileged"],
-                )
+    with mock.patch.object(report_workflow, "gather_section", _record):
+        await report_workflow.retrieve_section(
+            SectionRequest(
+                section=ReportSection(heading="H", query="q", memory_layer="evidence"),
+                requested_by="mallory@evil.example",
+                requested_roles=["Chemclaw.Admin", "Chemclaw.Privileged"],
             )
+        )
 
-    asyncio.run(_run())
     assert seen == [frozenset()], "a payload-declared privileged role reached the gate"
 
 

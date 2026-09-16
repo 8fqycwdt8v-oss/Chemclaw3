@@ -8,7 +8,6 @@ and its one caveat was about the *other* incompleteness (this system knows only 
 so the warning present was the one that was not biting.
 """
 
-import asyncio
 from datetime import UTC, datetime, timedelta
 
 from chemclaw.agent.pending_tools import check_pending_requests
@@ -54,44 +53,36 @@ async def _populate(count: int) -> None:
         )
 
 
-def test_a_page_of_the_wait_says_it_is_a_page() -> None:
+async def test_a_page_of_the_wait_says_it_is_a_page() -> None:
     """35 waiting, 20 shown — and the answer now carries both numbers and what they mean.
 
     The verdict is a `computed_field` rather than a property, so it survives `model_dump()`: the
     lesson `FingerprintSearch.verdict` records, learned on a hazard screen whose "this is not a
     safety assessment" sentence never left the process.
     """
+    await migrated_db_or_skip()
+    await _populate(35)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _populate(35)
+    page = await check_pending_requests(asked_of=ASKED_OF, limit=20)
+    assert len(page.requests) == 20
+    assert page.total_waiting == 35
+    assert page.limit_applied == 20
+    payload = page.model_dump()
+    assert "PARTIAL" in payload["verdict"]
+    assert "35" in payload["verdict"]
 
-        page = await check_pending_requests(asked_of=ASKED_OF, limit=20)
-        assert len(page.requests) == 20
-        assert page.total_waiting == 35
-        assert page.limit_applied == 20
-        payload = page.model_dump()
-        assert "PARTIAL" in payload["verdict"]
-        assert "35" in payload["verdict"]
-
-        # The marker means something, because the whole set does not set it.
-        whole = await check_pending_requests(asked_of=ASKED_OF, limit=200)
-        assert len(whole.requests) == 35
-        assert "COMPLETE" in whole.model_dump()["verdict"]
-
-    asyncio.run(_run())
+    # The marker means something, because the whole set does not set it.
+    whole = await check_pending_requests(asked_of=ASKED_OF, limit=200)
+    assert len(whole.requests) == 35
+    assert "COMPLETE" in whole.model_dump()["verdict"]
 
 
-def test_nothing_waiting_is_said_as_nothing_waiting() -> None:
+async def test_nothing_waiting_is_said_as_nothing_waiting() -> None:
     """An empty page and a page that ran out are different answers and must read differently."""
+    await migrated_db_or_skip()
+    await _populate(0)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _populate(0)
-
-        empty = await check_pending_requests(asked_of=ASKED_OF)
-        assert empty.requests == []
-        assert empty.total_waiting == 0
-        assert "NOTHING WAITING" in empty.model_dump()["verdict"]
-
-    asyncio.run(_run())
+    empty = await check_pending_requests(asked_of=ASKED_OF)
+    assert empty.requests == []
+    assert empty.total_waiting == 0
+    assert "NOTHING WAITING" in empty.model_dump()["verdict"]

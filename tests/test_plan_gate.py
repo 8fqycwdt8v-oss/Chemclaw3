@@ -222,32 +222,24 @@ def test_a_read_tool_is_not_gated(approvals: InMemoryPlanApprovalStore) -> None:
     assert asyncio.run(_run())
 
 
-def test_a_session_with_no_plan_cannot_write(approvals: InMemoryPlanApprovalStore) -> None:
+async def test_a_session_with_no_plan_cannot_write(approvals: InMemoryPlanApprovalStore) -> None:
     """No plan is not an approved plan: the agent proposes before it acts, by design."""
-
-    async def _run() -> None:
-        session = _Session("no-plan")
-        with pytest.raises(PlanNotApprovedError):
-            await _call("record_knowledge_note", session)
-
-    asyncio.run(_run())
+    session = _Session("no-plan")
+    with pytest.raises(PlanNotApprovedError):
+        await _call("record_knowledge_note", session)
 
 
-def test_a_rejection_after_an_approval_revokes_it(approvals: InMemoryPlanApprovalStore) -> None:
+async def test_a_rejection_after_an_approval_revokes_it(
+    approvals: InMemoryPlanApprovalStore,
+) -> None:
     """Migration 020 says the latest decision wins. Nothing acted on that until the gate did."""
-
-    async def _run() -> None:
-        session = _Session("revoked")
-        await _set_plan(session, ["do the thing"])
-        await _approve(approvals, session)
-        assert await _call("record_knowledge_note", session)
-        await approvals.record(
-            session.session_id, _hash(session), "chemist-1", False, session.declares
-        )
-        with pytest.raises(PlanNotApprovedError):
-            await _call("record_knowledge_note", session)
-
-    asyncio.run(_run())
+    session = _Session("revoked")
+    await _set_plan(session, ["do the thing"])
+    await _approve(approvals, session)
+    assert await _call("record_knowledge_note", session)
+    await approvals.record(session.session_id, _hash(session), "chemist-1", False, session.declares)
+    with pytest.raises(PlanNotApprovedError):
+        await _call("record_knowledge_note", session)
 
 
 def test_no_session_means_no_gate(approvals: InMemoryPlanApprovalStore) -> None:
@@ -418,18 +410,14 @@ def test_an_approval_is_spent_by_the_turn_that_used_it(
     assert again, "re-approving an unchanged plan did not re-authorize it"
 
 
-def test_consuming_is_silent_when_nothing_was_approved(
+async def test_consuming_is_silent_when_nothing_was_approved(
     approvals: InMemoryPlanApprovalStore,
 ) -> None:
     """Turn teardown runs on every path, so this must never fail a turn on its way out."""
-
-    async def _run() -> None:
-        session = _Session("never-approved")
-        await _set_plan(session, ["a step"])
-        await consume_turn_approval(session.session_id)
-        await consume_turn_approval(session.session_id)
-
-    asyncio.run(_run())
+    session = _Session("never-approved")
+    await _set_plan(session, ["a step"])
+    await consume_turn_approval(session.session_id)
+    await consume_turn_approval(session.session_id)
 
 
 # --- review fixes: one predicate, a non-fatal spend, and an honest display --------------------
@@ -458,7 +446,7 @@ def test_the_gate_and_the_spend_ask_the_same_question(monkeypatch: pytest.Monkey
     assert not gate_applies(AgentProfile(name="p")), "the default follows the deployment"
 
 
-def test_spending_never_raises_when_the_store_is_unreachable(
+async def test_spending_never_raises_when_the_store_is_unreachable(
     approvals: InMemoryPlanApprovalStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A turn must not fail on its way out because the approval store hiccupped.
@@ -476,12 +464,9 @@ def test_spending_never_raises_when_the_store_is_unreachable(
 
     monkeypatch.setattr(store_module, "plan_approval_store", lambda: _Broken())
 
-    async def _run() -> None:
-        session = _Session("broken-store")
-        await _set_plan(session, ["a step"])
-        await consume_turn_approval(session.session_id)  # must not raise
-
-    asyncio.run(_run())
+    session = _Session("broken-store")
+    await _set_plan(session, ["a step"])
+    await consume_turn_approval(session.session_id)  # must not raise
 
 
 # --- "nothing" is not an approvable plan, and a spent approval stays spent ---------------------
@@ -574,7 +559,7 @@ _WRITE_TODOS = {"name": "write_todos", "args": {"todos": []}, "id": "c-plan"}
 _GATED = {"name": "record_knowledge_note", "args": {"type": "insight"}, "id": "c-write"}
 
 
-def test_a_gated_call_beside_a_plan_rewrite_is_refused_even_with_a_live_approval(
+async def test_a_gated_call_beside_a_plan_rewrite_is_refused_even_with_a_live_approval(
     approvals: InMemoryPlanApprovalStore,
 ) -> None:
     """DARK-1's remaining shape, and the branch nothing exercised.
@@ -591,20 +576,14 @@ def test_a_gated_call_beside_a_plan_rewrite_is_refused_even_with_a_live_approval
     `enforce_plan_approval` left 204 tests green; only the `return True` control failed, which
     proved the function was reached and its true branch untested.
     """
+    session = _Session("dark-1-batch")
+    await _set_plan(session, ["screen the species", "find precedent"])
+    await _approve(approvals, session)
+    # The control: alone in its own message, this exact call is allowed right now.
+    assert await _call_with_messages("record_knowledge_note", session, [_batch(_GATED)])
 
-    async def _run() -> None:
-        session = _Session("dark-1-batch")
-        await _set_plan(session, ["screen the species", "find precedent"])
-        await _approve(approvals, session)
-        # The control: alone in its own message, this exact call is allowed right now.
-        assert await _call_with_messages("record_knowledge_note", session, [_batch(_GATED)])
-
-        with pytest.raises(PlanNotApprovedError):
-            await _call_with_messages(
-                "record_knowledge_note", session, [_batch(_WRITE_TODOS, _GATED)]
-            )
-
-    asyncio.run(_run())
+    with pytest.raises(PlanNotApprovedError):
+        await _call_with_messages("record_knowledge_note", session, [_batch(_WRITE_TODOS, _GATED)])
 
 
 def test_a_drifted_plans_old_approval_is_spent_at_turn_end(
@@ -633,7 +612,7 @@ def test_a_drifted_plans_old_approval_is_spent_at_turn_end(
     )
 
 
-def test_ticking_a_step_beside_the_steps_own_call_is_allowed(
+async def test_ticking_a_step_beside_the_steps_own_call_is_allowed(
     approvals: InMemoryPlanApprovalStore,
 ) -> None:
     """The canonical harness shape must pass on its standing approval — the livelock this closes.
@@ -653,76 +632,68 @@ def test_ticking_a_step_beside_the_steps_own_call_is_allowed(
     `D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read` and is why this
     fixture cannot be written without it.
     """
+    session = _Session("tick-and-act")
+    plan = ["compute the barrier", "propose the note"]
+    await _set_plan(session, plan)
+    await _approve(approvals, session)
+    tick = {
+        "name": "write_todos",
+        "args": {
+            "todos": [
+                {
+                    "content": "compute the barrier",
+                    "status": "completed",
+                    "tools": list(session.declares),
+                },
+                {
+                    "content": "propose the note",
+                    "status": "in_progress",
+                    "tools": list(session.declares),
+                },
+            ]
+        },
+        "id": "c-plan",
+    }
+    assert await _call_with_messages("record_knowledge_note", session, [_batch(tick, _GATED)]), (
+        "a status-flip write_todos beside the step's own call was refused — the livelock shape"
+    )
 
-    async def _run() -> None:
-        session = _Session("tick-and-act")
-        plan = ["compute the barrier", "propose the note"]
-        await _set_plan(session, plan)
-        await _approve(approvals, session)
-        tick = {
-            "name": "write_todos",
-            "args": {
-                "todos": [
-                    {
-                        "content": "compute the barrier",
-                        "status": "completed",
-                        "tools": list(session.declares),
-                    },
-                    {
-                        "content": "propose the note",
-                        "status": "in_progress",
-                        "tools": list(session.declares),
-                    },
-                ]
-            },
-            "id": "c-plan",
-        }
-        assert await _call_with_messages(
-            "record_knowledge_note", session, [_batch(tick, _GATED)]
-        ), "a status-flip write_todos beside the step's own call was refused — the livelock shape"
-
-        # A *content* rewrite in the same shape is a different plan, and refuses on its own hash.
-        reword = {
-            "name": "write_todos",
-            "args": {
-                "todos": [
-                    {
-                        "content": "something else entirely",
-                        "status": "pending",
-                        "tools": list(session.declares),
-                    }
-                ]
-            },
-            "id": "c-plan-2",
-        }
-        with pytest.raises(PlanNotApprovedError):
-            await _call_with_messages("record_knowledge_note", session, [_batch(reword, _GATED)])
-
-    asyncio.run(_run())
+    # A *content* rewrite in the same shape is a different plan, and refuses on its own hash.
+    reword = {
+        "name": "write_todos",
+        "args": {
+            "todos": [
+                {
+                    "content": "something else entirely",
+                    "status": "pending",
+                    "tools": list(session.declares),
+                }
+            ]
+        },
+        "id": "c-plan-2",
+    }
+    with pytest.raises(PlanNotApprovedError):
+        await _call_with_messages("record_knowledge_note", session, [_batch(reword, _GATED)])
 
 
-def test_an_unanswerable_batch_rewrite_still_refuses(
+async def test_an_unanswerable_batch_rewrite_still_refuses(
     approvals: InMemoryPlanApprovalStore,
 ) -> None:
     """Two rewrites in one batch, or unparseable arguments, fail closed without asking the store."""
-
-    async def _run() -> None:
-        session = _Session("unanswerable-batch")
-        await _set_plan(session, ["step one"])
-        await _approve(approvals, session)
-        two = {"name": "write_todos", "args": {"todos": []}, "id": "c-plan-b"}
-        with pytest.raises(PlanNotApprovedError):
-            await _call_with_messages(
-                "record_knowledge_note", session, [_batch(_WRITE_TODOS, two, _GATED)]
-            )
-        garbled = {"name": "write_todos", "args": {"todos": "not-a-list"}, "id": "c-plan-c"}
-        with pytest.raises(PlanNotApprovedError):
-            await _call_with_messages("record_knowledge_note", session, [_batch(garbled, _GATED)])
-
-    asyncio.run(_run())
+    session = _Session("unanswerable-batch")
+    await _set_plan(session, ["step one"])
+    await _approve(approvals, session)
+    two = {"name": "write_todos", "args": {"todos": []}, "id": "c-plan-b"}
+    with pytest.raises(PlanNotApprovedError):
+        await _call_with_messages(
+            "record_knowledge_note", session, [_batch(_WRITE_TODOS, two, _GATED)]
+        )
+    garbled = {"name": "write_todos", "args": {"todos": "not-a-list"}, "id": "c-plan-c"}
+    with pytest.raises(PlanNotApprovedError):
+        await _call_with_messages("record_knowledge_note", session, [_batch(garbled, _GATED)])
 
 
-def test_the_same_call_is_allowed_in_the_message_after_the_plan_was_rewritten(
+async def test_the_same_call_is_allowed_in_the_message_after_the_plan_was_rewritten(
     approvals: InMemoryPlanApprovalStore,
 ) -> None:
     """The twin, without which the refusal above would break every legitimate re-issue.
@@ -732,18 +703,14 @@ def test_the_same_call_is_allowed_in_the_message_after_the_plan_was_rewritten(
     `plan_only` would be a mode in which a plan can never be acted on — so the boundary is pinned
     from both sides, exactly as the read-tool case is.
     """
-
-    async def _run() -> None:
-        session = _Session("dark-1-next-message")
-        await _set_plan(session, ["compute the barrier"])
-        await _approve(approvals, session)
-        messages = [_batch(_WRITE_TODOS), _batch(_GATED)]
-        assert await _call_with_messages("record_knowledge_note", session, messages), (
-            "a re-issued call in the next message was refused; the batch rule has overrun into "
-            "the retry it exists to leave open"
-        )
-
-    asyncio.run(_run())
+    session = _Session("dark-1-next-message")
+    await _set_plan(session, ["compute the barrier"])
+    await _approve(approvals, session)
+    messages = [_batch(_WRITE_TODOS), _batch(_GATED)]
+    assert await _call_with_messages("record_knowledge_note", session, messages), (
+        "a re-issued call in the next message was refused; the batch rule has overrun into "
+        "the retry it exists to leave open"
+    )
 
 
 def test_a_teardown_spend_lands_without_awaiting(

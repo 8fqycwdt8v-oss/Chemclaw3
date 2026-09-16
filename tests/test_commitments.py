@@ -63,27 +63,23 @@ def _commitment(external_id: str, **kwargs: object) -> Commitment:
     )
 
 
-def test_re_reading_a_snapshot_converges_rather_than_accumulating() -> None:
+async def test_re_reading_a_snapshot_converges_rather_than_accumulating() -> None:
     """The upsert is keyed on `(source, external_id)`, which is what makes a full re-read free.
 
     A portfolio extract is a snapshot, not a change feed, so the sync re-reads it whole. If that
     duplicated, the mirror would grow a copy of the programme on every pass and every count over it
     would be wrong in a way no single row reveals.
     """
+    await migrated_db_or_skip()
+    await _clean()
+    await record_commitments([_commitment("M-1", due_at=datetime.now(UTC))])
+    await record_commitments([_commitment("M-1", due_at=datetime.now(UTC), state="blocked")])
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean()
-        await record_commitments([_commitment("M-1", due_at=datetime.now(UTC))])
-        await record_commitments([_commitment("M-1", due_at=datetime.now(UTC), state="blocked")])
-
-        rows = (await outstanding(source=SOURCE)).commitments
-        assert [(row.external_id, row.state) for row in rows] == [("M-1", "blocked")]
-
-    asyncio.run(_run())
+    rows = (await outstanding(source=SOURCE)).commitments
+    assert [(row.external_id, row.state) for row in rows] == [("M-1", "blocked")]
 
 
-def test_a_snapshot_source_converges_downward_when_a_commitment_is_withdrawn() -> None:
+async def test_a_snapshot_source_converges_downward_when_a_commitment_is_withdrawn() -> None:
     """Converging only *upward* is not converging, and this is the half the upsert cannot do.
 
     A portfolio export is a snapshot, and the way a snapshot says "this is no longer committed" is
@@ -102,32 +98,28 @@ def test_a_snapshot_source_converges_downward_when_a_commitment_is_withdrawn() -
     newer than that, so what is older is what the source stopped saying. Guarded by the adapter
     declaring itself a snapshot, because the sweep is only sound where the fetch is a whole picture.
     """
+    await migrated_db_or_skip()
+    await _clean()
+    await record_commitments([_commitment("MS-1"), _commitment("MS-2")])
+    # The mark: everything the next pass writes lands strictly after this.
+    marked_at = datetime.now(UTC)
+    await asyncio.sleep(0.01)
+    # The next snapshot: MS-2 was withdrawn, so the source simply stops exporting it.
+    await record_commitments([_commitment("MS-1")])
+    swept = await commitment_sync.sweep_withdrawn(SOURCE, marked_at)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean()
-        await record_commitments([_commitment("MS-1"), _commitment("MS-2")])
-        # The mark: everything the next pass writes lands strictly after this.
-        marked_at = datetime.now(UTC)
-        await asyncio.sleep(0.01)
-        # The next snapshot: MS-2 was withdrawn, so the source simply stops exporting it.
-        await record_commitments([_commitment("MS-1")])
-        swept = await commitment_sync.sweep_withdrawn(SOURCE, marked_at)
+    rows = (await outstanding(source=SOURCE)).commitments
+    assert [row.external_id for row in rows] == ["MS-1"], (
+        "a withdrawn commitment is still outstanding, in a list whose reported freshness comes "
+        "from the rows that *were* refreshed — so it reads as current work nobody is doing"
+    )
+    assert swept == 1, f"the sweep reported {swept} rows removed"
 
-        rows = (await outstanding(source=SOURCE)).commitments
-        assert [row.external_id for row in rows] == ["MS-1"], (
-            "a withdrawn commitment is still outstanding, in a list whose reported freshness comes "
-            "from the rows that *were* refreshed — so it reads as current work nobody is doing"
-        )
-        assert swept == 1, f"the sweep reported {swept} rows removed"
-
-        # And a pass in which nothing was withdrawn removes nothing.
-        marked_at = datetime.now(UTC)
-        await asyncio.sleep(0.01)
-        await record_commitments([_commitment("MS-1")])
-        assert await commitment_sync.sweep_withdrawn(SOURCE, marked_at) == 0
-
-    asyncio.run(_run())
+    # And a pass in which nothing was withdrawn removes nothing.
+    marked_at = datetime.now(UTC)
+    await asyncio.sleep(0.01)
+    await record_commitments([_commitment("MS-1")])
+    assert await commitment_sync.sweep_withdrawn(SOURCE, marked_at) == 0
 
 
 class _Export:
@@ -174,7 +166,7 @@ async def _mirror_pass(
 _BROKER_CLOCK_SKEW = timedelta(minutes=5)
 
 
-def test_the_pass_marks_from_the_database_that_stamps_the_rows_not_from_the_broker() -> None:
+async def test_the_pass_marks_from_the_database_that_stamps_the_rows_not_from_the_broker() -> None:
     """One clock decides both halves of the mark-and-sweep, or the sweep decides nothing.
 
     `observed_at` is stamped by Postgres (`now()` in the upsert). The mark used to be
@@ -194,45 +186,41 @@ def test_the_pass_marks_from_the_database_that_stamps_the_rows_not_from_the_brok
     is therefore that the broker's clock does not reach the outcome at all, which is why the skew
     is handed in rather than the two being forced equal.
     """
+    await migrated_db_or_skip()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
+    # A pass whose export restates everything: nothing may be swept, however far ahead the
+    # broker's clock runs.
+    await _clean()
+    await record_commitments([_commitment("MS-1"), _commitment("MS-2")])
+    ahead = await _mirror_pass(
+        _Export([_commitment("MS-1"), _commitment("MS-2")], snapshot=True),
+        broker_clock=datetime.now(UTC) + _BROKER_CLOCK_SKEW,
+    )
+    rows = (await outstanding(source=SOURCE)).commitments
+    assert ahead.withdrawn == 0, (
+        f"the pass swept {ahead.withdrawn} of the rows it had just written: the mark came from "
+        "a clock that leads the one stamping `observed_at`"
+    )
+    assert {row.external_id for row in rows} == {"MS-1", "MS-2"}, (
+        "a mirror the pass had just restated in full came back as "
+        f"{sorted(row.external_id for row in rows)} — the sweep deleted this pass's own work"
+    )
 
-        # A pass whose export restates everything: nothing may be swept, however far ahead the
-        # broker's clock runs.
-        await _clean()
-        await record_commitments([_commitment("MS-1"), _commitment("MS-2")])
-        ahead = await _mirror_pass(
-            _Export([_commitment("MS-1"), _commitment("MS-2")], snapshot=True),
-            broker_clock=datetime.now(UTC) + _BROKER_CLOCK_SKEW,
-        )
-        rows = (await outstanding(source=SOURCE)).commitments
-        assert ahead.withdrawn == 0, (
-            f"the pass swept {ahead.withdrawn} of the rows it had just written: the mark came from "
-            "a clock that leads the one stamping `observed_at`"
-        )
-        assert {row.external_id for row in rows} == {"MS-1", "MS-2"}, (
-            "a mirror the pass had just restated in full came back as "
-            f"{sorted(row.external_id for row in rows)} — the sweep deleted this pass's own work"
-        )
-
-        # And a pass whose export drops MS-2 must still remove it, however far *behind* the
-        # broker's clock runs.
-        behind = await _mirror_pass(
-            _Export([_commitment("MS-1")], snapshot=True),
-            broker_clock=datetime.now(UTC) - _BROKER_CLOCK_SKEW,
-        )
-        rows = (await outstanding(source=SOURCE)).commitments
-        assert behind.withdrawn == 1, (
-            f"the pass swept {behind.withdrawn} rows: a mark from a lagging clock is older than "
-            "every row already in the mirror, so a withdrawn commitment is never removed"
-        )
-        assert {row.external_id for row in rows} == {"MS-1"}
-
-    asyncio.run(_run())
+    # And a pass whose export drops MS-2 must still remove it, however far *behind* the
+    # broker's clock runs.
+    behind = await _mirror_pass(
+        _Export([_commitment("MS-1")], snapshot=True),
+        broker_clock=datetime.now(UTC) - _BROKER_CLOCK_SKEW,
+    )
+    rows = (await outstanding(source=SOURCE)).commitments
+    assert behind.withdrawn == 1, (
+        f"the pass swept {behind.withdrawn} rows: a mark from a lagging clock is older than "
+        "every row already in the mirror, so a withdrawn commitment is never removed"
+    )
+    assert {row.external_id for row in rows} == {"MS-1"}
 
 
-def test_an_export_that_answers_with_nothing_does_not_empty_the_mirror() -> None:
+async def test_an_export_that_answers_with_nothing_does_not_empty_the_mirror() -> None:
     """The sweep's second guard, and it is the one that decides which mistake this feature makes.
 
     A snapshot export returning zero rows is two things at once: a programme with nothing committed
@@ -250,28 +238,24 @@ def test_an_export_that_answers_with_nothing_does_not_empty_the_mirror() -> None
     Driven through the activity rather than through `sweep_withdrawn`, because the guard *is* the
     call site — `sweep_withdrawn` asked nothing about the answer and still does not.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean()
-        await record_commitments([_commitment("MS-1"), _commitment("MS-2")])
-        empty = await _mirror_pass(_Export([], snapshot=True))
-        rows = (await outstanding(source=SOURCE)).commitments
-        assert empty.withdrawn == 0, (
-            f"an export that returned nothing swept {empty.withdrawn} rows; a broken export and a "
-            "finished programme look identical from here, and only one of them is recoverable"
-        )
-        assert {row.external_id for row in rows} == {"MS-1", "MS-2"}, (
-            "a snapshot source's whole mirror was deleted by a pass that read nothing"
-        )
-        # And the source that genuinely empties still converges — one pass later, on its first
-        # remaining row. That is the price of the guard, stated rather than assumed.
-        remaining = await _mirror_pass(_Export([_commitment("MS-1")], snapshot=True))
-        rows = (await outstanding(source=SOURCE)).commitments
-        assert remaining.withdrawn == 1
-        assert {row.external_id for row in rows} == {"MS-1"}
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    await _clean()
+    await record_commitments([_commitment("MS-1"), _commitment("MS-2")])
+    empty = await _mirror_pass(_Export([], snapshot=True))
+    rows = (await outstanding(source=SOURCE)).commitments
+    assert empty.withdrawn == 0, (
+        f"an export that returned nothing swept {empty.withdrawn} rows; a broken export and a "
+        "finished programme look identical from here, and only one of them is recoverable"
+    )
+    assert {row.external_id for row in rows} == {"MS-1", "MS-2"}, (
+        "a snapshot source's whole mirror was deleted by a pass that read nothing"
+    )
+    # And the source that genuinely empties still converges — one pass later, on its first
+    # remaining row. That is the price of the guard, stated rather than assumed.
+    remaining = await _mirror_pass(_Export([_commitment("MS-1")], snapshot=True))
+    rows = (await outstanding(source=SOURCE)).commitments
+    assert remaining.withdrawn == 1
+    assert {row.external_id for row in rows} == {"MS-1"}
 
 
 def test_the_pass_sweeps_only_where_the_adapter_promises_a_whole_picture() -> None:
@@ -317,93 +301,77 @@ def test_the_pass_sweeps_only_where_the_adapter_promises_a_whole_picture() -> No
     asyncio.run(_run())
 
 
-def test_the_reading_reports_when_the_mirror_was_last_refreshed() -> None:
+async def test_the_reading_reports_when_the_mirror_was_last_refreshed() -> None:
     """A mirror's characteristic failure is staleness, not error.
 
     The export stops running, the numbers keep answering, and a manager acts on last month's
     picture. So freshness is a field on the answer rather than something a reader has to think to
     ask for — the same argument `operations.Coverage` makes about a window.
     """
+    await migrated_db_or_skip()
+    await _clean()
+    before = datetime.now(UTC)
+    await record_commitments([_commitment("M-2", due_at=before + timedelta(days=7))])
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean()
-        before = datetime.now(UTC)
-        await record_commitments([_commitment("M-2", due_at=before + timedelta(days=7))])
-
-        _page = await outstanding(source=SOURCE)
-        rows, freshness = _page.commitments, _page.mirrored_at
-        assert rows and freshness is not None and freshness >= before
-        assert await mirror_freshness(SOURCE) is not None
-
-    asyncio.run(_run())
+    _page = await outstanding(source=SOURCE)
+    rows, freshness = _page.commitments, _page.mirrored_at
+    assert rows and freshness is not None and freshness >= before
+    assert await mirror_freshness(SOURCE) is not None
 
 
-def test_nothing_outstanding_and_nothing_ever_mirrored_are_different_answers() -> None:
+async def test_nothing_outstanding_and_nothing_ever_mirrored_are_different_answers() -> None:
     """An empty list has two meanings, and only the freshness separates them.
 
     Conflating them is how a manager reads "nothing is late" out of a sync that never ran.
     """
+    await migrated_db_or_skip()
+    await _clean()
+    _page = await outstanding(source=SOURCE)
+    rows, freshness = _page.commitments, _page.mirrored_at
+    assert rows == []
+    assert freshness is None
+    assert await mirror_freshness(SOURCE) is None
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean()
-        _page = await outstanding(source=SOURCE)
-        rows, freshness = _page.commitments, _page.mirrored_at
-        assert rows == []
-        assert freshness is None
-        assert await mirror_freshness(SOURCE) is None
-
-        # Now one, and delivered: still nothing outstanding, but the mirror *has* run.
-        await record_commitments([_commitment("M-3", state="done")])
-        rows = (await outstanding(source=SOURCE)).commitments
-        assert rows == []
-        assert await mirror_freshness(SOURCE) is not None
-
-    asyncio.run(_run())
+    # Now one, and delivered: still nothing outstanding, but the mirror *has* run.
+    await record_commitments([_commitment("M-3", state="done")])
+    rows = (await outstanding(source=SOURCE)).commitments
+    assert rows == []
+    assert await mirror_freshness(SOURCE) is not None
 
 
-def test_outstanding_is_ordered_by_deadline_with_undated_work_last() -> None:
+async def test_outstanding_is_ordered_by_deadline_with_undated_work_last() -> None:
     """A commitment with no date is not the most urgent one.
 
     Which is what a plain `ORDER BY due_at` makes it under Postgres' NULL ordering, and is an easy
     thing to get backwards in the direction that puts undated work at the top of a manager's list.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean()
-        now = datetime.now(UTC)
-        await record_commitments(
-            [
-                _commitment("M-late", due_at=now + timedelta(days=30)),
-                _commitment("M-undated"),
-                _commitment("M-soon", due_at=now + timedelta(days=1)),
-            ]
-        )
-        rows = (await outstanding(source=SOURCE)).commitments
-        assert [row.external_id for row in rows] == ["M-soon", "M-late", "M-undated"]
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    await _clean()
+    now = datetime.now(UTC)
+    await record_commitments(
+        [
+            _commitment("M-late", due_at=now + timedelta(days=30)),
+            _commitment("M-undated"),
+            _commitment("M-soon", due_at=now + timedelta(days=1)),
+        ]
+    )
+    rows = (await outstanding(source=SOURCE)).commitments
+    assert [row.external_id for row in rows] == ["M-soon", "M-late", "M-undated"]
 
 
-def test_the_link_to_the_science_is_what_the_mirror_is_for() -> None:
+async def test_the_link_to_the_science_is_what_the_mirror_is_for() -> None:
     """A commitment with no link is a row the portfolio tool already holds and holds better."""
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean()
-        await record_commitments(
-            [
-                _commitment("M-linked", note_ids=["note-1"], compounds=["CCO"]),
-                _commitment("M-bare"),
-            ]
-        )
-        rows = (await outstanding(source=SOURCE)).commitments
-        linked = {row.external_id: row.links_to_science for row in rows}
-        assert linked == {"M-linked": True, "M-bare": False}
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    await _clean()
+    await record_commitments(
+        [
+            _commitment("M-linked", note_ids=["note-1"], compounds=["CCO"]),
+            _commitment("M-bare"),
+        ]
+    )
+    rows = (await outstanding(source=SOURCE)).commitments
+    linked = {row.external_id: row.links_to_science for row in rows}
+    assert linked == {"M-linked": True, "M-bare": False}
 
 
 def test_the_json_export_rejects_a_bad_row_and_keeps_the_rest(tmp_path: Path) -> None:
@@ -699,7 +667,7 @@ def test_cancelling_a_mirror_stops_it_instead_of_skipping_the_source_in_flight()
     )
 
 
-def test_a_page_of_the_portfolio_says_how_much_of_it_is_a_page() -> None:
+async def test_a_page_of_the_portfolio_says_how_much_of_it_is_a_page() -> None:
     """40 outstanding, 25 returned, and the answer used to say only "the outstanding commitments".
 
     The cost is a portfolio-risk answer: "which programmes are at risk" built over the 25 soonest
@@ -710,77 +678,65 @@ def test_a_page_of_the_portfolio_says_how_much_of_it_is_a_page() -> None:
     `limit_applied` is the other half: `outstanding` clamps to 200, so a caller asking for 1,000
     silently got 200 and could not tell that from a programme with 200 commitments.
     """
+    await migrated_db_or_skip()
+    await _clean()
+    now = datetime.now(UTC)
+    await record_commitments(
+        [
+            _commitment(f"M-page-{index:02d}", due_at=now + timedelta(days=index + 1))
+            for index in range(40)
+        ]
+    )
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean()
-        now = datetime.now(UTC)
-        await record_commitments(
-            [
-                _commitment(f"M-page-{index:02d}", due_at=now + timedelta(days=index + 1))
-                for index in range(40)
-            ]
-        )
+    page = await outstanding(source=SOURCE, limit=25)
+    assert len(page.commitments) == 25
+    assert page.total_outstanding == 40
+    assert page.limit_applied == 25
+    assert page.truncated
 
-        page = await outstanding(source=SOURCE, limit=25)
-        assert len(page.commitments) == 25
-        assert page.total_outstanding == 40
-        assert page.limit_applied == 25
-        assert page.truncated
+    clamped = await outstanding(source=SOURCE, limit=1000)
+    assert clamped.limit_applied == 200
 
-        clamped = await outstanding(source=SOURCE, limit=1000)
-        assert clamped.limit_applied == 200
-
-        whole = await outstanding(source=SOURCE, limit=200)
-        assert not whole.truncated
-
-    asyncio.run(_run())
+    whole = await outstanding(source=SOURCE, limit=200)
+    assert not whole.truncated
 
 
-def test_the_review_tool_says_which_of_its_two_silences_is_biting() -> None:
+async def test_the_review_tool_says_which_of_its_two_silences_is_biting() -> None:
     """`review_commitments` carried the mirror caveat in prose only, and the count in nothing.
 
     Both are now on the payload: the empty-versus-never-mirrored distinction its docstring already
     argued for, and the page-versus-population one it did not. A `computed_field`, so it survives
     `model_dump()` — the lesson `FingerprintSearch.verdict` records.
     """
+    await migrated_db_or_skip()
+    await _clean()
+    now = datetime.now(UTC)
+    await record_commitments(
+        [
+            _commitment(f"M-tool-{index:02d}", due_at=now + timedelta(days=index + 1))
+            for index in range(40)
+        ]
+    )
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean()
-        now = datetime.now(UTC)
-        await record_commitments(
-            [
-                _commitment(f"M-tool-{index:02d}", due_at=now + timedelta(days=index + 1))
-                for index in range(40)
-            ]
-        )
-
-        review = await review_commitments(source=SOURCE, limit=25)
-        payload = review.model_dump()
-        assert len(review.commitments) == 25
-        assert review.total_outstanding == 40
-        assert "PARTIAL" in payload["verdict"]
-        assert "40" in payload["verdict"]
-
-    asyncio.run(_run())
+    review = await review_commitments(source=SOURCE, limit=25)
+    payload = review.model_dump()
+    assert len(review.commitments) == 25
+    assert review.total_outstanding == 40
+    assert "PARTIAL" in payload["verdict"]
+    assert "40" in payload["verdict"]
 
 
-def test_an_empty_portfolio_and_a_sync_that_never_ran_read_differently() -> None:
+async def test_an_empty_portfolio_and_a_sync_that_never_ran_read_differently() -> None:
     """The distinction the docstring argued for, moved onto the payload where a model reads it."""
+    await migrated_db_or_skip()
+    await _clean()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean()
+    never = await review_commitments(source=SOURCE)
+    assert never.mirrored_at is None
+    assert "NEVER MIRRORED" in never.model_dump()["verdict"]
 
-        never = await review_commitments(source=SOURCE)
-        assert never.mirrored_at is None
-        assert "NEVER MIRRORED" in never.model_dump()["verdict"]
-
-        await record_commitments([_commitment("M-done", state="done")])
-        delivered = await review_commitments(source=SOURCE)
-        assert delivered.commitments == []
-        assert delivered.mirrored_at is not None
-        assert "NOTHING OUTSTANDING" in delivered.model_dump()["verdict"]
-
-    asyncio.run(_run())
+    await record_commitments([_commitment("M-done", state="done")])
+    delivered = await review_commitments(source=SOURCE)
+    assert delivered.commitments == []
+    assert delivered.mirrored_at is not None
+    assert "NOTHING OUTSTANDING" in delivered.model_dump()["verdict"]

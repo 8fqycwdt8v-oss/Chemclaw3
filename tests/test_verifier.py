@@ -812,7 +812,7 @@ def test_a_verdict_omitting_claims_no_longer_validates() -> None:
     assert VerificationResult.model_validate({"claims": [], "confidence": 1.0}).claims == []
 
 
-def test_the_judge_is_bound_with_json_schema_enforcement(
+async def test_the_judge_is_bound_with_json_schema_enforcement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`verify_answer` asks for strict schema enforcement, so a malformed verdict never validates.
@@ -829,10 +829,8 @@ def test_the_judge_is_bound_with_json_schema_enforcement(
     monkeypatch.setattr(settings, "verifier_enabled", True)
     client = _FakeVerifierClient(VerificationResult(claims=[], confidence=0.9, verified_by="judge"))
 
-    async def _run() -> None:
-        await verify_answer("an answer", [_chunk("a tool result")], client=client)
+    await verify_answer("an answer", [_chunk("a tool result")], client=client)
 
-    asyncio.run(_run())
     assert client.methods == ["json_schema"], client.methods
 
 

@@ -155,7 +155,7 @@ class _BrokenClaims(_RecordingClaims):
         raise self.Failure("terminating connection due to administrator command")
 
 
-def test_a_release_that_cannot_reach_the_store_never_escapes_its_task() -> None:
+async def test_a_release_that_cannot_reach_the_store_never_escapes_its_task() -> None:
     """Shielding makes the release *run*; it must not make a store failure a stray traceback.
 
     A shielded task whose awaiter has been cancelled is nobody's to await, so anything it raises
@@ -169,27 +169,24 @@ def test_a_release_that_cannot_reach_the_store_never_escapes_its_task() -> None:
     )
     stray: list[dict[str, Any]] = []
 
-    async def _drive() -> None:
-        asyncio.get_running_loop().set_exception_handler(lambda _loop, ctx: stray.append(ctx))
-        async with app.router.lifespan_context(app):
-            _status, payload = await _request(app, "POST", "/sessions", {})
-            session_id = json.loads(payload)["session_id"]
-            await _post_turn_and_vanish(app, session_id)
-            for _ in range(100):
-                if claims.entered:
-                    break
-                await asyncio.sleep(0.01)
-            await asyncio.sleep(0.2)
+    asyncio.get_running_loop().set_exception_handler(lambda _loop, ctx: stray.append(ctx))
+    async with app.router.lifespan_context(app):
+        _status, payload = await _request(app, "POST", "/sessions", {})
+        session_id = json.loads(payload)["session_id"]
+        await _post_turn_and_vanish(app, session_id)
+        for _ in range(100):
+            if claims.entered:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.2)
 
-            assert claims.entered == 1, "the release never ran"
-            assert stray == [], f"the failed release escaped as a loop-level error: {stray}"
-            # And the lease is what covers the session, which is the documented contract.
-            assert claims.held != {}, "the claim was somehow cleared by a release that failed"
-
-    asyncio.run(_drive())
+        assert claims.entered == 1, "the release never ran"
+        assert stray == [], f"the failed release escaped as a loop-level error: {stray}"
+        # And the lease is what covers the session, which is the documented contract.
+        assert claims.held != {}, "the claim was somehow cleared by a release that failed"
 
 
-def test_a_client_disconnect_releases_the_durable_turn_claim() -> None:
+async def test_a_client_disconnect_releases_the_durable_turn_claim() -> None:
     """The claim is *released*, not merely entered, when the stream is torn down mid-turn.
 
     Counterfactual: without the `shield` in `_release_turn_claim`, `entered` is 1 and `completed`
@@ -202,30 +199,27 @@ def test_a_client_disconnect_releases_the_durable_turn_claim() -> None:
         turn_claims=claims,
     )
 
-    async def _drive() -> None:
-        async with app.router.lifespan_context(app):
-            _status, payload = await _request(app, "POST", "/sessions", {})
-            session_id = json.loads(payload)["session_id"]
-            await _post_turn_and_vanish(app, session_id)
-            # The shielded release is a task of its own, so it lands just after the request that
-            # started it returns. Waiting on the recorder rather than sleeping a fixed amount
-            # keeps the test from encoding a timing guess.
-            for _ in range(100):
-                if claims.completed:
-                    break
-                await asyncio.sleep(0.01)
+    async with app.router.lifespan_context(app):
+        _status, payload = await _request(app, "POST", "/sessions", {})
+        session_id = json.loads(payload)["session_id"]
+        await _post_turn_and_vanish(app, session_id)
+        # The shielded release is a task of its own, so it lands just after the request that
+        # started it returns. Waiting on the recorder rather than sleeping a fixed amount
+        # keeps the test from encoding a timing guess.
+        for _ in range(100):
+            if claims.completed:
+                break
+            await asyncio.sleep(0.01)
 
-            assert claims.entered == 1, "the turn never even tried to release its claim"
-            assert claims.completed == 1, (
-                "the release was entered but never finished — the session stays 409 until the "
-                "lease expires"
-            )
-            assert claims.held == {}, f"the claim outlived the turn: {claims.held}"
-
-    asyncio.run(_drive())
+        assert claims.entered == 1, "the turn never even tried to release its claim"
+        assert claims.completed == 1, (
+            "the release was entered but never finished — the session stays 409 until the "
+            "lease expires"
+        )
+        assert claims.held == {}, f"the claim outlived the turn: {claims.held}"
 
 
-def test_the_session_accepts_a_new_turn_immediately_after_a_disconnect() -> None:
+async def test_the_session_accepts_a_new_turn_immediately_after_a_disconnect() -> None:
     """The user-visible half: reopening a closed tab is not refused.
 
     Asserted separately from the claim bookkeeping because both guards can hold a 409 and only
@@ -237,22 +231,19 @@ def test_the_session_accepts_a_new_turn_immediately_after_a_disconnect() -> None
         turn_claims=claims,
     )
 
-    async def _drive() -> None:
-        async with app.router.lifespan_context(app):
-            _status, payload = await _request(app, "POST", "/sessions", {})
-            session_id = json.loads(payload)["session_id"]
-            await _post_turn_and_vanish(app, session_id)
-            for _ in range(100):
-                if claims.completed:
-                    break
-                await asyncio.sleep(0.01)
+    async with app.router.lifespan_context(app):
+        _status, payload = await _request(app, "POST", "/sessions", {})
+        session_id = json.loads(payload)["session_id"]
+        await _post_turn_and_vanish(app, session_id)
+        for _ in range(100):
+            if claims.completed:
+                break
+            await asyncio.sleep(0.01)
 
-            assert app.state.active_turns == {}, "the in-process turn slot leaked"
-            status = await _post_turn_and_vanish(app, session_id)
-            assert status != 409, "the session refused its owner's next turn after a disconnect"
-            assert status == 200
-
-    asyncio.run(_drive())
+        assert app.state.active_turns == {}, "the in-process turn slot leaked"
+        status = await _post_turn_and_vanish(app, session_id)
+        assert status != 409, "the session refused its owner's next turn after a disconnect"
+        assert status == 200
 
 
 async def _post_turn_and_vanish_before_first_byte(app: Any, session_id: str) -> None:
@@ -284,7 +275,7 @@ async def _post_turn_and_vanish_before_first_byte(app: Any, session_id: str) -> 
     await app(_scope("POST", f"/sessions/{session_id}/messages"), _receive, _send)
 
 
-def test_a_client_gone_before_the_stream_starts_does_not_wedge_the_session(
+async def test_a_client_gone_before_the_stream_starts_does_not_wedge_the_session(
     monkeypatch: Any,
 ) -> None:
     """The in-process turn guard is a lease: the one release-less window cannot 409 forever (A3).
@@ -306,33 +297,30 @@ def test_a_client_gone_before_the_stream_starts_does_not_wedge_the_session(
         connector_factory=lambda _profile: [],
     )
 
-    async def _drive() -> None:
-        async with app.router.lifespan_context(app):
-            _status, payload = await _request(app, "POST", "/sessions", {})
-            session_id = json.loads(payload)["session_id"]
-            await _post_turn_and_vanish_before_first_byte(app, session_id)
+    async with app.router.lifespan_context(app):
+        _status, payload = await _request(app, "POST", "/sessions", {})
+        session_id = json.loads(payload)["session_id"]
+        await _post_turn_and_vanish_before_first_byte(app, session_id)
 
-            # The leak is real: no finally ran, so nothing released the slot. (If this fails,
-            # the reproduction no longer reproduces the window and the test proves nothing.)
-            assert session_id in app.state.active_turns, "the generator ran a finally after all"
+        # The leak is real: no finally ran, so nothing released the slot. (If this fails,
+        # the reproduction no longer reproduces the window and the test proves nothing.)
+        assert session_id in app.state.active_turns, "the generator ran a finally after all"
 
-            # Within the lease the guard still guards: the entry is indistinguishable from a
-            # live turn, so a duplicate submit is refused.
-            status, _ = await _request(
-                app, "POST", f"/sessions/{session_id}/messages", {"message": "again"}
-            )
-            assert status == 409
+        # Within the lease the guard still guards: the entry is indistinguishable from a
+        # live turn, so a duplicate submit is refused.
+        status, _ = await _request(
+            app, "POST", f"/sessions/{session_id}/messages", {"message": "again"}
+        )
+        assert status == 409
 
-            # Past the lease (turn timeout + admission timeout), the entry is dead weight and
-            # must not refuse the session's owner.
-            await asyncio.sleep(0.5)
-            status, _ = await _request(
-                app, "POST", f"/sessions/{session_id}/messages", {"message": "recovered"}
-            )
-            assert status != 409, "the leaked in-process turn entry never expired (A3)"
-            assert status == 200
-
-    asyncio.run(_drive())
+        # Past the lease (turn timeout + admission timeout), the entry is dead weight and
+        # must not refuse the session's owner.
+        await asyncio.sleep(0.5)
+        status, _ = await _request(
+            app, "POST", f"/sessions/{session_id}/messages", {"message": "recovered"}
+        )
+        assert status != 409, "the leaked in-process turn entry never expired (A3)"
+        assert status == 200
 
 
 # --- the push-back event stream's per-user slot (same window, different resource) --------------

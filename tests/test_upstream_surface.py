@@ -1596,7 +1596,7 @@ def test_a_file_a_helper_hands_back_is_a_mapping_carrying_its_text_under_content
     )
 
 
-def test_a_pipeline_block_on_an_autocommit_connection_is_still_one_transaction() -> None:
+async def test_a_pipeline_block_on_an_autocommit_connection_is_still_one_transaction() -> None:
     """Psycopg's pipeline is a transaction boundary, and two first-party modules reason from it.
 
     `AsyncPostgresSaver._cursor(pipeline=True)` opens `conn.pipeline()`, and inside that block an
@@ -1612,41 +1612,36 @@ def test_a_pipeline_block_on_an_autocommit_connection_is_still_one_transaction()
     becomes real again with no line of either module rewritten, so the assumption is pinned here
     rather than believed there.
     """
-    import asyncio
-
     import psycopg
 
     from chemclaw.core.config import settings
     from tests.pg import migrated_db_or_skip
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn, autocommit=True)
-        try:
-            async with conn.pipeline():
-                async with conn.cursor() as cur:
-                    await cur.execute("SELECT txid_current()")
-                    first = await cur.fetchone()
-                    await cur.execute("SELECT txid_current()")
-                    second = await cur.fetchone()
+    await migrated_db_or_skip()
+    conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn, autocommit=True)
+    try:
+        async with conn.pipeline():
             async with conn.cursor() as cur:
                 await cur.execute("SELECT txid_current()")
-                outside_first = await cur.fetchone()
+                first = await cur.fetchone()
                 await cur.execute("SELECT txid_current()")
-                outside_second = await cur.fetchone()
-        finally:
-            await conn.close()
+                second = await cur.fetchone()
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT txid_current()")
+            outside_first = await cur.fetchone()
+            await cur.execute("SELECT txid_current()")
+            outside_second = await cur.fetchone()
+    finally:
+        await conn.close()
 
-        assert first == second, (
-            "a pipeline block on an autocommit connection is no longer one transaction; "
-            "agent/checkpointer.py and durable/retention.py both reason from it being one"
-        )
-        assert outside_first != outside_second, (
-            "the control arm failed: autocommit outside a pipeline should commit per statement, "
-            "so this test would pass for the wrong reason"
-        )
-
-    asyncio.run(_run())
+    assert first == second, (
+        "a pipeline block on an autocommit connection is no longer one transaction; "
+        "agent/checkpointer.py and durable/retention.py both reason from it being one"
+    )
+    assert outside_first != outside_second, (
+        "the control arm failed: autocommit outside a pipeline should commit per statement, "
+        "so this test would pass for the wrong reason"
+    )
 
 
 def test_aput_still_writes_its_blobs_and_its_checkpoint_row_in_one_transaction() -> None:

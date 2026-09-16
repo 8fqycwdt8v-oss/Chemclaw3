@@ -11,8 +11,6 @@ is back, and `make lint type test` stays green. So this file drives the predicat
 than asserting that a string appears in a dict.
 """
 
-import asyncio
-
 import pytest
 
 from chemclaw.agent.evidence_tools import _may_read, assemble_evidence_pack
@@ -55,7 +53,7 @@ def test_an_owner_less_row_follows_the_enforcement_posture(
     assert owner_permits(None, INTRUDER) is False
 
 
-def test_a_session_somebody_else_owns_is_refused_and_does_not_confirm_it_exists() -> None:
+async def test_a_session_somebody_else_owns_is_refused_and_does_not_confirm_it_exists() -> None:
     """The gate, driven end to end against a real ownership row.
 
     The refusal deliberately uses the wording an *unknown* session gets: telling a caller that a
@@ -63,31 +61,27 @@ def test_a_session_somebody_else_owns_is_refused_and_does_not_confirm_it_exists(
     shared 404 rule exists to prevent — and the ids are discoverable, which is what made this
     reachable in the first place.
     """
+    await migrated_db_or_skip()
+    await SessionOwnerStore().record(SESSION, OWNER)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await SessionOwnerStore().record(SESSION, OWNER)
+    identity = set_current_identity(INTRUDER, frozenset())
+    session = set_current_session_id("sess-intruders-own")
+    try:
+        assert await _may_read(SESSION) is False
+        answer = await assemble_evidence_pack(SESSION)
+        assert answer["empty"] is True
+        assert SESSION in str(answer["reason"])
+        # The refusal must not carry any of the record it refused.
+        assert "tool_calls" not in answer and "jobs" not in answer
+    finally:
+        reset_current_session_id(session)
+        reset_current_identity(identity)
 
-        identity = set_current_identity(INTRUDER, frozenset())
-        session = set_current_session_id("sess-intruders-own")
-        try:
-            assert await _may_read(SESSION) is False
-            answer = await assemble_evidence_pack(SESSION)
-            assert answer["empty"] is True
-            assert SESSION in str(answer["reason"])
-            # The refusal must not carry any of the record it refused.
-            assert "tool_calls" not in answer and "jobs" not in answer
-        finally:
-            reset_current_session_id(session)
-            reset_current_identity(identity)
-
-        # And the owner still reaches their own session.
-        identity = set_current_identity(OWNER, frozenset())
-        session = set_current_session_id(SESSION)
-        try:
-            assert await _may_read(SESSION) is True
-        finally:
-            reset_current_session_id(session)
-            reset_current_identity(identity)
-
-    asyncio.run(_run())
+    # And the owner still reaches their own session.
+    identity = set_current_identity(OWNER, frozenset())
+    session = set_current_session_id(SESSION)
+    try:
+        assert await _may_read(SESSION) is True
+    finally:
+        reset_current_session_id(session)
+        reset_current_identity(identity)

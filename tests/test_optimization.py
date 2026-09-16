@@ -6,7 +6,6 @@ one note per campaign. Also covers the shared clustering helper. All in-memory (
 git).
 """
 
-import asyncio
 import re
 from datetime import date
 
@@ -85,25 +84,19 @@ def test_note_lays_out_runs_with_citations() -> None:
     assert set(note.outgoing_links()) == {"reaction-run-1", "reaction-run-2"}
 
 
-def test_job_pr_gates_one_note_per_campaign() -> None:
+async def test_job_pr_gates_one_note_per_campaign() -> None:
     """The optimization job proposes exactly one note per detected campaign.
 
     Driven as the durable job drives it — `build_optimization_notes`, then one PR-gate proposal per
     note — rather than through the whole-batch `synthesize_optimization_campaigns` wrapper, which
     nothing in `src/` had called since F10-D2 and which is now gone.
     """
-
-    async def _run() -> None:
-        reactions = [_ester("run-1", 80, 85), _ester("run-2", 100, 92), _suzuki()]
-        submitter = FakeWriter()
-        refs = [
-            await record_note(unit.note, submitter) for unit in build_optimization_notes(reactions)
-        ]
-        assert len(refs) == 1
-        assert len(submitter.writes) == 1
-        assert submitter.writes[0].files[0].path.startswith("knowledge/optimization-campaign/")
-
-    asyncio.run(_run())
+    reactions = [_ester("run-1", 80, 85), _ester("run-2", 100, 92), _suzuki()]
+    submitter = FakeWriter()
+    refs = [await record_note(unit.note, submitter) for unit in build_optimization_notes(reactions)]
+    assert len(refs) == 1
+    assert len(submitter.writes) == 1
+    assert submitter.writes[0].files[0].path.startswith("knowledge/optimization-campaign/")
 
 
 def test_clustering_drops_degenerate_reactions() -> None:

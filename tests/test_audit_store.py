@@ -28,59 +28,55 @@ from tests.pg import migrated_db_or_skip
 _WRITERS = 24
 
 
-def test_postgres_audit_sink_persists_an_event() -> None:
+async def test_postgres_audit_sink_persists_an_event() -> None:
     """Recording an event writes one append-only row with all fields preserved."""
+    await migrated_db_or_skip()
+    correlation_id = "conv-audit-roundtrip"
+    event = AuditEvent(
+        correlation_id=correlation_id,
+        actor="u-oid-1",
+        tool="sample_conformers",
+        arguments='{"smiles": "CCO"}',
+        outcome="ok",
+        detail="job qm-1 started",
+        latency_ms=12.5,
+        revision="orchestrator-abc123",
+        # The two provenance fields are read back together, because the mistake they guard
+        # against is one being written into the other's column: the `_INSERT` column list and
+        # the value tuple are positional, so a field appended to `AuditEvent` and forgotten in
+        # one of the two lands every later value one column to the left — silently, since both
+        # are `TEXT NOT NULL DEFAULT ''`.
+        tool_revision="calc@server-9f3c1d",
+    )
+    sink = PostgresAuditSink()
+    await sink.record(event)
+    # `record` buffers and returns — the write is off the tool-call path — so the drain seam
+    # is what a reader awaits before asserting rows. Production's reader is the runner's
+    # turn-end flush; this is the test-side use of the same seam.
+    await sink.flush()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        correlation_id = "conv-audit-roundtrip"
-        event = AuditEvent(
-            correlation_id=correlation_id,
-            actor="u-oid-1",
-            tool="sample_conformers",
-            arguments='{"smiles": "CCO"}',
-            outcome="ok",
-            detail="job qm-1 started",
-            latency_ms=12.5,
-            revision="orchestrator-abc123",
-            # The two provenance fields are read back together, because the mistake they guard
-            # against is one being written into the other's column: the `_INSERT` column list and
-            # the value tuple are positional, so a field appended to `AuditEvent` and forgotten in
-            # one of the two lands every later value one column to the left — silently, since both
-            # are `TEXT NOT NULL DEFAULT ''`.
-            tool_revision="calc@server-9f3c1d",
+    # Read the row back and assert every field survived the insert.
+    conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
+    try:
+        cursor = await conn.execute(
+            "SELECT actor, tool, arguments, outcome, detail, latency_ms, revision, "
+            "tool_revision "
+            "FROM audit_events WHERE correlation_id = %s ORDER BY id DESC LIMIT 1",
+            (correlation_id,),
         )
-        sink = PostgresAuditSink()
-        await sink.record(event)
-        # `record` buffers and returns — the write is off the tool-call path — so the drain seam
-        # is what a reader awaits before asserting rows. Production's reader is the runner's
-        # turn-end flush; this is the test-side use of the same seam.
-        await sink.flush()
+        row = await cursor.fetchone()
+    finally:
+        await conn.close()
 
-        # Read the row back and assert every field survived the insert.
-        conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
-        try:
-            cursor = await conn.execute(
-                "SELECT actor, tool, arguments, outcome, detail, latency_ms, revision, "
-                "tool_revision "
-                "FROM audit_events WHERE correlation_id = %s ORDER BY id DESC LIMIT 1",
-                (correlation_id,),
-            )
-            row = await cursor.fetchone()
-        finally:
-            await conn.close()
-
-        assert row is not None
-        assert row[0] == "u-oid-1"
-        assert row[1] == "sample_conformers"
-        assert row[2] == '{"smiles": "CCO"}'
-        assert row[3] == "ok"
-        assert row[4] == "job qm-1 started"
-        assert float(row[5]) == 12.5
-        assert row[6] == "orchestrator-abc123"
-        assert row[7] == "calc@server-9f3c1d"
-
-    asyncio.run(_run())
+    assert row is not None
+    assert row[0] == "u-oid-1"
+    assert row[1] == "sample_conformers"
+    assert row[2] == '{"smiles": "CCO"}'
+    assert row[3] == "ok"
+    assert row[4] == "job qm-1 started"
+    assert float(row[5]) == 12.5
+    assert row[6] == "orchestrator-abc123"
+    assert row[7] == "calc@server-9f3c1d"
 
 
 def _race_event(index: int) -> AuditEvent:
@@ -96,33 +92,29 @@ def _race_event(index: int) -> AuditEvent:
     )
 
 
-def test_concurrent_appends_all_arrive() -> None:
+async def test_concurrent_appends_all_arrive() -> None:
     """Twenty-four sinks append at once and every event is in the trail afterwards.
 
     Counted by `correlation_id` rather than over the whole table, so this needs no `TRUNCATE` and
     cannot be perturbed by another test's rows — which is also why it is safe to run beside the
     round-trip test above against one shared schema.
     """
+    await migrated_db_or_skip()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
+    sinks = [PostgresAuditSink() for _ in range(_WRITERS)]
+    await asyncio.gather(*(sink.record(_race_event(index)) for index, sink in enumerate(sinks)))
+    await asyncio.gather(*(sink.flush() for sink in sinks))
 
-        sinks = [PostgresAuditSink() for _ in range(_WRITERS)]
-        await asyncio.gather(*(sink.record(_race_event(index)) for index, sink in enumerate(sinks)))
-        await asyncio.gather(*(sink.flush() for sink in sinks))
-
-        async with await connect(settings.postgres_dsn) as conn:
-            cursor = await conn.execute(
-                "SELECT count(*) FROM audit_events WHERE correlation_id LIKE 'c-race-%'"
-            )
-            row = await cursor.fetchone()
-        assert row is not None
-        assert row[0] == _WRITERS, f"{row[0]} of {_WRITERS} concurrent appends survived"
-
-    asyncio.run(_run())
+    async with await connect(settings.postgres_dsn) as conn:
+        cursor = await conn.execute(
+            "SELECT count(*) FROM audit_events WHERE correlation_id LIKE 'c-race-%'"
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] == _WRITERS, f"{row[0]} of {_WRITERS} concurrent appends survived"
 
 
-def test_the_write_buffer_sheds_the_oldest_rather_than_growing_without_bound(
+async def test_the_write_buffer_sheds_the_oldest_rather_than_growing_without_bound(
     monkeypatch: "pytest.MonkeyPatch",
 ) -> None:
     """A slow database must not be able to grow this buffer until the pod dies.
@@ -138,20 +130,17 @@ def test_the_write_buffer_sheds_the_oldest_rather_than_growing_without_bound(
     """
     monkeypatch.setattr(settings, "agent_audit_buffer_max_events", 10)
 
-    async def _run() -> None:
-        sink = PostgresAuditSink(dsn="postgresql://nobody@127.0.0.1:1/none")
-        for index in range(25):
-            await sink.record(_race_event(index))
-        buffered = list(sink._buffer)
-        assert len(buffered) <= 10, f"buffer grew past its bound: {len(buffered)}"
-        assert [event.latency_ms for event in buffered] == [float(i) for i in range(15, 25)], (
-            "the buffer shed the newest events; the oldest are the ones that may go"
-        )
-
-    asyncio.run(_run())
+    sink = PostgresAuditSink(dsn="postgresql://nobody@127.0.0.1:1/none")
+    for index in range(25):
+        await sink.record(_race_event(index))
+    buffered = list(sink._buffer)
+    assert len(buffered) <= 10, f"buffer grew past its bound: {len(buffered)}"
+    assert [event.latency_ms for event in buffered] == [float(i) for i in range(15, 25)], (
+        "the buffer shed the newest events; the oldest are the ones that may go"
+    )
 
 
-def test_a_zero_bound_restores_the_unbounded_buffer(
+async def test_a_zero_bound_restores_the_unbounded_buffer(
     monkeypatch: "pytest.MonkeyPatch",
 ) -> None:
     """0 is the escape hatch for a deployment that would rather have the OOM than the gap.
@@ -161,10 +150,7 @@ def test_a_zero_bound_restores_the_unbounded_buffer(
     """
     monkeypatch.setattr(settings, "agent_audit_buffer_max_events", 0)
 
-    async def _run() -> None:
-        sink = PostgresAuditSink(dsn="postgresql://nobody@127.0.0.1:1/none")
-        for index in range(25):
-            await sink.record(_race_event(index))
-        assert len(sink._buffer) == 25
-
-    asyncio.run(_run())
+    sink = PostgresAuditSink(dsn="postgresql://nobody@127.0.0.1:1/none")
+    for index in range(25):
+        await sink.record(_race_event(index))
+    assert len(sink._buffer) == 25
