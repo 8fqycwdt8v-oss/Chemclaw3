@@ -61,28 +61,45 @@ class ComposedWorkflow(BaseModel):
     name: str = Field(min_length=1)
     summary: str = ""
     document: Template
+    # What a person approved, as a `template_fingerprint` of the document they were shown, or `""`
+    # when nobody has. Compared rather than trusted: `unapproved_jobs` asks whether it still matches
+    # *this* document, so re-composing lapses the approval without anything having to clear it.
+    approved_fingerprint: str = ""
+    # The person. Never the agent — nothing the model can call writes this, and
+    # `tests/test_composed_workflows.py` asserts that absence rather than trusting it.
+    approved_by: str = ""
 
 
 def authored_problems(template: Template, side_effecting: frozenset[str]) -> list[str]:
-    """Why this document may not be run as an agent-authored workflow, or `[]`.
+    """Why this document may not be run as an agent-authored workflow **at all**, or `[]`.
 
-    The whole security argument of this module, in one function so both the write path and the run
-    path can ask it and cannot drift apart.
+    The refusals no approval lifts. One function so the write path and the run path ask the same
+    question and cannot drift apart; `unapproved_jobs` below holds the one that a human *can* lift,
+    and the split between the two files is the whole security argument of this module.
 
-    Three refusals, and each closes a distinct way the plan gate could be bypassed:
+    Two refusals here, and each closes a distinct way the plan gate could be bypassed:
 
     - a **`tool` step naming a side-effecting tool**, which is the sharp one. A `tool` step runs
       through `invoke_governed` under the requester's identity, so `enforce_tool_authz` decides —
       but the plan gate's own early return (*"No session means no plan to approve"*) lets it past,
       correctly for a human-authored procedure and not for one the agent wrote a moment ago.
-    - a **`job` step**, because every durable job launcher is in `side_effecting_tools()`, and a
-      run that spends a cluster's compute on a procedure nobody reviewed is the cost this refuses.
     - **`write_tools`**, which `step_profile` would otherwise restore into the step's graph. This
       is the one the exemption's own wording is about.
 
-    An `agent` step itself is fine and is the point: its surface is already narrowed to reads by
-    `step_profile` when it declares no writes, so the reasoning inside the step stays free while
-    the procedure around it cannot act.
+    **Why a human's approval lifts the `job` step and not these two**, which is the line this
+    widening is drawn on rather than a limit nobody argued. A `job` step is *bounded compute whose
+    call the approver read*: the job's name and its arguments are in the document they approved, and
+    running it produces a result. `write_tools` is not a call at all — it is a permission handed to
+    a model turn, spent later on a call nobody has seen, chosen by the model inside the step. A
+    person can meaningfully approve the first and cannot meaningfully approve the second, so no
+    approval offers to. A side-effecting `tool` step sits nearer the first and stays refused with
+    it, because the reachable set is every write in the tree and the case for widening it has not
+    been made — `docs/planning/BACKLOG.md` carries that as its own question rather than smuggling
+    it in beside the one that was asked.
+
+    An `agent` step is fine and is the point: its surface is already narrowed to reads by
+    `step_profile` when it declares no writes, so the reasoning inside a step stays free while the
+    procedure around it cannot act.
 
     Args:
         template: The document to check.
@@ -92,7 +109,7 @@ def authored_problems(template: Template, side_effecting: frozenset[str]) -> lis
             has, which is not necessarily the one the compose-time check saw.
 
     Returns:
-        One line per problem, empty when the document is runnable as an agent-authored workflow.
+        One line per problem, empty when nothing here refuses the document.
     """
     problems: list[str] = []
     for step in template.steps:
@@ -103,19 +120,61 @@ def authored_problems(template: Template, side_effecting: frozenset[str]) -> lis
                 "so nothing can put a person in front of that call. Ask for the change directly "
                 "in the conversation instead, where the plan gate applies."
             )
-        elif isinstance(step, JobStep):
-            problems.append(
-                f"step {step.id!r} runs the durable job {step.job!r}. A workflow you composed "
-                "yourself may not launch one — it is unreviewed and a job spends real compute. "
-                "Run the job directly, or ask for a template to be added to `data/templates/`."
-            )
         elif isinstance(step, AgentStep) and step.write_tools:
             problems.append(
                 f"step {step.id!r} declares write tools {sorted(step.write_tools)}. Only a "
                 "reviewed template in `data/templates/` may declare those; a workflow you "
-                "composed is read-only."
+                "composed may not hand a model a write to spend."
             )
     return problems
+
+
+def job_steps(template: Template) -> list[str]:
+    """The ids of every `job` step in `template`, in declared order.
+
+    Separate from the refusal below so a caller that wants to *describe* what an approval would
+    authorize — the route that shows a person what they are approving — asks the same question the
+    enforcement asks, rather than re-deriving it from the document a second way.
+    """
+    return [step.id for step in template.steps if isinstance(step, JobStep)]
+
+
+def unapproved_jobs(template: Template, approved_fingerprint: str, fingerprint: str) -> list[str]:
+    """Why this document's durable jobs may not run yet, or `[]`.
+
+    **The refusal a human can lift, and the only one.** A composed workflow may contain `job` steps
+    and may be stored with them; what it may not do is *run* them until a person has approved this
+    exact document. Composing is therefore not the decision — which is deliberate, because a
+    workflow nobody may compose is a workflow nobody can put in front of a person to approve.
+
+    **One version of one workflow, not an actor.** The approval is keyed on the document's own hash
+    (`durable/template_job.template_fingerprint`), so re-composing lapses it with no clearing logic
+    to forget: the stored fingerprint simply stops matching. A standing *per-actor* permission —
+    the broader reading, and the phrase this feature was asked for in — never lapses, so a workflow
+    re-composed into something else would inherit the approval granted to what it used to be.
+
+    Args:
+        template: The document about to run.
+        approved_fingerprint: What a person approved, or `""` when nobody has.
+        fingerprint: This document's hash now. Passed rather than computed, because
+            `templates` may not import `durable` and because the caller already holds it.
+
+    Returns:
+        One line naming the jobs and how to authorize them, or `[]`.
+    """
+    jobs = job_steps(template)
+    if not jobs or approved_fingerprint == fingerprint:
+        return []
+    return [
+        f"it launches the durable job(s) at step(s) {jobs}, and a job costs real compute on a "
+        "procedure nobody has reviewed. Ask the chemist who owns this workflow to approve it — "
+        "`POST /workflows/{name}/approval` on the front door, which only a person can call — and "
+        + (
+            "it will run then."
+            if not approved_fingerprint
+            else "approve it again: the approval on file is for an earlier version of these steps."
+        )
+    ]
 
 
 @runtime_checkable
@@ -132,6 +191,10 @@ class ComposedStore(Protocol):
 
     async def list_for(self, owner: str) -> Sequence[ComposedWorkflow]:
         """Every one of `owner`'s workflows, most recently changed first."""
+        ...
+
+    async def approve(self, owner: str, name: str, fingerprint: str, approver: str) -> bool:
+        """Record that `approver` approved this exact version; False when the row is gone."""
         ...
 
 
@@ -164,6 +227,16 @@ class InMemoryComposedStore:
         """This owner's workflows, most recently saved first."""
         return [self._rows[key] for key in self._order if key[0] == owner]
 
+    async def approve(self, owner: str, name: str, fingerprint: str, approver: str) -> bool:
+        """Stamp the approval onto the stored row."""
+        row = self._rows.get((owner, name))
+        if row is None:
+            return False
+        self._rows[(owner, name)] = row.model_copy(
+            update={"approved_fingerprint": fingerprint, "approved_by": approver}
+        )
+        return True
+
 
 class PostgresComposedStore:
     """The durable backend, one row per `(owner, name)`."""
@@ -180,13 +253,22 @@ class PostgresComposedStore:
     """
 
     _SELECT_ONE = """
-        SELECT owner, name, summary, document FROM composed_workflows
-        WHERE owner = %s AND name = %s
+        SELECT owner, name, summary, document, approved_fingerprint, approved_by
+        FROM composed_workflows WHERE owner = %s AND name = %s
     """
 
     _SELECT_FOR = """
-        SELECT owner, name, summary, document FROM composed_workflows
-        WHERE owner = %s ORDER BY updated_at DESC, name LIMIT %s
+        SELECT owner, name, summary, document, approved_fingerprint, approved_by
+        FROM composed_workflows WHERE owner = %s ORDER BY updated_at DESC, name LIMIT %s
+    """
+
+    # **The approval is never part of the upsert above.** A save is the agent's write and an
+    # approval is a person's, so folding them into one statement would give the compose path a
+    # column it must not be able to set — the separation is the control, not a tidiness.
+    _APPROVE = """
+        UPDATE composed_workflows
+        SET approved_fingerprint = %(fingerprint)s, approved_by = %(approver)s, approved_at = now()
+        WHERE owner = %(owner)s AND name = %(name)s
     """
 
     async def save(self, workflow: ComposedWorkflow) -> None:
@@ -238,6 +320,25 @@ class PostgresComposedStore:
                 rows = await cur.fetchall()
         return [_from_row(row) for row in rows]
 
+    async def approve(self, owner: str, name: str, fingerprint: str, approver: str) -> bool:
+        """Stamp the approval, answering False when this owner has no such workflow."""
+        from chemclaw.core import db
+
+        async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    self._APPROVE,
+                    {
+                        "owner": owner,
+                        "name": name,
+                        "fingerprint": fingerprint,
+                        "approver": approver,
+                    },
+                )
+                touched = cur.rowcount
+            await conn.commit()
+        return touched > 0
+
 
 def _from_row(row: Sequence[object]) -> ComposedWorkflow:
     """One database row as a `ComposedWorkflow`, with its document revalidated."""
@@ -246,6 +347,8 @@ def _from_row(row: Sequence[object]) -> ComposedWorkflow:
         name=str(row[1]),
         summary=str(row[2]),
         document=Template.model_validate(row[3]),
+        approved_fingerprint=str(row[4]),
+        approved_by=str(row[5]),
     )
 
 

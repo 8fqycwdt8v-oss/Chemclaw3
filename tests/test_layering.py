@@ -314,6 +314,13 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.api", "chemclaw.durable"),
     ("chemclaw.api", "chemclaw.kg"),
     ("chemclaw.api", "chemclaw.protocols"),
+    # The same edge as `protocols` beside it, and for the same reason: a front-door route
+    # reads and decides on a stored document this layer owns. `api/routes/workflows.py` serves
+    # the human approval a composed workflow needs before it may launch a durable job
+    # (`D-2026-09-15-an-approval-is-for-one-version-of-one-workflow`), and that approval is a
+    # column on `composed_workflows` — so the route reaches the store directly rather than
+    # through `agent`, which would be indirection with no second caller to justify it.
+    ("chemclaw.api", "chemclaw.templates"),
     ("chemclaw.cli", "chemclaw.agent"),
     # `cli.leak_probe` builds the *real* front door in its own process — that is the whole point:
     # the leak it measures is in what a turn retains, and an in-process repro that faked the app

@@ -29,6 +29,8 @@ from chemclaw.templates.composed import (
     ComposedWorkflowError,
     authored_problems,
     default_composed_store,
+    job_steps,
+    unapproved_jobs,
 )
 from chemclaw.templates.manifest import Template
 
@@ -47,6 +49,10 @@ class WorkflowStep(BaseModel):
     tool: str = Field(
         default="",
         description="A read-only tool to call. Leave empty for a reasoning step.",
+    )
+    job: str = Field(
+        default="",
+        description="A durable job to run and wait for. Needs the owner's approval before it runs.",
     )
     arguments: dict[str, Any] = Field(
         default_factory=dict,
@@ -88,7 +94,9 @@ def _document(
             ],
             "steps": [
                 (
-                    {"id": step.id, "kind": "agent", "prompt": step.prompt}
+                    {"id": step.id, "kind": "job", "job": step.job, "arguments": step.arguments}
+                    if step.job
+                    else {"id": step.id, "kind": "agent", "prompt": step.prompt}
                     if not step.tool
                     else {
                         "id": step.id,
@@ -117,9 +125,13 @@ async def compose_workflow(
     between them, independent steps run at the same time, and a run that fails resumes rather than
     starting over.
 
-    **It may only read.** No step may call a tool that changes anything and no step may run a
-    durable job, because the run has no conversation to approve a plan in. Compose the reads;
-    ask for the change in the conversation, where a person can see it.
+    **No step may call a tool that changes anything**, because the run has no conversation to
+    approve a plan in — ask for the change in the conversation, where a person can see it.
+
+    **A durable job step is allowed and does not run until a person approves this workflow.** So a
+    procedure that ranks or searches conformers can be written down here; composing it is not the
+    decision. Say so when you hand the name back: its owner approves it on the front door, and the
+    approval covers exactly the steps as they stand, so composing it again needs approving again.
 
     Refer to values with `${inputs.<name>}` and to an earlier step with `${steps.<id>.result}` —
     a step that names no earlier step runs at the same time as its neighbours, so do not chain
@@ -138,9 +150,9 @@ async def compose_workflow(
         A confirmation naming the workflow and how many steps it has.
 
     Raises:
-        ChemclawError: When a step names a tool that does not exist, changes something, runs a
-            durable job, refers to a step that has not run yet, or when the procedure could not
-            finish inside this deployment's run ceiling.
+        ChemclawError: When a step names a tool that does not exist, changes something, hands a
+            model a write to spend, refers to a step that has not run yet, or when the procedure
+            could not finish inside this deployment's run ceiling.
     """
     from chemclaw.agent.template_surface import TemplateSurface, run_ceiling_problems, step_problems
 
@@ -171,6 +183,18 @@ async def compose_workflow(
             "Re-compose one of them under its own name instead of adding another."
         )
     await store.save(ComposedWorkflow(owner=owner, name=name, summary=summary, document=document))
+    jobs = job_steps(document)
+    if jobs:
+        # Said at the moment it is composed rather than left to the refusal a run would give: the
+        # chemist is in the conversation *now*, and telling them afterwards costs them a turn to
+        # learn something that was knowable when they asked.
+        return (
+            f"Saved the {name!r} workflow, {len(document.steps)} steps — but it will not run yet. "
+            f"Step(s) {jobs} launch durable jobs, so its owner has to approve this version first "
+            "(on the front door; there is no tool for it, because a workflow may not approve "
+            "itself). Approving covers these steps exactly, so composing it again needs approving "
+            "again."
+        )
     return (
         f"Saved the {name!r} workflow, {len(document.steps)} steps. "
         f"Run it with run_composed_workflow(name={name!r})."
@@ -196,6 +220,7 @@ async def run_composed_workflow(name: str, inputs: dict[str, str]) -> str:
             have — or when the workflow can no longer run here.
     """
     from chemclaw.agent.template_surface import TemplateSurface, run_ceiling_problems, step_problems
+    from chemclaw.durable.template_job import template_fingerprint
     from chemclaw.templates.registry import start_template_run
 
     owner = require_actor()
@@ -224,4 +249,13 @@ async def run_composed_workflow(name: str, inputs: dict[str, str]) -> str:
             + "\n".join(f"  - {p}" for p in problems)
             + "\nCompose it again without those steps."
         )
+    # Asked here and not at the write, because composing is deliberately not the decision: a
+    # workflow nobody may compose is a workflow nobody can put in front of a person to approve.
+    # The fingerprint is recomputed from the document *as stored*, so an approval only ever covers
+    # the steps somebody actually read.
+    withheld = unapproved_jobs(
+        workflow.document, workflow.approved_fingerprint, template_fingerprint(workflow.document)
+    )
+    if withheld:
+        raise ComposedWorkflowError(f"the {name!r} workflow is not approved to run: {withheld[0]}")
     return await start_template_run(workflow.document, dict(inputs))

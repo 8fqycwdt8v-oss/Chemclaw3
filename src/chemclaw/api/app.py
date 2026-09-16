@@ -70,6 +70,7 @@ from chemclaw.api.routes import (
     sessions,
     streams,
     turns,
+    workflows,
 )
 from chemclaw.api.schemas import _TRANSCRIPT_ARG_CHARS, _transcript
 from chemclaw.api.state import (
@@ -592,6 +593,7 @@ def create_app(
         notes,
         jobs,
         protocols,
+        workflows,
     ):
         module.register(app)
 

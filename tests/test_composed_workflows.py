@@ -27,6 +27,7 @@ from chemclaw.templates.composed import (
     PostgresComposedStore,
     authored_problems,
     default_composed_store,
+    unapproved_jobs,
 )
 from chemclaw.templates.manifest import Template
 from chemclaw.templates.schedule import schedule
@@ -64,6 +65,7 @@ _READ_STEP = {
 # Referring to nothing on purpose: these fixtures are combined with different first steps, and a
 # reference is a dependency the forward-reference validator enforces. The chained case has its
 # own steps below, where the reference is part of what is being asserted.
+_JOB_STEP = {"id": "rank", "kind": "job", "job": "rank_species", "arguments": {}}
 _REASON_STEP = {"id": "say", "kind": "agent", "prompt": "summarise what the earlier steps found"}
 
 
@@ -99,23 +101,59 @@ def test_a_composed_workflow_may_not_call_a_tool_that_changes_anything() -> None
     assert "plan gate applies" in problems[0]
 
 
-def test_a_composed_workflow_may_not_launch_a_durable_job() -> None:
-    """Every job launcher is side-effecting, and a job spends real compute on nobody's review."""
-    job = {"id": "rank", "kind": "job", "job": "rank_species", "arguments": {}}
+def test_a_job_step_is_not_refused_outright_any_more_but_is_not_authorized_either() -> None:
+    """The widening, and the shape of it: composing is allowed, *running* is what waits.
 
-    problems = authored_problems(_document([job, _REASON_STEP]), side_effecting_tools())
+    Refusing the composition was the first design and is the wrong one — a workflow nobody may
+    compose is a workflow nobody can put in front of a person to approve. So `authored_problems`
+    says nothing about a `job` step and `unapproved_jobs` withholds it until an approval stands.
+    """
+    document = _document([_JOB_STEP, _REASON_STEP])
 
-    assert len(problems) == 1
-    assert "rank_species" in problems[0]
+    assert authored_problems(document, side_effecting_tools()) == []
+    withheld = unapproved_jobs(document, approved_fingerprint="", fingerprint="fp-1")
+    assert len(withheld) == 1
+    assert "['rank']" in withheld[0]
+    # The refusal names the route, because a model told only "no" retries the same call.
+    assert "/workflows/{name}/approval" in withheld[0]
 
 
-def test_a_composed_workflow_may_not_declare_write_tools() -> None:
-    """The one the exemption's own wording is about.
+def test_an_approval_for_this_exact_version_releases_the_job() -> None:
+    """The control arm for the widening: the approval has to actually authorize something."""
+    document = _document([_JOB_STEP, _REASON_STEP])
 
-    `step_profile` removes every side-effecting tool from a step's graph *unless the step declares
-    it*, so a `write_tools:` line is precisely the lever that would put a write back into an
-    ungated turn. Refused at the document, not filtered at run time: the tool is then absent from
-    the graph by the same structural route it always was.
+    assert unapproved_jobs(document, approved_fingerprint="fp-1", fingerprint="fp-1") == []
+
+
+def test_an_approval_for_an_earlier_version_does_not_carry_over() -> None:
+    """The reason the approval is keyed on the document and not on the actor.
+
+    A standing per-actor permission never lapses, so a workflow re-composed into something else
+    would inherit the approval granted to what it used to be. Keyed on the document's own hash,
+    re-composing lapses it with nothing having to remember to clear it — and the refusal says so,
+    because "not approved" and "approved, but not this version" are different things to be told.
+    """
+    withheld = unapproved_jobs(
+        _document([_JOB_STEP, _REASON_STEP]), approved_fingerprint="fp-1", fingerprint="fp-2"
+    )
+
+    assert len(withheld) == 1
+    assert "earlier version" in withheld[0]
+
+
+def test_a_workflow_with_no_job_steps_needs_no_approval() -> None:
+    """The read-only case is unchanged by all of this, which is most composed workflows."""
+    assert unapproved_jobs(_document([_READ_STEP, _REASON_STEP]), "", "fp-1") == []
+
+
+def test_no_approval_lifts_a_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**The line this widening is drawn on**, asserted rather than left in a docstring.
+
+    A `job` step is bounded compute whose call the approver read in the document. `write_tools` is
+    not a call at all — it is a permission handed to a model turn, spent later on a call nobody has
+    seen. A person can meaningfully approve the first and cannot meaningfully approve the second,
+    so an approval offers to lift only the first; `authored_problems` takes no approval argument at
+    all, which is how that is enforced rather than remembered.
     """
     declaring = {
         "id": "say",
@@ -123,21 +161,14 @@ def test_a_composed_workflow_may_not_declare_write_tools() -> None:
         "prompt": "write it up",
         "write_tools": ["record_knowledge_note"],
     }
+    write_step = {"id": "note", "kind": "tool", "tool": "record_knowledge_note", "arguments": {}}
 
-    problems = authored_problems(_document([_READ_STEP, declaring]), side_effecting_tools())
-
-    assert len(problems) == 1
-    assert "record_knowledge_note" in problems[0]
-
-
-def test_every_refusal_is_reported_rather_than_the_first() -> None:
-    """A model told about one problem at a time re-composes once per problem."""
-    job = {"id": "rank", "kind": "job", "job": "rank_species", "arguments": {}}
-    write = {"id": "note", "kind": "tool", "tool": "record_knowledge_note", "arguments": {}}
-
-    assert (
-        len(authored_problems(_document([job, write, _REASON_STEP]), side_effecting_tools())) == 2
-    )
+    both: list[list[dict[str, Any]]] = [[_READ_STEP, declaring], [write_step, _REASON_STEP]]
+    for steps in both:
+        document = _document(steps)
+        # Approved to the hilt, and still refused: the approval is not an argument this can take.
+        assert unapproved_jobs(document, "fp-1", "fp-1") == []
+        assert authored_problems(document, side_effecting_tools()) != []
 
 
 def test_the_rule_reads_the_deployment_it_is_asked_about() -> None:
@@ -384,3 +415,59 @@ def test_a_stored_workflow_whose_tool_became_a_write_is_refused_at_run_time(
         )
         with pytest.raises(ComposedWorkflowError, match="cannot run here any more"):
             asyncio.run(workflow_tools.run_composed_workflow(name="reads", inputs={}))
+
+
+def test_a_workflow_with_a_job_composes_but_will_not_run_until_it_is_approved() -> None:
+    """The whole loop through the real tools: compose, refused, approved, runs.
+
+    Composing is deliberately not the decision — a workflow nobody may compose is one nobody can
+    put in front of a person — so the refusal lands at the run and the compose result says so at
+    the moment the chemist is still in the conversation to hear it.
+    """
+    from chemclaw.agent import workflow_tools
+    from chemclaw.durable.template_job import template_fingerprint
+    from chemclaw.templates.composed import ComposedWorkflowError
+
+    started: list[str] = []
+
+    with _as("chemist-jobs"):
+        answer = _compose(
+            name="ranking",
+            summary="Rank and report.",
+            inputs=[],
+            steps=[
+                workflow_tools.WorkflowStep(id="rank", job="rank_species", arguments={}),
+                workflow_tools.WorkflowStep(id="say", prompt="which one: ${steps.rank.result}"),
+            ],
+        )
+        # Said where the chemist can act on it, rather than only at the run that fails.
+        assert "will not run yet" in answer
+        assert "['rank']" in answer
+
+        with pytest.raises(ComposedWorkflowError, match="not approved to run"):
+            asyncio.run(workflow_tools.run_composed_workflow(name="ranking", inputs={}))
+
+        store = default_composed_store()
+        stored = asyncio.run(store.get("chemist-jobs", "ranking"))
+        assert stored is not None
+        # The human's act, through the store the route writes — there is no tool for this.
+        asyncio.run(
+            store.approve(
+                "chemist-jobs", "ranking", template_fingerprint(stored.document), "a-person"
+            )
+        )
+
+        # It runs now. The launcher is stubbed: what is under test is the gate, not Temporal.
+        monkey = pytest.MonkeyPatch()
+        try:
+
+            async def _fake_start(document: Any, inputs: dict[str, Any]) -> str:
+                started.append(document.name)
+                return "job-1"
+
+            monkey.setattr("chemclaw.templates.registry.start_template_run", _fake_start)
+            assert asyncio.run(workflow_tools.run_composed_workflow("ranking", {})) == "job-1"
+        finally:
+            monkey.undo()
+
+    assert started == ["ranking"]
