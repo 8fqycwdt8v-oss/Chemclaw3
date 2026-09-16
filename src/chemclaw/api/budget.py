@@ -42,7 +42,8 @@ Off by default (`budget_enabled`), so a deployment opts in.
 import asyncio
 import logging
 import threading
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 
 from chemclaw.core.bounded import BoundedLru
 from chemclaw.core.config import settings
@@ -66,10 +67,29 @@ class BudgetExceeded(Exception):
 
 @dataclass
 class _Counter:
-    """Cumulative turns and metered tokens booked against one scope (a session or a user)."""
+    """Turns and metered tokens booked against one scope (a session or a user) in one window."""
 
     turns: int = 0
     tokens: int = 0
+    #: Monotonic start of the window these counts belong to, for the *user* scope only — a session
+    #: counter carries one too and nothing reads it, because `_book` only rolls what it is told to.
+    started: float = field(default_factory=time.monotonic)
+
+
+def _rolled(counter: _Counter) -> bool:
+    """Whether this counter's window has expired, so its counts no longer bind.
+
+    **The in-process half has to roll on the same clock as the durable row, or `max()` stops being
+    a floor and becomes a ratchet.** `check` takes the larger of the two counts; the durable row
+    rolls (`budget_store._BOOK` resets it in place past `budget_window_hours`) and before this
+    function the in-process counter never did. So a pod that stayed up across a boundary pinned the
+    principal at their *lifetime* spend for ever: measured, one tracker that had booked 900 tokens
+    still refused against a 500-token cap after the durable row had correctly rolled to (0, 0),
+    while a freshly built tracker admitted the same turn. That inverts this feature's own premise —
+    a restart became the only thing that handed the allowance *back*, and on three replicas the
+    same request was a 429 on one pod and a 200 on the next.
+    """
+    return time.monotonic() - counter.started >= settings.budget_window_hours * 3600.0
 
 
 def _over(cap: int, used: int) -> bool:
@@ -99,28 +119,47 @@ def _durable() -> bool:
     return settings.session_store == "postgres"
 
 
-def _warn(scope: str, turns: int, tokens: int) -> None:
-    """Say so once when a scope's usage crosses the warning fraction of either cap.
+def _warn(scope: str, identity: str, turns: int, tokens: int, booked: int) -> None:
+    """Say so on the one turn that carries a scope's usage across the warning fraction of a cap.
+
+    **`identity` is on the line because it is the only place it can be.** The alert this feeds is
+    deliberately unlabelled — a session id or an Entra `oid` on a metric series is unbounded
+    cardinality, the argument `033_cost_attribution.sql` makes — so the log is an operator's one
+    route from "somebody is near their cap" to "who". The runbook, the alert annotation and
+    `core/metrics.py` all said in the present tense that the line carried it, and it carried the
+    scope *kind* ("session", "user") instead, which no `grep` can turn into a principal.
 
     Called from `record`, never from `check`: the front door checks twice per turn (a fast path
     before the admission permit and the binding one after it), so warning from `check` would double
     every count and every log line for a fact that changed once.
+
+    **Edge-triggered, and it has to be, because the band is wide.** `_near` is a predicate over a
+    running total with no memory, so warning whenever it holds warns on *every* turn spent between
+    the fraction and the cap. Measured at a 1,000-token cap: one crossing produced **ten** warnings
+    over ten turns. At the shipped user cap that band is 80%–100% of 20,000,000 tokens — some 130
+    turns of WARNING lines, and 130 increments of a counter
+    `deploy/helm/chemclaw/templates/prometheusrule.yaml` rules a `for:` clause out of on the
+    explicit ground that "a crossing is a **step**, not a rate ... a single crossing never produces
+    a repetition". That premise is only true of an edge. `booked` (this turn's own tokens, and one
+    turn) is what makes the previous total derivable without holding any state per principal.
     """
     caps = (
-        ("turns", turns, _cap(scope, "turns")),
-        ("tokens", tokens, _cap(scope, "tokens")),
+        ("turns", turns, turns - 1, _cap(scope, "turns")),
+        ("tokens", tokens, tokens - booked, _cap(scope, "tokens")),
     )
-    for unit, used, cap in caps:
-        if not _near(cap, used):
+    for unit, used, before, cap in caps:
+        if not _near(cap, used) or _near(cap, before):
             continue
         record_metric(lambda m: m.increment("chemclaw_budget_warnings_total"))
         logger.warning(
-            "%s %s budget %.0f%% spent (%d of %d) — the next turns will be refused at the cap",
+            "%s %s budget %.0f%% spent (%d of %d) for %s — the next turns will be refused at "
+            "the cap",
             scope,
             unit,
             100 * used / cap,
             used,
             cap,
+            identity,
         )
 
 
@@ -137,8 +176,17 @@ def _cap(scope: str, unit: str) -> int:
     return settings.budget_max_tokens_per_user
 
 
-def _book(counters: BoundedLru[str, _Counter], key: str, tokens: int) -> _Counter:
+def _book(
+    counters: BoundedLru[str, _Counter], key: str, tokens: int, *, rolls: bool = False
+) -> _Counter:
     """Add one turn and its (non-negative) tokens to `key`, evicting the LRU past capacity.
+
+    `rolls` starts a fresh window when the existing counter's has expired, and is passed for the
+    *user* scope only: that is the scope the durable row windows, and the two halves are combined
+    with `max()`, so a half that never rolled would hold the other one up for ever (`_rolled`).
+    A session is not windowed deliberately — `budget_max_turns_per_session` bounds one conversation
+    rather than a rate, and rolling it would quietly hand a long-running session a second allowance
+    that nobody configured.
 
     The map itself is `chemclaw.core.bounded.BoundedLru` (S2) — the tracker lives for the pod's
     whole lifetime, and without a bound every session/user ever seen would keep a counter (a slow
@@ -149,7 +197,7 @@ def _book(counters: BoundedLru[str, _Counter], key: str, tokens: int) -> _Counte
     Returns the updated counter so the caller can warn off it without a second lookup.
     """
     counter = counters.get(key)
-    if counter is None:
+    if counter is None or (rolls and _rolled(counter)):
         counter = _Counter()
     counter.turns += 1
     counter.tokens += max(tokens, 0)
@@ -221,7 +269,10 @@ class BudgetTracker:
         )
         if user is None:
             return
-        turns, tokens = (local.turns, local.tokens) if local is not None else (0, 0)
+        # A counter whose own window has expired reads as zero rather than as a floor under the
+        # durable row, which is what `_rolled` exists to stop.
+        live = local is not None and not _rolled(local)
+        turns, tokens = (local.turns, local.tokens) if live and local is not None else (0, 0)
         if _durable():
             stored_turns, stored_tokens = await self._stored(user)
             turns, tokens = max(turns, stored_turns), max(tokens, stored_tokens)
@@ -273,13 +324,14 @@ class BudgetTracker:
             return
         with self._lock:
             session = _book(self._sessions, session_id, tokens)
-            local = _book(self._users, user, tokens) if user is not None else None
-        _warn("session", session.turns, session.tokens)
+            local = _book(self._users, user, tokens, rolls=True) if user is not None else None
+        booked = max(tokens, 0)
+        _warn("session", session_id, session.turns, session.tokens, booked)
         if user is None:
             return
         if not _durable():
             if local is not None:
-                _warn("user", local.turns, local.tokens)
+                _warn("user", user, local.turns, local.tokens, booked)
             return
         self._schedule(user, tokens)
 
@@ -297,6 +349,22 @@ class BudgetTracker:
         async def _write() -> None:
             try:
                 turns, tokens_spent = await budget_store.book(user, tokens)
+            except asyncio.CancelledError:
+                # **Separately, and before the `Exception` arm, because it is not one.** A
+                # fire-and-forget task's dominant loss mode is cancellation — an ASGI shutdown, a
+                # rollout, `asyncio.run`'s `_cancel_all_tasks` — and `except Exception` does not
+                # catch it. So the loss this module's docstring calls "logged and lost" was, for
+                # the case that happens on every deploy, *silently* lost: measured, a `record()`
+                # followed by loop shutdown wrote no row and emitted no line at all, while the
+                # degradation counter that exists to make exactly this visible stayed flat.
+                degraded(
+                    logger,
+                    "budget_window",
+                    "the durable budget booking for %s was cancelled before it landed; this turn "
+                    "is counted on this pod only",
+                    user,
+                )
+                raise
             except Exception:
                 degraded(
                     logger,
@@ -306,7 +374,7 @@ class BudgetTracker:
                     user,
                 )
                 return
-            _warn("user", turns, tokens_spent)
+            _warn("user", user, turns, tokens_spent, max(tokens, 0))
 
         try:
             task = asyncio.get_running_loop().create_task(_write())
@@ -315,3 +383,27 @@ class BudgetTracker:
             return
         _PENDING.add(task)
         task.add_done_callback(_PENDING.discard)
+
+
+async def drain_pending(timeout: float = 5.0) -> None:
+    """Wait for the in-flight durable bookings, so an orderly shutdown does not drop them.
+
+    Called from the front door's lifespan after the turns have drained. Without it every rollout
+    loses the last booking of every in-flight principal — which is not one lost metric but a
+    quantum of allowance handed back, and handing allowance back on restart is the defect this
+    whole window exists to remove. A bounded wait rather than an unbounded one: the pod is inside
+    its termination grace, and a booking is worth waiting a moment for and never worth holding a
+    rollout open for.
+    """
+    if not _PENDING:
+        return
+    pending = tuple(_PENDING)
+    _, still_running = await asyncio.wait(pending, timeout=timeout)
+    if still_running:
+        degraded(
+            logger,
+            "budget_window",
+            "%d durable budget booking(s) did not land within %.1fs of shutdown",
+            len(still_running),
+            timeout,
+        )

@@ -1359,7 +1359,9 @@ refused yet; the rule above is what fires once they are.
 **The scope is not on the series, so do not look for it there.** A budget scope is a session id or
 an Entra `oid`, and `033_cost_attribution.sql` rules those out as label values for the cardinality
 reason the 64-series cap (D-152) enforces. The identity is in the WARNING log line from
-`chemclaw.api.budget`, which names the scope, the unit, the percentage and both numbers:
+`chemclaw.api.budget`, which names the scope, the unit, the percentage, both numbers and the
+session id or `oid` itself — which it did not when this paragraph was first written, and the three
+diagnoses below have no way to name an actor without it:
 
     oc logs -l app.kubernetes.io/name=chemclaw --since=1h | grep 'budget .* spent'
 
@@ -1384,10 +1386,13 @@ call to arrive where it already was.
 
 Three readings, and the first is the likeliest. **The claims are not fixable by rewording**: the
 answer needs evidence the turn never retrieved, so the model drops or hedges and the shape gate
-flags it again. Read `chemclaw_answer_revisions_total` against
-`chemclaw_retrieval_*` for those turns — if retrieval returned nothing, the revision was never
-going to help and the fix is upstream. **The rounds are too few**: raise
-`answer_review_max_rounds` and watch the ratio. **The verdict is wrong**: if
+flags it again. Read `chemclaw_answer_review_turns_total` against
+`chemclaw_evidence_source_chunks_total` for those turns — if retrieval contributed nothing, the
+revision was never going to help and the fix is upstream. (This line named `chemclaw_retrieval_*`,
+a family that has never existed; the trailing `*` is what let it past `make prose-validate`, whose
+metric check requires the backticked span to end at the name.) **The rounds are too few**: raise
+`answer_review_max_rounds` and watch the ratio — which is a fraction of *turns* that tried, not of
+revision passes, so raising the rounds no longer moves the threshold under you. **The verdict is wrong**: if
 `verifier_confidence_threshold` sits above what this corpus can support, every answer is flagged and
 every revision exhausts — check what fraction of *all* turns are flagged before raising the rounds.
 

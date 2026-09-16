@@ -576,7 +576,26 @@ class TurnReview(BaseModel):
     checks_run: list[AnswerCheck] = Field(default_factory=list)
     confidence: float | None = None
     verified_by: Literal["judge", "citation-gate"] | None = None
+    # **Claims the *answer* makes that its evidence does not support** — the model's own prose,
+    # quoted back. Nothing else may go in here, and that restriction is the whole reason
+    # `review_notes` exists below.
     unsupported: list[str] = Field(default_factory=list)
+    # **Why the verdict is what it is, when the reason is about the *check* rather than about the
+    # answer.** Two statuses used to be appended to `unsupported` — "verification did not run" and
+    # "verified by the citation gate only; the judge did not run" — and a reader that treats that
+    # list as claims about the answer is then reading a status string as something the model said.
+    # `api/runner.py`'s revision loop is exactly such a reader: it quotes each entry back to the
+    # model as a claim to drop and re-answer, so a judge outage made every flagged turn spend
+    # `answer_review_max_rounds + 1` model calls arguing with a status line it could never satisfy,
+    # and a low-confidence answer with no unsupported claim at all was sent back against an empty
+    # block — the "just try again" prompt `_revision_message` is written to avoid.
+    #
+    # Split rather than string-matched at the reader, because a reader that recognises a status by
+    # its wording is a reader that breaks the day the wording is improved. The wire is unchanged:
+    # `runner_answer.build_answer_event` concatenates the two onto `AnswerEvent.unsupported_claims`
+    # in this order, which is the order they were appended in, so a reviewer still sees the reason
+    # beside the findings and `Chemclaw3_ui`/`Chemclaw3_mock` read the same bytes as before.
+    review_notes: list[str] = Field(default_factory=list)
     review_required: bool = False
     # **Both of these are permanently at their defaults**, and they are declared rather than deleted
     # because they are `AnswerEvent` fields the frontend and the mock server both read: removing a
@@ -637,7 +656,9 @@ async def score_answer(
             result = await verify_turn_answer(answer, tool_outputs, evidence=evidence)
         except Exception:
             logger.exception("answer verification crashed; routing the turn to review")
-            review.unsupported = ["verification did not run"]
+            # A `review_notes` entry, not an `unsupported` one: nothing about the *answer* was
+            # found — the check itself did not complete, and the flag below is what says so.
+            review.review_notes = ["verification did not run"]
             review.review_required = True
         else:
             review.confidence = result.confidence
@@ -648,8 +669,10 @@ async def score_answer(
             # event, and "review this empty answer, maximum confidence" is not a judgement anyone
             # can use.
             if result.verified_by != "judge" and answer.strip():
-                review.unsupported = [
-                    *review.unsupported,
+                # `review_notes` for the same reason as the crash branch: this is a statement about
+                # which check produced the verdict, not a claim the answer made.
+                review.review_notes = [
+                    *review.review_notes,
                     "verified by the citation gate only; the judge did not run",
                 ]
                 review.review_required = True

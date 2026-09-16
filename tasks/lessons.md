@@ -2798,13 +2798,18 @@ keeping**, and during a feature that is almost never true of the file I am probi
 reason I am probing it is that I just changed it. Commit first, or copy first. This is the same
 shape as the `rm`-before-`ls` rule the working-tree guidance already states, one tool over.
 
-## An absence test that scanned 18% of the file it was guarding (2026-09-15)
+## An absence test that scanned a sixth of the file it was guarding (2026-09-15)
 
 I wrote a test asserting `durable/check_in.py` contains no model-running call, and implemented it as
 `source.split('"""')[2]` — meaning to skip the module docstring. That slice ends at the *next*
-docstring, so it covered the 1,636 characters between the module docstring and the first class, out
-of 9,001. Anything below the first class was unguarded, which is where the code that would violate
-it actually lives.
+docstring, so it covered only the 1,636 characters between the module docstring and the first class.
+Anything below the first class was unguarded, which is where the code that would violate it actually
+lives.
+
+(This heading said "18%" and the paragraph "out of 9,001", both measured against the file
+mid-development; the merged file is 9,833 characters, so the fraction was 16.6%. A worked ratio
+against a file that is still being written is a number that goes stale inside its own commit —
+which is the lesson two headings down, arriving early.)
 
 It passed, of course. Both versions pass on a clean file; that is what a guard does, and it is why
 passing says nothing about whether it works.

@@ -1072,7 +1072,13 @@ def test_a_degraded_openai_compatible_judge_is_still_routed_to_a_human_by_score_
     assert review.verified_by == "citation-gate"
     assert review.confidence == 1.0
     assert review.review_required is True
-    assert "verified by the citation gate only; the judge did not run" in review.unsupported
+    # `review_notes`, not `unsupported`: this is a statement about which check produced the
+    # verdict, not a claim the answer made — and `api/runner.py`'s revision loop reads the second
+    # list as claims to quote back at the model. Here the gate resolved the citation, so it found
+    # nothing wrong with the answer itself: the whole verdict is the note, and the loop therefore
+    # has nothing to send back.
+    assert review.unsupported == []
+    assert review.review_notes == ["verified by the citation gate only; the judge did not run"]
 
 
 class _MeteredJudge(GenericFakeChatModel):
@@ -1371,10 +1377,10 @@ def test_an_ungated_answer_is_distinguishable_from_a_cleared_one(
 
     monkeypatch.setattr(settings, "verifier_enabled", False)
     monkeypatch.setattr(settings, "answer_shape_gate_enabled", False)
-    ungated = asyncio.run(build_answer_event("Ethanol's pKa is 15.9.", ['{"pka": 15.9}']))
+    ungated, _ = asyncio.run(build_answer_event("Ethanol's pKa is 15.9.", ['{"pka": 15.9}']))
 
     monkeypatch.setattr(settings, "answer_shape_gate_enabled", True)
-    cleared = asyncio.run(build_answer_event("Ethanol's pKa is 15.9.", ['{"pka": 15.9}']))
+    cleared, _ = asyncio.run(build_answer_event("Ethanol's pKa is 15.9.", ['{"pka": 15.9}']))
 
     assert ungated.review_required is False and cleared.review_required is False
     assert ungated.model_dump_json() != cleared.model_dump_json(), (

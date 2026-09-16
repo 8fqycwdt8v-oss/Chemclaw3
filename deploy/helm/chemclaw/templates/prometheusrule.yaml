@@ -666,14 +666,29 @@ spec:
                review — which is exactly what it shipped before the loop existed.
 
                A ratio rather than a count, because the count scales with traffic and says nothing
-               on its own: ten exhaustions out of a thousand revisions is a working loop, ten out of
-               twelve is a broken one. `clamp_min(..., 1)` keeps the expression from dividing by
-               zero on a quiet window — with the feature off (the shipped default) both series are
-               absent and the rule is simply empty, which is the correct silence. */}}
+               on its own: ten exhaustions out of a thousand turns is a working loop, ten out of
+               twelve is a broken one.
+
+               **Both sides count turns.** This divided exhausted *turns* by revision *passes*,
+               which are different units, so the threshold moved with `answer_review_max_rounds`:
+               measured with every flagged turn exhausting, the ratio read 1.00 at 1 round and 0.20
+               at 5 — silent at total failure for every setting but one, while the description
+               below told an operator to raise the rounds, which pushes it further down.
+               `chemclaw_answer_review_turns_total` is the denominator that makes this a fraction
+               of turns that tried.
+
+               **A traffic floor rather than `clamp_min`.** A clamped denominator turns an idle
+               window into a large finite ratio instead of no sample, which is the shape
+               `tests/test_deploy_chart.py::test_every_ratio_alert_has_a_traffic_floor` exists to
+               reject — and it was admitted here only because that guard looked for `rate(` and
+               this rule uses `increase(`. With the feature off both series are absent and the
+               `and` clause leaves the rule empty, which is the same correct silence by a mechanism
+               the guard can see. */}}
         - alert: ChemclawAnswerRevisionsNotHelping
           expr: >-
             sum(increase(chemclaw_answer_review_exhausted_total[6h]))
-            / clamp_min(sum(increase(chemclaw_answer_revisions_total[6h])), 1) > 0.5
+            / sum(increase(chemclaw_answer_review_turns_total[6h])) > 0.5
+            and sum(increase(chemclaw_answer_review_turns_total[6h])) > 10
           for: 30m
           labels:
             severity: warning
@@ -681,7 +696,7 @@ spec:
             runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawanswerrevisionsnothelping
             summary: Most flagged answers are still unsupported after every allowed revision
             description: >-
-              More than half the revision passes ran out of rounds. The turns still answered and
+              More than half the turns that tried a revision ran out of rounds. They still answered and
               still carry `review_required`, so nothing is lost that was not already lost — but the
               second model call bought nothing. Raise `answer_review_max_rounds`, or turn it back to
               0 and treat the verifier's verdict as the signal it was before.

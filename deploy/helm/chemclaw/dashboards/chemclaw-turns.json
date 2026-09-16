@@ -626,6 +626,35 @@
           "refId": "C"
         }
       ]
+    },
+    {
+      "id": 14,
+      "type": "graph",
+      "title": "Answer revision: passes, turns and exhaustions",
+      "description": "What the revision loop costs and what it buys. `passes` is model calls — the spend; `turns` is flagged answers that entered the loop — the denominator the alert divides by; `exhausted` is turns that ran out of rounds and shipped still marked for review. Three series because passes and turns are different units and dividing one by the other made the alert's threshold move with `answer_review_max_rounds`. All three are flat at the shipped default, where the loop is off.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(chemclaw_answer_revisions_total[15m]))",
+          "legendFormat": "passes/s",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(chemclaw_answer_review_turns_total[15m]))",
+          "legendFormat": "turns/s",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(chemclaw_answer_review_exhausted_total[15m]))",
+          "legendFormat": "exhausted/s",
+          "refId": "C"
+        }
+      ]
     }
   ],
   "refresh": "30s",

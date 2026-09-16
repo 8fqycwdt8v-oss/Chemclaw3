@@ -662,6 +662,16 @@ def _clear_prefixed_env() -> Iterator[None]:
             "mid_turn_resume_timeout_seconds must be smaller than",
         ),
         (
+            "revision rounds cannot outlast the turn they run inside",
+            {
+                "verifier_enabled": True,
+                "answer_review_max_rounds": 20,
+                "verifier_timeout_seconds": 30.0,
+                "service_turn_timeout_seconds": 600.0,
+            },
+            "of judging alone against a",
+        ),
+        (
             "budgets on with every cap unlimited guards nothing",
             {
                 "budget_enabled": True,

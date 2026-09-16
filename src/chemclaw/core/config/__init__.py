@@ -817,6 +817,27 @@ class Settings(
             raise ValueError(
                 "mid_turn_resume_timeout_seconds must be smaller than service_turn_timeout_seconds"
             )
+        # **A revision is a whole extra model round-trip, and nothing related it to the deadline.**
+        # Each round ends in a judge call of its own (`build_answer_event` re-scores the revised
+        # answer), so the loop adds `answer_review_max_rounds` model calls *and* that many judge
+        # calls to a turn that `service_turn_timeout_seconds` already bounds. The model half has no
+        # declared ceiling to multiply — a gateway call is bounded only by the turn deadline — so
+        # what is checkable is the half that does: if the judge calls alone can fill the turn's
+        # deadline, the rounds cannot finish and every one of them is spend bought for an answer
+        # the chemist will never see. `mid_turn_resume_timeout_seconds` above is the same shape of
+        # guard for the same reason.
+        if self.answer_review_max_rounds and self.verifier_enabled:
+            judging = (self.answer_review_max_rounds + 1) * self.verifier_timeout_seconds
+            if judging >= self.service_turn_timeout_seconds:
+                raise ValueError(
+                    f"answer_review_max_rounds={self.answer_review_max_rounds} grades the answer "
+                    f"{self.answer_review_max_rounds + 1} times at "
+                    f"verifier_timeout_seconds={self.verifier_timeout_seconds}s, which is "
+                    f"{judging}s of judging alone against a "
+                    f"service_turn_timeout_seconds of {self.service_turn_timeout_seconds}s — "
+                    "before a single revision's model call. Lower answer_review_max_rounds or "
+                    "verifier_timeout_seconds, or raise service_turn_timeout_seconds"
+                )
         if self.budget_enabled and not any(
             (
                 self.budget_max_turns_per_session,

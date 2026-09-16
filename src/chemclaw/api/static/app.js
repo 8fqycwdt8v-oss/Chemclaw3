@@ -87,11 +87,12 @@ function applyEvent(evt, answerEl) {
     case "token":
       // Attributed tokens are another agent's working prose, not this turn's answer. The server
       // already knows: `api/runner` concatenates only unattributed tokens into `AnswerEvent.text`,
-      // so appending them here made the bubble a chemist reads diverge permanently from the
-      // durable transcript — permanently, because `case "answer"` below only fills an *empty*
-      // element and so never overwrites the contaminated one. Every other agent-bearing event
-      // routes through `agentTag`; this is the one where the attribution decides what the answer
-      // *is*, which is why it was the one worth getting wrong.
+      // so appending them here made the bubble a chemist reads diverge from the durable
+      // transcript. `case "answer"` below now *replaces* what this accumulated, so the divergence
+      // is no longer permanent — but the filter stays, because until the answer arrives the bubble
+      // is what the chemist is reading. Every other agent-bearing event routes through `agentTag`;
+      // this is the one where the attribution decides what the answer *is*, which is why it was
+      // the one worth getting wrong.
       if (evt.agent) {
         add("trace", `${agentTag(evt)}${evt.text}`);
         transcript.scrollTop = transcript.scrollHeight;
@@ -184,7 +185,13 @@ function applyEvent(evt, answerEl) {
       add("trace", `⌕ ${evt.source}: ${evt.chunks} chunk(s)`);
       return answerEl;
     case "answer":
-      if (!answerEl) add("assistant", evt.text);
+      // **Replace, not fill.** `AnswerEvent.text` is the authoritative answer — and under
+      // `answer_review_max_rounds` it is the *revised* one, while the element still holds the
+      // flagged prose this turn streamed before it was sent back. Filling only an empty element
+      // left a chemist reading flagged-text + revised-text concatenated and threw the corrected
+      // answer away, which is the one outcome worse than either half alone.
+      if (!answerEl) answerEl = add("assistant", "");
+      answerEl.textContent = evt.text;
       return answerEl;
     case "error":
       add("error", evt.message);

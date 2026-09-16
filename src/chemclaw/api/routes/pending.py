@@ -26,7 +26,7 @@ from chemclaw.api.deps import CurrentUser
 from chemclaw.api.schemas import PendingAnswerIn, PendingRequestOut, PendingRequestsOut
 from chemclaw.core.temporal_client import connect
 from chemclaw.durable import pending_store
-from chemclaw.kg.premise import premise_breaks
+from chemclaw.kg.premise import count_refusals, premise_breaks
 
 logger = logging.getLogger(__name__)
 
@@ -173,8 +173,15 @@ async def answer_pending(
         raise HTTPException(status_code=403, detail="this request is not routed to you")
     if stored.state != "waiting":
         raise HTTPException(status_code=409, detail=f"this request is already {stored.state}")
-    broken = await premise_breaks(stored.premise_note_ids)
+    # `blocks_an_answer` rather than every break: an `absent` note cannot be told apart from a
+    # checkout this replica has not caught up with, and refusing a chemist on that is both the
+    # wrong failure direction and unappealable — there is no override on this route. See the
+    # method's own docstring for the measurement.
+    broken = [
+        item for item in await premise_breaks(stored.premise_note_ids) if item.blocks_an_answer()
+    ]
     if broken:
+        count_refusals("answer", broken)
         raise HTTPException(
             status_code=409,
             detail=(

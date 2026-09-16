@@ -17,7 +17,7 @@ So what is left here is small on purpose: score the answer and build the event.
 import logging
 from collections.abc import Sequence
 
-from chemclaw.agent.verifier import score_answer
+from chemclaw.agent.verifier import TurnReview, score_answer
 from chemclaw.api.events import AnswerEvent
 
 logger = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ async def build_answer_event(
     answer: str,
     tool_outputs: Sequence[str],
     tools_called: Sequence[str] = (),
-) -> AnswerEvent:
+) -> tuple[AnswerEvent, TurnReview]:
     """Assemble the turn's final `AnswerEvent`, scoring the answer first.
 
     `review_required` is the one routing signal a surface reads to flag an answer rather than
@@ -43,7 +43,18 @@ async def build_answer_event(
         tools_called: Every tool this turn invoked, for the promised-but-uncalled scan.
 
     Returns:
-        The event, which never carries a flag the caller has to interpret: every *finding* field is
+        The event and the verdict it projects.
+
+        **The verdict comes back too, because the wire deliberately merges what a caller that
+        *acts* has to tell apart.** `AnswerEvent.unsupported_claims` is one list for a reviewer to
+        read, carrying both the claims the evidence did not support and the notes saying which
+        check spoke; `TurnReview` keeps those apart (`unsupported` / `review_notes`). The revision
+        loop in `api/runner.py` is the caller that acts — it quotes entries back to the model as
+        claims to re-answer — and off the merged list it quoted "verification did not run" at a
+        model that could do nothing about it. Returning the pair is what lets the loop read the
+        actionable half without recognising a status by its wording.
+
+        The event never carries a flag the caller has to interpret: every *finding* field is
         either what a check found or the `None`/`False` that says nothing was found — and
         `checks_run` says which checks were in a position to find anything at all.
 
@@ -54,13 +65,19 @@ async def build_answer_event(
         byte-for-byte identical to one no gate looked at, and both gates ship off.
     """
     review = await score_answer(answer, tool_outputs, tools_called)
-    return AnswerEvent(
-        text=answer,
-        checks_run=review.checks_run,
-        confidence=review.confidence,
-        verified_by=review.verified_by,
-        unsupported_claims=review.unsupported,
-        review_required=review.review_required,
-        challenged=review.challenged,
-        review_hold_id=review.hold_id,
+    return (
+        AnswerEvent(
+            text=answer,
+            checks_run=review.checks_run,
+            confidence=review.confidence,
+            verified_by=review.verified_by,
+            # Concatenated in the order the checks appended them, so the wire carries exactly the
+            # bytes it carried when `TurnReview` held one list: the findings first, then the note
+            # saying which check produced the verdict.
+            unsupported_claims=[*review.unsupported, *review.review_notes],
+            review_required=review.review_required,
+            challenged=review.challenged,
+            review_hold_id=review.hold_id,
+        ),
+        review,
     )

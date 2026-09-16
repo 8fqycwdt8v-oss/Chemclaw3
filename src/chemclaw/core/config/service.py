@@ -340,9 +340,13 @@ class ServiceSettings(BaseSettings):
     # declared. Stated here rather than left to be discovered, because "the user is warned at 80%"
     # is what this setting's name suggests and is not what it does.
     #
-    # 0 disables the warning, on the convention `agent.py` states for numeric ceilings; 1.0 makes
-    # it fire only on the turn that also refuses, which is legal and pointless.
-    budget_warn_fraction: float = Field(default=0.8, ge=0, le=1)
+    # 0 disables the warning, on the convention `agent.py` states for numeric ceilings. The upper
+    # bound is exclusive because 1.0 is the one value whose plain reading ("warn only at the cap")
+    # is not what it does: `_near` is `used >= cap * fraction and used < cap`, so at 1.0 it is
+    # `used >= cap and used < cap` — never true, the warning silently off. This line used to say
+    # 1.0 "fires only on the turn that also refuses, which is legal and pointless"; it fires never,
+    # and a bound that rejects it says so where a comment nobody reads did not.
+    budget_warn_fraction: float = Field(default=0.8, ge=0, lt=1)
     # Job→session push-back (plan F3-T2/T3): a finished Temporal job writes a `session_events`
     # row; the front door tails the table and wakes the owning session (appending the result,
     # flipping the `awaiting` todo) instead of the user polling. This is the tailer's poll
