@@ -155,7 +155,11 @@ def test_the_control_arm_asks_the_front_door_for_its_profile_by_name() -> None:
         if request.url.path == "/sessions":
             bodies.append(json.loads(request.content or b"{}"))
             return httpx.Response(200, json={"session_id": "s1"})
-        return httpx.Response(200, content=b'data: {"type": "answer", "text": "no."}\n\n')
+        return httpx.Response(
+            200,
+            content=b'data: {"type": "answer", "text": "no."}\n\n',
+            headers={"content-type": "text/event-stream"},
+        )
 
     async def go() -> tuple[str, str]:
         async with httpx.AsyncClient(

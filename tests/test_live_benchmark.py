@@ -390,3 +390,49 @@ def test_a_decimal_is_not_a_choice_and_a_full_stop_is_not_a_decimal() -> None:
     # And the ordinary case still scores, so a lookbehind tightened until nothing
     # matches is red rather than quietly conservative.
     assert _chosen("the answer is 4", digits) == "4"
+
+
+def test_ask_reads_the_same_awkward_stream_the_probe_harness_does() -> None:
+    """The third of the three readers, against the fixture the other two are held to.
+
+    This one carried `line[5:].strip()` where the storm carried `line[6:]` and `evals/live` carried
+    a third spelling — three readings of one wire format, none of which handled a `data:` field
+    split over two lines. The cost here is specific: `_ask` collects the `answer` event and the
+    `error` event and nothing else, so a dropped `answer` frame scores as the model declining to
+    name an option, which `Answered.unparsed` reports as a fact about chemistry.
+
+    The fixture is `tests/test_live_probes.AWKWARD_STREAM`, imported rather than copied, so the
+    claim that the three agree is a shared object rather than three transcriptions of one.
+    """
+    import asyncio
+
+    import httpx
+
+    from chemclaw.cli.live_benchmark import _ask
+    from tests.test_live_probes import AWKWARD_STREAM, SSE_HEADERS
+
+    question = BenchmarkQuestion(
+        id="q1",
+        category="solvents",
+        question="which solvent?",
+        options=["ethanol", "toluene"],
+        answer="ethanol",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s1"})
+        return httpx.Response(200, content=AWKWARD_STREAM, headers=SSE_HEADERS)
+
+    async def go() -> tuple[str, str]:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://front-door"
+        ) as client:
+            return await _ask(client, question, None)
+
+    answer, error_code = asyncio.run(go())
+    assert answer == "the corpus says ethanol."
+    assert error_code == ""
+    # And the scorer gets what it needs out of it, which is the reason the frame mattering is not
+    # an internal detail: a dropped answer is an abstention in the published table.
+    assert _chosen(answer, question.options) == "ethanol"

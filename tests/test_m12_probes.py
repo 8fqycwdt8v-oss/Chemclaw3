@@ -85,6 +85,11 @@ def _probe(**overrides: object) -> Probe:
     return Probe.model_validate(payload)
 
 
+SSE_HEADERS = {"content-type": "text/event-stream"}
+"""The header the front door sets and `httpx_sse` refuses to decode without — see
+`tests/test_live_probes.SSE_HEADERS`."""
+
+
 def _sse(*events: dict[str, object]) -> bytes:
     """Exactly the wire shape the front door emits: one `data:` line per event."""
     return "".join(f"data: {json.dumps(e)}\n\n" for e in events).encode()
@@ -96,7 +101,7 @@ def _run_one(probe: Probe, *events: dict[str, object]) -> ProbeOutcome:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/sessions":
             return httpx.Response(200, json={"session_id": "s1"})
-        return httpx.Response(200, content=_sse(*events))
+        return httpx.Response(200, content=_sse(*events), headers=SSE_HEADERS)
 
     async def go() -> ProbeOutcome:
         async with httpx.AsyncClient(
@@ -290,7 +295,7 @@ def _plan_gate_transport(
             return httpx.Response(200, json=remaining_plans.pop(0))
         if path.endswith("/plan/decision"):
             return httpx.Response(decision_status)
-        return httpx.Response(200, content=_sse(*remaining_turns.pop(0)))
+        return httpx.Response(200, content=_sse(*remaining_turns.pop(0)), headers=SSE_HEADERS)
 
     return httpx.MockTransport(handler)
 

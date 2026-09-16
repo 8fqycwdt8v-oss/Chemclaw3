@@ -37,11 +37,13 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Final
 
 import httpx
 import yaml
+from httpx_sse import EventSource, aconnect_sse
 from pydantic import BaseModel, ConfigDict, Field
 from temporalio.service import RPCError
 
@@ -247,15 +249,44 @@ def load_probes(probe_dir: str | None = None) -> list[Probe]:
     return probes
 
 
-def _decode(chunk: str) -> dict[str, Any] | None:
-    """One SSE `data:` line as an event dict, or `None` for a keepalive or unparseable frame."""
-    if not chunk.startswith("data:"):
-        return None
-    try:
-        decoded = json.loads(chunk[5:].strip())
-    except json.JSONDecodeError:
-        return None
-    return decoded if isinstance(decoded, dict) else None
+async def decoded_events(source: EventSource) -> AsyncIterator[dict[str, Any]]:
+    """Every turn event on one front-door stream, as the dict the surfaces switch on.
+
+    **One decoder, because there were three and they disagreed.** This harness, `cli/live_storm`
+    and `cli/live_benchmark` each carried their own — `line[6:]` after `"data: "`,
+    `line[5:].strip()` after `"data:"`, and a third with a `dict` guard the other two lacked.
+    Three readers of one wire format is three chances to read it differently, and the differences
+    were real: none of them handled a `data:` field split over more than one line, an `id:` or a
+    `retry:`, all of which the SSE grammar permits at any time. `httpx_sse` implements that
+    grammar, so the question stops being what each harness remembered about the format.
+
+    **This is a latent defect rather than a live one, and it is worth saying which.** The front
+    door serialises each event with `model_dump_json()` through `sse_starlette`, which never emits
+    a raw newline, so the multi-line case has never fired against this system's own server. What
+    the old readers would have done to it — take the first line as the whole payload and hand the
+    rest to `json.loads` as the next frame — is a decoding the harness would have reported as the
+    *system* dropping events.
+
+    **The `event:` name is now available and is deliberately not read.** `api/events.sse_frame`
+    derives it from the payload's own `type` discriminant (`{"event": event.type, "data":
+    event.model_dump_json()}`), and `api.events.Event` is a union discriminated on that same
+    `type`. A harness switching on the header would be switching on a copy of the field it already
+    has to parse, and would disagree with the typed model the moment the two ever diverged. So all
+    three call sites read `type` out of the body, and the wire name is left to the browser clients
+    it exists for.
+
+    A comment frame — sse-starlette's keepalive is `: ping - <timestamp>` — produces no event at
+    all here, because the grammar says a comment carries no fields. A frame whose payload is not
+    JSON, or is JSON that is not an object, is skipped: this reader's job is to observe what the
+    front door emitted, and a frame it cannot read is one event missing rather than a run lost.
+    """
+    async for sse in source.aiter_sse():
+        try:
+            decoded = json.loads(sse.data)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(decoded, dict):
+            yield decoded
 
 
 def _numbers(raw: Any, probe_id: str) -> list[float]:
@@ -478,16 +509,14 @@ async def run_turn(
             session_id = await open_session(client, profile=profile)
             outcome.session_id = session_id
 
-        async with client.stream(
+        async with aconnect_sse(
+            client,
             "POST",
             f"/sessions/{session_id}/messages",
             json={"message": message},
-        ) as response:
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                event = _decode(line)
-                if event is None:
-                    continue
+        ) as source:
+            source.response.raise_for_status()
+            async for event in decoded_events(source):
                 kind = str(event.get("type", "unknown"))
                 counts[kind] = counts.get(kind, 0) + 1
                 index += 1

@@ -63,9 +63,50 @@ def _probe(**overrides: object) -> Probe:
     return Probe.model_validate(payload)
 
 
+SSE_HEADERS = {"content-type": "text/event-stream"}
+"""What the front door actually answers a turn with, and what the client refuses without.
+
+`sse_starlette` sets it on every stream; `httpx_sse` checks it before decoding a byte, because a
+JSON error body served at 200 is not a stream and silently yielding nothing from one is how a
+harness reports a broken front door as a turn that said nothing. A fixture that omitted it was
+asserting against a response the service cannot produce.
+"""
+
+
 def _sse(*events: dict[str, object]) -> bytes:
     """Exactly the wire shape the front door emits: one `data:` line per event."""
     return "".join(f"data: {json.dumps(e)}\n\n" for e in events).encode()
+
+
+#: One turn's stream written in the parts of the SSE grammar the hand-written readers did not have.
+#:
+#: Every line here is legal and three of the four shapes were unreadable before `httpx_sse`:
+#: sse-starlette's keepalive **comment**, the `event:` name `api/events.sse_frame` sets on every
+#: real frame and no fixture in this suite used to send, `id:`/`retry:` fields, and a `data:` field
+#: **split over two lines**, which the grammar says is joined with a newline before it is parsed.
+#: The three old readers each took one `data:` line as a whole payload, so the split frame decoded
+#: as two JSONDecodeErrors and the event simply disappeared — an answer the harness would have
+#: recorded as the system going silent.
+#:
+#: **The split frame is latent, not live**, and the distinction is the point of writing it down:
+#: `sse_starlette` serialises with `model_dump_json()`, which emits no raw newline, so this system
+#: has never sent one. It is here because the reader's job is the wire format rather than this
+#: server's current habits, and because a harness that misreads a legal frame reports the *system*
+#: as broken.
+#:
+#: Defined once and read by `tests/test_live_storm.py` and `tests/test_live_benchmark.py` as well,
+#: because "the three call sites agree" is the claim, and three copies of the fixture would be
+#: three chances for them to stop agreeing.
+AWKWARD_STREAM = (
+    b": ping - 2026-09-16T00:00:00+00:00\n\n"
+    b"event: tool_call\n"
+    b'data: {"type": "tool_call", "tool": "gather_evidence", "arguments": "{}"}\n\n'
+    b"event: answer\n"
+    b"id: 7\n"
+    b"retry: 3000\n"
+    b'data: {"type": "answer",\n'
+    b'data:  "text": "the corpus says ethanol."}\n\n'
+)
 
 
 def _transport(*events: dict[str, object]) -> httpx.MockTransport:
@@ -74,7 +115,7 @@ def _transport(*events: dict[str, object]) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/sessions":
             return httpx.Response(200, json={"session_id": "s1"})
-        return httpx.Response(200, content=_sse(*events))
+        return httpx.Response(200, content=_sse(*events), headers=SSE_HEADERS)
 
     return httpx.MockTransport(handler)
 
@@ -155,6 +196,67 @@ def test_expected_tools_is_any_of_not_all_of() -> None:
         {"type": "answer", "text": "ok"},
     )
     assert outcome.expected_tools_met is True
+
+
+def test_a_legal_frame_the_old_readers_could_not_parse_is_read() -> None:
+    """The grammar, not the habit: a split `data:`, a comment, an `event:`, an `id:` and a `retry:`.
+
+    Driven through `run_probe` rather than through the decoder alone, because what broke before was
+    a whole event vanishing from an outcome rather than a function returning the wrong thing: the
+    `tool_call` has to reach `tools_called` and the split `answer` has to reach `answer`, out of
+    one stream that also contains a keepalive comment nothing may turn into an event.
+
+    Every assertion here failed before `httpx_sse` — the split frame decoded as two parse errors
+    and was dropped, so this probe recorded an unanswered turn, which is the silent-death signal
+    this harness exists to report. `AWKWARD_STREAM` says why that is latent against this system's
+    own server and why the test is worth having anyway.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s1"})
+        return httpx.Response(200, content=AWKWARD_STREAM, headers=SSE_HEADERS)
+
+    async def go() -> ProbeOutcome:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://front-door"
+        ) as client:
+            return await run_probe(client, _probe())
+
+    outcome = asyncio.run(go())
+    assert outcome.tools_called == ["gather_evidence"]
+    assert outcome.answer == "the corpus says ethanol."
+    assert outcome.transport_error is None
+    # The keepalive is a comment, which carries no fields — it must not arrive as an event at all,
+    # or every idle second of a long turn would show up in the counts as something that happened.
+    assert outcome.event_counts == {"tool_call": 1, "answer": 1}
+
+
+def test_a_response_that_is_not_an_event_stream_is_a_transport_failure_not_a_silent_turn() -> None:
+    """A 200 carrying JSON is refused rather than read as a turn that emitted nothing.
+
+    The old reader scanned for `data:` prefixes, so an HTML error page or a JSON body served at 200
+    — a proxy in front of the front door is the realistic way to get one — produced no events and
+    no complaint, and the probe booked a silent death against the *system*. `httpx_sse` checks the
+    content type first, `SSEError` is an `httpx.TransportError`, and `run_probe` already records a
+    transport failure rather than raising it. So the misconfiguration now names itself.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s1"})
+        return httpx.Response(200, json={"detail": "a proxy answered instead"})
+
+    async def go() -> ProbeOutcome:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://front-door"
+        ) as client:
+            return await run_probe(client, _probe())
+
+    outcome = asyncio.run(go())
+    assert outcome.transport_error is not None
+    assert "text/event-stream" in outcome.transport_error
+    assert outcome.answered is False
 
 
 def test_no_expected_tools_leaves_the_check_unscored_rather_than_failed() -> None:

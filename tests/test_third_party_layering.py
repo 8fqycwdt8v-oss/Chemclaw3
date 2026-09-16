@@ -123,6 +123,11 @@ _STACKS: dict[str, str] = {
     "torch": "ml",
     "linear_operator": "ml",
     "httpx": "httpx",
+    # The client half of SSE, on the `httpx` stack for the same reason `sse_starlette` sits on the
+    # server half's: it is an `httpx.AsyncClient` extension, not a stack of its own, and a root
+    # nobody maps is a root this walk cannot see. Without the row `import httpx_sse` in `science/`
+    # would pass the policy that exists to keep an HTTP client out of the physics.
+    "httpx_sse": "httpx",
     "openai": "llm",
     "anthropic": "llm",
     # The warehouse driver's client. Tracked here so its lazy import is a *declared* exception
@@ -230,6 +235,13 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.connectors", "mcp"): "MCP is the protocol a connector server speaks",
     ("chemclaw.connectors", "http"): "each bundle's tool server is an ASGI app",
     ("chemclaw.connectors", "httpx"): "the client that calls a bundle carries the turn's identity",
+    ("chemclaw.api", "httpx"): (
+        "api/auth.py fetches the tenant JWKS itself: `_HttpxJwkClient` overrides PyJWT's "
+        "`fetch_data`, whose `urllib.request.urlopen` has no `trust_env` and follows an ambient "
+        "`HTTPS_PROXY` (measured) — so the key set every bearer token is validated against could "
+        "come from the proxy. This row is the `token` row's transport half, not a second HTTP "
+        "client for the front door: `core/http.py` still owns the trust store it passes"
+    ),
     ("chemclaw.api", "langgraph"): (
         "api/graph_stream.py translates a compiled graph's stream into the turn event contract "
         "(M8, D-2026-08-10) — the front door's half of driving the graph"

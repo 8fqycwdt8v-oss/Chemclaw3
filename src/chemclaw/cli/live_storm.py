@@ -23,7 +23,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import json
 import logging
 import os
 import shutil
@@ -36,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from httpx_sse import aconnect_sse
 from temporalio.client import WorkflowExecutionStatus
 
 from chemclaw.connectors.jobs import build_job_tool, job_workflow_id
@@ -45,6 +45,7 @@ from chemclaw.core.db import _redact
 from chemclaw.core.db import connection as db_connection
 from chemclaw.core.logging import configure_logging
 from chemclaw.core.temporal_client import connect as temporal_connect
+from chemclaw.evals.live import decoded_events
 
 logger = logging.getLogger(__name__)
 
@@ -155,20 +156,20 @@ async def run_turn(client: httpx.AsyncClient, message: str) -> TurnResult:
         created.raise_for_status()
         result.session_id = str(created.json()["session_id"])
 
-        async with client.stream(
-            "POST", f"/sessions/{result.session_id}/messages", json={"message": message}
-        ) as response:
-            result.status = response.status_code
-            if response.status_code != 200:
-                await response.aread()
+        # `evals.live.decoded_events` rather than a fourth reading of the wire format — see its
+        # docstring for why there were three and what they each got wrong. The status is taken off
+        # the response before the stream is touched, because a refused turn has a JSON body and
+        # `aiter_sse` refuses a content type that is not `text/event-stream`: that refusal is the
+        # right answer for a 200 that is not a stream and the wrong one for a 429, which this
+        # harness has to record as a *status* rather than as a transport failure.
+        async with aconnect_sse(
+            client, "POST", f"/sessions/{result.session_id}/messages", json={"message": message}
+        ) as source:
+            result.status = source.response.status_code
+            if result.status != 200:
+                await source.response.aread()
                 return result
-            async for line in response.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                try:
-                    event = json.loads(line[6:])
-                except ValueError:
-                    continue
+            async for event in decoded_events(source):
                 kind = str(event.get("type", ""))
                 if kind == "tool_call":
                     result.announced += 1

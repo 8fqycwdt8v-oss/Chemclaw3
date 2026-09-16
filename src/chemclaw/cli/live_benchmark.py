@@ -40,10 +40,11 @@ from collections import Counter
 from pathlib import Path
 
 import httpx
+from httpx_sse import aconnect_sse
 from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core.config import settings
-from chemclaw.evals.live import open_session
+from chemclaw.evals.live import decoded_events, open_session
 
 
 class BenchmarkQuestion(BaseModel):
@@ -249,17 +250,14 @@ async def _ask(
     """
     session_id = await open_session(client, profile=profile)
     answer, error_code = "", ""
-    async with client.stream(
-        "POST", f"/sessions/{session_id}/messages", json={"message": _prompt(question)}
-    ) as response:
-        response.raise_for_status()
-        async for line in response.aiter_lines():
-            if not line.startswith("data:"):
-                continue
-            try:
-                event = json.loads(line[5:].strip())
-            except json.JSONDecodeError:
-                continue
+    # `evals.live.decoded_events` rather than a third reading of the wire format — its docstring
+    # carries the argument, including why the `event:` name this now has access to is still not
+    # what any of the three switches on.
+    async with aconnect_sse(
+        client, "POST", f"/sessions/{session_id}/messages", json={"message": _prompt(question)}
+    ) as source:
+        source.response.raise_for_status()
+        async for event in decoded_events(source):
             if event.get("type") == "answer":
                 answer = str(event.get("text", ""))
             elif event.get("type") == "error":
