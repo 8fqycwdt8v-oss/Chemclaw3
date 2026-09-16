@@ -130,3 +130,51 @@ def test_a_model_authored_path_is_bounded_before_it_reaches_a_log_line(
     assert "\ninjected-second-line" not in line, "a newline in the path forged a second log record"
     # The path is still identifiable — bounding it must not turn the record into nothing.
     assert "AAAA" in line
+
+
+def test_a_skill_the_model_reads_is_counted_by_name(tree: Path) -> None:
+    """The signal nothing persisted: which skill a turn actually used.
+
+    Before `chemclaw_skill_loads_total`, the only skill series in the whole registry counted
+    *denials*, so a skill could not be ranked, promoted or retired on evidence — "is this skill
+    ever used" was answerable from an INFO line on a live pod and from nowhere else. That is the
+    measurement any distiller or promotion threshold has to stand on.
+    """
+    before = METRICS.value("chemclaw_skill_loads_total")
+    backend = NarrowedSkillsBackend(str(tree), lambda _name: True)
+
+    assert backend.read("/solvent-selection/SKILL.md").error is None
+
+    assert METRICS.value("chemclaw_skill_loads_total") == before + 1
+    assert 'chemclaw_skill_loads_total{skill="solvent-selection"}' in METRICS.render()
+
+
+def test_a_refused_read_is_not_counted_as_a_load(tree: Path) -> None:
+    """The two counters partition the *decided* reads; neither is the number of asks.
+
+    A load counted beside the denial would make the series read as "asks", and the question it
+    exists to answer is which procedure the model actually opened.
+    """
+    before = METRICS.value("chemclaw_skill_loads_total")
+    backend = NarrowedSkillsBackend(str(tree), lambda name: name != "restricted-procedure")
+
+    assert backend.read("/restricted-procedure/SKILL.md").error is not None
+
+    assert METRICS.value("chemclaw_skill_loads_total") == before
+
+
+def test_a_name_no_directory_backs_mints_no_series(tree: Path) -> None:
+    """The label's clamp, driven rather than argued.
+
+    `skill` is the first segment of a path the *model* wrote, and `permits` only ever narrows — so
+    in a deployment configuring none of the three gates it returns True for any string. Counting
+    beside the ask would therefore mint a series per invented name. Counting the bytes clamps the
+    label to a directory that exists, because a path that resolved is one inside `root_dir`.
+    """
+    before = METRICS.value("chemclaw_skill_loads_total")
+    backend = NarrowedSkillsBackend(str(tree), lambda _name: True)
+
+    assert backend.read("/not-a-skill-anybody-wrote/SKILL.md").error is not None
+
+    assert METRICS.value("chemclaw_skill_loads_total") == before
+    assert "not-a-skill-anybody-wrote" not in METRICS.render()

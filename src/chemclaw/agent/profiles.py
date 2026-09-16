@@ -110,6 +110,27 @@ class AgentProfile(BaseModel):
     # `build_chat_model`'s own contract for an unrouted task is the same answer stated one level
     # down (it falls back to `llm_model`); this only declines to pay for that twice.
     model_route: str | None = None
+    # Which skills this agent may reach, narrowing the discovered set to the named subset. `None`
+    # leaves the skill surface to the three narrowings `agent/skill_access.py` already composes —
+    # deployment enablement, tool reachability, and the caller's roles — and a name here is a
+    # fourth, applied the same way and only ever removing.
+    #
+    # **It exists because nothing could vary skills independently of tools, and that made a skill
+    # unmeasurable.** The A/B harness pairs two arms across *profile files*
+    # (`evals/tool_utility.paired_tasks`), so an arm is whatever an `AgentProfile` can express —
+    # and a profile could express a tool surface and a prompt and nothing else. `ToolScopedSkills`
+    # then couples the two in the direction that defeats the measurement: narrowing `tool_names`
+    # to isolate a skill also removes every *other* skill whose declared tools went with them, so
+    # the delta is a prompt-and-tools-and-skills delta. That is
+    # `D-2026-09-14-tools-were-never-the-variable` one field over, and this field is what lets an
+    # arm hold the tool surface still and move only the skill.
+    #
+    # A name with no discovered skill behind it is caught by `make skill-validate` rather than at
+    # build time, for the reason the enable-list and the role-gate map are: the skills tree is
+    # configuration a deployment supplies, so a profile shipped here cannot be validated against a
+    # tree that does not exist until a deployment names one. The failure mode is the benign one —
+    # a name nothing backs narrows to nothing and removes no skill anybody has.
+    skill_names: frozenset[str] | None = None
 
 
 # The one profile that exists today: every field unset, so it resolves to the global agent verbatim.

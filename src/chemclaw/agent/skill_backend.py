@@ -164,6 +164,18 @@ class NarrowedSkillsBackend(FilesystemBackend):
         not reconstructible from anywhere else — but it is a per-call line, and a deployment
         drowning in it is looking at a real thing rather than at a broken bound.
 
+        **The count is taken on the bytes, not on the ask, and that is what clamps its label.**
+        `chemclaw_skill_loads_total` carries the skill name, and `skill` is the first segment of a
+        path the *model* wrote — so counting beside the INFO above would mint a series for every
+        string a model can invent, since `permits` only ever *narrows* and returns True for any
+        name in a deployment that configures none of the three gates. After `super().read` a path
+        that resolved holds bytes from inside `root_dir`, so its first segment is a directory that
+        exists: the label is clamped by the tree rather than by a predicate that may be inert.
+        Counting the successful read is also the truer measurement — "which procedure the model
+        actually opened" is the support question, and an ask that returned an error opened nothing.
+        The denial counter beside it is the other half, and the two do not sum to the asks: a read
+        that passes the gate and then fails on a missing file is in neither.
+
         A refusal is a WARNING and a count, not an INFO, because the role gate lives here — this is
         the enforcement point (the class docstring says why), and an enforcement point whose
         refusals are silent is a control nobody can audit. It names the path rather than the skill,
@@ -192,7 +204,12 @@ class NarrowedSkillsBackend(FilesystemBackend):
             )
             return ReadResult(error=REFUSED, file_data=None)
         log_event(logger, "skill.read", "the model read %s", recorded, skill=skill, path=recorded)
-        return super().read(file_path, offset, limit)
+        result = super().read(file_path, offset, limit)
+        if not result.error:
+            record_metric(
+                lambda m: m.increment("chemclaw_skill_loads_total", labels={"skill": skill})
+            )
+        return result
 
     def glob(self, pattern: str, path: str | None = None) -> GlobResult:
         """Match files, dropping every hit outside a permitted skill.
