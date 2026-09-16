@@ -13,12 +13,13 @@ around a wrapper with nothing in between.
 """
 
 import logging
+from collections.abc import Mapping
 from datetime import timedelta
 from functools import cache
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError, create_model
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
@@ -191,6 +192,12 @@ def _params_model(template: Template) -> type[BaseModel]:
     camel = "".join(part.capitalize() for part in template.name.replace("-", "_").split("_"))
     return create_model(
         f"{camel}Inputs",
+        # **`forbid`, because the silent direction here is a run that quietly does something else.**
+        # pydantic's default is `ignore`, so `solvant="MeCN"` for a declared `solvent` was
+        # accepted, dropped, and the procedure ran gas-phase — a misspelling of an *optional*
+        # input is invisible in a way a missing required one is not. The published schema names
+        # exactly these fields, so a caller sending anything else is already wrong.
+        __config__=ConfigDict(extra="forbid"),
         __doc__=f"Inputs for the {template.name!r} template.",
         **fields,
     )
@@ -222,9 +229,47 @@ def _docstring(template: Template) -> str:
     return "\n".join(lines)
 
 
-def run_workflow_id(template: Template, inputs: dict[str, Any]) -> str:
-    """The deterministic id of one template run — the idempotency key, as for a connector job."""
-    return f"template-{template.name}-{stable_hash([template.name, inputs])}"
+def run_workflow_id(template: Template, inputs: dict[str, Any], scope: str = "") -> str:
+    """The deterministic id of one template run — the idempotency key, as for a connector job.
+
+    **`scope` is what keeps a name from being an identity it is not.** For a `data/templates/`
+    file the name *is* the procedure: it is reviewed, global and the same for everybody, so
+    name-plus-inputs is the right key and two people asking the same question rightly share one
+    run (`D-2026-08-01-a-running-job-has-no-owner`). A composed workflow breaks both halves of that
+    premise — the name is one chemist's, and its steps change whenever they re-compose it.
+
+    Measured before this argument took: two documents with *nothing* in common but the name
+    `triage` produced the same id `template-triage-65f5e26304a2c36c`, and because the launcher
+    rejoins an already-started id, running the second returned the **first's** completed result and
+    its step outputs, with a summary that reads correct. Two chemists collide the same way, and the
+    second is denied their own workflow for as long as the first's run is retained.
+
+    Empty `scope` reproduces the old id exactly, so a file template's id — and every archived
+    history and test that names one — is unchanged.
+
+    Args:
+        template: The resolved template.
+        inputs: The validated inputs.
+        scope: What else distinguishes this document from another of the same name. Empty for a
+            reviewed file; owner and fingerprint for a composed workflow.
+
+    Returns:
+        The workflow id, prefixed `composed-` when a scope narrows it so a reader can tell the two
+        kinds of run apart in a job listing.
+    """
+    if not scope:
+        return f"template-{template.name}-{stable_hash([template.name, inputs])}"
+    return f"composed-{template.name}-{stable_hash([template.name, inputs, scope])}"
+
+
+def _family(scope: str) -> str:
+    """What a run of this kind is called on the session's started-jobs list.
+
+    A composed run says so: the two are the same machinery and not the same thing to a reader, and
+    a listing that called them both "template" would make a document the model wrote a moment ago
+    indistinguishable from a reviewed file with the same name.
+    """
+    return "composed" if scope else "template"
 
 
 async def _still_running(handle: Any) -> bool:
@@ -318,7 +363,9 @@ def unrunnable_reason(template: Template) -> str:
     return "\n".join(f"  - {problem}" for problem in problems)
 
 
-async def start_template_run(template: Template, inputs: dict[str, Any]) -> str:
+async def start_template_run(
+    template: Template, inputs: Mapping[str, Any] | BaseModel, scope: str = ""
+) -> str:
     """Start one run of `template` and return its job id, rejoining an identical run in flight.
 
     **Extracted so the two launchers cannot drift.** A `data/templates/` file reaches this through
@@ -329,10 +376,25 @@ async def start_template_run(template: Template, inputs: dict[str, Any]) -> str:
     not to either caller, and a second copy of it is how one of them would quietly lose the rejoin
     or the ceiling.
 
+    **Validation belongs here too, and did not**, which is the same drift this extraction exists to
+    stop. `build_template_tool.launch` validated against the template's own params model — the
+    D-138 fix — and `run_composed_workflow` called this with a raw dict, so a composed run carried
+    an undeclared key verbatim into the run's scope and accepted a *missing required* one, failing
+    on `${inputs.x}` deep inside a durable run rather than at the launch `unrunnable_reason` exists
+    to refuse. A check one of two callers performs is a check this seam does not have.
+
+    The params model is `extra="forbid"`, so a misspelled *optional* input is refused too. That is
+    the half a required-field check cannot reach: `solvant` for `solvent` was dropped in silence and
+    the procedure ran gas-phase.
+
     Args:
         template: The resolved template to run. Pinned into the workflow input, so an edit
             afterwards cannot change a run already executing.
-        inputs: The validated inputs, already JSON-shaped.
+        inputs: The caller's inputs, validated here against the template's declared ones.
+        scope: What distinguishes this document from another of the same name — see
+            `run_workflow_id`. Empty for a reviewed `data/templates/` file, whose name is the
+            procedure; owner and fingerprint for a composed workflow, whose name is neither
+            global nor fixed.
 
     Returns:
         The workflow id to poll with `get_durable_job_status`.
@@ -355,7 +417,27 @@ async def start_template_run(template: Template, inputs: dict[str, Any]) -> str:
             "use the tools that are available, or ask for the missing capability to be "
             "enabled."
         )
-    workflow_id = run_workflow_id(template, inputs)
+    # **Dumped first when it is already a model**, because `_params_model` builds a *new* class on
+    # every call: a `ProbeInputs` instance built by the generated tool is not an instance of the
+    # `ProbeInputs` built here, and `model_validate` rejects it on class identity. One shape in — a
+    # plain mapping — so the check below is about the values rather than about which `create_model`
+    # call made the object.
+    raw = inputs.model_dump(mode="json") if isinstance(inputs, BaseModel) else dict(inputs)
+    try:
+        resolved = (
+            _params_model(template).model_validate(raw).model_dump(mode="json", exclude_none=True)
+        )
+    except ValidationError as exc:
+        raise TemplateError(
+            f"the inputs for the {template.name!r} template are not what it declares "
+            f"({exc.error_count()} problem(s)): "
+            + "; ".join(
+                f"{'.'.join(str(part) for part in error['loc']) or '(root)'}: {error['msg']}"
+                for error in exc.errors()
+            )
+            + f". It declares: {[item.name for item in template.inputs]}."
+        ) from exc
+    workflow_id = run_workflow_id(template, resolved, scope)
     requested_by = require_actor()
     client = await connect()
     try:
@@ -365,10 +447,14 @@ async def start_template_run(template: Template, inputs: dict[str, Any]) -> str:
                 # The resolved template, pinned into the run — an edit afterwards cannot change
                 # what is already executing (`workflows.template_job`).
                 template=template,
-                inputs=inputs,
+                inputs=resolved,
                 requested_by=requested_by,
                 roles=sorted(get_current_roles()),
                 session_id=get_current_session_id() or "",
+                # Pinned here rather than read inside the workflow, so the bound the run enforces
+                # and the bound `run_ceiling_problems` sized it with are one number — see
+                # `TemplateRunInput.max_parallel_steps`.
+                max_parallel_steps=settings.orchestrator_max_parallel_children,
             ),
             id=workflow_id,
             task_queue=settings.background_task_queue,
@@ -393,7 +479,7 @@ async def start_template_run(template: Template, inputs: dict[str, Any]) -> str:
         # `RUNNING` and not "not completed", for that launcher's reason: a run that failed, was
         # cancelled or timed out will never emit the completion an announced row waits for.
         if await _still_running(client.get_workflow_handle(workflow_id)):
-            record_job_started(workflow_id, f"template:{template.name}")
+            record_job_started(workflow_id, f"{_family(scope)}:{template.name}")
         return workflow_id
     except Exception as exc:
         # `connect()` above frames an unreachable broker; this is the call *after* it — a
@@ -410,7 +496,7 @@ async def start_template_run(template: Template, inputs: dict[str, Any]) -> str:
             "fault clears."
         ) from exc
 
-    record_job_started(handle.id, f"template:{template.name}")
+    record_job_started(handle.id, f"{_family(scope)}:{template.name}")
     return handle.id
 
 
@@ -419,18 +505,16 @@ def build_template_tool(template: Template) -> CapabilityTool:
     params_model = _params_model(template)
 
     async def launch(params: params_model) -> str:  # type: ignore[valid-type]
-        # **Validate here, because nothing upstream does.** The annotation above is a pydantic model
-        # and its JSON schema is published, but the body is handed the decoded JSON *object* — a
-        # plain `dict`. The `cast` this replaces was a static no-op, so every template run died on
-        # `'dict' object has no attribute 'model_dump'` the first time a chemist asked for one, and
-        # the shipped `hazard-briefing` template had never once executed from a conversation.
-        #
-        # `connectors/jobs.py` learned this as D-138 and was fixed there; the template seam kept the
-        # assumption because the fix was applied where the bug was seen rather than everywhere it
-        # lived. `model_validate` is the one entry point that accepts either a dict or an
-        # already-built model, so a caller holding one (a test, a step) is still not wrong.
-        spec = params_model.model_validate(params)
-        return await start_template_run(template, spec.model_dump(mode="json", exclude_none=True))
+        # **The validation this used to do moved into `start_template_run`**, because the other
+        # caller did not do it. The annotation above is a pydantic model and its JSON schema is
+        # published, but the body is handed the decoded JSON *object* — a plain `dict` — so the
+        # `cast` that once stood here was a static no-op and every template run died on
+        # `'dict' object has no attribute 'model_dump'` the first time a chemist asked for one
+        # (D-138, learned at `connectors/jobs.py` and applied here only where the bug was seen).
+        # Doing it one level down is what stops the same hole reopening at the *next* caller:
+        # `model_validate` there accepts a dict or an already-built model, so a test holding one is
+        # still not wrong.
+        return await start_template_run(template, params)
 
     launch.__name__ = tool_name(template)
     launch.__qualname__ = launch.__name__

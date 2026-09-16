@@ -4,8 +4,10 @@ The security argument is the subject of this file, not the storage. `D-2026-08-1
 the-plan-so-the-step-is-read-only` exempts a template's `agent` step from the plan gate because the
 file *"is authored by a person, committed to git and reviewed, and nothing at run time can produce
 one"*. `compose_workflow` produces one at run time, so either the exemption has to be re-argued or
-the premise restored. It is restored: an agent-authored workflow may name no side-effecting tool,
-no durable job and no `write_tools`, so the exemption is never reached.
+the premise restored. It is restored: an agent-authored workflow may name no side-effecting tool and
+no `write_tools`, so the exemption is never reached. A durable `job` step is the one thing a person
+can authorize (`D-2026-09-15-an-approval-is-for-one-version-of-one-workflow`), and the tests below
+hold both halves — what an approval releases, and what no approval touches.
 
 **Both directions**, always. A refusal that also refuses the legitimate case is not a control, it
 is an outage with a good docstring — so every refusal below is paired with the composition it must
@@ -21,6 +23,7 @@ import pytest
 
 from chemclaw.agent.authz import side_effecting_tools
 from chemclaw.templates.composed import (
+    MAX_PER_OWNER,
     ComposedStore,
     ComposedWorkflow,
     InMemoryComposedStore,
@@ -451,18 +454,16 @@ def test_a_workflow_with_a_job_composes_but_will_not_run_until_it_is_approved() 
         stored = asyncio.run(store.get("chemist-jobs", "ranking"))
         assert stored is not None
         # The human's act, through the store the route writes — there is no tool for this.
-        asyncio.run(
-            store.approve(
-                "chemist-jobs", "ranking", template_fingerprint(stored.document), "a-person"
-            )
-        )
+        asyncio.run(store.approve("chemist-jobs", "ranking", template_fingerprint(stored.document)))
 
         # It runs now. The launcher is stubbed: what is under test is the gate, not Temporal.
         monkey = pytest.MonkeyPatch()
         try:
 
-            async def _fake_start(document: Any, inputs: dict[str, Any]) -> str:
-                started.append(document.name)
+            async def _fake_start(document: Any, inputs: dict[str, Any], scope: str = "") -> str:
+                # `scope` is asserted, not ignored: it is what stops two chemists' `triage` — and
+                # two versions of one — sharing a Temporal id and rejoining each other's runs.
+                started.append(f"{document.name}|{scope}")
                 return "job-1"
 
             monkey.setattr("chemclaw.templates.registry.start_template_run", _fake_start)
@@ -470,4 +471,352 @@ def test_a_workflow_with_a_job_composes_but_will_not_run_until_it_is_approved() 
         finally:
             monkey.undo()
 
-    assert started == ["ranking"]
+    assert len(started) == 1
+    name, _, scope = started[0].partition("|")
+    assert name == "ranking"
+    assert scope.startswith("chemist-jobs:"), scope
+
+
+# --- the terminal's approver, which is the only one that surface had ------------------------------
+
+
+def test_the_cli_can_approve_what_the_cli_composed() -> None:
+    """**The journey that had no ending**, driven rather than assumed.
+
+    A composed workflow is keyed `(owner, name)` on the ambient actor. That is the request
+    principal's oid at the front door and `cli_admin_actor` at this prompt — the same person's oid
+    once identity is enforced, and three different strings in a dev deployment (`admin@localhost`,
+    `dev-user`, `service-account`). So a workflow composed in the terminal was invisible to
+    `GET /workflows/{name}`, and its job steps could never be released by anybody: measured before
+    this command existed, the route answered 404 for a workflow the CLI had just stored.
+
+    The fix is the shape `/approve` already has for plans — each surface's person approves on that
+    surface — and not a change to what an actor is called, which would move identity semantics to
+    fix a feature.
+    """
+    from chemclaw.agent.workflow_tools import WorkflowStep, run_composed_workflow
+    from chemclaw.cli.chat import _workflow_command
+    from chemclaw.templates.composed import ComposedWorkflowError
+
+    # A distinct actor per test: `InMemoryComposedStore` is a process singleton (deliberately —
+    # a process has one store), so tests that shared an owner would see each other's rows.
+    actor = "cli-approves"
+    with _as(actor):
+        _compose(
+            name="ranking",
+            summary="Rank and report.",
+            inputs=[],
+            steps=[
+                WorkflowStep(id="rank", job="rank_species", arguments={}),
+                WorkflowStep(id="say", prompt="which: ${steps.rank.result}"),
+            ],
+        )
+        listing = asyncio.run(_workflow_command("/workflows", actor))
+        assert "needs approval" in listing
+        assert "['rank']" in listing
+
+        with pytest.raises(ComposedWorkflowError, match="not approved to run"):
+            asyncio.run(run_composed_workflow(name="ranking", inputs={}))
+
+        # **Read, then approve what was read.** The first line shows the procedure and hands back
+        # the fingerprint; the second binds to it. One line that approved "as it stands" was the
+        # defect: the *agent* also acts in this terminal under this same owner between two typed
+        # commands, so "the person reading and the person approving are the same terminal" is false
+        # here in a way it is not for `/approve`.
+        shown = asyncio.run(_workflow_command("/approve-workflow ranking", actor))
+        assert "rank_species" in shown, "the approver has to be shown the call, not a step id"
+        assert "/approve-workflow ranking " in shown
+        fingerprint = shown.rsplit(" ", 1)[-1].strip()
+
+        stale = asyncio.run(_workflow_command("/approve-workflow ranking not-that-hash", actor))
+        assert "changed since it was shown" in stale
+        assert asyncio.run(_workflow_command("/workflows", actor)).count("needs approval") == 1
+
+        answer = asyncio.run(_workflow_command(f"/approve-workflow ranking {fingerprint}", actor))
+        assert "approved 'ranking'" in answer
+        assert asyncio.run(_workflow_command("/workflows", actor)).count("ready") == 1
+
+        # And the cap's other half: a workflow the owner no longer wants is gone, rather than
+        # overwritten by a re-compose under a name that would then lie about its contents.
+        assert "forgot" in asyncio.run(_workflow_command("/forget-workflow ranking", actor))
+        assert asyncio.run(_workflow_command("/workflows", actor)) == "(no composed workflows)"
+
+
+def test_the_cli_listing_answers_the_question_a_refusal_could_not() -> None:
+    """Discovery across sessions, which was a `BACKLOG.md` row until this command existed.
+
+    `run_composed_workflow`'s refusal names the workflows an owner has, which works only once you
+    have already guessed a name wrong. `/workflows` is the question asked directly.
+    """
+    from chemclaw.cli.chat import _workflow_command
+
+    fresh = "cli-has-nothing"
+    with _as(fresh):
+        assert "no composed workflows" in asyncio.run(_workflow_command("/workflows", fresh))
+
+
+def test_approving_a_name_the_caller_does_not_have_says_what_they_do_have() -> None:
+    """A terminal refusal has to be actionable, because there is no UI to fall back on."""
+    from chemclaw.agent.workflow_tools import WorkflowStep
+    from chemclaw.cli.chat import _workflow_command
+
+    actor = "cli-one-workflow"
+    with _as(actor):
+        _compose(name="mine", summary="s", inputs=[], steps=[WorkflowStep(id="say", prompt="hi")])
+        answer = asyncio.run(_workflow_command("/approve-workflow theirs", actor))
+
+    assert "no composed workflow called 'theirs'" in answer
+    assert "['mine']" in answer
+
+
+def test_the_cli_approval_names_the_person_and_not_the_agent() -> None:
+    """`approved_by` is the record, so it must be the typist rather than whatever composed it.
+
+    And it can only ever be the owner: `ComposedStore.approve` takes no approver argument, because
+    both callers resolve the workflow against the caller's own rows and so had nobody else to name.
+    That is what lets `agent/leaver.py` erase a departing person's approvals with `WHERE owner =
+    ANY(...)` — a fourth parameter would have made a state the write path cannot produce but the
+    erase predicate cannot reach.
+    """
+    from chemclaw.agent.workflow_tools import WorkflowStep
+    from chemclaw.cli.chat import _workflow_command
+
+    actor = "cli-records-approver"
+    with _as(actor):
+        _compose(
+            name="ranking",
+            summary="s",
+            inputs=[],
+            steps=[
+                WorkflowStep(id="rank", job="rank_species", arguments={}),
+                WorkflowStep(id="say", prompt="x"),
+            ],
+        )
+        shown = asyncio.run(_workflow_command("/approve-workflow ranking", actor))
+        asyncio.run(
+            _workflow_command(f"/approve-workflow ranking {shown.rsplit(' ', 1)[-1]}", actor)
+        )
+        stored = asyncio.run(default_composed_store().get(actor, "ranking"))
+
+    assert stored is not None
+    assert stored.approved_by == actor
+    assert stored.approved_at is not None
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_both_backends_agree_about_what_a_save_may_touch(backend: str) -> None:
+    """A save carries an approval forward and can never set one — in both real backends.
+
+    Driven because it used to be false in both directions at once. `_UPSERT` names no approval
+    column, so Postgres kept a stored approval across a re-compose; `InMemoryComposedStore.save`
+    replaced the whole object, so memory destroyed it *and* would have accepted an approval handed
+    to it in a `ComposedWorkflow`. The same call sequence therefore produced a different stored row
+    in each — and the weaker of the two is what a CLI or dev process runs.
+
+    The two properties this pins are the ones the security argument actually rests on: the agent's
+    write cannot *grant* an approval, and it cannot *erase* the record of a person's. Whether the
+    approval still has effect is `unapproved_jobs`' question, asked against the fingerprint.
+    """
+
+    async def _drive() -> None:
+        store = await _backend(backend)
+        owner = f"save-scope-{backend}"
+        document = _document([_JOB_STEP, _REASON_STEP], "triage")
+        await store.save(
+            ComposedWorkflow(
+                owner=owner,
+                name="triage",
+                summary="one",
+                document=document,
+                # The forgery: an approval smuggled in on the agent's own write.
+                approved_fingerprint="forged",
+                approved_by="somebody-who-never-approved",
+            )
+        )
+        stored = await store.get(owner, "triage")
+        assert stored is not None
+        assert stored.approved_fingerprint == "", "a save must not be able to grant an approval"
+        assert stored.approved_by == ""
+
+        await store.approve(owner, "triage", "the-real-hash")
+        await store.save(
+            ComposedWorkflow(owner=owner, name="triage", summary="two", document=document)
+        )
+        after = await store.get(owner, "triage")
+        assert after is not None
+        assert after.summary == "two", "the document half of a save still replaces"
+        assert after.approved_fingerprint == "the-real-hash", (
+            "and the agent's write must not erase the record of a person's decision"
+        )
+        assert after.approved_by == owner
+        assert after.approved_at is not None
+
+    asyncio.run(_drive())
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_a_workflow_can_be_forgotten_and_forgetting_one_that_is_gone_says_so(backend: str) -> None:
+    """The cap's other half, in both backends.
+
+    Without a delete, `MAX_PER_OWNER` left one remedy — re-compose over a name — which destroys the
+    document anyway *and* leaves a row whose name lies about its contents. `False` rather than a
+    silent success for a name that is not there, because the caller asked for a specific thing to
+    stop existing and needs to know whether it did.
+    """
+
+    async def _drive() -> None:
+        store = await _backend(backend)
+        owner = f"forgetful-{backend}"
+        await store.save(
+            ComposedWorkflow(
+                owner=owner,
+                name="triage",
+                summary="s",
+                document=_document([_REASON_STEP], "triage"),
+            )
+        )
+        assert await store.forget(owner, "triage") is True
+        assert await store.get(owner, "triage") is None
+        assert await store.forget(owner, "triage") is False
+        assert await store.forget("somebody-else", "triage") is False
+
+    asyncio.run(_drive())
+
+
+def test_the_cap_can_tell_a_full_page_from_a_clamped_one() -> None:
+    """`list_for` fetches one past `MAX_PER_OWNER`, so the guard is not reading its own page size.
+
+    Driven against Postgres because that is where the clamp is a SQL `LIMIT`. At `LIMIT
+    MAX_PER_OWNER` the surplus was invisible to the cap guard *and* to the "you have: […]" listing
+    `run_composed_workflow` gives, so re-composing a workflow the owner still had was refused with
+    "you already have 50" while `get` went on finding and running it.
+    """
+
+    async def _drive() -> None:
+        await migrated_db_or_skip()
+        store = PostgresComposedStore()
+        owner = "at-the-cap"
+        document = _document([_REASON_STEP], "probe")
+        try:
+            for index in range(MAX_PER_OWNER + 3):
+                await store.save(
+                    ComposedWorkflow(
+                        owner=owner, name=f"w{index:03d}", summary="s", document=document
+                    )
+                )
+            rows = await store.list_for(owner)
+            assert len(rows) == MAX_PER_OWNER + 1, (
+                "the page has to exceed the cap by one, or 'at it' and 'over it' read the same"
+            )
+        finally:
+            for index in range(MAX_PER_OWNER + 3):
+                await store.forget(owner, f"w{index:03d}")
+
+    asyncio.run(_drive())
+
+
+def test_a_step_kind_nobody_has_a_position_on_is_refused_rather_than_allowed() -> None:
+    """`authored_problems` fails *closed* on a step kind it does not recognise.
+
+    The chain was `if ToolStep … elif AgentStep …` with no final branch, so a fourth step kind added
+    later would have been silently permitted here on the day it was added — failing open in the one
+    function whose whole job is to fail closed, and where "allowed" means "exempt from the plan
+    gate". Driven with a stand-in rather than argued, because the whole defect is about a class that
+    does not exist yet.
+
+    `agent/template_surface.template_step_ceilings` takes the same position from the other side: an
+    unsized kind raises rather than counting as free.
+    """
+
+    class _FutureStep:
+        """A step kind from next year: not a tool, not an agent step, not a job."""
+
+        id = "surprise"
+        kind = "surprise"
+
+    document = _document([_REASON_STEP])
+    # Past the model rather than through it: `Template` validates its union, and what is under test
+    # is the branch that runs when something gets past a validator this function does not own.
+    object.__setattr__(document, "steps", [*document.steps, _FutureStep()])
+
+    problems = authored_problems(document, side_effecting_tools())
+
+    assert len(problems) == 1
+    assert "surprise" in problems[0]
+    assert "_FutureStep" in problems[0]
+
+
+def test_running_a_composed_workflow_validates_its_inputs_before_anything_is_queued() -> None:
+    """Both launchers validate, because a check only one of them performs is not a check.
+
+    `build_template_tool.launch` validated against the template's own params model — the D-138 fix —
+    and `run_composed_workflow` called the shared launcher with a raw dict. So a composed run
+    started with whatever it was handed: a *declared required* input could be omitted entirely, and
+    `${inputs.smiles}` then failed deep inside a durable run rather than at the launch, which is
+    precisely the wasted launch `unrunnable_reason` exists to refuse. The validation now lives in
+    `start_template_run`, where both callers reach it, and a misspelled key is the same failure
+    because the one it was meant to be is then missing.
+    """
+    from chemclaw.agent.workflow_tools import WorkflowInput, WorkflowStep, run_composed_workflow
+    from chemclaw.templates.registry import TemplateError
+
+    with _as("chemist-validates"):
+        _compose(
+            name="brief",
+            summary="s",
+            inputs=[WorkflowInput(name="smiles", description="the molecule")],
+            steps=[
+                WorkflowStep(
+                    id="forms", tool="enumerate_tautomers", arguments={"smiles": "${inputs.smiles}"}
+                ),
+                WorkflowStep(id="say", prompt="which: ${steps.forms.result}"),
+            ],
+        )
+        with pytest.raises(TemplateError) as missing:
+            asyncio.run(run_composed_workflow(name="brief", inputs={}))
+        assert "smiles" in str(missing.value)
+        assert "['smiles']" in str(missing.value), "the refusal has to name what is declared"
+
+        with pytest.raises(TemplateError):
+            asyncio.run(run_composed_workflow(name="brief", inputs={"smilez": "CCO"}))
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_the_store_stamps_the_conversation_a_workflow_was_composed_in(backend: str) -> None:
+    """Provenance is the store's observation, not a field the writer declares.
+
+    The column shipped in migration 100 saying it exists "so a workflow that later looks wrong can
+    be traced back to the conversation that produced it", and nothing in `src/` selected it — a
+    promise only somebody holding a psql prompt could keep, and one the in-memory backend could not
+    keep at all. Stamped from the ambient context by both backends, the way `approved_at` is, and
+    read by `GET /workflows/{name}`.
+    """
+    from chemclaw.core.session_context import (
+        reset_current_session_id,
+        set_current_session_id,
+    )
+
+    async def _drive() -> None:
+        store = await _backend(backend)
+        owner = f"traceable-{backend}"
+        token = set_current_session_id("session-abc")
+        try:
+            await store.save(
+                ComposedWorkflow(
+                    owner=owner,
+                    name="triage",
+                    summary="s",
+                    document=_document([_REASON_STEP], "triage"),
+                    # Declared by the caller and ignored: the store observes this, it is not told.
+                    session_id="a-session-the-caller-made-up",
+                )
+            )
+        finally:
+            reset_current_session_id(token)
+
+        stored = await store.get(owner, "triage")
+        assert stored is not None
+        assert stored.session_id == "session-abc"
+        await store.forget(owner, "triage")
+
+    asyncio.run(_drive())

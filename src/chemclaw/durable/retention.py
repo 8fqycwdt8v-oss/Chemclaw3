@@ -405,8 +405,9 @@ _NOT_PRUNED: dict[str, str] = {
     "composed_workflows": (
         "refused: a procedure a chemist asked to have written down and is still using. Bounded "
         "by composed.MAX_PER_OWNER at the write instead, because how many working procedures "
-        "somebody keeps is their own decision and a clock is the wrong owner of it. Offboarding "
-        "is the one thing that deletes one (agent/leaver.py)"
+        "somebody keeps is their own decision and a clock is the wrong owner of it. Two things "
+        "delete one and neither is a clock: the owner saying so (`DELETE /workflows/{name}`, "
+        "`/forget-workflow`) and offboarding (agent/leaver.py)"
     ),
     "experiment_protocols": "refused: the design of an experiment somebody may still run, kept "
     "through erasure (`leaver._RETAINED`); no DELETE on it is granted, so the refusal is enforced",

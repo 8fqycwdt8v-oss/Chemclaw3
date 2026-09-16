@@ -297,29 +297,25 @@ class AgentSettings(BaseSettings):
     # prose.
     #
     # **Same derivation, honest input**: `tests/test_context_floor.PREFIX_BOUND` — the ratchet
-    # ceiling with the connector surface in its basis (65,000) plus 11,000 for the three bundles
-    # served from `Chemclaw3-mcp` that no test here can measure — plus the same 30,000 of thread
-    # this setting has always intended. It is still a translation rather than a retuning; what
-    # moved is the size of the thing being translated. The 11,000 is a *bound* and belongs beside
-    # the ceiling it extends, so it lives in `tests/test_context_floor.SERVED_ELSEWHERE_ALLOWANCE`
-    # where the assertion can read it, not as a second number here that would drift away from it.
-    # 109,000 since `D-2026-09-15-a-comparison-with-no-caller-is-a-promise-about-a-check-that-does-
-    # not-exist`: the ceiling it is derived from is 68,000 — 67,200 (itself up 2,000 for
-    # `write_todos` in every profile's prefix once the harness became the default, D-2026-09-13, and
-    # down 300 for the developer rationale `D-2026-09-14-a-docstring-is-a-prompt-and-a-comment-is-
-    # not` moved out of three tool descriptions) plus 800 for `check_against_specification`, the
-    # analytical tier's one tool. **That tool was trimmed first and the ceiling moved second**,
-    # which is the order this file's own history sets: the description came down from 1,266
-    # characters to 844 and the measured prefix still landed at 67,516, because a tool's
-    # description is counted twice — once as the description and once inside the schema that
-    # embeds it — so trimming cannot reach a 300-token overage without gutting the prompt the
-    # model reads. The cost is a real one and is stated rather than absorbed: every deployment's
-    # thread allowance is unchanged at 30,000, and the *request* bound moved up by 800 to keep it
-    # so. This is derived *upwards* from
-    # that ceiling, so it moves with it and keeps the whole thread allowance it was derived to
-    # have. The budget below cannot follow, because it is derived downwards from the
-    # window — which is why the ceiling's cost lands there and not here, and why that cost is
-    # 4.7% of the thread this time rather than wave 13's 1.16%.
+    # ceiling with the connector surface in its basis, plus
+    # `tests/test_context_floor.SERVED_ELSEWHERE_ALLOWANCE` for the bundles served from
+    # `Chemclaw3-mcp` that no test here can measure — plus the thread allowance this setting has
+    # always intended, which `tests/test_compaction.CLEAR_TRIGGER_THREAD_ALLOWANCE` holds. It is a
+    # translation rather than a retuning; what moves is the size of the thing being translated.
+    #
+    # **The figures that used to be in this paragraph are gone, and their absence is the point.**
+    # It named a default of 109,000 derived from a ceiling of 68,000 — against a field that reads
+    # 110,800 and a ceiling that reads 69,800 — because each raise moved the constants and left the
+    # narrative, which is `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` in the file
+    # that *defines* the number. The sibling paragraph 90 lines above already argued this and was
+    # not followed here. The live values are the field below, `PREFIX_BOUND` and
+    # `CLEAR_TRIGGER_THREAD_ALLOWANCE`; read those, and `tests/test_compaction.py` asserts the
+    # arithmetic between them rather than a reader checking it.
+    #
+    # What is durable, and is why the derivation runs this way rather than the budget's: this is
+    # derived *upwards* from the ceiling, so it moves with the prefix and keeps the whole thread
+    # allowance intact. The budget below cannot follow, because it is derived downwards from the
+    # model's window — which is why a ceiling raise costs the budget's thread and never this one's.
     agent_tool_result_clear_trigger: int = Field(default=110_800, ge=1)
     # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
     # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
