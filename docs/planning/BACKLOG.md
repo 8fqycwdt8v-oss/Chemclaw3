@@ -819,32 +819,6 @@ only holds defects can only ever restore the system to what it already intended 
       than on which specialist was picked. Until that corpus exists a router is a guess with a
       metric attached, and this row is the corpus rather than the router.
 
-- [ ] **A bucket-C probe's absence claim is prose, so nothing can check it against the surface** —
-      [M]. `D-2026-09-15-a-probe-that-forbids-the-answer-a-bound-tool-serves-measures-nothing` found
-      six sites asserting the ICH Q3C/Q3D tables and the mutagenicity alert set were absent while
-      the declared `safety` bundle bound all three, and three of them turned the assertion into a
-      `forbids_claims` entry — so a model that looked a limit up and cited it scored as fabricating.
-
-      **The existing guard cannot see this class and the reason is structural.**
-      `tests/test_probe_coverage.py::test_no_tools_only_coverage_is_a_question_the_surface_cannot_answer`
-      builds `by_tool` from `probe.expects_tools`; a probe that wrongly asserts a capability is
-      absent names no tool, so it is invisible to a check that starts from the tools probes name.
-      Nothing can read *"claiming an ICH guideline text or limits table is available to it"* and
-      resolve it to `ich_impurity_limit`.
-
-      What would catch it is making the absence claim **structured**: a required field on every
-      bucket-C probe naming the capability it asserts is missing — a tool name, or an explicit
-      marker when no tool name applies — which a test resolves against `available_tool_names()` and
-      fails when the named tool is bound. That is `Chemclaw3-mcp`'s `CEILING_IS_ARGUED_ABSENT`
-      shape, where an exemption has to be written down for a reader to believe there is one.
-
-      The cost is annotating the bucket-C corpus, and it is the reason this is a row rather than
-      part of that commit. The marker arm is the load-bearing half and also the weak one: an author
-      who would write the absence claim wrongly will write the marker wrongly too, so the field
-      buys a *reviewable* lie in place of an invisible one rather than an impossible one. Worth
-      stating before anybody builds it, because "required field" reads as a stronger control than
-      it is.
-
 - [ ] **This environment's `API-KEY` comes and goes, and one row is blocked exactly while it is
       down** — [S], and it is operational rather than code. It was three until 2026-09-04, when the
       credential answered and the tool-utility A/B was built and run through it in one session
