@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from chemclaw.agent.profiles import _REGISTRY, AgentProfile, registered_profile_names
 from chemclaw.cli.validate_skills import main, validate_skills
 from chemclaw.core.config import settings
 
@@ -220,3 +221,100 @@ def test_an_unknown_skill_role_gate_key_is_reported(
     # it lists the discovered names so the operator can see the spelling they meant.
     assert len(problems) == 1
     assert "porbe" in problems[0] and "gates nothing" in problems[0]
+
+
+def test_an_unknown_skill_name_in_a_profile_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The third map that names skills, failing the same quiet way the other two do.
+
+    `ProfileScopedSkills` narrows rather than raising — a turn must not break because a profile
+    file has a typo in it — so a misspelled name removes a skill the profile's author meant to keep
+    and the profile simply offers one fewer than the file reads. A profile is discovered from disk,
+    so this is a deployment's typo as readily as a shipped one.
+    """
+    root = _skill(tmp_path, "probe", "Guidance.")
+    # `load_profiles` too, not only the two readers: it registers the six shipped profiles into a
+    # module-global registry and this test has no cleanup, which is the leak
+    # `tests/test_profile_discovery.py`'s own fixture exists to prevent.
+    monkeypatch.setattr("chemclaw.cli.validate_skills.load_profiles", lambda: None)
+    monkeypatch.setattr("chemclaw.cli.validate_skills.registered_profile_names", lambda: ["narrow"])
+    monkeypatch.setattr(
+        "chemclaw.cli.validate_skills.get_profile",
+        lambda _name: AgentProfile(name="narrow", skill_names=frozenset({"probe", "porbe"})),
+    )
+
+    problems = validate_skills([str(root)])
+
+    assert len(problems) == 1
+    assert "porbe" in problems[0] and "narrow" in problems[0]
+
+
+def test_a_profile_naming_only_real_skills_is_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The negative arm: the check must not fire on the configuration it exists to permit."""
+    root = _skill(tmp_path, "probe", "Guidance.")
+    monkeypatch.setattr("chemclaw.cli.validate_skills.load_profiles", lambda: None)
+    monkeypatch.setattr("chemclaw.cli.validate_skills.registered_profile_names", lambda: ["narrow"])
+    monkeypatch.setattr(
+        "chemclaw.cli.validate_skills.get_profile",
+        lambda _name: AgentProfile(name="narrow", skill_names=frozenset({"probe"})),
+    )
+
+    assert validate_skills([str(root)]) == []
+
+
+def test_a_profile_file_on_disk_is_read_rather_than_assumed_registered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The check loads profiles itself, so a *deployment's* profile file is what it sees.
+
+    This is the arm the two above cannot be: they patch the registry, so a version of
+    `_profile_skill_problems` that never called `load_profiles()` would satisfy both and still be
+    green against every real tree forever — `validate_skills` runs in a CLI process where nothing
+    else has registered a profile, so the registry holds `default` alone and `default` declares no
+    `skill_names`. Driving it from a file is what distinguishes "looked and found nothing wrong"
+    from "did not look".
+    """
+    root = _skill(tmp_path / "tree", "probe", "Guidance.")
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    (profiles / "narrow.yaml").write_text(
+        "instructions: narrow agent\nskill_names:\n  - porbe\n", encoding="utf-8"
+    )
+    monkeypatch.setattr("chemclaw.core.config.settings.profiles_dir", str(profiles))
+    before = set(registered_profile_names())
+    try:
+        problems = validate_skills([str(root)])
+    finally:
+        for name in set(registered_profile_names()) - before:
+            _REGISTRY.pop(name, None)
+
+    assert len(problems) == 1
+    assert "porbe" in problems[0] and "narrow" in problems[0]
+
+
+def test_a_malformed_profile_is_reported_rather_than_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate lists problems; it does not traceback about a profile out of the skill validator.
+
+    Same treatment `_problems_for` gives a malformed `SKILL.md`, and for the same reason: CI goes
+    red either way, and what differs is whether the operator is told what to fix.
+    """
+    root = _skill(tmp_path / "tree", "probe", "Guidance.")
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    # `extra="forbid"`, so a singular `instruction:` is a validation error rather than a no-op.
+    (profiles / "broken.yaml").write_text("instruction: oops\n", encoding="utf-8")
+    monkeypatch.setattr("chemclaw.core.config.settings.profiles_dir", str(profiles))
+    before = set(registered_profile_names())
+    try:
+        problems = validate_skills([str(root)])
+    finally:
+        for name in set(registered_profile_names()) - before:
+            _REGISTRY.pop(name, None)
+
+    assert len(problems) == 1
+    assert "could not be loaded" in problems[0] and "broken.yaml" in problems[0]
