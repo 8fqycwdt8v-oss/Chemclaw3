@@ -457,15 +457,49 @@ def test_run_turn_reads_the_same_awkward_stream_the_probe_harness_does() -> None
     assert result.transport_error is None
 
 
+def test_run_turn_keeps_the_answer_of_a_turn_whose_stream_was_cut_off() -> None:
+    """The harness that *makes* truncated streams must be the one that can read them.
+
+    A storm's finding is whether the front door still answers under load and under cancellation,
+    and a cancelled turn's stream ends after its last `data:` line with no blank line behind it.
+    The SSE grammar dispatches an event on that blank line, so a driver that does nothing at
+    end-of-stream drops the last frame of exactly the turns this harness exists to observe —
+    measured, one event where the reader it replaced yielded two. `answered` is the column that
+    moves, and it moves the wrong way: a turn that answered and was then cut reads as a turn that
+    went silent, which is this harness's headline finding being manufactured by its own reader.
+
+    The fixture is `tests/test_live_probes.TRUNCATED_STREAM`, imported rather than copied, for the
+    reason the awkward one above is.
+    """
+    import httpx
+
+    from tests.test_live_probes import SSE_HEADERS, TRUNCATED_STREAM
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s1"})
+        return httpx.Response(200, content=TRUNCATED_STREAM, headers=SSE_HEADERS)
+
+    async def go() -> TurnResult:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://front-door"
+        ) as client:
+            return await live_storm.run_turn(client, "hello [[a-cheap]]")
+
+    result = asyncio.run(go())
+    assert result.answered is True
+    assert result.transport_error is None
+
+
 def test_a_refused_turn_is_recorded_as_its_status_rather_than_as_a_transport_failure() -> None:
     """The ordering that makes admission control measurable: status first, stream second.
 
     Family A's whole subject is what the front door does at capacity, and it says so with a 429 and
-    a JSON body — not an event stream. `aiter_sse` refuses a content type that is not
-    `text/event-stream`, which is the right answer for a 200 that is not a stream and the wrong one
-    here: folding a shed turn into `transport_error` would move it out of the `status` histogram
-    the shedding check reads and into the column that means the harness could not reach the lane.
-    So the status comes off the response before the stream is touched.
+    a JSON body — not an event stream. `decoded_events` answers a body that is not a stream by
+    yielding nothing, which is the right answer for a 200 that is not a stream and says nothing at
+    all here: a shed turn would then be indistinguishable from a turn that answered nothing, which
+    takes it out of the `status` histogram the shedding check reads. So the status comes off the
+    response before the stream is touched, and this is the test that holds that ordering.
     """
     import httpx
 

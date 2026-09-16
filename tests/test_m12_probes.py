@@ -86,7 +86,7 @@ def _probe(**overrides: object) -> Probe:
 
 
 SSE_HEADERS = {"content-type": "text/event-stream"}
-"""The header the front door sets and `httpx_sse` refuses to decode without — see
+"""The header the front door sets and without which the reader decodes nothing — see
 `tests/test_live_probes.SSE_HEADERS`."""
 
 

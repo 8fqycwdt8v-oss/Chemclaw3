@@ -968,6 +968,47 @@ def test_a_message_still_flattens_its_content_blocks_through_a_text_property() -
     )
 
 
+def test_the_sse_decoder_is_still_private_and_still_flushes_on_an_empty_line() -> None:
+    """`evals/live.decoded_events` drives `httpx_sse`'s parser itself, and this is why it may.
+
+    Three shapes are pinned here, all of them things `httpx_sse` does not publish. **That the
+    parser is private at all** is the first: if `SSEDecoder` ever reaches `httpx_sse.__all__`, the
+    row in `tests/test_third_party_layering.py` has to go and the import moves to the public name.
+    **The two class names** are the second — `chemclaw/evals/live.py` imports both at module scope,
+    so a rename is an ImportError at process start of the probe runner, the storm and the
+    benchmark. **`decode("")` returning the pending event** is the third and is the whole reason
+    the first two are worth paying for: `EventSource.aiter_sse` never hands the decoder that empty
+    line at end-of-stream, so it drops the final event of every stream that was cut off — which is
+    every turn `cli/live_storm` exists to produce. `decoded_events` supplies it. If upstream ever
+    flushes for itself, this assertion still passes and the one in
+    `tests/test_live_probes.py::test_the_final_event_of_a_stream_that_ends_without_a_blank_line_still_arrives`
+    is what says the workaround may be dropped.
+    """
+    import httpx_sse
+    from httpx_sse._decoders import SSEDecoder, SSELineDecoder
+
+    assert "SSEDecoder" not in httpx_sse.__all__, (
+        "httpx_sse now publishes SSEDecoder; chemclaw/evals/live.py should import it from the "
+        "package top level and lose its row in tests/test_third_party_layering.py"
+    )
+
+    lines = SSELineDecoder()
+    assert lines.decode('data: {"a": 1}\n') == ['data: {"a": 1}']
+    assert lines.decode('data: {"b": ') == []
+    assert lines.flush() == ['data: {"b": ']
+
+    events = SSEDecoder()
+    assert events.decode('data: {"a": 1}') is None, (
+        "SSEDecoder no longer buffers a `data:` line; evals/live.decoded_events drives it line "
+        "by line and reads the event off the blank line that follows"
+    )
+    flushed = events.decode("")
+    assert flushed is not None and flushed.data == '{"a": 1}', (
+        "SSEDecoder no longer emits the pending event on an empty line; that is the flush "
+        "evals/live.decoded_events supplies at end-of-stream so a truncated turn keeps its answer"
+    )
+
+
 def test_the_pinned_versions_are_the_ones_these_assertions_were_measured_against() -> None:
     """A floor, not a ceiling — so a bump is loud once and then accepted deliberately.
 
@@ -987,6 +1028,10 @@ def test_the_pinned_versions_are_the_ones_these_assertions_were_measured_against
         # usage keys above, `langchain-core` for `BaseMessage.text` being a property.
         "langchain-openai": (1, 6, 0),
         "langchain-core": (1, 6, 0),
+        # Not a layer-1 dependency at all — the live harnesses' SSE parser, whose *private*
+        # decoder `evals/live.py` drives by hand. It is here because that is the coupling most
+        # likely to be moved by a patch release, and the row above is the one that says so.
+        "httpx-sse": (0, 4, 3),
     }
     for package, floor in measured.items():
         found = tuple(int(part) for part in version(package).split(".")[:3])

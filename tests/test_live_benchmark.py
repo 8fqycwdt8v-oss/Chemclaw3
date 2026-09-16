@@ -436,3 +436,51 @@ def test_ask_reads_the_same_awkward_stream_the_probe_harness_does() -> None:
     # And the scorer gets what it needs out of it, which is the reason the frame mattering is not
     # an internal detail: a dropped answer is an abstention in the published table.
     assert _chosen(answer, question.options) == "ethanol"
+
+
+def test_ask_records_a_200_that_is_not_a_stream_as_an_empty_answer_rather_than_ending_the_run(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`_ask` holds no handler, so anything the reader raises costs every question already asked.
+
+    `_run` collects its `Answered` rows in a local list and `_ask` wraps nothing in a `try`, so an
+    exception out of the stream reader does not cost one question — it ends the run and takes the
+    whole partial result set with it. That is why the reader refuses a 200 whose content type is
+    not `text/event-stream` by yielding nothing and naming it in the log rather than by raising:
+    one misconfigured proxy in front of the front door should cost the benchmark one abstention,
+    not the afternoon.
+
+    The row it produces is the honest one — `chosen` empty, `unparsed` True — because the question
+    genuinely was not answered. `error_code` stays empty: no `error` event arrived, and inventing
+    one here would put a claim about the *agent* in the column that reads as one.
+    """
+    import asyncio
+    import logging
+
+    import httpx
+
+    from chemclaw.cli.live_benchmark import _ask
+
+    question = BenchmarkQuestion(
+        id="q1",
+        category="solvents",
+        question="which solvent?",
+        options=["ethanol", "toluene"],
+        answer="ethanol",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s1"})
+        return httpx.Response(200, json={"detail": "a proxy answered instead"})
+
+    async def go() -> tuple[str, str]:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://front-door"
+        ) as client:
+            return await _ask(client, question, None)
+
+    with caplog.at_level(logging.WARNING, logger="chemclaw.evals.live"):
+        answer, error_code = asyncio.run(go())
+    assert (answer, error_code) == ("", "")
+    assert "application/json" in caplog.text

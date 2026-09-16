@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -66,10 +67,13 @@ def _probe(**overrides: object) -> Probe:
 SSE_HEADERS = {"content-type": "text/event-stream"}
 """What the front door actually answers a turn with, and what the client refuses without.
 
-`sse_starlette` sets it on every stream; `httpx_sse` checks it before decoding a byte, because a
-JSON error body served at 200 is not a stream and silently yielding nothing from one is how a
-harness reports a broken front door as a turn that said nothing. A fixture that omitted it was
-asserting against a response the service cannot produce.
+`sse_starlette` sets it on every stream, and `decoded_events` checks it before decoding a byte: a
+JSON error body served at 200 is not a stream, and a harness that scanned it for `data:` prefixes
+would find none and report a broken front door as a turn that said nothing. It is still a turn that
+emitted nothing — see
+`test_a_response_that_is_not_an_event_stream_yields_nothing_rather_than_raising` for why the reader
+names it in the log rather than raising — but a fixture that omits this header is asserting against
+a response the service cannot produce.
 """
 
 
@@ -106,6 +110,22 @@ AWKWARD_STREAM = (
     b"retry: 3000\n"
     b'data: {"type": "answer",\n'
     b'data:  "text": "the corpus says ethanol."}\n\n'
+)
+
+#: A turn whose stream stops after the answer's `data:` line, with no blank line to terminate it.
+#:
+#: This is not an exotic frame — it is what every *interrupted* turn looks like on the wire, and
+#: `cli/live_storm` is a chaos harness whose whole subject is producing them: a cancelled turn, a
+#: worker killed mid-answer, a connection cut by a proxy. The SSE grammar dispatches an event on
+#: the blank line that follows it, so a reader that only dispatches there drops the last frame of
+#: every such stream — the frame *nearest the fault the storm was run to observe*.
+#:
+#: Read by `tests/test_live_storm.py` as well, for the same reason `AWKWARD_STREAM` is: the claim
+#: is that the three call sites share one reader, and three copies of a fixture are three chances
+#: for that to stop being true.
+TRUNCATED_STREAM = (
+    b'data: {"type": "token", "text": "the corpus "}\n\n'
+    b'data: {"type": "answer", "text": "says ethanol."}\n'
 )
 
 
@@ -232,20 +252,13 @@ def test_a_legal_frame_the_old_readers_could_not_parse_is_read() -> None:
     assert outcome.event_counts == {"tool_call": 1, "answer": 1}
 
 
-def test_a_response_that_is_not_an_event_stream_is_a_transport_failure_not_a_silent_turn() -> None:
-    """A 200 carrying JSON is refused rather than read as a turn that emitted nothing.
-
-    The old reader scanned for `data:` prefixes, so an HTML error page or a JSON body served at 200
-    — a proxy in front of the front door is the realistic way to get one — produced no events and
-    no complaint, and the probe booked a silent death against the *system*. `httpx_sse` checks the
-    content type first, `SSEError` is an `httpx.TransportError`, and `run_probe` already records a
-    transport failure rather than raising it. So the misconfiguration now names itself.
-    """
+def _run_bytes(body: bytes, headers: dict[str, str]) -> ProbeOutcome:
+    """Drive one probe against exact wire bytes rather than against `_sse`'s well-formed frames."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/sessions":
             return httpx.Response(200, json={"session_id": "s1"})
-        return httpx.Response(200, json={"detail": "a proxy answered instead"})
+        return httpx.Response(200, content=body, headers=headers)
 
     async def go() -> ProbeOutcome:
         async with httpx.AsyncClient(
@@ -253,10 +266,56 @@ def test_a_response_that_is_not_an_event_stream_is_a_transport_failure_not_a_sil
         ) as client:
             return await run_probe(client, _probe())
 
-    outcome = asyncio.run(go())
-    assert outcome.transport_error is not None
-    assert "text/event-stream" in outcome.transport_error
+    return asyncio.run(go())
+
+
+def test_the_final_event_of_a_stream_that_ends_without_a_blank_line_still_arrives() -> None:
+    """A truncated stream keeps its last frame, which is the one worth having.
+
+    The SSE grammar dispatches an event when the decoder sees a **blank line**, so a driver that
+    does nothing at end-of-stream silently drops the final frame of every stream that is cut off
+    — and a cut-off stream is exactly what `cli/live_storm` exists to produce. Measured on this
+    fixture, `EventSource.aiter_sse` yielded **1** event where all three hand-written readers it
+    replaced yielded **2**; `decoded_events` supplies the blank line the stream owed it.
+
+    Asserted through `run_probe` rather than against the decoder alone, because what a dropped
+    frame costs is an *outcome*: the answer vanishes, `answered` goes False, and the probe books a
+    silent death against the system under test. That is the signal this whole harness exists to
+    report, so a decoder defect and the defect it reports are one character apart.
+    """
+    outcome = _run_bytes(TRUNCATED_STREAM, SSE_HEADERS)
+    assert outcome.answer == "says ethanol."
+    assert outcome.answered is True
+    assert outcome.event_counts == {"token": 1, "answer": 1}
+    assert outcome.transport_error is None
+
+
+def test_a_response_that_is_not_an_event_stream_yields_nothing_rather_than_raising(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A 200 carrying JSON is an empty turn and a named warning, never an exception.
+
+    A proxy in front of the front door answering an error as JSON at 200 is the realistic way to
+    get one. `httpx_sse` refuses that content type by raising `SSEError` from inside the iterator,
+    which sounds stricter and is worse placed: whether the misconfiguration is *recorded* or
+    *fatal* then depends on which caller happens to hold a handler. `run_probe` holds one, so this
+    probe would be recorded — but `cli/live_benchmark._ask` holds none, and there the same response
+    ends the whole benchmark run with every already-answered question collected and lost.
+
+    So the turn reads as the turn that emitted nothing, which is what it was, and the finding the
+    old assertion was written for is kept where it costs nobody a run: the log names the content
+    type that arrived. A `transport_error` here would be a claim about the *network*, which was
+    fine.
+    """
+    with caplog.at_level(logging.WARNING, logger="chemclaw.evals.live"):
+        outcome = _run_bytes(
+            b'{"detail": "a proxy answered instead"}', {"content-type": "application/json"}
+        )
+    assert outcome.transport_error is None
     assert outcome.answered is False
+    assert outcome.event_counts == {}
+    assert "application/json" in caplog.text
+    assert "text/event-stream" in caplog.text
 
 
 def test_no_expected_tools_leaves_the_check_unscored_rather_than_failed() -> None:

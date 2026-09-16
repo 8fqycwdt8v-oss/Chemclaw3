@@ -159,10 +159,10 @@ async def run_turn(client: httpx.AsyncClient, message: str) -> TurnResult:
 
         # `evals.live.decoded_events` rather than a fourth reading of the wire format — see its
         # docstring for why there were three and what they each got wrong. The status is taken off
-        # the response before the stream is touched, because a refused turn has a JSON body and
-        # `aiter_sse` refuses a content type that is not `text/event-stream`: that refusal is the
-        # right answer for a 200 that is not a stream and the wrong one for a 429, which this
-        # harness has to record as a *status* rather than as a transport failure.
+        # the response before the stream is touched, because a refused turn has a JSON body rather
+        # than an event stream, and the reader answers a body that is not a stream by yielding
+        # nothing: right for a 200 that is not a stream, and indistinguishable from a silent turn
+        # for a 429, which this harness has to record as a *status*. So the status is read first.
         async with aconnect_sse(
             client, "POST", f"/sessions/{result.session_id}/messages", json={"message": message}
         ) as source:
