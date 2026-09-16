@@ -57,6 +57,22 @@ and gives up the moment that projection exceeds the budget. So a corpus that can
 costs the query tens of milliseconds to find that out, not the whole budget, and no memory of the
 refusal is needed to keep the cost off later queries.
 
+**The cold query still pays the build, and that is a decision rather than an oversight.** The
+three shipped paths, measured over the 4,999-row corpus at the shipped `fingerprint_max_top_k`,
+best of three each: no index 334-379 ms, cold (build then match) 1,176-1,225 ms, cached 10-26 ms.
+So the index is behind by ~0.85 s the first time and ahead by ~0.35 s every time after, and it is
+in front after **2.3-2.6 queries** on the same corpus generation. Two designs would remove even
+that one-off — building in a background thread, or building only on the second miss of a digest —
+and each was rejected for the same reason: they make "one build serves every later query" a
+property nothing can observe from a single call, so the concurrent-miss and rebuild-on-change
+assertions in `tests/test_molfp.py` become races rather than facts. Paying a bounded, skippable
+~0.85 s once to keep those assertions deterministic is the better trade, and the case the trade
+does *not* cover is named rather than hidden: an ingest that rewrites the corpus between every
+query mints a new digest each time, so the index is never reused and the ~0.85 s is never
+recovered. What answers that case is the database-side `pattern_bits` screen in
+`docs/planning/DEFERRED.md`, not a longer-lived in-process index over a slice that is already
+stale.
+
 **The cache is keyed on the corpus it was built from, because the store offers no revision to key
 it on.** `molecule_fingerprints` carries `created_at` and nothing else that moves — an upsert
 rewrites `label` and `bits` in place (`store.py`'s `_upsert`), so neither `count()` nor a max id
@@ -375,12 +391,13 @@ def _build_and_cache(key: bytes, labels: list[str], deadline: float) -> CorpusIn
     """Build the index for `labels` under its own budget, cache it, and return it — or None.
 
     **The budget is `substructure_index_build_timeout_seconds` and not the caller's match bound**,
-    which is the whole of `D-2026-09-16`'s first defect: charging a build to the budget for matching
-    made a corpus that could not be indexed a corpus that could not be *searched*, permanently,
-    because nothing is cached when a build is abandoned and every retry therefore started from
-    zero. The caller's deadline still applies on top of it — a build must not outlive the query
-    that wanted it — so the build stops at whichever comes first, and either way the caller gets
-    `None` and scans without it.
+    which is the whole of the first defect
+    `D-2026-09-16-an-index-is-an-optimisation-not-a-precondition` records: charging a build to the
+    budget for *matching* made a corpus that could not be indexed a corpus that could not be
+    **searched**, permanently, because nothing is cached when a build is abandoned and every retry
+    therefore started from zero. The caller's deadline still applies on top of it — a build must
+    not outlive the query that wanted it — so the build stops at whichever comes first, and either
+    way the caller gets `None` and scans without it.
     """
     budget = settings.substructure_index_build_timeout_seconds
     try:

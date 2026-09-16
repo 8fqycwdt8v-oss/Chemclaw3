@@ -361,8 +361,12 @@ def _match_record_by_record(
     deliberate difference: it keeps *parsing* after the hit cap is reached, so `unreadable` counts
     the whole slice. That is what the indexed path reports, and two paths that disagreed about
     whether every stored record was examined would make `scan_truncated` a property of which one
-    ran. Parsing is this scan's cost either way; only the subgraph matching, which is the part that
-    can run for minutes on an adversarial pattern, stops at the cap.
+    ran. Only the subgraph matching stops at the cap, which is the part that can run for minutes on
+    an adversarial pattern. **It is not free and the number is here rather than the claim**: over
+    4,999 NCI records at the shipped `fingerprint_max_top_k` of 100, a broad query that fills the
+    cap in its first few hundred records costs 334 ms parsing the rest against 40 ms stopping
+    there. That is the price of `scan_truncated` meaning the same thing on both paths, and it is
+    paid only when there is no index.
 
     Args:
         records: The capped corpus slice to match, in id order.

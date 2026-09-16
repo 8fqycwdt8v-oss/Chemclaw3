@@ -458,6 +458,18 @@ def test_the_topic_cursor_is_not_ahead_of_the_record() -> None:
 # different claim — "this guarantee is enforced right now, here" — which is why it is checked here
 # and there rather than exempted with the paths.
 _RETIRED_TEST_CITATIONS: dict[str, str] = {
+    # Deleted with the destination it charged. `D-2026-09-12-an-ambient-proxy-is-a-destination-
+    # nobody-declared` moved the JWKS fetch onto httpx with `trust_env=False`, so the row it drove
+    # had to leave `_env_reading_destinations` — and with it the only destination an
+    # `entra_required` + `otel_enabled=false` process charged at all.
+    # `D-2026-09-16-a-refusal-that-charges-a-destination-cannot-charge-an-inherited-environment`
+    # restores the refusal for a different and true reason, so the replacement asserts the same
+    # outcome for the same input while naming a carrier rather than that destination.
+    "test_the_jwks_fetch_is_charged_by_its_own_scheme": (
+        "replaced by `test_the_enforced_posture_is_refused_behind_an_undeclared_proxy` "
+        "(tests/test_netguard.py), which refuses the same configuration over the inherited "
+        "environment rather than over a destination that is now immune"
+    ),
     # Renamed because the name asserted the opposite of what the test pinned. It said "once" and
     # drove a single call, over a branch that returned `True` unconditionally — so what it actually
     # held was "every time, forever", which is the DARK-7 failure it was written to prevent

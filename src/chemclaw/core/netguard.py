@@ -524,10 +524,11 @@ def _env_reading_destinations(settings: Any) -> list[tuple[str, str, tuple[str, 
     that no longer exists, which is the failure this module's own docstring names above: a refusal
     for a reason that is not true is a pod that will not start.
 
-    **`git` is the third, it is still not charged here, and that is no longer the end of it.** The
-    KG note writer shells out to `git push`, which inherits the environment and is measurably
-    proxied — `_git_child_env` keeps every proxy variable on purpose, and a `git ls-remote` behind a
-    loopback recorder sent it `CONNECT notes.example.invalid:443`. Its URL is still not on this
+    **`git` is the third, it is still not charged here** (`docs/planning/BACKLOG.md`)**, and that is
+    no longer the end of it.** The KG note writer shells out to `git push`, which inherits the
+    environment and is measurably proxied — `_git_child_env` keeps every proxy variable on purpose,
+    and a `git ls-remote` behind a loopback recorder sent it
+    `CONNECT notes.example.invalid:443`. Its URL is still not on this
     object (`git_remote` is the string `"origin"`, and resolving it means `git remote get-url` in a
     subprocess at *config import*, a cost every entrypoint would pay at every start for a
     destination only one subsystem uses), so it cannot be a row here — a row needs a host to put in

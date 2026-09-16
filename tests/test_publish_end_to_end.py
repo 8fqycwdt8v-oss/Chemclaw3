@@ -403,11 +403,18 @@ async def test_a_finished_job_publishes_the_note_it_produced(
 # because `D-2026-08-26-the-driver-s-signature-is-the-schema` means a site brings its own driver
 # and this repository cannot require a method of a class it does not ship.
 #
-# `_BatchingCursor` below is what a driver adds to offer it, and it is here rather than in
-# `publish/drivers/postgres.py` only because nothing in this tree has claimed that file yet: it is
-# `_PostgresCursor.execute` with `executemany` in place of `execute`, error mapping included.
-# The two tests that use it are the pair that matters — the capability is actually used when it is
-# there, and the answer is byte-identical when it is not.
+# `_CountingCursor` and `_BatchingCursor` below exist to *count* round trips, and nothing else:
+# both delegate to the shipped driver's own cursor, which is `_PostgresCursor`. That is the whole
+# of this comment's history and the reason it was rewritten — it used to say the batching cursor
+# was a copy of `_PostgresCursor` kept here "only because nothing in this tree has claimed that
+# file yet", and that file had claimed it since the commit that added it. The copy reached past
+# the wrapper into the raw psycopg cursor, so these tests exercised the test's own code and no
+# production code: driven, `_PostgresCursor.executemany` could be **deleted** and all 286 publish
+# tests still passed, over the method whose own commit message says the batching change was inert
+# in production without it.
+#
+# The three tests below now go through it, so deleting it turns them red — two by the sink
+# reaching a cursor that no longer offers the capability, and one by naming it outright.
 
 _ROUND_TRIPS: dict[str, int] = {"execute": 0, "executemany": 0}
 
@@ -431,30 +438,22 @@ class _CountingCursor:
 
 
 class _BatchingCursor(_CountingCursor):
-    """`_CountingCursor` plus the one method that turns N statements into one round trip."""
+    """`_CountingCursor` plus the presence of the one method that makes N statements one round trip.
+
+    It counts and delegates. The JSON adaptation, the pipeline call and the error mapping are all
+    `_PostgresCursor.executemany`'s — which is the point: a wrapper that reimplemented them would
+    make every assertion below a claim about this file, and that is exactly what it was.
+
+    Declaring the method here is still what decides whether the capability is *offered*, since
+    `execute_many` probes a `runtime_checkable` Protocol and so tests member presence on the object
+    the sink holds. That is what lets the `batching=False` arm below be the same driver with the
+    capability withheld, which is the comparison the round-trip counts rest on.
+    """
 
     async def executemany(self, sql: str, params_seq: Any) -> None:
-        """Run `sql` over every parameter set, which psycopg does in pipeline mode.
-
-        The error mapping is `_PostgresCursor.execute`'s, unchanged and for its stated reason: a
-        programming error from the server is a `WarehouseQueryError` the retry contract treats as
-        permanent, while the server going away must pass through as itself.
-        """
-        from psycopg.types.json import Jsonb
-
-        from chemclaw.ingest.eln.warehouse.driver import WarehouseQueryError
-
+        """Count the batched round trip and hand it to the shipped driver's own cursor."""
         _ROUND_TRIPS["executemany"] += 1
-        adapted = [
-            [Jsonb(value) if isinstance(value, dict | list) else value for value in params]
-            for params in params_seq
-        ]
-        try:
-            await self._inner._cursor.executemany(sql, adapted)
-        except psycopg.OperationalError:
-            raise
-        except psycopg.Error as exc:
-            raise WarehouseQueryError(f"{exc.__class__.__name__}: {exc}") from exc
+        await self._inner.executemany(sql, params_seq)
 
 
 def _warehouse(dsn: str, *, schema: str, batching: bool) -> Any:
@@ -560,6 +559,58 @@ async def test_a_batch_is_one_statement_per_table_and_column_set_not_one_per_row
     assert counts["batching"] * 5 < counts["plain"], (
         f"batched {counts['batching']} vs row-at-a-time {counts['plain']}: a drain pass is "
         "order 10^3 round trips and this is the whole reason the change exists"
+    )
+
+
+async def test_the_shipped_postgres_cursor_is_what_offers_the_batching_capability() -> None:
+    """`_PostgresCursor` is the object `execute_many` probes, and this is what says so.
+
+    The two tests above count round trips through a wrapper, and a wrapper can be wrong about what
+    it wraps: before this, `_BatchingCursor` reached past `_PostgresCursor` into the raw psycopg
+    cursor, so the batching *tests* were green over a production method that could be deleted
+    outright — 286 publish tests still passed with it gone, over the method whose own commit says
+    the batching change was inert in production without it.
+
+    So this one names the class, takes its real cursor, and drives `execute_many` over it: the
+    `isinstance` is the same `runtime_checkable` probe `execute_many` performs, and the rows are
+    what say the pipeline call actually ran rather than merely being offered. Deleting
+    `_PostgresCursor.executemany` fails the probe here and the `execute_many` call in the two tests
+    above, which is the point of writing it three times over.
+    """
+    await migrated_db_or_skip()
+    dsn = settings.postgres_dsn
+    await _create_store(dsn)
+
+    from chemclaw.ingest.eln.warehouse.driver import BatchingCursor, execute_many
+    from chemclaw.publish.drivers.postgres import PostgresWarehouse, _PostgresCursor
+
+    warehouse = PostgresWarehouse(dsn=dsn, schema=_STORE)
+    try:
+        async with warehouse.cursor() as cursor:
+            assert isinstance(cursor, _PostgresCursor), (
+                "this test is about the shipped driver's own cursor; it has been given another"
+            )
+            assert isinstance(cursor, BatchingCursor), (
+                "`execute_many` probes this Protocol to decide whether a batch is one round trip "
+                "or N; the shipped Postgres driver must be on the batching side of it"
+            )
+            await execute_many(
+                cursor,
+                "INSERT INTO solvent (solvent_id, display_name, smiles) VALUES (%s, %s, %s)",
+                [(f"s-{index}", f"solvent {index}", "CCO") for index in range(4)],
+            )
+            # The shipped seed fills this table, so the read is scoped to what this test inserted.
+            await cursor.execute(
+                "SELECT solvent_id FROM solvent WHERE solvent_id LIKE %s ORDER BY solvent_id",
+                ["s-%"],
+            )
+            landed = [row["solvent_id"] for row in await cursor.fetchall()]
+    finally:
+        await warehouse.aclose()
+
+    assert landed == ["s-0", "s-1", "s-2", "s-3"], (
+        "the batched insert must land every parameter set, through the driver this repository "
+        f"ships rather than a test's copy of it; got {landed}"
     )
 
 
