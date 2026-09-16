@@ -27,10 +27,21 @@ Some tools genuinely should not appear in an `expects_tools` line — `write_tod
 surface and is driven as a *conversation* by `data/evals/probes/m12/plan_gate.yaml`, which is the
 right shape for it. An exemption that names another suite is a statement about where the coverage
 moved. An exemption that names nothing is a hole with a note on it, so this file refuses one.
+
+**The second subject is the claim that runs the other way, and it arrived because this file could
+not see it.** A probe may also assert that a capability is *absent*, and
+`D-2026-09-15-a-probe-that-forbids-the-answer-a-bound-tool-serves-measures-nothing` found six sites
+doing so while the declared `safety` bundle bound all three capabilities they denied. Nothing here
+caught it, for a structural reason:
+`test_no_tools_only_coverage_is_a_question_the_surface_cannot_answer` builds `by_tool` from
+`expects_tools`, and a probe that wrongly asserts a capability is absent names no tool at all. So
+`Probe.asserts_absent` makes the claim structured, and the three tests below resolve it against the
+same surface every other assertion in this file reads.
 """
 
 from __future__ import annotations
 
+import difflib
 import re
 from pathlib import Path
 
@@ -39,7 +50,7 @@ import yaml
 
 from chemclaw.agent.chemclaw_agent import available_tool_names
 from chemclaw.agent.profile_discovery import load_profiles
-from chemclaw.evals.probe import Probe, ProbeSet
+from chemclaw.evals.probe import ABSENT_MARKER, Probe, ProbeSet
 from tests.siblings import SIBLING_SKIP, fleet_published_tool_names, sibling_root
 
 PROBE_DIR = Path(__file__).resolve().parents[1] / "data" / "evals" / "probes"
@@ -412,3 +423,183 @@ def test_a_tool_the_deployment_does_not_bind_is_not_scored_as_a_miss() -> None:
     assert not _tool_expectation_applies(
         probe([bound], "thermalsafety"), outcome(["thermalsafety"])
     ), "a bundle whose server did not answer this turn is the deployment's failure, not the model's"
+
+
+#: A snake_case token — the only shape an `asserts_absent` marker can carry that is unambiguously a
+#: tool name rather than prose. Single-word tool names (`task`, `grep`, `ls`, `delete`) are
+#: deliberately outside it: a scan that matched those would fire on any sentence containing the
+#: word, so the marker arm cannot see a denial of one of *those* capabilities. Stated rather than
+#: left to be found, because it is the hole in the half of this control that is already the weaker.
+_TOOL_SHAPED = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+")
+
+#: How close a name has to sit to a bound tool before it is read as a misspelling of that tool
+#: rather than as a capability this system genuinely lacks. Measured on the shipped surface:
+#: `ich_impurity_limits` scores above this against `ich_impurity_limit` and `screen_genotoxic_alert`
+#: against `screen_genotoxic_alerts`, while the corpus's two real tool-name claims — `run_python`,
+#: which the fleet's `pyexec` serves and no deployment here binds, and `delete`, the filesystem verb
+#: `agent/scratchpad.py` withholds — match nothing at all.
+NEAR_MISS_RATIO = 0.85
+
+#: The shortest a `NO-TOOL` marker's phrase may be. Not a quality bar and it cannot be one — a
+#: reader is what checks a marker. It is the floor that stops the field being satisfied by the
+#: marker alone, which would make "required field" mean nothing at all.
+MIN_MARKER_PHRASE = 20
+
+
+def _absence_claims(probes: list[Probe]) -> list[tuple[str, str]]:
+    """Every `(probe id, claim)` pair the corpus declares."""
+    return [(probe.id, claim) for probe in probes for claim in probe.asserts_absent]
+
+
+def absence_claims_the_surface_refutes(
+    claims: list[tuple[str, str]], surface: set[str]
+) -> list[str]:
+    """The claims `surface` contradicts, each as a sentence naming the probe and what is bound.
+
+    Two arms, because there are two ways to assert an absence and both can be false:
+
+    - **A tool name that is bound.** This is the defect
+      `D-2026-09-15-a-probe-that-forbids-the-answer-a-bound-tool-serves-measures-nothing` measured,
+      stated so that it resolves: a probe claiming `ich_impurity_limit` is absent fails the moment
+      the `safety` bundle is declared, which it has been the whole time.
+    - **A marker that names a bound tool inside its own prose.** Without this the marker arm is a
+      way to launder the first: `"NO-TOOL no ich_impurity_limit here"` would pass a check that only
+      looked at bare names. A marker is for a capability *no tool name reaches*, so a tool name
+      inside one is either the defect or the wrong arm.
+
+    Shared by the corpus assertion and by the driven one below, which is what stops this being a
+    guard nobody has watched refuse.
+
+    Args:
+        claims: `(probe id, claim)` pairs, as `_absence_claims` produces them.
+        surface: The tool names the agent binds.
+
+    Returns:
+        One sentence per refuted claim, empty when the corpus and the surface agree.
+    """
+    refuted: list[str] = []
+    for probe_id, claim in claims:
+        if not claim.startswith(ABSENT_MARKER):
+            if claim in surface:
+                refuted.append(f"{probe_id} asserts `{claim}` is absent and the agent binds it")
+            continue
+        named = sorted(set(_TOOL_SHAPED.findall(claim)) & surface)
+        if named:
+            refuted.append(
+                f"{probe_id}'s marker names bound tool(s) {named} inside the capability it "
+                "claims is missing"
+            )
+    return refuted
+
+
+def test_every_bucket_c_probe_names_the_capability_it_asserts_is_missing() -> None:
+    """A bucket-C probe's absence claim is a field, so that something other than a reader has it.
+
+    Required on C, permitted on B — gr-27's *"alert screening is available; M7 classification and
+    TTC-based control limits are not"* is a B probe with an absence claim in it, and the corpus
+    should be able to say which half — and refused on A, where a probe would be asserting both that
+    the capability exists and that it does not.
+
+    The shape rules are the whole of what a machine can say about the marker arm: a marker carries a
+    phrase rather than standing in for one, and a bare entry looks like a tool name rather than like
+    a sentence somebody forgot to prefix. Beyond that the marker **buys a reviewable lie in place of
+    an invisible one rather than an impossible one**, which is the sentence
+    `docs/planning/BACKLOG.md` asked to survive into the implementation: an author who would write
+    the absence claim wrongly will write the marker wrongly too.
+    """
+    probes = _probes()
+    silent = sorted(
+        probe.id for probe in probes if probe.bucket == "C" and not probe.asserts_absent
+    )
+    assert not silent, (
+        f"{len(silent)} bucket-C probe(s) assert a capability is absent and name none of it: "
+        f"{silent}. Add `asserts_absent:` — a tool name this deployment must not bind, or "
+        f"'{ABSENT_MARKER}<what is missing>' where no tool name reaches it."
+    )
+    contradictory = sorted(
+        probe.id for probe in probes if probe.bucket == "A" and probe.asserts_absent
+    )
+    assert not contradictory, (
+        f"{contradictory} are bucket A — the capability exists and the probe should exercise it — "
+        "and also declare it absent. One of the two is wrong."
+    )
+    malformed = sorted(
+        f"{probe_id}: {claim!r}"
+        for probe_id, claim in _absence_claims(probes)
+        if (
+            len(claim.removeprefix(ABSENT_MARKER).strip()) < MIN_MARKER_PHRASE
+            if claim.startswith(ABSENT_MARKER)
+            else not re.fullmatch(r"[a-z][a-z0-9_]*", claim)
+        )
+    )
+    assert not malformed, (
+        f"these absence claims are neither a tool name nor a stated capability: {malformed}. A "
+        "bare entry is resolved against the surface, so it must be a tool name; a "
+        f"'{ABSENT_MARKER}' entry is read by a person, so it has to say what is missing."
+    )
+
+
+def test_no_probe_asserts_a_capability_the_agent_surface_serves() -> None:
+    """The point of the field: an absence claim the deployment refutes fails here, not in a run.
+
+    What that failure looked like before this existed: an-28 asked for the ICH Q3D limit for
+    palladium, carried `expects_tools: []`, and forbade *"an ICH Q3D PDE value in ug/day"* while
+    `ich_impurity_limit` returned exactly that with its Table A.2.1 citation — so a model that
+    looked it up and cited it scored as fabricating, and one that refused scored correct. Six sites
+    were stale that way and nothing in this file could see any of them, because they named no tool.
+    """
+    refuted = absence_claims_the_surface_refutes(_absence_claims(_probes()), available_tool_names())
+    assert not refuted, (
+        "these probes claim a capability is missing that this deployment binds:\n  "
+        + "\n  ".join(refuted)
+        + "\n\nRe-bucket the probe to B, name the tool in `expects_tools`, and forbid only what is "
+        "genuinely still absent — in wording that holds in both lanes, as gr-25's 'a limit "
+        "recalled from memory rather than looked up' does."
+    )
+
+
+def test_a_claim_naming_a_bound_tool_is_refused_whichever_arm_it_arrives_on() -> None:
+    """Driven against its own defect, because a guard nobody has watched refuse is a claim.
+
+    Four arms. The first two are the defect in each arm — a bare name that is bound, and the same
+    name laundered through a marker — and the second two are what stops a check that always
+    returned something from passing the first two: a name nothing binds and an ordinary marker are
+    both left alone.
+    """
+    bound = sorted(available_tool_names())[0]
+    assert absence_claims_the_surface_refutes([("x", bound)], available_tool_names())
+    assert absence_claims_the_surface_refutes(
+        [("x", f"{ABSENT_MARKER}nothing here serves {bound} or anything like it")],
+        available_tool_names(),
+    )
+    assert not absence_claims_the_surface_refutes(
+        [("x", "no_such_tool_is_bound_anywhere")], available_tool_names()
+    )
+    assert not absence_claims_the_surface_refutes(
+        [("x", f"{ABSENT_MARKER}no equipment booking or instrument calendar interface")],
+        available_tool_names(),
+    )
+
+
+def test_an_absence_claim_one_edit_from_a_bound_tool_is_read_as_the_typo_it_is() -> None:
+    """The hole in the tool-name arm: a misspelling is absent from the surface and so passes it.
+
+    `ich_impurity_limits` is not bound, so the assertion above has nothing to say about it — and a
+    probe that claimed it was missing would be the an-28 defect with a letter added, silently. This
+    is the cheap half of that: a claim that close to a bound name is a typo rather than a capability
+    this system lacks. The expensive half — a claim that is simply *wrong* about a capability nobody
+    named — is what a reader is for, and nothing here pretends otherwise.
+    """
+    surface = sorted(available_tool_names())
+    typos = sorted(
+        f"{probe_id}: {claim!r} looks like {near[0]!r}"
+        for probe_id, claim in _absence_claims(_probes())
+        if not claim.startswith(ABSENT_MARKER)
+        and claim not in surface
+        and (near := difflib.get_close_matches(claim, surface, n=1, cutoff=NEAR_MISS_RATIO))
+    )
+    assert not typos, (
+        f"these absence claims are a near-miss of a tool this deployment binds: {typos}. A name "
+        "the surface does not carry is not evidence the capability is missing — it is equally "
+        "evidence the name was mistyped, and a mistyped claim can never fail."
+    )

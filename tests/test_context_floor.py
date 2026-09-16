@@ -849,7 +849,32 @@ SERVED_ELSEWHERE_ALLOWANCE = 11_000
 #:
 #: `SERVED_ELSEWHERE_ALLOWANCE` did not move for the third time, and for the third time because
 #: this tree declares no such bundle.
-FLEET_PUBLISHED_ALLOWANCE = 28_500
+#:
+#: **A fourth, and this one is the most expensive server in the fleet per tool.** `unitops` —
+#: scale-up and unit-operation sizing, seven tools — took the directory to **33,048 over 55 tools**
+#: (`chem` 5,577 / 12, `kinetics` 3,389 / 6, `props` 2,936 / 6, `pyexec` 1,142 / 1,
+#: `rxnpredict` 2,784 / 6, `safety` 1,632 / 3, `suitability` 4,471 / 7, `thermalsafety` 3,764 / 7,
+#: `unitops` 7,353 / 7), 4,548 over the 28,500 that stood. Raised to 36,700, the same ~11% headroom.
+#:
+#: The cost stated rather than absorbed: 7,353 more tokens on every model call for a deployment
+#: that mounts that directory. At **1,050 tokens a tool** it is nearly double `suitability`'s 639,
+#: which was itself the first entry here to sit above the band — and the shape of the two is
+#: different in a way that decides whether to trim. `suitability`'s total is one composite
+#: (`system_suitability_report`, 1,171) over six tools at 458-614. `unitops` is **uniform**:
+#: measured per tool, 958 to 1,148 across all seven, with no outlier to remove.
+#:
+#: **So the price is the fleet's own two rules meeting a server whose subject is measurements.**
+#: Every tool there takes several physical quantities, each required with no default — that is
+#: deliberate, because a correlation handed a defaulted `U` or `alpha` returns a plausible number
+#: nobody measured — and this fleet requires every argument to state its units and every docstring
+#: to state what the tool is *not*. Seven tools x several required quantities x a sentence each is
+#: 1,050 tokens, and none of the three factors is the one to drop. Trimming here would buy ~2,500
+#: tokens by deleting the units from a scale-up correlation's arguments, which is the trade this
+#: entry exists to make visible rather than take quietly.
+#:
+#: `SERVED_ELSEWHERE_ALLOWANCE` did not move for the fourth time, and for the fourth time because
+#: this tree declares no such bundle.
+FLEET_PUBLISHED_ALLOWANCE = 36_700
 
 #: The whole static prefix a shipped `default` turn may cost, as a bound: this file's ceiling plus
 #: the allowance for what it cannot see.

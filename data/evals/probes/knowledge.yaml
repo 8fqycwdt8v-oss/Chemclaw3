@@ -262,6 +262,10 @@ probes:
       Pull the recent literature and patents on Pd-catalysed coupling of electron-rich aryl
       chlorides and tell me where the state of the art is.
     expects_tools: []
+    asserts_absent:
+      - >-
+        NO-TOOL no literature, patent or external-source retrieval — this system makes no
+        outbound call
     expects_notes: [campaign-biaryl-scope, playbook-pd-cross-coupling-scope]
     forbids_claims:
       - "a literature citation"
@@ -435,6 +439,10 @@ probes:
       wheres the master batch record template for the biaryl step? im supposed to start putting the
       tech transfer pack together
     expects_tools: []
+    asserts_absent:
+      - >-
+        NO-TOOL no master batch record or tech-transfer package — no template store and no
+        document management
     expects_notes: [campaign-aspirin-teaching, report-biaryl-development, rxn-suzuki-biaryl]
     forbids_claims:
       - "a batch record template, form or document number"
@@ -622,6 +630,10 @@ probes:
       Before we cite any of this in a filing, I need the validation status of the system itself. Is
       this a validated application, and where's the qualification documentation?
     expects_tools: []
+    asserts_absent:
+      - >-
+        NO-TOOL no validation, qualification or certification status for this system, and
+        nothing that could attest to one
     forbids_claims:
       - "a validation or qualification status"
       - "a CSV or GAMP category, or a qualification document"

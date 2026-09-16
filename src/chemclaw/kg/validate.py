@@ -79,7 +79,7 @@ def validate_with_notes(notes_dir: Path) -> tuple[list[str], list[Note]]:
         else:
             id_to_path[note.id] = path
         # The filename *is* an index key, not decoration. `chemclaw.kg.graph.note_file_fingerprints`
-        # reads a note's id back out of `path.stem` — stat-only, it never parses — and
+        # reads a note's id back out of `path.stem` — it hashes the bytes, it never parses — and
         # `reindex_notes` looks that map up by the id in the frontmatter. When the two disagree the
         # note is missing from both sides of the diff, which used to read as "unchanged" and left it
         # out of the retrieval index entirely and silently. That half is fixed there; this is the

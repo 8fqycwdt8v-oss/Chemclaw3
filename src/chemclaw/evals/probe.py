@@ -58,6 +58,14 @@ class Turn(BaseModel):
 # C = no capability at all; a good answer is an honest refusal plus what it *can* do.
 Bucket = Literal["A", "B", "C"]
 
+#: The prefix that marks an `asserts_absent` entry as a capability no tool name reaches.
+#:
+#: A constant rather than a spelling each reader re-types, because the whole value of the field is
+#: that one side writes it and another side resolves it — two spellings would mean a marker that
+#: silently reads as a tool name, which is the failure mode the field exists to end. Upper case and
+#: hyphenated so it cannot collide with a tool name, which on this surface is lower snake case.
+ABSENT_MARKER = "NO-TOOL "
+
 
 class Probe(BaseModel):
     """One question to ask a live system, with the direction a satisfying answer would take.
@@ -96,6 +104,43 @@ class Probe(BaseModel):
     # lane-independent: gr-25 forbids *a limit recalled rather than looked up*, which with no tool
     # bound forbids every limit, because every one of them is then recalled.
     needs_bundle: str | None = None
+    # What a bucket-C probe claims this system cannot do, named so that the claim can be resolved
+    # against the surface instead of being read out of `direction:` by a human.
+    #
+    # **It exists because an absence claim was the one kind of claim in this corpus nothing could
+    # check.** `D-2026-09-15-a-probe-that-forbids-the-answer-a-bound-tool-serves-measures-nothing`
+    # found six sites asserting the ICH Q3C/Q3D tables and the mutagenicity alert set were absent
+    # while the declared `safety` bundle bound all three — three of them as `forbids_claims`
+    # entries, so a model that looked a limit up and cited it scored as fabricating and one that
+    # refused scored correct. The guard that exists for the adjacent defect indexes `by_tool` from
+    # `expects_tools`, and a probe that wrongly asserts a capability is absent names no tool, so it
+    # is invisible to a check that starts from the tools probes name. Nothing can read *"claiming
+    # an ICH guideline text or limits table is available to it"* and resolve it to
+    # `ich_impurity_limit`; this is that sentence being made resolvable.
+    #
+    # Two arms, and the second is the load-bearing one and also the weak one:
+    #
+    # - **A tool name** — `delete`, `run_python` — is checked against `available_tool_names()` and
+    #   the probe fails when the surface binds it. This is the mechanical arm, and it is the same
+    #   control `PromptBlock.absent_unless` applies to the system prompt's own denials: a blanket
+    #   denial is wrong as soon as one of the capabilities it denies exists. A name that is not
+    #   bound is not evidence of anything else — it may equally be a typo — which is what
+    #   `tests/test_probe_coverage.py` reads with `difflib` rather than trusting.
+    # - **`NO-TOOL <what is absent>`** — the marker, for the many absences no tool name reaches: no
+    #   chromatographic model, no equipment booking interface, no project or headcount data. It is
+    #   checked for being a real phrase and for not naming a bound tool inside itself, and beyond
+    #   that a reader is the check. **It buys a reviewable lie in place of an invisible one rather
+    #   than an impossible one**: an author who would write the absence claim wrongly will write
+    #   the marker wrongly too. Said here because "required field" reads as a stronger control than
+    #   this is.
+    #
+    # Required on bucket C, permitted on B — where half the ask is absent and the corpus should be
+    # able to say which half — and refused on A, where a probe asserting the capability exists and
+    # that it is missing would be asserting both. Those rules are tests rather than validators here
+    # for the reason `expects_tools` is: a `Probe` is rehydrated from archived transcripts written
+    # before this field existed (`evals/live.py` stores `probe.model_dump()`), and a required
+    # pydantic field would make every one of those runs unreadable.
+    asserts_absent: list[str] = Field(default_factory=list)
     # True when a satisfying answer requires a *durable* job to have actually run — not merely a
     # tool named in `expects_tools` to have been called. The distinction is the whole reason this
     # field exists: a job tool returns a workflow id the moment the launch is accepted, so an
