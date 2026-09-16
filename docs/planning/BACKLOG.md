@@ -231,6 +231,39 @@ topic).
       measurement from scratch, and the baseline itself moved 4.38 → 4.69 between 2026-09-14 and
       2026-09-15 with no retrieval code changed, because the corpus grew.
 
+- [ ] **What `graph` means as a retrieval source: a lexical rule of its own, or the leg that reads
+      the index** — [M], measured 2026-09-16 by the dependency audit that proposed deleting one of
+      the two lexical rankers and had to withdraw it. Anchors: `agent/graph_tools.py::_scan_notes`
+      and its `_relevance`, `retrieval/retrievers.py::LexicalRetriever`,
+      `retrieval/vector_index.py::note_reindex_effective`, `CHEMCLAW_DATA_SOURCES`.
+
+      Two lexical rankers run over one corpus, and `_scan_notes` justified its 151 ms event-loop
+      stall (836 ms at eight concurrent, 10k-note corpus) by saying there is no database to push the
+      scan into — which is false: `note_index` exists with a GIN `tsvector` and `search_lexical`
+      reads it. **The removable leg is the opposite of the obvious one.** Ablated at a *matched slot
+      budget* — three legs at k=8 deliver 24 slots against one leg's 8, so comparing them unmatched
+      measures the budget rather than the ranker — the Postgres `ts_rank` leg strictly dominates the
+      in-process BM25-lite: 42 gold notes found to 40, 24 in the top 3 to 19, and the graph leg
+      contributes **zero** gold notes the Postgres leg misses.
+
+      **It is still not removable, for a reason that is not about ranking.**
+      `note_reindex_effective` schedules the reindex only when `lexical` or `vector` is in
+      `CHEMCLAW_DATA_SOURCES`, and the shipped default is `graph,eln-json` — so in the default
+      deployment the index nothing maintains is the one the survivor would read, and deleting the
+      graph leg's own ranking retrieves nothing from the knowledge graph. The narrower removal that
+      fits inside one file is a measured regression on its own: dropping just `_relevance` moves
+      graph-alone mean gold rank 4.72 → 5.67 and loses a gold note from the shipped three-leg arm,
+      39 → 38, which `retrieval_recall` gates on. The two rules are also not one rule in two
+      spellings — driven against live Postgres, `couplings`, `coupled`, `dry` and `films` hit
+      `ts_rank` and miss the substring rule, while `ester` matches `polyester` for `term_coverage`
+      and produces no lexeme at all for the server; `tests/test_note_search.py` pins both directions.
+
+      What closes this is a decision and a default, not a retriever edit: either `graph` keeps
+      meaning a lexical rule of its own, or it becomes the leg that reads the index and the reindex
+      stops being conditional on a source nobody enables. Re-run `make retrieval-arms` on both sides
+      of it, and read the `hybrid` row above first — the audit quoted its 3.69 headline as a reason
+      to cut a leg, and that configuration finds three fewer gold notes.
+
 ## 3 — Work that is lost, dropped or invisible
 
 - [ ] **The model-facing prose guards scan the in-process registry and four bundles, not the

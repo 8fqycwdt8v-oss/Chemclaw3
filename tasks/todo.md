@@ -1,263 +1,331 @@
-# Off-the-shelf adoption — implementing the 2026-09-16 dependency audit
+# Off-the-shelf adoption — the 2026-09-16 dependency audit, reconciled against what shipped
 
-Fourteen read-only audits across `Chemclaw3`, `Chemclaw3-mcp` and `Chemclaw3_ui` asked one question of
-every module: **is this hand-written code a library already does better?** Mostly the answer is no and
-the tree already argues it. This plan implements the residue — the places where the argument is stale,
-absent, or contradicted by a sibling repository.
+**This is a closed plan, reconciled on 2026-09-16 against the tree rather than against itself.**
+Every row below carries a verdict and the anchor that proves it. Nothing here is a claim about work
+still to come: what is still open left this file for `docs/planning/BACKLOG.md`, which is the
+register a next branch does not overwrite.
 
-Scope decided by the owner on 2026-09-16: **everything except the RDKit Postgres cartridge** (it needs
-a database image this session cannot provision), **including** the three changes that invalidate a
-deployed calculation cache, **including** both `Chemclaw3_ui` policy reversals. One PR per repository,
-auto-merged.
+Four verdicts, and they are not interchangeable:
 
-## The rule this plan follows
+| Marker | Means |
+| --- | --- |
+| `- [x]` **landed** | shipped as the row described it |
+| `- [x]` **landed, modified** | shipped, and the clause after the marker says what differs from the row |
+| `- [ ]` **DECLINED** | measured and *not* taken; the measurement or the ADR that settled it is named |
+| `- [ ]` **not done** | neither taken nor settled |
 
-A finding is only worth implementing if the *argument* behind the hand-written code has actually
-expired. Where a docstring argues correctly for what it does, the item is not here — it is in the
-report's "checked and declined" list, and re-proposing it later is the failure the register at
-`docs/planning/BACKLOG.md:1013` exists to prevent. Three items below reverse a merged decision; each
-gets an ADR that says so and states what changed, because **a decision that has changed gets a new
-ADR, never an edit** (CLAUDE.md).
+A checked box is a claim about a commit, so `grep -c '^- \[x\]' tasks/todo.md` and
+`grep -c '^- \[ \]' tasks/todo.md` are what count them. No number here does.
+
+Scope decided by the owner on 2026-09-16: everything except the RDKit Postgres cartridge, including
+the three changes that invalidate a deployed calculation cache and both `Chemclaw3_ui` policy
+reversals. One PR per repository — `Chemclaw3-mcp` #79 and `Chemclaw3_ui` #86 are merged to their
+`main`; this repository's branch is not, and each sibling has a follow-up in flight.
+
+## The rule this plan followed
+
+A finding was only worth implementing if the *argument* behind the hand-written code had actually
+expired. Where a docstring argued correctly for what it does, the item was declined — and a decline
+is only a decline if a later session can find it, which is why the reasons are in
+`docs/planning/BACKLOG.md`'s upstream-capability register and not in this file.
 
 ---
 
 ## A. Verified defects (this repository)
 
-These are bugs, not adoptions. Each was reproduced at the top level before it was written down.
-
-- [ ] **A1 — `core/metrics.py:1638,1653` renders `inf`/`nan` into a Prometheus scrape.**
-      `f"{float('inf'):g}"` is `inf`; the text format requires `+Inf`. One bound gauge with a zero
-      denominator poisons the whole exposition body. The histogram path at `:1673` already emits
-      `le="+Inf"` correctly, so this is an inconsistency inside one renderer, not a convention.
-      Fix: one `_sample(value)` formatter used by every numeric emission. Test: a gauge source
-      returning each of `inf`, `-inf`, `nan` and a finite float, asserted against the rendered body.
-- [ ] **A2 — `operations/activity.py:381` guards SQL string surgery with a bare `assert`.**
-      `python -O` deletes it and the failure is then silent: `_TOOL_USAGE_ONE` becomes identical to
-      `_TOOL_USAGE`, a third parameter is still appended, and psycopg raises a bind-count error at
-      query time rather than at import. One of only four asserts in `src/`. Fix: `if ...: raise`.
-      Also adopt the sibling repo's rule — see F3.
-- [ ] **A3 — `agent/audit_store.py` buffers without a write-side bound.**
-      The docstring argues correctly that a *failed* batch must not requeue without bound; a merely
-      *slow* database is the case it does not cover, at ~90 rows a turn in a pod the chart limits to
-      1 GiB. Fix: bound the buffer, drop oldest, and count the drop on a declared counter — an audit
-      row lost silently is worse than one lost loudly.
-- [ ] **A4 — `deliver/driver.py:364` opens an `AsyncClient` per delivered message.**
-      A fresh TCP+TLS handshake per message to the same host. `registry.build` is uncached *on
-      purpose* (a driver may hold a credential that must not outlive a rotation), so the pool cannot
-      live on the driver: it goes on a module-level transport keyed by nothing, with `trust_env=False`
-      preserved for the measured reason in the comment above it.
+- [x] **A1 — `core/metrics.py` rendered `inf`/`nan` into a Prometheus scrape.** **Landed, modified:**
+      one `_sample()` at `core/metrics.py:61` used by every numeric emission, `le` deliberately left
+      on `:g` because it is a label. The `:g` spelling turned out to be wrong a second way nothing
+      would have reported — six significant digits, so a counter past 1,234,567 rendered
+      `1.23457e+06`, accepted and wrong.
+      `D-2026-09-16-six-significant-digits-is-not-the-number-that-was-counted`.
+- [x] **A2 — `operations/activity.py` guarded SQL string surgery with a bare `assert`.**
+      **Landed, modified:** `if …: raise` at `operations/activity.py:381,390`, and the sibling's
+      no-`assert`-in-serving-code rule adopted here as an argued allowlist rather than as the
+      one-line fix. `D-2026-09-16-an-assert-is-a-control-with-an-off-switch-in-this-repository-too`.
+- [x] **A3 — `agent/audit_store.py` buffered without a write-side bound.** **Landed, modified:**
+      `agent_audit_buffer_max_events` (`core/config/agent.py:730`) sheds oldest and counts on
+      `chemclaw_audit_events_shed_total`. A reviewer then found the bound was half the real ceiling
+      — `_flush_all` swaps the list out and the in-flight batch was uncounted, measured peak 20 at a
+      bound of 10 — and that it logged one WARNING per audit event; both fixed.
+      `D-2026-09-16-a-buffer-bounded-against-a-dead-database-is-not-bounded-against-a-slow-one`.
+- [x] **A4 — `deliver/driver.py` opened an `AsyncClient` per delivered message.**
+      **Landed, modified — half of it was declined on measurement.** The shared TLS context is taken
+      (`deliver/driver.py:380`, `core.http.default_ssl_context`, the 390x certifi parse). The shared
+      **connection pool** is *not*: it needs per-event-loop caching, which is the shape `core/db.py`
+      already carries a measured bug and a `_forget_pools_of_ended_loops` sweep for. The comment at
+      `deliver/driver.py:376` is the record.
 
 ## B. Already in the closure (this repository)
 
-Every library here already resolves in `uv.lock`. Adoption is a declaration line, not a new download.
+- [x] **B1 — `httpx-sse` replaces three disagreeing SSE decoders.** **Landed, modified:** one
+      `evals/live.decoded_events` for all three call sites, but driving `httpx_sse`'s **private**
+      `SSEDecoder`/`SSELineDecoder` rather than `aiter_sse` — the adopted reader dropped the final
+      event of a stream that ends without a blank line, which is exactly what `cli/live_storm.py`
+      exists to generate, and raised inside the iterator on a wrong content type where one caller
+      has no handler. 19-case matrix, 15/19 before and 19/19 after; the coupling is pinned in
+      `tests/test_upstream_surface.py`.
+- [x] **B2 — `pathspec` replaces `fnmatch` tried three ways.** **Landed:** `ingest/documents/crawl.py`
+      and `binding.py:exclude_spec`, with the directory prune taken and proven by recording
+      `os.scandir`. The compatibility check over the shipped patterns ran first — 13 cases, no
+      divergence — and the one gitignore semantic that differs is stated in the docstring.
+- [x] **B3 — `charset-normalizer` replaces a hardcoded UTF-8 decode.** **Landed, modified:**
+      `ingest/documents/parse.py:29`, ordered `utf-8-sig` strict → detection → `errors="replace"`,
+      so every file that decodes correctly today is byte-identical. `_CHUNK_TEXT_VERSION` is
+      deliberately **not** bumped, so an already-indexed non-UTF-8 document keeps its mojibake until
+      its fingerprint moves.
+- [x] **B4 — `networkx.utils.UnionFind` replaces a hand-typed union-find.** **Landed as written:**
+      `agent/message_pairing.py:51,306`. (It is B9, in `memory/similarity.py`, that uses
+      `scipy.sparse.csgraph.connected_components` — not this row.) Identity measured over 30,000
+      random row/candidate sets.
+- [x] **B5 — `bisect.bisect_right(…, key=)` replaces a hand-written binary search.**
+      **Landed, modified:** over `range(1, len(text) + 1)`, not `range(len(text) + 1)` — `text[-0:]`
+      is the whole string, so the obvious form's keys are not sorted. `agent/model_calls.py:323`.
+      Identity over 20,000 random strings at budgets 0–40, zero mismatches.
+- [x] **B6 — `PyJWKClient.fetch_data` overridden onto `httpx`.** **Landed:** `_HttpxJwkClient` at
+      `api/auth.py:77`; the `os.environ` `no_proxy` surgery, the `threading.Lock` and two exception
+      workarounds are gone, the 401-vs-503 split re-mapped deliberately, and the unpromised shape
+      pinned in `tests/test_upstream_surface.py`. It had a consequence nobody predicted — see the
+      netguard paragraph in the Review.
+- [x] **B7 — `psycopg` `executemany` + `class_row`.** **Landed, modified:** `executemany` is an
+      **optional** `BatchingCursor` member with a row-at-a-time fallback, because a site brings its
+      own driver (`D-2026-08-26-the-driver-s-signature-is-the-schema`). A reviewer then found the
+      shipped `_PostgresCursor` had no such method, so the whole change was inert in production;
+      `publish/drivers/postgres.py:93` is the fix, measured 1,500 round trips / 5.6 s → 9 / 0.41 s.
+      `class_row` at `operations/evidence_pack.py:334`.
+- [x] **B8 — RDKit's `rdSubstructLibrary` replaces a scan that re-parses the corpus per query.**
+      **Landed, modified:** `science/fingerprints/molfp/substructure_index.py`, holder
+      `CachedMolHolder` over `ToBinary()` rather than `CachedTrustedSmilesMolHolder` (that one needs
+      `MolToSmiles` per record, which this tree records as an uncatchable SIGSEGV past ~16k atoms).
+      `GetMatches` defaults `useChirality=True` where `HasSubstructMatch` defaults it `False` — taken
+      by default that turned 514 matches into 0. Reviewer fix: the build got its own budget and a
+      missing index is skipped rather than fatal, after it failed 3 of 3 on a 19,996-record corpus
+      the loop answered in 2.01 s. `D-2026-09-16-an-index-is-an-optimisation-not-a-precondition`.
+- [x] **B9 — numpy replaces an O(n²) Python Tanimoto loop.** **Landed, modified:** **sparse**
+      `csr @ csr.T` into `scipy.sparse.csgraph.connected_components` (`memory/similarity.py:11,125`),
+      not the dense `X @ X.T` the row proposed — dense is *slower than the Python loop* below a few
+      hundred fingerprints (BLAS sync costs a flat ~75 ms) and its float64 matrix is 800 MB at the
+      deferral's own trigger. Measured 4–5x, not the ~100x the row guessed, because the parse had
+      already been hoisted. Clusters byte-identical at five thresholds.
 
-- [ ] **B1 — `httpx-sse` (in lock via `mcp`) replaces three disagreeing SSE decoders.**
-      `cli/live_storm.py:166` slices `[6:]`, `cli/live_benchmark.py:257` slices `[5:].strip()`,
-      `evals/live.py:252` does it a third way. All three discard the `event:` name that
-      `api/events.sse_frame` deliberately sets and re-read `type` out of the body. Latent rather than
-      broken today — `sse_starlette` emits `model_dump_json()`, which carries no raw newline — so the
-      cost being paid is three spellings drifting, not a live fault.
-- [ ] **B2 — `pathspec` (in lock via `mypy`) replaces `fnmatch` tried three ways.**
-      Measured: `fnmatch("Projects/Archive", "**/Archive/**")` is `False` in *all three* forms
-      `crawl.py:80` attempts, so an excluded **directory** never matches and `descend` walks the whole
-      archive subtree, excluding it one file at a time. Take the directory prune as well as the match.
-      Needs a compatibility test over the shipped `sharedrive` patterns first: gitwildmatch drops the
-      basename fallback, so a deployment-authored `Foo/Bar` would stop matching a file named `Bar`.
-- [ ] **B3 — `charset-normalizer` (in lock via `requests`) replaces a hardcoded UTF-8 decode.**
-      `parse.py:95,107` decode a decade-old Windows/CIFS share with `errors="replace"`. Measured:
-      cp1252 `60 °C` becomes mojibake that is parsed, chunked, embedded and citable with nothing
-      counted; a BOM breaks the first CSV header cell; UTF-16 is filed `skipped_unreadable` with a
-      misleading reason. The same parser serves chemist uploads via `agent/attachments.py`.
-      Strict UTF-8 (and `utf-8-sig`) first, so every currently-correct file stays byte-identical.
-- [ ] **B4 — `networkx.utils.UnionFind` replaces a hand-typed union-find.**
-      `agent/message_pairing.py:292`. `networkx` is a declared dependency, already imported in this
-      package, and explicitly permitted by `tests/test_third_party_layering.py`. `.to_sets()` is the
-      `members` dict built by hand at `:311`.
-- [ ] **B5 — `bisect.bisect_right(..., key=)` replaces a hand-written binary search.**
-      `agent/model_calls.py:304`. Worth taking beyond the line count: the hand-rolled version shipped
-      with a `text[-0:]` off-by-one that returned 100,024 characters at a budget of 0–2 — the exact
-      failure the function exists to prevent.
-- [ ] **B6 — `PyJWKClient.fetch_data` overridden onto `httpx`.**
-      `api/auth.py:103` mutates **process-global** `os.environ` (`no_proxy`) on every client build
-      because PyJWT fetches with `urllib`, and carries a `threading.Lock` solely because that
-      read-modify-write races on the validation pool — five concurrent writers left one of five hosts
-      in `no_proxy`. `httpx` is a declared dependency. `fetch_data` is an unpromised shape, so this
-      owes an assertion in `tests/test_upstream_surface.py`, which is what that file is for.
-- [ ] **B7 — `psycopg` `executemany` + `class_row`, both already used elsewhere in this tree.**
-      `publish/drivers/sql.py:298` opens a cursor and executes once *per row*, three loops deep, on an
-      autocommit connection — order 10³ round trips per drain pass. And `operations/evidence_pack.py:295`
-      unpacks **nine adjacent `str` columns positionally**, so reordering the SELECT produces a
-      plausible evidence pack that passes `mypy --strict`. `dict_row` is already in use at
-      `publish/drivers/postgres.py:23`, so there is no in-house policy against the row factory.
-      The `WarehouseCursor` Protocol needs an optional `executemany` with a row-at-a-time fallback,
-      because a batch shares a failure and today's per-row `except` names the offending table.
-- [ ] **B8 — RDKit's `rdSubstructLibrary` replaces a scan that re-parses the corpus per query.**
-      `science/fingerprints/molfp/search.py:114,240` calls `MolFromSmiles` on every stored SMILES on
-      every query; the parse, not the isomorphism, is a large share of the 343 ms/molecule the
-      docstring quotes. Zero mentions in the tree. `DEFERRED.md:63` defers this exact problem and
-      frames the fix as a Postgres GIN back-port; the in-memory library is the cheaper half and does
-      not close that row. Results identical — same `HasSubstructMatch`, same screen soundness — but
-      `CachedTrustedSmilesMolHolder` skips sanitisation, so rows that land in `unreadable` today must
-      keep landing there, and `maxResults` truncation must re-plumb into `scan_truncated`.
-- [ ] **B9 — numpy replaces an O(n²) Python Tanimoto loop.**
-      `memory/similarity.py:36`. `unpackbits` → `X @ X.T` → threshold → `connected_components`.
-      Same asymptotics, ~100× constant, exact at the threshold. `DEFERRED.md:62` defers the
-      *asymptotic* fix and is orthogonal: this does not close it.
+## C. Needing a decision
 
-## C. Needing a decision — taken, with the decision recorded
-
-Each of these reverses or reopens something. Each gets an ADR.
-
-- [ ] **C1 — `pint` replaces the hand-built unit registry.** `core/units.py:119-268`.
-      The module's own history is three instances of one bug: a prefix rung existing on one ladder and
-      not the other (`nM` missing so nanomolar folded to nanometre; `pM` added without its length twin
-      so **picometre resolved to picomolar**; `µm` aliased to micromolar so a particle size was
-      accepted as a concentration). A registry that *derives* prefixes cannot have that class of bug,
-      and pint is case-sensitive by default, which is the other half. No ADR anywhere — 648 grepped.
-      Built from a **restricted definitions file**, not the default registry: the docstring's
-      "0.5 furlongs" refusal is right and must survive. `log_solubility` and `acidity` become declared
-      pseudo-dimensions so nothing converts into them; `basis` (`area%` vs `% w/w` vs `mol%`) has no
-      pint concept and stays first-party; `uncertainty` stays first-party. Use `ureg.Unit(symbol)`,
-      never `parse_expression`, which would re-open the derived-unit algebra the docstring refuses.
-- [ ] **C2 — `tiktoken` replaces chars/4, and the calibration class it needs.**
-      `agent/context_budget.py:140` is ~110 lines of EWMA, seed-bias correction, sanity band and clamp
-      that exist *only* because the counter is approximate. Three constraints: the gateway's model is
-      deliberately unknowable (`D-2026-09-04`), so the encoding is configured rather than derived;
-      tiktoken **downloads** its merge table on first use, which the air-gap forbids, so the encoding
-      is baked into the image and `TIKTOKEN_CACHE_DIR` is set in the chart; and encoding a 100k-token
-      thread per model call costs real CPU, so the exact count is memoised on the same key the
-      estimate already uses. Land the **prefix half first** (`estimate_tool_schemas:435` is already
-      memoised per bound surface, one encode per process) and keep the calibration as the fallback for
-      a gateway whose encoding is unknown, rather than deleting it outright.
-- [ ] **C3 — delete the second lexical ranker.** `retrieval/retrievers.py:229` + `agent/graph_tools.py:220`.
-      `_scan_notes` stalls the event loop a measured 151 ms per call and 836 ms at eight concurrent on
-      a 10k-note corpus, and its stated reason — "there is no database to push the scan into" — is
-      false: `retrieval/vector_index.py` maintains a GIN-indexed `tsvector` over those same notes and
-      `LexicalRetriever` already queries it. In `hybrid` mode both rankers run over one corpus.
-      **Not** a BM25 library: `rank_bm25` rebuilds its index per construction and would pay the same
-      cost. The risk is precise — `term_coverage` is *substring* and `term_frequencies` is *token*,
-      and `D-2026-08-05-three-searches-that-disagreed-about-one-note` is about exactly this — so the
-      gold-set numbers in `BACKLOG.md:210` get re-measured before and after, not assumed.
-- [ ] **C4 — ruff `TID253` as a second belt on the third-party layering rule.**
-      It bans a module at *module scope only* while permitting a function-scope import, which is the
-      distinction `tests/test_third_party_layering.py` hand-builds. Ruff is already installed and
-      already run by `make lint`. **A second belt, not a replacement** —
-      `D-2026-09-13-the-rule-that-would-have-caught-it-was-not-the-one-asked-for` refused exactly this
-      trade for `S101` on the grounds that two declarations of one rule with nothing reconciling them
-      is worse than one, so the test stays and gains an assertion that the ruff config agrees with it.
-- [ ] **C5 — reconcile `_STRUCTURAL_SECRETS` against a maintained ruleset.**
-      `core/logging.py:889` is eleven vendor-prefix regexes that go stale in silence. Import the
-      *pattern inventory*, keep the engine: `detect-secrets` is scan-shaped, returns spans rather than
-      redactions, has no equivalent of the `(?P<keep>…)` group that keeps a redacted line saying which
-      credential failed, carries no ReDoS bounds of its own, and **declares `requests`**, which is on
-      the fleet's forbidden-import list. So this is a periodic reconciliation with a test that fails
-      when the inventory drifts, not a swap.
-- [ ] **C6 — `pytest` gains an async plugin and 660 tests stop hand-rolling `asyncio.run`.**
-      Counted: **2,236** `asyncio.run(` sites across 135 files defining `async def _run`. The largest
-      entirely unargued pattern in the tree — stated only in two test docstrings, nothing in 648 ADRs.
-      `anyio` is already in the lock (via httpx/starlette) and ships a pytest plugin, so this adds
-      zero distributions. Drive it on the **Postgres-backed files first**:
-      `D-2026-09-13-a-loop-that-abandons-its-pool-can-fail-to-end` is precisely the teardown hazard a
-      plugin-managed loop has to reproduce. Staged last, because a 260-file diff that goes wrong
-      buries every other change in this PR.
+- [x] **C1 — `pint` replaces the hand-built unit registry.** **Landed, modified:** built from a
+      restricted definition list (`pint.UnitRegistry(None)` + `define()`), and resolution goes
+      through `UnitRegistry.get_name`, **not** `ureg.Unit` — `Unit("m/g")` builds metre-per-gram even
+      on a restricted registry, which would have lost the no-derived-unit-algebra invariant the row
+      set out to keep. The rewrite found a fourth live instance of the family: `parse_unit('cM')`
+      resolved to a **centimetre** on `main`, inside the allowlist written to excuse the family.
+      Differential: 22,500 ordered pairs, 0 divergences; the refusal half bit-identical.
+      It is **larger**, not smaller, and the growth is argument rather than logic. The commit that
+      landed it measured 434 → 609 lines; `wc -l src/chemclaw/core/units.py` already answers
+      differently, because a later commit in this same wave moved three constants onto
+      `scipy.constants` — which is why the figure is named as a measurement of a commit and not
+      restated as the module's size.
+- [x] **C2 — `tiktoken` replaces chars/4.** **Landed, modified:** the **request prefix** is counted
+      exactly (`agent/context_budget.py`, encoding configured, merge table baked at
+      `TIKTOKEN_CACHE_DIR`, `tiktoken` declared rather than transitive). The per-turn **thread**
+      count is now deliberately *refused* rather than staged next: 24.2 ms against 0.03 ms, at least
+      three times per model call and two of the three on the loop that serves every SSE stream. The
+      audit's premise was half wrong and measuring is what found it — chars/4 is 0.05% low on JSON
+      schemas and 18% *high* on the English prompt, so the whole correction was the prose. The
+      calibration stays, and not only as a fallback.
+- [ ] **C3 — delete the second lexical ranker.** **DECLINED on measurement.** The duplication is real
+      and the removable leg is the *opposite* of the obvious one — at a matched slot budget the
+      Postgres `ts_rank` leg dominates and the graph leg contributes zero gold notes it misses — but
+      `note_reindex_effective` schedules the reindex only when `lexical` or `vector` is in
+      `CHEMCLAW_DATA_SOURCES`, and the shipped default is `graph,eln-json`, so the survivor would
+      read an index nothing maintains. The narrower removal is its own regression: dropping
+      `_relevance` moves graph-alone mean gold rank 4.72 → 5.67 and loses a gold note from the
+      shipped arm, 39 → 38, which `retrieval_recall` gates on. No retrieval code changed; three
+      docstrings stopped claiming what their own measurements contradict. **The decision this left
+      open is now a `BACKLOG.md` row** — see the Review.
+- [ ] **C4 — ruff `TID253` as a second belt on the third-party layering rule.** **DECLINED here,
+      adopted in `Chemclaw3-mcp`.** `D-2026-09-16-a-flat-ban-cannot-express-a-matrix`: the sibling
+      bans a flat list of network roots everywhere, which the rule expresses exactly; this tree
+      declares a `(package, stack)` matrix with 51 edges, which `per-file-ignores` can only restate
+      in another syntax — the "two declarations with nothing reconciling them" `D-2026-09-13` already
+      refused for `S101` — and `TID253` sees one of the three import scopes the policy distinguishes.
+      What *was* missing was root coverage, and that is closed: an unmapped root is skipped by the
+      walk, which is how `httpx_sse`, `pint`, `tiktoken`, `pathspec`, `charset_normalizer` and
+      `scipy` were invisible to it.
+- [x] **C5 — reconcile `_STRUCTURAL_SECRETS` against a maintained ruleset.** **Landed as written:**
+      the inventory was imported, the engine kept. `detect-secrets` stays out of the runtime for the
+      four reasons the row gave. `core/logging.py:902` gained `ASIA`/`ABIA`/`ACCA`, a PEM private-key
+      block (there was **no** rule at all), `dapi…`, `glpat-`, `xapp-` and `sk-admin-`; every added
+      pattern timed against adversarial input at 10/40/80/160 kB; and staleness is now visible — a
+      dated reconciliation with a 180-day bound, a per-shape sample list that fails by name, and a
+      register of what was declined. A reviewer then found the PEM rule let the **encrypted** form
+      through whole — see the Review.
+- [x] **C6 — an async plugin, so tests stop hand-rolling `asyncio.run`.** **Landed, modified:**
+      `anyio`'s bundled plugin with `anyio_mode = "auto"` and a session `anyio_backend`, adding zero
+      distributions. The brief was wrong in a way worth recording: it asserted anyio had no auto
+      mode and required a marker per file. The conversion is **partial by design** — strict-shape
+      sites only, leaving a test with two `asyncio.run` calls, a `_run` that takes arguments or
+      returns a value, and anything inside a `with` block alone. Collection 9,495 before and after.
+      A full serial run then left four red; three were the conversion's and one was A1's metrics
+      change, and all four are fixed and argued.
 
 ## D. Duplication with no library answer
 
-- [x] **D1 — one Markdown table helper.** Landed as `core/markdown.py`; the emitters across `cli/`,
-      `evals/`, `memory/` and `protocols/` now go through it, and `grep -rn 'render_table(' src/chemclaw`
-      is what counts them rather than a figure here. **Not `tabulate`**: `memory/comparison.py` is
-      right that its three "honesty rules" are the part worth having in one place, and a library that
-      renders cells uniformly pushes them back out to every call site.
-- [ ] **D2 — the electronvolt constant has one definition.** `publish/properties.py:102` writes
-      `23.060547830619026` while `core/units.py:213` holds `ELECTRONVOLT_TO_KJ`. Verified equal today
-      (`96.48533212331 / 4.184` is *exactly* that literal, difference 0.0) — latent drift, not a live
-      bug, and `core/units.py:200` already names this file as owing the import.
-- [ ] **D3 — ionisable-site perception is three rule sets in two repos.** Here: `science/calc/logd.py:82`.
-      Express the rules as an RDKit SMARTS table rather than `GetBonds()` loops, transcribed to
-      reproduce today's partition exactly, and pinned by the existing fixtures. Paired with F4/F5.
+- [x] **D1 — one Markdown table helper.** **Landed:** `core/markdown.py`; `grep -rn 'render_table('
+      src/chemclaw` is what counts the call sites. Deliberately not `tabulate`. The escaping turned
+      out to be a live correctness defect rather than a style inconsistency — seventeen of twenty
+      sites escaped nothing, and a connector tool result containing `|` produced four cells under a
+      three-column header.
+- [x] **D2 — the electronvolt constant has one definition.** **Landed:**
+      `publish/properties.py:107` derives it from `core.units`; the four bare `4.184` literals went
+      with it. Verified equal to 0.0 before changing anything, so no published value moved. The
+      constants themselves later moved to `scipy.constants` — see the Review.
+- [x] **D3 — ionisable-site perception as an RDKit SMARTS table.** **Landed:**
+      `science/calc/logd.py:50,70`, 262 → 227 lines, `maxMatches` bound to the atom count in place of
+      RDKit's silent 1,000 default. Equivalence measured over **742** molecules against the old
+      implementation: 0 disagreements, same counts and same refusals. That bit-identity is what stops
+      this and the sibling's pKa predictor drifting.
 
----
+## E. `Chemclaw3-mcp` — PR #79, merged
 
-## E. `Chemclaw3-mcp` (own PR)
+- [x] **E1 — four physical constants from `scipy.constants`.** **Landed:**
+      `servers/calc/src/chemclaw_mcp_calc/engine/xtb_engine.py:24`, `xtb_props.py:35`, with the
+      `_HAMILTONIAN_REVISION` bump **shared with E2** — one cache invalidation, not two. scipy ships
+      CODATA 2022 where the comment claimed 2018.
+- [x] **E2 — `geomeTRIC` replaces the hand-written preconditioned optimizer.** **Landed:**
+      `engine/xtb_opt.py:48-54`; `engine/anc.py` is deleted. Same revision bump as E1.
+- [ ] **E3 — `rxn-insight` replaces the second reaction classifier.** **Not done — queued rather
+      than declined:** it is a row in that repository's own `docs/BACKLOG.md`, carrying the
+      label-vocabulary mapping it needs against vendored `trust_priors.json` and the reason the
+      SMARTS path has to stay as the no-extra fallback. The consensus-ranking move the Verification
+      section below promised to state did not happen, because the change did not.
+- [x] **E4 — `molmass` replaces a hand-transcribed periodic table.** **Landed:**
+      `servers/thermalsafety/.../engine/oxygen_balance.py:39`; the deliberate refusals stay *in front
+      of* the library, which is what keeps `Ca(NO3)2` and hydrates refused by name.
+- [x] **E5 — one reconciliation test for molecular mass.** **Landed:**
+      `tests/test_fleet.py::test_the_three_answers_to_molecular_mass_agree` — four independent
+      sources written as three comparisons against the vendored `mw`, tolerance 0.05 g/mol, which is
+      the one `props`' own check already used.
+- [x] **E6 — the ionisable-site SMARTS table, shared shape with D3.** **Landed:**
+      `servers/calc/.../engine/pka.py:111,143,153`. Transcription only; `dimorphite-dl` stays out.
+- [x] **E7 — `TID251/253` beside `no_egress`, and pydantic for the two loaders.** **Landed, both
+      halves:** `pyproject.toml:109` selects `TID253` with a test reconciling it against the static
+      scan, and `mcp_server_kit/datasets.py` and `testing.py` validate through `BaseModel` with
+      `extra="forbid"`.
 
-- [ ] **E1 — four physical constants take their value from `scipy.constants`**, already a dependency of
-      that server. The comment claims "CODATA 2018, to full double precision" and is false for the
-      first: `1.8897261246` against an exact `1.8897261246257702`, 1.4e-11 relative.
-      **Invalidates the cache deliberately** — `calc_version` does not cover these literals, so
-      `_HAMILTONIAN_REVISION` is bumped in the same commit or stored rows are served for a physics the
-      code no longer reproduces.
-- [ ] **E2 — `geomeTRIC` replaces the hand-written preconditioned optimizer** (`engine/xtb_opt.py:236`
-      + `engine/anc.py`, ~330 LOC driving L-BFGS-B with both its own stopping tests disabled).
-      `anc.py`'s docstring already states the gap in the library's favour. **Every stored
-      `Structure.structure_id` changes**, and that id is the `input_hash` of every `xtb.*` key in
-      Chemclaw3's cache and calibration ledger. Same revision bump as E1, one invalidation not two.
-- [ ] **E3 — `rxn-insight` replaces the second reaction classifier**, already an optional dependency of
-      that exact server and already constructed in `engine/predictors/conditions/rxn_insight.py`.
-      The label vocabulary is a wire contract against vendored `trust_priors.json`, so it needs a
-      mapping, and the SMARTS path stays as the no-extra fallback. Consensus ranking moves.
-- [ ] **E4 — `molmass` replaces a hand-transcribed periodic table** in `servers/thermalsafety`.
-      Zero-dependency, which is the only candidate respecting that server's stated closure rule.
-      The deliberate refusals stay *in front of* the library: molmass parses `Ca(NO3)2` and hydrates,
-      which `parse_formula` refuses by name because guessing is wrong by a factor of two.
-- [ ] **E5 — one reconciliation test for molecular mass.** Four sources in one fleet;
-      `tests/test_fleet.py` already reconciles densities across servers and nothing does the same for
-      mass. Cheaper than any of the above and independent of all of them.
-- [ ] **E6 — the ionisable-site SMARTS table**, shared shape with D3 above (`servers/calc/engine/pka.py`,
-      `servers/chem/engine/species.py`). Transcription only — `dimorphite-dl` would desynchronise the
-      three and invalidate a fitted calibration.
-- [ ] **E7 — `no_egress`'s `network_imports` gains ruff `TID251/253` beside it** (second belt, same
-      argument as C4), and `datasets.load_dataset` + `testing.load_manifest` validate through pydantic
-      rather than defensive dict-walking — `extra="forbid"` catches the typo'd key that today parses
-      clean and then reports the *correct* key as missing.
+## F. `Chemclaw3_ui` — PR #86, merged
 
-## F. `Chemclaw3_ui` (own PR)
-
-- [ ] **F1 — Web Locks replaces hand-built cross-tab leader election.** `src/state/jobStreamLeader.ts:313`,
-      ~150 lines of claim/heartbeat/lease/resign plus a two-leaders watchdog. Kernel-held leadership
-      means a crashed tab releases immediately, which collapses the lease apparatus and the
-      "two leaders is expected, not prevented" invariant. Zero bytes. The every-tab-leads fallback stays.
-- [ ] **F2 — `eventsource-parser` in `scripts/smoke.mjs:324`.** Already a *production* dependency, and
-      `src/lib/sse.ts:6` already documents why writing this twice is wrong.
-- [ ] **F3 — `culori` replaces hand-transcribed OKLab matrices** in `scripts/check-contrast.mjs`.
-      Real caveat: line 36 clamps out-of-gamut **linear** RGB before luminance, which culori will not
-      reproduce, so every pair is re-measured and the deltas explained rather than a green run accepted.
-- [ ] **F4 — `immer` replaces nested spread-chain updaters** in `ProtocolEditor.tsx:278`, and
-      **`comlink`** replaces the hand-rolled worker RPC in `src/chem/rdkit.client.ts`. The parts that
-      earn their keep stay: `REPLY_BUDGET_MS`, the retire-and-rerun-in-process fallback, and the
-      three-ways-the-worker-is-absent handling. `check-bundle.mjs` asserts the worker chunk spelling,
-      so Comlink's `new Worker(new URL(...))` must survive it verbatim.
-- [ ] **F5 — policy reversal: `valibot` in `shared/events.ts`.** The file header says keep it
-      dependency-free (three bundlers import it) and is also a **nine-incident changelog of this seam
-      failing** — six events and three fields shipped upstream and were *deleted in transit*, because
-      `normalizeEvent` rebuilds field by field. A schema makes the type derived, so a field cannot
-      exist in the interface and be absent from the decoder. ADR reverses the rule explicitly and
-      addresses `src/env.ts:8`, which declines a schema library for a dozen string checks — sound
-      there, not transferable to a 17-member union.
-- [ ] **F6 — policy reversal: `@tanstack/react-query`.** Replaces an `inFlight` map, a TTL cache with
-      manual invalidation, and a `let cancelled = false` + two-`useState` triad repeated at nine
-      components. Three behaviours must survive deliberately: `orEmpty` folding 404 to `[]` *with a log
-      line*, `listPendingPlans` deliberately not swallowing errors, and `refetchOnWindowFocus` **off**
-      for `/plans/pending`, which `client.ts:176` quotes as the most expensive call in the app.
-- [ ] **F7 — a bundle-size budget, because F5 and F6 add bytes nothing currently watches.**
-      `check-bundle.mjs` asserts bundle *shape* and says nothing about size. Adding weight to an entry
-      chunk the repo actively polices, without a budget, is how the next reviewer inherits a number
-      nobody measured.
+- [x] **F1 — Web Locks replaces hand-built cross-tab leader election.** **Landed:**
+      `src/state/jobStreamLeader.ts`; crash takeover 3.0–4.3 s → under 250 ms, a throttled leader is
+      no longer deposed, two leaders are now impossible. `freeze`/`resume` handled beside
+      `pagehide`/`pageshow`, and the wedged-thread trade is a named test rather than a comment.
+- [x] **F2 — `eventsource-parser` in `scripts/smoke.mjs`.** **Landed:** `smoke.mjs:15`. The
+      hand-rolled parser was dropping the multi-line `data:` frame — 3 events where 4 arrived.
+- [x] **F3 — `culori` replaces hand-transcribed OKLab matrices.** **Landed, modified:** three gamut
+      treatments measured and CSS Color 4 mapping adopted rather than reproducing the old linear-RGB
+      clamp; 2 of 46 pairs move, by at most +0.22, no threshold touched. It also found 10 of 23
+      tokens sit outside sRGB.
+- [x] **F4 — `immer` in `ProtocolEditor`, `comlink` for the RDKit worker.** **Landed** as F4a and
+      F4b; `isDirty` and `clone` both kept, the second with a measurement, and the
+      rejection-vs-`null` mapping is under two tests.
+- [x] **F5 — policy reversal: `valibot` in `shared/events.ts`.** **Landed:** every event's type is
+      now `v.InferOutput` of its decoder, so a field cannot exist in the interface and be absent from
+      the decoder; two compiler-API walks over the file are deleted with the drift they existed to
+      catch. `src/env.ts` is deliberately unchanged and says why. Recorded in `docs/dependencies.md`.
+- [x] **F6 — policy reversal: `@tanstack/react-query`.** **Landed:** ten `cancelled`-flag triads, an
+      in-flight map and a TTL cache replaced, each of the three must-survive behaviours under a
+      control that can fail. It turned up that a provider-less client never calls
+      `queryClient.mount()`, which had made `refetchOnWindowFocus` inert everywhere.
+- [x] **F7 — a bundle-size budget.** **Landed, modified:** the budget is on the **first load**, not
+      the entry chunk, and it lives inside `scripts/check-bundle.mjs` rather than a new script — the
+      entry chunk moved 4 bytes while the first load moved 13 kB gzipped, so an entry-chunk budget
+      would have reported this wave as nothing. Set above the measurement with the headroom stated.
 
 ---
 
 ## Verification
 
-- Each repository's own gate: `make lint type test` here and in `Chemclaw3-mcp`; `npm run ci` in
-  `Chemclaw3_ui`. **The Postgres-backed tests must actually run** — a green local line over 216 skips
-  is not evidence about the durable layer (`D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose`).
-  `sudo -n dockerd && make up && make db-migrate` first, and report what the run skipped.
-- Behaviour-preserving items are diffed against the base rather than asserted: B8 (same hit set),
-  B9 (same clusters), C1 (same conversions and the same refusals), C3 (the gold-set numbers).
-- Number-moving items state what moved and why: E1/E2 (the revision bump), E3 (consensus ranking).
-- One ADR per decision, `D-2026-09-16-<slug>.md`, with its row in `docs/decisions/README.md`.
-- `docs/planning/BACKLOG.md` and `DEFERRED.md` rows deleted in the commit that closes them — B8 and B9
-  do **not** close `DEFERRED.md:62,63`, and saying so is part of the change.
+- **Each repository's own gate.** `Chemclaw3-mcp` #79 and `Chemclaw3_ui` #86 merged green, and
+  each has an uncommitted follow-up in its checkout. **Here, no `make lint type test` run is
+  recorded after the reviewer commits, and that is what this branch owes before merge.** What is
+  recorded: `make lint` and `make type` green over the full targets at the conversion fix, a full
+  serial suite run during the anyio conversion whose four failures were diagnosed and fixed, and a
+  red `tests/test_docstring_paths.py` that a reviewer found on an unrelated file — which is the
+  evidence that the per-agent verification target was narrower than the gate. `make type` is
+  `mypy src examples tests`; every agent in this wave verified with `mypy --strict src/chemclaw`,
+  and two errors lived in exactly that gap.
+- **Postgres-backed tests must actually run.** `sudo -n dockerd && make up && make db-migrate`
+  first; a green local line over a skipped durable layer is not evidence about it
+  (`D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose`). How many the run skipped is what
+  `tests/conftest.py`'s terminal epilogue prints — no number belongs in this sentence, and the one
+  that stood here was a transcription of CLAUDE.md's own example of the mistake.
+- **Behaviour-preserving items were diffed against the base rather than asserted**: B8 (same hit
+  set), B9 (byte-identical clusters at five thresholds), C1 (22,500 pairs, 0 divergences, refusals
+  bit-identical), D3 (742 molecules, 0 disagreements), C6 (9,495 tests collected before and after).
+- **Number-moving items state what moved**: E1/E2 share one `_HAMILTONIAN_REVISION` bump. E3 is not
+  in this wave, so there is no consensus-ranking move to state.
+- **Register hygiene.** Neither `DEFERRED.md` row was deleted, and both were edited to say why:
+  the substructure row is **retitled** to name the Postgres `pattern_bits` GIN screen, which is the
+  half an in-process index cannot do, and the sub-quadratic clustering row is **corrected** to say
+  the constant was taken and the exponent was not. `ls docs/decisions/D-2026-09-16-*` lists the ADRs
+  this wave wrote, each with its ledger row in `docs/decisions/README.md`.
 
 ## Review
 
-_(filled in at the end)_
+**What was adopted.** Every library in section B was already resolved in `uv.lock`, and that framing
+was itself corrected in the register: *resolved* is not *in the image*. `deploy/Containerfile`
+installs `uv sync --frozen --no-dev`, and `pathspec` arrived only through `mypy`, a dev-group tool —
+so it, like `pint` and `tiktoken`, is a new install in every shipped image. `uv export --frozen
+--no-dev` is what answers that question per package.
+
+**What was declined, and why it matters that it was declined rather than skipped.** C3 and C4 are
+measured refusals with the measurement written down where a re-proposal will hit it — the
+upstream-capability register in `docs/planning/BACKLOG.md` now carries the adoptions, both declines,
+and every library the audit rejected, one line each. Where the audit recorded no
+measurement, the register says so rather than inventing one: "declined, measurement not recorded" is
+a question a later session can settle in an afternoon, and a fabricated number is one it cannot.
+A4's connection pool and C2's per-turn thread count are the same shape one level down — half a row
+declined inside a row that landed.
+
+**What the wave's own reviews found.** Eight fresh-context reviewers were run over the implemented
+work, told to measure rather than read, and they found real defects in it:
+
+- **The `inf`/`nan` fix carried the same total-outage bug it was written to remove.** `_sample` began
+  `if isinstance(value, int): return str(value)` under a comment asserting bool renders 0/1. `bool`
+  *is* an `int`, so a gauge bound to a flag would have emitted `True` and lost the whole exposition.
+  The branch was also dead — instrumented, `render` hands it `float` and nothing else.
+- **The adopted SSE reader lost data the hand-written ones kept.** `aiter_sse` drops the last event
+  of a stream cut off without a trailing blank line; the chaos harness that generates truncated
+  streams could not see the last answer of the runs it cuts.
+- **Making the JWKS fetch immune emptied a boot refusal's charge sheet.** B6 was right, and its row
+  had to leave `_env_reading_destinations` — but for `entra_required=true` with `otel_enabled=false`
+  that row was the *only* destination charged, so behind a loopback sidecar the knowledge-graph note
+  push and its credential had no observer at all. The refusal grew a second arm rather than
+  resurrecting a false one.
+- **The new PEM redaction rule did not redact an encrypted private key.** The lookahead required an
+  unbroken base64 run within 8 whitespace characters of the header and `Proc-Type:`/`DEK-Info:` sit
+  in between, so `openssl genrsa -aes256` output went through verbatim; at ~12 kB, 85 body lines
+  survived past the `***`. One mistake three times: every bound was a guess about the *unencrypted*
+  64-column shape.
+- **The substructure index answered by failing.** Charged against the *match* timeout with nothing
+  cached on abandon, it failed 3 of 3 on a corpus the loop it replaced answered in 2.01 s — reachable
+  by following this tree's own advice to raise the scan cap.
+- **The batching seam was inert in production**, because the one driver this repository ships had no
+  `executemany`; and the audit's own scope had a hole — `scipy.constants` was approved and never
+  taken, so `core/units.py` was still transcribing the calorie, the hartree and the electronvolt.
+- **The tiktoken air-gap guard disagreed with the function it transcribes**, in the unsafe
+  direction: an empty `TIKTOKEN_CACHE_DIR` read as "baked" while tiktoken went to the network.
+
+Two of those are the same lesson as A1's: a control written against a defect can carry the defect.
+Three more are `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` arriving inside the commits
+that wrote the prose — a `scipy` layering edge whose reason named a module path that does not exist,
+an alert-count sentence that said "three" over nineteen rules, and a fleet-token figure that moved on
+a sibling's merge between the measurement and the commit recording it.
+
+**What is still open.** The full serial suite has not been re-run since the reviewer commits, and
+this branch is not merged while the two siblings' are. One genuinely open decision was moved out of
+this file: **the meaning of the `graph` retrieval source** — C3 proved the in-process ranker is the
+weaker of the two and *unremovable* only because `note_reindex_effective` leaves the better leg's
+index unmaintained under the shipped `CHEMCLAW_DATA_SOURCES` default. That is a `data_sources` and
+manifest decision, not a retriever edit, and it is now a row in `docs/planning/BACKLOG.md` §2 beside
+the `hybrid` retrieval row it bears on. E3 is queued in `Chemclaw3-mcp`'s own `docs/BACKLOG.md`. One
+hole is written down and deliberately not closed: no pytest rule catches a forgotten `await` inside
+an async test — the obvious `filterwarnings` line does not work, because the warning is raised by
+the garbage collector after the test has returned.
