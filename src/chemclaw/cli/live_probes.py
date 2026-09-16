@@ -39,6 +39,7 @@ import yaml
 from chemclaw.connectors.registry import job_names
 from chemclaw.core.config import settings
 from chemclaw.core.logging import configure_logging
+from chemclaw.core.markdown import render_table
 from chemclaw.evals.ab import ABSummary, TaskScores
 from chemclaw.evals.live import (
     Finding,
@@ -107,11 +108,11 @@ def _summary(
     lines.append(f"# Live probe run — {len(outcomes)} probes\n")
     lines.append(f"{provenance}\n")
     lines.append("## Verdicts\n")
-    lines.append("| verdict | count | share |")
-    lines.append("| --- | ---: | ---: |")
+    verdict_rows = []
     for verdict in ("served", "partial", "unserved", "fabricated", "ungraded"):
         count = verdicts.get(verdict, 0)
-        lines.append(f"| {verdict} | {count} | {count / max(len(grades), 1):.0%} |")
+        verdict_rows.append([verdict, str(count), f"{count / max(len(grades), 1):.0%}"])
+    lines.append(render_table(["verdict", "count", "share"], verdict_rows, align="lrr"))
 
     answered = sum(1 for o in outcomes if o.answered)
     zero_tool = [o for o in outcomes if not o.tools_called]
@@ -122,10 +123,13 @@ def _summary(
     uncited = [o for o in outcomes if o.uncited_note_ids]
 
     lines.append("\n## Coverage and honesty\n")
-    lines.append("| signal | value |")
-    lines.append("| --- | ---: |")
-    lines.append(f"| answered at all | {answered} / {len(outcomes)} |")
-    lines.append(f"| expected tool reached | {len(reached)} / {len(expected)} |")
+    # Accumulated as rows rather than appended as text, because half of them are conditional: a
+    # signal nothing measured is an absent row, and only a row-shaped accumulator can leave one out
+    # without also leaving out the table.
+    signals: list[list[str]] = [
+        ["answered at all", f"{answered} / {len(outcomes)}"],
+        ["expected tool reached", f"{len(reached)} / {len(expected)}"],
+    ]
     # The gold-set line. Reported as mean recall over the probes that declare `expects_notes`, and
     # kept beside "expected tool reached" rather than folded into it: a turn can reach
     # `gather_evidence` and be handed none of the notes the question is about, and one number
@@ -134,29 +138,29 @@ def _summary(
     if graded_notes:
         recalls = [o.expected_notes_recall or 0.0 for o in graded_notes]
         incomplete = sum(1 for o in graded_notes if o.expected_notes_missing)
-        lines.append(
-            f"| expected notes retrieved (mean recall over {len(graded_notes)} probes) | "
-            f"{sum(recalls) / len(recalls):.2f} |"
+        signals.append(
+            [
+                f"expected notes retrieved (mean recall over {len(graded_notes)} probes)",
+                f"{sum(recalls) / len(recalls):.2f}",
+            ]
         )
-        lines.append(f"| …probes missing at least one expected note | {incomplete} |")
-    lines.append(f"| answers using no tool at all | {len(zero_tool)} / {len(outcomes)} |")
-    lines.append(
-        f"| …of those, on questions the surface covers (bucket A) | {len(zero_tool_covered)} |"
-    )
-    lines.append(f"| **failed silently** (no answer, no error) | **{len(silent)}** |")
-    lines.append(f"| **answers citing a note no tool returned** | **{len(uncited)}** |")
-    lines.append(
-        f"| clarified via ask_clarifying_question | "
-        f"{sum(1 for o in outcomes if o.asked_clarifying)} |"
-    )
-    lines.append(
-        f"| …and clarified in prose instead (the tool existed) | "
-        f"{sum(1 for o in outcomes if o.asked_clarifying_in_prose)} |"
-    )
-    lines.append(
-        f"| turns that surfaced a failure | {sum(1 for o in outcomes if o.failed_loudly)} |"
-    )
-    lines.append(f"| durable jobs started | {sum(len(o.jobs_started) for o in outcomes)} |")
+        signals.append(["…probes missing at least one expected note", str(incomplete)])
+    signals += [
+        ["answers using no tool at all", f"{len(zero_tool)} / {len(outcomes)}"],
+        ["…of those, on questions the surface covers (bucket A)", str(len(zero_tool_covered))],
+        ["**failed silently** (no answer, no error)", f"**{len(silent)}**"],
+        ["**answers citing a note no tool returned**", f"**{len(uncited)}**"],
+        [
+            "clarified via ask_clarifying_question",
+            str(sum(1 for o in outcomes if o.asked_clarifying)),
+        ],
+        [
+            "…and clarified in prose instead (the tool existed)",
+            str(sum(1 for o in outcomes if o.asked_clarifying_in_prose)),
+        ],
+        ["turns that surfaced a failure", str(sum(1 for o in outcomes if o.failed_loudly))],
+        ["durable jobs started", str(sum(len(o.jobs_started) for o in outcomes))],
+    ]
 
     # What the broker says became of those jobs, for the probes that declared they needed one.
     # Reported beside the launch count and never folded into it, for the same reason tool reach is
@@ -166,7 +170,7 @@ def _summary(
     job_states = Counter(state for outcome in outcomes for state in outcome.job_outcomes.values())
     if job_states:
         summary = " · ".join(f"{state} {count}" for state, count in sorted(job_states.items()))
-        lines.append(f"| …and what Temporal says became of them | {summary} |")
+        signals.append(["…and what Temporal says became of them", summary])
 
     # Whether an `expects_job` probe reached the durable path at all — asked of the *tool calls*,
     # not of the `job_started` events.
@@ -186,30 +190,42 @@ def _summary(
         }
         missed = sorted({p.id for p in probes if p.expects_job} - ran_a_job)
         if inline:
-            lines.append(
-                f"| …of which finished inside the turn (never announced) | {len(inline)} |"
+            signals.append(
+                ["…of which finished inside the turn (never announced)", str(len(inline))]
             )
         if missed:
-            lines.append(
-                f"| **probes needing a durable job that ran none** | **{', '.join(missed)}** |"
+            signals.append(
+                [
+                    "**probes needing a durable job that ran none**",
+                    f"**{', '.join(missed)}**",
+                ]
             )
 
     latencies = sorted(o.latency_seconds for o in outcomes)
     if latencies:
-        lines.append(f"| median turn | {latencies[len(latencies) // 2]:.1f} s |")
+        signals.append(["median turn", f"{latencies[len(latencies) // 2]:.1f} s"])
+    lines.append(render_table(["signal", "value"], signals, align="lr"))
 
     lines.append("\n## By bucket\n")
-    lines.append("| bucket | probes | served | partial | unserved | fabricated | ungraded |")
-    lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
     grade_by_id = {g.probe_id: g for g in grades}
+    bucket_rows = []
     for bucket in ("A", "B", "C"):
         ids = [p.id for p in probes if p.bucket == bucket]
         counts = Counter(grade_by_id[i].verdict for i in ids if i in grade_by_id)
-        lines.append(
-            f"| {bucket} | {len(ids)} | {counts.get('served', 0)} | {counts.get('partial', 0)} "
-            f"| {counts.get('unserved', 0)} | {counts.get('fabricated', 0)} "
-            f"| {counts.get('ungraded', 0)} |"
+        bucket_rows.append(
+            [bucket, str(len(ids))]
+            + [
+                str(counts.get(verdict, 0))
+                for verdict in ("served", "partial", "unserved", "fabricated", "ungraded")
+            ]
         )
+    lines.append(
+        render_table(
+            ["bucket", "probes", "served", "partial", "unserved", "fabricated", "ungraded"],
+            bucket_rows,
+            align="lrrrrrr",
+        )
+    )
 
     fabricated = [g for g in grades if g.verdict == "fabricated"]
     if fabricated:
@@ -417,11 +433,20 @@ def _findings_report(title: str, preamble: str, findings: list[Finding], notes: 
     lines = [f"# {title}\n", preamble, ""]
     lines.extend(f"- {note}" for note in notes)
     lines.append("")
-    lines.append("| probe | check | result | observed |")
-    lines.append("| --- | --- | --- | --- |")
-    for finding in findings:
-        verdict = "PASS" if finding.ok else "**FAIL**"
-        lines.append(f"| {finding.probe_id} | {finding.check} | {verdict} | {finding.observed} |")
+    lines.append(
+        render_table(
+            ["probe", "check", "result", "observed"],
+            [
+                [
+                    finding.probe_id,
+                    finding.check,
+                    "PASS" if finding.ok else "**FAIL**",
+                    finding.observed,
+                ]
+                for finding in findings
+            ],
+        )
+    )
     passed = sum(1 for finding in findings if finding.ok)
     lines.append(f"\n**{passed}/{len(findings)} checks passed.**")
     return "\n".join(lines) + "\n"
@@ -551,28 +576,40 @@ def _ab_report(
         " `instructions:`, so this delta varies prompt and tools together",
         f"- judge: `{judge_model()}`",
         "",
-        "| set | n | helped | hurt | no effect | net delta |",
-        "| --- | --- | --- | --- | --- | --- |",
+        render_table(
+            ["set", "n", "helped", "hurt", "no effect", "net delta"],
+            [
+                [
+                    name,
+                    str(len(summary.utilities)),
+                    str(len(summary.helped)),
+                    str(len(summary.hurt)),
+                    str(len(summary.no_effect)),
+                    f"{summary.net_delta:+.4g}",
+                ]
+                for name, summary in summaries.items()
+            ],
+        ),
     ]
-    for name, summary in summaries.items():
-        lines.append(
-            f"| {name} | {len(summary.utilities)} | {len(summary.helped)} | "
-            f"{len(summary.hurt)} | {len(summary.no_effect)} | {summary.net_delta:+.4g} |"
-        )
+    bucket_of = {probe.id: probe.bucket for probe in probes}
     lines += [
         "",
         "## Per probe",
         "",
-        "| probe | bucket | baseline | augmented | delta |",
-        "| --- | --- | --- | --- | --- |",
+        render_table(
+            ["probe", "bucket", "baseline", "augmented", "delta"],
+            [
+                [
+                    task.task_id,
+                    bucket_of[task.task_id],
+                    f"{task.baseline:+.1f}",
+                    f"{task.augmented:+.1f}",
+                    f"{task.augmented - task.baseline:+.1f}",
+                ]
+                for task in tasks
+            ],
+        ),
     ]
-    bucket_of = {probe.id: probe.bucket for probe in probes}
-    for task in tasks:
-        delta = task.augmented - task.baseline
-        lines.append(
-            f"| {task.task_id} | {bucket_of[task.task_id]} | {task.baseline:+.1f} | "
-            f"{task.augmented:+.1f} | {delta:+.1f} |"
-        )
     return "\n".join(lines) + "\n"
 
 

@@ -44,6 +44,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.db import _redact
 from chemclaw.core.db import connection as db_connection
 from chemclaw.core.logging import configure_logging
+from chemclaw.core.markdown import render_table
 from chemclaw.core.temporal_client import connect as temporal_connect
 from chemclaw.evals.live import decoded_events
 
@@ -1235,11 +1236,20 @@ def report(
             "about whatever they would have measured."
         )
     lines.append("")
-    lines.append("| family | what it covers | checks |")
-    lines.append("| --- | --- | ---: |")
-    for letter in planned:
-        count = sum(1 for finding in findings if finding.family == letter)
-        lines.append(f"| {letter} | {FAMILIES.get(letter, '?')} | {count or '**0**'} |")
+    lines.append(
+        render_table(
+            ["family", "what it covers", "checks"],
+            [
+                [
+                    letter,
+                    FAMILIES.get(letter, "?"),
+                    str(count) if (count := sum(f.family == letter for f in findings)) else "**0**",
+                ]
+                for letter in planned
+            ],
+            align="llr",
+        )
+    )
     lines.append("")
 
     if sweep:
@@ -1249,14 +1259,31 @@ def report(
             f"{sweep[0]['turns']} turns per step; the front door restarted at each cap.\n"
         )
         lines.append(
-            "| cap | accepted | shed/error | p50 s | p95 s | answered/s | offered drained/s |"
-        )
-        lines.append("| ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
-        for row in sweep:
-            lines.append(
-                f"| {row['cap']} | {row['accepted']} | {row['failed']} | "
-                f"{row['p50']:.1f} | {row['p95']:.1f} | {row['goodput']:.2f} | {row['drain']:.2f} |"
+            render_table(
+                [
+                    "cap",
+                    "accepted",
+                    "shed/error",
+                    "p50 s",
+                    "p95 s",
+                    "answered/s",
+                    "offered drained/s",
+                ],
+                [
+                    [
+                        str(row["cap"]),
+                        str(row["accepted"]),
+                        str(row["failed"]),
+                        f"{row['p50']:.1f}",
+                        f"{row['p95']:.1f}",
+                        f"{row['goodput']:.2f}",
+                        f"{row['drain']:.2f}",
+                    ]
+                    for row in sweep
+                ],
+                align="rrrrrrr",
             )
+        )
         lines.append(
             "\nThe last column is not throughput — it counts a shed turn as a drained one, so "
             "refusing fast reads as going fast. `answered/s` is the measurement."
@@ -1264,11 +1291,20 @@ def report(
         lines.append("")
 
     lines.append("## Findings\n")
-    lines.append("| family | check | result | observed |")
-    lines.append("| --- | --- | --- | --- |")
-    for finding in findings:
-        verdict = "PASS" if finding.ok else "**FAIL**"
-        lines.append(f"| {finding.family} | {finding.name} | {verdict} | {finding.observed} |")
+    lines.append(
+        render_table(
+            ["family", "check", "result", "observed"],
+            [
+                [
+                    finding.family,
+                    finding.name,
+                    "PASS" if finding.ok else "**FAIL**",
+                    finding.observed,
+                ]
+                for finding in findings
+            ],
+        )
+    )
     passed = sum(1 for f in findings if f.ok)
     lines.append(f"\n**{passed}/{len(findings)} checks passed**, over the families that ran.")
     return "\n".join(lines) + "\n"

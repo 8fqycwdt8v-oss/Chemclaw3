@@ -44,6 +44,7 @@ from httpx_sse import aconnect_sse
 from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core.config import settings
+from chemclaw.core.markdown import render_table
 from chemclaw.evals.live import decoded_events, open_session
 
 
@@ -302,8 +303,6 @@ def render(results: list[Answered], profile: str | None) -> str:
         f"**{correct}/{total} correct ({correct / max(total, 1):.0%})**, "
         f"{unparsed} answer(s) named no option.",
         "",
-        "| category | correct | asked | accuracy |",
-        "| --- | ---: | ---: | ---: |",
     ]
     if errored:
         # Stated on its own line and never folded into the abstentions: a turn the system failed
@@ -316,11 +315,21 @@ def render(results: list[Answered], profile: str | None) -> str:
         lines[2] += f" {len(errored)} turn(s) failed and answered nothing ({codes})."
     asked = Counter(r.category for r in results)
     right = Counter(r.category for r in results if r.correct)
-    for category in sorted(asked):
-        lines.append(
-            f"| {category} | {right[category]} | {asked[category]} | "
-            f"{right[category] / asked[category]:.0%} |"
+    lines.append(
+        render_table(
+            ["category", "correct", "asked", "accuracy"],
+            [
+                [
+                    category,
+                    str(right[category]),
+                    str(asked[category]),
+                    f"{right[category] / asked[category]:.0%}",
+                ]
+                for category in sorted(asked)
+            ],
+            align="lrrr",
         )
+    )
     return "\n".join(lines) + "\n"
 
 

@@ -22,8 +22,8 @@ from chemclaw.agent.condense import (
 )
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.markdown import MISSING
 from chemclaw.kg.note import ProcessConditions
-from chemclaw.memory.comparison import MISSING
 
 
 class _FakeStructured:

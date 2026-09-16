@@ -125,9 +125,9 @@ def test_clustering_drops_degenerate_reactions() -> None:
 def _cells(line: str) -> list[str]:
     r"""Split a rendered row into cells the way a Markdown reader does.
 
-    On *unescaped* pipes only: `render_table` escapes a `|` inside a value, and a reader sees
-    `des-ethyl \| 99.9` as one cell. Splitting on every pipe would count an escaped one as a column
-    boundary, which is exactly the misreading the escaping exists to prevent.
+    On *unescaped* pipes only: `core.markdown.render_table` escapes a `|` inside a value, so a
+    reader sees `des-ethyl \| 99.9` as one cell. Splitting on every pipe would count an escaped one
+    as a column boundary, which is exactly the misreading the escaping exists to prevent.
     """
     return [cell.strip() for cell in re.split(r"(?<!\\)\|", line.strip("|"))]
 
@@ -270,8 +270,9 @@ def test_an_impurity_name_cannot_add_a_column_to_the_campaign_table() -> None:
     An impurity name is whatever the source instrument or analyst typed, and it lands in a cell. A
     `|` in it does not render badly — it renders as another column, silently shifting every value
     after it under the wrong heading, which in this artifact means reading one run's impurity area
-    as another run's yield. The fix is in `memory.comparison.render_table` rather than at either
-    caller, and this is the second caller proving it.
+    as another run's yield. The fix is in `core.markdown.render_table` rather than at either caller,
+    and this is the second caller proving it — the renderer moved out of `memory.comparison` when
+    nineteen other tables in this tree turned out to need the same rule.
     """
     runs = [
         _ester("run-1", 80, 85).model_copy(
