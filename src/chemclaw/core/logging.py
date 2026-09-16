@@ -869,6 +869,19 @@ _OPAQUE = r"[A-Za-z0-9_\-.~+/=]"
 # what made the JWT rule quadratic. A real credential is preceded by a space, a quote, `=` or `:`,
 # never by another token character, so this costs nothing and removes the amplifier.
 _NOT_MID_TOKEN = r"(?<![A-Za-z0-9_\-.])"
+
+#: The two RFC 1421 header lines an encrypted traditional-format PEM carries between the
+#: `-----BEGIN` line and its body (`Proc-Type: 4,ENCRYPTED`, `DEK-Info: <cipher>,<iv>`). Written
+#: as literals rather than as a widened character class because the class would need `-` and `:`,
+#: and a run class containing `-` walks through `-----END` and keeps going. The tails are bounded
+#: to what the format can hold and stop at a line break, so each alternative matches one line.
+_PEM_RFC1421 = r"Proc-Type:[^\r\n\\]{0,40}|DEK-Info:[^\r\n\\]{0,96}"
+
+#: One step of the gap between a PEM header and its body: a JSON escape taken as a unit, one
+#: whitespace or backslash character, or one RFC 1421 header line. The three branches are disjoint
+#: on their first character, so the separator is deterministic and the lookahead it sits in costs a
+#: constant rather than a scan.
+_PEM_SEPARATOR = r"(?:\\[nrt]|[\s\\]|" + _PEM_RFC1421 + r")"
 # "Contains a digit" — the cheap discriminator between a token and an identifier.
 #
 # **Bounded, for the same reason `_NOT_MID_TOKEN` exists.** Written as `_OPAQUE*\d` this was the
@@ -1009,24 +1022,50 @@ _STRUCTURAL_SECRETS: tuple["re.Pattern[str]", ...] = (
     #
     # **The header is kept and the body redacted, and the rule deliberately does not look for the
     # END line.** A lazy `[\s\S]{0,8192}?` up to `-----END` would scan its whole bound from every
-    # `-----BEGIN` in a hostile input; a single greedy run of a class that excludes `-` stops at
-    # the END line by itself, cannot backtrack into itself, and costs one pass. The kept header is
-    # what tells an operator a key was there and which kind it was.
+    # `-----BEGIN` in a hostile input; a greedy run of a class that excludes `-` stops at the END
+    # line by itself, cannot backtrack into itself (nothing follows it, so nothing can force a
+    # retry), and costs one pass. The kept header is what tells an operator a key was there and
+    # which kind it was.
     #
     # **The lookahead is what keeps it off prose, and without it this rule ate a sentence.** The
     # body class has to contain letters and whitespace — base64 is letters, and a PEM body is
     # wrapped across lines — so `expected -----BEGIN PRIVATE KEY----- but found garbage` came back
-    # with the second half replaced. Requiring an unbroken 32-character base64 run just after the
-    # header is the discriminator: that is what a key body starts with and what an English clause
-    # never is. Both bounds are fixed, so the lookahead adds a constant, not a scan.
+    # with the second half replaced. Requiring an unbroken base64 run just after the header is the
+    # discriminator: that is what a key body starts with and what an English clause is not. Both
+    # bounds are fixed, so the lookahead adds a constant, not a scan.
     #
-    # `\\` is in both classes for the JSON-encoded spelling: a key inside a config blob reaches a
+    # **Four shapes walked past the first version of this rule, and the encrypted one is the shape
+    # the rule's own motivation names.** `openssl genrsa -aes256`, `openssl rsa -aes256` and
+    # `ssh-keygen -m PEM -N <pass>` all emit the RFC 1421 form — two header lines and a blank line
+    # between `-----BEGIN` and the body — which is the *passphrase-protected* spelling of the
+    # warehouse key-pair credential the paragraph above cites. Measured on the first version:
+    # `redacted=False`, the whole block through verbatim, because a `[\s\\]{0,8}` window cannot
+    # cross `Proc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC,<iv>` and the run class stops at the `-`
+    # in `Proc-Type`. So both halves name those two lines explicitly: they are a closed, documented
+    # set, and naming them is narrower than widening a character class with `-` and `:` — which
+    # would let the run walk straight through `-----END` and out the other side.
+    #
+    # The other three were each one number: an indent deeper than 8 columns (a YAML block scalar
+    # at 12 spaces — a Helm Secret quoted into an error — measured `redacted=False`), a body
+    # wrapped narrower than 32 columns (measured `redacted=False` at a 24-column wrap), and a body
+    # longer than the run's 8192 bound (measured: 85 body lines of a ~12 kB block survived *past*
+    # the `***`, which is the worst of the four because it looks redacted). The separator window is
+    # 64, the required run is 20, and the run itself is unbounded. Unbounded is safe here for the
+    # same reason the greedy run always was: nothing follows it, so there is no failure that can
+    # make the engine retry, and it terminates at the first character outside its class — the `-`
+    # of `-----END` in every well-formed block. A *finite* bound is what cannot be safe, because
+    # whatever it is, a longer block leaks its tail silently.
+    #
+    # `\\` is in the classes for the JSON-encoded spelling: a key inside a config blob reaches a
     # log line as `-----BEGIN PRIVATE KEY-----\nMIIE…` with a literal backslash-n, and a class that
     # stopped at the backslash would redact nothing at all while looking like it had matched.
+    # `\\[nrt]` is consumed as a *unit* in the separator rather than leaned on the way the first
+    # version did — it happened to work only because `n` is itself a base64 character, which is
+    # true of `\n` and false of the `\nProc-Type:` an encrypted key in a JSON blob arrives as.
     re.compile(
         r"(?P<keep>-----BEGIN (?:[A-Z]{1,16} ){0,3}PRIVATE KEY-----)"
-        r"(?=[\s\\]{0,8}[A-Za-z0-9+/=]{32})"
-        r"[\s\\A-Za-z0-9+/=]{0,8192}"
+        r"(?=" + _PEM_SEPARATOR + r"{0,64}[A-Za-z0-9+/=]{20})"
+        r"(?:" + _PEM_RFC1421 + r"|[\s\\A-Za-z0-9+/=])*"
     ),
     # `Authorization: Bearer <opaque>` / `Token <opaque>` — the JWT rule covers the structured case;
     # an opaque bearer has no internal structure, so the scheme is the anchor and the digit

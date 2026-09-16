@@ -1486,6 +1486,178 @@ def test_a_caller_with_no_time_left_builds_nothing_and_is_told_what_ran_out() ->
     assert len(substructure_index._INDEXES) == 1
 
 
+def test_a_corpus_too_large_to_index_is_searched_record_by_record_instead_of_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The regression this pair of budgets exists for: a big corpus must ANSWER, not fail forever.
+
+    The build used to be charged against `substructure_match_timeout_seconds` — the bound on
+    *matching* — and nothing is cached when a build is abandoned, so a corpus whose build outran
+    that bound could never produce an index and therefore never produce an answer. Measured on
+    19,996 NCI records at the shipped 5.0 s: the build gave up at 11,776, 13,440 and 14,976
+    molecules on three successive attempts, three failures out of three, over a corpus the
+    per-record loop answers in 2.01 s with 2,684 hits. It was reachable by following this module's
+    own advice, which is to raise `substructure_scan_max_records` when the cap truncates.
+
+    So the build has its own budget and a build that does not fit it is *skipped*: `index_for`
+    returns None and the scan matches record by record. Driven here with a budget no corpus can
+    meet, over the twelve query classes the index itself is held to, because a fallback that
+    answered differently from the thing it falls back from would be a worse defect than the one it
+    fixes.
+    """
+    monkeypatch.setattr(settings, "fingerprint_max_top_k", 100_000)
+    monkeypatch.setattr(settings, "substructure_index_build_timeout_seconds", 0.001)
+    labels = [*_nci_corpus(1200), "not-a-molecule((("]
+    records = [
+        FingerprintRecord(id=f"{index:05d}", label=label, bits="01")
+        for index, label in enumerate(labels)
+    ]
+
+    for query in _DIFFERENTIAL_QUERIES:
+        pattern = substructure_pattern(query)
+        expected, unreadable = _loop_matches(labels, pattern)
+        outcome = search._scan_for_matches(records, pattern, time.monotonic() + 600)
+        assert [hit.smiles for hit in outcome.hits] == expected, query
+        assert outcome.unreadable == unreadable == 1, query
+
+    assert len(substructure_index._INDEXES) == 0, (
+        "a build that could not meet its budget must cache nothing; a library holding a fraction "
+        "of the corpus answers later queries over that fraction with no flag saying so"
+    )
+
+
+def test_a_build_that_cannot_meet_its_budget_costs_the_query_a_fraction_of_that_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The budget is a projection, not a stopwatch run to exhaustion.
+
+    A refusal taken by running the clock out would spend the whole build budget before the scan it
+    falls back to had even started — at the shipped numbers, 3.0 s of a 5.0 s bound, which turns
+    "answers slowly" back into "does not answer" for a corpus only a little larger. Extrapolating
+    the build's own measured rate every `_BUILD_CHECK_STRIDE` records instead, the refusal lands
+    after a few tens of records.
+
+    Asserted against the *loop's* cost on the same corpus rather than against a clock reading, so
+    the fixture's own speed is not the subject: finding out that an index is not worth building
+    must cost less than the scan that then answers without one.
+    """
+    monkeypatch.setattr(settings, "substructure_index_build_timeout_seconds", 0.001)
+    labels = _nci_corpus(1200)
+    records = [
+        FingerprintRecord(id=f"{index:05d}", label=label, bits="01")
+        for index, label in enumerate(labels)
+    ]
+    pattern = substructure_pattern("C(=O)N")
+
+    started = time.perf_counter()
+    _loop_matches(labels, pattern)
+    loop_seconds = time.perf_counter() - started
+
+    started = time.perf_counter()
+    search._scan_for_matches(records, pattern, time.monotonic() + 600)
+    refused_and_scanned = time.perf_counter() - started
+
+    assert refused_and_scanned < loop_seconds * 2, (
+        f"the refused build plus the fallback scan took {refused_and_scanned:.3f}s against "
+        f"{loop_seconds:.3f}s for the scan alone, so the refusal is being taken by burning the "
+        "budget rather than by projecting it"
+    )
+
+
+def test_a_query_whose_index_is_cached_is_not_blocked_by_an_unrelated_corpus_building(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One lock for the whole module made a *cache hit* wait for somebody else's build.
+
+    `index_for` took a single process-global lock on every call, hit or miss, and held it across
+    the build. Driven at a 1.0 s bound while an unrelated corpus was being indexed, a query whose
+    own index was already in the map refused at 1.0014 s — where before this module existed the
+    two ran concurrently in separate `to_thread` workers. It is worse under ingest than that
+    sounds: the key is a digest of the labels, so one new molecule mints a new corpus and every
+    concurrent query serializes behind one build.
+
+    The build is blocked here rather than merely slow, so the assertion is about *whether* the
+    cached query waits at all and not about how fast this box is.
+    """
+    cached = [record_for(f"c{index:03d}", "CCO") for index in range(50)]
+    other = [record_for(f"o{index:03d}", "c1ccccc1" + "C" * (index + 1)) for index in range(50)]
+    pattern = substructure_pattern("CO")
+    search._scan_for_matches(cached, pattern, time.monotonic() + 600)
+    assert len(substructure_index._INDEXES) == 1, "the fixture must leave one index cached"
+
+    building = threading.Event()
+    release = threading.Event()
+    real = substructure_index._build
+
+    def _blocking(
+        labels: list[str], budget: float, deadline: float
+    ) -> substructure_index.CorpusIndex:
+        building.set()
+        release.wait(30.0)
+        return real(labels, budget, deadline)
+
+    monkeypatch.setattr(substructure_index, "_build", _blocking)
+    blocked = threading.Thread(
+        target=search._scan_for_matches, args=(other, pattern, time.monotonic() + 600)
+    )
+    blocked.start()
+    try:
+        assert building.wait(30.0), "the second corpus never reached its build"
+        began = time.monotonic()
+        outcome = search._scan_for_matches(cached, pattern, time.monotonic() + 1.0)
+        waited = time.monotonic() - began
+    finally:
+        release.set()
+        blocked.join(30.0)
+
+    assert len(outcome.hits) == 50
+    assert waited < 0.5, (
+        f"the cached corpus answered after {waited:.4f}s while an unrelated corpus was being "
+        "indexed; a build must be single-flighted per corpus, not per process"
+    )
+
+
+async def test_the_refusal_names_the_scan_that_ran_out_of_time_and_a_remedy_that_works(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What the chemist is handed, for both ways a scan can run out of time.
+
+    The message used to read "substructure match for 'C(=O)N' exceeded 5.0s over 19996 molecules;
+    narrow the pattern" over a corpus whose *indexing* had run out of that budget with the pattern
+    never matched once — so the one remedy it named could not have helped. It now carries whatever
+    the scan that gave up said about itself, and `asyncio.wait_for`'s own `TimeoutError`, which
+    carries no message at all, is the case where nobody can say and the text says that instead.
+
+    Driven through the seam rather than by racing the two bounds, because which of them wins is a
+    scheduling accident and the subject here is the sentence, not the race.
+    """
+    store = InMemoryFingerprintStore()
+    for record in (record_for("a", "CCO"), record_for("b", "CC(=O)O")):
+        await store.add(record)
+
+    def _out_of_time(*_args: object, **_kwargs: object) -> ScanOutcome:
+        raise TimeoutError("substructure scan gave up after 7 of 9 molecule(s), matching them one")
+
+    monkeypatch.setattr(search, "_scan_for_matches", _out_of_time)
+    with pytest.raises(FingerprintError) as raised:
+        await find_substructure_matches(store, "CO")
+    message = str(raised.value)
+    assert "gave up after 7 of 9" in message, message
+    assert "CHEMCLAW_SUBSTRUCTURE_SCAN_MAX_RECORDS" in message, (
+        "a corpus too large for the bound is the remedy the old message never named"
+    )
+
+    def _silent(*_args: object, **_kwargs: object) -> ScanOutcome:
+        raise TimeoutError
+
+    monkeypatch.setattr(search, "_scan_for_matches", _silent)
+    with pytest.raises(FingerprintError) as raised:
+        await find_substructure_matches(store, "CO")
+    assert "still inside one chunk" in str(raised.value), (
+        "wait_for's TimeoutError carries no message; the text must say so rather than invent one"
+    )
+
+
 def test_the_scan_stops_within_a_time_slice_of_its_deadline_not_a_record_count() -> None:
     """Deadline granularity is one *chunk*, and a chunk is a slice of time, not a count of records.
 

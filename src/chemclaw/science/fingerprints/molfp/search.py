@@ -238,9 +238,10 @@ async def find_substructure_matches(
         # because the remedies differ: this message used to say "the match exceeded 5.0s, narrow
         # the pattern" over a corpus whose *indexing* had run out of time with the pattern never
         # matched once, so the one thing it told a chemist to do could not have helped.
+        gave_up = str(exc) or "the scan was still inside one chunk when the bound passed"
         raise FingerprintError(
             f"substructure search for {query!r} exceeded {timeout}s over {len(records)} "
-            f"molecule(s): {exc or 'the scan was still inside one chunk when the bound passed'}. "
+            f"molecule(s): {gave_up}. "
             "Narrow the pattern, lower CHEMCLAW_SUBSTRUCTURE_SCAN_MAX_RECORDS, or raise "
             "CHEMCLAW_SUBSTRUCTURE_MATCH_TIMEOUT_SECONDS"
         ) from exc

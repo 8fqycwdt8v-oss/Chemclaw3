@@ -999,7 +999,15 @@ _QUADRATIC_UNITS = {
     # every start position and then fail — the shape that found the quadratic rules above.
     "databricks": "dapi0123456789abcdef0123456789abcde",
     "gitlab": "glpat-0123456789abcde",
-    "pem": "-----BEGIN PRIVATE KEY-----",
+    # The PEM unit is the header plus an RFC 1421 header section whose body is one character short
+    # of the 20 the lookahead requires — the input that makes the separator walk its whole 64-step
+    # window and each header line's tail, and then fail, at every one of thousands of start
+    # positions. The bare header alone (what this unit was) does not reach the separator at all,
+    # so it measured a rule the encrypted shape had never been run through.
+    "pem": (
+        "-----BEGIN PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n"
+        "DEK-Info: AES-256-CBC,0A1B\n\nMIIEpAIBAAKC!"
+    ),
     "url-userinfo": "postgresql://a:b@",
 }
 
@@ -1533,6 +1541,20 @@ _VENDOR_SHAPES = {
         "-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC0123456789abcd\\n"
         "-----END PRIVATE KEY-----"
     ),
+    # **The passphrase-protected form, which is the likelier one and was covered by nothing.**
+    # `openssl genrsa -aes256`, `openssl rsa -aes256` and `ssh-keygen -m PEM -N <pass>` all emit
+    # RFC 1421 — two header lines and a blank line between `-----BEGIN` and the body — and the
+    # warehouse key-pair credential the PEM rule's own comment cites as its motivation is more
+    # likely to carry a passphrase than not. Measured before the fix: `redacted=False`, the whole
+    # block through verbatim.
+    "pem private key, encrypted (rfc 1421)": (
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "Proc-Type: 4,ENCRYPTED\n"
+        "DEK-Info: AES-256-CBC,0A1B2C3D4E5F60718293A4B5C6D7E8F9\n"
+        "\n"
+        "MIIEpAIBAAKCAQEA0123abcdefghijklmnopqrstuvwxyz\nQ==\n"
+        "-----END RSA PRIVATE KEY-----"
+    ),
 }
 
 #: Shapes the same reconciliation saw and **declined**, with the reason, and asserted below to be
@@ -1571,6 +1593,76 @@ def test_every_vendor_shape_the_inventory_claims_is_actually_redacted(sample: st
     """
     assert sample not in redact_secrets(f"upstream rejected {sample} at 09:31"), (
         f"{sample!r} is in the declared prefix inventory and reached the stream verbatim"
+    )
+
+
+#: One line of PEM body, reused by every shape below so one substring check covers all four.
+_PEM_BODY_LINE = "MIIEpAIBAAKCAQEA0123abcdefghijklmnopqrstuvwxyzABCDEF"
+
+#: The four shapes that walked past the first version of the PEM rule, each named by the number
+#: that let it. Kept as a table rather than folded into `_VENDOR_SHAPES` because three of them need
+#: an assertion that table cannot make: a sample repeated across many lines is *not* in the output
+#: verbatim even when most of it survived, which is exactly how the 8192-character run bound hid a
+#: leak of 85 body lines behind a `***` that looked like a redaction.
+_PEM_SHAPES_THAT_WALKED_PAST = {
+    # `openssl genrsa -aes256` / `openssl rsa -aes256` / `ssh-keygen -m PEM -N <pass>`: two RFC 1421
+    # header lines and a blank line stand between the header and the body, and the separator window
+    # was eight whitespace characters wide. Measured before: `redacted=False`.
+    "encrypted rfc 1421 (the passphrase-protected form)": (
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "Proc-Type: 4,ENCRYPTED\n"
+        "DEK-Info: AES-256-CBC,0A1B2C3D4E5F60718293A4B5C6D7E8F9\n"
+        "\n" + _PEM_BODY_LINE + "\n"
+        "-----END RSA PRIVATE KEY-----\n"
+    ),
+    # A Helm Secret quoted into an error arrives as a YAML block scalar, and twelve columns of
+    # indent is more than the eight the window allowed. Measured before: `redacted=False`.
+    "indented twelve columns in a yaml block scalar": (
+        "key: |\n            -----BEGIN PRIVATE KEY-----\n            "
+        + _PEM_BODY_LINE
+        + "\n            -----END PRIVATE KEY-----\n"
+    ),
+    # The discriminator asked for an unbroken 32-character base64 run, which a body wrapped
+    # narrower than that does not have on any line. Measured before: `redacted=False`.
+    "wrapped at twenty-four columns": (
+        "-----BEGIN PRIVATE KEY-----\n"
+        + "\n".join(_PEM_BODY_LINE[i : i + 24] for i in range(0, len(_PEM_BODY_LINE), 24))
+        + "\n-----END PRIVATE KEY-----\n"
+    ),
+    # The run stopped after 8192 characters and `re.sub` resumed *inside the body*, where no rule
+    # has a header to anchor on. Measured before: redacted **True**, and 85 body lines survived
+    # past the `***` — the only one of the four that looks handled in the output it produces.
+    "longer than the run's eight-kilobyte bound": (
+        "-----BEGIN PRIVATE KEY-----\n"
+        + "\n".join([_PEM_BODY_LINE] * 240)
+        + "\n-----END PRIVATE KEY-----\n"
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "block", _PEM_SHAPES_THAT_WALKED_PAST.values(), ids=_PEM_SHAPES_THAT_WALKED_PAST.keys()
+)
+def test_a_pem_body_is_redacted_whatever_shape_the_key_arrives_in(block: str) -> None:
+    """A private key is the highest-value secret this filter sees, and four spellings walked past.
+
+    The substring asserted is one *prefix* of a body line rather than the whole block, because the
+    block-level check `_VENDOR_SHAPES` makes is the one that could not see the fourth shape: a body
+    repeated over 240 lines is absent from the output verbatim whether none of it survived or most
+    of it did. Sixteen characters of base64 is short enough to survive any wrap in the table and
+    long enough that it appears nowhere else.
+
+    All four are one rule and one fix, and the reason they are one fix is that they are the same
+    mistake: each number in the pattern — an eight-character gap, a thirty-two-character run, an
+    8192-character body — was a guess about a shape rather than a property of the format, and each
+    was true of the unencrypted 64-column PEM somebody had in front of them.
+    """
+    redacted = redact_secrets(f"driver rejected the key:\n{block}\nat 09:31")
+    assert _PEM_BODY_LINE[:16] not in redacted, f"a PEM body reached the stream: {redacted[:200]!r}"
+    assert "-----BEGIN" in redacted, (
+        "the header is deliberately kept — it is what tells an operator a key was there and which "
+        "kind it was — so a rule that redacted the whole block would pass the assertion above "
+        "while losing the diagnostic the rule was designed around"
     )
 
 
