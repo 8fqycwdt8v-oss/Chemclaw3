@@ -221,7 +221,9 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
         "O(n^2) Python pairwise loop over the same fingerprints"
     ),
     ("chemclaw.analytical", "scipy"): "stability regression over the analytical series",
-    ("chemclaw.science", "scipy"): "the RRHO arithmetic's eigenproblem, in `science/calc/thermo.py`",
+    ("chemclaw.science", "scipy"): (
+        "the RRHO arithmetic's eigenproblem, in `science/calc/thermo.py`"
+    ),
     ("chemclaw.core", "scipy"): (
         "`core/units.py` reads the calorie, the hartree and the electronvolt out of "
         "`scipy.constants` instead of transcribing them — the kernel is the one layer that may "
