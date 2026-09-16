@@ -170,11 +170,22 @@ def test_every_fleet_served_expectation_names_a_tool_that_bundle_declares() -> N
     server, so a declared-but-unserved name fails there rather than passing quietly here.
 
     **It does less in the lane that mounts the fleet, and that is worth saying rather than
-    discovering.** With `CHEMCLAW_CONNECTORS_DIR` pointed at the fleet's `manifests/`, every name is
-    already on the surface and this passes without consulting the manifest at all. That lane is not
-    unguarded — it is the lane where `test_every_agent_callable_tool_is_probed_or_exempt` has 121
-    tools to account for instead of 114 — but the guard against a *typo in a fleet name* is this
-    one, and it is the bare checkout that runs it.
+    discovering.** With `CHEMCLAW_CONNECTORS_DIR` pointed at the fleet's `manifests/`, every name a
+    `needs_bundle:` probe expects is already on the surface, `unresolved` is empty, and this returns
+    before it reads any manifest. So the guard against a *typo in a fleet name* is this one, and it
+    is the **bare** checkout that runs it — which makes the bare lane the one that has to stay
+    green, not an impoverished version of a better lane.
+
+    **What used to stand here said that lane was guarded by the test above instead, and it is
+    not.** The sentence claimed the fleet lane was "the lane where
+    `test_every_agent_callable_tool_is_probed_or_exempt` has 121 tools to account for instead of
+    114"; measured on this commit, the bare surface is not 114 and the fleet surface is not 121, and
+    more importantly that test does not *pass* with the fleet mounted at all — the corpus is
+    written against the surface this repository declares, so every fleet tool no probe names is
+    unprobed there. Two stale figures dressing up a claim that was false in kind is
+    `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`, so no figure is transcribed here:
+    what each lane binds is `available_tool_names()` under that lane's
+    `CHEMCLAW_CONNECTORS_DIR`, and the only number worth reading is the one an assertion computes.
 
     **A skip, loudly, rather than a green line.** With no sibling checkout this cannot tell a fleet
     tool from a typo, and `tests/conftest.py::_report_sibling_skips` counts the skip so the run says
@@ -435,9 +446,18 @@ _TOOL_SHAPED = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+")
 #: How close a name has to sit to a bound tool before it is read as a misspelling of that tool
 #: rather than as a capability this system genuinely lacks. Measured on the shipped surface:
 #: `ich_impurity_limits` scores above this against `ich_impurity_limit` and `screen_genotoxic_alert`
-#: against `screen_genotoxic_alerts`, while the corpus's two real tool-name claims — `run_python`,
-#: which the fleet's `pyexec` serves and no deployment here binds, and `delete`, the filesystem verb
-#: `agent/scratchpad.py` withholds — match nothing at all.
+#: against `screen_genotoxic_alerts`, while the corpus's two real tool-name claims — `run_python`
+#: and `delete`, the filesystem verb `agent/scratchpad.py` withholds — match nothing at all.
+#:
+#: **`run_python` used to be described here as one "no deployment here binds", and that is false.**
+#: The fleet's `pyexec` serves it and `infra/live/e2e-full-stack/up.sh` both puts
+#: `Chemclaw3-mcp/manifests/` on `CHEMCLAW_CONNECTORS_DIR` and starts that server — measured, pc-07
+#: and ws-12 fail `test_no_probe_asserts_a_capability_the_agent_surface_serves` in that lane. That
+#: is not a defect to reword:
+#: `D-2026-09-16-an-absence-claim-that-names-no-capability-cannot-be-refuted` argues it shut in its
+#: own "what this does not close" section — the asymmetry is *useful*, because in a lane that binds
+#: `pyexec` those two probes genuinely are stale and going red is the correct report. What was wrong
+#: was only the parenthesis here saying no deployment binds it.
 NEAR_MISS_RATIO = 0.85
 
 #: The shortest a `NO-TOOL` marker's phrase may be. Not a quality bar and it cannot be one — a
@@ -581,25 +601,116 @@ def test_a_claim_naming_a_bound_tool_is_refused_whichever_arm_it_arrives_on() ->
     )
 
 
-def test_an_absence_claim_one_edit_from_a_bound_tool_is_read_as_the_typo_it_is() -> None:
-    """The hole in the tool-name arm: a misspelling is absent from the surface and so passes it.
+def absence_claims_that_near_miss_a_bound_tool(
+    claims: list[tuple[str, str]], surface: set[str]
+) -> list[str]:
+    """The claims that misspell a bound tool, on either arm, each as a sentence naming the probe.
 
-    `ich_impurity_limits` is not bound, so the assertion above has nothing to say about it — and a
-    probe that claimed it was missing would be the an-28 defect with a letter added, silently. This
-    is the cheap half of that: a claim that close to a bound name is a typo rather than a capability
-    this system lacks. The expensive half — a claim that is simply *wrong* about a capability nobody
-    named — is what a reader is for, and nothing here pretends otherwise.
+    The bare-name arm is the one this started as: `ich_impurity_limits` is not bound, so
+    `absence_claims_the_surface_refutes` has nothing to say about it, and a probe claiming it is
+    missing would be the an-28 defect with a letter added.
+
+    **The marker arm was outside it, and that is the hole this closes.**
+    `absence_claims_the_surface_refutes` already looks *inside* a marker for a bound tool name,
+    precisely so the marker cannot launder a bare claim — but it resolves those names exactly, so
+    `NO-TOOL nothing like ich_impurity_limits here` escaped the near-miss check and the exact-name
+    scan at once, which is both arms of one control declining the same string. A tool-shaped token
+    in a marker gets the same near-miss reading the bare arm gets.
+
+    Ordinary prose cannot reach this: `_TOOL_SHAPED` requires an underscore, and no marker in the
+    shipped corpus contains a single token of that shape — so the marker arm fires on zero claims
+    today, which is what a guard with no false positives looks like before it has a subject.
+
+    Args:
+        claims: `(probe id, claim)` pairs, as `_absence_claims` produces them.
+        surface: The tool names the agent binds.
+
+    Returns:
+        One sentence per near-miss, empty when nothing in the corpus misspells a bound tool.
     """
-    surface = sorted(available_tool_names())
-    typos = sorted(
-        f"{probe_id}: {claim!r} looks like {near[0]!r}"
-        for probe_id, claim in _absence_claims(_probes())
-        if not claim.startswith(ABSENT_MARKER)
-        and claim not in surface
-        and (near := difflib.get_close_matches(claim, surface, n=1, cutoff=NEAR_MISS_RATIO))
+    ordered = sorted(surface)
+
+    def near(token: str) -> str | None:
+        if token in surface:
+            return None  # exactly bound is the other guard's finding, not a typo.
+        hit = difflib.get_close_matches(token, ordered, n=1, cutoff=NEAR_MISS_RATIO)
+        return hit[0] if hit else None
+
+    found: list[str] = []
+    for probe_id, claim in claims:
+        if not claim.startswith(ABSENT_MARKER):
+            if (match := near(claim)) is not None:
+                found.append(f"{probe_id}: {claim!r} looks like {match!r}")
+            continue
+        for token in sorted(set(_TOOL_SHAPED.findall(claim))):
+            if (match := near(token)) is not None:
+                found.append(f"{probe_id}: {token!r} inside a marker looks like {match!r}")
+    return found
+
+
+def test_an_absence_claim_one_edit_from_a_bound_tool_is_read_as_the_typo_it_is() -> None:
+    """The hole in both arms: a misspelling is absent from the surface and so passes them.
+
+    A claim that close to a bound name is a typo rather than a capability this system lacks. The
+    expensive half — a claim that is simply *wrong* about a capability nobody named — is what a
+    reader is for, and nothing here pretends otherwise.
+    """
+    typos = absence_claims_that_near_miss_a_bound_tool(
+        _absence_claims(_probes()), available_tool_names()
     )
     assert not typos, (
         f"these absence claims are a near-miss of a tool this deployment binds: {typos}. A name "
         "the surface does not carry is not evidence the capability is missing — it is equally "
         "evidence the name was mistyped, and a mistyped claim can never fail."
+    )
+
+
+def test_a_near_miss_is_caught_on_the_marker_arm_as_well_as_the_bare_one() -> None:
+    """Driven against its own defect, for the reason the adjacent driven test gives.
+
+    Four arms, the same shape the adjacent driven test uses over the other helper: the defect in
+    each arm, then the two cases that must be left alone, so a helper that always returned
+    something could not pass the first two.
+    """
+    surface = available_tool_names()
+    bound = sorted(surface)[0]
+    typo = bound + "s" if not bound.endswith("s") else bound[:-1]
+    assert typo not in surface, "the constructed near-miss must not itself be a bound name"
+
+    assert absence_claims_that_near_miss_a_bound_tool([("x", typo)], surface)
+    assert absence_claims_that_near_miss_a_bound_tool(
+        [("x", f"{ABSENT_MARKER}nothing like {typo} anywhere in this system")], surface
+    )
+    assert not absence_claims_that_near_miss_a_bound_tool(
+        [("x", "no_such_tool_is_bound_anywhere")], surface
+    )
+    assert not absence_claims_that_near_miss_a_bound_tool(
+        [("x", f"{ABSENT_MARKER}no equipment booking or instrument calendar interface")], surface
+    )
+
+
+def test_no_probe_names_one_tool_in_both_expects_tools_and_asserts_absent() -> None:
+    """A probe cannot both reach for a tool and deny it exists — and nothing said so.
+
+    Every other check here reads one field against the surface, so the *pair* is nobody's subject.
+    For a **bound** name the contradiction is already loud: `asserts_absent` fails on
+    `test_no_probe_asserts_a_capability_the_agent_surface_serves`. The case that survives is a name
+    this tree does not bind and a fleet bundle serves — `fleet_expected_tools()` forgives the
+    expectation because the probe declares `needs_bundle:`, and the denial passes because the name
+    really is off this surface. The probe then grades the model for *calling* that tool in the lane
+    that mounts the bundle and for *not fabricating* it in the lane that does not, off one
+    declaration, which is the two halves of `needs_bundle`'s own rule pointed at each other.
+
+    Measured zero on the shipped corpus. Free to keep at zero, and lane-independent by
+    construction: no surface is consulted, so this answers the same with the fleet mounted or not.
+    """
+    contradictory = sorted(
+        f"{probe.id}: {sorted(set(probe.expects_tools) & set(probe.asserts_absent))}"
+        for probe in _probes()
+        if set(probe.expects_tools) & set(probe.asserts_absent)
+    )
+    assert not contradictory, (
+        f"these probes name the same tool in `expects_tools` and in `asserts_absent`: "
+        f"{contradictory}. One of the two is wrong — either the probe expects the capability or it "
+        "asserts the capability is missing, and it cannot grade both."
     )
