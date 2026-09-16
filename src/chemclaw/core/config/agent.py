@@ -614,19 +614,33 @@ class AgentSettings(BaseSettings):
     # forever; one turn can *spend* without a bound.
     #
     # **0 means no cap**, the convention `budget.py::_over` and `llm_context_window_tokens`
-    # already use, and it is the shipped default for the reason a wrong number here is worse than
-    # no number: the cap ends the turn, and a turn ended early on a corpus this setting was never
-    # sized against loses a chemist's work. A deployment sets it from what its own
-    # `turn_costs.total_tokens` rows actually show, which is the number `chemclaw.evals` and the
-    # cost ledger exist to give it. The iteration cap stays on regardless, so switching this off
-    # is not switching the runaway guard off.
+    # already use. It is no longer the shipped default, and the argument that made it one is kept
+    # here rather than deleted, because it is still true and is what bounds the number chosen.
+    #
+    # That argument ran: a wrong number is worse than no number, since the cap ends the turn and a
+    # turn ended early on a corpus this setting was never sized against loses a chemist's work.
+    # **Two things answer it.** The first is what "ends the turn" means — `spend_cap.py` jumps the
+    # graph `to end` rather than raising, and `api/runner.py` emits a `spend_cap_reached` error
+    # naming the answer as *partial*, so a capped turn hands back what it had. That is a smaller
+    # loss than the sentence above implies. The second is that the alternative was not "no cap"
+    # but an unbounded one: measured, a single turn billed **250,000 tokens against a 1,000-token
+    # session cap**, and neither half of `api/budget.py` can see it — `check()` runs before a turn
+    # and `record()` after it.
+    #
+    # **So this ships as a runaway backstop, not as a budget.** 300,000 sits above the one runaway
+    # this tree has actually measured and well above a heavy ordinary turn, which is the right side
+    # to err on for a ceiling nobody has sized against a live corpus. It is explicitly *not* the
+    # number a deployment should keep: that one comes from its own `turn_costs.total_tokens`
+    # distribution, which `chemclaw.evals` and the cost ledger exist to give it, and a site whose
+    # real work runs heavier must raise this rather than discover it as refusals. The iteration cap
+    # stays on regardless, so this is a second ceiling rather than the only one.
     #
     # Billed rather than estimated tokens, because this is a *cost* ceiling and the estimator is
     # measured to undercount by a quarter to two thirds on exactly the payload class a runaway turn
     # is made of (`agent/context_budget.py` carries the 2026-09-06 re-measurement; the 0.45x this
     # line used to name did not reproduce). No conversion is needed here and none is done: the
     # provider reports is the number this compares.
-    agent_max_turn_billed_tokens: int = Field(default=0, ge=0)
+    agent_max_turn_billed_tokens: int = Field(default=300_000, ge=0)
 
     # Supersteps one model call costs, for deriving the graph's own step ceiling below.
     #
