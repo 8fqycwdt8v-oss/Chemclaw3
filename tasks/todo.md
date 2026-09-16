@@ -1,67 +1,117 @@
-# A probe corpus that can name a tool the fleet serves
+# Multi-agent team, evolving skills, and automatic expert selection
 
-Closes `docs/planning/BACKLOG.md`'s row *"A bundle declared only in the fleet reaches an agent
-surface with no probe covering it"*.
+Five phases, each its own PR, each green under `make lint type test` before merge.
 
-## The problem, stated as the two tests that disagree
+**The product requirement driving this** (owner, 2026-09-16): expert selection must happen
+automatically; the chemist gets a chat interface and never configures infrastructure. Everything
+stays LangChain/LangGraph-native.
 
-`tests/test_probe_coverage.py` holds the corpus against `available_tool_names()`, which reads
-`CHEMCLAW_CONNECTORS_DIR`. So the corpus is caught between two assertions pointing in opposite
-environment directions:
+**What the analysis found and this plan is shaped by**
+- A supervisor holding every tool has no reason to delegate (`D-2026-08-12`), so capability-framed
+  routing needs specialists to hold what the orchestrator lacks — a widening that inverts a merged
+  invariant. **Not taken.** The roster here is perspective-differentiated: every helper is still an
+  attenuation, varying by instructions and model route.
+- The fan-out/compaction defect is **already fixed** — `ClearOlderToolResultsEdit` keeps the newest
+  batch structurally. Nothing owed.
+- A candidate *profile* is gradeable today; a candidate *skill* is not, because nothing varies the
+  skill surface independently of the tool surface.
+- The self-confirmation guard is owed, and it is owed **with its caller** — built in phase 5.
 
-| test | fails when |
-| --- | --- |
-| `test_every_agent_callable_tool_is_probed_or_exempt` (L88) | the fleet **is** mounted — 121 tools, 7 unprobed |
-| `test_no_probe_expects_a_tool_that_does_not_exist` (L99) | the fleet is **not** mounted and a probe names one of its tools |
+## Phase 1 — Instrument the skills surface, and make a skill gradeable
+- [x] `chemclaw_skill_loads_total{skill}` at the existing `skill.read` log site
+- [x] `AgentProfile.skill_names` — a fourth narrowing, only-ever-narrows, so a skill arm can vary
+      skills independently of tools
+- [x] `ProfileScopedSkills` narrowing in `agent/skill_access.py`, composed like the other three
+- [x] `make skill-validate` checks a profile's `skill_names` against discovered skills
+- [x] An eval arm profile that differs only in its skill surface
+- [x] ADR
 
-There is no bucket a configuration-dependent probe can sit in today, so three servers shipped this
-session (`thermalsafety`, `suitability`, `kinetics`) are unmeasurable by the corpus in every lane.
+## Phase 2 — The roster: N named helpers, selected automatically in-context
+- [ ] A roster setting naming which profiles are offered as helpers
+- [ ] `_subagents` builds one governed entry per roster name, each an attenuation
+- [ ] Each helper's `task` description derived from its profile so selection has information
+      (`D-2026-08-12` measured identical descriptions costing every delegation)
+- [ ] The caller stays `default`; selection is the model's ordinary tool-call decision
+- [ ] ADR recording that the reason the backlog said was missing has arrived
 
-## Why not the other fix
+## Phase 3 — The per-actor local skills tier
+- [ ] Per-turn, actor-scoped skills directory resolved where ambient identity is reachable
+- [ ] Never shared, never citable, never auto-promoted
+- [ ] Routes so a chemist can list, read and delete the local skills acting on their turns
+- [ ] `SkillsReadOnlyRefusal` unchanged — no agent tool writes a skill
+- [ ] ADR
 
-Declaring the three as in-tree bundles was measured and rejected: 11,624 tokens over 20 tools
-(3,764 + 4,471 + 3,389) would move from `FLEET_PUBLISHED_ALLOWANCE` — a bound on a lane nobody
-deploys — into `PREFIX_BOUND`, which both compaction defaults derive from, for every deployment.
-`tests/test_context_floor.py` records that refusal three times already.
+## Phase 4 — The proposal queue and its human gate
+- [ ] A content-hashed, append-only proposal table modelled on `plan_approvals`, schema-informed by
+      retired `note_proposals`
+- [ ] Decision is an HTTP route, never a tool
+- [ ] A rejection leaves a trace and an unchanged re-proposal cannot reopen it
+- [ ] A proposer can learn what became of its proposal
+- [ ] ADR
 
-## Plan
-
-- [x] 1. `tests/siblings.py` — `fleet_published_tool_names(root)`: parse each published manifest's
-      `endpoint.tools`. The cheap tier (`sibling_root`, YAML off disk), not `sibling_python`.
-- [x] 2. `src/chemclaw/evals/probe.py` — `Probe.needs_bundle: str | None`. `Probe` is
-      `extra="forbid"`, so a YAML-only change is impossible; this is the declaration that a probe's
-      tool expectations are conditional on a bundle being bound.
-- [x] 3. `src/chemclaw/evals/live.py` — apply `expects_tools` only when `needs_bundle` is bound.
-      A probe whose bundle is absent degrades to its bucket-C form: no tool expected.
-- [x] 4. `tests/test_probe_coverage.py` — a probe may name a tool off the local surface **iff** it
-      declares `needs_bundle`; verify the pairing against the fleet's own manifests when a sibling
-      checkout exists, and skip with `SIBLING_SKIP` (counted by `conftest._report_sibling_skips`)
-      when it does not.
-- [x] 5. Re-bucket the probes that this unblocks: pc-01, pc-04, pc-05, pc-06, pc-08, pc-09.
-- [x] 6. ADR + delete the BACKLOG row + `make lint type test`.
-
-## What the probes actually need, checked rather than assumed
-
-Most of these **under-specify the tool's inputs**, so a mechanical re-bucket would be wrong:
-
-| probe | tool | the question supplies |
-| --- | --- | --- |
-| pc-06 | `oxygen_balance_screen` | a SMILES — and that tool takes a **molecular formula and refuses a SMILES**, so the answer composes `resolve_compound` (declared here) with it. `CC(=O)Oc1ccc([N+](=O)[O-])cc1[N+](=O)[O-]` is C8H6N2O6. The one clean cross-repo composition in the set. |
-| pc-05 | `heat_removal_capacity` | area and jacket temperature, **not** U — so the answer states the assumption or asks |
-| pc-09 | `continuous_reactor_conversion` | a residence time, **no rate constant** |
-| pc-08 | `semibatch_accumulation_profile` | a dose time and temperature, **no rate constant or volumes** |
-| pc-01 / pc-04 | `adiabatic_temperature_rise`, `mtsr`, `tmr_ad` | no calorimetry at all — and that server supplies **no default for a number that carries the safety argument**, so asking for the DSC/ARC numbers is the correct answer |
-
-So these are bucket **B**, and `expects_tools` is any-of (`live.py:540`), which lets "called the tool"
-and "asked for what the tool needs" both count where that is genuinely right.
-
-## The property that makes the claims lane-independent
-
-`gr-25`'s wording — *"a limit recalled from memory rather than looked up"* — is correct in **both**
-lanes: with no tool bound, any number is necessarily recalled and so already forbidden. So only the
-tool *expectation* needs gating, never `forbids_claims`. Same for an alert.
+## Phase 5 — The proposers
+- [ ] Profile proposer over session tool co-occurrence
+- [ ] Skill distiller over recurring trajectories and human protocol corrections
+- [ ] **The self-confirmation guard, with its caller**: nothing distilled may count evidence it
+      itself produced
+- [ ] Approval writes the local tier (phase 3); the shared tree stays git-merged by a human
+- [ ] ADR
 
 ## Review
+
+### Phase 1 — landed
+
+Shipped: `chemclaw_skill_loads_total{skill}`, `AgentProfile.skill_names` with the
+`ProfileScopedSkills` narrowing, a `skill-validate` check for it, and
+`data/evals/profiles/skills-removed.yaml`. No behaviour change on any shipped profile —
+`skill_names` is `None` everywhere.
+
+**Two things measurement changed before they shipped.**
+
+- The fan-out/compaction defect this plan listed for phase 2 is **already fixed**:
+  `ClearOlderToolResultsEdit` makes `keep` the larger of the configured floor and the newest
+  batch's size, so the batch survives structurally. Nothing was owed; a "fix" would have been a
+  change to working code.
+- The self-confirmation guard stays in phase 5 rather than moving earlier, because its caller is
+  the distiller. Built now it would be a guard with no caller kept alive by its own test — the
+  `reject_widening` shape this repository deleted once already.
+
+**What a fresh-context review caught, and it was the same failure twice.** The first version of the
+counter's clamp was asserted in a docstring, a metric HELP string and the ADR, and the shipped tree
+falsified it: `skills/README.md` resolves, so the counter booked a skill called `README.md` — in
+the one series whose stated purpose is deciding which skills to promote and retire. `limit=0`
+booked a load of zero bytes under a paragraph claiming the count is taken on the bytes. Both are
+fixed with the argument recorded rather than the prose quietly corrected, and both now have tests
+asserting the *property* rather than the filename that exposed them. Three smaller findings went
+with them: the validator tracebacked instead of reporting when a profile file was malformed, two
+tests leaked the shipped profiles into a module-global registry, and the control arm's "what it
+still carries" paragraph named the listing and missed the larger residual — the deployment's prose
+still orders the model to load skills the arm cannot reach, which makes a delta measured there a
+lower bound rather than an unbiased estimate.
+
+### Phase 2 — what the measurement decided before any code
+
+Three of the six shipped profiles are **unusable as helpers**, because `helper_profile` subtracts
+`side_effecting_tools()` and their job is writing: `reporting` keeps 3 of 8, `property-lookup` 1 of
+5, and `design` keeps 4 of 8 but loses `suggest_next_experiment`, which is the whole specialist.
+What survives coherently is `evidence` (14 of 15), `computation` (12 of 41) and `safety` (4 of 6).
+So the roster is those three plus `general-purpose`, which is a measured choice and a much smaller
+prefix cost than the six this plan assumed.
+
+`computation`'s surviving 12 are the enumeration family, topology, the calibration ledger and
+calculation lookup — a real capability, and **not** "compute things". So a roster description is a
+human-written purpose sentence *plus the tool list derived from the compiled helper*, which makes
+`D-2026-08-12`'s measured defect — five specialists whose descriptions were identical and carried
+no capability information — structurally unrepeatable rather than fixed by hand.
+
+---
+
+## A previous session's closed review, kept rather than overwritten
+
+`tasks/todo.md` is one file per repository and several sessions run at once, so this section
+and the one above are two sessions' working state that met in a merge. Theirs is finished
+work; it is preserved here rather than discarded because a merge is not the place to decide
+somebody else's record is done with.
 
 **Done, and the shape changed twice under measurement.**
 
@@ -539,3 +589,58 @@ Also worth recording because it cost time and was not mine:
 `test_no_adr_cites_a_commit_a_squash_will_strand` fails on a **shallow** checkout, naming nine ADRs
 nobody touched. `git fetch --unshallow` turns it green. Its sibling in the same file skips with that
 exact reason; this one has no such guard.
+
+## Wave G — four fresh-context reviews of everything waves D–F built (2026-09-16)
+
+Three reviewers were run against the composed-workflow seam with Docker, Postgres and Temporal up,
+each asked to drive rather than read; a fourth pass swept the declarations. Two ADRs record the
+result: `D-2026-09-16-a-wave-costs-its-slowest-member-once-per-batch` and
+`D-2026-09-16-an-approval-binds-to-the-version-that-was-shown-on-every-surface`.
+
+**The security argument held.** Nothing broke the gate: the `unapproved_jobs` check is strictly
+before `start_template_run` with no TOCTOU, the fingerprint covers every field including
+`write_tools`, a step naming both a tool and a job produces a `JobStep` and drops the tool, both
+composition tools are themselves side-effecting so no composed workflow can contain either, SQL
+owner scoping is exact, and an irreversible effect still fails closed inside an approved job.
+
+**What did not hold was the *surfaces*.** The same property was enforced on one path and merely
+described on another, three times over:
+
+- [x] The CLI approved "as it stands", argued from a premise the agent falsifies by acting in the
+      same terminal under the same owner. Read-then-bind now, with the procedure rendered.
+- [x] Two store backends disagreed about what a save may touch. Aligned on carrying an approval
+      forward: the agent's write must not erase the record of a person's decision, and the lapse is
+      the fingerprint's job. `GET` returns a derived `approved` so nothing renders a stale approver.
+- [x] Only one of two launchers validated its inputs. Moved into `start_template_run`.
+- [x] `run_ceiling_problems` sized a wave at one slow step however wide it is — 501 independent
+      steps passed the ceiling. `_batches` bounds the wave and `ceil(width / limit)` sizes it, from
+      one pinned number.
+- [x] `authored_problems` failed open on an unrecognised step kind.
+- [x] `approve` took an `approver` both callers satisfied with the owner, which left `leaver.py` a
+      person-column its predicate could not reach. Parameter removed.
+- [x] No delete: `DELETE /workflows/{name}` and `/forget-workflow`.
+- [x] The cap's guard read its own page size; `list_for` fetches one past the cap.
+- [x] `composed_workflows.session_id` had no reader in code; the approval screen is one now.
+- [x] Eight stale present-tense claims, each falsified by its own pull request, including the
+      plan-gate exemption argued from "nothing at run time can produce one" at the two places a
+      reader would look, and probe `ws-19` scoring the shipped behaviour as a fabrication.
+- [x] The wave scheduler and the resume path had no ADR at all, while the one merged decision that
+      discusses them declines both.
+
+### Review
+
+**What the reviewers got wrong, and it matters.** One reported that a departing *approver* who is
+not the owner is neither erased nor counted — a real gap in the shape of `note_proposals.decided_by`.
+It is unreachable: both callers of `approve` resolve against the caller's own rows, so `approved_by`
+can only be the owner. The finding was still worth acting on, because the *store* permitted the
+state the write path cannot produce. Removing the parameter is what turns "unreached" into
+"unrepresentable", and that is the difference the register test could not see.
+
+**The measurement that changed a design.** The 501-step case looked like a missing
+`MAX_COMPOSED_STEPS`. It is not: once a wave's cost stops assuming unbounded parallelism, the run
+ceiling that was already there refuses it, and a second number would have been a magic one. Fixing
+the arithmetic fixed the class; capping the document would have fixed the example.
+
+**The process failure is in `tasks/lessons.md`.** A reviewer mutation-testing `template_job.py`
+restored it from its own scratch copy over my edits, and when stopped mid-restore left
+`if False:  # MUTATION` in the file. A subagent shares this working tree.

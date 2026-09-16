@@ -53,7 +53,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from chemclaw.templates.manifest import AgentStep, JobStep, Template, ToolStep
     from chemclaw.templates.resolve import resolve
-    from chemclaw.templates.schedule import schedule
+    from chemclaw.templates.schedule import batches, schedule
 
 from chemclaw.core.ids import stable_hash
 from chemclaw.durable.publish import (
@@ -78,6 +78,16 @@ class TemplateRunInput(BaseModel):
     roles: list[str] = Field(default_factory=list)
     # The chat to wake on completion; empty off the service path, where there is none.
     session_id: str = ""
+    # How many of one wave's steps may be in flight at once. **Pinned at launch for the same
+    # reason the template is**, and for one more: `agent/template_surface.run_ceiling_problems`
+    # sizes a wave as `ceil(width / limit)` slow steps, so the number that *bounds* the run and the
+    # number the launch was *checked against* have to be one number. A live settings read inside
+    # workflow code would be neither — nondeterministic on replay, and not what the ceiling saw.
+    #
+    # `0` means "no bound", which is what an input predating this field declares: every archived
+    # history is pre-wave, so its waves are one step wide and an unbounded gather over one step is
+    # the sequential shape byte for byte.
+    max_parallel_steps: int = Field(default=0, ge=0)
 
 
 class TemplateRunResult(BaseModel):
@@ -341,7 +351,9 @@ class TemplateWorkflow:
             if not wave:
                 continue
             try:
-                finished = await self._run_wave(wave, scope, identity, timeout, run.template.name)
+                finished = await self._run_wave(
+                    wave, scope, identity, timeout, run.template.name, run.max_parallel_steps
+                )
             except _StepFailed as failure:
                 step, exc = failure.step, failure.cause
                 # The completion push-back below had no counterpart, so a template that failed at
@@ -539,6 +551,7 @@ class TemplateWorkflow:
         identity: StepIdentity,
         timeout: timedelta,
         template: str,
+        limit: int,
     ) -> list[tuple[Any, Any]]:
         """Run one wave's steps together and return `(step, result)` in the wave's declared order.
 
@@ -572,6 +585,9 @@ class TemplateWorkflow:
             identity: Who the run acts for.
             timeout: One step's `start_to_close` budget.
             template: The run's template name, for the prompt-truncation label.
+            limit: How many steps may be in flight at once; `0` for no bound. See
+                `templates/schedule.batches`, and `TemplateRunInput.max_parallel_steps` for why the
+                number is pinned rather than read.
 
         Returns:
             `(step, result)` for each step, in the wave's declared order.
@@ -584,21 +600,35 @@ class TemplateWorkflow:
             step = wave[0]
             try:
                 return [(step, await self._run_step(step, scope, identity, timeout, template))]
+            except asyncio.CancelledError:
+                # **Re-raised, not wrapped**, which is what the paragraph above says and what this
+                # branch did not do. `except BaseException` caught it too, so a cancelled run of a
+                # chained template — seven of the nine shipped ones, and every pre-marker history by
+                # construction — was recorded by `failed_template_record` and announced to the
+                # chemist as having failed at a named step. The wide branch below already got this
+                # right, so the two halves of one function disagreed about whether cancellation is
+                # a failure.
+                raise
             except BaseException as exc:
                 raise _StepFailed(step, exc) from exc
 
-        settled = await asyncio.gather(
-            *(self._run_step(step, scope, identity, timeout, template) for step in wave),
-            return_exceptions=True,
-        )
-        # `gather` returns in argument order, which is the wave's declared order — the property
-        # `fan_out` relies on too, and the reason nothing here has to sort or match by id.
-        for step, outcome in zip(wave, settled, strict=True):
-            if isinstance(outcome, asyncio.CancelledError):
-                raise outcome
-            if isinstance(outcome, BaseException):
-                raise _StepFailed(step, outcome) from outcome
-        return [(step, outcome) for step, outcome in zip(wave, settled, strict=True)]
+        done: list[tuple[Any, Any]] = []
+        for batch in batches(wave, limit):
+            settled = await asyncio.gather(
+                *(self._run_step(step, scope, identity, timeout, template) for step in batch),
+                return_exceptions=True,
+            )
+            # `gather` returns in argument order, which is the batch's declared order — the property
+            # `fan_out` relies on too, and the reason nothing here has to sort or match by id.
+            # Batches run in declared order as well, so the failure this reports is still the first
+            # in the file whichever worker was busier, exactly as it was for one gather.
+            for step, outcome in zip(batch, settled, strict=True):
+                if isinstance(outcome, asyncio.CancelledError):
+                    raise outcome
+                if isinstance(outcome, BaseException):
+                    raise _StepFailed(step, outcome) from outcome
+            done.extend(zip(batch, settled, strict=True))
+        return done
 
     async def _run_step(
         self,

@@ -29,7 +29,12 @@ iteration, dict ordering or completion timing is a divergence waiting for a work
 sequence this module returns is ordered by the step's position in the file.
 """
 
+from typing import TypeVar
+
 from chemclaw.templates.manifest import Step, Template, step_references
+
+#: The element of a wave. `batches` is positional, so it is generic in it.
+_T = TypeVar("_T")
 
 #: A step's dependencies, as step ids — the `${steps.<id>.result}` references it makes.
 #:
@@ -59,6 +64,11 @@ def dependencies(step: Step) -> frozenset[str]:
 def schedule(template: Template) -> tuple[tuple[Step, ...], ...]:
     """`template`'s steps grouped into waves that may each run concurrently.
 
+    **May, not will.** How much of a wave is actually in flight is
+    `TemplateRunInput.max_parallel_steps` — `TemplateWorkflow._run_wave` dispatches a wave in
+    batches of that width, and `agent/template_surface.run_ceiling_problems` sizes it the same way.
+    This module says which steps *could* run together; it does not decide how many do.
+
     Wave *k* is every step all of whose dependencies completed in waves before *k*. A template
     whose steps chain — which is seven of the nine shipped ones — yields one step per wave and runs
     exactly as it did before this module existed, which is the property that makes this safe to
@@ -87,10 +97,48 @@ def schedule(template: Template) -> tuple[tuple[Step, ...], ...]:
     return tuple(waves)
 
 
+def batches(wave: tuple[_T, ...], limit: int) -> tuple[tuple[_T, ...], ...]:
+    """One wave split into runs of at most `limit` steps, in declared order.
+
+    **Here rather than in `durable/template_job.py`, because two callers must agree.**
+    `TemplateWorkflow._run_wave` dispatches these batches and
+    `agent/template_surface.run_ceiling_problems` sizes the wave by summing what each one costs. It
+    lived beside the dispatcher first, and the ceiling then re-derived the cost as
+    `ceil(width / limit) x the whole wave's slowest member` — which charges the slow step to every
+    batch, including batches holding nothing slow. Measured: one 39,330 s `job` step beside eight
+    900 s `tool` steps is a 40,230 s wave charged at 78,660 s, so a procedure that fits inside a
+    45,330 s budget by 4,200 s is refused by 34,230 s. An over-stating bound here refuses a template
+    that would have finished, which is the failure the wave arithmetic exists to avoid rather than
+    a conservative choice. Two callers reading one function is what makes "the same number" true.
+
+    **A fixed-size batch rather than a semaphore**, the reason `durable/orchestrator.fan_out` gives
+    for the same choice: a batch does not depend on lock-acquisition order, so it is deterministic
+    under Temporal's replay, and it bounds concurrency just the same.
+
+    Generic in the element, because the split is purely positional — it never reads a step's
+    fields — and typing it to `Step` would force every caller and test to build documents to
+    exercise arithmetic that has nothing to do with them.
+
+    Args:
+        wave: The steps that may run together, in the file's order.
+        limit: The most that may be in flight at once. `0` — or a limit no narrower than the wave —
+            means one batch, which is the unbounded gather this replaced.
+
+    Returns:
+        The batches, in declared order; flattening them reproduces `wave` exactly.
+    """
+    if limit < 1 or limit >= len(wave):
+        return (wave,)
+    return tuple(wave[index : index + limit] for index in range(0, len(wave), limit))
+
+
 def widest(template: Template) -> int:
-    """How many steps this template ever has in flight at once.
+    """How wide this template's widest wave is.
 
     Read by the tests that assert a chained template did not silently gain concurrency, and by the
-    ceiling arithmetic's own explanation of why a sum over waves is not a sum over steps.
+    ceiling arithmetic's own explanation of why a sum over waves is not a sum over steps. **Not
+    "how many it has in flight at once"**, which is what this said and is the same optimism the
+    ceiling arithmetic carried: a wave of 501 has at most `max_parallel_steps` in flight, and the
+    difference is exactly what `ceil(width / limit)` counts.
     """
     return max((len(wave) for wave in schedule(template)), default=0)

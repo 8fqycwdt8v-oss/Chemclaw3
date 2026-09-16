@@ -1,14 +1,22 @@
 """Skill visibility: admin enablement, capability scoping, then Phase-6 RBAC (plan step 6.2).
 
-Three independent narrowings, deliberately kept separate because they answer different questions.
+Four independent narrowings, deliberately kept separate because they answer different questions.
 `EnabledSkills` answers *"is this skill turned on in this
-deployment?"* (an admin/config concern); `ToolScopedSkills` answers *"can this agent do any
+deployment?"* (an admin/config concern); `ProfileScopedSkills` answers *"is this agent about it?"*
+(a per-profile concern); `ToolScopedSkills` answers *"can this agent do any
 of what the skill teaches?"* (a capability concern); `RoleScopedSkills` answers *"may this
-caller see it?"* (an identity concern). All three only ever remove skills, so chaining them in any
+caller see it?"* (an identity concern). All four only ever remove skills, so chaining them in any
 order is safe; `build_langgraph_agent` wraps them in the order the request reads — what exists at
-all, then what this agent can do, then who may see it.
+all, then what this agent is about, then what it can do, then who may see it.
 
-All three are the same short-circuit over a different predicate, which is what `_Narrowing`
+**The fourth arrived last and for a reason that is not symmetry.** The other three are a
+deployment's, a tool surface's and an identity's, and none of them belongs to a *profile* — so
+until `AgentProfile.skill_names` existed, the only way to move one agent's skill surface was to
+move its tool surface and let `ToolScopedSkills` follow. That coupling is what made a skill
+unmeasurable: an A/B arm is a profile file, and an arm that cannot hold tools still while moving
+skills produces a delta nobody can attribute. See `ProfileScopedSkills`.
+
+All four are the same short-circuit over a different predicate, which is what `_Narrowing`
 holds: await the inner source, return it untouched when this narrowing is unconfigured, otherwise
 filter. Extracted at the third copy (Rule of Three), and the short-circuit is the part worth
 sharing — it is what keeps an unconfigured decorator from paying for itself on every turn.
@@ -156,6 +164,52 @@ class ToolScopedSkills(_Narrowing):
         return not required or bool(required & self._available)
 
 
+class ProfileScopedSkills(_Narrowing):
+    """Advertise only the skills this agent's profile names.
+
+    The fourth narrowing, and the one a *profile* owns. `EnabledSkills` answers "did this
+    deployment turn it on", `ToolScopedSkills` answers "can this agent do any of what it teaches",
+    `RoleScopedSkills` answers "may this caller see it" — and none of them can express "this agent
+    is about these skills", which is the question a profile exists to answer for every other
+    dimension it carries.
+
+    **Why it is not just a longer enable-list.** The enable-list is a deployment's, read from
+    `settings`, and it is one set for the whole process: two profiles served by one deployment get
+    the same answer from it. `tool_names` already narrows per profile and the skill surface did not,
+    so the only per-profile skill narrowing available was the *indirect* one — take a tool away and
+    `ToolScopedSkills` takes its skills with it. That indirection is precisely what makes a skill
+    unmeasurable, because it cannot be moved on its own.
+
+    An unset `skill_names` means "whatever the other three left", which is today's behaviour, so
+    this is a no-op on every shipped profile. A name no directory provides is absent rather than an
+    error, for the same reason `EnabledSkills` degrades that way: this runs per turn, and a config
+    typo must narrow the advertised set rather than break every live conversation.
+    `make skill-validate` is where it is caught loudly.
+
+    Args:
+        names: The skill names this profile may reach; `None` narrows nothing.
+    """
+
+    def __init__(self, names: Iterable[str] | None = None) -> None:
+        """Pre-normalize to a frozenset, keeping `None` distinct from the empty set."""
+        self._names: frozenset[str] | None = None if names is None else frozenset(names)
+
+    def _narrows(self) -> bool:
+        """`None` narrows nothing; an **empty** set narrows everything away, and means to.
+
+        The distinction is deliberate and is the one `EnabledSkills` does not make: there, an empty
+        list is the unset default, because a deployment that names no skill means "all of them". A
+        profile is the other way round — `skill_names: []` is a profile author writing down that
+        this agent reaches no skill at all, which is a real configuration (a no-skills eval arm is
+        exactly it) and is unrepresentable if empty silently means everything.
+        """
+        return self._names is not None
+
+    def _permits(self, name: str) -> bool:
+        """A skill survives if this profile names it."""
+        return name in (self._names or frozenset())
+
+
 class RoleScopedSkills(_Narrowing):
     """Advertise a gated skill only to callers holding one of its roles.
 
@@ -193,8 +247,9 @@ def skill_permits(
     declared: Mapping[str, frozenset[str]],
     available: Iterable[str],
     gates: Mapping[str, list[str]] | None,
+    names: Iterable[str] | None = None,
 ) -> Callable[[str], bool]:
-    """The three narrowings as one predicate over a skill name — the engine-neutral form.
+    """The four narrowings as one predicate over a skill name — the engine-neutral form.
 
     The one form now. It was one of two while MAF composed the same three as `SkillsSource`
     decorators, because that framework reached skills by asking a source for them; the backend
@@ -206,15 +261,18 @@ def skill_permits(
     place and offered in another — which is not a gate, it is a coin flip with a config flag for a
     coin. The plumbing that made it two forms is gone; the rule that keeps it one stands.
 
-    The order matches the request as it reads — what exists at all, then what this agent can do,
-    then who may see it — though all three only ever remove, so composing them in any order gives
-    the same answer.
+    The order matches the request as it reads — what exists at all, then what this agent is about,
+    then what it can do, then who may see it — though all four only ever remove, so composing them
+    in any order gives the same answer.
 
     Args:
         enabled: The deployment's enable-list; empty means every discovered skill.
         declared: `{skill name: declared tool names}` from `skill_manifest.declared_tools`.
         available: The tool names this agent advertises, both halves of the surface.
         gates: `{skill name: allowed roles}`; a skill absent from the map is ungated.
+        names: The profile's `skill_names`; `None` narrows nothing, and an empty set narrows
+            everything away — see `ProfileScopedSkills._narrows` for why those differ here and not
+            in the enable-list.
 
     Returns:
         A predicate answering "is this skill visible to the turn in flight". Evaluated per call,
@@ -223,6 +281,7 @@ def skill_permits(
     """
     narrowings = (
         EnabledSkills(enabled),
+        ProfileScopedSkills(names),
         ToolScopedSkills(declared, available),
         RoleScopedSkills(gates),
     )

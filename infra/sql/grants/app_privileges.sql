@@ -141,7 +141,8 @@ BEGIN
         'corpus_reactions, corpus_cursors, '
         'tool_result_links TO %I', app_role);
 
-    -- `composed_workflows` takes DELETE beside the two, and the DELETE is the offboarding one.
+    -- `composed_workflows` takes DELETE beside the two, and two things use it: the owner
+    -- forgetting one (`DELETE /workflows/{name}`, `/forget-workflow`) and offboarding.
     -- UPDATE because re-composing under the same name revises one working procedure rather than
     -- adding a second (the row is keyed `(owner, name)` and the store upserts it). DELETE because
     -- `chemclaw.agent.leaver` erases a departing person's workflows: a procedure names no result

@@ -334,9 +334,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--profile",
         default=None,
-        help="the agent profile to ask. `tools-removed` varies only the tools; `no-tools` varies "
-        "the tools and the whole system prompt, so it answers a different question. Omitted, the "
-        "front door's default agent",
+        help="the agent profile to ask. `tools-removed` varies only the tools; `skills-removed` "
+        "varies only the skills; `no-tools` varies the tools and the whole system prompt, so it "
+        "answers a different question. Omitted, the front door's default agent",
     )
     parser.add_argument(
         "--limit", type=int, default=0, help="ask only the first N questions (0 = all)"

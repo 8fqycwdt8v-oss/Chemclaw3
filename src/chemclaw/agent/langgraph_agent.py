@@ -953,6 +953,7 @@ def skills_backend(
         declared=declared,
         available=available if available is not None else _advertised_names(profile, tools),
         gates=settings.skill_role_gates,
+        names=profile.skill_names,
     )
     _log_narrowing(profile, declared, permits)
     return CompositeBackend(

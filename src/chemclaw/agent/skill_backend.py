@@ -164,6 +164,25 @@ class NarrowedSkillsBackend(FilesystemBackend):
         not reconstructible from anywhere else — but it is a per-call line, and a deployment
         drowning in it is looking at a real thing rather than at a broken bound.
 
+        **The count is taken on a skill body that was actually delivered, and it takes three
+        conditions to say that.** `chemclaw_skill_loads_total` carries the skill name, and `skill`
+        is the first segment of a path the *model* wrote, so counting beside the INFO above would
+        mint a series for every string a model can invent — `permits` only ever *narrows* and
+        returns True for any name in a deployment that configures none of the three gates. The
+        read having resolved is the first condition and it is **not sufficient**, which is where
+        the first version of this paragraph was wrong: it argued that a resolved path is one inside
+        `root_dir` so its first segment is a real directory, which is true and is not the property
+        wanted — `skills/README.md` resolves and booked a skill called `README.md`. So
+        `_is_a_skill_body` is the second condition, and `no_lines_requested` is the third, because
+        `read_file(limit=0)` returns empty content with no error and would otherwise book a load of
+        zero bytes under a paragraph claiming the count is taken on the bytes.
+
+        Counting a delivered body is also the truer measurement — "which procedure the model
+        actually opened" is the support question, and an ask that returned an error, or named a
+        file beside the tree, or asked for no lines, opened nothing. The denial counter beside it
+        is the other half, and the two do not sum to the asks: a read that passes the gate and then
+        fails on a missing file is in neither.
+
         A refusal is a WARNING and a count, not an INFO, because the role gate lives here — this is
         the enforcement point (the class docstring says why), and an enforcement point whose
         refusals are silent is a control nobody can audit. It names the path rather than the skill,
@@ -192,7 +211,12 @@ class NarrowedSkillsBackend(FilesystemBackend):
             )
             return ReadResult(error=REFUSED, file_data=None)
         log_event(logger, "skill.read", "the model read %s", recorded, skill=skill, path=recorded)
-        return super().read(file_path, offset, limit)
+        result = super().read(file_path, offset, limit)
+        if _is_a_skill_body(file_path) and not result.error and not result.no_lines_requested:
+            record_metric(
+                lambda m: m.increment("chemclaw_skill_loads_total", labels={"skill": skill})
+            )
+        return result
 
     def glob(self, pattern: str, path: str | None = None) -> GlobResult:
         """Match files, dropping every hit outside a permitted skill.
@@ -289,6 +313,30 @@ def _skill_of(path: str) -> str:
     """
     parts = PurePosixPath(path.strip("/")).parts
     return parts[0] if parts else ""
+
+
+def _is_a_skill_body(path: str) -> bool:
+    """Whether `path` names a document *inside* a skill, rather than one at the tree root.
+
+    The clamp on `chemclaw_skill_loads_total`'s label, and it is a second predicate rather than a
+    tightening of `_skill_of` because the two questions differ. `_allows` asks which skill a path is
+    *gated* as, and a root-level document gated under its own filename is the conservative answer
+    there. This asks which skill a read is *evidence about*, and a root-level document is evidence
+    about none.
+
+    **Written because the first version of this clamp was false on the shipped tree.** The claim was
+    that a path which resolved is one inside `root_dir`, so its first segment is a directory that
+    exists — true, and not the property wanted: `skills/README.md` resolves, its first segment is
+    `README.md`, and the counter booked a skill by that name. `ls("/")` lists it to the model, so
+    this was reachable rather than theoretical. A series that is the stated evidence base for
+    ranking, promoting and retiring skills must not carry a row for a document that is not one, and
+    any future top-level file lands the same way.
+
+    Two segments after the root is the test: a skill is a directory holding `SKILL.md`, so anything
+    belonging to one has a directory segment before its filename. No `stat` is needed — the read
+    already resolved, so a path with a segment before its filename has a real directory there.
+    """
+    return len(PurePosixPath(path.strip("/")).parts) > 1
 
 
 def _path_of(hit: Any) -> str:
