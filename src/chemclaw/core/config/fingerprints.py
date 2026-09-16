@@ -112,3 +112,30 @@ class FingerprintSettings(BaseSettings):
     # Killing the work outright would need a subprocess — over-engineering until a real abuse
     # case is measured. Seconds; normally ms.
     substructure_match_timeout_seconds: float = Field(default=5.0, gt=0.0)
+    # How long one chunk of a substructure scan may run before the deadline is consulted again.
+    # The scan matches through `rdSubstructLibrary`, whose `GetMatches` is a C++ call that cannot be
+    # interrupted, so the wall-clock bound above can only be enforced *between* calls — and the
+    # chunk is therefore sized in **time**, not in records. That unit is the whole point: measured
+    # on this branch, one molecule costs ~6 us for a functional-group SMARTS on caffeine and ~117 ms
+    # for a 16-atom recursive pattern on a 121-atom dendrimer, so a fixed chunk of 500 records is
+    # 7 ms of overrun on one corpus and ~58 s on another. Sized in time, the same 500-record chunk
+    # becomes one or two molecules on the second corpus — the granularity the per-record loop this
+    # replaced had — and the whole corpus in ~7 calls on the first.
+    #
+    # 0.25 s: a twentieth of the shipped `substructure_match_timeout_seconds`, so a scan that
+    # overruns its bound overruns it by a slice a caller will not notice, while the per-call cost it
+    # buys back (the query's own pattern fingerprint, ~69 us) stays invisible. Lower it for a
+    # tighter bound on an abandoned thread; the cost is one fingerprint per chunk.
+    substructure_scan_deadline_slice_seconds: float = Field(default=0.25, gt=0.0)
+    # How many built substructure indexes are held in memory at once (D-080 follow-up). An index is
+    # the corpus slice pre-parsed into `rdSubstructLibrary` — 1.16 s to build for 5,000 molecules
+    # against 13-41 ms to search, so it is only worth building if it is kept — and it is keyed by a
+    # digest of the labels it was built from, because nothing in the schema moves when an upsert
+    # rewrites a row's SMILES in place.
+    #
+    # 2, not 1: an ingest that changes the corpus invalidates the key, and holding one generation
+    # behind means the queries already in flight against the old slice do not each rebuild it. Not
+    # more, because nothing reads a third generation and the memory is real — measured at 863 bytes
+    # per molecule (binary molecules plus pattern fingerprints), so this bound times
+    # `substructure_scan_max_records` is the ceiling: ~8.4 MB at the shipped defaults.
+    substructure_index_cache_entries: int = Field(default=2, ge=1)

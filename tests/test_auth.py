@@ -539,8 +539,8 @@ def test_every_way_the_fetch_can_fail_is_a_503_and_not_a_401(
     The 302 is the one case that is a *decision* rather than a translation: `urlopen` followed
     redirects and httpx does not, so this pins which way round that was settled. Refused, because a
     redirect moves the key set's origin out of the address `core/netguard.py` derived its allowlist
-    from — and refused *by name*, so an operator reads "redirected" rather than the empty-body
-    decode failure an unfollowed 3xx would otherwise produce.
+    from — and refused *by name* and before `raise_for_status`, which httpx raises on a 3xx too,
+    so an operator reads "redirected" rather than a bare "answered 302".
     """
     with _jwks_server(status, body) as url:
         with pytest.raises(auth.IdentityProviderUnavailable, match=expected):

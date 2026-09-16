@@ -150,6 +150,14 @@ _EXPECTED_SUBSYSTEMS = {
     # record it does not hold. Per (sink, table) rather than per row, because a lagging schema is a
     # deployment fact and one row's worth of it is not news.
     "result_sink_schema_lag",
+    # `publish/drivers/sql`, when a whole `executemany` group is refused and the sink falls back to
+    # sending that group a row at a time so the error can name the row. The fast path having failed
+    # is the degradation — the delivery itself still either lands or raises `SinkRejectedError`
+    # naming the table and the `calc_ref`, which is the granularity the batching would otherwise
+    # have cost. WARNING rather than ERROR because the answer is unchanged; what is lost is the
+    # round-trip saving, and a site whose store refuses a statement this release writes should see
+    # it counted rather than inferred from the drain taking longer.
+    "result_sink_batch_replayed",
     # `agent.condense`, added with the protocol condenser. Two degradations share it and both
     # are per protocol rather than per turn: no reachable `"protocol-digest"` route (the comparison
     # still renders from every record's own figures), and one extraction that failed or timed out

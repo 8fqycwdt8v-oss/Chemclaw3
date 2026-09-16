@@ -1941,7 +1941,11 @@ def test_pyjwt_still_fetches_its_key_set_through_fetch_data() -> None:
         def fetch_data(self) -> Any:
             nonlocal calls
             calls += 1
-            data = {
+            # Typed `Any` rather than as the dict it is, because upstream's `JWKSetCache.put` is
+            # annotated `PyJWKSet` while upstream's own `fetch_data` hands it the parsed dict —
+            # so the runtime contract and the annotation disagree, and it is the runtime one
+            # `api/auth.py` copies.
+            data: Any = {
                 "keys": [
                     {
                         "kty": "oct",
@@ -1988,7 +1992,7 @@ def test_a_pyjwt_client_still_fills_its_key_set_cache_from_fetch_data() -> None:
         def fetch_data(self) -> Any:
             nonlocal calls
             calls += 1
-            data = {"keys": [{"kty": "oct", "kid": "kid-a", "use": "sig", "k": "c2VjcmV0"}]}
+            data: Any = {"keys": [{"kty": "oct", "kid": "kid-a", "use": "sig", "k": "c2VjcmV0"}]}
             # Exactly what `api/auth._HttpxJwkClient.fetch_data` does with its response.
             if self.jwk_set_cache is not None:
                 self.jwk_set_cache.put(data)

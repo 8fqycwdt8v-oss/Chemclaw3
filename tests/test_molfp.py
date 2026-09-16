@@ -7,16 +7,19 @@ The Postgres backend reproduces the same ranking in SQL (tested in CI).
 """
 
 import asyncio
+import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from pathlib import Path
 
 import psycopg
 import pytest
-from rdkit import Chem
+from rdkit import Chem, RDConfig
 
+from chemclaw.core.bounded import BoundedLru
 from chemclaw.core.chem import substructure_pattern
 from chemclaw.core.config import settings
-from chemclaw.science.fingerprints.molfp import search
+from chemclaw.science.fingerprints.molfp import search, substructure_index
 from chemclaw.science.fingerprints.molfp.fingerprint import ecfp_bitstring, molecule_definition
 from chemclaw.science.fingerprints.molfp.search import (
     ScanOutcome,
@@ -1290,3 +1293,366 @@ def test_the_reference_shelves_a_superseded_generation_rather_than_evicting_it()
         assert [r.definition for r in await new.all_records(limit=10)] == [molecule_definition()]
 
     asyncio.run(_run())
+
+
+# --------------------------------------------------------------------------------------------
+# The `rdSubstructLibrary` index behind `_scan_for_matches`, and the cache that makes it a win.
+# Everything below is about `chemclaw.science.fingerprints.molfp.substructure_index`.
+# --------------------------------------------------------------------------------------------
+
+
+def _nci_corpus(limit: int) -> list[str]:
+    """`limit` SMILES from the NCI sample RDKit ships, as a realistic drug-like corpus.
+
+    Realistic rather than hand-written on purpose: the pattern-fingerprint screen this index adds
+    is a *filter in front of the matcher*, and a screen is only interesting over molecules diverse
+    enough for it to reject some of them. Four hand-picked alcohols would agree with any screen,
+    sound or not.
+
+    It is RDKit's own package data (`rdkit/Data/NCI/first_5K.smi`), so it is not a corpus under
+    `data/` and carries no licence/checksum contract of this repository's — it is read from the
+    installed dependency the same way `science/bo/benchmarks` reads its own package data.
+    """
+    path = Path(RDConfig.RDDataDir) / "NCI" / "first_5K.smi"
+    if not path.exists():  # pragma: no cover - only on an RDKit build that drops its sample data
+        pytest.skip(f"RDKit sample corpus is not installed at {path}")
+    return [line.split()[0] for line in path.read_text().splitlines()[:limit]]
+
+
+def _loop_matches(labels: list[str], pattern: Chem.Mol) -> tuple[list[str], int]:
+    """The scan exactly as it was before the index: parse every label, ask each molecule.
+
+    Written out here rather than imported, because the point of the test below is that the
+    *replaced* algorithm and the replacement agree — an import would make it one algorithm
+    compared with itself.
+    """
+    matches: list[str] = []
+    unreadable = 0
+    for label in labels:
+        molecule = Chem.MolFromSmiles(label)
+        if molecule is None:
+            unreadable += 1
+            continue
+        if molecule.HasSubstructMatch(pattern):
+            matches.append(label)
+    return matches, unreadable
+
+
+# The four query classes the adoption was measured on, plus the shapes a pattern-fingerprint screen
+# is most likely to get wrong if it is unsound: recursive SMARTS, ring/aromaticity primitives,
+# any-atom/any-bond wildcards and an element nothing in the corpus carries.
+_DIFFERENTIAL_QUERIES = [
+    "C(=O)N",  # amide — the broad, many-hit case
+    "c1ccccc1C(=O)N",  # aryl amide — narrow and specific
+    "[Se]",  # an element the screen should reject on almost every molecule
+    "C(~*)(~*)(~*)~*",  # adversarial: wildcards give the screen nothing to work with
+    "c1ccccc1",
+    "[CX3](=O)[OX2H1]",
+    "[NX3;H2,H1;!$(NC=O)]",  # recursive SMARTS
+    "[$([NX3](=O)=O),$([NX3+](=O)[O-])]",  # recursive SMARTS, two alternatives
+    "[R2]",
+    "[nH]",
+    "[F,Cl,Br,I]",
+    "*~*~*~*~*~*~*~*",
+]
+
+
+def test_the_index_returns_exactly_what_the_per_record_loop_returned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The replacement's whole licence to exist: same hits, same order, over a real corpus.
+
+    `find_substructure_matches` used to parse every stored SMILES on every query and call
+    `HasSubstructMatch`; it now matches through `rdSubstructLibrary`, which screens each molecule
+    with a pattern fingerprint in C++ first. A screen that is unsound for some SMARTS class would
+    drop real hits *silently*, and this tool's silent drop is a chemist told a precedent does not
+    exist — so the agreement is asserted rather than assumed, over the twelve query classes above
+    and as a list, since hit order is what the model cites.
+
+    The corpus carries a deliberately malformed row, because the holder skips sanitisation and so
+    would never have noticed one: the `unreadable` count has to come from somewhere, and this is
+    the arm that says it still does.
+    """
+    monkeypatch.setattr(settings, "fingerprint_max_top_k", 100_000)  # compare whole hit lists
+    labels = [*_nci_corpus(1200), "not-a-molecule((("]
+    records = [
+        FingerprintRecord(id=f"{index:05d}", label=label, bits="01")
+        for index, label in enumerate(labels)
+    ]
+
+    for query in _DIFFERENTIAL_QUERIES:
+        pattern = substructure_pattern(query)
+        expected, unreadable = _loop_matches(labels, pattern)
+        outcome = search._scan_for_matches(records, pattern, time.monotonic() + 600)
+        assert [hit.smiles for hit in outcome.hits] == expected, query
+        assert outcome.unreadable == unreadable == 1, query
+        assert outcome.hits_truncated is False, query
+
+
+def test_a_chiral_query_is_matched_the_way_the_loop_matched_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`GetMatches` defaults `useChirality` to True and `HasSubstructMatch` defaults it to False.
+
+    Taking the default would have been a silent, total change of answer for every stereochemical
+    query: measured over the 4,991-molecule NCI corpus, `[C@H](O)(C)C` matches **514** molecules
+    through `HasSubstructMatch` and **0** through `GetMatches` at its default — a clean "no
+    precedent exists" for 514 molecules that are on file. The scan therefore passes it explicitly.
+
+    The second assertion is about *upstream*, not about this repository: it pins that the two
+    defaults still disagree, so that a future RDKit aligning them turns this into a red test with
+    the reason attached rather than leaving an explicit argument nobody can justify any more.
+    """
+    monkeypatch.setattr(settings, "fingerprint_max_top_k", 100_000)
+    labels = [*_nci_corpus(1200)]
+    records = [
+        FingerprintRecord(id=f"{index:05d}", label=label, bits="01")
+        for index, label in enumerate(labels)
+    ]
+    pattern = substructure_pattern("[C@H](O)(C)C")
+    expected, _ = _loop_matches(labels, pattern)
+    assert expected, "the fixture corpus must actually contain the chiral motif"
+
+    outcome = search._scan_for_matches(records, pattern, time.monotonic() + 600)
+    assert [hit.smiles for hit in outcome.hits] == expected
+
+    index = substructure_index.index_for(records, time.monotonic() + 600)
+    at_upstream_default = index.library.GetMatches(pattern, maxResults=100_000)
+    assert len(at_upstream_default) != len(expected), (
+        "GetMatches and HasSubstructMatch now agree on useChirality; the explicit argument in "
+        "CorpusIndex.labels_matching no longer defends against anything and its docstring is stale"
+    )
+
+
+def _count_builds(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Count real index builds without replacing one: a spy over `_build`, not a stand-in.
+
+    The cache's whole claim is "this expensive thing happens once", and the only honest way to
+    observe that is to let it happen and count it — a fake would be asserting against itself.
+    """
+    built = [0]
+    real = substructure_index._build
+
+    def _counting(labels: list[str], deadline: float) -> substructure_index.CorpusIndex:
+        built[0] += 1
+        return real(labels, deadline)
+
+    monkeypatch.setattr(substructure_index, "_build", _counting)
+    return built
+
+
+@pytest.fixture(autouse=True)
+def _clear_the_substructure_index_cache() -> Iterator[None]:
+    """Give every test its own cache, so a build counted here is a build this test caused.
+
+    The cache is process-global by design (it is keyed on the corpus, and two searches over one
+    corpus must share one index), which makes it exactly the kind of state that leaks between
+    tests: a corpus another test already indexed would make a build counter read zero and the
+    assertion pass for the wrong reason.
+    """
+    substructure_index._INDEXES = BoundedLru(
+        lambda: settings.substructure_index_cache_entries,
+    )
+    yield
+
+
+def test_the_index_is_built_once_and_reused_by_every_later_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The adoption is a *loss* without this, which is why it is asserted and not assumed.
+
+    Measured on the 4,991-molecule NCI corpus: building the index costs 1,155 ms against 13-41 ms
+    to search it and 326 ms for the per-record loop it replaces. A per-query rebuild would
+    therefore be about three times slower than doing nothing at all, so "one build serves every
+    later query" is the change, not a refinement of it.
+    """
+    built = _count_builds(monkeypatch)
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        for identifier, smiles in [("a", "CCO"), ("b", "c1ccccc1"), ("c", "CC(=O)O")]:
+            await store.add(record_for(identifier, smiles))
+        first = await find_substructure_matches(store, "CO")
+        second = await find_substructure_matches(store, "c1ccccc1")
+        third = await find_substructure_matches(store, "C(=O)O")
+        assert [h.smiles for h in first.hits] == ["CCO", "CC(=O)O"]  # both carry a C-O bond
+        assert [h.smiles for h in second.hits] == ["c1ccccc1"]
+        assert [h.smiles for h in third.hits] == ["CC(=O)O"]
+
+    asyncio.run(_run())
+    assert built == [1], f"three queries over one corpus built {built[0]} indexes"
+
+
+def test_a_rewritten_label_invalidates_the_index_although_the_row_count_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reason the cache key is a digest of the labels and not a count, a max id or a timestamp.
+
+    `molecule_fingerprints` has no revision column, and its upsert rewrites `label` and `bits` **in
+    place** — so a corpus whose azide row is corrected to a different structure has the same row
+    count, the same maximum id and the same `created_at`. A cache keyed on any of those would keep
+    answering from the structure that is no longer stored, which is the one failure mode worse than
+    being slow: a chemist told a precedent does not exist when it does.
+
+    Driven end to end rather than by inspecting the key: the same store, the same number of rows,
+    one label rewritten, and the answer has to follow the corpus.
+    """
+    built = _count_builds(monkeypatch)
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        await store.add(record_for("only", "CCO"))
+        assert (await find_substructure_matches(store, "[N-]=[N+]=N")).hits == []
+        # The same id, so the store replaces the row rather than adding one: same count, same
+        # ordering, same everything the schema could offer as a revision signal.
+        await store.add(record_for("only", "CC(=O)N=[N+]=[N-]"))
+        assert await store.count() == 1
+        found = await find_substructure_matches(store, "[N-]=[N+]=N")
+        assert [h.smiles for h in found.hits] == ["CC(=O)N=[N+]=[N-]"]
+
+    asyncio.run(_run())
+    assert built == [2], "the rewritten corpus was answered from the index built for the old one"
+
+
+def test_the_index_cache_holds_no_more_than_the_configured_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The memory bound, as a fact rather than as a comment about `BoundedLru`.
+
+    An index is ~863 bytes per molecule (binary molecules plus pattern fingerprints, measured), so
+    the ceiling this map is holding is `substructure_index_cache_entries` times
+    `substructure_scan_max_records` — about 8.4 MB at the shipped defaults. Unbounded, it would be
+    one index per corpus generation an ingest ever produced, which is the unbounded-growth shape
+    `core/bounded.py` exists for.
+    """
+    monkeypatch.setattr(settings, "substructure_index_cache_entries", 2)
+    pattern = substructure_pattern("CCO")
+    for generation in range(5):
+        records = [FingerprintRecord(id="only", label="C" * (generation + 2) + "O", bits="01")]
+        search._scan_for_matches(records, pattern, time.monotonic() + 600)
+    assert len(substructure_index._INDEXES) == 2
+
+
+def test_concurrent_misses_on_one_corpus_build_one_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two threads that miss together must not each pay the build.
+
+    The scan runs in the loop's default executor (`asyncio.to_thread`), so "two coroutines miss at
+    once" is really two worker threads inside `index_for` at once — and two builds of a 5,000-row
+    corpus is ~2.3 s of CPU taken from the pool that also validates every bearer token. The second
+    caller waits on the build lock and then finds the entry.
+    """
+    built = _count_builds(monkeypatch)
+    records = [record_for(f"{index:03d}", "CCO") for index in range(50)]
+    pattern = substructure_pattern("CO")
+    outcomes: list[ScanOutcome] = []
+    barrier = threading.Barrier(4)
+
+    def _scan() -> None:
+        barrier.wait()
+        outcomes.append(search._scan_for_matches(records, pattern, time.monotonic() + 600))
+
+    threads = [threading.Thread(target=_scan) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(outcomes) == 4
+    assert all(len(outcome.hits) == 50 for outcome in outcomes)
+    assert built == [1], f"four concurrent misses built {built[0]} indexes"
+
+
+def test_an_unreadable_row_is_counted_even_when_the_result_cap_stops_the_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deliberate, argued change of behaviour, in the conservative direction.
+
+    The per-record loop stopped counting where it stopped scanning, so a query that filled
+    `fingerprint_max_top_k` early never reached a malformed row further down the corpus and the
+    answer said nothing about it. The parse now happens once when the index is built, over the
+    whole slice — so `unreadable`, and the `scan_truncated` it folds into, describe the **corpus**
+    rather than one query's hit distribution, and two different queries over one corpus can no
+    longer disagree about whether every stored record was examined.
+
+    It can only move the flag from False to True, which is the direction this module errs in
+    everywhere else: the model is told not to read a miss as a negative.
+    """
+    monkeypatch.setattr(settings, "fingerprint_max_top_k", 2)
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        for index in range(4):
+            await store.add(record_for(f"{100 + index}", "CCO"))
+        # Bypass `record_for`, which would refuse to fingerprint it — a row that parsed when it was
+        # indexed and does not now. Last by id, so the capped scan never reached it.
+        await store.add(FingerprintRecord(id="900", label="not-a-molecule", bits="01"))
+
+        result = await find_substructure_matches(store, "CO")
+        assert len(result.hits) == 2 and result.hits_truncated is True
+        assert result.scan_truncated is True
+        # Both flags at once render as one sentence, and the half this test is about is the one
+        # telling the model an operator has an index to repair.
+        assert "repair the index" in result.verdict
+
+    asyncio.run(_run())
+
+
+def test_a_build_past_its_deadline_gives_up_and_caches_nothing() -> None:
+    """The deadline has to reach the *build*, and a half-built index must never be kept.
+
+    Building is the most expensive thing on this path — 1,560 ms for 5,000 molecules — and it runs
+    in the same worker thread the scan does, which is the loop's default executor. A caller whose
+    bound has passed must not leave that thread parsing thousands of molecules behind it, for
+    exactly the reason `find_substructure_matches` gives about the matching half.
+
+    The second assertion is the one that matters: an abandoned build is not cached, because a
+    library holding a fraction of the corpus would answer every later query over that fraction with
+    no flag saying so.
+    """
+    records = [record_for(f"{index:04d}", "CCO") for index in range(400)]
+    pattern = substructure_pattern("CO")
+    with pytest.raises(TimeoutError, match="indexing after"):
+        search._scan_for_matches(records, pattern, time.monotonic() - 1)
+    assert len(substructure_index._INDEXES) == 0
+
+    # And the same records index fine once there is time for them, so the refusal above was the
+    # deadline rather than the corpus.
+    outcome = search._scan_for_matches(records, pattern, time.monotonic() + 600)
+    assert len(outcome.hits) == settings.fingerprint_max_top_k
+    assert len(substructure_index._INDEXES) == 1
+
+
+def test_the_scan_stops_within_a_time_slice_of_its_deadline_not_a_record_count() -> None:
+    """Deadline granularity is one *chunk*, and a chunk is a slice of time, not a count of records.
+
+    The per-record loop checked the clock before each molecule. A C++ `GetMatches` call cannot be
+    interrupted, so the check can now only happen between calls — and if a chunk were a fixed
+    number of records, the overrun would be that count times a per-molecule cost which spans five
+    orders of magnitude here (microseconds for a functional-group SMARTS on caffeine, ~117 ms for
+    the pattern below on the dendrimer above). A chunk of 500 would be milliseconds on one corpus
+    and a minute on another.
+
+    Sized in time instead, the scan converges on the cost it is actually paying: this asserts the
+    property in the unit the bound is written in, so the fixture's own speed is not the subject.
+    """
+    pattern = substructure_pattern(_UNMATCHABLE)
+    per_record = _one_match_seconds()
+    records = _dendrimer_records(24)
+    # Build first, so what is measured below is the scan rather than the parse.
+    search._scan_for_matches(records, pattern, time.monotonic() + 3600)
+
+    slice_seconds = settings.substructure_scan_deadline_slice_seconds
+    started = time.perf_counter()
+    with pytest.raises(TimeoutError):
+        search._scan_for_matches(records, pattern, time.monotonic())
+    overrun = time.perf_counter() - started
+
+    # One chunk past the deadline at most, and the first chunk of any scan is a single record —
+    # so a deadline that has already passed costs nothing at all, and nothing near the 24-record
+    # corpus a record-counted chunk would have run out.
+    assert overrun < max(slice_seconds, per_record) * 2, (
+        f"the scan ran {overrun:.3f}s past a deadline that had already passed "
+        f"({overrun / per_record:.1f} records' worth of a {len(records)}-record corpus)"
+    )

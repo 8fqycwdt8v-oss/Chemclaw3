@@ -482,15 +482,21 @@ def _env_reading_destinations(settings: Any) -> list[tuple[str, str, tuple[str, 
     from a default in code — which is that guard working, and it caught this line.)
 
     So the question is not "which hosts does this process dial" but **"which of them are dialled by
-    something that reads the environment"**, and today that is two:
+    something that reads the environment"**, and today that is one:
 
     - **The OTLP span exporter.** `core/logging.py` uses the *gRPC* exporter, and grpc resolves
       `grpc_proxy` then `https_proxy` then `http_proxy` **regardless of the target's scheme** —
       measured, `http_proxy` alone carried a `https://` target, three `CONNECT` frames to the
       recorder. With `otel_include_sensitive_data` that traffic is prompts and completions.
-    - **The Entra JWKS endpoint.** `api/auth.py` builds a `PyJWKClient`, which fetches through
-      `urllib.request.urlopen` — no `trust_env`, and measured to follow `HTTP_PROXY`. It is the
-      anchor every bearer token is validated against.
+
+    **The Entra JWKS endpoint was the second and is gone, which is a deletion this function had to
+    make rather than keep.** It was charged here because `api/auth.py` fetched the key set through
+    `urllib.request.urlopen`, which takes no `trust_env` and was measured following `HTTP_PROXY`.
+    `_HttpxJwkClient` now fetches it with `httpx` and `trust_env=False`, so that destination is
+    immune by construction — and a destination that is immune must leave this list, because what
+    this function feeds is a *refusal*. Keeping the row would refuse a pod to boot over a hazard
+    that no longer exists, which is the failure this module's own docstring names above: a refusal
+    for a reason that is not true is a pod that will not start.
 
     **`git` is the third and is filed rather than charged** (`docs/planning/BACKLOG.md`). The KG
     note writer shells out to `git push`, which inherits the environment and is measurably proxied —
@@ -508,11 +514,6 @@ def _env_reading_destinations(settings: Any) -> list[tuple[str, str, tuple[str, 
                 ("grpc_proxy", "https_proxy", "http_proxy", "all_proxy"),
             )
         )
-    if getattr(settings, "entra_required", False):
-        jwks = getattr(settings, "entra_jwks_endpoint", "") or settings.entra_jwks_url
-        if jwks:
-            scheme = urlsplit(jwks).scheme or "https"
-            destinations.append((jwks, "the Entra JWKS fetch", (f"{scheme}_proxy", "all_proxy")))
     return destinations
 
 

@@ -810,32 +810,30 @@ def test_a_bare_host_port_otlp_endpoint_is_not_dropped(monkeypatch: pytest.Monke
     assert _refuses(settings)
 
 
-def test_the_jwks_fetch_is_charged_by_its_own_scheme(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`PyJWKClient` goes through `urllib`, which *does* resolve per scheme — unlike grpc.
-
-    The two readers in this check disagree about the environment and both are reproduced rather
-    than averaged: an `https` JWKS endpoint is carried by `https_proxy` or `all_proxy` and not by
-    `http_proxy`, while the exporter beside it is carried by any of them.
-    """
-    settings = _entra_settings()
-    for variable in ("https_proxy", "all_proxy"):
-        _proxy_env(monkeypatch, **{variable: "http://sidecar.internal:15001"})
-        assert _refuses(settings), f"{variable} must charge the JWKS fetch"
-    _proxy_env(monkeypatch, HTTP_PROXY="http://sidecar.internal:15001")
-    assert not _refuses(settings), "an https JWKS endpoint is not carried by HTTP_PROXY"
-    _assert_live(monkeypatch, settings)
-
-
-def test_an_unenforced_identity_posture_has_no_jwks_fetch_to_charge(
+def test_the_jwks_fetch_is_no_longer_a_charged_destination(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`entra_required=False` means nothing fetches the key set, so nothing is proxied."""
-    settings = _proxy_settings(
-        otel_enabled=False, entra_jwks_url="https://login.microsoftonline.com/t/keys"
-    )
+    """An *absence* test, because the destination that used to be here is now immune.
+
+    `api/auth.py` fetched the tenant key set through `urllib.request.urlopen`, which takes no
+    `trust_env` and was measured following `HTTP_PROXY` — on the anchor every bearer token is
+    validated against — so `_env_reading_destinations` charged it and the enforced identity posture
+    refused to boot behind a proxy. `_HttpxJwkClient` now fetches it with httpx and
+    `trust_env=False`, so there is nothing left to charge.
+
+    Written as an absence rather than deleted with the destination, because what this function
+    feeds is a **refusal**, and a refusal for a reason that is no longer true is a pod that will not
+    start — which `_env_reading_destinations`' own docstring names as its worst failure mode. This
+    fails whoever re-adds the row without first re-adding a reader that ignores `trust_env`.
+    """
+    settings = _entra_settings(otel_enabled=False)
+    charged = [reason for _, reason, _ in netguard._env_reading_destinations(settings)]
+    assert charged == [], f"the enforced posture charges a destination nothing proxies: {charged}"
     _proxy_env(monkeypatch, HTTPS_PROXY="http://sidecar.internal:15001")
-    assert not _refuses(settings)
-    _assert_live(monkeypatch, _entra_settings())
+    assert not _refuses(settings), (
+        "an enforced-identity deployment behind a proxy is refused over the JWKS fetch, which now "
+        "passes trust_env=False and cannot be carried by it"
+    )
 
 
 def test_a_proxy_named_in_the_allowlist_is_the_operators_decision(
@@ -880,31 +878,38 @@ def test_two_readers_on_one_host_do_not_collapse(monkeypatch: pytest.MonkeyPatch
     """A declared proxy must not hide an undeclared one reaching the same host by another reader.
 
     An earlier version keyed `carried` by destination host alone, so two entries for one host
-    overwrote each other and only the survivor was compared against the allowlist. **The first
-    test written for this could not fail**, because it varied two variables on *one* reader — and a
+    overwrote each other and only the survivor was compared against the allowlist. **The first test
+    written for this could not fail**, because it varied two variables on *one* reader — and a
     reader takes the first variable that hits and stops, so it can only ever record one proxy. The
-    collision needs two readers, which is what this deployment has: the gRPC exporter and the
-    `urllib` JWKS fetch, resolving different variables, both able to name the same host.
+    collision needs two readers.
 
-    Here the exporter is carried by an **undeclared** proxy and the JWKS fetch by a declared one,
-    on one host. Keyed by host, whichever landed second wins the comparison and the process starts
-    with the exporter's spans — prompts, under `otel_include_sensitive_data` — going to a host
-    nobody declared.
+    **This deployment no longer has two**, which is why the pair is injected rather than taken from
+    the shipped list. The second reader used to be `api/auth.py`'s `urllib` JWKS fetch, which now
+    passes `trust_env=False` and is not charged at all. Losing the fixture must not lose the
+    invariant: `proxied_destinations` is still keyed per destination *and reader and variable*, a
+    second reader is one ADR away, and the property is a property of that function rather than of
+    the list it happens to be handed today. So the real function is driven, with the input it can
+    no longer be given by configuration.
     """
-    shared = _entra_settings(
-        otel_enabled=True,
-        otel_endpoint="https://shared.internal:4317",
-        entra_jwks_url="https://shared.internal/tenant/keys",
-        egress_allow="gateway.internal,declared.corp",
+    monkeypatch.setattr(
+        netguard,
+        "_env_reading_destinations",
+        lambda _settings: [
+            ("https://shared.internal:4317", "the OTLP span exporter", ("grpc_proxy",)),
+            ("https://shared.internal/tenant/keys", "a second reader", ("https_proxy",)),
+        ],
     )
     _proxy_env(
         monkeypatch,
         GRPC_PROXY="http://undeclared.corp:3128",
         HTTPS_PROXY="http://declared.corp:3128",
     )
-    carried = netguard.proxied_destinations(shared)
+    carried = netguard.proxied_destinations(_proxy_settings())
     assert len(carried) == 2, f"one reader's entry was overwritten by the other's: {carried}"
-    assert _refuses(shared), "the undeclared proxy on the exporter was hidden by the declared one"
+    proxies = {proxy for proxy, _ in carried.values()}
+    assert proxies == {"undeclared.corp", "declared.corp"}, (
+        f"both readers' proxies must survive into the comparison, got {proxies}"
+    )
 
 
 def test_no_proxy_configured_is_the_silent_case(monkeypatch: pytest.MonkeyPatch) -> None:

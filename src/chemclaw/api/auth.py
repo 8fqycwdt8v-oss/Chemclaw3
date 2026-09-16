@@ -133,9 +133,11 @@ class _HttpxJwkClient(PyJWKClient):
         `trust_env=False` is: a redirect moves the key set's origin out of the address the
         deployment declared, past `core/netguard.py`'s allowlist, which is derived from
         `entra_jwks_endpoint` and cannot see where a `Location` header points. Real Entra does not
-        redirect this endpoint. Said explicitly instead of left to the decode, because an
-        unfollowed 3xx has an empty body and would otherwise surface as "unusable" — a true
-        statement about the wrong fault.
+        redirect this endpoint. Said explicitly, and *before* `raise_for_status`, because httpx
+        raises on 3xx as well: without this arm the refusal is the generic "answered 302", which
+        names a status where the operator needs to be told the address moved. (This paragraph
+        first shipped claiming an unfollowed 3xx would fall through to the decode as "unusable" —
+        driven against a real 302, it does not.)
 
         Raising this module's own exception rather than `PyJWKClientConnectionError` is deliberate:
         PyJWT catches nothing around `fetch_data`, so the type that reaches `require_principal` is
@@ -155,12 +157,12 @@ class _HttpxJwkClient(PyJWKClient):
                 trust_env=False,
                 verify=default_ssl_context(),
             )
-            response.raise_for_status()
             if response.is_redirect:
                 raise IdentityProviderUnavailable(
                     f"tenant JWKS endpoint redirected ({response.status_code}); the key set must "
                     "come from the declared address"
                 )
+            response.raise_for_status()
             jwk_set = response.json()
         except httpx.HTTPStatusError as exc:
             raise IdentityProviderUnavailable(
