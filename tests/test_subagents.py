@@ -19,24 +19,31 @@ The properties, in the order they would hurt:
 """
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
+from langchain_core.tools import StructuredTool
 
 from chemclaw.agent.authz import side_effecting_tools
 from chemclaw.agent.chemclaw_agent import _capability_tools
-from chemclaw.agent.langgraph_agent import build_langgraph_agent
-from chemclaw.agent.profiles import AgentProfile
+from chemclaw.agent.langgraph_agent import _subagents, build_langgraph_agent
+from chemclaw.agent.profile_discovery import load_profiles
+from chemclaw.agent.profiles import AgentProfile, get_profile, registered_profile_names
+from chemclaw.agent.scratchpad import scratchpad_tools
 from chemclaw.agent.state import turn_config, turn_input
 from chemclaw.agent.subagents import (
     HELPER_BRIEF,
     SPEAKS_TO_THE_CHEMIST,
     general_purpose_helper,
+    helper_profile,
+    refuse_an_unknown_roster,
 )
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tool_registry import registered_tool_names
 
 #: The brief that tells the one fake model which of the two graphs is calling it.
@@ -310,7 +317,13 @@ def test_a_routed_helper_is_built_from_its_route_even_when_a_model_was_supplied(
     # is the caller's model being rebuilt: it is unrouted, and it was already handed in.
     asked.clear()
     build_langgraph_agent(model=_model(), profile=AgentProfile(name="default"))
-    assert asked == ["helper"], "the roster's helper is routed on the caller's path too"
+    # One ask per roster entry, since each is its own compiled graph and each carries the route.
+    # A *set* rather than a list, because what matters is which key was asked for, not how many
+    # names a deployment rosters — this assertion used to be `== ["helper"]` and encoded the
+    # one-name roster, which is a count in a test the way a count in prose is a claim about a
+    # commit.
+    assert set(asked) == {"helper"}, "every helper is routed, whatever it is named"
+    assert asked, "the roster's helpers are routed on the caller's path too"
     assert "agent" not in asked, "the caller's own model is unrouted and must not be rebuilt"
 
 
@@ -1262,3 +1275,226 @@ def test_a_delegation_is_counted_where_every_other_tool_call_is() -> None:
         "rate is once again invisible in production — which is the absence three merged documents "
         "used as a reason not to decide the roster"
     )
+
+
+# --- the roster (`D-2026-09-16-a-roster-varies-the-two-dimensions-that-carry-no-authority`) -----
+
+
+def _roster(profile: AgentProfile, connectors: list[Any] | None = None) -> list[dict[str, Any]]:
+    """The specs `_subagents` builds for one caller, with this turn's connectors."""
+    return _subagents(
+        profile=profile,
+        model=GenericFakeChatModel(messages=iter([AIMessage(content="")])),
+        audit_sink=None,
+        correlation_id="c",
+        actor="a",
+        connectors=connectors,
+    )
+
+
+def _fake_connector(name: str) -> Any:
+    """One already-open connector tool, the shape `_bound_surface` receives."""
+    return StructuredTool.from_function(func=lambda **_: "x", name=name, description=f"{name} tool")
+
+
+def test_a_rostered_helper_holds_no_tool_its_caller_does_not(
+    agent: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The invariant a roster is most likely to break, compared between two *compiled* graphs.
+
+    `D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor` is the rule, and a named roster is
+    exactly the shape that could break it — a specialist profile names tools its caller may not
+    hold, and taking the specialist's set would be a widening. The surface is an *intersection*, so
+    this cannot fail by arithmetic; asserted anyway, because that is the difference between
+    enforcing an attenuation and restating one, and `reject_widening` was deleted for being the
+    latter.
+    """
+    caller = _tool_names(agent)
+
+    for spec in _roster(AgentProfile(name="default")):
+        held = _tool_names(spec["runnable"])
+        assert held <= caller, f"{spec['name']} holds {sorted(held - caller)} its caller does not"
+
+
+def test_a_specialist_naming_more_than_its_caller_holds_gets_the_intersection() -> None:
+    """The widening attempt, driven: a narrow caller and a broad specialist.
+
+    The caller narrows itself to two readers; the specialist names one of them and three it does
+    not. The helper must hold the one they agree on — never the specialist's three, which is the
+    failure this would have if the specialist's set replaced rather than intersected.
+    """
+    narrow = AgentProfile(name="narrow", tool_names=frozenset({"find_notes", "expand_note"}))
+    specialist = AgentProfile(
+        name="evidence",
+        description="finds things",
+        tool_names=frozenset(
+            {"find_notes", "gather_evidence", "find_past_jobs", "similar_molecules"}
+        ),
+    )
+
+    helper = helper_profile(narrow, frozenset({"find_notes", "expand_note"}), specialist)
+
+    assert helper.tool_names == frozenset({"find_notes"})
+    assert helper.instructions == specialist.instructions
+    # The *caller's* name leads, so a log line says which conversation the helper came from.
+    assert helper.name == "narrow-evidence"
+
+
+def test_a_specialist_that_names_no_tool_narrows_to_nothing_rather_than_to_everything() -> None:
+    """`tool_names is None` means two different things, and only one of them is right here.
+
+    On a session profile it means "this profile does not narrow", which is correct. On a roster
+    entry the same reading would hand a named helper its caller's entire reading surface under a
+    name promising less — the one case where falling back to the caller is the *permissive*
+    answer, so it is refused.
+    """
+    caller = AgentProfile(name="default")
+    unnamed = AgentProfile(name="vague", description="does something")
+
+    helper = helper_profile(caller, frozenset({"find_notes", "expand_note"}), unnamed)
+
+    assert helper.tool_names == frozenset()
+
+
+def test_a_roster_entry_that_binds_nothing_is_not_offered() -> None:
+    """A menu entry whose only possible outcome is a wasted delegation.
+
+    What a profile *names* and what a deployment *binds* are different sets: `safety`'s three
+    screens are served by a connector bundle, so with that bundle absent its helper binds no
+    capability at all. It is dropped rather than offered empty — and this is the case the scratch
+    verbs hid, since every helper binds six file verbs whatever its profile says.
+    """
+    names = {spec["name"] for spec in _roster(AgentProfile(name="default"), connectors=None)}
+
+    assert "safety" not in names
+    # The unnamed helper is never dropped: it is what displaces upstream's ungoverned one.
+    assert "general-purpose" in names
+
+
+def test_a_roster_entry_is_offered_once_its_connectors_are_bound() -> None:
+    """The other direction, so the drop above is a measurement rather than a permanent absence."""
+    connectors = [
+        _fake_connector(name)
+        for name in ("screen_hazards", "screen_genotoxic_alerts", "ich_impurity_limit")
+    ]
+
+    specs = {s["name"]: s for s in _roster(AgentProfile(name="default"), connectors=connectors)}
+
+    assert "safety" in specs
+    assert "screen_hazards" in specs["safety"]["description"]
+
+
+def test_every_roster_description_names_the_surface_its_graph_bound() -> None:
+    """The half that cannot drift, and the reason the description is not hand-written.
+
+    `D-2026-08-12` measured a five-name roster whose menu was `instructions.split(". ")[0]` over
+    five profiles that all open "You are Chemclaw's `<name>` specialist" — so the model chose from
+    five entries differing only in a name. A derived tool list cannot regress that way, and it is
+    also what keeps a description honest about a helper being *narrower* than the profile it is
+    named for.
+    """
+    for spec in _roster(AgentProfile(name="default")):
+        if spec["name"] == "general-purpose":
+            continue
+        bound = _tool_names(spec["runnable"]) - set(scratchpad_tools())
+        assert bound, spec["name"]
+        for tool in bound:
+            assert tool in spec["description"], f"{spec['name']} does not name {tool}"
+
+
+def test_the_roster_entries_do_not_read_alike() -> None:
+    """Two entries a model cannot tell apart are one entry and a coin flip.
+
+    The scratch verbs are why this is asserted rather than assumed: `FilesystemMiddleware` binds
+    six of them to every helper, and with them in the derivation all four descriptions listed the
+    same file tools — alike in exactly the dimension the model chooses on.
+    """
+    specs = _roster(AgentProfile(name="default"), connectors=[_fake_connector("screen_hazards")])
+    descriptions = [spec["description"] for spec in specs]
+
+    assert len(set(descriptions)) == len(descriptions)
+    assert not any("read_file" in text for text in descriptions)
+
+
+def test_an_unknown_roster_name_is_skipped_rather_than_raised(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A turn must not die because a deployment misspelled a roster entry.
+
+    The loud half is `api/app.py`'s startup refusal; this is the fail-soft half, and the two
+    together are the split this repository already draws for a misconfiguration. Skipping is safe
+    in the direction that matters — an absent helper costs delegation, never authority.
+    """
+    monkeypatch.setattr(settings, "agent_helper_roster", "evidence:porbe")
+
+    with caplog.at_level(logging.WARNING):
+        names = {spec["name"] for spec in _roster(AgentProfile(name="default"))}
+
+    assert "porbe" not in names
+    assert "evidence" in names
+    assert "porbe" in caplog.text
+
+
+def test_a_rostered_helper_still_cannot_spawn_a_helper(agent: Any) -> None:
+    """The recursion guard is structural and a roster must not reopen it.
+
+    `build_langgraph_agent(helper=True)` compiles on `create_agent`, so `SubAgentMiddleware` is
+    absent rather than merely unpopulated — and every roster entry goes through that same switch.
+    """
+    for spec in _roster(AgentProfile(name="default")):
+        assert "task" not in _tool_names(spec["runnable"]), spec["name"]
+
+
+def test_no_rostered_helper_holds_a_tool_that_acts() -> None:
+    """The read-only property, held across every name rather than only the unnamed one."""
+    acting = side_effecting_tools()
+
+    for spec in _roster(
+        AgentProfile(name="default"), connectors=[_fake_connector("run_hazard_briefing")]
+    ):
+        held = _tool_names(spec["runnable"])
+        assert not (held & acting), f"{spec['name']} holds {sorted(held & acting)}"
+        assert not (held & SPEAKS_TO_THE_CHEMIST)
+
+
+def test_a_misspelled_roster_entry_is_refused_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The loud half of the roster's misconfiguration split.
+
+    `_subagents` skips an unknown name with a WARNING because a turn must not die for a typo, and
+    that fail-soft is exactly what makes this check necessary rather than redundant: a helper
+    silently absent from the menu is a capability nobody is told is missing.
+    """
+    monkeypatch.setattr(settings, "agent_helper_roster", "evidence:porbe")
+
+    with pytest.raises(ChemclawError) as caught:
+        refuse_an_unknown_roster(["default", "evidence"])
+
+    assert "porbe" in str(caught.value)
+    assert "evidence" not in str(caught.value).split("known:")[0]
+
+
+def test_the_shipped_roster_names_profiles_that_exist() -> None:
+    """The negative arm, over the profiles this repository actually ships.
+
+    A startup refusal that is wrong is an outage, and the roster names profiles discovered from
+    *files* rather than registered in code — so this also asserts the discovery half, which is the
+    bug `TemplateSurface.resolve` already recorded once: a registry read before `load_profiles()`
+    holds `default` alone and reports every shipped profile as unknown.
+    """
+    load_profiles()
+
+    refuse_an_unknown_roster(registered_profile_names())
+
+
+def test_every_rostered_profile_carries_a_description() -> None:
+    """A roster entry with no written purpose is half a menu entry.
+
+    `describe_helper` derives the *capability* half off the compiled graph, which cannot drift —
+    but the purpose half is prose a profile author writes, and an entry that omits it would reach
+    the model as a bare tool list. `D-2026-08-12` measured what a roster whose entries carry no
+    purpose costs: five specialists the model could not tell apart.
+    """
+    load_profiles()
+
+    for name in settings.helper_roster:
+        assert get_profile(name).description, f"rostered profile {name!r} has no description"

@@ -111,7 +111,8 @@ from chemclaw.agent.model_calls import model_call_middleware, refuse_unparsed_ar
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
 from chemclaw.agent.plan_link import stamp_plan_link
 from chemclaw.agent.plan_scope import ScopedTodoListMiddleware
-from chemclaw.agent.profiles import AgentProfile, get_profile
+from chemclaw.agent.profile_discovery import load_profiles
+from chemclaw.agent.profiles import AgentProfile, get_profile, registered_profile_names
 from chemclaw.agent.repeat_guard import refuse_repeated_calls
 from chemclaw.agent.scratchpad import (
     filesystem_permissions,
@@ -125,6 +126,7 @@ from chemclaw.agent.spend_cap import MeterTurnSpend, enforce_spend_cap
 from chemclaw.agent.state import ChemclawState
 from chemclaw.agent.subagents import (
     HELPER_BRIEF,
+    describe_helper,
     general_purpose_helper,
     governed_roster,
     helper_connectors,
@@ -160,6 +162,7 @@ def build_langgraph_agent(
     response_format: Any | None = None,
     store: Any | None = None,
     helper: bool = False,
+    specialist: AgentProfile | None = None,
 ) -> Any:
     """Compile the LangGraph conversation agent for one profile.
 
@@ -203,11 +206,18 @@ def build_langgraph_agent(
             thing it changes is that a helper gets no helpers of its own, which is the recursion
             guard: `_subagents` builds its spec by calling this function, so a graph that handed its
             helper a helper would not terminate. It is a parameter rather than a depth counter
-            because one level is the whole design — `agent/subagents.py` says why the roster is one
-            name — so a counter would be a knob for a depth nobody has asked for. It also
+            because one level is the whole design — `agent/subagents.py` says why — so a counter
+            would be a knob for a depth nobody has asked for. It also
             narrows: a helper gets `helper_profile`'s in-process subtraction and
             `helper_connectors`' matching one over the caller's open connector tools, so "a helper
             reads, it does not act" travels with this switch rather than with a call site.
+        specialist: The rostered profile this helper is named for, or `None` for the unnamed one.
+            Ignored unless `helper`, since a specialist is a narrowing *of* a helper. It only ever
+            intersects — the surface stays what the caller holds ∩ what the specialist names, minus
+            everything that acts — so a roster entry cannot reach past the agent that spawned it and
+            `D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor` needs no revisiting. What it
+            *does* replace is the instructions and the model route, which are the two dimensions
+            that carry no authority.
 
     Returns:
         A compiled graph. No network call happens here; construction only, exactly as
@@ -257,9 +267,9 @@ def build_langgraph_agent(
     # bundle whose manifest declares a `state_changing` tool is out of a helper's reach on the day
     # it is enabled.
     if helper:
-        prof = helper_profile(prof, frozenset(fn.__name__ for fn in tools))
+        prof = helper_profile(prof, frozenset(fn.__name__ for fn in tools), specialist)
         tools = _capability_tools(prof)
-        connectors = helper_connectors(connectors)
+        connectors = helper_connectors(connectors, specialist)
     # **Resolved once, here, because two things now depend on which sink this graph got.** The
     # middleware writes the rows and the prompt tells the chemist what the trail is
     # (`instructions_for(durable_trail=…)`), and the two disagreeing is precisely the defect that
@@ -527,7 +537,7 @@ def _subagents(
     actor: str,
     connectors: list[Any] | None,
 ) -> list[Any]:
-    """The helpers this agent may spawn — one, compiled here so it carries this chain.
+    """The helpers this agent may spawn, each compiled here so it carries this chain.
 
     **Not optional, and that is the reason this function exists.** `SubAgentMiddleware` is in
     upstream's `_REQUIRED_MIDDLEWARE` and `_apply_excluded_middleware` raises rather than let a
@@ -596,24 +606,111 @@ def _subagents(
         connectors: This turn's already-open connector tools, shared with the helper rather than
             reopened. Narrowed to the read-only half by the helper's own build.
 
+    **One unnamed helper plus whatever `CHEMCLAW_HELPER_ROSTER` names**, and the roster half is new
+    (`D-2026-09-16-a-roster-varies-the-two-dimensions-that-carry-no-authority`). Every entry is
+    built by this same function with a `specialist=`, so each is an *intersection* of the caller's
+    surface rather than a profile of its own: a name can make a helper narrower and never wider.
+    The unnamed one stays, and must — it claims upstream's `general-purpose`, which is the string
+    comparison that displaces the ungoverned helper `create_deep_agent` would otherwise insert.
+
+    A rostered entry that binds no capability tool is **dropped with a WARNING rather than offered
+    empty**, because what a profile names and what a deployment binds are different sets: `safety`'s
+    three screens are served by a connector bundle, so with that bundle off its helper is a menu
+    entry whose only possible outcome is a wasted delegation. An unknown name is skipped the same
+    way and refused loudly at startup instead (`api/app.py`), which is the split this repository
+    already draws — a turn must not die for a misconfiguration, and a misconfiguration must not be
+    discoverable only by noticing something missing.
+
     Returns:
-        The single-entry list to hand `create_deep_agent(subagents=…)`.
+        The list to hand `create_deep_agent(subagents=…)`.
     """
-    return governed_roster(
-        [
-            general_purpose_helper(
-                build_langgraph_agent(
-                    model=model,
-                    profile=profile,
-                    actor=actor,
-                    correlation_id=correlation_id,
-                    audit_sink=audit_sink,
-                    connectors=connectors,
-                    helper=True,
-                )
+
+    def compile_helper(specialist: AgentProfile | None) -> Any:
+        """One helper graph, built from the caller's own profile and this turn's open connectors."""
+        return build_langgraph_agent(
+            model=model,
+            profile=profile,
+            actor=actor,
+            correlation_id=correlation_id,
+            audit_sink=audit_sink,
+            connectors=connectors,
+            helper=True,
+            specialist=specialist,
+        )
+
+    specs: list[dict[str, Any]] = [general_purpose_helper(compile_helper(None))]
+    # Registering the file profiles is part of building the roster, not something each caller does
+    # first — `TemplateSurface.resolve` carries the same line and the record of what happened when
+    # it did not: `registered_profile_names()` holds `default` alone until this has run, so every
+    # shipped profile read as unknown from any process that had not started the front door. The
+    # load is idempotent, so a turn pays for it once per process.
+    load_profiles()
+    for name in settings.helper_roster:
+        try:
+            rostered = get_profile(name)
+        except ValueError:
+            # Fail-soft *here* and loud at startup (`api/app.py`), which is the split this
+            # repository already draws for a misconfiguration: a turn must not die because a
+            # deployment misspelled a roster entry, and a misspelling must not be discoverable only
+            # by noticing a missing menu item. Skipping is safe in the direction that matters — an
+            # absent helper costs delegation, never authority.
+            logger.warning(
+                "helper roster: no profile named %r, so it is not offered; known: %s",
+                name,
+                sorted(registered_profile_names()),
             )
-        ]
-    )
+            continue
+        runnable = compile_helper(rostered)
+        bound = _bound_helper_names(runnable)
+        if not bound:
+            # A named helper that bound nothing is a menu entry that can only waste a delegation:
+            # the model reads a name, spawns it, and gets a report saying it had no tools. Dropped
+            # with a WARNING rather than refused at startup, because the cause is a *deployment's*
+            # connector set rather than a typo — `connectors_enabled` can empty a profile this
+            # repository ships as coherent, and a turn must not fail for it.
+            logger.warning(
+                "helper roster: %r bound no tools for this profile and deployment, so it is not "
+                "offered; check that its connectors are enabled",
+                name,
+            )
+            continue
+        specs.append(
+            {
+                "name": name,
+                "description": describe_helper(rostered, bound),
+                "runnable": runnable,
+            }
+        )
+    return governed_roster(specs)
+
+
+def _bound_helper_names(runnable: Any) -> frozenset[str]:
+    """A compiled helper's **capability** tools, read off its own `ToolNode`.
+
+    The same read `tests/test_context_floor.py` makes, and for the same reason: a surface derived
+    from a profile is a claim about what a build *should* have produced, and this is what it did.
+    It is what makes a roster description underivable from anything stale — and it is also the only
+    honest test of "is this entry worth offering", since a profile that names ten connector tools
+    binds none of them in a deployment that has those bundles turned off.
+
+    **The scratch verbs are subtracted, and driving this is what showed why.**
+    `FilesystemMiddleware` is in `create_deep_agent`'s required set, so every helper binds `ls`,
+    `glob`, `grep`, `read_file`, `write_file` and `edit_file` whatever its profile says. Left in,
+    they appeared in
+    all four roster descriptions — making entries look alike in exactly the dimension the model
+    chooses on, which is the defect `D-2026-08-12` measured — and, worse, they made the
+    "bound nothing" test unreachable: a helper whose every capability tool was missing still bound
+    six verbs and was offered as though it could do its job. They are the helper's own notepad over
+    a backend with no store behind it, so they are not capability and do not belong in either
+    answer.
+
+    Empty rather than raising when the graph has no tool node: a helper compiled with no capability
+    is exactly the case the caller is asking about.
+    """
+    node = runnable.nodes.get("tools") if hasattr(runnable, "nodes") else None
+    bound = getattr(getattr(node, "bound", None), "tools_by_name", None)
+    scratch = set(scratchpad_tools())
+    return frozenset(bound) - scratch if bound else frozenset()
 
 
 class ReloadingSkillsState(SkillsState):

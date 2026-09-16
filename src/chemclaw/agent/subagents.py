@@ -94,10 +94,12 @@ between enforcing an attenuation and restating it — and the subtraction above 
 that comparison a *strict* subset rather than an equality nobody could fail.
 """
 
+from collections.abc import Iterable
 from typing import Any
 
 from chemclaw.agent.authz import side_effecting_tools
 from chemclaw.agent.profiles import AgentProfile
+from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 
 #: Tools that change nothing and still reach the person on the other side of the conversation.
@@ -222,12 +224,92 @@ def general_purpose_helper(runnable: Any) -> dict[str, Any]:
     }
 
 
-def helper_profile(caller: AgentProfile, held: frozenset[str]) -> AgentProfile:
+def refuse_an_unknown_roster(known: Iterable[str]) -> None:
+    """Raise if `CHEMCLAW_HELPER_ROSTER` names a profile that does not exist.
+
+    **The loud half of a deliberate split.** `_subagents` skips an unknown name with a WARNING,
+    because a turn must not die because a deployment misspelled a roster entry — the cost of
+    skipping is a missing helper, which is delegation lost and never authority gained. But a
+    capability nobody is told is missing is one nobody restores, so the same typo is refused where
+    a deployment's settings first meet the profiles they name: startup.
+
+    Here rather than in `api/app.py` so it is reachable without driving a lifespan, and so the rule
+    sits beside the roster it is about. A function rather than a validator target because the
+    roster is a *deployment's* setting: `make skill-validate` checks what this repository ships,
+    and no CI gate can see the environment a pod is started with.
+
+    Args:
+        known: The registered profile names, which the caller must have loaded already —
+            `registered_profile_names()` holds `default` alone until `load_profiles()` has run.
+
+    Raises:
+        ChemclawError: One or more rostered names resolve to no profile.
+    """
+    unknown = sorted(set(settings.helper_roster) - set(known))
+    if unknown:
+        raise ChemclawError(
+            f"CHEMCLAW_HELPER_ROSTER names unknown agent profile(s) {unknown}, so each would be "
+            f"silently absent from the task roster; known: {sorted(known)}"
+        )
+
+
+def describe_helper(profile: AgentProfile, bound: Iterable[str]) -> str:
+    """One roster entry's description: a written purpose, then the surface the graph really bound.
+
+    **The derived half is the point.**
+    `D-2026-08-12-a-supervisor-that-holds-every-tool-has-no-reason-to-delegate`
+    measured a five-name roster whose menu was built as `instructions.split(". ")[0]` — and all five
+    profiles open with "You are Chemclaw's `<name>` specialist", so the model chose from five
+    entries that differed only in a name. Writing better sentences fixes that for one commit; a
+    sentence and a *derived* list fixes it for good, because the list comes off the compiled graph's
+    own tool surface and a profile edited next year cannot leave it stale.
+
+    It also removes a mistake that is otherwise very easy to make here, and one this repository
+    would have made: a rostered helper is **narrower than the profile it is named for**, since every
+    tool that acts is subtracted. `computation` names 41 tools and its helper binds 12 of them —
+    the enumeration family, topology, the calibration ledger and calculation lookup. A description
+    written about the profile would advertise a helper that computes, and the model would delegate a
+    calculation and get back a report saying it could not run one.
+
+    Sorted, because a set's iteration order is not stable across processes and this string lands in
+    the prefix of every model call: an unsorted list would make the same deployment send two
+    different prompts and defeat any prompt cache keyed on them.
+
+    Args:
+        profile: The rostered profile, whose `description` supplies the written half.
+        bound: The tool names this helper's compiled graph actually bound.
+
+    Returns:
+        The `description` for this entry's `CompiledSubAgent` spec.
+    """
+    purpose = (profile.description or "").strip()
+    names = ", ".join(sorted(bound))
+    return f"{purpose} Reads only, and holds exactly: {names}."
+
+
+def helper_profile(
+    caller: AgentProfile, held: frozenset[str], specialist: AgentProfile | None = None
+) -> AgentProfile:
     """The caller's profile, narrowed to what a helper is for and routed to its own model.
 
     Three changes and nothing else, so that every dimension this does not name — the instructions,
     the connector selection, the harness mode, the effort — stays the caller's. A helper is meant to
     be the same agent working on a smaller piece with a clearer desk, not a different agent.
+
+    **A `specialist` makes it a fourth change and not a different function**, because the one thing
+    a roster entry must never do is widen. It intersects: the surface becomes what the *caller*
+    holds ∩ what the specialist names, still minus everything that acts. Intersection is the whole
+    safety argument and it is arithmetic rather than a check — a caller that narrowed itself hands
+    in the smaller set, and no specialist can name its way past it, so
+    `D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor` holds by construction on a roster
+    exactly as it did on one unnamed helper.
+
+    The specialist's `instructions` do replace the caller's, and that is deliberate rather than an
+    inconsistency: a prompt carries no authority. This is the same asymmetry `model_route` already
+    has — the two dimensions a roster varies are the two that cannot reach anything.
+    `D-2026-08-12-a-supervisor-that-holds-every-tool-has-no-reason-to-delegate` is why the roster
+    varies these and not capability: making a specialist hold what its caller lacks is the redesign
+    that ADR names, and this is not it.
 
     1. **The surface loses everything that acts.** `side_effecting_tools()` is subtracted rather
        than an allow-list being written here, because that set is already the one this repository
@@ -257,6 +339,9 @@ def helper_profile(caller: AgentProfile, held: frozenset[str]) -> AgentProfile:
             re-derived here because the registry is complete only after `_capability_tools` has run
             `_register_generated_tools()`, and a set read before that is missing every launcher a
             deployment generated — see the call site.
+        specialist: A rostered profile whose tools this helper is further narrowed to and whose
+            instructions it carries. `None` is the unnamed helper, which is the caller's own agent
+            with the acting half removed.
 
     Returns:
         A profile to build the helper's graph from. Never registered, never cached.
@@ -297,17 +382,38 @@ def helper_profile(caller: AgentProfile, held: frozenset[str]) -> AgentProfile:
     # inherited, which `tests/test_checkpointer_prune.py` bounds at one turn's own writes. That is
     # the assertion that caught this, and it is the cheaper statement of the same argument
     # `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller` makes throughout.
+    reading = held - side_effecting_tools() - SPEAKS_TO_THE_CHEMIST
+    if specialist is None:
+        return caller.model_copy(
+            update={
+                "name": f"{caller.name}-helper",
+                "tool_names": reading,
+                "model_route": "helper",
+                "harness_enabled": False,
+            }
+        )
+    # `&` and not `|`, and a specialist naming nothing narrows to nothing rather than to everything:
+    # `tool_names is None` on a rostered profile means "this profile does not narrow", which is the
+    # right reading for a session profile and the wrong one for a roster entry, where it would hand
+    # a named helper the caller's whole reading surface under a name promising less.
+    named = specialist.tool_names if specialist.tool_names is not None else frozenset()
     return caller.model_copy(
         update={
-            "name": f"{caller.name}-helper",
-            "tool_names": held - side_effecting_tools() - SPEAKS_TO_THE_CHEMIST,
-            "model_route": "helper",
+            "name": f"{caller.name}-{specialist.name}",
+            "tool_names": reading & named,
+            "instructions": specialist.instructions or caller.instructions,
+            # The specialist's own route if it declares one, so a deployment can make the cheap
+            # readers cheap per name; otherwise the shared `helper` key, which is what every helper
+            # has always used.
+            "model_route": specialist.model_route or "helper",
             "harness_enabled": False,
         }
     )
 
 
-def helper_connectors(connectors: list[Any] | None) -> list[Any] | None:
+def helper_connectors(
+    connectors: list[Any] | None, specialist: AgentProfile | None = None
+) -> list[Any] | None:
     """The caller's open connector tools, minus every one that acts.
 
     The connector half of `helper_profile`'s subtraction, and a second function rather than a
@@ -337,8 +443,17 @@ def helper_connectors(connectors: list[Any] | None) -> list[Any] | None:
     connector tool cannot write a turn signal — the signal is written in this process, by the
     capability, and a connector's answer comes back over the wire as a `ToolMessage`.
 
+    **A `specialist` narrows this half too, and it has to**, because a profile's `tool_names` spans
+    both halves of the surface — `evidence.yaml` names `gather_evidence` in this process and
+    `similar_reactions` out of it, and a reader could not tell from the file which is which, by
+    design. Narrowing only the in-process half would give a named helper every connector tool its
+    caller held, so `evidence` and `computation` would differ in their local tools and be identical
+    across the wire. The same intersection as `helper_profile`, for the same reason.
+
     Args:
         connectors: The caller's already-open connector tools, or `None` for a turn with none.
+        specialist: A rostered profile whose `tool_names` also bounds this half. `None` is the
+            unnamed helper, which keeps every connector tool that does not act.
 
     Returns:
         The subset a helper may call, or `None` if the caller had none — `None` rather than `[]` so
@@ -347,4 +462,8 @@ def helper_connectors(connectors: list[Any] | None) -> list[Any] | None:
     if not connectors:
         return None
     acting = side_effecting_tools()
-    return [tool for tool in connectors if tool.name not in acting]
+    kept = [tool for tool in connectors if tool.name not in acting]
+    if specialist is None:
+        return kept
+    named = specialist.tool_names if specialist.tool_names is not None else frozenset()
+    return [tool for tool in kept if tool.name in named]

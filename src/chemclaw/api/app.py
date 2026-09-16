@@ -44,7 +44,9 @@ from chemclaw.agent.graph_tools import expand_note
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.plan_approval_store import plan_approval_store
 from chemclaw.agent.profile_discovery import load_profiles
+from chemclaw.agent.profiles import registered_profile_names
 from chemclaw.agent.session_events import stream_new_events
+from chemclaw.agent.subagents import refuse_an_unknown_roster
 from chemclaw.agent.verifier import require_verifier_capability
 from chemclaw.api.budget import BudgetTracker, drain_pending
 from chemclaw.api.deps import CurrentUser
@@ -269,6 +271,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # deployment configuration error, and a front door that started anyway would 400 every
     # request naming that profile with no hint as to why.
     load_profiles()
+    # And the `task` roster names profiles, so it is checked here for the same reason the load
+    # above fails here: a misspelled entry is a deployment configuration error, and the only thing
+    # it does at run time is make a helper quietly absent from the menu. `_subagents` skips an
+    # unknown name with a WARNING because a turn must not die for one; that fail-soft is what makes
+    # this loud check necessary rather than redundant, since a capability nobody is told is missing
+    # is one nobody restores.
+    refuse_an_unknown_roster(registered_profile_names())
     # After `configure_logging()` so the line is formatted the way the operator asked, and after
     # the profiles load so a malformed one fails before anything claims the deployment is sound.
     _report_inventory()
