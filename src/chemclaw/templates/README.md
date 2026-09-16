@@ -55,9 +55,15 @@ Three step kinds:
 
 **A template is not plan-gated.** The plan gate puts a human between an autonomously-chosen write
 and its execution; a template already has that human — the file is authored by a person, committed
-to git and reviewed, and nothing at run time can produce one. Asking an `agent` step to get its plan
-approved would be asking for approval of a plan nobody wrote, and there is no session to approve it
-in.
+to git and reviewed. Asking an `agent` step to get its plan approved would be asking for approval of
+a plan nobody wrote, and there is no session to approve it in.
+
+**The premise that used to carry that sentence was "nothing at run time can produce one", and it is
+false**: `agent/workflow_tools.compose_workflow` produces one. What restores the exemption is
+`templates/composed.py::authored_problems` — an agent-authored document may name no side-effecting
+tool and no `write_tools`, so it never reaches the question the gate answers. See "A workflow the
+agent composed" below; that section is the whole argument, and this one is no longer allowed to
+stand without it.
 
 **So the step is narrowed instead.** Its agent is built with every state-changing tool removed from
 both halves of its surface — the in-process tools *and* every connector's allow-list — unless the
@@ -100,6 +106,15 @@ above refuse a forward reference, so the declared order is already a topological
 `templates/schedule.py` reads the waves straight off it. Two of the nine shipped templates —
 `degradant-triage` and `hazard-briefing` — turned out to be shaped this way and had been running
 one step after another for no reason anybody had written down.
+
+**How many actually run together is bounded, and it is the same number the ceiling is checked
+against.** A wave is dispatched in batches of `orchestrator_max_parallel_children`, pinned into the
+run at launch as `TemplateRunInput.max_parallel_steps`, and `run_ceiling_problems` sizes a wave as
+`ceil(width / limit)` slow steps. Sizing it at one slow step however wide it is was optimistic in a
+way no worker makes true — an agent-authored document of 501 independent steps passed the run
+ceiling as though the whole procedure cost 900 s
+(`D-2026-09-16-a-wave-costs-its-slowest-member-once-per-batch`). The two shipped templates with a
+concurrent wave are two steps wide, so nothing about them changes.
 
 **This is not the fan-out `D-2026-08-25-the-loop-is-a-composite-not-a-template` declined.** That
 decision is about a *loop*: ranking N microstates, where N is known only once an earlier step has

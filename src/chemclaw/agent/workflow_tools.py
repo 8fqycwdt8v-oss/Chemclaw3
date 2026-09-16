@@ -7,8 +7,16 @@ These two tools are the run-time half: the agent writes the procedure down once,
 is one durable run.
 
 **What keeps that safe is `templates/composed.authored_problems`, not this module**, and the rule
-is worth reading there: an agent-authored workflow may name no side-effecting tool, no durable job
-and no `write_tools`. Read that file for why the plan gate's exemption survives this.
+is worth reading there: an agent-authored workflow may name no side-effecting tool and no
+`write_tools`, ever, and no approval lifts either. Read that file for why the plan gate's exemption
+survives this.
+
+A durable `job` step is the one thing on the other side of that line, and it is withheld rather
+than refused: `templates/composed.unapproved_jobs` keeps it from running until the workflow's owner
+has approved *that version* of the document — at whichever surface they are on, never through a
+tool, because a model must never authorize its own plan. The front door's route and the terminal's
+`/approve-workflow` are the two, and naming only the first was a real defect while it stood: a
+workflow is keyed on the ambient actor, so one composed at the terminal is a 404 at the route.
 
 Two tools and not three. A listing of one owner's workflows is the third thing the model needs and
 it rides on the refusal `run_composed_workflow` gives an unknown name, which names what does exist
@@ -84,6 +92,23 @@ def _document(
     knowing where it came from. A second shape would be a second set of those rules to keep in
     step.
     """
+    contradictory = [
+        step.id
+        for step in steps
+        if sum(1 for field in (step.tool, step.job, step.prompt) if field) != 1
+    ]
+    if contradictory:
+        # **Refused rather than resolved by precedence.** The branch below picks job, then tool,
+        # then prompt, so a step naming both a tool and a job silently became a job step and the
+        # tool was discarded with nothing said — and since the approver is shown the *rendered*
+        # document, nobody downstream could notice either. A step that says two things is a step
+        # whose author is confused about what it does, and guessing for them is how a procedure
+        # comes to do something nobody wrote.
+        raise ComposedWorkflowError(
+            f"step(s) {contradictory} each have to be exactly one thing: a `tool` to call, a `job` "
+            "to run, or a `prompt` to reason with. Split them, or drop the fields that do not "
+            "belong."
+        )
     return Template.model_validate(
         {
             "name": name,
@@ -121,23 +146,22 @@ async def compose_workflow(
     """Write down a repeatable multi-step procedure so it runs as one durable job from now on.
 
     Use this when the same sequence of reads keeps coming up and the order matters. Afterwards
-    `run_composed_workflow` runs the whole thing in one call: the steps run without a model turn
-    between them, independent steps run at the same time, and a run that fails resumes rather than
-    starting over.
+    `run_composed_workflow` runs the whole thing in one call, with no model turn between steps, and
+    a run that fails resumes rather than starting over. Composing the same name again replaces it.
 
     **No step may call a tool that changes anything**, because the run has no conversation to
     approve a plan in — ask for the change in the conversation, where a person can see it.
 
-    **A durable job step is allowed and does not run until a person approves this workflow.** So a
-    procedure that ranks or searches conformers can be written down here; composing it is not the
-    decision. Say so when you hand the name back: its owner approves it on the front door, and the
-    approval covers exactly the steps as they stand, so composing it again needs approving again.
+    **A durable job step is allowed and will not run until a person approves this workflow.** Say so
+    when you hand the name back: its owner approves it where they are — `/approve-workflow` at a
+    terminal, the workflow screen on the front door — and it covers the steps exactly as they
+    stand, so composing it again needs approving again. Two jobs that do
+    not read each other are fine; one that waits for another will not fit, because a job's budget is
+    most of the whole run's — split that into two workflows.
 
-    Refer to values with `${inputs.<name>}` and to an earlier step with `${steps.<id>.result}` —
-    a step that names no earlier step runs at the same time as its neighbours, so do not chain
-    steps that do not actually need each other.
-
-    Composing the same name again replaces it.
+    Refer to values with `${inputs.<name>}` and to an earlier step with `${steps.<id>.result}`. A
+    step naming no earlier step runs at the same time as its neighbours, so do not chain steps that
+    do not need each other.
 
     Args:
         name: What to call it. Lowercase words joined by hyphens.
@@ -178,9 +202,15 @@ async def compose_workflow(
     store = default_composed_store()
     existing = await store.list_for(owner)
     if len(existing) >= MAX_PER_OWNER and not any(row.name == name for row in existing):
+        # **`MAX_PER_OWNER`, never `len(existing)`.** The store fetches one past the cap so the
+        # guard can tell a full page from a clamped one, which means `existing` can read 51 — and
+        # the message said "you already have 51 … which is the limit" over a limit of 50, quoting
+        # a number that is neither the count nor the cap. The names are the page, and the page is
+        # what `not any(...)` above resolved against, so both are stated as the page they are.
         raise ComposedWorkflowError(
-            f"you already have {len(existing)} composed workflows, which is the limit. "
-            "Re-compose one of them under its own name instead of adding another."
+            f"you are at the limit of {MAX_PER_OWNER} composed workflows. The most recent are: "
+            f"{sorted(row.name for row in existing)}. Re-compose one of them under its own name, "
+            "or ask the chemist to forget one they no longer use."
         )
     await store.save(ComposedWorkflow(owner=owner, name=name, summary=summary, document=document))
     jobs = job_steps(document)
@@ -190,10 +220,11 @@ async def compose_workflow(
         # learn something that was knowable when they asked.
         return (
             f"Saved the {name!r} workflow, {len(document.steps)} steps — but it will not run yet. "
-            f"Step(s) {jobs} launch durable jobs, so its owner has to approve this version first "
-            "(on the front door; there is no tool for it, because a workflow may not approve "
-            "itself). Approving covers these steps exactly, so composing it again needs approving "
-            "again."
+            f"Step(s) {jobs} launch durable jobs, so its owner has to approve this version first. "
+            "There is no tool for that, because a workflow may not approve itself: they do it "
+            "where they are — `/approve-workflow` at the terminal, or the workflow screen on the "
+            "front door. Approving covers these steps exactly, so composing it again needs "
+            "approving again."
         )
     return (
         f"Saved the {name!r} workflow, {len(document.steps)} steps. "
@@ -258,4 +289,12 @@ async def run_composed_workflow(name: str, inputs: dict[str, str]) -> str:
     )
     if withheld:
         raise ComposedWorkflowError(f"the {name!r} workflow is not approved to run: {withheld[0]}")
-    return await start_template_run(workflow.document, dict(inputs))
+    # **Scoped, because a composed workflow's name is neither global nor fixed.** The run id is an
+    # idempotency key; unscoped it is `hash([name, inputs])`, so two chemists' `triage` — and two
+    # *versions* of one chemist's — share it, and the launcher's rejoin branch then hands back
+    # somebody else's finished run with a summary that reads correct (`run_workflow_id`).
+    return await start_template_run(
+        workflow.document,
+        dict(inputs),
+        f"{owner}:{template_fingerprint(workflow.document)}",
+    )
