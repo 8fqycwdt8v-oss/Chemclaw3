@@ -715,7 +715,7 @@ async def test_the_erase_statements_are_valid_sql() -> None:
     }
 
 
-async def test_the_cli_reports_a_statement_level_database_error_instead_of_raising() -> None:
+def test_the_cli_reports_a_statement_level_database_error_instead_of_raising() -> None:
     """A `psycopg.Error` that is not a connection failure must still print, not traceback.
 
     **Two earlier versions of this test were worthless, in different ways.** The first asserted
@@ -731,7 +731,10 @@ async def test_the_cli_reports_a_statement_level_database_error_instead_of_raisi
     Reproduced here by pointing the search path at a schema with no tables, which raises
     `UndefinedTable` from the same family, against a database that is reachable and healthy.
     """
-    await migrated_db_or_skip()
+    # Synchronous on purpose, where every other test in this file is a coroutine: the subject is
+    # `erase_actor_main`, a console entry point that owns an `asyncio.run` of its own, and a nested
+    # one refuses outright. So the skip check gets its own loop and the CLI gets the loop it builds.
+    asyncio.run(migrated_db_or_skip())
 
     original = settings.postgres_dsn
     separator = "&" if "?" in original else "?"

@@ -409,7 +409,9 @@ async def test_the_workflow_hands_the_activity_the_actor_off_the_runs_memo(
     server, so the workflow's own `job_envelope` still runs on a shape it would really see.
     """
     seen: list[tuple[str, str]] = []
-    answer = _run(EnsembleJobSpec(smiles="CCO"))
+    # Awaited rather than routed through `_run`, which owns an `asyncio.run` of its own:
+    # this test is already inside a loop, and a nested `asyncio.run` refuses outright.
+    answer = await activities.run_xtb_calculation(EnsembleJobSpec(smiles="CCO"))
 
     @activity.defn(name="run_xtb_calculation")
     async def _capture(spec: XtbJobSpec, actor: str = "", correlation_id: str = "") -> XtbJobResult:
@@ -453,7 +455,9 @@ async def test_a_durable_run_with_no_memo_is_attributed_to_the_service_identity(
     behaviours the durable path has.
     """
     seen: list[tuple[str, str]] = []
-    answer = _run(EnsembleJobSpec(smiles="CCO"))
+    # Awaited rather than routed through `_run`, which owns an `asyncio.run` of its own:
+    # this test is already inside a loop, and a nested `asyncio.run` refuses outright.
+    answer = await activities.run_xtb_calculation(EnsembleJobSpec(smiles="CCO"))
 
     @activity.defn(name="run_xtb_calculation")
     async def _capture(spec: XtbJobSpec, actor: str = "", correlation_id: str = "") -> XtbJobResult:
