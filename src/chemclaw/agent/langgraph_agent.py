@@ -1076,9 +1076,10 @@ def _harness_middleware(profile: AgentProfile) -> list[Any]:
     millions, depending on how wide it fans out and how large the results are, and nothing in the
     turn could tell those apart (`agent/spend_cap.py` says what `api/budget.py` does and does not
     close). The pair is a `before_model` hook that enforces and a `wrap_model_call` middleware that
-    meters, because only the response carries the bill; both are inert until a deployment sets
-    `agent_max_turn_billed_tokens`, so attaching them unconditionally costs a turn nothing until it
-    is asked for.
+    meters, because only the response carries the bill. **Both are live in every shipped
+    configuration**, because `agent_max_turn_billed_tokens` no longer defaults to 0. They were
+    attached unconditionally when it did — costing an unconfigured turn nothing — and that
+    unconditional attachment is now what actually enforces the ceiling.
     """
     caps = [enforce_loop_cap, enforce_spend_cap, MeterTurnSpend()]
     if not harness_enabled_for(profile):

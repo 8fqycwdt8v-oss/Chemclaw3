@@ -166,8 +166,10 @@ _COUNTERS: dict[str, str] = {
     # wide over large results reaches this one inside a handful of iterations, and a turn that
     # plans in circles reaches that one having billed almost nothing. A rising rate here is a
     # deployment whose turns are too expensive rather than too long, which is a retrieval or
-    # tool-result-size problem; flat at zero while `turn_costs` shows large turns means the cap is
-    # unset (`agent_max_turn_billed_tokens` ships at 0) rather than never reached.
+    # tool-result-size problem; flat at zero now means the cap was **never reached**, which is the
+    # healthy reading — `agent_max_turn_billed_tokens` ships non-zero, so "unset" is no longer the
+    # diagnosis to rule out first. A series that moves at all wants the cap checked against this
+    # deployment's `turn_costs` rows: a backstop that bites is a backstop set too low.
     "chemclaw_turn_spend_caps_total": "Turns stopped by the per-turn billed-token cap.",
     # The detach/stop split (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop). A disconnect no
     # longer cancels a turn, so these two are what tell an operator how often clients drop away
