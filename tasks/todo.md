@@ -57,20 +57,34 @@ namespace is the erasure key `agent/leaver.py` already sweeps by prefix.
 - [x] `SkillsReadOnlyRefusal` unchanged — no agent tool writes a skill
 - [x] ADR
 
-## Phase 4 — The proposal queue and its human gate
+## Phase 4 — The proposal queue, its human gate, **and its first proposer**
+
+**Reordered for the second time, by the rule that reordered phase 3 — and stated here rather than
+done quietly.** A queue whose only caller is its own test is the `reject_widening` shape this
+repository deleted 254 lines for, and phase 5's two proposers are both blocked on deployment
+history `make trajectory-census` measures at zero. So the queue ships with the one proposer that
+needs no history: **the agent, in the turn where the procedure was worked out**. A `propose_skill`
+tool writes a proposal row and never a skill, so `SkillsReadOnlyRefusal` is untouched — it is a
+different table, and the only thing that turns a proposal into judgment is a person calling a
+route. That is "auto proposal based on user interactions" in the most direct form available today,
+and it exercises every part of the queue on day one.
+
 - [ ] A content-hashed, append-only proposal table modelled on `plan_approvals`, schema-informed by
-      retired `note_proposals`
-- [ ] Decision is an HTTP route, never a tool
+      retired `note_proposals` — `(kind, name, content_hash)` unique, so a decision is evidence and
+      a re-proposal of *changed* content is a new row rather than an overwrite
+- [ ] `propose_skill`, the agent's half: writes a proposal, never a skill
+- [ ] Decision is an HTTP route, never a tool — `plan.py`/`workflows.py`/`skills.py`'s shape
+- [ ] Accepting a skill proposal writes the proposer's **local** tier (phase 3), which is the only
+      destination that exists: the shared tree is git-merged by a human and a route cannot commit
 - [ ] A rejection leaves a trace and an unchanged re-proposal cannot reopen it
 - [ ] A proposer can learn what became of its proposal
 - [ ] ADR
 
-## Phase 5 — The proposers
+## Phase 5 — The proposers that need history
 - [ ] Profile proposer over session tool co-occurrence
 - [ ] Skill distiller over recurring trajectories and human protocol corrections
 - [ ] **The self-confirmation guard, with its caller**: nothing distilled may count evidence it
       itself produced
-- [ ] Approval writes the local tier (phase 3); the shared tree stays git-merged by a human
 - [ ] ADR
 
 ## Review
@@ -684,3 +698,33 @@ the arithmetic fixed the class; capping the document would have fixed the exampl
 **The process failure is in `tasks/lessons.md`.** A reviewer mutation-testing `template_job.py`
 restored it from its own scratch copy over my edits, and when stopped mid-restore left
 `if False:  # MUTATION` in the file. A subagent shares this working tree.
+
+
+### Phase 3 — the review round
+
+Thirteen findings from a fresh-context adversarial review, all fixed, plus one the fixing exposed.
+
+**Two were blocking and were the same class — a bound asserted in prose and enforced nowhere.**
+`store.asearch(namespace)` with no `limit` is `BaseStore`'s default of **10**, not "everything", so
+twelve saved skills listed ten while the prompt carried twelve and the two beyond the page were
+undeletable through the only route that deletes — which falsifies the condition this tier's
+exemption from review is granted on. And `MAX_LOCAL_SKILL_CHARS`' own comment claimed
+`agent_memory_max_files` bounded the row count, which is `BoundedStoreBackend`'s and mounts
+`/memories/` rather than this root: measured, an empty mounted tier costs **6** tokens of prefix and
+a maximal one **5,571**, none of it counted anywhere.
+
+**The collision order was an accident and is now a decision.** Upstream resolves a skill-name
+collision last-source-wins and `/mine` was appended last, so a personal skill silently displaced a
+reviewed one. `/mine` moved first and the route refuses the collision it can see; the test fails on
+the reversed order, which is what makes it an assertion rather than a description.
+
+**And one claim in the ADR itself was wrong in both directions at once.** It said
+`chemclaw_skill_loads_total{skill}` already covered this tier and warned that a chemist's own skill
+name therefore reached the exposition. Measured: the labelled series sat at 1 for a shipped skill
+and did not exist for a personal one, because that counter is `NarrowedSkillsBackend`'s and this
+tier is a `StoreBackend`. So the coverage claim was false *and* the privacy warning was about
+nothing — the same base-class mistake as the async write verbs, one method over, which is why the
+rule that finding left behind is written about inheritance rather than about writes.
+`chemclaw_local_skill_loads_total` is the tier's signal now, on `read` and `aread` both, and bare
+rather than labelled: a local skill's name is a person's own words and a label would mint a series
+per private project name in a shared exposition.
