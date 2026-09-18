@@ -1278,3 +1278,29 @@ which is on the response and not on the call, so telling "the model finished thi
 "the transport cut it" is a response-level question this middleware does not currently ask. Closing
 it means deciding what a `length` finish with tool calls means — refuse the reply and re-ask, or
 run the completion and say so — and that decision is what §3 asked for and did not get.
+
+## A calibrated calculator names a fleet tool through a caller the seam walker cannot resolve
+
+- [ ] **`_CALIBRATED` puts a `calc` tool name on the wire outside every check that watches the
+  seam.** Found on 2026-09-18 while closing a `Chemclaw3-mcp` row whose own stated fix —
+  "that repository's `_CALLERS` tuple" — described work `D-2026-09-14-a-tripwire-over-two-named-modules-covers-the-modules-it-names`
+  had already done, which is worth knowing before implementing any cross-repository row's
+  prescription: re-measure it against the other tree first.
+  `connectors/calc/server/tools.py::_CALIBRATED` maps a property name to a fleet tool name
+  and `_calibrated` hands it to `remote_version`, which asks the server `calculation_key` for that
+  tool. Three things make it invisible to
+  `tests/test_sibling_manifest_agreement.py::test_the_calc_seam_calls_only_tools_the_fleet_records_serving`:
+  `remote_version` is not in `_DISPATCHERS`, its tool argument is a tuple-unpacked local rather
+  than a literal, and the names live in a dict value rather than at a call site. Measured on
+  2026-09-18: both names it currently holds — `predict_solubility` and `predict_pka` — are covered
+  by other sites, so nothing is unchecked today and a *third* calibrated row would be. The obvious
+  fix is not available: teaching `_literal_strings` to resolve a value out of a named module-level
+  table would put one module's private data structure inside a generic walker, which is the
+  allowlist-of-its-own-exceptions shape `ARCHITECTURE.md` already refuses for the layering rule. So
+  the question is whether the table should declare its tool names somewhere the walker already
+  reads, or whether `remote_version` should take a literal. Wants a measurement of which calibrated
+  calculators are actually planned before either is built.
+  Anchors: `src/chemclaw/connectors/calc/server/tools.py::_CALIBRATED`,
+  `src/chemclaw/connectors/calc/remote.py::remote_version`,
+  `tests/test_sibling_manifest_agreement.py::_DISPATCHERS`,
+  `docs/decisions/D-2026-09-18-a-seam-read-in-one-direction-cannot-see-a-surface-grow.md`.
