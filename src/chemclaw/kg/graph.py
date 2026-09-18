@@ -7,6 +7,7 @@ graph traversal (D-004), so this indexer is the substrate the query skill walks
 """
 
 import contextlib
+import hashlib
 import logging
 import os
 import subprocess
@@ -207,27 +208,76 @@ def _dir_fingerprint(notes_dir: Path) -> NotesFingerprint:
     )
 
 
-def note_file_fingerprints(notes_dir: Path) -> dict[str, str]:
-    """A cheap per-note change signal: `note id -> "mtime_ns:size"`, stat-only (no read/parse).
+#: The fingerprint of a note file that is on disk and would not open. Never equal to a `sha256:`
+#: digest, so the note re-embeds once when it becomes readable again; constant, so it does not
+#: re-embed every pass while it stays broken. Its real job is to keep the note inside
+#: `reindex_notes`'s `keep` set, which is what stops a transient I/O fault retiring an index row.
+UNREADABLE = "unreadable"
 
-    Same stat-only scan `_dir_fingerprint` does for the whole-tree cache (KM-14), but keyed per note
-    id (the file's stem — `note.type/note.id.md` is the one filename shape a note is written under,
-    `chemclaw.kg.record.NoteFile`) rather than folded into one aggregate. A single fingerprint
-    can
-    only answer "did anything change"; this answers "which ones", which is what an incremental
-    rebuild needs — `chemclaw.retrieval.vector_index.reindex_notes` re-embeds a note only when its
-    entry here differs from what was stored at the last index run, instead of the whole corpus on
-    every scheduled pass (D-2026-08-02-embed-only-what-changed).
+
+def note_file_fingerprints(notes_dir: Path) -> dict[str, str]:
+    """A per-note change signal: `note id -> "sha256:<hex>"` over the file's own bytes.
+
+    Keyed per note id (the file's stem — `note.type/note.id.md` is the one filename shape a note is
+    written under, `chemclaw.kg.record.NoteFile`) rather than folded into the single aggregate
+    `_dir_fingerprint` builds for the whole-tree cache. One aggregate can only answer "did anything
+    change"; this answers "which ones", which is what an incremental rebuild needs —
+    `chemclaw.retrieval.vector_index.reindex_notes` re-embeds a note only when its entry here
+    differs from what was stored at the last index run, instead of the whole corpus on every
+    scheduled pass (D-2026-08-02-embed-only-what-changed).
+
+    **It hashes the content rather than reading `mtime_ns:size`, because the thing it is
+    compared against is shared between pods and an mtime is not**
+    (`D-2026-09-16-a-fingerprint-that-names-a-checkout-is-not-a-fingerprint-of-a-note`).
+    `note_index` is one table; the checkout under it is an `emptyDir` each pod's sidecar clones,
+    and a checkout sets a file's mtime when it *writes* the file. So two pods holding the identical
+    commit produce entirely disjoint fingerprint sets, and each pod's pass reads every note the
+    other just indexed as changed. Driven over two real clones of one commit against one index, the
+    incremental rebuild degenerated to a full one: 3 of 3 notes re-embedded on every pass after the
+    first, for ever. A hash of the bytes is a property of the content, which is the thing the two
+    pods actually share.
+
+    The cost is one read per note per scan where a stat costs none — the trade D-2026-08-02 declined
+    when the alternative was an embedding call, and now the cheaper side of that same trade by
+    orders of magnitude. `_dir_fingerprint` keeps the stat deliberately: its cache is *per process*,
+    so one checkout's mtimes are all it ever compares, and it is paid on interactive query latency
+    (DA-5) rather than once an hour.
+
+    The digest carries its algorithm as a prefix so the format change is visible in a stored row
+    rather than inferred: no `mtime_ns:size` string can equal a `sha256:` one, so every row written
+    before this reads as changed exactly once and the corpus is re-embedded one final time on
+    upgrade — the same one-time cost migration 035 paid to introduce the column.
 
     Two files claiming one id resolve **first in path order**, the same way `_parse_notes` and
     `chemclaw.kg.validate` resolve one. It used to be a dict comprehension, where the *last* file
     won — so the served corpus held one note and the reindex diffed the other, and `reindex_notes`
     could embed one file's text under the other's id. Two scans of one tree disagreeing about which
     file is a note is worse than either answer.
+
+    **A file that cannot be read keeps an entry, and that is not the same choice `scan_notes_dir`
+    makes one function up.** That one drops a file whose *stat* fails, because a file that vanished
+    between the listing and the stat is a file that is gone. Reading opens a second, wider window —
+    a permission change or an I/O error leaves a file that is still very much there — and dropping
+    those would quietly widen a hole `reindex_notes` deliberately closed: it builds its `keep` set
+    from this dict precisely so a note it cannot *parse* is not retired from the index, measured at
+    40 rows lost per 40 broken notes. A note that will not open is a stricter case of the same
+    thing, so it gets the same protection: `UNREADABLE` keeps it in `keep`, and being a constant it
+    does not churn an embedding either — the note is absent from `load_notes` too, so it is never
+    in `changed`. When the file opens again its bytes are compared against what was indexed, so it
+    is re-embedded only if they actually differ. **That last clause is measured rather than
+    reasoned**: this docstring first claimed "re-embeds it exactly once", and driving it showed a
+    fault that heals to the same content costs *nothing*, because the stored digest was never wrong
+    in the first place. A stat-based signal could not have said that — the repair would have moved
+    the mtime.
     """
     fingerprints: dict[str, str] = {}
-    for path, stat in scan_notes_dir(notes_dir):
-        fingerprints.setdefault(path.stem, f"{stat.st_mtime_ns}:{stat.st_size}")
+    for path, _stat in scan_notes_dir(notes_dir):
+        if path.stem in fingerprints:
+            continue
+        try:
+            fingerprints[path.stem] = f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}"
+        except OSError:
+            fingerprints[path.stem] = UNREADABLE
     return fingerprints
 
 

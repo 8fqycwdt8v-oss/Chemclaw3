@@ -732,8 +732,8 @@ spec:
            above conditional on something no rule stated: **every one of them alerts on an
            application counter, so a process that is gone emits silence** — and silence is what a
            healthy quiet system also emits. (The sentence here used to say "all sixteen", and by the
-           time it was read the file held thirty-seven rules, of which the two below are the only
-           ones that read anything but a first-party series. `tests/test_deploy_chart.py` derives
+           time it was read the file held thirty-seven rules, of which only the handful in this
+           group read anything but a first-party series. `tests/test_deploy_chart.py` derives
            that split from the rendered rules rather than restating it here, for the reason
            `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` gives.) A CrashLooping, evicted, unschedulable or simply un-scraped pod
            produced no alert of any kind. `up` is the only series that inverts that: it is
@@ -791,11 +791,18 @@ spec:
                labels stopped matching all produce *no series*, and `up{...} == 0` over no series is
                an empty vector. `absent()` is the only shape that alerts on nothing being there.
 
-               Pinned to the workers' scrape endpoint because they are the release's one guaranteed
-               population — the front door has an HPA and connectors are enabled per deployment,
-               while `background-worker` always runs. `endpoint` is the port *name* the operator
-               stamps on every sample, and `tests/test_deploy_chart.py` holds it equal to the
-               PodMonitor's own `port:` so the two cannot drift apart silently. */}}
+               Scoped to the `metrics` endpoint, which every pod in this release serves. `endpoint`
+               is the port *name* the operator stamps on every sample, and `tests/test_deploy_chart.py`
+               holds it equal to the PodMonitor's own `port:` so the two cannot drift apart silently.
+
+               **This used to say it was "pinned to the workers' scrape endpoint because they are
+               the release's one guaranteed population", and that was true of the Deployment and
+               false of the expression.** `deployment-connectors.yaml` says in its own comment that
+               a connector worker "serves the same `metrics` port as core's worker", and the front
+               door and mcp-face serve it too — so this `absent()` is false whenever *any* of them
+               is up, and a background worker that cannot schedule is invisible to it. What the
+               sentence described is what the rule below does, by carrying the component label the
+               PodMonitor already stamps. */}}
         - alert: ChemclawNoWorkerIsScraped
           expr: absent(up{namespace="{{ .Release.Namespace }}", endpoint="metrics"})
           for: 10m
@@ -810,6 +817,54 @@ spec:
               scheduled, a PodMonitor whose selector no longer matches, or user-workload monitoring
               having been turned off cluster-wide — in which case every alert in this file is inert
               and this is the only one that says so.
+
+        {{- /* The same failure one component down, and the one `Recreate` makes reachable.
+               `deployment-workers.yaml` is the only Deployment in this chart with a `strategy:`
+               block, and it is `Recreate` — deliberately, because two background workers racing on
+               one corpus clone is the defect `D-2026-08-27-what-a-second-background-worker-would-race-on`
+               pins the replica count to prevent. The cost of that choice is that the old pod is
+               gone *before* the new one is tried, so a background worker that cannot start leaves
+               the release with none at all, and the rule above stays green because connectors and
+               the front door are still scraped on the same endpoint. Every other Deployment here
+               defaults to RollingUpdate, which keeps the old pod serving, so this is scoped to the
+               one component that needs it rather than generalised.
+
+               `app_kubernetes_io_component` is the PodMonitor's own `podTargetLabels` entry, so
+               this needs no new plumbing and no series this Prometheus cannot see — which is the
+               constraint the comment above the fleet group states: kube-state-metrics lives in
+               *platform* monitoring, so `kube_deployment_status_replicas_unavailable`, the obvious
+               expression for "a rollout is stuck", would be permanently empty here and green
+               forever.
+
+               The window is derived, not chosen. `Recreate` first waits out the old pod's whole
+               `chemclaw.workerGracePeriod`, then the new pod gets its startup budget, then the
+               same margin `ChemclawTargetDown` already allows. Stated as arithmetic over the same
+               values so that raising a probe budget or a shutdown budget cannot leave this behind.
+
+               **What it does not catch**: a worker that serves `/metrics` and never passes
+               `/readyz`. A PodMonitor scrapes unready pods, so `up` is 1 and this stays silent.
+               That case is `ChemclawWorkerNotPolling` below, which renders only when the Temporal
+               SDK exporter is enabled — and it ships disabled. */}}
+        {{- $workerStart := mul (int .Values.probes.worker.startup.periodSeconds) (int .Values.probes.worker.startup.failureThreshold) }}
+        {{- $workerGrace := add (int (required "config.CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS must be set: ChemclawNoBackgroundWorkerIsScraped's `for:` is derived from it" .Values.config.CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS)) 30 }}
+        - alert: ChemclawNoBackgroundWorkerIsScraped
+          expr: >-
+            absent(up{namespace="{{ .Release.Namespace }}", endpoint="metrics",
+            app_kubernetes_io_component="background-worker"})
+          for: {{ add $workerGrace $workerStart (int .Values.monitoring.alerts.targetDownMarginSeconds) }}s
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawnobackgroundworkerisscraped
+            summary: No background worker pod exists as a scrape target
+            description: >-
+              The background worker is not being scraped at all, so nothing in this release is
+              polling `background-jobs` — sync, re-index, reports and the connector-job wrapper are
+              all stopped, silently, because none of them emits a counter when it is not running.
+              This Deployment uses `Recreate`, so the old pod is already gone: usual causes are a
+              pod that cannot be scheduled, an image that will not pull, or a container that exits
+              before serving. `ChemclawNoWorkerIsScraped` does not cover this — connectors and the
+              front door share the `metrics` endpoint and keep it satisfied.
 {{- if .Values.monitoring.temporalSdkMetrics.enabled }}
 
         {{- /* The gap the worker's own probes leave open on purpose, and it is narrower than this

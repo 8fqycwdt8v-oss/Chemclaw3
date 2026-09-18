@@ -42,10 +42,12 @@ from typing import Any, Final
 from langchain.agents.middleware import wrap_tool_call
 
 from chemclaw.agent.authz import AuthorizationError, side_effecting_call
+from chemclaw.agent.framing import safe_id
 from chemclaw.agent.plan_approval_store import plan_approval_store
 from chemclaw.agent.plan_scope import step_declaration
 from chemclaw.agent.plan_state import session_plan
 from chemclaw.agent.profiles import AgentProfile
+from chemclaw.agent.refusal_route import routed
 from chemclaw.core.config import settings
 from chemclaw.core.config.agent import HarnessAutonomy
 from chemclaw.core.ids import stable_hash
@@ -155,10 +157,32 @@ async def approval_stands(session_id: str, plan_hash: str | None) -> bool:
 
 
 def plan_approval_refusal(tool_name: str) -> PlanNotApprovedError:
-    """The refusal an unapproved state-changing call earns — one sentence, both engines."""
+    """The refusal an unapproved state-changing call earns — one sentence, both engines.
+
+    The sentence is the chemist's; the footer (`agent/refusal_route`) is the model's, and this is
+    the gate where the two readers want most different things. The chemist wants "nobody has
+    approved this"; the model wants to know that a plan is a thing it can *write* — the declaration
+    a step carries is what an approval is later keyed on (`plan_scope.step_declaration`), so the
+    sanctioned path really is a `write_todos` call it can make right now, followed by a wait. Left
+    to the sentence alone, the two moves available are stalling and retrying the same call.
+
+    `tool_name` is not reduced here, and that is not an oversight: this is reached only past
+    `authz.side_effecting_call`, so the name is a member of a set this repository owns. The two
+    refusal sites that interpolate a string nothing validated are `authz.authorize_tool` and
+    `out_of_scope_refusal` below, and only those two reduce.
+    """
     return PlanNotApprovedError(
-        f"{tool_name} changes stored data or starts work, and the plan it is part of "
-        "has not been approved yet; review the plan and approve it, then ask again"
+        routed(
+            f"{tool_name} changes stored data or starts work, and the plan it is part of "
+            "has not been approved yet; review the plan and approve it, then ask again",
+            code="plan_not_approved",
+            boundary="the harness plan gate",
+            who_can_act="a human, by approving this session's current plan",
+            sanctioned_path=(
+                f"write the plan with write_todos so a step declares {tool_name}, then wait for "
+                "that plan to be approved; read-only tools still run meanwhile"
+            ),
+        )
     )
 
 
@@ -174,12 +198,38 @@ def out_of_scope_refusal(tool_name: str, scope: frozenset[str]) -> PlanNotApprov
 
     Same exception class, so the audit outcome, the `plan_gate` refusal reason and the relay to the
     model are unchanged: the class answers "which gate refused", and the sentence answers "why".
+
+    **This was the only one of the eleven gated refusals that already named a tool the model could
+    call instead**, and measuring that asymmetry is what produced `agent/refusal_route` — five
+    others named an action in prose and five named nothing at all. Its footer therefore
+    *points at* the list rather than repeating it: the scope is a model-authored declaration bounded
+    only in count (`plan_max_tools_per_step` × `plan_max_steps`), and `core/config/agent.py` records
+    a measured 600,192-character sentence built out of one — a second copy in the footer would
+    double a length that is bounded only at `tool_authz._refusal_message`, and unbounded in the
+    exception, the log and the audit row before it.
+
+    **Each declared name is reduced by `framing.safe_id`.** `plan_scope.step_declaration` keeps
+    every string in a step's `tools` list, so this is the one refusal that interpolates text the
+    *model itself* authored — which is exactly the shape that could spell a second
+    `sanctioned path:` field and have the model read it as this system's routing. The charset
+    cannot spell a field, a separator or an envelope delimiter, and a real tool name is unchanged
+    by it.
     """
-    declared = ", ".join(sorted(scope)) or "no tools at all"
+    declared = ", ".join(safe_id(name) for name in sorted(scope)) or "no tools at all"
     return PlanNotApprovedError(
-        f"{tool_name} changes stored data or starts work, and the approved plan does not list it: "
-        f"its steps declared {declared}. Rewrite the plan so a step declares {tool_name}, and ask "
-        "for the new plan to be approved."
+        routed(
+            f"{tool_name} changes stored data or starts work, and the approved plan does not "
+            f"list it: its steps declared {declared}. Rewrite the plan so a step declares "
+            f"{tool_name}, and ask for the new plan to be approved.",
+            code="plan_scope_excludes_tool",
+            boundary="the tools the approved plan's steps declared",
+            who_can_act="a human, by approving a plan whose steps declare this tool",
+            sanctioned_path=(
+                "call one of the tools the approval already covers — they are named above — or "
+                f"rewrite the plan so a step declares {tool_name} and ask for that plan to be "
+                "approved"
+            ),
+        )
     )
 
 

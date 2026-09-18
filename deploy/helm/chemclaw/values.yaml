@@ -174,21 +174,35 @@ mcpFace:
 
 workers:
   background:
-    # Keep at 1 — but no longer for the checkout lock. That reason is closed: submissions to one
-    # remote are serialized across pods by a Postgres advisory lock
-    # (`kg/git_writer.py::_cluster_lock`), and the host-local `flock` now only guards this pod's
-    # own worktree sweep.
+    # Keep at 1 — and **the reason is now that nobody has driven two, not that two are known to
+    # break.** Saying which of those it is matters, because the two read identically in a values
+    # file and only one of them is a defect somebody can go and close.
     #
-    # The reason that is still live is `NoteReindexWorkflow`
-    # (`D-2026-08-27-what-a-second-background-worker-would-race-on`): the reindex retires
-    # `note_index` rows for every note missing from *this pod's* knowledge checkout, and that
-    # checkout is an emptyDir refreshed by the pod's own sidecar every
-    # `knowledge.sync.intervalSeconds`. Two pods are two views of the corpus, so a freshly merged
-    # note is indexed by one and retired by the other, alternating, while each run logs that it
-    # retired a note that exists. Nothing else on this queue needs the pin: the periodic jobs are
-    # Temporal Schedules under `SKIP` (server-enforced, so worker count is irrelevant to them), the
-    # ELN cursor has exactly one writer, retention re-checks every predicate inside its own DELETE,
-    # and the result outbox claims rows with `FOR UPDATE SKIP LOCKED`.
+    # Both reasons this comment used to give are closed. The D-069 checkout lock: submissions to one
+    # remote are serialized across pods by a Postgres advisory lock
+    # (`kg/git_writer.py::_cluster_lock`), and the host-local `flock` only guards this pod's own
+    # worktree sweep, which is per-pod by construction. And `NoteReindexWorkflow`'s disagreement
+    # about the corpus (`D-2026-08-27-what-a-second-background-worker-would-race-on`), in both its
+    # halves: a prune is bounded by the corpus revision a row was built from
+    # (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`), and a note's fingerprint is
+    # a hash of its bytes rather than the mtime its own checkout wrote
+    # (`D-2026-09-16-a-fingerprint-that-names-a-checkout-is-not-a-fingerprint-of-a-note`), so two
+    # pods holding one commit now agree about every note — driven over two real clones against one
+    # index, where every note was re-embedded on every pass before and none is now. The rate was
+    # one endpoint call per note per pass, so what it cost a release was that release's own corpus
+    # size; the probe's corpus is this repository's 40 notes and is not a figure to read as yours.
+    #
+    # What is left is an *unmeasured* claim rather than a known race. The rest of this queue —
+    # periodic jobs as Temporal Schedules under `SKIP` (server-enforced, so worker count cannot
+    # reach them), one writer on the ELN cursor, retention re-checking every predicate inside its
+    # own DELETE, the result outbox claiming rows with `FOR UPDATE SKIP LOCKED` — is an argument
+    # that has never been run with two workers polling. It is a good argument and it is not
+    # evidence, which is the distinction this repository keeps having to relearn. `BACKLOG.md`
+    # carries what to drive before this becomes a 2.
+    #
+    # Note that `strategy: Recreate` in `deployment-workers.yaml` does **not** relax with this: its
+    # second justification — one code version replays any unfinished history — is independent of
+    # the replica count and still live.
     replicas: 1
 
 # A classical SMB/CIFS file share, mounted read-only on the background worker so its documents can
@@ -992,16 +1006,23 @@ config:
   # (`agent/spend_cap.py`). This is that ceiling, in billed tokens across every model call of a
   # turn, the subagent's included.
   #
-  # 0 (no cap) is deliberate rather than an omission, and it is the one guard in this block that
-  # ships inert. The others refuse a *request*; this one **ends a turn that is already running**,
-  # so a number set too low loses work a chemist has waited for, and no number this chart could
-  # ship would be right for a corpus it has never seen. Size it from this deployment's own
-  # `turn_costs.total_tokens` rows — the p99 of a turn that answered, with headroom — and set it
-  # then. `chemclaw_turn_spend_caps_total` is what says whether the number you chose is biting.
+  # **This shipped at 0 (no cap) and no longer does.** The caution behind that 0 was real and is
+  # kept: the others refuse a *request*, this one acts on a turn that is already running, so a
+  # number set too low costs work a chemist has waited for. Two things make a number the better
+  # side of that trade. `spend_cap.py` jumps the graph `to end` rather than raising, and the runner
+  # emits `spend_cap_reached` naming the answer **partial** — so a capped turn returns what it had.
+  # And the alternative was never "no cap" but an unbounded one: measured, one turn billed 250,000
+  # tokens against a 1,000-token session cap, which neither half of `BUDGET_ENABLED` can see.
   #
-  # Turning it on is not what makes the deployment guarded: `harness_max_loop_iterations` still
-  # bounds the loop, and that cap is on in every configuration.
-  CHEMCLAW_AGENT_MAX_TURN_BILLED_TOKENS: "0"
+  # **300,000 is a runaway backstop, not a budget.** It sits above the one runaway this system has
+  # measured and well above a heavy ordinary turn. It is explicitly not the number to keep: size it
+  # from this deployment's own `turn_costs.total_tokens` rows — the p99 of a turn that answered,
+  # with headroom — and set it then. `chemclaw_turn_spend_caps_total` is what says whether the
+  # number you chose is biting; if it moves on turns that were doing real work, this is too low.
+  #
+  # It is not what makes the deployment guarded: `harness_max_loop_iterations` still bounds the
+  # loop, and that cap is on in every configuration.
+  CHEMCLAW_AGENT_MAX_TURN_BILLED_TOKENS: "300000"
   # On in production, off in code, for the same reason `BUDGET_ENABLED` is (REV-16): a CLI, a test
   # and a single-user dev run have no reason to be throttled, and a deployment serving real users
   # over a shared endpoint has no reason not to be. The turn guards above bound what reaches the

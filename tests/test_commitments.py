@@ -31,6 +31,7 @@ from chemclaw.ingest.commitments.models import Commitment
 from chemclaw.ingest.commitments.store import mirror_freshness, outstanding, record_commitments
 from chemclaw.ingest.sources.base import SourceSpec
 from chemclaw.ingest.sources.manifest import DataSourceManifest
+from chemclaw.ingest.sources.registry import _build_half
 from tests.pg import migrated_db_or_skip
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
@@ -299,6 +300,43 @@ def test_the_pass_sweeps_only_where_the_adapter_promises_a_whole_picture() -> No
         )
 
     asyncio.run(_run())
+
+
+def test_the_shipped_adapter_takes_its_completeness_promise_from_the_manifest() -> None:
+    """The sweep above is wired to a claim; this is what lets a site make that claim.
+
+    `snapshot` was a hard-coded class attribute, so the destructive sweep the test above exercises
+    was unreachable for the one adapter that ships. It could not be a setting either: whether an
+    export is complete every pass is a property of *one site's* export tool — whether it writes the
+    directory atomically — so two sources sharing a process-wide field would have to agree about
+    something they have no reason to agree about.
+
+    It is a manifest key, and the seam already carried it: `registry._build_half` calls
+    `factory(**manifest.config)`, so the constructor's signature *is* the config schema. That is the
+    D-120 property being exercised rather than described — a new source is a manifest folder with
+    **zero** core edits, and this key cost none.
+
+    Both directions, because the default is the load-bearing half: a manifest that says nothing
+    must keep today's behaviour exactly, or this change silently arms a destructive sweep on every
+    deployment that already runs this adapter.
+    """
+    default = json_commitment_export(name="probe")
+    assert default.snapshot is False, (
+        "the shipped manifest declares no `config:`, so an unset key must mean no sweep — "
+        "otherwise this change deletes rows on deployments that never asked for it"
+    )
+
+    manifest = DataSourceManifest(
+        name="probe",
+        description="A probe source whose export tool writes the whole directory atomically.",
+        commitments="chemclaw.ingest.commitments.json_export:json_commitment_export",
+        config={"snapshot": True, "path": "/nonexistent-by-design"},
+    )
+    built = _build_half(manifest, manifest.commitments or "", name=manifest.name)
+    assert built.snapshot is True, (
+        "a `snapshot: true` in the manifest did not reach the adapter, so a site cannot state that "
+        "its export is complete and `sweep_withdrawn` stays unreachable for the shipped adapter"
+    )
 
 
 async def test_the_reading_reports_when_the_mirror_was_last_refreshed() -> None:

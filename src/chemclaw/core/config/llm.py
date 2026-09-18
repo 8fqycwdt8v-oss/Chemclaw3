@@ -230,15 +230,43 @@ class LlmSettings(BaseSettings):
     # they count uniformly. Each revision is still a model call and is still counted by both,
     # which is the conclusion D-2026-08-16 reached about revisions and a cap they could skip.
     #
-    # 0 is off, on the convention `core/config/agent.py` states for numeric ceilings. It ships
-    # off because it is only reachable behind `verifier_enabled` or
-    # `answer_shape_gate_enabled`, which are themselves off, and because a revision doubles a
-    # flagged turn's model spend — a real cost that a deployment should choose.
+    # 0 is off, on the convention `core/config/agent.py` states for numeric ceilings. **It ships
+    # on, at 2, and the gate below is what makes that mean anything.** The loop reads a *verdict*,
+    # so it is reachable only behind `verifier_enabled` or `answer_shape_gate_enabled` — with both
+    # off, as they were, every non-zero value here was a no-op. `answer_shape_gate_enabled` now
+    # ships on, which is the deliberate pairing: a deterministic gate that marks an answer, and a
+    # bounded loop that tries to re-ground what it marked rather than only labelling it.
+    # `verifier_enabled` stays off — it adds a judge model call to every answer and
+    # `require_verifier_capability()` fails pod startup where the gateway cannot enforce structured
+    # output, which is a deployment's decision rather than this one.
+    #
+    # The cost is real and is accepted rather than argued away: a flagged turn pays up to two extra
+    # model calls, and one that stays flagged through both opens a durable review request
+    # (`answer_review_escalation_enabled`). 0 restores the previous posture exactly, and the
+    # off-path is asserted as a complete no-op rather than assumed.
     #
     # **Bounded against the turn deadline** by the cross-field check in `core/config/__init__.py`:
     # each round is a model round-trip *and* a judge call, so a setting whose judging alone fills
     # `service_turn_timeout_seconds` buys rounds the chemist can never be shown.
-    answer_review_max_rounds: int = Field(default=0, ge=0)
+    answer_review_max_rounds: int = Field(default=2, ge=0)
+    # Whether an answer that is *still* flagged when the rounds run out is put in front of a
+    # person, as a durable `review` wait (`durable/awaiting.py`) opened by `api/runner.py`.
+    # Bounded rounds that end in silence are the gap this closes: the rounds were spent, the
+    # exhaustion counter moved, and the chemist got an answer marked for review that nobody was
+    # ever asked to look at — the bounded half of Paperclip's `maxReviewRounds` without the
+    # escalation that gives the bound its meaning.
+    #
+    # **On by default, unlike its neighbours above, because it has no trigger of its own.** It
+    # fires only where `answer_review_max_rounds` is non-zero *and* a check flagged the answer
+    # *and* the rounds bought nothing, so a deployment that turned the loop on has already decided
+    # the mark is worth acting on; an escalation that reaches nobody is what makes that spend buy
+    # nothing at all. Turned off, an exhausted answer ships marked and the only record is
+    # `chemclaw_answer_review_exhausted_total`, which is where this started.
+    #
+    # It opens a wait and changes nothing else: the answer still ships, and a wait that cannot be
+    # opened is logged and skipped rather than failing the turn
+    # (`api/runner.py::_escalate_exhausted_review`).
+    answer_review_escalation_enabled: bool = True
     verifier_band_rerolls: int = Field(default=2, ge=1)
     # The per-protocol condensation call's own deadline (`agent.condense`). Per *map unit*, so
     # one stalled extraction costs one row of the comparison and never the turn — the same
@@ -255,16 +283,22 @@ class LlmSettings(BaseSettings):
     # specification — a flow rate, a gradient table, a wavelength, a back pressure, a column brand,
     # an ICH limit, a polymorph form — marked for review when no tool in the turn produced them.
     #
-    # Off by default and deliberately a deployment decision. It is a *shape* heuristic, not proof
-    # of grounding: it both misses (an invented number in a shape it does not know) and over-fires
-    # (a chemist's own figure quoted back). An answer marked for review that did not need it costs
-    # trust in every mark after it, which is the failure mode that matters more here.
+    # **On by default, and the over-firing is accepted rather than denied.** It is a *shape*
+    # heuristic, not proof of grounding: it both misses (an invented number in a shape it does not
+    # know) and over-fires (a chemist's own figure quoted back — four such answers are pinned in
+    # `tests/test_verifier.py`, deliberately, so the rate cannot drift unnoticed). An answer marked
+    # for review that did not need it still costs trust in every mark after it. What changed is
+    # what a mark leads to: with `answer_review_max_rounds` shipping at 2, a mark sends the answer
+    # back to be re-grounded and, failing that, to a person — so an over-fire now costs a model
+    # call and possibly a review request, where before it cost only a label the chemist had to
+    # learn to discount. That trade is why this gate rather than `verifier_enabled` is the one
+    # turned on: it is deterministic and costs no model call of its own.
     #
     # The measured case for having it at all: a capability-boundary instruction cut invented
     # parameter classes from 9 to 1 across the six worst live probes, and a stronger model still
     # produced a complete branded HPLC method table *while writing* "not a validated method".
     # Prompting is necessary and demonstrably not sufficient.
-    answer_shape_gate_enabled: bool = False
+    answer_shape_gate_enabled: bool = True
     # Embedding provider (plan F10-A). Selects how a note/query is embedded: `hash` is a
     # deterministic, offline, dependency-free feature-hash (dev/CI only — token-overlap
     # similarity, NOT neural-semantic); `openai_compatible` calls the internal endpoint's

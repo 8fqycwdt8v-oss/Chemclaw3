@@ -20,7 +20,8 @@ from pathlib import Path
 import pytest
 
 from chemclaw.core.config import settings
-from chemclaw.kg.graph import corpus_revision
+from chemclaw.kg import graph
+from chemclaw.kg.graph import corpus_revision, note_file_fingerprints
 from chemclaw.retrieval.external_note_index import ExternalVectorNoteIndex
 from chemclaw.retrieval.vector_index import (
     InMemoryNoteIndex,
@@ -405,3 +406,149 @@ async def test_the_postgres_predicate_protects_a_row_from_a_newer_corpus(tmp_pat
     # A caller with no revision of its own prunes everything absent, exactly as before.
     assert await index.retire_absent({"kept"}) == 1
     assert await index.fingerprints("key-1") == {}
+
+
+# --- two pods at ONE commit: the re-embedding half of the same measurement ----------------------
+
+
+def _corpus_cloned_twice(root: Path) -> tuple[Path, Path]:
+    """One commit of one corpus, cloned twice — the steady state, not the lagging one.
+
+    `_corpus_at_two_revisions` above builds the *retirement* case: two pods that genuinely disagree
+    about what the corpus contains. This builds the case where they agree about everything a person
+    would call content and still disagree about the fingerprint, because a clone writes its own
+    mtimes. Real clones rather than copied directories, for the reason that helper gives.
+    """
+    origin = root / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    for note_id in ("reaction-a", "reaction-b", "reaction-c"):
+        _write_note(origin, note_id, note_id.upper())
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-q", "-m", "three notes")
+
+    pod_a, pod_b = root / "pod-a", root / "pod-b"
+    _git(root, "clone", "-q", str(origin), str(pod_a))
+    _git(root, "clone", "-q", str(origin), str(pod_b))
+    return pod_a, pod_b
+
+
+def test_two_clones_of_one_commit_fingerprint_every_note_identically(tmp_path: Path) -> None:
+    """The root cause, at the smallest scale that shows it.
+
+    Measured before the change: the two dicts shared not one value, because `mtime_ns:size` names
+    the moment a checkout *wrote* the file. Asserted as full equality rather than as "the same
+    keys", since the keys always agreed — that was the whole trap.
+    """
+    pod_a, pod_b = _corpus_cloned_twice(tmp_path)
+    assert note_file_fingerprints(pod_a) == note_file_fingerprints(pod_b) != {}
+
+
+async def test_two_pods_sharing_one_index_re_embed_nothing_on_an_unchanged_corpus(
+    tmp_path: Path,
+) -> None:
+    """The defect, as the count that pays for it: embedding calls per scheduled pass.
+
+    Driven before the change, over these exact clones: pass 1 embedded 3, and passes 2, 3, 4 and 5
+    each embedded 3 again — the whole corpus, every pass, for ever, which is the incremental
+    rebuild `D-2026-08-02-embed-only-what-changed` exists to provide degenerating to a full one the
+    moment a second pod shares the index.
+
+    Five passes rather than two, and alternating, because two would be satisfied by a fingerprint
+    that merely happened to survive one round trip: the steady state is each pod repeatedly finding
+    the other's work acceptable. Pass 5 repeats pod A immediately after pod B, which is the
+    interleaving a Temporal Schedule actually produces — one execution per firing, landing on
+    whichever worker polls first.
+    """
+    pod_a, pod_b = _corpus_cloned_twice(tmp_path)
+    index = InMemoryNoteIndex()
+
+    assert await reindex_notes(index, notes_dir=str(pod_a)) == 3, "the first pass embeds the corpus"
+    for pod in (pod_b, pod_a, pod_b, pod_a):
+        assert await reindex_notes(index, notes_dir=str(pod)) == 0, (
+            "a pod re-embedded notes another pod had already embedded from the identical commit"
+        )
+
+
+async def test_a_second_pod_still_embeds_a_note_the_first_has_not_seen(tmp_path: Path) -> None:
+    """The change may only stop work that was redundant; a real edit still costs its call.
+
+    Without this, the fix is indistinguishable from deleting the diff — the shape a
+    "nothing changed" optimisation is most easily mistaken for. Both arms are here: a note edited
+    in one clone is re-embedded from that clone, and a note added to it is embedded too.
+    """
+    pod_a, pod_b = _corpus_cloned_twice(tmp_path)
+    index = InMemoryNoteIndex()
+    await reindex_notes(index, notes_dir=str(pod_a))
+
+    _write_note(pod_b, "reaction-b", "Ester B, corrected")
+    _write_note(pod_b, "reaction-d", "Ester D")
+    assert await reindex_notes(index, notes_dir=str(pod_b)) == 2
+
+    # And pod A, which still holds the old bytes for `reaction-b`, sees its own version as changed.
+    assert await reindex_notes(index, notes_dir=str(pod_a)) == 1
+
+
+async def test_the_fingerprint_survives_the_round_trip_through_postgres(tmp_path: Path) -> None:
+    """The same agreement through the shipped backend, because a column is what a deployment has.
+
+    `note_index.fingerprint` is `TEXT` (migration 035) and the value it now holds is 71 characters
+    where it held around 25, so this is the assertion that the wider value is stored and read back
+    whole rather than truncated somewhere between the upsert and `fingerprints()`. A fingerprint
+    that came back clipped would compare unequal and re-embed everything — the defect, restored,
+    with every offline test still green.
+    """
+    await migrated_db_or_skip()
+    from chemclaw.core import db
+
+    async with db.connection(settings.postgres_dsn) as conn:
+        await conn.execute("DELETE FROM note_index")
+        await conn.commit()
+
+    pod_a, pod_b = _corpus_cloned_twice(tmp_path)
+    index = PostgresNoteIndex()
+
+    assert await reindex_notes(index, notes_dir=str(pod_a)) == 3
+    stored = await index.fingerprints(await _key())
+    assert stored == note_file_fingerprints(pod_b), (
+        "what Postgres gave back is not what the other pod's disk says"
+    )
+    assert await reindex_notes(index, notes_dir=str(pod_b)) == 0
+
+
+async def test_a_note_that_will_not_open_is_kept_rather_than_retired(tmp_path: Path) -> None:
+    """Hashing widened the window in which a note can drop out of `keep`, and this holds it shut.
+
+    `reindex_notes` builds `keep` from `note_file_fingerprints`, which is what stops a note it
+    cannot *parse* being retired from the index — measured at 40 rows per 40 broken notes. Moving
+    from stat to read added a second way to fail: a file that stats fine and will not open. Without
+    `graph.UNREADABLE` it would have vanished from that set and taken its index row with it.
+
+    The last two passes are the part that was written wrong before it was run. The docstring in
+    `note_file_fingerprints` claimed the note is "re-embedded exactly once" when the file opens
+    again; it is re-embedded only if its *bytes* moved, so a fault that heals to the same content
+    costs nothing. The fault is staged as a directory wearing a note's name, the same
+    privilege-independent way `tests/test_graph.py` stages it.
+    """
+    index = InMemoryNoteIndex()
+    _write_note(tmp_path, "reaction-a", "Ester A")
+    _write_note(tmp_path, "reaction-b", "Ester B")
+    assert await reindex_notes(index, notes_dir=str(tmp_path)) == 2
+
+    broken = tmp_path / "reaction" / "reaction-b.md"
+    broken.unlink()
+    broken.mkdir()
+    assert note_file_fingerprints(tmp_path)["reaction-b"] == graph.UNREADABLE
+    assert await reindex_notes(index, notes_dir=str(tmp_path)) == 0
+    assert set(await index.fingerprints(await _key())) == {"reaction-a", "reaction-b"}, (
+        "a note that would not open was retired by the pass that could not read it"
+    )
+
+    # Healed to the *same* bytes: the stored digest was never wrong, so there is nothing to redo.
+    broken.rmdir()
+    _write_note(tmp_path, "reaction-b", "Ester B")
+    assert await reindex_notes(index, notes_dir=str(tmp_path)) == 0
+
+    # Healed to *different* bytes: exactly that one note.
+    _write_note(tmp_path, "reaction-b", "Ester B, corrected")
+    assert await reindex_notes(index, notes_dir=str(tmp_path)) == 1

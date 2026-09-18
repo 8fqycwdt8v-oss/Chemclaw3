@@ -55,8 +55,8 @@ makes it testable without a gateway. **The run half does not exist yet, and that
 missing credential** — this paragraph read "the run half is what needs one", which describes a
 runner waiting on a gateway. There is no runner: nothing in `src/`, `tests/`, `data/` or the
 `Makefile` constructs an `ArmRun`, records `delegated`, or builds the `no-helper` arm at all
-(`data/evals/profiles/` holds `no-tools.yaml` and nothing else). `docs/planning/BACKLOG.md` carries
-that half with what it owes.
+(`data/evals/profiles/` holds control arms for the *tool* and *skill* surfaces and none for this
+one). `docs/planning/BACKLOG.md` carries that half with what it owes.
 """
 
 from __future__ import annotations

@@ -827,32 +827,37 @@ SERVED_ELSEWHERE_ALLOWANCE = 11_000
 #: `SERVED_ELSEWHERE_ALLOWANCE` did not move for the third time, and for the third time because
 #: this tree declares no such bundle.
 #:
-#: **A fourth, and this one was caught by a dependency review rather than by a fleet change of its
-#: own.** `Chemclaw3-mcp` merged two pull requests while this repository's own adoption work was in
-#: flight: one added the `unitops` server, the other took six library adoptions across the fleet.
-#: Measured against that merged `main`, the published directory is **33,048 over 55 tools**
-#: (`chem` 5,577 / 12, `kinetics` 3,389 / 6, `props` 2,936 / 6, `pyexec` 1,142 / 1, `rxnpredict`
-#: 2,784 / 6, `safety` 1,632 / 3, `suitability` 4,471 / 7, `thermalsafety` 3,764 / 7, `unitops`
-#: 7,353 / 7), 4,548 over the 28,500 that stood. Raised to 36,700, the same ~11% headroom.
+#: **A fourth, and this one is the most expensive server in the fleet per tool.** `unitops` —
+#: scale-up and unit-operation sizing, seven tools — took the directory to **33,048 over 55 tools**
+#: (`chem` 5,577 / 12, `kinetics` 3,389 / 6, `props` 2,936 / 6, `pyexec` 1,142 / 1,
+#: `rxnpredict` 2,784 / 6, `safety` 1,632 / 3, `suitability` 4,471 / 7, `thermalsafety` 3,764 / 7,
+#: `unitops` 7,353 / 7), 4,548 over the 28,500 that stood. Raised to 36,700, the same ~11% headroom.
 #:
-#: **The whole breach is `unitops`.** Subtract it and the fleet is 25,695 — the exact figure the
-#: paragraph above recorded, so the six adoptions next door moved this number by **zero**. That is
-#: worth stating rather than glossing: a review that replaced a periodic table, an optimizer and a
-#: set of physical constants across seven servers changed no tool's schema, which is what a
-#: dependency swap behind a stable surface is supposed to look like and is not what anybody could
-#: have asserted without measuring it here.
+#: The cost stated rather than absorbed: 7,353 more tokens on every model call for a deployment
+#: that mounts that directory. At **1,050 tokens a tool** it is nearly double `suitability`'s 639,
+#: which was itself the first entry here to sit above the band — and the shape of the two is
+#: different in a way that decides whether to trim. `suitability`'s total is one composite
+#: (`system_suitability_report`, 1,171) over six tools at 458-614. `unitops` is **uniform**:
+#: measured per tool, 958 to 1,148 across all seven, with no outlier to remove.
 #:
-#: The cost again stated rather than absorbed: 7,353 more tokens on every model call for a
-#: deployment that mounts that directory. At 1,050 tokens a tool `unitops` is **well outside** the
-#: band its siblings occupy (`suitability` 639, `kinetics` 565, `thermalsafety` 538, `safety` 544,
-#: `props` 489, `chem` 465) — nearly double the next dearest. Nothing in this tree can say whether
-#: that is a composite paying for itself the way `system_suitability_report` argues it does, or a
-#: surface nobody has priced; that question belongs in a pull request over there, and this comment
-#: is the only place it is currently asked.
+#: **So the price is the fleet's own two rules meeting a server whose subject is measurements.**
+#: Every tool there takes several physical quantities, each required with no default — that is
+#: deliberate, because a correlation handed a defaulted `U` or `alpha` returns a plausible number
+#: nobody measured — and this fleet requires every argument to state its units and every docstring
+#: to state what the tool is *not*. Seven tools x several required quantities x a sentence each is
+#: 1,050 tokens, and none of the three factors is the one to drop. Trimming here would buy ~2,500
+#: tokens by deleting the units from a scale-up correlation's arguments, which is the trade this
+#: entry exists to make visible rather than take quietly.
+#:
+#: **And the six library adoptions that landed next door in the same week moved this by zero.**
+#: Subtract `unitops` and the fleet is 25,695 — the exact figure the paragraph above recorded
+#: before either merge. A review that replaced a periodic table, an optimizer and a set of physical
+#: constants across seven servers changed no tool's schema, which is what a dependency swap behind
+#: a stable surface is supposed to look like and is not something anybody could have asserted
+#: without measuring it here. The whole breach is `unitops`.
 #:
 #: `SERVED_ELSEWHERE_ALLOWANCE` did not move for the fourth time, and for the fourth time because
-#: this tree declares no such bundle — there is no `connectors/unitops/` here, so no chart
-#: deployment binds it and only the e2e lane that mounts the whole directory pays.
+#: this tree declares no such bundle.
 FLEET_PUBLISHED_ALLOWANCE = 36_700
 
 #: The whole static prefix a shipped `default` turn may cost, as a bound: this file's ceiling plus

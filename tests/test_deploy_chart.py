@@ -1633,14 +1633,23 @@ def test_the_singleton_worker_is_a_singleton_across_a_rollout_too() -> None:
     one is told to stop, and the old one then has up to its `terminationGracePeriodSeconds` (150) to
     finish. Two background workers poll `background-jobs` for that whole window.
 
-    That is exactly the interleaving `values.yaml` and
-    `D-2026-08-27-what-a-second-background-worker-would-race-on` pin the replica count to prevent.
-    `NoteReindexWorkflow` retires `note_index` rows for notes missing from *this pod's* knowledge
-    checkout — an `emptyDir` its own sidecar refreshes on an interval — so during the overlap the
-    new pod's clone is fresh and the old pod's is up to an interval stale, and a merge-webhook
-    reindex landing on the old one deletes the freshly merged notes' rows while logging that it
-    retired notes that exist. The ADR's "one pod's clone only ever moves forward" is true at steady
-    state and false during a rollout, which is the gap this closes.
+    **The reason this test was written is gone, and it is kept for the other one.** It was the
+    corpus interleaving `D-2026-08-27-what-a-second-background-worker-would-race-on` named: during
+    the overlap the new pod's clone is fresh and the old pod's is up to a sidecar interval stale, so
+    a reindex landing on the old one retired the freshly merged notes' rows and then re-embedded
+    everything on the way back. Both halves are closed — the prune is bounded by the corpus revision
+    a row was built from (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`) and the
+    fingerprint is a hash of the note's bytes rather than of the mtime its own checkout wrote
+    (`D-2026-09-16-a-fingerprint-that-names-a-checkout-is-not-a-fingerprint-of-a-note`), so two pods
+    holding one commit now agree about every note.
+
+    What still needs `Recreate` is replay: with no overlap every unfinished run on
+    `background-jobs` is resumed by exactly one code version, so the new image must be able to
+    replay the histories the old one wrote
+    (`D-2026-09-09-a-replay-control-needs-an-archived-history-not-a-patch`). That justification
+    never depended on the replica count, which is why this assertion outlives the race it was
+    written for — and why the premise assertion below is about `replicas` being *readable* rather
+    than about it still being the reason.
 
     `Recreate` rather than `maxSurge: 0`: a singleton worker has no availability to protect —
     Temporal redelivers an activity whose worker vanished — so the honest statement is that the old
@@ -1648,7 +1657,8 @@ def test_the_singleton_worker_is_a_singleton_across_a_rollout_too() -> None:
     """
     text = (CHART / "templates" / "deployment-workers.yaml").read_text()
     assert _values()["workers"]["background"]["replicas"] == 1, (
-        "the background worker is no longer pinned to one replica; this test's premise is gone"
+        "the background worker is no longer pinned to one replica — which is allowed now that the "
+        "corpus race is closed, but `Recreate` below then has to be re-argued for replay alone"
     )
     strategy = re.search(r"^  strategy:\n\s+type: (\w+)", text, flags=re.MULTILINE)
     assert strategy and strategy.group(1) == "Recreate", (
@@ -3098,9 +3108,11 @@ def test_only_the_fleet_group_alerts_on_a_series_this_system_does_not_emit() -> 
     Its header argued that every rule reads an application counter — "so a process that is gone
     emits silence" — which is what makes `up` and `absent()` necessary. The sentence carried a
     count ("all sixteen") that was thirty-seven by the time anyone read it, and the count was never
-    the interesting half: the *split* is. Two rules read Prometheus's own synthesised `up` and
-    every other rule reads a series this registry declares, and that is what the header now says
-    and this asserts.
+    the interesting half: the *split* is. A short list of rules read Prometheus's own synthesised
+    `up` and every other rule reads a series this registry declares, and that is what the header
+    now says and this asserts. The list is enumerated below rather than counted here, for the
+    reason the count it replaced failed: a number in this docstring is stale the next time somebody
+    adds a rule, while a set that must match exactly is not.
 
     A third rule written against a series nothing here emits would be green forever, which reads
     exactly like the condition never occurring — the same failure
@@ -3131,9 +3143,15 @@ def test_only_the_fleet_group_alerts_on_a_series_this_system_does_not_emit() -> 
     # `monitoring.temporalSdkMetrics.enabled`, which is the same flag that renders the port the
     # exporter would bind, so it is absent from every shipped configuration rather than green
     # forever in one. The panels were unconditional.
+    # `ChemclawNoBackgroundWorkerIsScraped` is the fourth and belongs to the same fleet group as
+    # the first two: the shared-endpoint `absent()` beside it cannot see a background worker that
+    # is missing, because connectors and the front door serve the same `metrics` port and keep it
+    # satisfied. It reads `up` for exactly the reason the other two do — a pod that never became a
+    # target emits no first-party series to alert on.
     assert on_up == {
         "ChemclawTargetDown",
         "ChemclawNoWorkerIsScraped",
+        "ChemclawNoBackgroundWorkerIsScraped",
         "ChemclawWorkerNotPolling",
     }, (
         f"the rules that read something other than a first-party series are {sorted(on_up)}; the "
@@ -5565,3 +5583,82 @@ def test_every_declared_ecosystem_is_audited_or_accepted() -> None:
         f"(and name its target in _AUDITED_ECOSYSTEMS) or write the `{_ACCEPTED_RISK}` line "
         "naming it — an updater without either is a control a reader will assume exists."
     )
+
+
+def test_the_background_worker_has_an_alert_the_shared_endpoint_cannot_give_it() -> None:
+    """The shared-endpoint alert cannot see a background worker that is missing entirely.
+
+    `Recreate` is what makes that state reachable.
+
+    `deployment-workers.yaml` is the only Deployment in this chart carrying a `strategy:` block,
+    and it is `Recreate` — deliberately, because two background workers racing on one corpus clone
+    is what `D-2026-08-27-what-a-second-background-worker-would-race-on` pins the replica count to
+    prevent. The cost is that the old pod is gone before the new one is tried, so a worker that
+    cannot start leaves the release with none.
+
+    `ChemclawNoWorkerIsScraped` does not cover that, and its own comment used to claim it did:
+    connector workers serve the same `metrics` port (`deployment-connectors.yaml` says so), as do
+    the front door and mcp-face, so its `absent()` is false whenever any of them is up. The
+    distinguishing label has to be in the expression, not in the reasoning about it.
+    """
+    rules = (CHART / "templates" / "prometheusrule.yaml").read_text()
+    assert "ChemclawNoBackgroundWorkerIsScraped" in rules
+
+    expr = _alert_expression(rules, "ChemclawNoBackgroundWorkerIsScraped")
+    assert "absent(" in expr, "only absent() alerts on no series existing at all"
+    assert 'app_kubernetes_io_component="background-worker"' in expr, (
+        "without the component label this is the shared-endpoint alert again, which any connector "
+        "or front-door pod keeps satisfied while no background worker exists"
+    )
+
+    # The other direction, which is what makes the first assertion mean something: the alert this
+    # one supplements must still NOT carry that label, or the two are the same rule twice.
+    shared = _alert_expression(rules, "ChemclawNoWorkerIsScraped")
+    assert "app_kubernetes_io_component" not in shared, (
+        "ChemclawNoWorkerIsScraped now scopes to a component, so the new alert is redundant and "
+        "one of the two should go"
+    )
+
+
+def test_the_component_label_the_worker_alert_reads_is_one_the_podmonitor_stamps() -> None:
+    """An alert label the scrape config does not produce is a rule that is green forever.
+
+    This is the same failure the fleet group's own comment records for `kube_pod_status_ready`, one
+    label instead of one metric: `podTargetLabels` is what turns a pod label into a sample label,
+    so an alert selecting on `app_kubernetes_io_component` is only meaningful while the PodMonitor
+    copies it. Held in both directions so neither side can be edited alone.
+    """
+    monitor = (CHART / "templates" / "podmonitor.yaml").read_text()
+    assert "app.kubernetes.io/component" in monitor.split("podTargetLabels:")[1][:200], (
+        "the PodMonitor stopped copying the component label, so the background-worker alert now "
+        "selects on a label no sample carries and can never fire"
+    )
+    workers = (CHART / "templates" / "deployment-workers.yaml").read_text()
+    assert "app.kubernetes.io/component: background-worker" in workers, (
+        "the worker Deployment's component label changed; the alert's selector no longer matches it"
+    )
+
+
+def test_no_alert_reads_a_series_this_prometheus_cannot_see() -> None:
+    """kube-state-metrics is platform monitoring; these rules are evaluated by user-workload.
+
+    The fleet group's comment already argues this for `kube_pod_status_ready`, and a backlog row
+    nevertheless proposed `kube_deployment_status_replicas_unavailable` for a stuck rollout — the
+    obvious expression, and one that would have been permanently empty here. Green forever reads
+    exactly like "the condition never occurred", which is the failure mode this whole file is
+    arranged against.
+
+    So the constraint is asserted rather than left in a comment for the next person to miss. If a
+    deployment ever federates those series, this test is the one place that has to change, and it
+    says why.
+    """
+    rules = (CHART / "templates" / "prometheusrule.yaml").read_text()
+    expressions = "\n".join(
+        block.split("for:")[0] for block in rules.split("- alert: ")[1:] if "for:" in block
+    )
+    for series in ("kube_deployment_", "kube_pod_", "kube_statefulset_", "kube_daemonset_"):
+        assert series not in expressions, (
+            f"an alert expression reads `{series}*`, which kube-state-metrics publishes to the "
+            "*platform* Prometheus in `openshift-monitoring`. A user-workload PrometheusRule "
+            "cannot see those series, so this rule is green forever."
+        )

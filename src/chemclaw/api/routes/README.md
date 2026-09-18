@@ -26,6 +26,7 @@ disables `app.dependency_overrides`.)
 | `protocols.py` | `GET /protocols[...]`, `GET /protocols/{id}/diff`, `GET /protocols/{id}/run-sheet.csv`, `POST /protocols/{id}/revisions`, `POST /protocols/{id}/status` — the design revision surface. **The two write routes are the only ones in this package that answer 403 rather than 404**, because a protocol is not owner-scoped the way a session is; worth knowing before reading their gate as an inconsistency |
 | `notes.py` | `GET /notes/{id}` — one knowledge note as the `NoteView` `expand_note` returns, so a citation chip resolves to the note it cites. `CurrentUser`-gated, not owner-scoped: the graph has no owner |
 | `jobs.py` | `GET/DELETE /jobs[...]` — the durable-run surface over `job_records` |
+| `workflows.py` | `GET /workflows`, `GET/DELETE /workflows/{name}`, `POST /workflows/{name}/approval` — a chemist's own composed workflows, and the standing approval that lets one launch durable jobs. **Routes and deliberately not agent tools**, for `plan.py`'s reason: a model must never authorize its own plan, and the guarantee is obtained by not building the tool. Owner-scoped, so somebody else's name is a 404 rather than a 403 |
 
 `caching.py` holds no route. It is the conditional-GET policy the two *read* routes above share —
 `results.py` and `notes.py` — and it exists because the caching header a surface asked for
