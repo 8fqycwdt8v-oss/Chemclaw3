@@ -800,5 +800,7 @@ modules in this tree had already measured the truth and written it down. The tre
 claim and its refutation for weeks.
 
 **Still open, now queued rather than implied:** a chemist's own `/scratch/` writes are unbounded and
-— with `retention_enabled=False` — permanent; and a parallel `task` fan-out still multiplies the
-helper file budget by its width, because `_files_already_held` reads a pre-batch snapshot.
+— with `retention_enabled=False` — permanent. The parallel `task` fan-out that used to be named
+beside it is closed by
+`D-2026-09-18-a-pre-batch-snapshot-cannot-see-its-own-superstep`; what is left of it is the
+narrower row that ADR opens, that the divisor counts siblings by name rather than writers.

@@ -2051,3 +2051,40 @@ def test_the_fan_out_divisor_counts_the_tools_that_write_files_not_the_whole_bat
         f"a lone `task` beside seven tools that write no file stored {landed} of "
         f"{len(note)} characters, so the divisor is counting the batch rather than the producers"
     )
+
+
+def test_the_file_share_bounds_the_superstep_at_every_width_this_deployment_allows() -> None:
+    """The per-file floor is a notice, so past a crossover the total grows linearly again.
+
+    **The counterpart `bounded_for_batch` already has and this budget did not.**
+    `tests/test_tool_result_size.py::test_the_batch_share_bounds_the_batch_at_every_width` exists
+    because a share driven below `bounded_content`'s brief form stops shrinking — the notice is
+    ~44 characters and nothing returns less — so N files each at the floor is 44N, which passes
+    the budget again at a large enough N. Every floor test beside this one pins `sharing=2` or
+    `sharing=4`, comfortably inside the crossover, which is the exact blind spot that test's own
+    docstring records about its first version.
+
+    It matters more since `concurrent` joined the denominator: multiplying it by up to
+    `agent_max_parallel_tool_calls` moves the crossover down by the same factor, measured from
+    ~4,444 files per command at width 1 to ~555 at width 8.
+
+    So this sweeps the widths a deployment can actually reach, and asserts the thing worth
+    asserting — that the notice is what remains, rather than content. A floor that stores only
+    system text is a bound doing its job at the edge; a floor that stores a helper's bytes is not.
+    """
+    from chemclaw.agent.tool_result_size import _bounded_file
+
+    budget = settings.agent_subagent_files_max_chars
+    content = "z" * 10_000
+    for concurrent in (1, 2, 4, settings.agent_max_parallel_tool_calls):
+        for sharing in (1, 8, 600, 5_000):
+            stored = _bounded_file(content, sharing, budget, concurrent)
+            assert len(stored) < len(content), (
+                f"at {sharing} file(s) across {concurrent} call(s) on an exhausted budget, "
+                f"{len(stored)} of {len(content)} characters were stored uncut"
+            )
+            assert "z" * 100 not in stored, (
+                f"at {sharing} file(s) across {concurrent} call(s) the floor kept a run of the "
+                "helper's own bytes; past the crossover what remains must be the notice, or the "
+                f"superstep total grows linearly again ({len(stored)} characters each)"
+            )

@@ -297,6 +297,33 @@ topic).
   `agent/scratchpad.py`, `deepagents.backends.state.StateBackend`, `agent/tool_result_size.py::_bounded_file`.
 
 
+- [ ] **The helper file budget is charged to siblings that wrote nothing, and two write verbs are
+  charged to nobody** — [M], opened by
+  `D-2026-09-18-a-pre-batch-snapshot-cannot-see-its-own-superstep`, which closed the fan-out's
+  fail-open and states both of these as what it did not do. Two halves of one resource, the
+  caller's `files` channel.
+
+  **The over-charge.** `batch_siblings` divides the remaining budget by the batch's calls *naming*
+  `task`, because the siblings' results do not exist when it runs. Most `task` calls read and write
+  nothing, so one helper filing a note beside seven silent ones is charged an eighth: driven at the
+  shipped budget, a 199,999-character note lands whole at width 1 and as 25,000 at width 8. The
+  bound holds — an unclaimed share is wasted, never spent — so this is lost allowance rather than a
+  hole. The shape that would be exact is a trim over the **merged** channel after the superstep,
+  where every real contribution is visible, and it is not free: the exemption that keeps a
+  chemist's own documents out of this budget is `rewritten_command_files` comparing each command
+  against the state *before* it, and a post-merge trim has nothing to compare against, so exact
+  accounting has to buy the channel provenance first.
+  `test_a_chemists_own_file_survives_a_delegation_it_had_nothing_to_do_with` is what a naive
+  version breaks, which makes this a design with an ADR rather than an edit.
+
+  **The unbounded half.** `write_file` and `edit_file` reach the same channel through
+  `StateBackend`'s `send(...)` and return a plain `ToolMessage`, so they never pass
+  `rewritten_command_files` and **nothing bounds them at all** — while everything they store is
+  charged into `held` against every later helper. So the tightest arm of this budget is spent by
+  the arm nobody measures. Anchors: `agent/tool_result_size.py::batch_siblings`,
+  `_bounded_file`, `agent/tool_result_shape.py::rewritten_command_files`,
+  `deepagents.backends.state.StateBackend`.
+
 - [ ] **The model-facing prose guards scan the in-process registry and four bundles, not the
       surface** — [M], found 2026-09-15 in the round-two review.
       `tests/test_prose_contract.py::test_no_tool_description_tells_the_model_about_a_tier_that_is_gone`

@@ -493,13 +493,27 @@ def batch_siblings(request: Any) -> int:
     A `props` call in the same batch writes no file, so charging a helper for it would cut a
     research note to a fraction on a batch that shares none of its budget.
 
+    **It counts siblings by name, not writers, and that gap is a real cost rather than a rounding
+    one.** Most `task` calls read and write nothing, so a batch of eight helpers of which one files
+    a note charges that note an eighth — which is the same outcome the paragraph above rejects
+    `batch_width` for, arrived at by a narrower route. Driven at the shipped budget, one writer
+    beside silent siblings: 199,999 characters land whole at width 1, 100,000 at width 2, 50,000 at
+    4 and 25,000 at 8. The bound still holds — an unused sibling's share is wasted allowance, never
+    spent — so this fails closed, and what it costs is a note cut for company it did not keep.
+    Counting writers instead needs their results, which do not exist when this runs;
+    `docs/planning/BACKLOG.md` carries the exact-accounting design and why it is not a free win.
+
     Args:
         request: The tool-call request the middleware chain is running.
 
     Returns:
         The number of calls in this batch naming this call's tool, never below 1.
     """
-    name = request.tool_call.get("name")
+    # Subscript rather than `.get`, because `bounded_for_batch` one function up already requires
+    # the key and the two reads of one dict must not disagree about whether it is optional — a
+    # missing name here would match no sibling, floor to 1 and hand out the whole budget, which is
+    # a fail-open reached by a shape the other reader would have raised on.
+    name = request.tool_call["name"]
     return max(sum(1 for call in _batch_calls(request) if call.get("name") == name), 1)
 
 
@@ -597,8 +611,10 @@ def _bounded_file(content: str, sharing: int, held: int = 0, concurrent: int = 1
     is a *pre-batch* snapshot — `batch_siblings`'s docstring says why it has to be — so the
     siblings running right now in this superstep are invisible to it and every one of them read
     the same number. Dividing what is left by how many of them there are is the only arithmetic
-    available before their results exist; it assumes each takes an equal slice, which over-charges
-    a narrow producer beside a wide one and is the conservative direction for a storage bound.
+    available before their results exist; it assumes each of them writes, and each an equal slice,
+    so a lone writer beside silent siblings is over-charged by the batch's width. That is the
+    conservative direction for a storage bound — an unclaimed share is wasted, not spent — and it
+    is the cost `batch_siblings` states with its measurement.
 
     The tool name passed to the notice is `task`, because that is the call the caller sees in its
     own thread and the one an operator would go looking at.
@@ -607,7 +623,8 @@ def _bounded_file(content: str, sharing: int, held: int = 0, concurrent: int = 1
         content: The file's text as the helper left it.
         sharing: How many files cross in this command.
         held: Characters of `files` the caller's state already carries.
-        concurrent: How many calls in this batch write into the same channel.
+        concurrent: How many calls in this batch name this call's tool, which is an upper
+            bound on how many of them write into the same channel — see `batch_siblings`.
 
     Returns:
         The text to store, or `content` itself when nothing was cut.
@@ -630,8 +647,8 @@ def _bounded_file(content: str, sharing: int, held: int = 0, concurrent: int = 1
     record_metric(lambda m: m.increment("chemclaw_subagent_file_truncations_total"))
     logger.warning(
         "cut %d character(s) from a file a helper wrote into its caller's state; the share of "
-        "`agent_subagent_files_max_chars` across %d file(s) in %d concurrent call(s) is %d, with "
-        "%d character(s) of the budget already held",
+        "`agent_subagent_files_max_chars` across %d file(s) in %d concurrent call(s) to this tool "
+        "— however few of them wrote — is %d, with %d character(s) of the budget already held",
         removed,
         sharing,
         concurrent,
