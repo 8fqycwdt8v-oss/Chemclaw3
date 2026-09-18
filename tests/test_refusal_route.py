@@ -54,6 +54,7 @@ from tests.middleware import run_middleware, tool_request
 _HAS_A_PATH = frozenset(
     {
         "dry_run",
+        "local_skills_read_only",
         "plan_not_approved",
         "plan_scope_excludes_tool",
         "skills_read_only",
@@ -140,6 +141,17 @@ def _every_routed_refusal(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     refusals["tool_withheld_reaches_the_chemist"] = str(chemist)
 
     refusals["skills_read_only"] = str(SkillsReadOnlyRefusal(_skills_refusal()))
+    # The chemist's own skills tier, whose refusal is a *different sentence* with a different
+    # sanctioned path — the shared tree names a reviewed commit as the way in, which is wrong for a
+    # tier its owner changes through a route they call. Read off the module rather than built here,
+    # for `_skills_refusal`'s reason: a copy of prose held in a test is a reword away from being
+    # silently wrong. This entry is the first thing
+    # `test_the_partition_is_read_off_the_tree_rather_than_copied_into_this_file` ever caught —
+    # the site arrived on `main` while this branch was open, and the hand-written fixture below it
+    # would have gone on reporting "every refusal" over eleven of twelve.
+    from chemclaw.agent.local_skills import _LOCAL_READ_ONLY
+
+    refusals["local_skills_read_only"] = _LOCAL_READ_ONLY
     return refusals
 
 

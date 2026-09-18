@@ -27,6 +27,7 @@ from typing import NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from chemclaw.core.markdown import render_table
 from chemclaw.protocols.models import (
     DesignStatus,
     ExperimentDesign,
@@ -298,17 +299,6 @@ def receipt(
     )
 
 
-def _cell(text: str) -> str:
-    """One table cell, escaped so free text cannot restructure the table.
-
-    Cell contents are a chemist's own words — a level's rationale, a charge line's note, an arm's
-    note — and none of them was escaped. A `|` overflowed the row, so GFM dropped the surplus cells
-    and the text after the pipe vanished; a newline *terminated the table* and dumped the rest of
-    the run sheet into the page as a paragraph. Both are reachable from any free-text field.
-    """
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ").replace("\r", " ")
-
-
 #: Backtick runs, so a code span can be fenced longer than anything inside it.
 _BACKTICKS = re.compile(r"`+")
 
@@ -341,12 +331,12 @@ def _code(value: str) -> str:
 def _text(value: str) -> str:
     r"""One piece of a chemist's free text, safe to place in the document's block flow.
 
-    `_cell` keeps free text from restructuring a *table*; nothing protected the block context, and
-    the fields outside tables are the same browser-supplied strings. Measured: a hazard line reading
-    `## Waste\n\nQuench into water.` rendered a second `## Waste` section, so the page carried two
-    waste headings with conflicting disposal instructions — one of them forged from a hazard string.
-    A blank line inside a step ejected the rest of that step into an orphan paragraph between the
-    numbered ones.
+    `core.markdown.placeable` keeps free text from restructuring a *table*; nothing protected the
+    block context, and the fields outside tables are the same browser-supplied strings. Measured: a
+    hazard line reading `## Waste\n\nQuench into water.` rendered a second `## Waste` section, so
+    the page carried two waste headings with conflicting disposal instructions — one of them forged
+    from a hazard string. A blank line inside a step ejected the rest of that step into an orphan
+    paragraph between the numbered ones.
 
     Both come from the same two characters: a newline that ends the block, and a leading marker that
     starts a new one. Line breaks collapse to spaces (a bullet or a numbered step is one line by
@@ -366,13 +356,20 @@ def _text(value: str) -> str:
 
 
 def _table(headers: list[str], rows: list[list[str]]) -> str:
-    """A GitHub-flavoured Markdown table, or an empty string when there are no rows."""
+    """A GitHub-flavoured Markdown table, or an empty string when there are no rows.
+
+    The grid and the cell escaping are `core.markdown`'s — this document's tables carry the same
+    chemist free text as the campaign note and the probe reports, and the escaping that keeps a `|`
+    from adding a cell was written here three times over before it had one home.
+
+    The zero-row rule stays here, because it is a claim about *this* document rather than about
+    tables: a run sheet with no charge lines has no charge table, where a probe report with no
+    findings still prints its header to say it asked. `core.markdown` renders the header either
+    way and leaves the choice to whoever knows which sentence is true.
+    """
     if not rows:
         return ""
-    head = "| " + " | ".join(_cell(h) for h in headers) + " |"
-    rule = "| " + " | ".join("---" for _ in headers) + " |"
-    body = ["| " + " | ".join(_cell(cell) or "—" for cell in row) + " |" for row in rows]
-    return "\n".join([head, rule, *body])
+    return render_table(headers, rows)
 
 
 def _number(value: float | None) -> str:

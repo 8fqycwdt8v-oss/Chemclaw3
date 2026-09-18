@@ -15,7 +15,6 @@ test would pass on a partial answer:
   aggregate.
 """
 
-import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -283,20 +282,18 @@ async def _rows(conn: psycopg.AsyncConnection[Any], sql: str, params: Any = ()) 
     return list(await cursor.fetchall())
 
 
-def test_q1_reactions_below_a_free_energy_in_one_solvent() -> None:
+async def test_q1_reactions_below_a_free_energy_in_one_solvent() -> None:
     """Answer: every reaction with delta-G below -10 kcal/mol run in THF at GFN2.
 
     One index, one table — and the alias table is what makes it complete. `rxn-thf-spelled-long`
     was submitted as `tetrahydrofuran`; a schema that stored the name as given would return three
     rows here, look entirely correct, and be missing a run.
     """
-
-    async def _run() -> None:
-        loaded = await _open_loaded()
-        try:
-            rows = await _rows(
-                loaded,
-                """
+    loaded = await _open_loaded()
+    try:
+        rows = await _rows(
+            loaded,
+            """
                 SELECT pv.calc_ref, pv.value_canonical, pv.uncertainty
                 FROM property_value pv
                 WHERE pv.property = 'reaction_delta_g'
@@ -305,54 +302,48 @@ def test_q1_reactions_below_a_free_energy_in_one_solvent() -> None:
                   AND pv.method = 'GFN2-xTB'
                 ORDER BY pv.value_canonical
                 """,
-            )
-            found = {row[0] for row in rows}
-            assert found == {"rxn-thf-spelled-long", "rxn-thf-short"}, (
-                "the THF question must find the run submitted as 'tetrahydrofuran'; if it does "
-                "not, the alias table is not applied and this answers with a subset"
-            )
-            # The near-misses are excluded for the right reason, each by a different predicate.
-            assert "rxn-thf-shallow" not in found  # in THF, not downhill enough
-            assert "rxn-mecn" not in found  # downhill, wrong solvent
-            assert "rxn-thf-dft" not in found  # downhill in THF, different method
-            # The uncertainty is on the value's own row, so a caller cannot read one without it.
-            assert all(row[2] is not None for row in rows)
+        )
+        found = {row[0] for row in rows}
+        assert found == {"rxn-thf-spelled-long", "rxn-thf-short"}, (
+            "the THF question must find the run submitted as 'tetrahydrofuran'; if it does "
+            "not, the alias table is not applied and this answers with a subset"
+        )
+        # The near-misses are excluded for the right reason, each by a different predicate.
+        assert "rxn-thf-shallow" not in found  # in THF, not downhill enough
+        assert "rxn-mecn" not in found  # downhill, wrong solvent
+        assert "rxn-thf-dft" not in found  # downhill in THF, different method
+        # The uncertainty is on the value's own row, so a caller cannot read one without it.
+        assert all(row[2] is not None for row in rows)
 
-        finally:
-            await loaded.close()
-
-    asyncio.run(_run())
+    finally:
+        await loaded.close()
 
 
-def test_q2_ensembles_with_several_populated_conformers() -> None:
+async def test_q2_ensembles_with_several_populated_conformers() -> None:
     """Answer: every conformer ensemble with more than 5 conformers above 1% population.
 
     The `count(*) FILTER` is the shape a series table makes possible and an attribute-value store
     does not: the members are rows with an ordering and a population, not a blob to be parsed.
     """
-
-    async def _run() -> None:
-        loaded = await _open_loaded()
-        try:
-            rows = await _rows(
-                loaded,
-                """
+    loaded = await _open_loaded()
+    try:
+        rows = await _rows(
+            loaded,
+            """
                 SELECT c.calc_ref, count(*) FILTER (WHERE c.population > 0.01) AS populated
                 FROM conformer c
                 GROUP BY c.calc_ref
                 HAVING count(*) FILTER (WHERE c.population > 0.01) > 5
                 """,
-            )
-            assert {row[0] for row in rows} == {"ens-flexible"}
-            assert rows[0][1] == 6, "six of the seven members are above 1%"
+        )
+        assert {row[0] for row in rows} == {"ens-flexible"}
+        assert rows[0][1] == 6, "six of the seven members are above 1%"
 
-        finally:
-            await loaded.close()
-
-    asyncio.run(_run())
+    finally:
+        await loaded.close()
 
 
-def test_q3_predicted_pka_in_a_window_with_its_uncertainty() -> None:
+async def test_q3_predicted_pka_in_a_window_with_its_uncertainty() -> None:
     """Answer: every compound whose predicted pKa is between 4 and 6, with its uncertainty.
 
     The uncertainty is a column on the value's own row, deliberately. Were it a second property
@@ -360,44 +351,38 @@ def test_q3_predicted_pka_in_a_window_with_its_uncertainty() -> None:
     whenever the second row is missing — and a semiempirical pKa quoted bare is precisely what the
     result model's own docstring warns against.
     """
-
-    async def _run() -> None:
-        loaded = await _open_loaded()
-        try:
-            rows = await _rows(
-                loaded,
-                """
+    loaded = await _open_loaded()
+    try:
+        rows = await _rows(
+            loaded,
+            """
                 SELECT s.label, pv.value_canonical, pv.uncertainty, pv.value_id
                 FROM property_value pv
                 JOIN subject s ON s.subject_id = pv.subject_id
                 WHERE pv.property = 'pka' AND pv.value_canonical BETWEEN 4 AND 6
                 """,
-            )
-            assert len(rows) == 1, "only acetic acid is inside the window"
-            label, value, uncertainty, _ = rows[0]
-            assert label == "CC(=O)O"
-            assert value == pytest.approx(4.76)
-            assert uncertainty == pytest.approx(1.2)
+        )
+        assert len(rows) == 1, "only acetic acid is inside the window"
+        label, value, uncertainty, _ = rows[0]
+        assert label == "CC(=O)O"
+        assert value == pytest.approx(4.76)
+        assert uncertainty == pytest.approx(1.2)
 
-        finally:
-            await loaded.close()
-
-    asyncio.run(_run())
+    finally:
+        await loaded.close()
 
 
-def test_q4_everything_resting_on_one_calculation() -> None:
+async def test_q4_everything_resting_on_one_calculation() -> None:
     """Answer: everything that rests on this calculation - asked when one is found wrong.
 
     A recursive walk over an edge table. This is why lineage is not an array column: the walk goes
     in the *reverse* direction, and no array type indexes that way.
     """
-
-    async def _run() -> None:
-        loaded = await _open_loaded()
-        try:
-            rows = await _rows(
-                loaded,
-                """
+    loaded = await _open_loaded()
+    try:
+        rows = await _rows(
+            loaded,
+            """
                 WITH RECURSIVE dependents (calc_ref, depth) AS (
                     SELECT calc_ref, 1 FROM calculation_input WHERE depends_on_calc_ref = %s
                   UNION ALL
@@ -408,31 +393,27 @@ def test_q4_everything_resting_on_one_calculation() -> None:
                 )
                 SELECT DISTINCT calc_ref FROM dependents
                 """,
-                ("screen-1",),
-            )
-            assert {row[0] for row in rows} == {"screen-1#solvent0", "screen-1#solvent1"}, (
-                "a solvent screen's per-solvent parts must be traceable back to the comparison"
-            )
+            ("screen-1",),
+        )
+        assert {row[0] for row in rows} == {"screen-1#solvent0", "screen-1#solvent1"}, (
+            "a solvent screen's per-solvent parts must be traceable back to the comparison"
+        )
 
-        finally:
-            await loaded.close()
-
-    asyncio.run(_run())
+    finally:
+        await loaded.close()
 
 
-def test_q5_every_geometry_for_a_compound_with_its_energy() -> None:
+async def test_q5_every_geometry_for_a_compound_with_its_energy() -> None:
     """Answer: every geometry we hold for this compound, with the energy of each.
 
     Joins the ensemble's members back to the compound they belong to — which works because a
     conformer's `structure_id` is a real column and the subject's member carries the compound.
     """
-
-    async def _run() -> None:
-        loaded = await _open_loaded()
-        try:
-            rows = await _rows(
-                loaded,
-                """
+    loaded = await _open_loaded()
+    try:
+        rows = await _rows(
+            loaded,
+            """
                 SELECT c.structure_id, c.relative_kcal, c.population
                 FROM conformer c
                 JOIN calculation cal ON cal.calc_ref = c.calc_ref
@@ -441,18 +422,16 @@ def test_q5_every_geometry_for_a_compound_with_its_energy() -> None:
                 WHERE cmp.canonical_smiles = 'CCO'
                 ORDER BY c.ordinal
                 """,
-            )
-            assert len(rows) == 7, "every member of the ethanol ensemble is addressable"
-            assert all(row[0].startswith("st_") for row in rows), "each is a resolvable address"
-            assert rows[0][1] == pytest.approx(0.0), "ordinal 0 is the lowest"
+        )
+        assert len(rows) == 7, "every member of the ethanol ensemble is addressable"
+        assert all(row[0].startswith("st_") for row in rows), "each is a resolvable address"
+        assert rows[0][1] == pytest.approx(0.0), "ordinal 0 is the lowest"
 
-        finally:
-            await loaded.close()
-
-    asyncio.run(_run())
+    finally:
+        await loaded.close()
 
 
-def test_q6_one_reaction_across_every_solvent_it_was_run_in() -> None:
+async def test_q6_one_reaction_across_every_solvent_it_was_run_in() -> None:
     """Answer: compare delta-G for this reaction across every solvent we ran it in.
 
     The payoff of a subject identity that excludes solvent, temperature and method: this is a
@@ -463,20 +442,18 @@ def test_q6_one_reaction_across_every_solvent_it_was_run_in() -> None:
     only its aggregate would leave the first two unanswerable here — which is why publishing an
     aggregate's parts is a rule and not an optimization.
     """
-
-    async def _run() -> None:
-        loaded = await _open_loaded()
-        try:
-            subject = (
-                await _rows(
-                    loaded,
-                    "SELECT subject_id FROM subject WHERE label = %s",
-                    ("C=C.C=CC=C>>C1CCCCC1",),
-                )
-            )[0][0]
-            rows = await _rows(
+    loaded = await _open_loaded()
+    try:
+        subject = (
+            await _rows(
                 loaded,
-                """
+                "SELECT subject_id FROM subject WHERE label = %s",
+                ("C=C.C=CC=C>>C1CCCCC1",),
+            )
+        )[0][0]
+        rows = await _rows(
+            loaded,
+            """
                 SELECT coalesce(sv.display_name, 'gas phase') AS solvent,
                        pv.value_canonical, pv.calc_ref
                 FROM property_value pv
@@ -486,95 +463,81 @@ def test_q6_one_reaction_across_every_solvent_it_was_run_in() -> None:
                   AND pv.method = 'GFN2-xTB'
                 ORDER BY pv.value_canonical
                 """,
-                (subject,),
-            )
-            solvents = {row[0] for row in rows}
-            assert {
-                "tetrahydrofuran",
-                "acetonitrile",
-                "dimethyl sulfoxide",
-                "toluene",
-            } <= solvents, (
-                "the comparison must span both the screened solvents and the standalone runs"
-            )
-            # All three THF runs land under one solvent despite two different spellings on the
-            # way in -- which is the point of canonicalizing at write time rather than at read.
-            thf = {row[2] for row in rows if row[0] == "tetrahydrofuran"}
-            assert thf == {"rxn-thf-spelled-long", "rxn-thf-short", "rxn-thf-shallow"}
+            (subject,),
+        )
+        solvents = {row[0] for row in rows}
+        assert {
+            "tetrahydrofuran",
+            "acetonitrile",
+            "dimethyl sulfoxide",
+            "toluene",
+        } <= solvents, "the comparison must span both the screened solvents and the standalone runs"
+        # All three THF runs land under one solvent despite two different spellings on the
+        # way in -- which is the point of canonicalizing at write time rather than at read.
+        thf = {row[2] for row in rows if row[0] == "tetrahydrofuran"}
+        assert thf == {"rxn-thf-spelled-long", "rxn-thf-short", "rxn-thf-shallow"}
 
-        finally:
-            await loaded.close()
-
-    asyncio.run(_run())
+    finally:
+        await loaded.close()
 
 
-def test_a_quick_level_reaction_publishes_no_free_energy() -> None:
+async def test_a_quick_level_reaction_publishes_no_free_energy() -> None:
     """An absent number stays absent — there is no fallback anywhere in the projector.
 
     `delta_g_kcal` is None at `quick` level and whenever a species' symmetry number was unstated.
     A projector that substituted `delta_e_kcal` would publish an electronic energy under the name
     of a free energy, and every query above would then be quietly wrong rather than incomplete.
     """
+    loaded = await _open_loaded()
+    try:
+        await _load(loaded, [_reaction(solvent="thf", delta_g=None, ref="rxn-quick")])
+        rows = await _rows(
+            loaded,
+            "SELECT property FROM property_value "
+            "WHERE calc_ref = %s AND scope_kind = 'calculation'",
+            ("rxn-quick",),
+        )
+        published = {row[0] for row in rows}
+        assert "reaction_delta_e" in published, (
+            "the electronic energy was established and is published"
+        )
+        assert "reaction_delta_g" not in published, (
+            "no free energy was established, so none may be published under that name"
+        )
 
-    async def _run() -> None:
-        loaded = await _open_loaded()
-        try:
-            await _load(loaded, [_reaction(solvent="thf", delta_g=None, ref="rxn-quick")])
-            rows = await _rows(
-                loaded,
-                "SELECT property FROM property_value "
-                "WHERE calc_ref = %s AND scope_kind = 'calculation'",
-                ("rxn-quick",),
-            )
-            published = {row[0] for row in rows}
-            assert "reaction_delta_e" in published, (
-                "the electronic energy was established and is published"
-            )
-            assert "reaction_delta_g" not in published, (
-                "no free energy was established, so none may be published under that name"
-            )
-
-        finally:
-            await loaded.close()
-
-    asyncio.run(_run())
+    finally:
+        await loaded.close()
 
 
-def test_republishing_the_same_record_is_a_no_op() -> None:
+async def test_republishing_the_same_record_is_a_no_op() -> None:
     """Delivery is at-least-once, so writing a record twice must converge rather than duplicate.
 
     Every primary key in the shipped schema is a content hash precisely so this holds; it is what
     makes the outbox's retry safe.
     """
+    loaded = await _open_loaded()
+    try:
+        before = (await _rows(loaded, "SELECT count(*) FROM property_value"))[0][0]
+        await _load(loaded, [_reaction(solvent="thf", delta_g=-15.1, ref="rxn-thf-short")])
+        after = (await _rows(loaded, "SELECT count(*) FROM property_value"))[0][0]
+        assert after == before, "a redelivered record must not add rows"
 
-    async def _run() -> None:
-        loaded = await _open_loaded()
-        try:
-            before = (await _rows(loaded, "SELECT count(*) FROM property_value"))[0][0]
-            await _load(loaded, [_reaction(solvent="thf", delta_g=-15.1, ref="rxn-thf-short")])
-            after = (await _rows(loaded, "SELECT count(*) FROM property_value"))[0][0]
-            assert after == before, "a redelivered record must not add rows"
-
-        finally:
-            await loaded.close()
-
-    asyncio.run(_run())
+    finally:
+        await loaded.close()
 
 
-def test_a_reaction_carries_its_per_species_breakdown() -> None:
+async def test_a_reaction_carries_its_per_species_breakdown() -> None:
     """The breakdown `job_records.result` holds today and nothing can query.
 
     A reaction's delta-G is a fact about the run (`member_ordinal IS NULL`); each species' absolute
     Gibbs energy is a fact about one member. One table answers both, which is what
     `member_ordinal` being nullable buys.
     """
-
-    async def _run() -> None:
-        loaded = await _open_loaded()
-        try:
-            rows = await _rows(
-                loaded,
-                """
+    loaded = await _open_loaded()
+    try:
+        rows = await _rows(
+            loaded,
+            """
                 SELECT sm.role, sm.smiles, pv.value_canonical
                 FROM property_value pv
                 JOIN calculation cal ON cal.calc_ref = pv.calc_ref
@@ -583,15 +546,13 @@ def test_a_reaction_carries_its_per_species_breakdown() -> None:
                 WHERE pv.calc_ref = %s AND pv.property = 'gibbs_free_energy'
                 ORDER BY sm.ordinal
                 """,
-                ("rxn-thf-short",),
-            )
-            assert [(row[0], row[1]) for row in rows] == [
-                ("reactant", "C=C"),
-                ("product", "C1CCCCC1"),
-            ]
-            assert rows[0][2] == pytest.approx(-13.15)
+            ("rxn-thf-short",),
+        )
+        assert [(row[0], row[1]) for row in rows] == [
+            ("reactant", "C=C"),
+            ("product", "C1CCCCC1"),
+        ]
+        assert rows[0][2] == pytest.approx(-13.15)
 
-        finally:
-            await loaded.close()
-
-    asyncio.run(_run())
+    finally:
+        await loaded.close()

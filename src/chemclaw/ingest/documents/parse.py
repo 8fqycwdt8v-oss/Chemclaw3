@@ -26,6 +26,7 @@ import logging
 import zipfile
 from collections.abc import Callable
 
+from charset_normalizer import from_bytes
 from docx import Document
 from openpyxl import load_workbook
 from pptx import Presentation
@@ -92,9 +93,74 @@ def _refuse_a_bomb(name: str, raw: bytes) -> None:
         )
 
 
+def _decode(raw: bytes) -> str:
+    """Turn a text document's bytes into characters: strict UTF-8 first, detection only after it.
+
+    The policy this replaces was `raw.decode("utf-8", errors="replace")`, one encoding, over a
+    decade-old Windows/CIFS share and over whatever a chemist uploads. Three things it did, each
+    re-measured on this commit rather than transcribed:
+
+    * **cp1252 became mojibake that is indexed and citable.** `Reaction held at 60 °C; yield 87 %.`
+      written by Excel or Notepad decodes to `Reaction held at 60 <U+FFFD>C; yield 87 %.` — the
+      degree sign becomes a replacement character and nothing counts it, so that text is chunked,
+      embedded, retrieved and cited exactly like a correct reading. `errors="replace"` never fails,
+      which is why this was invisible rather than rare.
+    * **A UTF-8 BOM landed inside the first CSV cell.** A BOM is valid UTF-8, so it survived the
+      decode intact and `_parse_csv` rendered the first header cell as `<U+FEFF>Compound` — a column
+      name that matches nothing anybody can type or configure.
+    * **UTF-16 was refused with the wrong reason.** `"…".encode("utf-16")` — Notepad's "Unicode" —
+      keeps its NUL bytes through `errors="replace"`, so `sync._read_and_parse`'s NUL guard caught
+      it at position 3 and filed it as `skipped_unreadable` saying a Postgres `text` column cannot
+      hold a NUL. True, and not why that file was unreadable; an operator reading the report learns
+      nothing about the encoding.
+
+    **Strict UTF-8 first is what makes this additive, and it is the whole safety argument.**
+    `utf-8-sig` accepts exactly the byte strings strict `utf-8` accepts, so every file that decodes
+    cleanly today decodes to the same characters — no detector is consulted and nothing can be
+    re-labelled. The one deliberate difference is the BOM it strips, which is the second defect
+    above. `tests/test_document_formats.py` asserts that identity over every text format.
+
+    **Detection is heuristic, and what it is worst on is byte *variety*, not length.** Said that way
+    because the first version of this paragraph said "worst on short files" and measured it over one
+    cp1252 sentence repeated to length — which is the most degenerate input there is, and reads as a
+    multi-byte encoding at any size. Re-measured on the pinned `charset-normalizer` with that same
+    repeated sentence: `big5` at 75, 150 and 225 bytes, `cp949` from 300 bytes to 50 kB, and it
+    never round-trips at any length. Length does not rescue it, and neither codec named here before
+    was one the detector actually produced.
+
+    On realistic mixed prose the same detector is reliable and short is not the problem: a 311-byte
+    cp1252 ELN paragraph carrying `°`, `±`, an em dash and curly quotes is answered `cp1250` from
+    about 70 bytes on and decodes **exactly** — cp1250 and cp1252 agree on every high byte that text
+    uses, so the label is wrong and the characters are right, which is the only property this
+    function is asked for. German accented prose behaves the same way. One 36-byte line on its own
+    does not: too few distinct bytes, and it goes to `big5`.
+
+    So the residual risk is a short, low-variety, non-UTF-8 file, and what bounds it is the
+    *ordering* rather than the detector: a file a detector can damage is a file strict UTF-8 already
+    refused, where the answer today is a replacement character in the same place — so the trade is
+    one wrong reading for another on those, and a right reading for a wrong one on ordinary prose.
+
+    Args:
+        raw: The document's bytes, as read off the share or off an upload.
+
+    Returns:
+        The decoded text. `errors="replace"` is the last resort, for bytes no encoding claims —
+        refusing instead would turn a file that is 99% readable into a document the share does not
+        have, which is the failure mode this package is built around avoiding.
+    """
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        pass
+    detected = from_bytes(raw).best()
+    if detected is not None:
+        return str(detected)
+    return raw.decode("utf-8", errors="replace")
+
+
 def _parse_text(raw: bytes) -> tuple[str, int]:
     """Decode a text document verbatim — nothing is summarized or dropped at ingest."""
-    return raw.decode("utf-8", errors="replace"), 0
+    return _decode(raw), 0
 
 
 def _parse_csv(raw: bytes) -> tuple[str, int]:
@@ -103,8 +169,12 @@ def _parse_csv(raw: bytes) -> tuple[str, int]:
     Rendered rather than handed over as raw CSV because the agent reads prose far more reliably
     than it reads quoting rules, and because a mangled quote in a raw paste can silently shift a
     whole column — a wrong number a chemist would have no way to spot.
+
+    The decode is `_decode`'s, which matters more here than anywhere else in this module: a BOM or a
+    cp1252 byte lands in a *header cell*, where it is a column name rather than a stray character in
+    a paragraph.
     """
-    text = raw.decode("utf-8", errors="replace")
+    text = _decode(raw)
     dialect_sample = text[:4096]
     try:
         dialect = csv.Sniffer().sniff(dialect_sample, delimiters=",;\t|")

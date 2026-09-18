@@ -58,29 +58,25 @@ def _request(*sections: ReportSection) -> ReportRequest:
 # --- harness core (5b.1) --------------------------------------------------------------
 
 
-def test_gather_marks_unsupported_section_instead_of_inventing() -> None:
+async def test_gather_marks_unsupported_section_instead_of_inventing() -> None:
     """A section with no retrieved evidence is kept but marked unsupported (no hallucination)."""
-
-    async def _run() -> None:
-        chunk = EvidenceChunk(
-            content="Yield rose to 85%.", source_note_id="reaction-a", retriever="fake"
-        )
-        retriever = _FakeRetriever("yield", [chunk])
-        report = await _gather(
-            _request(
-                ReportSection(heading="Yield", query="yield trend", memory_layer="episodic"),
-                ReportSection(heading="Toxicity", query="tox data", memory_layer="evidence"),
-            ),
-            [retriever],
-        )
-        assert report.sections[0].supported is True
-        assert report.sections[1].supported is False  # no evidence for toxicity
-        text = report_note(report).body
-        assert "No supporting data found" in text  # marked, not fabricated
-        assert "[[reaction-a]]" in text  # supported claim cites its source
-        assert "[layer: episodic]" in text and "[layer: evidence]" in text  # layers declared
-
-    asyncio.run(_run())
+    chunk = EvidenceChunk(
+        content="Yield rose to 85%.", source_note_id="reaction-a", retriever="fake"
+    )
+    retriever = _FakeRetriever("yield", [chunk])
+    report = await _gather(
+        _request(
+            ReportSection(heading="Yield", query="yield trend", memory_layer="episodic"),
+            ReportSection(heading="Toxicity", query="tox data", memory_layer="evidence"),
+        ),
+        [retriever],
+    )
+    assert report.sections[0].supported is True
+    assert report.sections[1].supported is False  # no evidence for toxicity
+    text = report_note(report).body
+    assert "No supporting data found" in text  # marked, not fabricated
+    assert "[[reaction-a]]" in text  # supported claim cites its source
+    assert "[layer: episodic]" in text and "[layer: evidence]" in text  # layers declared
 
 
 def test_failed_section_renders_distinctly_from_empty() -> None:
@@ -95,23 +91,19 @@ def test_failed_section_renders_distinctly_from_empty() -> None:
     assert "No supporting data found" in text  # the genuinely empty section reads differently
 
 
-def test_report_note_cites_every_source() -> None:
+async def test_report_note_cites_every_source() -> None:
     """Every evidence chunk in the draft wikilinks its source note (5b.7)."""
-
-    async def _run() -> None:
-        chunks = [
-            EvidenceChunk(content="A", source_note_id="reaction-a", retriever="fake"),
-            EvidenceChunk(content="B", source_note_id="campaign-b", retriever="fake"),
-        ]
-        report = await _gather(
-            _request(ReportSection(heading="S", query="k", memory_layer="episodic")),
-            [_FakeRetriever("k", chunks)],
-        )
-        note = report_note(report)
-        assert note.type == "report"
-        assert set(note.outgoing_links()) == {"reaction-a", "campaign-b"}
-
-    asyncio.run(_run())
+    chunks = [
+        EvidenceChunk(content="A", source_note_id="reaction-a", retriever="fake"),
+        EvidenceChunk(content="B", source_note_id="campaign-b", retriever="fake"),
+    ]
+    report = await _gather(
+        _request(ReportSection(heading="S", query="k", memory_layer="episodic")),
+        [_FakeRetriever("k", chunks)],
+    )
+    note = report_note(report)
+    assert note.type == "report"
+    assert set(note.outgoing_links()) == {"reaction-a", "campaign-b"}
 
 
 def test_report_id_is_ref_safe_and_unique() -> None:
@@ -240,186 +232,148 @@ def test_a_document_citation_grounds_against_the_stored_chunk_id() -> None:
 # --- concrete retrievers (5b.3) -------------------------------------------------------
 
 
-def test_graph_retriever_matches_and_cites_notes(tmp_path: Path) -> None:
+async def test_graph_retriever_matches_and_cites_notes(tmp_path: Path) -> None:
     """The graph retriever returns citable chunks from notes matching the query + filters."""
+    (tmp_path / "a.md").write_text(
+        "---\nid: reaction-a\ntype: reaction\ntags: [proj-x]\n---\nEsterification at 80 C.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "b.md").write_text(
+        "---\nid: playbook-b\ntype: playbook\n---\nUnrelated distillation.\n", encoding="utf-8"
+    )
+    retriever = GraphRetriever(str(tmp_path))
 
-    async def _run() -> None:
-        (tmp_path / "a.md").write_text(
-            "---\nid: reaction-a\ntype: reaction\ntags: [proj-x]\n---\nEsterification at 80 C.\n",
-            encoding="utf-8",
-        )
-        (tmp_path / "b.md").write_text(
-            "---\nid: playbook-b\ntype: playbook\n---\nUnrelated distillation.\n", encoding="utf-8"
-        )
-        retriever = GraphRetriever(str(tmp_path))
-
-        hits = await retriever.retrieve("esterification", {"type": "reaction"})
-        assert [c.source_note_id for c in hits] == ["reaction-a"]
-        assert hits[0].retriever == "graph"
-        # A type filter excludes the playbook even if the query would match it.
-        assert await retriever.retrieve("distillation", {"type": "reaction"}) == []
-
-    asyncio.run(_run())
+    hits = await retriever.retrieve("esterification", {"type": "reaction"})
+    assert [c.source_note_id for c in hits] == ["reaction-a"]
+    assert hits[0].retriever == "graph"
+    # A type filter excludes the playbook even if the query would match it.
+    assert await retriever.retrieve("distillation", {"type": "reaction"}) == []
 
 
-def test_graph_retriever_scores_by_confidence(tmp_path: Path) -> None:
+async def test_graph_retriever_scores_by_confidence(tmp_path: Path) -> None:
     """Each chunk carries a score from its note's confidence, defaulting when absent (KM-5)."""
     from chemclaw.core.config import settings
 
-    async def _run() -> None:
-        (tmp_path / "a.md").write_text(
-            "---\nid: reaction-a\ntype: reaction\nconfidence: 0.7\n---\nEsterification.\n",
-            encoding="utf-8",
-        )
-        (tmp_path / "b.md").write_text(
-            "---\nid: reaction-b\ntype: reaction\n---\nEsterification.\n", encoding="utf-8"
-        )
-        hits = await GraphRetriever(str(tmp_path)).retrieve("esterification", {})
-        by_id = {c.source_note_id: c.score for c in hits}
-        assert by_id["reaction-a"] == 0.7
-        assert by_id["reaction-b"] == settings.retrieval_default_confidence
-
-    asyncio.run(_run())
+    (tmp_path / "a.md").write_text(
+        "---\nid: reaction-a\ntype: reaction\nconfidence: 0.7\n---\nEsterification.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "b.md").write_text(
+        "---\nid: reaction-b\ntype: reaction\n---\nEsterification.\n", encoding="utf-8"
+    )
+    hits = await GraphRetriever(str(tmp_path)).retrieve("esterification", {})
+    by_id = {c.source_note_id: c.score for c in hits}
+    assert by_id["reaction-a"] == 0.7
+    assert by_id["reaction-b"] == settings.retrieval_default_confidence
 
 
-def test_graph_retriever_ranks_hits_by_score_not_disk_order(tmp_path: Path) -> None:
+async def test_graph_retriever_ranks_hits_by_score_not_disk_order(tmp_path: Path) -> None:
     """Graph hits come back best-first (KM-5), not in alphabetical file order (the RRF contract)."""
-
-    async def _run() -> None:
-        (tmp_path / "aaa.md").write_text(
-            "---\nid: reaction-aaa\ntype: reaction\nconfidence: 0.2\n---\nEsterification.\n",
-            encoding="utf-8",
-        )
-        (tmp_path / "zzz.md").write_text(
-            "---\nid: reaction-zzz\ntype: reaction\nconfidence: 0.9\n---\nEsterification.\n",
-            encoding="utf-8",
-        )
-        hits = await GraphRetriever(str(tmp_path)).retrieve("esterification", {})
-        assert [c.source_note_id for c in hits] == ["reaction-zzz", "reaction-aaa"]
-
-    asyncio.run(_run())
+    (tmp_path / "aaa.md").write_text(
+        "---\nid: reaction-aaa\ntype: reaction\nconfidence: 0.2\n---\nEsterification.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "zzz.md").write_text(
+        "---\nid: reaction-zzz\ntype: reaction\nconfidence: 0.9\n---\nEsterification.\n",
+        encoding="utf-8",
+    )
+    hits = await GraphRetriever(str(tmp_path)).retrieve("esterification", {})
+    assert [c.source_note_id for c in hits] == ["reaction-zzz", "reaction-aaa"]
 
 
-def test_graph_retriever_excludes_expired_notes(tmp_path: Path) -> None:
+async def test_graph_retriever_excludes_expired_notes(tmp_path: Path) -> None:
     """A report never cites a note past its `valid_to` as current evidence (KM-7)."""
-
-    async def _run() -> None:
-        (tmp_path / "old.md").write_text(
-            "---\nid: reaction-old\ntype: reaction\nvalid_to: 2000-01-01\n---\nEsterification.\n",
-            encoding="utf-8",
-        )
-        (tmp_path / "new.md").write_text(
-            "---\nid: reaction-new\ntype: reaction\n---\nEsterification, current.\n",
-            encoding="utf-8",
-        )
-        hits = await GraphRetriever(str(tmp_path)).retrieve("esterification", {})
-        assert [c.source_note_id for c in hits] == ["reaction-new"]
-
-    asyncio.run(_run())
+    (tmp_path / "old.md").write_text(
+        "---\nid: reaction-old\ntype: reaction\nvalid_to: 2000-01-01\n---\nEsterification.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "new.md").write_text(
+        "---\nid: reaction-new\ntype: reaction\n---\nEsterification, current.\n",
+        encoding="utf-8",
+    )
+    hits = await GraphRetriever(str(tmp_path)).retrieve("esterification", {})
+    assert [c.source_note_id for c in hits] == ["reaction-new"]
 
 
-def test_graph_retriever_excerpt_strips_wikilinks(tmp_path: Path) -> None:
+async def test_graph_retriever_excerpt_strips_wikilinks(tmp_path: Path) -> None:
     """An excerpt never carries a source note's `[[wikilink]]` into the report verbatim.
 
     A copied link would add unintended (possibly dangling) graph edges to the report
     note; the link target survives as plain text, the brackets do not.
     """
-
-    async def _run() -> None:
-        (tmp_path / "a.md").write_text(
-            "---\nid: campaign-a\ntype: campaign\n---\n"
-            "See [[reaction-b]] for the esterification.\n",
-            encoding="utf-8",
-        )
-        hits = await GraphRetriever(str(tmp_path)).retrieve("esterification", {})
-        assert hits[0].content == "See reaction-b for the esterification."
-        assert "[[" not in hits[0].content
-
-    asyncio.run(_run())
+    (tmp_path / "a.md").write_text(
+        "---\nid: campaign-a\ntype: campaign\n---\nSee [[reaction-b]] for the esterification.\n",
+        encoding="utf-8",
+    )
+    hits = await GraphRetriever(str(tmp_path)).retrieve("esterification", {})
+    assert hits[0].content == "See reaction-b for the esterification."
+    assert "[[" not in hits[0].content
 
 
-def test_fingerprint_retriever_cites_reaction_records() -> None:
+async def test_fingerprint_retriever_cites_reaction_records() -> None:
     """The fingerprint retriever cites reaction records for structurally similar reactions."""
+    store = InMemoryFingerprintStore()
+    await store.add(record_for_reaction("eln-1", _ESTER))
+    retriever = FingerprintReactionRetriever(store, InMemoryReactionRecordStore())
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        await store.add(record_for_reaction("eln-1", _ESTER))
-        retriever = FingerprintReactionRetriever(store, InMemoryReactionRecordStore())
-
-        hits = await retriever.retrieve(_ESTER, {})
-        assert hits[0].source_note_id == "reaction-eln-1"  # cites the reaction record
-        # A prose (non-reaction-SMILES) query yields no evidence, not an error.
-        assert await retriever.retrieve("what was the yield?", {}) == []
-
-    asyncio.run(_run())
+    hits = await retriever.retrieve(_ESTER, {})
+    assert hits[0].source_note_id == "reaction-eln-1"  # cites the reaction record
+    # A prose (non-reaction-SMILES) query yields no evidence, not an error.
+    assert await retriever.retrieve("what was the yield?", {}) == []
 
 
-def test_graph_retriever_finds_a_note_through_ordinary_phrasing(tmp_path: Path) -> None:
+async def test_graph_retriever_finds_a_note_through_ordinary_phrasing(tmp_path: Path) -> None:
     """`the biaryl route` must find the biaryl note; the phrase-substring test never could.
 
     The live failure this reproduces (D-138): asking about "the biaryl route" returned nothing
     while "biaryl" returned three notes, so the agent told a project manager the knowledge graph
     was empty on a programme it holds the campaign for — and then asked them to supply it.
     """
-
-    async def _run() -> None:
-        (tmp_path / "a.md").write_text(
-            "---\nid: campaign-biaryl\ntype: campaign\n---\nSuzuki scope for the product.\n",
-            encoding="utf-8",
-        )
-        retriever = GraphRetriever(str(tmp_path))
-        assert [c.source_note_id for c in await retriever.retrieve("biaryl", {})] == [
+    (tmp_path / "a.md").write_text(
+        "---\nid: campaign-biaryl\ntype: campaign\n---\nSuzuki scope for the product.\n",
+        encoding="utf-8",
+    )
+    retriever = GraphRetriever(str(tmp_path))
+    assert [c.source_note_id for c in await retriever.retrieve("biaryl", {})] == ["campaign-biaryl"]
+    # The words a chemist actually puts around the term must not erase the hit.
+    for phrasing in ("the biaryl", "our biaryl route", "status of the biaryl programme"):
+        assert [c.source_note_id for c in await retriever.retrieve(phrasing, {})] == [
             "campaign-biaryl"
-        ]
-        # The words a chemist actually puts around the term must not erase the hit.
-        for phrasing in ("the biaryl", "our biaryl route", "status of the biaryl programme"):
-            assert [c.source_note_id for c in await retriever.retrieve(phrasing, {})] == [
-                "campaign-biaryl"
-            ], phrasing
-
-    asyncio.run(_run())
+        ], phrasing
 
 
-def test_graph_retriever_requires_every_term_before_it_widens(tmp_path: Path) -> None:
+async def test_graph_retriever_requires_every_term_before_it_widens(tmp_path: Path) -> None:
     """All-terms first: a note matching the whole query beats one matching part of it.
 
     Term matching must not become "any word matches", which would return the whole corpus for
     every question and make the ranking the only thing standing between the model and noise.
     """
-
-    async def _run() -> None:
-        (tmp_path / "a.md").write_text(
-            "---\nid: reaction-both\ntype: reaction\n---\nAmide coupling in toluene.\n",
-            encoding="utf-8",
-        )
-        (tmp_path / "b.md").write_text(
-            "---\nid: reaction-one\ntype: reaction\n---\nSuzuki coupling in water.\n",
-            encoding="utf-8",
-        )
-        retriever = GraphRetriever(str(tmp_path))
-        # Both terms present in one note only: the partial match is not returned at all.
-        assert [c.source_note_id for c in await retriever.retrieve("amide coupling", {})] == [
-            "reaction-both"
-        ]
-        # Nothing matches everything, so the search widens — and coverage orders what comes back.
-        widened = await retriever.retrieve("amide suzuki coupling", {})
-        assert [c.source_note_id for c in widened] == ["reaction-both", "reaction-one"]
-
-    asyncio.run(_run())
+    (tmp_path / "a.md").write_text(
+        "---\nid: reaction-both\ntype: reaction\n---\nAmide coupling in toluene.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "b.md").write_text(
+        "---\nid: reaction-one\ntype: reaction\n---\nSuzuki coupling in water.\n",
+        encoding="utf-8",
+    )
+    retriever = GraphRetriever(str(tmp_path))
+    # Both terms present in one note only: the partial match is not returned at all.
+    assert [c.source_note_id for c in await retriever.retrieve("amide coupling", {})] == [
+        "reaction-both"
+    ]
+    # Nothing matches everything, so the search widens — and coverage orders what comes back.
+    widened = await retriever.retrieve("amide suzuki coupling", {})
+    assert [c.source_note_id for c in widened] == ["reaction-both", "reaction-one"]
 
 
-def test_graph_retriever_still_answers_a_query_that_is_only_stopwords(tmp_path: Path) -> None:
+async def test_graph_retriever_still_answers_a_query_that_is_only_stopwords(tmp_path: Path) -> None:
     """Filtering every term away must not turn into "no terms, therefore everything matches"."""
-
-    async def _run() -> None:
-        (tmp_path / "a.md").write_text(
-            "---\nid: reaction-a\ntype: reaction\n---\nEsterification at 80 C.\n", encoding="utf-8"
-        )
-        retriever = GraphRetriever(str(tmp_path))
-        assert await retriever.retrieve("of the", {}) == []
-        assert [c.source_note_id for c in await retriever.retrieve("at", {})] == ["reaction-a"]
-
-    asyncio.run(_run())
+    (tmp_path / "a.md").write_text(
+        "---\nid: reaction-a\ntype: reaction\n---\nEsterification at 80 C.\n", encoding="utf-8"
+    )
+    retriever = GraphRetriever(str(tmp_path))
+    assert await retriever.retrieve("of the", {}) == []
+    assert [c.source_note_id for c in await retriever.retrieve("at", {})] == ["reaction-a"]
 
 
 def test_a_truncated_conflict_flag_says_how_many_it_is_not_naming() -> None:
@@ -691,7 +645,7 @@ async def _one_section(retrievers: list[Any]) -> SynthesizedSection:
     )
 
 
-def test_a_declined_source_and_a_failed_one_do_not_render_the_same_sentence() -> None:
+async def test_a_declined_source_and_a_failed_one_do_not_render_the_same_sentence() -> None:
     """Two causes, two remedies — and one sentence, measured on the real sweep and renderer.
 
         B. vector raised (ConnectionError) → "_Some retrieval sources failed …re-run required._"
@@ -702,34 +656,30 @@ def test_a_declined_source_and_a_failed_one_do_not_render_the_same_sentence() ->
     not in question — `gather_section` argues that correctly. The rendered *remedy* was wrong for
     the second: re-running as the same actor produces the same section forever.
     """
+    broken = await _one_section([_FakeRetriever("yield", _CHUNKS), _RaisingRetriever()])
+    declined = await _one_section([_FakeRetriever("yield", _CHUNKS), _DecliningRetriever()])
 
-    async def _run() -> None:
-        broken = await _one_section([_FakeRetriever("yield", _CHUNKS), _RaisingRetriever()])
-        declined = await _one_section([_FakeRetriever("yield", _CHUNKS), _DecliningRetriever()])
+    assert broken.retrieval_failed and declined.retrieval_failed
+    assert broken.failed_sources == ["vector"] and broken.skipped_sources == {}
+    assert declined.failed_sources == [] and list(declined.skipped_sources) == ["share"]
 
-        assert broken.retrieval_failed and declined.retrieval_failed
-        assert broken.failed_sources == ["vector"] and broken.skipped_sources == {}
-        assert declined.failed_sources == [] and list(declined.skipped_sources) == ["share"]
+    broken_line = _marker(report_note(Report(title="R", sections=[broken])).body)
+    declined_line = _marker(report_note(Report(title="R", sections=[declined])).body)
 
-        broken_line = _marker(report_note(Report(title="R", sections=[broken])).body)
-        declined_line = _marker(report_note(Report(title="R", sections=[declined])).body)
+    assert broken_line != declined_line
+    # The failure family keeps its opening words, which is the substring every earlier report
+    # carries and a reader greps for.
+    assert broken_line.startswith("_Retrieval failed for vector")
+    assert "re-run required" in broken_line
+    # The skip family says the opposite thing, because the opposite thing is true.
+    assert "re-run required" not in declined_line
+    assert "the entitlement or the filters must change" in declined_line
+    # Both name the source. "Some retrieval sources" sends nobody anywhere.
+    assert "share: the service actor holds no entitlement" in declined_line
 
-        assert broken_line != declined_line
-        # The failure family keeps its opening words, which is the substring every earlier report
-        # carries and a reader greps for.
-        assert broken_line.startswith("_Retrieval failed for vector")
-        assert "re-run required" in broken_line
-        # The skip family says the opposite thing, because the opposite thing is true.
-        assert "re-run required" not in declined_line
-        assert "the entitlement or the filters must change" in declined_line
-        # Both name the source. "Some retrieval sources" sends nobody anywhere.
-        assert "share: the service actor holds no entitlement" in declined_line
-
-        # And the evidence the working leg found is still rendered under either marker.
-        for section in (broken, declined):
-            assert [chunk.source_note_id for chunk in section.evidence] == ["reaction-a"]
-
-    asyncio.run(_run())
+    # And the evidence the working leg found is still rendered under either marker.
+    for section in (broken, declined):
+        assert [chunk.source_note_id for chunk in section.evidence] == ["reaction-a"]
 
 
 def test_a_section_with_no_per_source_detail_renders_exactly_as_it_always_did() -> None:

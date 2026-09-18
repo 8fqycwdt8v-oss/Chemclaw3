@@ -59,6 +59,7 @@ in the fourth section, and a verdict here would let them skip reading it.
 | That prefix cannot grow silently: it is observed off the compiled graph with connectors bound, and ratcheted | `tests/test_context_floor.py` |
 | A single tool result is bounded head-and-tail, with a notice naming itself as system text | `tests/test_tool_result_size.py` |
 | A turn cannot loop forever: a first-party `before_model` counter, so the number that enforces and the number that records are one number | `tests/test_langgraph_agent.py`, `tests/test_middleware_order.py` |
+| A turn cannot *spend* without limit either, which is the different question the iteration cap cannot answer: the ceiling is enforced in `before_model`, counted in a `TurnTotal` channel so a fan-out shares one budget rather than getting one each, and metered off the provider's own bill — and `agent_max_turn_billed_tokens` **ships on** | `tests/test_spend_cap.py` |
 | Concurrent turns cannot pile onto the model endpoint: each takes a permit, the overshoot at the boundary never exceeds the cap, and the wait is reported on the stream | `tests/test_concurrency_claims.py`, `tests/test_service.py` |
 | A session's stream count is bounded per user and per process | `tests/test_service.py`, `tests/test_session_events.py` |
 | Every dispatched activity bounds its queue wait, and one nobody polls fails instead of waiting for ever | `tests/test_activity_queue_bound.py` |
@@ -108,17 +109,16 @@ that wants the model's closed-book score back changes the prompt rather than the
 Each of these is a real gap and none is mitigated by anything in this repository. **Three different
 kinds of answer appear in the right-hand column and the difference matters**: a `DEFERRED.md` row
 with a trigger (work a *condition* unblocks), a `BACKLOG.md` row with an anchor (work somebody can
-start), or — for four of them — neither, because the answer is a setting, a credential or a tenant
+start), or — for some of them — neither, because the answer is a setting, a credential or a tenant
 rather than work in this tree. A row whose answer is "set it" is not tracked in a register and
 saying so is the point: nothing here is left implied, including which gaps have no ticket.
 
 | Accepted | Why it is accepted, and what would close it |
 | --- | --- |
 | **No cluster has ever run this.** No registry has received a push, no `helm upgrade` has touched a namespace, no `databricks bundle` has reached a workspace. The pipelines exist and every claim they make *about this tree* is checked (`tests/test_jenkins_delivery.py`); nothing here is evidence about somebody's infrastructure | `DEFERRED.md`, "push-to-registry + `helm upgrade` rollout, run". A namespace, a registry and their credentials |
-| **A turn's spend is unbounded in the shipped configuration.** `agent/spend_cap.py` exists, is enforced in `before_model`, is metered in `wrap_model_call` and is held by `tests/test_spend_cap.py` — and `agent_max_turn_billed_tokens` ships at **0**, which is off. A deployment that wants the ceiling sets it | Set it. It is off by default because no site's right number is knowable from here |
 | **Retention is off in the shipped configuration.** Every `retention_*_days` defaults to 0, so a deployment that states no posture keeps every durable row for the deployment's lifetime. The chart refuses to render without a posture, which makes it a decision rather than a default | State `retention.windows` or `retention.unboundedGrowthAccepted` at release |
 | **The browser → tenant hop is unproven.** `tests/test_entra_end_to_end.py` runs the production app against a real HTTP JWKS with nothing patched; what it cannot do is drive MSAL against `login.microsoftonline.com`, and mocking that is mocking a login UI rather than a key set | A real tenant |
-| **Two background-worker replicas re-embed the whole corpus.** The prune half is closed (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`); `note_file_fingerprints` is `mtime_ns:size` and two clones of one commit carry different mtimes, so alternating passes re-embed everything. `workers.background.replicas` stays 1 | `BACKLOG.md`, content-derived fingerprints |
+| **Nothing has ever run two background workers against one `background-jobs` queue.** `workers.background.replicas` stays 1, and the reason is now that **nobody has driven two** rather than that two are known to break: the prune half became revision-bounded (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`) and the re-embedding half became a content hash, so two clones of one commit agree about every note (`D-2026-09-16-a-fingerprint-that-names-a-checkout-is-not-a-fingerprint-of-a-note`). What is left is an argument about four mechanisms that nobody has observed with two workers polling | `BACKLOG.md`, and the live Temporal edge it needs |
 | **The `github-actions` dependency closure is audited by nothing.** Actions are pinned by commit, which bounds *what runs* and says nothing about whether it is vulnerable. Measured 2026-09-14: all four actions in use carry zero advisories, so a gate today would be a control with nothing behind it | `BACKLOG.md`, with the OSV query shape named. Trigger: the first advisory on an action here |
 | **Two of the four deployables have no chart.** `Chemclaw3_ui` and every `Chemclaw3-mcp` server are deployed by `oc set image` against a Deployment an operator created; a release cannot create one or move a port, a probe, a limit or an env var. The release now says so where it bites | `DEFERRED.md`. One real namespace, and the repository that owns the component |
 | **The prefix this system really sends is this repository's ratchet plus what the sibling fleet serves**, and the second half goes stale on somebody else's merge schedule. `SERVED_ELSEWHERE_ALLOWANCE` is the bound; the check skips, loudly, without a sibling checkout | `tests/test_context_floor.py`, `tests/conftest.py::_report_sibling_skips` |
@@ -146,6 +146,11 @@ decides it.
 - `tests/test_readiness_record.py::test_the_record_still_carries_all_four_sections` — a record that
   keeps "enforced / bounded / measured" and loses "accepted" reads as a stronger claim than the
   original while being strictly less honest.
+- `tests/test_readiness_record.py::test_a_claim_about_a_shipped_default_agrees_with_the_setting`
+  — a row stating what a setting ships as is checked against the setting. Two §4 rows went
+  stale in two days because another session *closed* them, which is staleness in the
+  reassuring direction: a record that understates what it has reads as honest until
+  somebody re-derives it.
 - `tests/test_readiness_record.py::test_the_external_benchmark_number_is_still_in_it` — the one
   figure nobody here chose the questions for is the one a later edit would drop.
 - `tests/test_deferred_register.py` and `tests/test_decision_log.py` hold the two registers §4

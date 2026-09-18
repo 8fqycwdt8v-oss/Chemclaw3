@@ -9,8 +9,6 @@ fake agrees with the adapter about the calls, which is a different claim from th
 with them. `docs/planning/BACKLOG.md` carries the row.
 """
 
-import asyncio
-import functools
 from typing import Any
 
 import pytest
@@ -47,21 +45,6 @@ class _StubVectorStore(InMemoryVectorStore):
 COLLECTION = "chunks"
 
 
-def _sync(test: Any) -> Any:
-    """Run an `async def` test on its own loop, so pytest collects a plain function.
-
-    This repository has no async pytest plugin; `tests/test_document_share.py` calls `asyncio.run`
-    inline at each await. That reads badly when a test makes six calls, so the same mechanism is
-    hoisted into a decorator here. One loop per test, exactly as `asyncio.run` gives.
-    """
-
-    @functools.wraps(test)
-    def runner(*args: Any, **kwargs: Any) -> None:
-        asyncio.run(test(*args, **kwargs))
-
-    return runner
-
-
 def _point(reference: str, vector: list[float], group: str = "") -> VectorPoint:
     return VectorPoint(id=reference, vector=vector, group=group)
 
@@ -83,7 +66,6 @@ def test_the_reference_store_satisfies_the_protocol() -> None:
 _CHUNKING = "2000:200"
 
 
-@_sync
 async def test_a_search_ranks_by_similarity_and_drops_non_matches() -> None:
     """Best first, and a vector orthogonal to the query is not a hit at all.
 
@@ -105,7 +87,6 @@ async def test_a_search_ranks_by_similarity_and_drops_non_matches() -> None:
     assert hits[0].score > hits[1].score
 
 
-@_sync
 async def test_an_identical_vector_scores_one_and_does_not_raise() -> None:
     """Self-similarity rounds above 1.0 about half the time, and the score is bounded `le=1.0`."""
     store = InMemoryVectorStore()
@@ -115,7 +96,6 @@ async def test_an_identical_vector_scores_one_and_does_not_raise() -> None:
     assert hits[0].score == 1.0
 
 
-@_sync
 async def test_a_scope_narrows_before_the_cut_rather_than_after_it() -> None:
     """The property the whole design rests on: filter first, *then* take the top k.
 
@@ -136,7 +116,6 @@ async def test_a_scope_narrows_before_the_cut_rather_than_after_it() -> None:
     assert [hit.id for hit in scoped] == ["wanted#0"]
 
 
-@_sync
 async def test_an_empty_scope_is_not_an_unfiltered_search() -> None:
     """`set()` means "nothing is eligible" and `None` means "no restriction" — never the same.
 
@@ -149,7 +128,6 @@ async def test_an_empty_scope_is_not_an_unfiltered_search() -> None:
     assert len(await store.search(COLLECTION, [1.0, 0.0], 5, None)) == 1
 
 
-@_sync
 async def test_a_point_with_no_group_is_its_own_group() -> None:
     """The default that makes the seam usable for anything embedded whole (a note is one vector)."""
     store = InMemoryVectorStore()
@@ -159,7 +137,6 @@ async def test_a_point_with_no_group_is_its_own_group() -> None:
     ]
 
 
-@_sync
 async def test_collections_do_not_see_each_other() -> None:
     """A shared cluster is normal; one collection's points must never answer another's search."""
     store = InMemoryVectorStore()
@@ -168,14 +145,12 @@ async def test_collections_do_not_see_each_other() -> None:
     assert [hit.id for hit in await store.search("one", [1.0, 0.0], 5)] == ["a"]
 
 
-@_sync
 async def test_deleting_an_absent_point_is_not_an_error() -> None:
     """The catalogue is the record; a point already gone is the state being asked for."""
     store = InMemoryVectorStore()
     await store.delete(COLLECTION, ["never-existed"])
 
 
-@_sync
 async def test_a_zero_query_vector_matches_nothing_rather_than_ordering_over_nan() -> None:
     """A token-less query under the hash embedder is a zero vector; cosine is 0 to everything."""
     store = InMemoryVectorStore()
@@ -297,7 +272,6 @@ def _fake_qdrant_models(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(qdrant_module, "_models", lambda: _FakeModels)
 
 
-@_sync
 async def test_the_adapter_reads_the_reference_back_out_of_the_payload() -> None:
     """A hit is useless unless it rejoins the catalogue, and `ref` is what does that."""
     client = _FakeClient(matches=[("doc-a#0", 0.9), ("doc-b#2", 0.4)])
@@ -306,7 +280,6 @@ async def test_the_adapter_reads_the_reference_back_out_of_the_payload() -> None
     assert hits[0].score == pytest.approx(0.9)
 
 
-@_sync
 async def test_the_adapter_sends_the_scope_to_the_server(monkeypatch: pytest.MonkeyPatch) -> None:
     """The filter must reach Qdrant, or the top-k is taken before eligibility and recall is lost."""
     client = _FakeClient()
@@ -314,7 +287,6 @@ async def test_the_adapter_sends_the_scope_to_the_server(monkeypatch: pytest.Mon
     assert client.queries[0]["filter"] is not None, "the scope was not sent to the server"
 
 
-@_sync
 async def test_the_adapter_answers_an_empty_scope_without_a_round_trip() -> None:
     """Nothing is eligible, so there is nothing to ask — and asking would ask for everything."""
     client = _FakeClient(matches=[("doc-a#0", 0.9)])
@@ -322,7 +294,6 @@ async def test_the_adapter_answers_an_empty_scope_without_a_round_trip() -> None
     assert client.queries == []
 
 
-@_sync
 async def test_a_point_with_no_ref_is_dropped_rather_than_guessed_at() -> None:
     """It cannot be rejoined to the catalogue, so it is not evidence anyone could check."""
 
@@ -333,7 +304,6 @@ async def test_a_point_with_no_ref_is_dropped_rather_than_guessed_at() -> None:
     assert await QdrantVectorStore(client=_Nameless()).search(COLLECTION, [1.0, 0.0], 5) == []
 
 
-@_sync
 async def test_a_client_failure_becomes_one_error_type() -> None:
     """The caller handles `VectorStoreError`; a vendor hierarchy leaking through defeats that."""
 
@@ -345,7 +315,6 @@ async def test_a_client_failure_becomes_one_error_type() -> None:
         await QdrantVectorStore(client=_Broken()).search(COLLECTION, [1.0, 0.0], 5)
 
 
-@_sync
 async def test_an_empty_upsert_touches_no_client() -> None:
     """A crawl chunk where nothing changed must not cost a round trip."""
     client = _FakeClient()
@@ -568,7 +537,6 @@ def test_every_chunk_is_filed_under_its_document_not_under_itself() -> None:
     assert {point.group_key for point in points} == {f"doc-abc@{_CHUNKING}"}
 
 
-@_sync
 async def test_the_adapter_writes_both_the_reference_and_the_group() -> None:
     """`ref` is what rejoins the catalogue; `group` is what the scope filter matches on.
 
@@ -617,7 +585,6 @@ class _RecordingStore:
         return []  # returning nothing short-circuits before `_resolve` touches a database
 
 
-@_sync
 async def test_an_unfiltered_search_is_still_scoped_to_its_own_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -645,7 +612,6 @@ async def test_an_unfiltered_search_is_still_scoped_to_its_own_source(
     )
 
 
-@_sync
 async def test_a_source_with_no_eligible_documents_returns_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -769,7 +735,6 @@ class _FakeConnection:
     async def __aexit__(self, *exc: Any) -> None: ...
 
 
-@_sync
 async def test_the_catalogue_is_consulted_even_when_nothing_is_filtered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -798,7 +763,6 @@ async def test_the_catalogue_is_consulted_even_when_nothing_is_filtered(
     assert eligible == {"doc-a@400:40", "doc-b@4000:400"}
 
 
-@_sync
 async def test_a_re_chunk_reclaims_the_superseded_cutting_s_vectors() -> None:
     """The catalogue deletes the old cutting's rows; the store must lose their points too.
 

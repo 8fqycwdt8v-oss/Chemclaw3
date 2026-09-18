@@ -54,6 +54,16 @@ dependencies = [
     # launcher. Declared explicitly: four first-party modules import it directly, so it is a
     # direct dependency, not merely transitive (via fastapi/mcp).
     "httpx>=0.28",
+    # The SSE *client* half, declared for the same reason `httpx` above it is. Already resolved in
+    # `uv.lock` as a requirement of `mcp`, so this costs the image nothing — what it buys is that
+    # three first-party decoders stop disagreeing. `cli/live_storm.py` sliced `[6:]` off
+    # `"data: "`, `cli/live_benchmark.py` sliced `[5:].strip()` off `"data:"`, and `evals/live.py`
+    # did it a third way; none handled a multi-line `data:`, an `id:` or a `retry:`, and all three
+    # discarded the `event:` name `api/events.sse_frame` deliberately sets, re-reading `type` out
+    # of the JSON body instead. Latent rather than broken — `sse_starlette` emits
+    # `model_dump_json()`, which carries no raw newline — so what was being paid for was three
+    # spellings drifting, not a live fault.
+    "httpx-sse>=0.4.3",
     # **The second HTTP stack, declared rather than left transitive** (see
     # `docs/decisions/D-2026-08-14-two-http-stacks-is-the-price-of-the-openai-major.md`). `openai` 3
     # makes httpx2 its default client and stops installing `httpx`; `starlette` 1.6's test client
@@ -138,13 +148,49 @@ dependencies = [
     "openinference-instrumentation-langchain>=0.1.70",
     "opentelemetry-exporter-otlp-proto-grpc>=1.44.0",
     "opentelemetry-sdk>=1.44.0",
+    # The unit registry behind `core/units.py`, built from a **restricted definitions file** rather
+    # than `pint.UnitRegistry()` bare — this is a chemistry registry and the "0.5 furlongs" refusal
+    # that module argues for is the product, not a limitation of it.
+    #
+    # It replaces ~200 lines of hand-built registry whose own history is three instances of one
+    # bug, each a prefix rung existing on one ladder and not the other: `nM` missing so nanomolar
+    # folded to nanometre; `pM` added without its length twin so **picometre resolved to
+    # picomolar**; `µm` aliased to micromolar so a particle size was accepted as a concentration.
+    # A registry that *derives* SI prefixes cannot have that class of defect, and pint is
+    # case-sensitive by default, which is the other half (`M` molar against `m` metre).
+    "pint>=0.25.3",
     "pandas>=2.2",
     "psycopg-pool>=3.2",
     "psycopg[binary]>=3.2",
     "pydantic-settings>=2.5",
     "pyjwt[crypto]>=2.8",
+    # Gitwildmatch path matching for the mounted share's `exclude:` globs
+    # (`ingest/documents/crawl.py`). Already in `uv.lock` through `mypy`, promoted to a runtime
+    # dependency because `fnmatch` gives `**` no special meaning: the crawler tried every pattern
+    # three ways — bare, `/`-prefixed and basename — and a top-level `Archive/` still shipped as an
+    # indexed, citable defect. Measured, the three-way form is *also* `False` for every spelling of
+    # a directory, so `**/Archive/**` never matched `Projects/Archive` and the walk descended the
+    # whole subtree to exclude it one file at a time — on a share this module's own docstring sizes
+    # in terabytes.
+    # `>=1.1`, not `>=0.12`: a floor is a claim, and this one's claim is that it is the generation
+    # every assertion in `tests/test_document_share.py` was measured against. 1.x is a different
+    # pattern implementation from 0.12, and the code uses `GitIgnoreSpec` rather than
+    # `PathSpec.from_lines("gitwildmatch", ...)` because 1.1 deprecates the latter, while
+    # `GitIgnoreSpec` exists and warns on neither generation. A warning *count* is deliberately not
+    # written here: the deprecated form warns twice per pattern per compile, so the figure is about
+    # that file's fixtures and the active warning filter, and the two counts this comment and
+    # `ingest/documents/binding.py` each carried were measured under different filters and
+    # disagreed. Portable either way; the floor says which generation was tested.
+    "pathspec>=1.1",
     "pypdf>=6.15.0",
     "python-docx>=1.2.0",
+    # Encoding detection for the mounted share (`ingest/documents/parse.py`), already in `uv.lock`
+    # through `requests`. The parser decoded a decade-old Windows/CIFS share as UTF-8 with
+    # `errors="replace"`: measured, cp1252 `60 °C` became mojibake that was parsed, chunked,
+    # embedded and citable with nothing counted, a BOM broke the first CSV header cell, and UTF-16
+    # was filed `skipped_unreadable` with a misleading reason. Strict UTF-8 is still tried first, so
+    # every file that decodes correctly today is byte-identical after this.
+    "charset-normalizer>=3.4",
     "python-frontmatter>=1.3.0",
     "python-pptx>=1.0.2",
     "pyyaml>=6.0",
@@ -156,6 +202,16 @@ dependencies = [
     # vibrations from its translations and rotations.
     "scipy>=1.11",
     "sse-starlette>=3.4.5",
+    # Declared rather than left transitive, and this one had a measurable failure mode.
+    # `agent/context_budget.py` imports it to count the request prefix exactly, and it arrives today
+    # only as a requirement of `langchain-openai` — so a bump over there that drops it would degrade
+    # the budget to its chars/4 estimator **in silence**, since the fallback is by design never an
+    # error. Nothing else in this tree holds an import against the manifest.
+    #
+    # The merge table is baked into the image at build time (`deploy/Containerfile`,
+    # `TIKTOKEN_CACHE_DIR`); the package must never fetch one at request time, which is what
+    # `core/netguard.py` would refuse and what the no-egress posture forbids.
+    "tiktoken>=0.13",
     "temporalio[pydantic]>=1.30.0",
     "uvicorn>=0.51.0",
 ]
@@ -166,6 +222,11 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "pytest>=8.3",
+    # The runner for every `async def` test, via its bundled pytest plugin and `anyio_mode`. Only
+    # the suite uses it — `src/` imports `asyncio`, never `anyio` — so it belongs here rather than
+    # beside the runtime dependencies. See the `anyio_mode` comment under `[tool.pytest.ini_options]`
+    # for why a transitive resolve through httpx/starlette/mcp is not a declaration.
+    "anyio>=4.5",
     "pytest-cov>=5.0",
     "pytest-timeout>=2.3",
     "pre-commit>=3.8",
@@ -319,6 +380,23 @@ testpaths = ["tests"]
 # `timeout` leaves it on the global cap. There is nothing to register and nothing to migrate; the
 # flag simply makes the empty set enforced.
 addopts = "-ra --strict-markers"
+# Every `async def test_*` is run by anyio's bundled pytest plugin, on the backend
+# `tests/conftest.py::anyio_backend` pins. "auto" rather than a `@pytest.mark.anyio` per test: the
+# marker is real — the plugin registers it, so `--strict-markers` is satisfied — and it would be
+# seven hundred lines of it, one per test, all saying the same thing. What makes the marker
+# load-bearing in other repositories is the risk that an unmarked async test passes vacuously; on
+# pytest 9 it does not, an `async def` no plugin claims is a hard failure naming the plugins that
+# would run it, so "auto" gives up nothing that strict mode was buying.
+#
+# anyio is not a new distribution: httpx, starlette and the `mcp` SDK all require it, so it is
+# already resolved in `uv.lock` and installed wherever `chemclaw` can be imported. It is *not* in
+# `[dependency-groups] dev`, which is where a tool only the tests use belongs. **That gap is now
+# closed** — it is declared there, and `uv lock` moved no version and added no distribution, as the
+# sentence that described the gap predicted. The reason to close it rather than keep relying on the
+# transitive resolve is the one this repository already applies to `tiktoken`: nothing here holds
+# imports against the manifest, so an `httpx` or `mcp` bump that stopped requiring anyio would take
+# the runner for 773 tests out with it.
+anyio_mode = "auto"
 # Deprecations aimed at *first-party* code are errors; everybody else's are left alone.
 #
 # The suite emits third-party deprecations today (torch's `jit.script`, bofire's class-based
@@ -328,6 +406,24 @@ addopts = "-ra --strict-markers"
 # telling `chemclaw.*` that the call it is making is going away, which is precisely the signal that
 # was invisible until the upgrade that removed it. `pandas>=2.2`, `numpy>=2.0` and a pinned-major
 # `mcp`/`deepagents` policy are what make that a live risk rather than a hypothetical one.
+#
+# **A forgotten `await` inside an async test is a real residual hole, and the obvious one-line
+# close does not work — measured, not assumed.** The `anyio_mode` note above covers the *unclaimed*
+# test; this is the other half it does not reach. A test that runs and forgets an `await` passes
+# with a `RuntimeWarning`, and `mypy --strict`'s `unused-coroutine` only catches the bare-expression
+# form: measured, it is silent when the coroutine is bound to a name (`result = _helper()`, then an
+# `is not None` a coroutine object always satisfies) or returned through `Any`. So a guard was
+# wanted, and `"error:coroutine .* was never awaited:RuntimeWarning"` is the line everybody reaches
+# for. **It was added here and then removed, because it changes nothing**: the warning is raised by
+# the garbage collector when the orphaned coroutine is finalised, which is after the test has
+# returned and outside the scope `filterwarnings` governs — pytest reports it as a
+# `PytestUnraisableExceptionWarning` instead. Driven against a scratch test with the rule in place:
+# `1 passed, 1 warning`, unchanged. Erroring on `PytestUnraisableExceptionWarning` itself *would*
+# catch it and is refused for a different reason — it also catches every unclosed-transport
+# `ResourceWarning`, which is a scheduling artefact, and a gate that reds for one of those is the
+# thing `D-2026-09-13-a-stable-failure-set-is-not-two-green-runs` keeps this suite serial to avoid.
+# The hole is left open, stated, and cheap to close the day somebody finds a mechanism that is not
+# either inert or a flake generator. Nothing in `tests/` exhibits it today.
 filterwarnings = [
     "default",
     "error::DeprecationWarning:chemclaw.*",

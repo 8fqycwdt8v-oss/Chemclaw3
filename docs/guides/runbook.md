@@ -1118,6 +1118,24 @@ Two things to know before reading any of them:
 already lost are not recoverable — `durable/retention.py` refuses to prune this table for the same
 reason this is critical.
 
+#### ChemclawAuditTrailShedding
+`critical`. The same hole from the other cause, and the distinction is the whole reason it is a
+separate alert: `ChemclawAuditTrailIncomplete` means the database **refused** a batch, this one
+means it could not **keep up** with the producer. The write buffer reached
+`CHEMCLAW_AGENT_AUDIT_BUFFER_MAX_EVENTS` and shed its oldest records to bound memory, in a pod the
+chart limits to 1 GiB, at roughly ninety rows a turn.
+
+So do not start with connectivity — the database is reachable by construction here. Look at write
+latency and pool saturation (`chemclaw_pg_pool_available`, `chemclaw_pg_pool_requests_waiting`,
+`chemclaw_db_query_duration_seconds`), and at whether something else on that database is holding
+locks. The `audit_buffer_full` log marker names how many rows went and at what bound.
+
+This arm has **no exception to log**, which is why pooling it with the alert above would be a trap:
+an operator following that runbook would grep for `audit_sink_failure`, find nothing, and conclude
+the alert was wrong. Every shed event still reached the stdlib log, so the record is recoverable
+from there even though the queryable trail has a gap. Raising the bound is a memory decision, not a
+fix; the fix is the write latency.
+
 #### ChemclawDeliveryChannelFailing
 `warning`. An outbound channel is refusing messages, and the digest that could not be sent was
 **still acknowledged** — the watermark turns on the in-app mailbox, deliberately, so nothing

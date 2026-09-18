@@ -15,9 +15,11 @@ before a single file is opened.
 """
 
 import re
+from functools import cached_property
 from pathlib import PurePosixPath
 from typing import Any, Self
 
+import pathspec
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from chemclaw.core.errors import ChemclawError
@@ -141,9 +143,10 @@ class DocumentShareBinding(BaseModel):
     # it writes one word, and an author who forgot gets an error naming both choices.
     public: bool = False
 
-    # Glob patterns matched against the mount-relative POSIX path. Office lock files (`~$...`),
-    # archive folders and scratch directories are the usual population, and excluding them is
-    # cheaper than parsing them.
+    # Gitignore patterns matched against the mount-relative POSIX path. Office lock files
+    # (`~$...`), archive folders and scratch directories are the usual population, and excluding
+    # them is cheaper than parsing them. Compiled by `exclude_spec`, which is where the choice of
+    # gitignore semantics over `fnmatch`'s is argued.
     exclude: list[str] = Field(default_factory=list)
     # The formats to open, a subset of what this system can actually read. Narrowing it is a
     # legitimate cost control on a large share ("PDFs and decks only, for now").
@@ -179,6 +182,38 @@ class DocumentShareBinding(BaseModel):
         deployment re-read its own share.
         """
         return f"{self.chunk_chars}:{self.chunk_overlap_chars}:{_CHUNK_TEXT_VERSION}"
+
+    @cached_property
+    def exclude_spec(self) -> pathspec.GitIgnoreSpec:
+        """The `exclude:` patterns compiled once, under gitignore semantics rather than `fnmatch`'s.
+
+        Gitignore is the semantics the patterns a deployment writes were already assuming —
+        `**/Archive/**`, `~$*`, `*.tmp` are gitignore lines, and `sharedrive/datasource.yaml` ships
+        exactly those three. `fnmatch` gives `**` no special meaning, which is why
+        `crawl._is_excluded` used to try every pattern three ways; `crawl.py` carries what that
+        bought, what it could not reach, and the compatibility measurement over the shipped set.
+
+        Compiled here because the binding is where the patterns live and the spec is a pure function
+        of them, so one compile serves every bounded crawl chunk instead of one per chunk.
+
+        `GitIgnoreSpec` rather than `PathSpec.from_lines("gitwildmatch", ...)`, which is the form
+        the library's own docs call subtly wrong for negation precedence — and which `pathspec` 1.x
+        deprecates, at two `DeprecationWarning`s per pattern per compile. How loud that is on a run
+        of `tests/test_document_share.py` is therefore a fact about that file's fixtures and about
+        the active warning filter rather than about this line — measured on one commit it was 76
+        under pytest's defaults and 262 under `-W always`, which is why no number is stated here and
+        why the two that were, in this docstring and in `pyproject.toml`, disagreed. `GitIgnoreSpec`
+        warns on neither generation. Measured over the shipped patterns the two spellings agree on
+        every probed path; the declared floor is `pathspec>=1.1` and `pyproject.toml` carries why —
+        a floor is a claim about the generation these assertions were measured against.
+
+        Raises:
+            ValueError: A pattern gitignore cannot parse (`pathspec` raises a subclass of it).
+                Surfaced at load by `_is_coherent` rather than mid-crawl: a degenerate pattern
+                fails identically on every attempt, and `DocumentShareError` is the family the
+                durable layer already knows not to retry.
+        """
+        return pathspec.GitIgnoreSpec.from_lines(self.exclude)
 
     @model_validator(mode="after")
     def _is_coherent(self) -> Self:
@@ -230,6 +265,20 @@ class DocumentShareBinding(BaseModel):
                 "if every authenticated caller may read it. Omitting both used to mean ungated, "
                 "which is a security decision no manifest should make by accident"
             )
+        # Compiled at load, not at first use: an exclusion nobody can parse is a manifest error,
+        # and the alternative is a `GitWildMatchPatternError` out of the middle of a crawl — a
+        # deterministic failure in the one family `chemclaw.durable.publish` would keep retrying,
+        # because it is not a `DocumentShareError`.
+        #
+        # Caught as `ValueError` rather than by name: `pathspec` raises
+        # `GitWildMatchPatternError` on 0.12 and `GitIgnorePatternError` from a module that does
+        # not exist there on 1.x, and both subclass `ValueError`. Naming either one pins this
+        # package to a generation of a dependency for no gain — the message is what an operator
+        # reads, and it is carried through either way.
+        try:
+            _ = self.exclude_spec
+        except ValueError as exc:
+            raise ValueError(f"exclude pattern is not a usable gitignore pattern: {exc}") from exc
         return self
 
     @property

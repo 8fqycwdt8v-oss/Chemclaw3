@@ -250,7 +250,7 @@ class _SlowOwnerStore:
         return []
 
 
-def test_a_turn_still_setting_up_holds_the_session_against_a_second_one(
+async def test_a_turn_still_setting_up_holds_the_session_against_a_second_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A second POST during the first turn's store round trips is a 409, not a second turn.
@@ -271,28 +271,25 @@ def test_a_turn_still_setting_up_holds_the_session_against_a_second_one(
     monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 0.05)
     store = _SlowOwnerStore()
 
-    async def _run() -> None:
-        app = _app(owner_store=store)
-        async with asgi_client(app, timeout=10.0) as client:
-            session_id = (await client.post("/sessions")).json()["session_id"]
-            first = asyncio.create_task(
-                client.post(f"/sessions/{session_id}/messages", json={"message": "one"})
-            )
-            async with asyncio.timeout(5):
-                await store.inside.wait()
-            # Past the lease the claim was stamped with, with the first turn not yet begun.
-            await asyncio.sleep(0.2)
-            second = await client.post(f"/sessions/{session_id}/messages", json={"message": "two"})
-            # Released before the assertion, so a failure reports rather than hanging on the
-            # first turn's parked round trip.
-            store.release.set()
-            admitted = await first
-            assert second.status_code == 409, (
-                "a second turn was admitted while the first was still being set up"
-            )
-            assert admitted.status_code == 200
-
-    asyncio.run(_run())
+    app = _app(owner_store=store)
+    async with asgi_client(app, timeout=10.0) as client:
+        session_id = (await client.post("/sessions")).json()["session_id"]
+        first = asyncio.create_task(
+            client.post(f"/sessions/{session_id}/messages", json={"message": "one"})
+        )
+        async with asyncio.timeout(5):
+            await store.inside.wait()
+        # Past the lease the claim was stamped with, with the first turn not yet begun.
+        await asyncio.sleep(0.2)
+        second = await client.post(f"/sessions/{session_id}/messages", json={"message": "two"})
+        # Released before the assertion, so a failure reports rather than hanging on the
+        # first turn's parked round trip.
+        store.release.set()
+        admitted = await first
+        assert second.status_code == 409, (
+            "a second turn was admitted while the first was still being set up"
+        )
+        assert admitted.status_code == 200
 
 
 class _BrokenTitleStore(_SlowOwnerStore):
@@ -506,7 +503,7 @@ def test_a_client_that_stops_reading_detaches_the_stream_and_the_turn_still_clea
     asyncio.run(_run())
 
 
-def test_a_turn_torn_down_in_a_foreign_context_still_unstamps_every_ambient() -> None:
+async def test_a_turn_torn_down_in_a_foreign_context_still_unstamps_every_ambient() -> None:
     """The GC finalizer's `aclose()` runs in a different `Context`; the teardown must survive it.
 
     A contextvar `Token` records the `Context` it was created in, so every `reset_*` in
@@ -532,17 +529,14 @@ def test_a_turn_torn_down_in_a_foreign_context_still_unstamps_every_ambient() ->
         ):
             yield "parked"
 
-    async def _run() -> None:
-        # The concrete object is an async *generator*; the cast narrows the declared type to the
-        # real one, as `tests/test_turn_cancellation._closable` does for the same reason.
-        stream = cast(AsyncGenerator[str, None], _turn())
-        # Advanced inside a task, so the tokens are created in *that* task's copy of the context —
-        # exactly as sse-starlette's `_stream_response` task creates them.
-        await asyncio.create_task(anext(stream))
-        # Closed from a different task, as the async-generator GC finalizer does.
-        await asyncio.create_task(stream.aclose())
-
-    asyncio.run(_run())
+    # The concrete object is an async *generator*; the cast narrows the declared type to the
+    # real one, as `tests/test_turn_cancellation._closable` does for the same reason.
+    stream = cast(AsyncGenerator[str, None], _turn())
+    # Advanced inside a task, so the tokens are created in *that* task's copy of the context —
+    # exactly as sse-starlette's `_stream_response` task creates them.
+    await asyncio.create_task(anext(stream))
+    # Closed from a different task, as the async-generator GC finalizer does.
+    await asyncio.create_task(stream.aclose())
 
 
 # --- F5: the route's own error events carry the same joins the runner's do ----------------------

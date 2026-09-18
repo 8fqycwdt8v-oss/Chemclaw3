@@ -1,5 +1,12 @@
 # Multi-agent team, evolving skills, and automatic expert selection
 
+**This file is the plan of the branch in hand, and it replaced one rather than joining it.** The
+2026-09-16 off-the-shelf dependency audit closed on its own terms: its header says every row carries
+a verdict, that nothing in it is a claim about work still to come, and that "what is still open left
+this file for `docs/planning/BACKLOG.md`". Keeping a closed plan beside a live one is a closed record
+reading as live state, which is what this repository's rules for `DEFERRED.md` forbid one directory
+over. `git log` is its history; `docs/planning/BACKLOG.md` is what survived it.
+
 Five phases, each its own PR, each green under `make lint type test` before merge.
 
 **The product requirement driving this** (owner, 2026-09-16): expert selection must happen
@@ -35,27 +42,56 @@ stays LangChain/LangGraph-native.
 - [x] The caller stays `default`; selection is the model's ordinary tool-call decision
 - [x] ADR recording that the reason the backlog said was missing has arrived
 
-## Phase 3 — The per-actor local skills tier
-- [ ] Per-turn, actor-scoped skills directory resolved where ambient identity is reachable
-- [ ] Never shared, never citable, never auto-promoted
-- [ ] Routes so a chemist can list, read and delete the local skills acting on their turns
-- [ ] `SkillsReadOnlyRefusal` unchanged — no agent tool writes a skill
-- [ ] ADR
+## Phase 3 — The per-actor local skills tier, *with its writer*
 
-## Phase 4 — The proposal queue and its human gate
+**Reordered, and the reason is this repository's own rule.** `D-2026-09-05` §3 specifies this tier
+and records it unbuilt because "nothing writes a per-actor directory until the distiller exists" —
+and the distiller is blocked on deployment history the census measures at zero. Shipping the tier
+with no writer is a mechanism whose only caller is its own test, which is the `reject_widening`
+shape this repository deleted 254 lines for. So the writer ships with it, and the first writer is
+**the chemist**: a route they call, never a tool the agent holds. `SkillsReadOnlyRefusal` is
+untouched — the agent may draft the text into its answer and can never write the file.
+
+**Storage is the store, not a directory**, which is the one place this ADR's own specification has
+to be departed from. A pod's filesystem is ephemeral and the chart runs `serverReplicas` of them,
+so a local skill written to disk would vanish on restart and differ per replica. `StoreBackend` over
+the same `AsyncPostgresStore` that already serves `/memories/` is multi-replica-safe, and its
+namespace is the erasure key `agent/leaver.py` already sweeps by prefix.
+
+- [x] Per-turn, actor-scoped skills directory resolved where ambient identity is reachable
+- [x] Never shared, never citable, never auto-promoted
+- [x] Routes so a chemist can list, read and delete the local skills acting on their turns
+- [x] `SkillsReadOnlyRefusal` unchanged — no agent tool writes a skill
+- [x] ADR
+
+## Phase 4 — The proposal queue, its human gate, **and its first proposer**
+
+**Reordered for the second time, by the rule that reordered phase 3 — and stated here rather than
+done quietly.** A queue whose only caller is its own test is the `reject_widening` shape this
+repository deleted 254 lines for, and phase 5's two proposers are both blocked on deployment
+history `make trajectory-census` measures at zero. So the queue ships with the one proposer that
+needs no history: **the agent, in the turn where the procedure was worked out**. A `propose_skill`
+tool writes a proposal row and never a skill, so `SkillsReadOnlyRefusal` is untouched — it is a
+different table, and the only thing that turns a proposal into judgment is a person calling a
+route. That is "auto proposal based on user interactions" in the most direct form available today,
+and it exercises every part of the queue on day one.
+
 - [ ] A content-hashed, append-only proposal table modelled on `plan_approvals`, schema-informed by
-      retired `note_proposals`
-- [ ] Decision is an HTTP route, never a tool
+      retired `note_proposals` — `(kind, name, content_hash)` unique, so a decision is evidence and
+      a re-proposal of *changed* content is a new row rather than an overwrite
+- [ ] `propose_skill`, the agent's half: writes a proposal, never a skill
+- [ ] Decision is an HTTP route, never a tool — `plan.py`/`workflows.py`/`skills.py`'s shape
+- [ ] Accepting a skill proposal writes the proposer's **local** tier (phase 3), which is the only
+      destination that exists: the shared tree is git-merged by a human and a route cannot commit
 - [ ] A rejection leaves a trace and an unchanged re-proposal cannot reopen it
 - [ ] A proposer can learn what became of its proposal
 - [ ] ADR
 
-## Phase 5 — The proposers
+## Phase 5 — The proposers that need history
 - [ ] Profile proposer over session tool co-occurrence
 - [ ] Skill distiller over recurring trajectories and human protocol corrections
 - [ ] **The self-confirmation guard, with its caller**: nothing distilled may count evidence it
       itself produced
-- [ ] Approval writes the local tier (phase 3); the shared tree stays git-merged by a human
 - [ ] ADR
 
 ## Review
@@ -89,6 +125,30 @@ tests leaked the shipped profiles into a module-global registry, and the control
 still carries" paragraph named the listing and missed the larger residual — the deployment's prose
 still orders the model to load skills the arm cannot reach, which makes a delta measured there a
 lower bound rather than an unbiased estimate.
+
+### Phase 3 — landed
+
+The per-actor tier plus its writer, in one PR, because `D-2026-09-05` §3 records the tier as
+blocked on *"nothing writes a per-actor directory until the distiller exists"* and the distiller is
+blocked on deployment history the census measures at zero. Shipping the tier alone would have been
+a mechanism whose only caller is its own test.
+
+**Two things departed from the design on purpose, both stated in the ADR rather than absorbed.**
+Storage is the store rather than a directory — a pod's filesystem is ephemeral and the chart runs
+`serverReplicas`, so a filed skill vanishes on restart and differs per replica, while the store
+puts the rows under the namespace `agent/leaver.py` already erases by. And `ToolScopedSkills` is
+not applied; the backlog carries the row and the cheap shape for closing it.
+
+**The derived enumeration earned its keep immediately.** Four sync overrides left `awrite`, `aedit`
+and `adelete` open on a read-only tier — the async path is the one an async agent takes — because
+`skill_backend.py`'s argument that async twins need no override is true of `FilesystemBackend` and
+false of `StoreBackend`. Three of four succeeded; the fourth refused, which is what a spot check
+passes. The rule worth keeping: an inherited-refusal argument is about one base class and does not
+travel with the refusal.
+
+Two of my own tests were replaced rather than left: one asserted a hardcoded set was a subset of a
+list built from the same hardcoded set, the other only checked a symbol was imported. The second is
+why `leaver.store_prefixes` is a function now.
 
 ### Phase 2 — what the measurement decided before any code
 
@@ -646,55 +706,32 @@ the arithmetic fixed the class; capping the document would have fixed the exampl
 restored it from its own scratch copy over my edits, and when stopped mid-restore left
 `if False:  # MUTATION` in the file. A subagent shares this working tree.
 
----
 
-# Probe-corpus absence claims vs the fleet that now serves them (2026-09-16)
+### Phase 3 — the review round
 
-Measured on this commit before any edit:
-- bare `available_tool_names()` = 119; fleet lane (own bundles + `Chemclaw3-mcp/manifests` +
-  the e2e harness manifests) = 155. `tests/test_probe_coverage.py` docstring said 114 / 121.
-- `Chemclaw3-mcp/MODULES.md`: `thermalsafety` (8851), `kinetics` (8852), `unitops` (8853) and
-  `suitability` (8892) are all **built** and published in `manifests/`.
-- Every tool on those three process servers takes a *measured* number as a required argument;
-  none of the probe questions supplies one. `oxygen_balance_screen` is the sole exception and is
-  already the probe that carries `needs_bundle:` (pc-06).
+Thirteen findings from a fresh-context adversarial review, all fixed, plus one the fixing exposed.
 
-## Items
+**Two were blocking and were the same class — a bound asserted in prose and enforced nowhere.**
+`store.asearch(namespace)` with no `limit` is `BaseStore`'s default of **10**, not "everything", so
+twelve saved skills listed ten while the prompt carried twelve and the two beyond the page were
+undeletable through the only route that deletes — which falsifies the condition this tier's
+exemption from review is granted on. And `MAX_LOCAL_SKILL_CHARS`' own comment claimed
+`agent_memory_max_files` bounded the row count, which is `BoundedStoreBackend`'s and mounts
+`/memories/` rather than this root: measured, an empty mounted tier costs **6** tokens of prefix and
+a maximal one **5,571**, none of it counted anywhere.
 
-- [x] Verify claim 1 site by site against real signatures in `Chemclaw3-mcp/servers/*/tools.py`
-- [x] Verify claim 2: `draft_experiment_protocol` bound bare, `protocols/layout.py::place()` real
-- [x] Verify claim 3: the process-chemistry header contradicts itself
-- [x] Verify claim 4: measure both lanes
-- [x] Narrow the lane-dependent halves of the markers (shape (b)); re-bucket only op-22 (shape (a))
-- [x] Rewrite the process-chemistry header's "what does not exist" paragraph
-- [x] Replace the stale figures in `test_probe_coverage.py` with the property
-- [x] Add R2 (no tool in both `expects_tools` and `asserts_absent`) and N3 (near-miss inside markers)
-- [x] ADR + ledger row + topic filing
-- [x] `make lint type`, the three named suites
+**The collision order was an accident and is now a decision.** Upstream resolves a skill-name
+collision last-source-wins and `/mine` was appended last, so a personal skill silently displaced a
+reviewed one. `/mine` moved first and the route refuses the collision it can see; the test fails on
+the reversed order, which is what makes it an assertion rather than a description.
 
-## Review
-
-Seventeen markers narrowed across five files, op-22 re-bucketed C -> B, pl-22's `CSV` forbid
-narrowed too (`draft_experiment_protocol`'s receipt carries a `run-sheet.csv` path, so forbidding
-"a CSV file name" would have re-opened the same defect one field over). Two guards added, the stale
-fleet-lane figures deleted.
-
-One report claim **rejected**: the docstring's *"this passes without consulting the manifest at
-all"* is true. Measured with the fleet on `CHEMCLAW_CONNECTORS_DIR`, `unresolved` is empty and the
-function returns before `sibling_root`. What was false beside it is the *other* half — that the
-fleet lane is guarded by `test_every_agent_callable_tool_is_probed_or_exempt` instead, which does
-not pass in that lane at all (34 unprobed there, measured).
-
-One thing left alone deliberately: `run_python` on pc-07 and ws-12 fails in a lane that mounts
-`pyexec`. `D-2026-09-16-an-absence-claim-that-names-no-capability-cannot-be-refuted` argues that
-asymmetry shut on purpose, so only the false parenthesis in `NEAR_MISS_RATIO`'s comment was
-corrected. A BACKLOG row was drafted for it and reverted, for the reason
-`D-2026-09-14-two-gaps-the-code-had-already-argued-shut` gives.
-
-Ran: `make lint`, `make type`, `make prose-validate`, and `make test PYTEST_WORKERS=4` over the
-whole suite -- 9,334 passed, 76 skipped, one failure
-(`test_workflow_replay.py::test_the_control_still_detects_the_divergence_it_was_built_for
-[TemplateWorkflow-before-the-run-record.json]`) that passes serially and touches nothing this
-change reaches. The 76 skips are `helm`/`promtool` not installed, one IPv6-less host, two declared
-non-deployment surfaces, and one checkpointer-in-`public` case. Docker was started and
-`make up && make db-migrate` run first, so the Postgres-backed set is not among them.
+**And one claim in the ADR itself was wrong in both directions at once.** It said
+`chemclaw_skill_loads_total{skill}` already covered this tier and warned that a chemist's own skill
+name therefore reached the exposition. Measured: the labelled series sat at 1 for a shipped skill
+and did not exist for a personal one, because that counter is `NarrowedSkillsBackend`'s and this
+tier is a `StoreBackend`. So the coverage claim was false *and* the privacy warning was about
+nothing — the same base-class mistake as the async write verbs, one method over, which is why the
+rule that finding left behind is written about inheritance rather than about writes.
+`chemclaw_local_skill_loads_total` is the tier's signal now, on `read` and `aread` both, and bare
+rather than labelled: a local skill's name is a person's own words and a label would mint a series
+per private project name in a shared exposition.

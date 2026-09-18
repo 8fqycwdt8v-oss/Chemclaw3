@@ -684,7 +684,7 @@ _SCALED = {
 _LATE_SECONDS = 8.0
 
 
-def test_a_job_that_fails_records_and_says_so_even_when_the_write_queue_is_busy(
+async def test_a_job_that_fails_records_and_says_so_even_when_the_write_queue_is_busy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A child that hit its own ceiling must still reach `job_records` and the chemist.
@@ -731,46 +731,43 @@ def test_a_job_that_fails_records_and_says_so_even_when_the_write_queue_is_busy(
 
     status: list[str] = []
 
-    async def _run() -> None:
-        async with await start_local_env_or_skip() as env:
-            client = pydantic_client(env)
-            # Workflow tasks only: the writes below have nowhere to run until the late worker is up.
-            core = Worker(client, task_queue=_CORE_QUEUE, workflows=[ConnectorJobWorkflow])
-            connector = Worker(client, task_queue=_CONNECTOR_QUEUE, workflows=[FixtureJobWorkflow])
-            writes = Worker(
-                client,
-                task_queue=_CORE_QUEUE,
-                activities=[record_session_event_activity, record_job],
-            )
+    async with await start_local_env_or_skip() as env:
+        client = pydantic_client(env)
+        # Workflow tasks only: the writes below have nowhere to run until the late worker is up.
+        core = Worker(client, task_queue=_CORE_QUEUE, workflows=[ConnectorJobWorkflow])
+        connector = Worker(client, task_queue=_CONNECTOR_QUEUE, workflows=[FixtureJobWorkflow])
+        writes = Worker(
+            client,
+            task_queue=_CORE_QUEUE,
+            activities=[record_session_event_activity, record_job],
+        )
 
-            async def _start_writes_late() -> None:
+        async def _start_writes_late() -> None:
+            await asyncio.sleep(_LATE_SECONDS)
+            async with writes:
                 await asyncio.sleep(_LATE_SECONDS)
-                async with writes:
-                    await asyncio.sleep(_LATE_SECONDS)
 
-            async with core, connector:
-                late = asyncio.create_task(_start_writes_late())
-                handle = await client.start_workflow(
-                    ConnectorJobWorkflow.run,
-                    _CEILING_JOB.model_copy(
-                        update={
-                            "payload": {"subject": "boom"},
-                            "session_id": _SESSION,
-                            "timeout_seconds": None,
-                        }
-                    ),
-                    id="wrapper-headroom-under-a-busy-queue",
-                    task_queue=_CORE_QUEUE,
-                    execution_timeout=wrapper_execution_timeout(),
-                )
-                with pytest.raises(WorkflowFailureError):
-                    await handle.result()
-                described = (await handle.describe()).status
-                assert described is not None, "a described execution always carries a status"
-                status.append(described.name)
-                await late
-
-    asyncio.run(_run())
+        async with core, connector:
+            late = asyncio.create_task(_start_writes_late())
+            handle = await client.start_workflow(
+                ConnectorJobWorkflow.run,
+                _CEILING_JOB.model_copy(
+                    update={
+                        "payload": {"subject": "boom"},
+                        "session_id": _SESSION,
+                        "timeout_seconds": None,
+                    }
+                ),
+                id="wrapper-headroom-under-a-busy-queue",
+                task_queue=_CORE_QUEUE,
+                execution_timeout=wrapper_execution_timeout(),
+            )
+            with pytest.raises(WorkflowFailureError):
+                await handle.result()
+            described = (await handle.describe()).status
+            assert described is not None, "a described execution always carries a status"
+            status.append(described.name)
+            await late
 
     assert status == ["FAILED"], (
         "the wrapper was reaped by its own execution timeout instead of failing on its child's "

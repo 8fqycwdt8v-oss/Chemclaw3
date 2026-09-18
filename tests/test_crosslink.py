@@ -10,7 +10,6 @@ The fix is not an index. It is letting a submission carry a note *with its depen
 link and its target land in one reviewable unit.
 """
 
-import asyncio
 import logging
 from pathlib import Path
 
@@ -121,70 +120,62 @@ def test_the_reverse_lookup_is_gone_and_stays_gone_until_something_calls_it() ->
     assert not hasattr(crosslink, "notes_for_calculation")
 
 
-def test_a_note_and_the_compound_it_links_land_in_one_write() -> None:
+async def test_a_note_and_the_compound_it_links_land_in_one_write() -> None:
     """The actual unblocking change: a reviewable unit is a note *and what it needs*.
 
     Before this a `NoteWrite` was one path and one content, which is why a note could never
     link a note that did not already exist on the base branch.
     """
+    smiles = "CCO"
+    note = Note(
+        id="job-1",
+        type="job-result",
+        compound_smiles=smiles,
+        created_by="agent",
+        body=f"Computed for [[{compound_id(smiles)}]].",
+    )
+    submitter = _Capturing()
+    await record_note(
+        note, submitter, knowledge_dir="knowledge", dependencies=compound_dependencies(note)
+    )
 
-    async def _run() -> None:
-        smiles = "CCO"
-        note = Note(
-            id="job-1",
-            type="job-result",
-            compound_smiles=smiles,
-            created_by="agent",
-            body=f"Computed for [[{compound_id(smiles)}]].",
-        )
-        submitter = _Capturing()
-        await record_note(
-            note, submitter, knowledge_dir="knowledge", dependencies=compound_dependencies(note)
-        )
-
-        assert submitter.captured is not None
-        paths = [file.path for file in submitter.captured.files]
-        # The compound is written **before** the note that cites it: a reader scanning mid-write
-        # must never meet a note whose `[[wikilink]]` dangles
-        # (`D-2026-09-05-the-gate-is-deleted-not-dormant`). Under the PR-gate both files merged in
-        # one commit, so the order was free and the subject came first.
-        assert paths == [
-            f"knowledge/compound/{compound_id(smiles)}.md",
-            "knowledge/job-result/job-1.md",
-        ]
-
-    asyncio.run(_run())
+    assert submitter.captured is not None
+    paths = [file.path for file in submitter.captured.files]
+    # The compound is written **before** the note that cites it: a reader scanning mid-write
+    # must never meet a note whose `[[wikilink]]` dangles
+    # (`D-2026-09-05-the-gate-is-deleted-not-dormant`). Under the PR-gate both files merged in
+    # one commit, so the order was free and the subject came first.
+    assert paths == [
+        f"knowledge/compound/{compound_id(smiles)}.md",
+        "knowledge/job-result/job-1.md",
+    ]
 
 
-def test_that_submission_passes_kg_validate(tmp_path: Path) -> None:
+async def test_that_submission_passes_kg_validate(tmp_path: Path) -> None:
     """The claim the old comment doubted, checked against the validator itself.
 
     That bundle's note builder avoided the link because it would fail validation. Write both
     files of the submission to disk and run the real validator over them: no dangling link.
     """
+    smiles = "CCO"
+    note = Note(
+        id="job-1",
+        type="job-result",
+        compound_smiles=smiles,
+        created_by="agent",
+        body=f"Computed for [[{compound_id(smiles)}]].",
+    )
+    submitter = _Capturing()
+    await record_note(
+        note, submitter, knowledge_dir="knowledge", dependencies=compound_dependencies(note)
+    )
+    assert submitter.captured is not None
+    for file in submitter.captured.files:
+        path = tmp_path / file.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(file.content, encoding="utf-8")
 
-    async def _run() -> None:
-        smiles = "CCO"
-        note = Note(
-            id="job-1",
-            type="job-result",
-            compound_smiles=smiles,
-            created_by="agent",
-            body=f"Computed for [[{compound_id(smiles)}]].",
-        )
-        submitter = _Capturing()
-        await record_note(
-            note, submitter, knowledge_dir="knowledge", dependencies=compound_dependencies(note)
-        )
-        assert submitter.captured is not None
-        for file in submitter.captured.files:
-            path = tmp_path / file.path
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(file.content, encoding="utf-8")
-
-        assert validate(tmp_path / "knowledge") == []
-
-    asyncio.run(_run())
+    assert validate(tmp_path / "knowledge") == []
 
 
 def test_the_note_alone_would_not_have_passed(tmp_path: Path) -> None:
@@ -208,24 +199,20 @@ def test_the_note_alone_would_not_have_passed(tmp_path: Path) -> None:
     assert any("unknown note" in problem for problem in problems)
 
 
-def test_a_dependency_is_not_duplicated_however_many_times_it_is_named() -> None:
+async def test_a_dependency_is_not_duplicated_however_many_times_it_is_named() -> None:
     """Writing one path twice in a commit is noise at best and a race at worst."""
-
-    async def _run() -> None:
-        note = Note(id="n", type="job-result", created_by="agent", body="[[compound-x]]")
-        duplicate = compound_note("CCO")
-        submitter = _Capturing()
-        await record_note(
-            note,
-            submitter,
-            knowledge_dir="knowledge",
-            dependencies=[duplicate, duplicate, note],
-        )
-        assert submitter.captured is not None
-        paths = [file.path for file in submitter.captured.files]
-        assert len(paths) == len(set(paths)) == 2  # the note, and one copy of the compound
-
-    asyncio.run(_run())
+    note = Note(id="n", type="job-result", created_by="agent", body="[[compound-x]]")
+    duplicate = compound_note("CCO")
+    submitter = _Capturing()
+    await record_note(
+        note,
+        submitter,
+        knowledge_dir="knowledge",
+        dependencies=[duplicate, duplicate, note],
+    )
+    assert submitter.captured is not None
+    paths = [file.path for file in submitter.captured.files]
+    assert len(paths) == len(set(paths)) == 2  # the note, and one copy of the compound
 
 
 def test_a_note_that_does_not_link_its_compound_brings_nothing_along() -> None:
@@ -244,7 +231,7 @@ def test_an_unparseable_smiles_does_not_fail_a_submission() -> None:
     assert compound_dependencies(note) == []
 
 
-def test_a_link_to_a_note_that_does_not_exist_is_reported_at_write_time(
+async def test_a_link_to_a_note_that_does_not_exist_is_reported_at_write_time(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A hand-written `[[wikilink]]` at a note nobody wrote used to land in silence.
@@ -258,24 +245,21 @@ def test_a_link_to_a_note_that_does_not_exist_is_reported_at_write_time(
     A WARNING and not a refusal: the note is the record either way, the model is told what it
     linked to, and refusing would lose a real observation over a typo in a citation.
     """
+    monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
+    note = Note(
+        id="job-1",
+        type="job-result",
+        created_by="agent",
+        body="Computed for [[compound-ethanol-w141]].",
+    )
+    with caplog.at_level(logging.WARNING, logger="chemclaw.kg.record"):
+        await record_note(note, _Capturing(), knowledge_dir="knowledge")
 
-    async def _run() -> None:
-        monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
-        note = Note(
-            id="job-1",
-            type="job-result",
-            created_by="agent",
-            body="Computed for [[compound-ethanol-w141]].",
-        )
-        with caplog.at_level(logging.WARNING, logger="chemclaw.kg.record"):
-            await record_note(note, _Capturing(), knowledge_dir="knowledge")
-
-    asyncio.run(_run())
     assert "compound-ethanol-w141" in caplog.text
     assert "job-1" in caplog.text
 
 
-def test_a_link_whose_target_lands_in_the_same_write_is_not_reported(
+async def test_a_link_whose_target_lands_in_the_same_write_is_not_reported(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The negative control: the ordinary computed note must not warn on every write.
@@ -284,30 +268,27 @@ def test_a_link_whose_target_lands_in_the_same_write_is_not_reported(
     moment the unit lands — warning about it would make the marker noise and train the model to
     ignore it.
     """
-
-    async def _run() -> None:
-        monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
-        smiles = "CCO"
-        note = Note(
-            id="job-2",
-            type="job-result",
-            compound_smiles=smiles,
-            created_by="agent",
-            body=f"Computed for [[{compound_id(smiles)}]].",
+    monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
+    smiles = "CCO"
+    note = Note(
+        id="job-2",
+        type="job-result",
+        compound_smiles=smiles,
+        created_by="agent",
+        body=f"Computed for [[{compound_id(smiles)}]].",
+    )
+    with caplog.at_level(logging.WARNING, logger="chemclaw.kg.record"):
+        await record_note(
+            note,
+            _Capturing(),
+            knowledge_dir="knowledge",
+            dependencies=compound_dependencies(note),
         )
-        with caplog.at_level(logging.WARNING, logger="chemclaw.kg.record"):
-            await record_note(
-                note,
-                _Capturing(),
-                knowledge_dir="knowledge",
-                dependencies=compound_dependencies(note),
-            )
 
-    asyncio.run(_run())
     assert caplog.text == ""
 
 
-def test_a_citation_of_a_transcribed_reaction_is_not_a_dangling_link(
+async def test_a_citation_of_a_transcribed_reaction_is_not_a_dangling_link(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`[[reaction-<id>]]` resolves in the record store, not in the graph (D-2026-08-25).
@@ -315,17 +296,14 @@ def test_a_citation_of_a_transcribed_reaction_is_not_a_dangling_link(
     Every campaign and optimization note cites its runs that way, so reporting them would warn on
     the notes the miners write most.
     """
+    monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
+    note = Note(
+        id="campaign-1",
+        type="campaign",
+        created_by="agent",
+        body="Distilled from [[reaction-eln-7]].",
+    )
+    with caplog.at_level(logging.WARNING, logger="chemclaw.kg.record"):
+        await record_note(note, _Capturing(), knowledge_dir="knowledge")
 
-    async def _run() -> None:
-        monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
-        note = Note(
-            id="campaign-1",
-            type="campaign",
-            created_by="agent",
-            body="Distilled from [[reaction-eln-7]].",
-        )
-        with caplog.at_level(logging.WARNING, logger="chemclaw.kg.record"):
-            await record_note(note, _Capturing(), knowledge_dir="knowledge")
-
-    asyncio.run(_run())
     assert caplog.text == ""

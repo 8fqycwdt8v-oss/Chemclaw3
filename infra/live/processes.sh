@@ -375,7 +375,7 @@ PY
 
 # The `calc` backend, which is **not** a connector and must never enter `CHEMCLAW_CONNECTOR_URLS`.
 #
-# Chemclaw3 keeps its own `calc` bundle and all fifteen tools; what moved to the fleet is the
+# Chemclaw3 keeps its own `calc` bundle and its whole tool surface; what moved to the fleet is the
 # *physics* behind them (D-2026-08-16-the-physics-leaves-the-cache-stays), which
 # `connectors/calc/remote.py::calc_session` dials at `calc_server_url` on a cache miss. So it is
 # invisible to `check_connectors_at_startup`, `/readyz` is green with it down, and the front door

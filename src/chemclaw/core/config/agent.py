@@ -467,6 +467,27 @@ class AgentSettings(BaseSettings):
     # 200 at 5 kB is ~1 MB per person, which a namespace this is meant to hold does not approach:
     # the working surface of one chemist's research turns, not an archive.
     agent_memory_max_files: int = Field(default=200, ge=1)
+    # **What bounds the chemist's own skills tier, which `agent_memory_max_files` does not.** That
+    # cap lives in `scratchpad.BoundedStoreBackend`, which mounts `/memories/`; the local-skills
+    # tier mounts a plain read-only backend and is written from an HTTP route, so nothing on either
+    # half counted a row until these two existed.
+    #
+    # Two numbers because they bound different things, the `preferences_*` pair's reason exactly.
+    # The char cap is one skill's *body*, which is read into context on demand. The row cap is
+    # **prefix** spend: every local skill's name and description sit in the system message of every
+    # model call this chemist makes, unconditionally, so the row count is a multiplier on the one
+    # part of the request nothing can compact. 20 x deepagents' 1,024-character description limit is
+    # ~5,300 tokens of worst case; `agent/local_skills.py` carries the arithmetic.
+    #
+    # Refused at the route rather than evicted, unlike the memory tier: a memory a turn wrote may
+    # be dropped silently, and judgment a person authored may not.
+    #
+    # 16,000 is the shared tree's own largest skill (`protocol-generation`, 12,896 characters)
+    # plus room, so a person may write judgment as substantial as anything reviewed in. 20 is
+    # not the memory tier's 200 because a memory is a note a turn took and there are as many as
+    # the work produced, while a skill is judgment somebody sat down and wrote.
+    agent_local_skill_max_chars: int = Field(default=16_000, ge=1)
+    agent_local_skills_max: int = Field(default=20, ge=1)
     # What `recall_preferences` may hand back, and the second half of the same finding.
     # `user_preferences` is the other agent-writable table with no bound: `remember_preference`
     # takes a **model-chosen** key, so the row count is not one-per-known-name, and the `SELECT …
@@ -750,6 +771,39 @@ class AgentSettings(BaseSettings):
     # them carries the same sentence. 20 is the old setting's value, kept so a deployment that
     # tuned it reads the same number.
     agent_max_promoted_invalid_calls: int = Field(default=20, ge=0)
+
+    # How many audit events `PostgresAuditSink` may hold before it starts shedding the oldest.
+    #
+    # **The buffer had no write-side bound at all, and its docstring is why that looked safe.** It
+    # argues — correctly — that a *failed* batch must be dropped rather than re-queued, "because
+    # re-queueing it would make a broken database grow the buffer without bound". That covers a
+    # database which is **down**. It says nothing about one which is merely **slow**: `record()`
+    # appends and returns while `_flush_all` drains at whatever rate the connection allows, so a
+    # database answering in seconds instead of milliseconds grows the list on the producer side,
+    # inside a pod the chart limits to 1 GiB, at roughly ninety rows a turn.
+    #
+    # Shedding the **oldest** is deliberate. Both ends lose a row, and the end worth keeping is the
+    # recent one: an operator reaching for this trail is asking what just happened. Nothing is lost
+    # silently either way — every event has already gone to the stdlib log by the time it is
+    # buffered, and `chemclaw_audit_events_shed_total` is a separate series from
+    # `chemclaw_audit_sink_failures_total` on purpose, because "the database is unreachable" and
+    # "the database cannot keep up" have different remedies and would be indistinguishable pooled.
+    #
+    # 50,000 is about 555 turns of backlog at the measured ~90 rows a turn — large enough that an
+    # ordinary slow patch never reaches it, small enough that it cannot be the thing that ends the
+    # process. 0 removes the bound and restores the old unbounded behaviour for a deployment that
+    # would rather have the OOM than the gap.
+    #
+    # **The memory figure is measured, because the sentence here first said "a few tens of MB" and
+    # that was wrong by 4x in the reassuring direction.** At the realistic row — `arguments` cut to
+    # `agent_audit_max_arg_chars`, i.e. 200 — 50,000 events is **1,672 B each, 80 MB**, which is 8%
+    # of the 1 GiB the chart gives a pod that is also holding the model context. That is the number
+    # this default is chosen against, and it is only 80 rather than 160 because `_shed_to_bound`
+    # charges the in-flight batch too: before that fix `_flush_all` swapped the list out and
+    # `record` refilled a fresh one the bound could not see, so the real ceiling was twice whatever
+    # this field said. Raising this field past ~150,000 puts the buffer alone over a quarter of the
+    # pod, which is the point at which it stops being a backstop and becomes the risk.
+    agent_audit_buffer_max_events: int = Field(default=50_000, ge=0)
 
     # How many times one turn may call a tool with the *identical* arguments before the call is
     # refused (`agent.repeat_guard`). The loop cap above bounds the harness's iterations and says

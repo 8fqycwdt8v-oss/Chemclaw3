@@ -345,28 +345,24 @@ def test_genuine_negative_temperature_still_extracted() -> None:
     assert _prose_temperature("stirred at 0 °C") == 0.0
 
 
-def test_fetch_only_returns_entries_after_cursor(tmp_path: Path) -> None:
+async def test_fetch_only_returns_entries_after_cursor(tmp_path: Path) -> None:
     """fetch_new_entries returns only entries at or after `since`, oldest first."""
-
-    async def _run() -> None:
-        for name, ts in [("a", "2026-01-01T00:00:00Z"), ("b", "2026-06-01T00:00:00Z")]:
-            (tmp_path / f"{name}.json").write_text(
-                json.dumps(
-                    {
-                        "id": name,
-                        "timestamp": ts,
-                        "reactants": [{"smiles": "CCO"}],
-                        "products": [{"smiles": "CCO"}],
-                    }
-                ),
-                encoding="utf-8",
-            )
-        adapter = JsonExportAdapter(str(tmp_path))
-        cutoff = datetime(2026, 3, 1, tzinfo=UTC)
-        new = await adapter.fetch_new_entries(cutoff)
-        assert [e.entry_id for e in new] == ["b"]  # only the June entry
-
-    asyncio.run(_run())
+    for name, ts in [("a", "2026-01-01T00:00:00Z"), ("b", "2026-06-01T00:00:00Z")]:
+        (tmp_path / f"{name}.json").write_text(
+            json.dumps(
+                {
+                    "id": name,
+                    "timestamp": ts,
+                    "reactants": [{"smiles": "CCO"}],
+                    "products": [{"smiles": "CCO"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+    adapter = JsonExportAdapter(str(tmp_path))
+    cutoff = datetime(2026, 3, 1, tzinfo=UTC)
+    new = await adapter.fetch_new_entries(cutoff)
+    assert [e.entry_id for e in new] == ["b"]  # only the June entry
 
 
 def _write_entry(path: Path, entry_id: str, timestamp: str) -> None:
@@ -384,33 +380,23 @@ def _write_entry(path: Path, entry_id: str, timestamp: str) -> None:
     )
 
 
-def test_fetch_includes_entry_exactly_at_cursor(tmp_path: Path) -> None:
+async def test_fetch_includes_entry_exactly_at_cursor(tmp_path: Path) -> None:
     """An entry stamped exactly at the cursor is fetched (inclusive boundary).
 
     A same-second entry exported after a sync run must not be skipped forever;
     re-ingesting a boundary entry is idempotent, so inclusivity is safe.
     """
-
-    async def _run() -> None:
-        _write_entry(tmp_path / "a.json", "a", "2026-03-01T00:00:00Z")
-        new = await JsonExportAdapter(str(tmp_path)).fetch_new_entries(
-            datetime(2026, 3, 1, tzinfo=UTC)
-        )
-        assert [e.entry_id for e in new] == ["a"]
-
-    asyncio.run(_run())
+    _write_entry(tmp_path / "a.json", "a", "2026-03-01T00:00:00Z")
+    new = await JsonExportAdapter(str(tmp_path)).fetch_new_entries(datetime(2026, 3, 1, tzinfo=UTC))
+    assert [e.entry_id for e in new] == ["a"]
 
 
-def test_fetch_skips_corrupt_json_file(tmp_path: Path) -> None:
+async def test_fetch_skips_corrupt_json_file(tmp_path: Path) -> None:
     """One corrupt export file is skipped, not allowed to abort the whole fetch (G4)."""
-
-    async def _run() -> None:
-        (tmp_path / "corrupt.json").write_text("{not json", encoding="utf-8")
-        _write_entry(tmp_path / "good.json", "good", "2026-01-01T00:00:00Z")
-        new = await JsonExportAdapter(str(tmp_path)).fetch_new_entries(_EPOCH)
-        assert [e.entry_id for e in new] == ["good"]
-
-    asyncio.run(_run())
+    (tmp_path / "corrupt.json").write_text("{not json", encoding="utf-8")
+    _write_entry(tmp_path / "good.json", "good", "2026-01-01T00:00:00Z")
+    new = await JsonExportAdapter(str(tmp_path)).fetch_new_entries(_EPOCH)
+    assert [e.entry_id for e in new] == ["good"]
 
 
 def test_fetch_logs_the_skipped_corrupt_file(
@@ -580,20 +566,16 @@ def test_ord_adapter_reports_late_arrivals_too(
     assert "late-ord.json" in caplog.text
 
 
-def test_naive_timestamp_is_read_as_utc(tmp_path: Path) -> None:
+async def test_naive_timestamp_is_read_as_utc(tmp_path: Path) -> None:
     """A timestamp without an offset is treated as UTC.
 
     A naive datetime would later raise TypeError when compared against the sync's
     offset-aware cursor.
     """
-
-    async def _run() -> None:
-        _write_entry(tmp_path / "naive.json", "naive", "2026-01-01T00:00:00")  # no offset
-        new = await JsonExportAdapter(str(tmp_path)).fetch_new_entries(_EPOCH)
-        assert [e.entry_id for e in new] == ["naive"]
-        assert new[0].created_at == datetime(2026, 1, 1, tzinfo=UTC)
-
-    asyncio.run(_run())
+    _write_entry(tmp_path / "naive.json", "naive", "2026-01-01T00:00:00")  # no offset
+    new = await JsonExportAdapter(str(tmp_path)).fetch_new_entries(_EPOCH)
+    assert [e.entry_id for e in new] == ["naive"]
+    assert new[0].created_at == datetime(2026, 1, 1, tzinfo=UTC)
 
 
 # --- note + ingest + sync -------------------------------------------------------------
@@ -609,45 +591,35 @@ def test_record_from_ord_reaction() -> None:
     assert cited_ids(record.body) == []
 
 
-def test_ingest_indexes_and_records() -> None:
+async def test_ingest_indexes_and_records() -> None:
     """A valid reaction is indexed (reaction + compounds) and stored as a queryable record."""
-
-    async def _run() -> None:
-        rxn, mol, rec = (
-            InMemoryFingerprintStore(),
-            InMemoryFingerprintStore(),
-            InMemoryReactionRecordStore(),
-        )
-        record = await ingest_reaction(
-            _ester(), rxn, mol, rec, label_index=_labels(), source="test-eln"
-        )
-        assert record.reaction_id == "rxn-1"
-        assert len(await rxn.all_records()) == 1  # the reaction fingerprint
-        assert len(await mol.all_records()) == 3  # ethanol, acetic acid, ethyl acetate
-        assert (await rec.read("rxn-1")) is not None  # readable at once, with no PR to merge
-
-    asyncio.run(_run())
+    rxn, mol, rec = (
+        InMemoryFingerprintStore(),
+        InMemoryFingerprintStore(),
+        InMemoryReactionRecordStore(),
+    )
+    record = await ingest_reaction(
+        _ester(), rxn, mol, rec, label_index=_labels(), source="test-eln"
+    )
+    assert record.reaction_id == "rxn-1"
+    assert len(await rxn.all_records()) == 1  # the reaction fingerprint
+    assert len(await mol.all_records()) == 3  # ethanol, acetic acid, ethyl acetate
+    assert (await rec.read("rxn-1")) is not None  # readable at once, with no PR to merge
 
 
-def test_ingest_rejects_invalid_without_side_effects() -> None:
+async def test_ingest_rejects_invalid_without_side_effects() -> None:
     """An invalid reaction raises and writes nothing to the index or the corpus (G4)."""
-
-    async def _run() -> None:
-        rxn, mol, rec = (
-            InMemoryFingerprintStore(),
-            InMemoryFingerprintStore(),
-            InMemoryReactionRecordStore(),
-        )
-        bad = _ester().model_copy(
-            update={"outcomes": [Component(smiles="CCCl", role=Role.PRODUCT)]}
-        )
-        with pytest.raises(IngestError, match="mass balance"):
-            await ingest_reaction(bad, rxn, mol, rec, label_index=_labels(), source="test-eln")
-        assert await rxn.all_records() == []
-        assert await mol.all_records() == []
-        assert await rec.all_records() == []
-
-    asyncio.run(_run())
+    rxn, mol, rec = (
+        InMemoryFingerprintStore(),
+        InMemoryFingerprintStore(),
+        InMemoryReactionRecordStore(),
+    )
+    bad = _ester().model_copy(update={"outcomes": [Component(smiles="CCCl", role=Role.PRODUCT)]})
+    with pytest.raises(IngestError, match="mass balance"):
+        await ingest_reaction(bad, rxn, mol, rec, label_index=_labels(), source="test-eln")
+    assert await rxn.all_records() == []
+    assert await mol.all_records() == []
+    assert await rec.all_records() == []
 
 
 def test_sync_ingests_batch_and_skips_bad_entries() -> None:
@@ -819,41 +791,37 @@ class _ListAdapter:
         return JsonExportAdapter().map_to_ord(raw)
 
 
-def test_sync_rejects_non_slug_entry_id_without_aborting_batch() -> None:
+async def test_sync_rejects_non_slug_entry_id_without_aborting_batch() -> None:
     """An entry id that is not a valid note slug is one rejection, never a batch abort (G4).
 
     `Note(id="reaction-EXP 2024/001")` raises a pydantic ValidationError, which is not a
     ChemclawError — it must still be caught per entry, or one routinely-named ELN entry
     permanently halts the whole sync source.
     """
+    bad_id = _good_entry("EXP 2024/001", datetime(2026, 1, 1, tzinfo=UTC))
+    good = _good_entry("good", datetime(2026, 2, 1, tzinfo=UTC))
+    rxn, mol, rec = (
+        InMemoryFingerprintStore(),
+        InMemoryFingerprintStore(),
+        InMemoryReactionRecordStore(),
+    )
+    summary = await sync_entries(
+        _ListAdapter([bad_id, good]),
+        rxn,
+        mol,
+        rec,
+        _EPOCH,
+        label_index=_labels(),
+        source="test-eln",
+    )
 
-    async def _run() -> None:
-        bad_id = _good_entry("EXP 2024/001", datetime(2026, 1, 1, tzinfo=UTC))
-        good = _good_entry("good", datetime(2026, 2, 1, tzinfo=UTC))
-        rxn, mol, rec = (
-            InMemoryFingerprintStore(),
-            InMemoryFingerprintStore(),
-            InMemoryReactionRecordStore(),
-        )
-        summary = await sync_entries(
-            _ListAdapter([bad_id, good]),
-            rxn,
-            mol,
-            rec,
-            _EPOCH,
-            label_index=_labels(),
-            source="test-eln",
-        )
-
-        assert summary.ingested == ["good"]
-        assert [r.entry_id for r in summary.rejected] == ["EXP 2024/001"]
-        assert "slug" in summary.rejected[0].reason
-        assert summary.next_cursor == datetime(2026, 2, 1, tzinfo=UTC)
-
-    asyncio.run(_run())
+    assert summary.ingested == ["good"]
+    assert [r.entry_id for r in summary.rejected] == ["EXP 2024/001"]
+    assert "slug" in summary.rejected[0].reason
+    assert summary.next_cursor == datetime(2026, 2, 1, tzinfo=UTC)
 
 
-def test_a_nul_byte_in_free_text_is_one_rejection_not_a_half_written_batch() -> None:
+async def test_a_nul_byte_in_free_text_is_one_rejection_not_a_half_written_batch() -> None:
     """Free text the corpus cannot store is bad data per entry, refused before anything is written.
 
     A NUL byte anywhere in an ELN's prose — a procedure, a hypothesis, an impurity name, an
@@ -870,42 +838,38 @@ def test_a_nul_byte_in_free_text_is_one_rejection_not_a_half_written_batch() -> 
     like any other bad-data refusal. Sanitising instead was the alternative and is the wrong one
     here — see `ingest/rejections.py::_storable` for where the opposite trade is right, and why.
     """
+    poisoned = RawEntry(
+        entry_id="EXP-2",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        payload={
+            "reactants": [{"smiles": "CCO"}, {"smiles": "CC(=O)O"}],
+            "products": [{"smiles": "CCOC(C)=O"}],
+            "procedure": "Quenched with brine\x00 and dried over MgSO4.",
+        },
+    )
+    good = _good_entry("EXP-3", datetime(2026, 2, 1, tzinfo=UTC))
+    rxn, mol, rec = (
+        InMemoryFingerprintStore(),
+        InMemoryFingerprintStore(),
+        InMemoryReactionRecordStore(),
+    )
+    summary = await sync_entries(
+        _ListAdapter([poisoned, good]),
+        rxn,
+        mol,
+        rec,
+        _EPOCH,
+        label_index=_labels(),
+        source="test-eln",
+    )
 
-    async def _run() -> None:
-        poisoned = RawEntry(
-            entry_id="EXP-2",
-            created_at=datetime(2026, 1, 1, tzinfo=UTC),
-            payload={
-                "reactants": [{"smiles": "CCO"}, {"smiles": "CC(=O)O"}],
-                "products": [{"smiles": "CCOC(C)=O"}],
-                "procedure": "Quenched with brine\x00 and dried over MgSO4.",
-            },
-        )
-        good = _good_entry("EXP-3", datetime(2026, 2, 1, tzinfo=UTC))
-        rxn, mol, rec = (
-            InMemoryFingerprintStore(),
-            InMemoryFingerprintStore(),
-            InMemoryReactionRecordStore(),
-        )
-        summary = await sync_entries(
-            _ListAdapter([poisoned, good]),
-            rxn,
-            mol,
-            rec,
-            _EPOCH,
-            label_index=_labels(),
-            source="test-eln",
-        )
-
-        assert summary.ingested == ["EXP-3"], "the entry after the poisoned one must still ingest"
-        assert [r.entry_id for r in summary.rejected] == ["EXP-2"]
-        assert "NUL" in summary.rejected[0].reason
-        # Nothing of the refused entry reached any index: the refusal is at construction, so the
-        # dangling half-write — findable by structure, not expandable to a record — cannot happen.
-        assert [r.id for r in await rxn.all_records()] == ["EXP-3"]
-        assert await rec.read("EXP-2") is None
-
-    asyncio.run(_run())
+    assert summary.ingested == ["EXP-3"], "the entry after the poisoned one must still ingest"
+    assert [r.entry_id for r in summary.rejected] == ["EXP-2"]
+    assert "NUL" in summary.rejected[0].reason
+    # Nothing of the refused entry reached any index: the refusal is at construction, so the
+    # dangling half-write — findable by structure, not expandable to a record — cannot happen.
+    assert [r.id for r in await rxn.all_records()] == ["EXP-3"]
+    assert await rec.read("EXP-2") is None
 
 
 def test_a_lone_surrogate_in_free_text_is_refused_the_same_way() -> None:
@@ -1015,40 +979,36 @@ def test_the_next_field_added_to_a_record_cannot_forget_the_storable_check() -> 
     assert "extras[0].major_impurity" in str(in_a_nested_model.value)
 
 
-def test_future_dated_entry_is_rejected_and_does_not_poison_cursor() -> None:
+async def test_future_dated_entry_is_rejected_and_does_not_poison_cursor() -> None:
     """A typo'd future year is a visible rejection and never becomes the high-water cursor.
 
     If it advanced the cursor, every later real entry would be silently skipped forever
     (the persisted cursor is never lowered by any code path).
     """
+    future = _good_entry("future", datetime(2062, 7, 23, tzinfo=UTC))
+    good = _good_entry("good", datetime(2026, 1, 1, tzinfo=UTC))
+    rxn, mol, rec = (
+        InMemoryFingerprintStore(),
+        InMemoryFingerprintStore(),
+        InMemoryReactionRecordStore(),
+    )
+    summary = await sync_entries(
+        _ListAdapter([future, good]),
+        rxn,
+        mol,
+        rec,
+        _EPOCH,
+        label_index=_labels(),
+        source="test-eln",
+    )
 
-    async def _run() -> None:
-        future = _good_entry("future", datetime(2062, 7, 23, tzinfo=UTC))
-        good = _good_entry("good", datetime(2026, 1, 1, tzinfo=UTC))
-        rxn, mol, rec = (
-            InMemoryFingerprintStore(),
-            InMemoryFingerprintStore(),
-            InMemoryReactionRecordStore(),
-        )
-        summary = await sync_entries(
-            _ListAdapter([future, good]),
-            rxn,
-            mol,
-            rec,
-            _EPOCH,
-            label_index=_labels(),
-            source="test-eln",
-        )
-
-        assert summary.ingested == ["good"]
-        assert [r.entry_id for r in summary.rejected] == ["future"]
-        assert "future" in summary.rejected[0].reason
-        assert summary.next_cursor == datetime(2026, 1, 1, tzinfo=UTC)  # not 2062
-
-    asyncio.run(_run())
+    assert summary.ingested == ["good"]
+    assert [r.entry_id for r in summary.rejected] == ["future"]
+    assert "future" in summary.rejected[0].reason
+    assert summary.next_cursor == datetime(2026, 1, 1, tzinfo=UTC)  # not 2062
 
 
-def test_a_future_amendment_stamp_costs_the_cursor_and_not_the_entry() -> None:
+async def test_a_future_amendment_stamp_costs_the_cursor_and_not_the_entry() -> None:
     """A typo in an amendment date must not delete a real experiment from the corpus.
 
     The guard exists to keep an implausible timestamp out of the *stored cursor*, because nothing
@@ -1062,39 +1022,35 @@ def test_a_future_amendment_stamp_costs_the_cursor_and_not_the_entry() -> None:
     anything that has happened — is still a rejection, and
     `test_future_dated_entry_is_rejected_and_does_not_poison_cursor` pins it.
     """
+    amended = _good_entry("amended", datetime(2026, 1, 1, tzinfo=UTC)).model_copy(
+        update={"modified_at": datetime(2062, 7, 23, tzinfo=UTC)}
+    )
+    good = _good_entry("good", datetime(2026, 2, 1, tzinfo=UTC))
+    rxn, mol, rec = (
+        InMemoryFingerprintStore(),
+        InMemoryFingerprintStore(),
+        InMemoryReactionRecordStore(),
+    )
+    summary = await sync_entries(
+        _ListAdapter([amended, good]),
+        rxn,
+        mol,
+        rec,
+        _EPOCH,
+        label_index=_labels(),
+        source="test-eln",
+    )
 
-    async def _run() -> None:
-        amended = _good_entry("amended", datetime(2026, 1, 1, tzinfo=UTC)).model_copy(
-            update={"modified_at": datetime(2062, 7, 23, tzinfo=UTC)}
-        )
-        good = _good_entry("good", datetime(2026, 2, 1, tzinfo=UTC))
-        rxn, mol, rec = (
-            InMemoryFingerprintStore(),
-            InMemoryFingerprintStore(),
-            InMemoryReactionRecordStore(),
-        )
-        summary = await sync_entries(
-            _ListAdapter([amended, good]),
-            rxn,
-            mol,
-            rec,
-            _EPOCH,
-            label_index=_labels(),
-            source="test-eln",
-        )
-
-        assert summary.ingested == ["amended", "good"]
-        assert summary.rejected == []
-        # The cursor is what the batch's *plausible* entries reached. The amended one contributes
-        # nothing to it — not even its own sane `created_at`, because the fetch filters on the
-        # watermark and the simplest safe answer is to leave the cursor where the rest of the
-        # batch put it. So the entry is fetched again next run, as the warning says.
-        assert summary.next_cursor == datetime(2026, 2, 1, tzinfo=UTC)  # not 2062
-
-    asyncio.run(_run())
+    assert summary.ingested == ["amended", "good"]
+    assert summary.rejected == []
+    # The cursor is what the batch's *plausible* entries reached. The amended one contributes
+    # nothing to it — not even its own sane `created_at`, because the fetch filters on the
+    # watermark and the simplest safe answer is to leave the cursor where the rest of the
+    # batch put it. So the entry is fetched again next run, as the warning says.
+    assert summary.next_cursor == datetime(2026, 2, 1, tzinfo=UTC)  # not 2062
 
 
-def test_sync_fetches_an_overlap_window_behind_the_cursor(
+async def test_sync_fetches_an_overlap_window_behind_the_cursor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A late-landing export file stamped just before the cursor is still ingested.
@@ -1102,32 +1058,28 @@ def test_sync_fetches_an_overlap_window_behind_the_cursor(
     The fetch reaches `since - eln_sync_overlap_seconds` (re-fetching is free — ingestion
     is idempotent), and the returned cursor never regresses below `since`.
     """
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))  # no merged notes
+    monkeypatch.setattr(settings, "eln_sync_overlap_seconds", 1800.0)
+    cursor = datetime(2026, 1, 1, 2, 0, tzinfo=UTC)
+    late = _good_entry("late", cursor - timedelta(minutes=20))
+    adapter = _ListAdapter([late])
+    rxn, mol, rec = (
+        InMemoryFingerprintStore(),
+        InMemoryFingerprintStore(),
+        InMemoryReactionRecordStore(),
+    )
+    summary = await sync_entries(
+        adapter, rxn, mol, rec, cursor, label_index=_labels(), source="test-eln"
+    )
 
-    async def _run() -> None:
-        monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))  # no merged notes
-        monkeypatch.setattr(settings, "eln_sync_overlap_seconds", 1800.0)
-        cursor = datetime(2026, 1, 1, 2, 0, tzinfo=UTC)
-        late = _good_entry("late", cursor - timedelta(minutes=20))
-        adapter = _ListAdapter([late])
-        rxn, mol, rec = (
-            InMemoryFingerprintStore(),
-            InMemoryFingerprintStore(),
-            InMemoryReactionRecordStore(),
-        )
-        summary = await sync_entries(
-            adapter, rxn, mol, rec, cursor, label_index=_labels(), source="test-eln"
-        )
-
-        assert adapter.fetched_since == [cursor - timedelta(seconds=1800)]
-        assert summary.ingested == ["late"]
-        assert summary.skipped_existing == []  # its note is not merged yet, so it ingests
-        # And it is flagged as awaiting merge, which is the honest report even on a first sync:
-        # the entry sits inside the replay window with no merged note, so the *next* run fetches
-        # and proposes it again. "Will come back until someone merges it" is what a single run can
-        # establish; "was proposed before" is not (this entry never was).
-        assert summary.next_cursor == cursor  # the cursor never moves backwards
-
-    asyncio.run(_run())
+    assert adapter.fetched_since == [cursor - timedelta(seconds=1800)]
+    assert summary.ingested == ["late"]
+    assert summary.skipped_existing == []  # its note is not merged yet, so it ingests
+    # And it is flagged as awaiting merge, which is the honest report even on a first sync:
+    # the entry sits inside the replay window with no merged note, so the *next* run fetches
+    # and proposes it again. "Will come back until someone merges it" is what a single run can
+    # establish; "was proposed before" is not (this entry never was).
+    assert summary.next_cursor == cursor  # the cursor never moves backwards
 
 
 # The registry source name these sync tests run under. Seeding a record under a *different* name
@@ -1148,7 +1100,7 @@ async def _seed_record(store: InMemoryReactionRecordStore, entry: RawEntry) -> N
     )
 
 
-def test_sync_skips_overlap_entry_whose_note_already_merged(
+async def test_sync_skips_overlap_entry_whose_note_already_merged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An overlap-window entry whose note is already merged is skipped, not re-ingested.
@@ -1159,30 +1111,26 @@ def test_sync_skips_overlap_entry_whose_note_already_merged(
     is why every in-place ELN amendment was dropped. An unchanged entry costs a lookup and is
     reported under `skipped_existing`, never inflating `ingested`.
     """
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    cursor = datetime(2026, 1, 2, tzinfo=UTC)
+    late = _good_entry("late", cursor - timedelta(hours=2))
+    rxn, mol, rec = (
+        InMemoryFingerprintStore(),
+        InMemoryFingerprintStore(),
+        InMemoryReactionRecordStore(),
+    )
+    await _seed_record(rec, late)
+    summary = await sync_entries(
+        _ListAdapter([late]), rxn, mol, rec, cursor, label_index=_labels(), source="test-eln"
+    )
 
-    async def _run() -> None:
-        monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-        cursor = datetime(2026, 1, 2, tzinfo=UTC)
-        late = _good_entry("late", cursor - timedelta(hours=2))
-        rxn, mol, rec = (
-            InMemoryFingerprintStore(),
-            InMemoryFingerprintStore(),
-            InMemoryReactionRecordStore(),
-        )
-        await _seed_record(rec, late)
-        summary = await sync_entries(
-            _ListAdapter([late]), rxn, mol, rec, cursor, label_index=_labels(), source="test-eln"
-        )
-
-        assert summary.skipped_existing == ["late"]
-        assert summary.ingested == []  # a replay skip is not a fresh ingest
-        assert await rxn.all_records() == []  # no fingerprint re-upserts
-        assert summary.next_cursor == cursor
-
-    asyncio.run(_run())
+    assert summary.skipped_existing == ["late"]
+    assert summary.ingested == []  # a replay skip is not a fresh ingest
+    assert await rxn.all_records() == []  # no fingerprint re-upserts
+    assert summary.next_cursor == cursor
 
 
-def test_sync_still_ingests_new_entry_even_if_its_note_exists(
+async def test_sync_still_ingests_new_entry_even_if_its_note_exists(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The merged-note short-circuit applies only to the overlap replay, never past the cursor.
@@ -1190,29 +1138,25 @@ def test_sync_still_ingests_new_entry_even_if_its_note_exists(
     An entry *after* `since` is deliberate work (e.g. a manual backfill re-run): it must
     take the full idempotent ingest path even when a note with its id already exists.
     """
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    cursor = datetime(2026, 1, 2, tzinfo=UTC)
+    new = _good_entry("new", cursor + timedelta(hours=2))
+    rxn, mol, rec = (
+        InMemoryFingerprintStore(),
+        InMemoryFingerprintStore(),
+        InMemoryReactionRecordStore(),
+    )
+    await _seed_record(rec, new)
+    summary = await sync_entries(
+        _ListAdapter([new]), rxn, mol, rec, cursor, label_index=_labels(), source="test-eln"
+    )
 
-    async def _run() -> None:
-        monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-        cursor = datetime(2026, 1, 2, tzinfo=UTC)
-        new = _good_entry("new", cursor + timedelta(hours=2))
-        rxn, mol, rec = (
-            InMemoryFingerprintStore(),
-            InMemoryFingerprintStore(),
-            InMemoryReactionRecordStore(),
-        )
-        await _seed_record(rec, new)
-        summary = await sync_entries(
-            _ListAdapter([new]), rxn, mol, rec, cursor, label_index=_labels(), source="test-eln"
-        )
-
-        assert summary.ingested == ["new"]
-        assert summary.skipped_existing == []
-        assert len(await rec.all_records()) == 1
-
-    asyncio.run(_run())
+    assert summary.ingested == ["new"]
+    assert summary.skipped_existing == []
+    assert len(await rec.all_records()) == 1
 
 
-def test_sync_without_overlap_fetches_from_the_cursor_itself(
+async def test_sync_without_overlap_fetches_from_the_cursor_itself(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`apply_overlap=False` fetches from `since` (still inclusive), not the overlap floor.
@@ -1221,32 +1165,28 @@ def test_sync_without_overlap_fetches_from_the_cursor_itself(
     drain replays the overlap window once per run instead of once per chunk — while the
     inclusive same-second boundary entry is still picked up, preserving the cursor contract.
     """
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))  # no merged notes
+    cursor = datetime(2026, 1, 2, tzinfo=UTC)
+    adapter = _ListAdapter([_good_entry("boundary", cursor)])
+    rxn, mol, rec = (
+        InMemoryFingerprintStore(),
+        InMemoryFingerprintStore(),
+        InMemoryReactionRecordStore(),
+    )
+    summary = await sync_entries(
+        adapter,
+        rxn,
+        mol,
+        rec,
+        cursor,
+        apply_overlap=False,
+        label_index=_labels(),
+        source="test-eln",
+    )
 
-    async def _run() -> None:
-        monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))  # no merged notes
-        cursor = datetime(2026, 1, 2, tzinfo=UTC)
-        adapter = _ListAdapter([_good_entry("boundary", cursor)])
-        rxn, mol, rec = (
-            InMemoryFingerprintStore(),
-            InMemoryFingerprintStore(),
-            InMemoryReactionRecordStore(),
-        )
-        summary = await sync_entries(
-            adapter,
-            rxn,
-            mol,
-            rec,
-            cursor,
-            apply_overlap=False,
-            label_index=_labels(),
-            source="test-eln",
-        )
-
-        assert adapter.fetched_since == [cursor]  # no reach behind the cursor
-        assert summary.ingested == ["boundary"]  # inclusive boundary still processed
-        assert summary.next_cursor == cursor
-
-    asyncio.run(_run())
+    assert adapter.fetched_since == [cursor]  # no reach behind the cursor
+    assert summary.ingested == ["boundary"]  # inclusive boundary still processed
+    assert summary.next_cursor == cursor
 
 
 def test_overlap_rerejection_logs_debug_not_warning(
@@ -1519,7 +1459,7 @@ def test_the_record_form_keeps_the_solvent_the_fingerprint_form_drops_it() -> No
     assert "C1CCOC1" in record_from_ord_reaction(reaction).body
 
 
-def test_an_amended_entry_is_re_proposed_rather_than_dropped(
+async def test_an_amended_entry_is_re_proposed_rather_than_dropped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A yield corrected after assay must reach the graph, not vanish into `skipped_existing`.
@@ -1533,47 +1473,43 @@ def test_an_amended_entry_is_re_proposed_rather_than_dropped(
     The corrected entry is simply re-proposed, so the PR-gate shows a reviewer the diff. That is
     what a git-backed graph is for, and why an amendment needs no separate note-versioning scheme.
     """
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    cursor = datetime(2026, 1, 2, tzinfo=UTC)
+    original = _good_entry("amended", cursor - timedelta(hours=2))
+    corrected = original.model_copy(
+        update={
+            "payload": {
+                **original.payload,
+                "products": [{"smiles": "CCOC(C)=O", "yield_percent": 31}],
+            },
+            "modified_at": cursor + timedelta(hours=1),
+        }
+    )
+    rxn, mol, rec = (
+        InMemoryFingerprintStore(),
+        InMemoryFingerprintStore(),
+        InMemoryReactionRecordStore(),
+    )
+    await _seed_record(rec, original)
+    summary = await sync_entries(
+        _ListAdapter([corrected]),
+        rxn,
+        mol,
+        rec,
+        cursor,
+        label_index=_labels(),
+        source="test-eln",
+    )
 
-    async def _run() -> None:
-        monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-        cursor = datetime(2026, 1, 2, tzinfo=UTC)
-        original = _good_entry("amended", cursor - timedelta(hours=2))
-        corrected = original.model_copy(
-            update={
-                "payload": {
-                    **original.payload,
-                    "products": [{"smiles": "CCOC(C)=O", "yield_percent": 31}],
-                },
-                "modified_at": cursor + timedelta(hours=1),
-            }
-        )
-        rxn, mol, rec = (
-            InMemoryFingerprintStore(),
-            InMemoryFingerprintStore(),
-            InMemoryReactionRecordStore(),
-        )
-        await _seed_record(rec, original)
-        summary = await sync_entries(
-            _ListAdapter([corrected]),
-            rxn,
-            mol,
-            rec,
-            cursor,
-            label_index=_labels(),
-            source="test-eln",
-        )
-
-        assert summary.ingested == ["amended"]
-        assert summary.skipped_existing == []
-        # Not awaiting merge: a merged predecessor is proof the review queue moves, so this is new
-        # content going in front of a human rather than the same claim going round again.
-        stored = await rec.read("amended")
-        assert stored is not None and "31" in stored.body
-
-    asyncio.run(_run())
+    assert summary.ingested == ["amended"]
+    assert summary.skipped_existing == []
+    # Not awaiting merge: a merged predecessor is proof the review queue moves, so this is new
+    # content going in front of a human rather than the same claim going round again.
+    stored = await rec.read("amended")
+    assert stored is not None and "31" in stored.body
 
 
-def test_an_entry_that_fails_to_ingest_is_only_reported_as_rejected(
+async def test_an_entry_that_fails_to_ingest_is_only_reported_as_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The two reports are exclusive: a rejection must not also show up as awaiting merge.
@@ -1582,31 +1518,27 @@ def test_an_entry_that_fails_to_ingest_is_only_reported_as_rejected(
     and recorded after it, so a bad entry inside the replay window — which is exactly where a
     rejection is deterministic and repeats every run — reports one outcome, not two.
     """
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    cursor = datetime(2026, 1, 2, tzinfo=UTC)
+    bad = RawEntry(
+        entry_id="bad",
+        created_at=cursor - timedelta(hours=2),
+        payload={"reactants": [{"smiles": "CCO"}], "products": [{"smiles": "CCCl"}]},
+    )
+    rxn, mol, rec = (
+        InMemoryFingerprintStore(),
+        InMemoryFingerprintStore(),
+        InMemoryReactionRecordStore(),
+    )
+    summary = await sync_entries(
+        _ListAdapter([bad]), rxn, mol, rec, cursor, label_index=_labels(), source="test-eln"
+    )
 
-    async def _run() -> None:
-        monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-        cursor = datetime(2026, 1, 2, tzinfo=UTC)
-        bad = RawEntry(
-            entry_id="bad",
-            created_at=cursor - timedelta(hours=2),
-            payload={"reactants": [{"smiles": "CCO"}], "products": [{"smiles": "CCCl"}]},
-        )
-        rxn, mol, rec = (
-            InMemoryFingerprintStore(),
-            InMemoryFingerprintStore(),
-            InMemoryReactionRecordStore(),
-        )
-        summary = await sync_entries(
-            _ListAdapter([bad]), rxn, mol, rec, cursor, label_index=_labels(), source="test-eln"
-        )
-
-        assert [entry.entry_id for entry in summary.rejected] == ["bad"]
-        assert summary.ingested == []
-
-    asyncio.run(_run())
+    assert [entry.entry_id for entry in summary.rejected] == ["bad"]
+    assert summary.ingested == []
 
 
-def test_an_unchanged_entry_reported_as_amended_still_costs_nothing(
+async def test_an_unchanged_entry_reported_as_amended_still_costs_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A source that stamps `modified` on every export must not re-propose the whole corpus.
@@ -1615,28 +1547,24 @@ def test_an_unchanged_entry_reported_as_amended_still_costs_nothing(
     exporter that touches every record would turn each sync into a full re-submission, which is a
     worse failure than the one being fixed because it is loud and continuous.
     """
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    cursor = datetime(2026, 1, 2, tzinfo=UTC)
+    entry = _good_entry("touched", cursor - timedelta(hours=2))
+    touched = entry.model_copy(update={"modified_at": cursor + timedelta(hours=1)})
 
-    async def _run() -> None:
-        monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-        cursor = datetime(2026, 1, 2, tzinfo=UTC)
-        entry = _good_entry("touched", cursor - timedelta(hours=2))
-        touched = entry.model_copy(update={"modified_at": cursor + timedelta(hours=1)})
+    rxn, mol, rec = (
+        InMemoryFingerprintStore(),
+        InMemoryFingerprintStore(),
+        InMemoryReactionRecordStore(),
+    )
+    await _seed_record(rec, entry)
+    summary = await sync_entries(
+        _ListAdapter([touched]), rxn, mol, rec, cursor, label_index=_labels(), source="test-eln"
+    )
 
-        rxn, mol, rec = (
-            InMemoryFingerprintStore(),
-            InMemoryFingerprintStore(),
-            InMemoryReactionRecordStore(),
-        )
-        await _seed_record(rec, entry)
-        summary = await sync_entries(
-            _ListAdapter([touched]), rxn, mol, rec, cursor, label_index=_labels(), source="test-eln"
-        )
-
-        assert summary.skipped_existing == ["touched"]
-        assert summary.ingested == []
-        assert await rxn.all_records() == []  # no fingerprint re-upserts either
-
-    asyncio.run(_run())
+    assert summary.skipped_existing == ["touched"]
+    assert summary.ingested == []
+    assert await rxn.all_records() == []  # no fingerprint re-upserts either
 
 
 def test_an_amended_export_re_enters_the_fetch_window(tmp_path: Path) -> None:
@@ -1837,7 +1765,7 @@ class _OrdListAdapter:
         return OrdJsonAdapter().map_to_ord(raw)
 
 
-def test_ord_malformed_entry_does_not_abort_the_sync_batch() -> None:
+async def test_ord_malformed_entry_does_not_abort_the_sync_batch() -> None:
     """The batch-level proof: a malformed nested field never aborts the whole sync run.
 
     Reproduces the sync-aborting shape (Ingest-1) end to end through `sync_entries`: without the
@@ -1863,36 +1791,33 @@ def test_ord_malformed_entry_does_not_abort_the_sync_batch() -> None:
     good_payload = _ord_payload([{"type": "SMILES", "value": "CCO"}])
     good_payload["reactionId"] = "good"
 
-    async def _run() -> None:
-        malformed = RawEntry(
-            entry_id="malformed-amount",
-            created_at=datetime(2026, 1, 1, tzinfo=UTC),
-            payload=malformed_payload,
-        )
-        good = RawEntry(
-            entry_id="good", created_at=datetime(2026, 2, 1, tzinfo=UTC), payload=good_payload
-        )
-        rxn, mol, rec = (
-            InMemoryFingerprintStore(),
-            InMemoryFingerprintStore(),
-            InMemoryReactionRecordStore(),
-        )
-        summary = await sync_entries(
-            _OrdListAdapter([malformed, good]),
-            rxn,
-            mol,
-            rec,
-            _EPOCH,
-            label_index=_labels(),
-            source="test-eln",
-        )
+    malformed = RawEntry(
+        entry_id="malformed-amount",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        payload=malformed_payload,
+    )
+    good = RawEntry(
+        entry_id="good", created_at=datetime(2026, 2, 1, tzinfo=UTC), payload=good_payload
+    )
+    rxn, mol, rec = (
+        InMemoryFingerprintStore(),
+        InMemoryFingerprintStore(),
+        InMemoryReactionRecordStore(),
+    )
+    summary = await sync_entries(
+        _OrdListAdapter([malformed, good]),
+        rxn,
+        mol,
+        rec,
+        _EPOCH,
+        label_index=_labels(),
+        source="test-eln",
+    )
 
-        # Both land: the malformed field never poisoned the batch, and the second entry
-        # (which the un-guarded AttributeError would never have let the run reach) ingests too.
-        assert summary.ingested == ["malformed-amount", "good"]
-        assert summary.rejected == []
-
-    asyncio.run(_run())
+    # Both land: the malformed field never poisoned the batch, and the second entry
+    # (which the un-guarded AttributeError would never have let the run reach) ingests too.
+    assert summary.ingested == ["malformed-amount", "good"]
+    assert summary.rejected == []
 
 
 def test_a_search_hit_id_is_the_note_id_the_ingest_wrote() -> None:
@@ -1920,7 +1845,7 @@ def _with_impurities(*impurities: Impurity) -> OrdReaction:
     return _ester().model_copy(update={"impurities": list(impurities)})
 
 
-def test_an_identified_impurity_is_findable_by_structure() -> None:
+async def test_an_identified_impurity_is_findable_by_structure() -> None:
     """An impurity question — "have we seen this one before?" — is a structure question.
 
     An impurity's SMILES used to reach the note *text* only, so the molecule it names was findable
@@ -1928,53 +1853,45 @@ def test_an_identified_impurity_is_findable_by_structure() -> None:
     inverse of the question. Asserted through the search, not through a record count: what matters
     is that a chemist querying the structure gets the run back.
     """
-
-    async def _run() -> None:
-        rxn, mol, rec = (
-            InMemoryFingerprintStore(),
-            InMemoryFingerprintStore(),
-            InMemoryReactionRecordStore(),
-        )
-        # Diethyl ether — an ether by-product of the esterification, charged nowhere in the record.
-        await ingest_reaction(
-            _with_impurities(Impurity(name="ether", smiles="CCOCC")),
-            rxn,
-            mol,
-            rec,
-            label_index=_labels(),
-            source="test-eln",
-        )
-        hits = (await find_similar_molecules(mol, "CCOCC", threshold=0.99)).hits
-        assert [hit.smiles for hit in hits] == ["CCOCC"]
-
-    asyncio.run(_run())
+    rxn, mol, rec = (
+        InMemoryFingerprintStore(),
+        InMemoryFingerprintStore(),
+        InMemoryReactionRecordStore(),
+    )
+    # Diethyl ether — an ether by-product of the esterification, charged nowhere in the record.
+    await ingest_reaction(
+        _with_impurities(Impurity(name="ether", smiles="CCOCC")),
+        rxn,
+        mol,
+        rec,
+        label_index=_labels(),
+        source="test-eln",
+    )
+    hits = (await find_similar_molecules(mol, "CCOCC", threshold=0.99)).hits
+    assert [hit.smiles for hit in hits] == ["CCOCC"]
 
 
-def test_an_impurity_with_no_structure_is_skipped_not_fatal() -> None:
+async def test_an_impurity_with_no_structure_is_skipped_not_fatal() -> None:
     """An ELN routinely records only a chromatographic name; that is not an error (KNW-2)."""
-
-    async def _run() -> None:
-        rxn, mol, rec = (
-            InMemoryFingerprintStore(),
-            InMemoryFingerprintStore(),
-            InMemoryReactionRecordStore(),
-        )
-        await ingest_reaction(
-            _with_impurities(Impurity(name="RRT 0.82")),
-            rxn,
-            mol,
-            rec,
-            label_index=_labels(),
-            source="test-eln",
-        )
-        # The three reaction compounds, and nothing minted from a nameless chromatographic peak.
-        assert len(await mol.all_records()) == 3
-        assert await rec.all_records()  # the run was still recorded
-
-    asyncio.run(_run())
+    rxn, mol, rec = (
+        InMemoryFingerprintStore(),
+        InMemoryFingerprintStore(),
+        InMemoryReactionRecordStore(),
+    )
+    await ingest_reaction(
+        _with_impurities(Impurity(name="RRT 0.82")),
+        rxn,
+        mol,
+        rec,
+        label_index=_labels(),
+        source="test-eln",
+    )
+    # The three reaction compounds, and nothing minted from a nameless chromatographic peak.
+    assert len(await mol.all_records()) == 3
+    assert await rec.all_records()  # the run was still recorded
 
 
-def test_an_unparseable_impurity_structure_is_skipped_and_logged(
+async def test_an_unparseable_impurity_structure_is_skipped_and_logged(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A malformed trace-impurity string must not cost the whole experiment.
@@ -1983,58 +1900,46 @@ def test_an_unparseable_impurity_structure_is_skipped_and_logged(
     structure the analytics software garbled reaches the fingerprinter unchecked. Dropping it
     keeps the run; logging it keeps the drop visible.
     """
-
-    async def _run() -> None:
-        rxn, mol, rec = (
-            InMemoryFingerprintStore(),
-            InMemoryFingerprintStore(),
-            InMemoryReactionRecordStore(),
+    rxn, mol, rec = (
+        InMemoryFingerprintStore(),
+        InMemoryFingerprintStore(),
+        InMemoryReactionRecordStore(),
+    )
+    bad = Impurity(name="garbled", smiles="C1CC")
+    with caplog.at_level(logging.WARNING, logger="chemclaw.ingest.eln.ingest"):
+        await ingest_reaction(
+            _with_impurities(bad), rxn, mol, rec, label_index=_labels(), source="test-eln"
         )
-        bad = Impurity(name="garbled", smiles="C1CC")
-        with caplog.at_level(logging.WARNING, logger="chemclaw.ingest.eln.ingest"):
-            await ingest_reaction(
-                _with_impurities(bad), rxn, mol, rec, label_index=_labels(), source="test-eln"
-            )
-        assert len(await mol.all_records()) == 3
-        assert await rec.all_records()
-        assert "unparseable impurity SMILES" in caplog.text
-
-    asyncio.run(_run())
+    assert len(await mol.all_records()) == 3
+    assert await rec.all_records()
+    assert "unparseable impurity SMILES" in caplog.text
 
 
 # --- the note carries its project, and its scale --------------------------------------
 
 
-def test_a_reaction_record_is_reachable_by_its_project_tag() -> None:
+async def test_a_reaction_record_is_reachable_by_its_project_tag() -> None:
     """`gather_evidence(tag=…)` is documented as the project filter and was inert on reactions.
 
     Proven through the store's own eligibility gate rather than by reading a field: the project is
     worth recording only because a filtered sweep reaches the record, and a wrong tag must still
     exclude it.
     """
-
-    async def _run() -> None:
-        store = InMemoryReactionRecordStore()
-        record = record_from_ord_reaction(_ester().model_copy(update={"project": "prj-alpha"}))
-        await store.record([record], "eln-json")
-        assert await store.eligible(["rxn-1"], {"tag": "prj-alpha"}) == {"rxn-1"}
-        assert await store.eligible(["rxn-1"], {"tag": "prj-beta"}) == set()
-
-    asyncio.run(_run())
+    store = InMemoryReactionRecordStore()
+    record = record_from_ord_reaction(_ester().model_copy(update={"project": "prj-alpha"}))
+    await store.record([record], "eln-json")
+    assert await store.eligible(["rxn-1"], {"tag": "prj-alpha"}) == {"rxn-1"}
+    assert await store.eligible(["rxn-1"], {"tag": "prj-beta"}) == set()
 
 
-def test_a_reaction_with_no_project_invents_no_tag() -> None:
+async def test_a_reaction_with_no_project_invents_no_tag() -> None:
     """A record without a project gets no project — never a placeholder a filter would match."""
-
-    async def _run() -> None:
-        store = InMemoryReactionRecordStore()
-        await store.record([record_from_ord_reaction(_ester())], "eln-json")
-        stored = await store.read("rxn-1")
-        assert stored is not None and stored.project is None
-        # No project means no tag can match it — not that every tag matches.
-        assert await store.eligible(["rxn-1"], {"tag": "prj-alpha"}) == set()
-
-    asyncio.run(_run())
+    store = InMemoryReactionRecordStore()
+    await store.record([record_from_ord_reaction(_ester())], "eln-json")
+    stored = await store.read("rxn-1")
+    assert stored is not None and stored.project is None
+    # No project means no tag can match it — not that every tag matches.
+    assert await store.eligible(["rxn-1"], {"tag": "prj-alpha"}) == set()
 
 
 def _charged(*inputs: Component) -> OrdReaction:
@@ -2198,7 +2103,7 @@ def test_scale_survives_the_retrieval_excerpt_of_a_procedure_heavy_note() -> Non
     assert "Step 12" in note.body and "Step 12" not in excerpt
 
 
-def test_one_non_utf8_ord_export_does_not_abort_the_directory(
+async def test_one_non_utf8_ord_export_does_not_abort_the_directory(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A file the codec cannot read is skipped, like every other unreadable export.
@@ -2229,19 +2134,16 @@ def test_one_non_utf8_ord_export_does_not_abort_the_directory(
         encoding="utf-8",
     )
 
-    async def _run() -> None:
-        with caplog.at_level(logging.WARNING):
-            entries = await OrdJsonAdapter(str(tmp_path)).fetch_new_entries(
-                datetime(2026, 1, 1, tzinfo=UTC)
-            )
-        assert [entry.entry_id for entry in entries] == ["ord-good"], (
-            "the unreadable export must cost itself and nothing else"
+    with caplog.at_level(logging.WARNING):
+        entries = await OrdJsonAdapter(str(tmp_path)).fetch_new_entries(
+            datetime(2026, 1, 1, tzinfo=UTC)
         )
-        assert any("a-bad.json" in record.getMessage() for record in caplog.records), (
-            "a skipped export is skipped loudly — silence here is the same loss with no record"
-        )
-
-    asyncio.run(_run())
+    assert [entry.entry_id for entry in entries] == ["ord-good"], (
+        "the unreadable export must cost itself and nothing else"
+    )
+    assert any("a-bad.json" in record.getMessage() for record in caplog.records), (
+        "a skipped export is skipped loudly — silence here is the same loss with no record"
+    )
 
 
 def test_eln_free_text_cannot_forge_a_knowledge_graph_relation() -> None:
@@ -2384,7 +2286,7 @@ def test_a_typographic_minus_survives_step_segmentation_too() -> None:
     assert [step.temperature_c for step in steps] == [-78.0, None, 20.0]
 
 
-def test_ingesting_a_reaction_writes_the_label_index_record_phase() -> None:
+async def test_ingesting_a_reaction_writes_the_label_index_record_phase() -> None:
     """The half of the label row that cannot be reconstructed later is written at ingest.
 
     Two things are asserted rather than one, and the second is the point: the row carries the
@@ -2393,59 +2295,51 @@ def test_ingesting_a_reaction_writes_the_label_index_record_phase() -> None:
     DRFP similarity — and an index built from it could never answer "which solvent", which is
     half of what the precedent questions ask.
     """
+    rxn, mol, rec = (
+        InMemoryFingerprintStore(),
+        InMemoryFingerprintStore(),
+        InMemoryReactionRecordStore(),
+    )
+    labels = InMemoryLabelIndex()
+    reaction = _ester()
+    await ingest_reaction(reaction, rxn, mol, rec, label_index=labels, source="eln-json")
 
-    async def _run() -> None:
-        rxn, mol, rec = (
-            InMemoryFingerprintStore(),
-            InMemoryFingerprintStore(),
-            InMemoryReactionRecordStore(),
-        )
-        labels = InMemoryLabelIndex()
-        reaction = _ester()
-        await ingest_reaction(reaction, rxn, mol, rec, label_index=labels, source="eln-json")
-
-        [row] = await labels.stale("any-version", limit=10)
-        assert (row.source, row.reaction_id) == ("eln-json", reaction.reaction_id)
-        assert row.record_smiles == reaction.reaction_smiles()
-        # Qualified by the source the row already carries, and asserted as a literal: deriving it
-        # from `note_id_for_reaction` would move both sides together, so a record phase that
-        # stopped passing the source would still pass. A precedent a chemist cannot follow back is
-        # not a precedent, and a bare id two sites both used follows back to a refusal.
-        assert row.citation == f"reaction-eln-json.{reaction.reaction_id}"
-        # Every component, with the role the record stated and nothing derived from it yet.
-        assert [(s.ordinal, s.role) for s in row.species] == [
-            (i, c.role.value) for i, c in enumerate(reaction.compounds())
-        ]
-        assert row.labeller_version is None
-
-    asyncio.run(_run())
+    [row] = await labels.stale("any-version", limit=10)
+    assert (row.source, row.reaction_id) == ("eln-json", reaction.reaction_id)
+    assert row.record_smiles == reaction.reaction_smiles()
+    # Qualified by the source the row already carries, and asserted as a literal: deriving it
+    # from `note_id_for_reaction` would move both sides together, so a record phase that
+    # stopped passing the source would still pass. A precedent a chemist cannot follow back is
+    # not a precedent, and a bare id two sites both used follows back to a refusal.
+    assert row.citation == f"reaction-eln-json.{reaction.reaction_id}"
+    # Every component, with the role the record stated and nothing derived from it yet.
+    assert [(s.ordinal, s.role) for s in row.species] == [
+        (i, c.role.value) for i, c in enumerate(reaction.compounds())
+    ]
+    assert row.labeller_version is None
 
 
-def test_the_label_row_keeps_the_agents_the_fingerprint_drops() -> None:
+async def test_the_label_row_keeps_the_agents_the_fingerprint_drops() -> None:
     """The measured difference the two-phase design exists for, asserted rather than argued.
 
     `reaction_fingerprints` stores `transformation_smiles()`; the label index stores
     `reaction_smiles()`. On a reaction with a solvent, those are not the same string, and only one
     of them can be asked which solvent was used.
     """
+    rxn, mol, rec = (
+        InMemoryFingerprintStore(),
+        InMemoryFingerprintStore(),
+        InMemoryReactionRecordStore(),
+    )
+    labels = InMemoryLabelIndex()
+    solvent = Component(smiles="CC#N", role=Role.SOLVENT)
+    reaction = _ester().model_copy(update={"inputs": [*_ester().inputs, solvent]})
+    await ingest_reaction(reaction, rxn, mol, rec, label_index=labels, source="eln-json")
 
-    async def _run() -> None:
-        rxn, mol, rec = (
-            InMemoryFingerprintStore(),
-            InMemoryFingerprintStore(),
-            InMemoryReactionRecordStore(),
-        )
-        labels = InMemoryLabelIndex()
-        solvent = Component(smiles="CC#N", role=Role.SOLVENT)
-        reaction = _ester().model_copy(update={"inputs": [*_ester().inputs, solvent]})
-        await ingest_reaction(reaction, rxn, mol, rec, label_index=labels, source="eln-json")
-
-        [row] = await labels.stale("any-version", limit=10)
-        assert "CC#N" in row.record_smiles
-        assert "CC#N" not in reaction.transformation_smiles()
-        assert "CC#N" in {s.smiles for s in row.species}
-
-    asyncio.run(_run())
+    [row] = await labels.stale("any-version", limit=10)
+    assert "CC#N" in row.record_smiles
+    assert "CC#N" not in reaction.transformation_smiles()
+    assert "CC#N" in {s.smiles for s in row.species}
 
 
 def test_the_validator_checks_the_sources_that_are_attached(

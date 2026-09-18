@@ -23,7 +23,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import json
 import logging
 import os
 import shutil
@@ -36,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from httpx_sse import aconnect_sse
 from temporalio.client import WorkflowExecutionStatus
 
 from chemclaw.connectors.jobs import build_job_tool, job_workflow_id
@@ -44,7 +44,9 @@ from chemclaw.core.config import settings
 from chemclaw.core.db import _redact
 from chemclaw.core.db import connection as db_connection
 from chemclaw.core.logging import configure_logging
+from chemclaw.core.markdown import render_table
 from chemclaw.core.temporal_client import connect as temporal_connect
+from chemclaw.evals.live import decoded_events
 
 logger = logging.getLogger(__name__)
 
@@ -155,20 +157,20 @@ async def run_turn(client: httpx.AsyncClient, message: str) -> TurnResult:
         created.raise_for_status()
         result.session_id = str(created.json()["session_id"])
 
-        async with client.stream(
-            "POST", f"/sessions/{result.session_id}/messages", json={"message": message}
-        ) as response:
-            result.status = response.status_code
-            if response.status_code != 200:
-                await response.aread()
+        # `evals.live.decoded_events` rather than a fourth reading of the wire format — see its
+        # docstring for why there were three and what they each got wrong. The status is taken off
+        # the response before the stream is touched, because a refused turn has a JSON body rather
+        # than an event stream, and the reader answers a body that is not a stream by yielding
+        # nothing: right for a 200 that is not a stream, and indistinguishable from a silent turn
+        # for a 429, which this harness has to record as a *status*. So the status is read first.
+        async with aconnect_sse(
+            client, "POST", f"/sessions/{result.session_id}/messages", json={"message": message}
+        ) as source:
+            result.status = source.response.status_code
+            if result.status != 200:
+                await source.response.aread()
                 return result
-            async for line in response.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                try:
-                    event = json.loads(line[6:])
-                except ValueError:
-                    continue
+            async for event in decoded_events(source):
                 kind = str(event.get("type", ""))
                 if kind == "tool_call":
                     result.announced += 1
@@ -1234,11 +1236,20 @@ def report(
             "about whatever they would have measured."
         )
     lines.append("")
-    lines.append("| family | what it covers | checks |")
-    lines.append("| --- | --- | ---: |")
-    for letter in planned:
-        count = sum(1 for finding in findings if finding.family == letter)
-        lines.append(f"| {letter} | {FAMILIES.get(letter, '?')} | {count or '**0**'} |")
+    lines.append(
+        render_table(
+            ["family", "what it covers", "checks"],
+            [
+                [
+                    letter,
+                    FAMILIES.get(letter, "?"),
+                    str(count) if (count := sum(f.family == letter for f in findings)) else "**0**",
+                ]
+                for letter in planned
+            ],
+            align="llr",
+        )
+    )
     lines.append("")
 
     if sweep:
@@ -1248,14 +1259,31 @@ def report(
             f"{sweep[0]['turns']} turns per step; the front door restarted at each cap.\n"
         )
         lines.append(
-            "| cap | accepted | shed/error | p50 s | p95 s | answered/s | offered drained/s |"
-        )
-        lines.append("| ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
-        for row in sweep:
-            lines.append(
-                f"| {row['cap']} | {row['accepted']} | {row['failed']} | "
-                f"{row['p50']:.1f} | {row['p95']:.1f} | {row['goodput']:.2f} | {row['drain']:.2f} |"
+            render_table(
+                [
+                    "cap",
+                    "accepted",
+                    "shed/error",
+                    "p50 s",
+                    "p95 s",
+                    "answered/s",
+                    "offered drained/s",
+                ],
+                [
+                    [
+                        str(row["cap"]),
+                        str(row["accepted"]),
+                        str(row["failed"]),
+                        f"{row['p50']:.1f}",
+                        f"{row['p95']:.1f}",
+                        f"{row['goodput']:.2f}",
+                        f"{row['drain']:.2f}",
+                    ]
+                    for row in sweep
+                ],
+                align="rrrrrrr",
             )
+        )
         lines.append(
             "\nThe last column is not throughput — it counts a shed turn as a drained one, so "
             "refusing fast reads as going fast. `answered/s` is the measurement."
@@ -1263,11 +1291,20 @@ def report(
         lines.append("")
 
     lines.append("## Findings\n")
-    lines.append("| family | check | result | observed |")
-    lines.append("| --- | --- | --- | --- |")
-    for finding in findings:
-        verdict = "PASS" if finding.ok else "**FAIL**"
-        lines.append(f"| {finding.family} | {finding.name} | {verdict} | {finding.observed} |")
+    lines.append(
+        render_table(
+            ["family", "check", "result", "observed"],
+            [
+                [
+                    finding.family,
+                    finding.name,
+                    "PASS" if finding.ok else "**FAIL**",
+                    finding.observed,
+                ]
+                for finding in findings
+            ],
+        )
+    )
     passed = sum(1 for f in findings if f.ok)
     lines.append(f"\n**{passed}/{len(findings)} checks passed**, over the families that ran.")
     return "\n".join(lines) + "\n"

@@ -37,11 +37,14 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Final
 
 import httpx
 import yaml
+from httpx_sse import EventSource, ServerSentEvent, aconnect_sse
+from httpx_sse._decoders import SSEDecoder, SSELineDecoder
 from pydantic import BaseModel, ConfigDict, Field
 from temporalio.service import RPCError
 
@@ -73,6 +76,11 @@ logger = logging.getLogger(__name__)
 # against `ToolFailedEvent`'s declared value set, which is the declaration-versus-surface check
 # this repository applies to every such copy.
 PLAN_GATE_REASON: Final = "plan_gate"
+
+# The one content type an SSE stream may have, per the WHATWG grammar. A protocol constant rather
+# than a setting: a deployment cannot choose it, and `sse_starlette` sets exactly this on every
+# stream the front door opens.
+_SSE_CONTENT_TYPE: Final = "text/event-stream"
 
 # The events that are the turn beginning to *answer*, as opposed to the turn working. Both, not
 # only `token`: a deployment that does not stream — or a turn whose whole reply arrives at once —
@@ -247,15 +255,102 @@ def load_probes(probe_dir: str | None = None) -> list[Probe]:
     return probes
 
 
-def _decode(chunk: str) -> dict[str, Any] | None:
-    """One SSE `data:` line as an event dict, or `None` for a keepalive or unparseable frame."""
-    if not chunk.startswith("data:"):
+def _payload(sse: ServerSentEvent | None) -> dict[str, Any] | None:
+    """One decoded SSE frame as the event dict, or `None` when there is no event to report.
+
+    Three cases fold into that `None` deliberately, because all three mean "nothing the harness can
+    record happened here": the decoder has not reached the end of an event yet, the frame's payload
+    is not JSON, or it is JSON that is not an object. This reader's job is to observe what the front
+    door emitted, and a frame it cannot read is one event missing rather than a run lost.
+    """
+    if sse is None:
         return None
     try:
-        decoded = json.loads(chunk[5:].strip())
+        decoded = json.loads(sse.data)
     except json.JSONDecodeError:
         return None
     return decoded if isinstance(decoded, dict) else None
+
+
+async def decoded_events(source: EventSource) -> AsyncIterator[dict[str, Any]]:
+    """Every turn event on one front-door stream, as the dict the surfaces switch on.
+
+    **One decoder, because there were three and they disagreed.** This harness, `cli/live_storm`
+    and `cli/live_benchmark` each carried their own — `line[6:]` after `"data: "`,
+    `line[5:].strip()` after `"data:"`, and a third with a `dict` guard the other two lacked.
+    Three readers of one wire format is three chances to read it differently, and the differences
+    were real: none of them handled a `data:` field split over more than one line, an `id:` or a
+    `retry:`, all of which the SSE grammar permits at any time. `httpx_sse` implements that
+    grammar, so the question stops being what each harness remembered about the format.
+
+    **The grammar is upstream's; the end of the stream is ours.** `httpx_sse.SSEDecoder` is the
+    line-to-event state machine and it is what runs below — but `EventSource.aiter_sse`, the
+    driver around it, is not used, because it drops the final event of any stream that ends
+    without a trailing blank line. `SSEDecoder` emits an event only when it is handed an empty
+    line, and `_aiter_sse_lines` flushes the *line* buffer at end-of-stream while nothing flushes
+    the *event* buffer. Measured on a two-frame stream whose second `data:` line has no blank line
+    behind it: `aiter_sse` yields one event where all three hand-written readers yielded two, and
+    on a stream that is one such frame it yields none at all. That is not a hypothetical shape —
+    `cli/live_storm` is a chaos harness whose whole subject is turns cut off mid-stream, so the
+    event it would lose is the one nearest the fault it was run to observe. The loop below supplies
+    the blank line the stream owed us, which is where a final unterminated event comes from.
+
+    **A 200 that is not an event stream yields nothing, and says so in the log.** `aiter_sse` also
+    raises `SSEError` on that, which sounds stricter and is worse placed: the exception surfaces
+    from inside the iterator, so whether a misconfigured proxy is recorded or fatal depends on
+    which caller happens to hold a handler — `run_probe` does, `cli/live_benchmark._ask` does not,
+    and there one HTML error page at 200 would end a whole benchmark run with every answered
+    question already collected and lost. So the refusal is a warning naming the content type that
+    arrived, and the turn reads as the turn that emitted nothing, which is what it was.
+
+    **This is a latent defect rather than a live one, and it is worth saying which.** The front
+    door serialises each event with `model_dump_json()` through `sse_starlette`, which never emits
+    a raw newline, so the multi-line case has never fired against this system's own server. What
+    the old readers would have done to it — take the first line as the whole payload and hand the
+    rest to `json.loads` as the next frame — is a decoding the harness would have reported as the
+    *system* dropping events.
+
+    **The `event:` name is now available and is deliberately not read.** `api/events.sse_frame`
+    derives it from the payload's own `type` discriminant (`{"event": event.type, "data":
+    event.model_dump_json()}`), and `api.events.Event` is a union discriminated on that same
+    `type`. A harness switching on the header would be switching on a copy of the field it already
+    has to parse, and would disagree with the typed model the moment the two ever diverged. So all
+    three call sites read `type` out of the body, and the wire name is left to the browser clients
+    it exists for.
+
+    A comment frame — sse-starlette's keepalive is `: ping - <timestamp>` — produces no event at
+    all here, because the grammar says a comment carries no fields.
+
+    `SSEDecoder` and `SSELineDecoder` are private to `httpx_sse`; that coupling is pinned in
+    `tests/test_upstream_surface.py` rather than restated here.
+    """
+    content_type = source.response.headers.get("content-type", "").partition(";")[0]
+    if _SSE_CONTENT_TYPE not in content_type:
+        logger.warning(
+            "the front door answered 200 with content type %r rather than %r; "
+            "this turn is recorded as having emitted nothing",
+            content_type,
+            _SSE_CONTENT_TYPE,
+        )
+        return
+
+    line_decoder = SSELineDecoder()
+    event_decoder = SSEDecoder()
+    async for text in source.response.aiter_text():
+        for line in line_decoder.decode(text):
+            payload = _payload(event_decoder.decode(line))
+            if payload is not None:
+                yield payload
+    # End of stream, and both flushes are load-bearing. `SSELineDecoder.flush` returns a final line
+    # that arrived without its newline; the empty string after it is the blank line that terminates
+    # an event, which a truncated stream never sent. A well-formed stream has already fired its last
+    # event on its own blank line, so the extra one finds empty buffers — or, once an `id:` has been
+    # seen, mints a frame with no data, which `_payload` drops for the same reason it drops any
+    # other frame carrying nothing to read.
+    for line in (*line_decoder.flush(), ""):
+        payload = _payload(event_decoder.decode(line))
+        if payload is not None:
+            yield payload
 
 
 def _numbers(raw: Any, probe_id: str) -> list[float]:
@@ -478,16 +573,14 @@ async def run_turn(
             session_id = await open_session(client, profile=profile)
             outcome.session_id = session_id
 
-        async with client.stream(
+        async with aconnect_sse(
+            client,
             "POST",
             f"/sessions/{session_id}/messages",
             json={"message": message},
-        ) as response:
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                event = _decode(line)
-                if event is None:
-                    continue
+        ) as source:
+            source.response.raise_for_status()
+            async for event in decoded_events(source):
                 kind = str(event.get("type", "unknown"))
                 counts[kind] = counts.get(kind, 0) + 1
                 index += 1

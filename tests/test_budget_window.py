@@ -62,7 +62,7 @@ def _durable(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(settings, field, 0)
 
 
-def test_a_turn_booked_by_one_tracker_binds_a_second_one(_durable: None) -> None:
+async def test_a_turn_booked_by_one_tracker_binds_a_second_one(_durable: None) -> None:
     """The whole point: a restart, an eviction or a second pod does not hand back the allowance.
 
     Two `BudgetTracker`s share nothing in memory — this is exactly the state a pod roll leaves, and
@@ -70,71 +70,59 @@ def test_a_turn_booked_by_one_tracker_binds_a_second_one(_durable: None) -> None
     existed the second tracker admitted the turn, because the only counter that had ever seen the
     spend died with the first.
     """
+    await migrated_db_or_skip()
+    await _clean("window-restart")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean("window-restart")
+    spender = BudgetTracker()
+    spender.record("s1", "window-restart", tokens=900)
+    await _drain()
 
-        spender = BudgetTracker()
-        spender.record("s1", "window-restart", tokens=900)
-        await _drain()
-
-        settings.budget_max_tokens_per_user = 500
-        fresh = BudgetTracker()
-        with pytest.raises(BudgetExceeded, match="user token budget"):
-            await fresh.check("s2", "window-restart")
-
-    asyncio.run(_run())
+    settings.budget_max_tokens_per_user = 500
+    fresh = BudgetTracker()
+    with pytest.raises(BudgetExceeded, match="user token budget"):
+        await fresh.check("s2", "window-restart")
 
 
-def test_a_window_that_has_rolled_starts_the_principal_again(_durable: None) -> None:
+async def test_a_window_that_has_rolled_starts_the_principal_again(_durable: None) -> None:
     """A rolling window is a window: past it the counter resets, in place, on the next booking."""
+    await migrated_db_or_skip()
+    await _clean("window-rolls")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean("window-rolls")
+    tracker = BudgetTracker()
+    tracker.record("s1", "window-rolls", tokens=900)
+    await _drain()
+    assert await budget_store.usage("window-rolls") == (1, 900)
 
-        tracker = BudgetTracker()
-        tracker.record("s1", "window-rolls", tokens=900)
-        await _drain()
-        assert await budget_store.usage("window-rolls") == (1, 900)
+    await _age_window("window-rolls", settings.budget_window_hours + 1)
+    assert await budget_store.usage("window-rolls") == (0, 0), (
+        "a window that has expired must read as zero without anything having rewritten it"
+    )
 
-        await _age_window("window-rolls", settings.budget_window_hours + 1)
-        assert await budget_store.usage("window-rolls") == (0, 0), (
-            "a window that has expired must read as zero without anything having rewritten it"
-        )
-
-        tracker.record("s2", "window-rolls", tokens=10)
-        await _drain()
-        assert await budget_store.usage("window-rolls") == (1, 10), (
-            "the first booking after an expiry resets the counter rather than adding to it"
-        )
-
-    asyncio.run(_run())
+    tracker.record("s2", "window-rolls", tokens=10)
+    await _drain()
+    assert await budget_store.usage("window-rolls") == (1, 10), (
+        "the first booking after an expiry resets the counter rather than adding to it"
+    )
 
 
-def test_a_window_that_has_not_rolled_accumulates(_durable: None) -> None:
+async def test_a_window_that_has_not_rolled_accumulates(_durable: None) -> None:
     """The other half of the same statement — inside the window, bookings add up.
 
     Paired with the test above deliberately: one `CASE` arm decides both, so a change that made the
     reset unconditional would pass that test alone and lose every deployment's whole accounting.
     """
+    await migrated_db_or_skip()
+    await _clean("window-adds")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean("window-adds")
+    tracker = BudgetTracker()
+    for _ in range(3):
+        tracker.record("s1", "window-adds", tokens=100)
+    await _drain()
 
-        tracker = BudgetTracker()
-        for _ in range(3):
-            tracker.record("s1", "window-adds", tokens=100)
-        await _drain()
-
-        assert await budget_store.usage("window-adds") == (3, 300)
-
-    asyncio.run(_run())
+    assert await budget_store.usage("window-adds") == (3, 300)
 
 
-def test_an_unreachable_meter_admits_the_turn_rather_than_refusing_it(
+async def test_an_unreachable_meter_admits_the_turn_rather_than_refusing_it(
     monkeypatch: pytest.MonkeyPatch, _durable: None
 ) -> None:
     """A budget that cannot be read must not become an outage amplifier.
@@ -151,14 +139,11 @@ def test_an_unreachable_meter_admits_the_turn_rather_than_refusing_it(
     monkeypatch.setattr(budget_store, "usage", _boom)
     monkeypatch.setattr(settings, "budget_max_tokens_per_user", 500)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await BudgetTracker().check("s1", "window-unreachable")
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    await BudgetTracker().check("s1", "window-unreachable")
 
 
-def test_the_in_process_counter_still_binds_before_the_durable_write_lands(
+async def test_the_in_process_counter_still_binds_before_the_durable_write_lands(
     monkeypatch: pytest.MonkeyPatch, _durable: None
 ) -> None:
     """`record` is synchronous and its durable write is not, so the gap has to be covered.
@@ -180,17 +165,14 @@ def test_the_in_process_counter_still_binds_before_the_durable_write_lands(
 
     monkeypatch.setattr(budget_store, "usage", _silent)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean("window-notyet")
+    await migrated_db_or_skip()
+    await _clean("window-notyet")
 
-        tracker = BudgetTracker()
-        tracker.record("s1", "window-notyet", tokens=900)
-        settings.budget_max_tokens_per_user = 500
-        with pytest.raises(BudgetExceeded, match="user token budget"):
-            await tracker.check("s2", "window-notyet")
-
-    asyncio.run(_run())
+    tracker = BudgetTracker()
+    tracker.record("s1", "window-notyet", tokens=900)
+    settings.budget_max_tokens_per_user = 500
+    with pytest.raises(BudgetExceeded, match="user token budget"):
+        await tracker.check("s2", "window-notyet")
 
 
 def _age_counter(tracker: BudgetTracker, actor: str, hours: float) -> None:
@@ -206,7 +188,7 @@ def _age_counter(tracker: BudgetTracker, actor: str, hours: float) -> None:
     counter.started -= hours * 3600.0
 
 
-def test_a_rolled_window_stops_binding_on_the_pod_that_spent_it(_durable: None) -> None:
+async def test_a_rolled_window_stops_binding_on_the_pod_that_spent_it(_durable: None) -> None:
     """The window has to roll on *both* halves, or `max()` is a ratchet instead of a floor.
 
     The defect this pins shipped: the durable row rolled and the in-process counter never did, so
@@ -217,26 +199,22 @@ def test_a_rolled_window_stops_binding_on_the_pod_that_spent_it(_durable: None) 
     and the test that was supposed to cover the roll never re-checked the tracker that did the
     spending, only `budget_store.usage()`.
     """
+    await migrated_db_or_skip()
+    await _clean("window-both-halves")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean("window-both-halves")
+    tracker = BudgetTracker()
+    tracker.record("s1", "window-both-halves", tokens=900)
+    await _drain()
 
-        tracker = BudgetTracker()
-        tracker.record("s1", "window-both-halves", tokens=900)
-        await _drain()
+    settings.budget_max_tokens_per_user = 500
+    with pytest.raises(BudgetExceeded, match="user token budget"):
+        await tracker.check("s2", "window-both-halves")
 
-        settings.budget_max_tokens_per_user = 500
-        with pytest.raises(BudgetExceeded, match="user token budget"):
-            await tracker.check("s2", "window-both-halves")
+    past = settings.budget_window_hours + 1
+    await _age_window("window-both-halves", past)
+    _age_counter(tracker, "window-both-halves", past)
 
-        past = settings.budget_window_hours + 1
-        await _age_window("window-both-halves", past)
-        _age_counter(tracker, "window-both-halves", past)
-
-        await tracker.check("s3", "window-both-halves")
-
-    asyncio.run(_run())
+    await tracker.check("s3", "window-both-halves")
 
 
 async def _drain() -> None:
@@ -253,7 +231,9 @@ async def _drain() -> None:
         await asyncio.gather(*tuple(_PENDING), return_exceptions=True)
 
 
-def test_two_concurrent_bookings_neither_lose_an_update_nor_reset_twice(_durable: None) -> None:
+async def test_two_concurrent_bookings_neither_lose_an_update_nor_reset_twice(
+    _durable: None,
+) -> None:
     """The upstream behaviour the whole durable window rests on, pinned rather than believed.
 
     `_BOOK` is one `INSERT ... ON CONFLICT DO UPDATE` whose three `CASE` arms each test
@@ -272,27 +252,23 @@ def test_two_concurrent_bookings_neither_lose_an_update_nor_reset_twice(_durable
     if somebody splits the reset into a second statement. `tests/test_upstream_surface.py` keeps
     the same kind of assertion for the same reason: a promise nothing in this repository owns.
     """
+    await migrated_db_or_skip()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
+    for actor, age_hours in (("window-race-live", None), ("window-race-rolled", 25.0)):
+        await _clean(actor)
+        await budget_store.book(actor, 10)
+        if age_hours is not None:
+            await _age_window(actor, age_hours)
 
-        for actor, age_hours in (("window-race-live", None), ("window-race-rolled", 25.0)):
-            await _clean(actor)
-            await budget_store.book(actor, 10)
-            if age_hours is not None:
-                await _age_window(actor, age_hours)
+        await asyncio.gather(*(budget_store.book(actor, 10) for _ in range(32)))
 
-            await asyncio.gather(*(budget_store.book(actor, 10) for _ in range(32)))
-
-            turns, tokens = await budget_store.usage(actor)
-            if age_hours is None:
-                assert (turns, tokens) == (33, 330), (
-                    "a booking inside a live window was lost — the arms read a stale pre-image"
-                )
-            else:
-                assert (turns, tokens) == (32, 320), (
-                    "an expired window must reset once for the batch, not once per writer"
-                )
-            await _clean(actor)
-
-    asyncio.run(_run())
+        turns, tokens = await budget_store.usage(actor)
+        if age_hours is None:
+            assert (turns, tokens) == (33, 330), (
+                "a booking inside a live window was lost — the arms read a stale pre-image"
+            )
+        else:
+            assert (turns, tokens) == (32, 320), (
+                "an expired window must reset once for the batch, not once per writer"
+            )
+        await _clean(actor)

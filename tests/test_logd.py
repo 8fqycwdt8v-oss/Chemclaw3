@@ -223,6 +223,31 @@ def test_a_monoprotic_acid_is_unchanged_by_the_multi_site_refusal() -> None:
             "nitrogen is not a base either — the honest answer is that this predictor has "
             "nothing to say about it",
         ),
+        # Every other arm of the SMARTS table, one row each, added with the transcription so that
+        # a pattern narrowed by one primitive fails here rather than in a chemist's logD.
+        ("NC(=O)N", 0, 0, "urea: both nitrogens are conjugated into the same C=O"),
+        ("COC(=O)NC", 0, 0, "a carbamate, which is the amide rule reached through an ester oxygen"),
+        ("CC(=S)N", 0, 0, "a thioamide — the chalcogen arm of the rule is O *or* S"),
+        ("CS(=O)N", 0, 0, "a sulfinamide: one S=O is enough, a sulfonamide's second is not needed"),
+        ("O=C1CCCN1", 0, 0, "a lactam is an amide whose ring hides nothing from the rule"),
+        ("N#CC#N", 0, 0, "two sp nitrogens are still two nitriles"),
+        ("CC=NC", 0, 1, "an imine: a double bond is not a triple one and drains no lone pair"),
+        ("CCN", 0, 1, "an aliphatic amine is enumerated here; the *predictor* is what refuses it"),
+        ("Cn1ccnc1", 0, 1, "N-methylimidazole: the alkylated pyrrole-type N is still pyrrole-type"),
+        ("NN", 0, 2, "hydrazine: two independent basic nitrogens, which is what polyprotic means"),
+        ("C[N+](C)(C)C", 0, 0, "a quaternary ammonium has no valence and no charge-neutral pair"),
+        ("[O-][N+](=O)c1ccccc1", 0, 0, "nitrobenzene's nitrogen is formally charged, not basic"),
+        ("OCCO", 2, 0, "a diol is two acid sites — the polyprotic case the O-H count has to see"),
+        ("CCS", 1, 0, "a thiol: the S in `[#8,#16]` is not decoration"),
+        ("NO", 1, 1, "hydroxylamine is amphoteric on one heavy atom each"),
+        ("Oc1ccncc1", 1, 1, "4-hydroxypyridine: a phenol and a pyridine-type N in one ring system"),
+        (
+            "CN1C=NC2=C1C(=O)N(C)C(=O)N2C",
+            0,
+            1,
+            "caffeine: three amide-type nitrogens excluded and the imidazole's pyridine-type one "
+            "kept — the whole table in one molecule",
+        ),
     ],
 )
 def test_ionisable_sites_counts_only_sites_that_are_really_sites(
@@ -240,6 +265,14 @@ def test_ionisable_sites_counts_only_sites_that_are_really_sites(
     the pKa predictor runs before any xTB, it is pure graph inspection, and asking the server for it
     would cost a round trip on a refusal path. It is therefore exactly as good as that enumeration
     and no better, which is what the docstring says and what this table pins.
+
+    **The rules are an RDKit SMARTS table now, and this table is the whole of what changed about
+    them — which is nothing.** ~80 lines of `GetBonds()` walking became `_ACIDIC_SITE` and
+    `_BASIC_SITE`, and the transcription was proven rather than reviewed: both implementations were
+    run over 742 molecules on 2026-09-16 — this file's fixtures, every `records.csv` structure in
+    the sibling `Chemclaw3-mcp` fleet, every `compound_smiles` in `data/`, and a 592-molecule
+    systematic sweep pairing 24 left fragments with 26 right ones — with **0 disagreements**. The
+    rows below are the same table's readable half, one per arm of the two patterns.
     """
     sites = ionisable_sites(smiles)
     assert (sites.acidic, sites.basic) == (acidic, basic), why

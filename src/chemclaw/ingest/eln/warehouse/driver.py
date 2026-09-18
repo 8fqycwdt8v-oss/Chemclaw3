@@ -98,6 +98,56 @@ class WarehouseCursor(Protocol):
 
 
 @runtime_checkable
+class BatchingCursor(Protocol):
+    """A cursor that can run one statement over many parameter sets in one go.
+
+    **A second Protocol rather than a method on `WarehouseCursor`, because a site brings its own
+    driver.** `D-2026-08-26-the-driver-s-signature-is-the-schema` makes the connection block that
+    driver's own keyword arguments, and the corollary is that this repository cannot require a
+    method of a class it does not ship: adding `executemany` to `WarehouseCursor` would make every
+    site driver written against the two-method seam fail the `isinstance` check `SqlResultSink`
+    already performs, for a capability that is an optimisation. Declared separately and probed with
+    `execute_many` below, an optional capability is exactly that — present, used; absent, unnoticed.
+
+    Named for what the caller gets rather than for psycopg, though psycopg is why it is worth
+    having: `AsyncCursor.executemany` runs the parameter sets in **pipeline** mode, so N statements
+    cost one network round trip instead of N.
+    """
+
+    async def executemany(self, sql: str, params_seq: Sequence[Sequence[Any]]) -> None:
+        """Run `sql` once per entry in `params_seq`, binding each positionally.
+
+        The same statement every time — this is a bulk *bind*, not a bulk statement.
+
+        **What a failed set leaves behind is the driver's, and this Protocol does not settle it.**
+        Measured for psycopg, which is the implementation that matters here: `executemany` runs the
+        set inside one implicit transaction *even on an autocommit connection*, so a four-entry set
+        failing on its third leaves none of the four. A driver that loops `execute` on an
+        autocommit connection leaves the entries before the failure. Both are correct for a caller
+        whose statement is an idempotent upsert, which is the only kind of caller this has — and a
+        caller for whom the difference matters must not use this method.
+        """
+        ...
+
+
+async def execute_many(
+    cursor: WarehouseCursor, sql: str, params_seq: Sequence[Sequence[Any]]
+) -> None:
+    """Run `sql` over every parameter set — in one round trip where the driver can, else in N.
+
+    The one place the optional capability above is probed, so a caller writes the batched form and
+    gets the row-at-a-time one for free on a driver that cannot batch. `isinstance` against a
+    `runtime_checkable` Protocol is a `hasattr` check, which is the right test here: what matters is
+    whether this object has the method, not whose base class it inherited.
+    """
+    if isinstance(cursor, BatchingCursor):
+        await cursor.executemany(sql, params_seq)
+        return
+    for params in params_seq:
+        await cursor.execute(sql, params)
+
+
+@runtime_checkable
 class Warehouse(Protocol):
     """A connected warehouse the engine can query. One per data source, built from its binding."""
 

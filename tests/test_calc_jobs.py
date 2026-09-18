@@ -395,7 +395,7 @@ def test_a_direct_call_with_no_identity_stamps_nothing_rather_than_a_placeholder
     assert seen and all(HEADER_ACTOR not in headers for headers in seen), seen
 
 
-def test_the_workflow_hands_the_activity_the_actor_off_the_runs_memo(
+async def test_the_workflow_hands_the_activity_the_actor_off_the_runs_memo(
     server: FakeCalcServer,
 ) -> None:
     """The other half of the same route: identity has to reach the activity to be stampable.
@@ -409,7 +409,9 @@ def test_the_workflow_hands_the_activity_the_actor_off_the_runs_memo(
     server, so the workflow's own `job_envelope` still runs on a shape it would really see.
     """
     seen: list[tuple[str, str]] = []
-    answer = _run(EnsembleJobSpec(smiles="CCO"))
+    # Awaited rather than routed through `_run`, which owns an `asyncio.run` of its own:
+    # this test is already inside a loop, and a nested `asyncio.run` refuses outright.
+    answer = await activities.run_xtb_calculation(EnsembleJobSpec(smiles="CCO"))
 
     @activity.defn(name="run_xtb_calculation")
     async def _capture(spec: XtbJobSpec, actor: str = "", correlation_id: str = "") -> XtbJobResult:
@@ -417,26 +419,24 @@ def test_the_workflow_hands_the_activity_the_actor_off_the_runs_memo(
         seen.append((actor, correlation_id))
         return answer
 
-    async def _run_workflow() -> None:
-        async with await start_env_or_skip() as env:
-            client = pydantic_client(env)
-            queue = bundle_queue("calc")
-            async with Worker(
-                client, task_queue=queue, workflows=[CalcJobWorkflow], activities=[_capture]
-            ):
-                await client.execute_workflow(
-                    CalcJobWorkflow.run,
-                    EnsembleJobSpec(smiles="CCO"),
-                    id="calc-memo-identity",
-                    task_queue=queue,
-                    memo={"requested_by": "chemist-1", "correlation_id": "job-correlation-1"},
-                )
+    async with await start_env_or_skip() as env:
+        client = pydantic_client(env)
+        queue = bundle_queue("calc")
+        async with Worker(
+            client, task_queue=queue, workflows=[CalcJobWorkflow], activities=[_capture]
+        ):
+            await client.execute_workflow(
+                CalcJobWorkflow.run,
+                EnsembleJobSpec(smiles="CCO"),
+                id="calc-memo-identity",
+                task_queue=queue,
+                memo={"requested_by": "chemist-1", "correlation_id": "job-correlation-1"},
+            )
 
-    asyncio.run(_run_workflow())
     assert seen == [("chemist-1", "job-correlation-1")]
 
 
-def test_a_durable_run_with_no_memo_is_attributed_to_the_service_identity(
+async def test_a_durable_run_with_no_memo_is_attributed_to_the_service_identity(
     server: FakeCalcServer,
 ) -> None:
     """The durable path's own no-identity behaviour, which is not the activity's.
@@ -455,7 +455,9 @@ def test_a_durable_run_with_no_memo_is_attributed_to_the_service_identity(
     behaviours the durable path has.
     """
     seen: list[tuple[str, str]] = []
-    answer = _run(EnsembleJobSpec(smiles="CCO"))
+    # Awaited rather than routed through `_run`, which owns an `asyncio.run` of its own:
+    # this test is already inside a loop, and a nested `asyncio.run` refuses outright.
+    answer = await activities.run_xtb_calculation(EnsembleJobSpec(smiles="CCO"))
 
     @activity.defn(name="run_xtb_calculation")
     async def _capture(spec: XtbJobSpec, actor: str = "", correlation_id: str = "") -> XtbJobResult:
@@ -463,19 +465,17 @@ def test_a_durable_run_with_no_memo_is_attributed_to_the_service_identity(
         seen.append((actor, correlation_id))
         return answer
 
-    async def _run_workflow() -> None:
-        async with await start_env_or_skip() as env:
-            client = pydantic_client(env)
-            queue = bundle_queue("calc")
-            async with Worker(
-                client, task_queue=queue, workflows=[CalcJobWorkflow], activities=[_capture]
-            ):
-                await client.execute_workflow(
-                    CalcJobWorkflow.run,
-                    EnsembleJobSpec(smiles="CCO"),
-                    id="calc-no-memo-identity",
-                    task_queue=queue,
-                )
+    async with await start_env_or_skip() as env:
+        client = pydantic_client(env)
+        queue = bundle_queue("calc")
+        async with Worker(
+            client, task_queue=queue, workflows=[CalcJobWorkflow], activities=[_capture]
+        ):
+            await client.execute_workflow(
+                CalcJobWorkflow.run,
+                EnsembleJobSpec(smiles="CCO"),
+                id="calc-no-memo-identity",
+                task_queue=queue,
+            )
 
-    asyncio.run(_run_workflow())
     assert seen == [(settings.service_actor_id, "")]

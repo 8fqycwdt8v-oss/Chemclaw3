@@ -378,7 +378,19 @@ _TOOL_USAGE = """
 _TOOL_USAGE_ONE = _TOOL_USAGE.replace(
     "WHERE ts >= %s AND ts < %s", "WHERE ts >= %s AND ts < %s AND tool = %s"
 )
-assert _TOOL_USAGE_ONE != _TOOL_USAGE, "the predicate this narrowing rewrites has moved"
+if _TOOL_USAGE_ONE == _TOOL_USAGE:  # pragma: no cover - import-time guard on a sibling constant
+    # **`assert` was the wrong statement here and `python -O` is why.** It deletes every one, so
+    # the guard on this whitespace-sensitive string surgery was conditional on how somebody started
+    # the process — and its absence is silent rather than loud: `_TOOL_USAGE_ONE` becomes identical
+    # to `_TOOL_USAGE`, `tool_usage` still appends a third parameter below, and psycopg raises a
+    # bind-count error at *query* time, from a route, rather than at import from the module whose
+    # constant moved. `Chemclaw3-mcp` states the same rule with a test behind it
+    # (`D-2026-09-12-an-assert-is-a-control-with-an-off-switch`); this repository had four asserts
+    # in `src/` and no rule, and this is the one where the off switch had a consequence.
+    raise RuntimeError(
+        "the predicate `_TOOL_USAGE_ONE` narrows has moved: "
+        "`WHERE ts >= %s AND ts < %s` no longer occurs in `_TOOL_USAGE`"
+    )
 
 
 async def tool_usage(window: Window, *, tool: str | None = None) -> ToolUsage:

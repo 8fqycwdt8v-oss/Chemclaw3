@@ -71,26 +71,22 @@ class _FanOutParent:
         return await fan_out(_DoublerWorkflow, values, id_prefix="dbl", max_parallel=2)
 
 
-def test_fan_out_runs_children_in_order_and_isolates_failures() -> None:
+async def test_fan_out_runs_children_in_order_and_isolates_failures() -> None:
     """Each input runs as a child; a poison child is dropped, the rest return in input order."""
-
-    async def _run() -> None:
-        async with await start_env_or_skip() as env:
-            client: Client = pydantic_client(env)
-            async with Worker(
-                client,
+    async with await start_env_or_skip() as env:
+        client: Client = pydantic_client(env)
+        async with Worker(
+            client,
+            task_queue=settings.background_task_queue,
+            workflows=[_FanOutParent, _DoublerWorkflow],
+        ):
+            out = await client.execute_workflow(
+                _FanOutParent.run,
+                [1, 2, 13, 4, 5],
+                id="fan-out-test",
                 task_queue=settings.background_task_queue,
-                workflows=[_FanOutParent, _DoublerWorkflow],
-            ):
-                out = await client.execute_workflow(
-                    _FanOutParent.run,
-                    [1, 2, 13, 4, 5],
-                    id="fan-out-test",
-                    task_queue=settings.background_task_queue,
-                )
-        assert out == [2, 4, 8, 10]  # 13 dropped (poison), others doubled, input order kept
-
-    asyncio.run(_run())
+            )
+    assert out == [2, 4, 8, 10]  # 13 dropped (poison), others doubled, input order kept
 
 
 def test_fan_out_limit_is_resolved_via_an_activity(monkeypatch) -> None:  # type: ignore[no-untyped-def]

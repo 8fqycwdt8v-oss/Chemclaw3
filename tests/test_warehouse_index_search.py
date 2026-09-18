@@ -15,8 +15,6 @@ Three properties carry that split, and each of them is a silent wrong answer whe
   wrong answer that reads as a thin corpus.
 """
 
-import asyncio
-import functools
 from typing import Any
 
 import pytest
@@ -32,16 +30,6 @@ from tests import warehouse_fake
 
 _DRIVER = "tests.warehouse_fake:open_fake"
 _INDEX = "pistachio.public.reaction_index"
-
-
-def _sync(test: Any) -> Any:
-    """Run an `async def` test on its own loop; this repository has no async pytest plugin."""
-
-    @functools.wraps(test)
-    def runner(*args: Any, **kwargs: Any) -> None:
-        asyncio.run(test(*args, **kwargs))
-
-    return runner
 
 
 def _binding(**vector: Any) -> dict[str, Any]:
@@ -132,7 +120,6 @@ def test_an_index_ranked_source_pins_the_two_settings_it_cannot_honour(
 # --- the search itself ----------------------------------------------------------------------------
 
 
-@_sync
 async def test_the_store_ranks_and_the_warehouse_only_resolves() -> None:
     """One statement reaches the warehouse, and it is a keyed lookup with no similarity in it."""
     retriever = _retriever(await _store_ranked("ester formation", "RX-1", "RX-2"))
@@ -145,7 +132,6 @@ async def test_the_store_ranks_and_the_warehouse_only_resolves() -> None:
     assert "SIMILARITY" not in statements[0].upper()
 
 
-@_sync
 async def test_the_stores_order_survives_the_resolve() -> None:
     """The relation returns rows in its own order; the ranking is the store's and must win."""
     retriever = _retriever(await _store_ranked("oxidation", "RX-2", "RX-1"))
@@ -155,7 +141,6 @@ async def test_the_stores_order_survives_the_resolve() -> None:
     assert chunks[0].score > chunks[1].score
 
 
-@_sync
 async def test_a_key_the_relation_no_longer_holds_is_dropped_not_guessed_at() -> None:
     """An index outlives a deleted row; a hit nobody can resolve is not a citation."""
     retriever = _retriever(await _store_ranked("ester formation", "RX-1", "RX-GONE"))
@@ -164,7 +149,6 @@ async def test_a_key_the_relation_no_longer_holds_is_dropped_not_guessed_at() ->
     assert [chunk.source_note_id for chunk in chunks] == ["pistachio:RX-1"]
 
 
-@_sync
 async def test_an_unfiltered_search_costs_no_scope_query() -> None:
     """`None` means the whole index and must cost nothing extra — one statement, not two.
 
@@ -181,7 +165,6 @@ async def test_an_unfiltered_search_costs_no_scope_query() -> None:
     assert len(warehouse_fake.NEXT.executed) == 1  # type: ignore[union-attr]
 
 
-@_sync
 async def test_a_filtered_search_sends_its_eligibility_before_the_top_k() -> None:
     """Filter after the cut and a narrow filter over a wide corpus returns nothing at all.
 
@@ -198,7 +181,6 @@ async def test_a_filtered_search_sends_its_eligibility_before_the_top_k() -> Non
     assert "PUBLICATION_DATE" in statements[0]
 
 
-@_sync
 async def test_an_empty_filter_value_is_not_a_filter() -> None:
     """`tag=""` is what a model passes for an optional string it has nothing to say about.
 
@@ -219,7 +201,6 @@ async def test_an_empty_filter_value_is_not_a_filter() -> None:
     )
 
 
-@_sync
 async def test_a_scope_too_broad_to_send_is_refused_rather_than_truncated() -> None:
     """A silently cut eligibility set is a wrong answer that reads as a thin corpus.
 
@@ -236,7 +217,6 @@ async def test_a_scope_too_broad_to_send_is_refused_rather_than_truncated() -> N
         object.__setattr__(settings, "vector_store_max_scope_keys", settings_cap)
 
 
-@_sync
 async def test_an_empty_eligibility_set_returns_nothing_without_asking_the_store() -> None:
     """An empty scope means nothing is eligible, which is not the same as no filter."""
     warehouse_fake.prime(V_REACTION=[])
@@ -249,7 +229,6 @@ async def test_an_empty_eligibility_set_returns_nothing_without_asking_the_store
 # --- the binding's own `where:` reaches the index path ------------------------------------------
 
 
-@_sync
 async def test_a_binding_where_is_enforced_with_no_query_filter_and_costs_no_scope() -> None:
     """`where:` says which rows are *ever* eligible; a query that filters nothing cannot waive it.
 
@@ -277,7 +256,6 @@ async def test_a_binding_where_is_enforced_with_no_query_filter_and_costs_no_sco
     assert "IN (" in statements[0], "on the resolve, alongside the keys the index returned"
 
 
-@_sync
 async def test_a_broad_where_does_not_starve_an_unfiltered_query() -> None:
     """The overcorrection, pinned from the outcome rather than from the statement text.
 
@@ -296,7 +274,6 @@ async def test_a_broad_where_does_not_starve_an_unfiltered_query() -> None:
     assert len(chunks) == 2, "a `where:` bigger than the cap must not zero an unfiltered query"
 
 
-@_sync
 async def test_the_scope_cap_message_reaches_a_default_level_log(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

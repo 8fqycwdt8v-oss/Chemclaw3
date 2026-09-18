@@ -20,6 +20,7 @@ used elsewhere for heartbeat timing.
 """
 
 import asyncio
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
 
@@ -38,6 +39,36 @@ async def _reset(conn: Any) -> None:
     await conn.execute("DELETE FROM job_records")
     await conn.execute("DELETE FROM result_publications")
     await conn.commit()
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _leave_the_corpus_as_it_was_found() -> Iterator[None]:
+    """Empty the three tables again when this module finishes.
+
+    Every test here calls `_reset` on the way *in*, which makes the file self-consistent and lets
+    its rows escape to every file that runs after it. Measured:
+    `pytest tests/test_publish_backfill.py tests/test_job_record_postgres.py -p no:randomly` failed
+    `test_a_past_run_is_found_by_the_reason_it_was_run`, which asserts an **exact** roster for
+    `connector='calc'` and got `['pg-qm-barrier-1', 'n2', 'n1']` — two rows this module left behind.
+
+    It survived because the suite runs in random order and the two files rarely land adjacent in
+    that direction, so the failure looked like flake rather than like the deterministic corpus
+    difference it is. Resetting on the way in cannot fix it: by then the damage is to somebody
+    else's assertion, and `tests/pg.py` gives every run its own schema but not every *file* one.
+    """
+    yield
+
+    async def _clean() -> None:
+        # Defensive rather than gated on `migrated_db_or_skip`: this runs in teardown, where a skip
+        # would be raised at the wrong moment, and on a run with no database there is nothing to
+        # clean and nothing to say about it.
+        try:
+            async with db.connection(settings.postgres_dsn) as conn:
+                await _reset(conn)
+        except Exception:
+            return
+
+    asyncio.run(_clean())
 
 
 async def _insert_cached(conn: Any, key: str, created_at: datetime, calc_type: str = "pka") -> None:
@@ -79,7 +110,7 @@ def test_the_queries_break_ties_on_a_unique_column_and_walk_by_keyset() -> None:
     assert "OFFSET" not in backfill._CACHED and "OFFSET" not in backfill._JOBS
 
 
-def test_every_row_is_seen_exactly_once_even_when_many_share_a_timestamp(
+async def test_every_row_is_seen_exactly_once_even_when_many_share_a_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The regression: a batch smaller than a run of tied `created_at` values must still see all.
@@ -87,29 +118,25 @@ def test_every_row_is_seen_exactly_once_even_when_many_share_a_timestamp(
     Every row here carries an unregistered `calc_type`, so the count under test is `seen` — the
     walk's own accounting of how many rows it visited — not anything projection-dependent.
     """
+    await migrated_db_or_skip()
+    async with db.connection(settings.postgres_dsn) as conn:
+        await _reset(conn)
+        # Two ties of four and three, both wider than `batch=2`, so at least one page boundary
+        # must fall strictly inside a run of identical timestamps.
+        tie_a = datetime(2026, 1, 1, tzinfo=UTC)
+        tie_b = datetime(2026, 1, 2, tzinfo=UTC)
+        for i in range(4):
+            await _insert_cached(conn, f"a-{i}", tie_a, calc_type="no-such-calculator")
+        for i in range(3):
+            await _insert_cached(conn, f"b-{i}", tie_b, calc_type="no-such-calculator")
+        await conn.commit()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with db.connection(settings.postgres_dsn) as conn:
-            await _reset(conn)
-            # Two ties of four and three, both wider than `batch=2`, so at least one page boundary
-            # must fall strictly inside a run of identical timestamps.
-            tie_a = datetime(2026, 1, 1, tzinfo=UTC)
-            tie_b = datetime(2026, 1, 2, tzinfo=UTC)
-            for i in range(4):
-                await _insert_cached(conn, f"a-{i}", tie_a, calc_type="no-such-calculator")
-            for i in range(3):
-                await _insert_cached(conn, f"b-{i}", tie_b, calc_type="no-such-calculator")
-            await conn.commit()
+    counts = await backfill.backfill_cached(dry_run=True, batch=2)
+    seen, queued, skipped = counts.seen, counts.queued, counts.skipped
 
-        counts = await backfill.backfill_cached(dry_run=True, batch=2)
-        seen, queued, skipped = counts.seen, counts.queued, counts.skipped
-
-        assert seen == 7
-        assert skipped == 7, "every row has an unregistered calc_type"
-        assert queued == 0
-
-    asyncio.run(_run())
+    assert seen == 7
+    assert skipped == 7, "every row has an unregistered calc_type"
+    assert queued == 0
 
 
 def test_a_row_arriving_behind_the_cursor_does_not_shift_the_walk(
@@ -174,29 +201,25 @@ def test_a_row_arriving_behind_the_cursor_does_not_shift_the_walk(
     assert seen == 6, f"the walk reports {seen} rows over 6 originals plus one arriving behind it"
 
 
-def test_every_job_is_seen_exactly_once_even_when_many_share_a_timestamp() -> None:
+async def test_every_job_is_seen_exactly_once_even_when_many_share_a_timestamp() -> None:
     """`backfill_jobs`'s half of the same regression, over `job_records`/`completed_at`."""
+    await migrated_db_or_skip()
+    async with db.connection(settings.postgres_dsn) as conn:
+        await _reset(conn)
+        tie = datetime(2026, 1, 1, tzinfo=UTC)
+        for i in range(5):
+            await _insert_job(conn, f"job-{i}", tie)
+        await conn.commit()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with db.connection(settings.postgres_dsn) as conn:
-            await _reset(conn)
-            tie = datetime(2026, 1, 1, tzinfo=UTC)
-            for i in range(5):
-                await _insert_job(conn, f"job-{i}", tie)
-            await conn.commit()
+    counts = await backfill.backfill_jobs(dry_run=True, batch=2)
+    seen, queued, skipped = counts.seen, counts.queued, counts.skipped
 
-        counts = await backfill.backfill_jobs(dry_run=True, batch=2)
-        seen, queued, skipped = counts.seen, counts.queued, counts.skipped
-
-        assert seen == 5
-        assert skipped == 5, "`x.unregistered-job` matches no projector prefix"
-        assert queued == 0
-
-    asyncio.run(_run())
+    assert seen == 5
+    assert skipped == 5, "`x.unregistered-job` matches no projector prefix"
+    assert queued == 0
 
 
-def test_a_row_with_a_registered_projector_is_queued_not_skipped(
+async def test_a_row_with_a_registered_projector_is_queued_not_skipped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The skip/queue split itself, decoupled from the real outbox and projection machinery.
@@ -216,27 +239,24 @@ def test_a_row_with_a_registered_projector_is_queued_not_skipped(
     monkeypatch.setattr(outbox, "project_payload", _one_record)
     monkeypatch.setattr(outbox, "enqueue", _fake_enqueue)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with db.connection(settings.postgres_dsn) as conn:
-            await _reset(conn)
-            await _insert_cached(conn, "known", datetime(2026, 1, 1, tzinfo=UTC), calc_type="pka")
-            await _insert_cached(
-                conn, "unknown", datetime(2026, 1, 1, tzinfo=UTC), calc_type="no-such-calculator"
-            )
-            await conn.commit()
+    await migrated_db_or_skip()
+    async with db.connection(settings.postgres_dsn) as conn:
+        await _reset(conn)
+        await _insert_cached(conn, "known", datetime(2026, 1, 1, tzinfo=UTC), calc_type="pka")
+        await _insert_cached(
+            conn, "unknown", datetime(2026, 1, 1, tzinfo=UTC), calc_type="no-such-calculator"
+        )
+        await conn.commit()
 
-        counts = await backfill.backfill_cached(dry_run=False, batch=10)
+    counts = await backfill.backfill_cached(dry_run=False, batch=10)
 
-        assert counts.seen == 2
-        assert counts.queued == 1, "the row with a registered projector must reach the outbox"
-        assert counts.skipped == 1
-        assert counts.failed == 0
-
-    asyncio.run(_run())
+    assert counts.seen == 2
+    assert counts.queued == 1, "the row with a registered projector must reach the outbox"
+    assert counts.skipped == 1
+    assert counts.failed == 0
 
 
-def test_dry_run_counts_without_calling_the_outbox(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_dry_run_counts_without_calling_the_outbox(monkeypatch: pytest.MonkeyPatch) -> None:
     """`dry_run=True` must be a read-only preview: no row reaches the outbox *write*.
 
     It reaches the *projection* now, deliberately — that is what makes the preview's numbers the
@@ -249,48 +269,41 @@ def test_dry_run_counts_without_calling_the_outbox(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(outbox, "enqueue", _explode)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with db.connection(settings.postgres_dsn) as conn:
-            await _reset(conn)
-            await _insert_cached(conn, "known", datetime(2026, 1, 1, tzinfo=UTC), calc_type="pka")
-            await conn.commit()
+    await migrated_db_or_skip()
+    async with db.connection(settings.postgres_dsn) as conn:
+        await _reset(conn)
+        await _insert_cached(conn, "known", datetime(2026, 1, 1, tzinfo=UTC), calc_type="pka")
+        await conn.commit()
 
-        counts = await backfill.backfill_cached(dry_run=True, batch=10)
+    counts = await backfill.backfill_cached(dry_run=True, batch=10)
 
-        assert (counts.seen, counts.queued, counts.skipped, counts.failed) == (1, 1, 0, 0)
-
-    asyncio.run(_run())
+    assert (counts.seen, counts.queued, counts.skipped, counts.failed) == (1, 1, 0, 0)
 
 
-def test_requeue_failed_returns_failed_rows_to_pending() -> None:
+async def test_requeue_failed_returns_failed_rows_to_pending() -> None:
     """An operator's fix (rotated credential, applied DDL) is a resource nothing else recovers."""
+    await migrated_db_or_skip()
+    async with db.connection(settings.postgres_dsn) as conn:
+        await _reset(conn)
+        await conn.execute(
+            "INSERT INTO result_publications "
+            "(sink, calc_ref, document, schema_version, state, attempts, last_error) "
+            "VALUES ('a', 'r-1', %s, 1, 'failed', 3, 'boom'), "
+            "       ('a', 'r-2', %s, 1, 'pending', 0, '')",
+            (Jsonb({}), Jsonb({})),
+        )
+        await conn.commit()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with db.connection(settings.postgres_dsn) as conn:
-            await _reset(conn)
-            await conn.execute(
-                "INSERT INTO result_publications "
-                "(sink, calc_ref, document, schema_version, state, attempts, last_error) "
-                "VALUES ('a', 'r-1', %s, 1, 'failed', 3, 'boom'), "
-                "       ('a', 'r-2', %s, 1, 'pending', 0, '')",
-                (Jsonb({}), Jsonb({})),
-            )
-            await conn.commit()
+    reset_count = await backfill.requeue_failed()
+    assert reset_count == 1
 
-        reset_count = await backfill.requeue_failed()
-        assert reset_count == 1
-
-        async with db.connection(settings.postgres_dsn) as conn:
-            cursor = await conn.execute(
-                "SELECT state, attempts, last_error FROM result_publications WHERE calc_ref = 'r-1'"
-            )
-            row = await cursor.fetchone()
-        assert row is not None
-        assert tuple(row) == ("pending", 0, "")
-
-    asyncio.run(_run())
+    async with db.connection(settings.postgres_dsn) as conn:
+        cursor = await conn.execute(
+            "SELECT state, attempts, last_error FROM result_publications WHERE calc_ref = 'r-1'"
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    assert tuple(row) == ("pending", 0, "")
 
 
 def test_a_requeue_dry_run_counts_the_retired_rows_without_touching_them() -> None:
@@ -590,7 +603,9 @@ def test_both_entrypoints_of_one_walk_refuse_when_this_deployment_publishes_nowh
     )
 
 
-def test_the_jobs_walk_carries_the_note_the_run_produced(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_the_jobs_walk_carries_the_note_the_run_produced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The backfill reads the very row `job_records.note_id` sits in, and dropped it.
 
     The live publish path and this one are two producers of one field, and both had the value in
@@ -608,28 +623,25 @@ def test_the_jobs_walk_carries_the_note_the_run_produced(monkeypatch: pytest.Mon
         captured.append(kwargs["publication"])
         return [object()]
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        at = datetime(2026, 1, 1, tzinfo=UTC)
-        async with db.connection(settings.postgres_dsn) as conn:
-            await _reset(conn)
-            for job_id, note_id in (("n1", "note-from-the-run"), ("n2", "")):
-                await _insert_composite(
-                    conn,
-                    job_id,
-                    at,
-                    "compute_reaction_energy",
-                    "ReactionEnergyResult",
-                    {"method": "GFN2-xTB"},
-                )
-                await conn.execute(
-                    "UPDATE job_records SET note_id = %s WHERE job_id = %s", (note_id, job_id)
-                )
-            await conn.commit()
-        monkeypatch.setattr("chemclaw.publish.outbox.project_payload", _capture)
-        await backfill.backfill_jobs(dry_run=True, batch=10)
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    at = datetime(2026, 1, 1, tzinfo=UTC)
+    async with db.connection(settings.postgres_dsn) as conn:
+        await _reset(conn)
+        for job_id, note_id in (("n1", "note-from-the-run"), ("n2", "")):
+            await _insert_composite(
+                conn,
+                job_id,
+                at,
+                "compute_reaction_energy",
+                "ReactionEnergyResult",
+                {"method": "GFN2-xTB"},
+            )
+            await conn.execute(
+                "UPDATE job_records SET note_id = %s WHERE job_id = %s", (note_id, job_id)
+            )
+        await conn.commit()
+    monkeypatch.setattr("chemclaw.publish.outbox.project_payload", _capture)
+    await backfill.backfill_jobs(dry_run=True, batch=10)
 
     assert [publication.note_id for publication in captured] == ["note-from-the-run", ""], (
         "the walk that re-publishes a deployment's whole history drops the note link on every row"

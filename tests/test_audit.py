@@ -444,7 +444,7 @@ def _hangs_until(started: asyncio.Event) -> Callable[[], Awaitable[Any]]:
     return _call
 
 
-def test_a_cancelled_tool_call_still_records_the_attempt() -> None:
+async def test_a_cancelled_tool_call_still_records_the_attempt() -> None:
     """A disconnect or turn deadline mid-tool leaves a `cancelled` row, not silence (D-130).
 
     `CancelledError` is a `BaseException`, so the `except Exception` that records a failure never
@@ -456,21 +456,18 @@ def test_a_cancelled_tool_call_still_records_the_attempt() -> None:
     sink = _RecordingSink()
     middleware = make_audit_middleware(correlation_id="conv-cancel", actor="carol", sink=sink)
 
-    async def _run() -> None:
-        started = asyncio.Event()
-        task = asyncio.ensure_future(
-            run_middleware(
-                middleware,
-                _ctx("compute_xtb_energy", {"smiles": "CCO"}),
-                _as_handler(_hangs_until(started)),
-            )
+    started = asyncio.Event()
+    task = asyncio.ensure_future(
+        run_middleware(
+            middleware,
+            _ctx("compute_xtb_energy", {"smiles": "CCO"}),
+            _as_handler(_hangs_until(started)),
         )
-        await started.wait()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-    asyncio.run(_run())
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
     assert [event.outcome for event in sink.events] == ["cancelled"]
     event = sink.events[0]
@@ -483,7 +480,7 @@ def test_a_cancelled_tool_call_still_records_the_attempt() -> None:
     assert event.latency_ms > 0.0
 
 
-def test_the_cancelled_row_survives_a_second_cancellation() -> None:
+async def test_the_cancelled_row_survives_a_second_cancellation() -> None:
     """The write is shielded, so the teardown that caused it cannot also erase it.
 
     A structured-concurrency teardown does not cancel once: sse-starlette's task group and
@@ -495,24 +492,21 @@ def test_the_cancelled_row_survives_a_second_cancellation() -> None:
     sink = _SlowSink()
     middleware = make_audit_middleware(correlation_id="conv-torn", actor="dave", sink=sink)
 
-    async def _run() -> None:
-        started = asyncio.Event()
-        task = asyncio.ensure_future(
-            run_middleware(
-                middleware,
-                _ctx("gather_evidence", {"query": "biaryl"}),
-                _as_handler(_hangs_until(started)),
-            )
+    started = asyncio.Event()
+    task = asyncio.ensure_future(
+        run_middleware(
+            middleware,
+            _ctx("gather_evidence", {"query": "biaryl"}),
+            _as_handler(_hangs_until(started)),
         )
-        await started.wait()
-        task.cancel()
-        await asyncio.sleep(0)  # let the middleware reach its cancellation handler
-        task.cancel()  # the re-delivery a task group makes while the handler is awaiting
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        await asyncio.wait_for(sink.written.wait(), timeout=5.0)
-
-    asyncio.run(_run())
+    )
+    await started.wait()
+    task.cancel()
+    await asyncio.sleep(0)  # let the middleware reach its cancellation handler
+    task.cancel()  # the re-delivery a task group makes while the handler is awaiting
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(sink.written.wait(), timeout=5.0)
 
     assert [event.outcome for event in sink.events] == ["cancelled"]
 

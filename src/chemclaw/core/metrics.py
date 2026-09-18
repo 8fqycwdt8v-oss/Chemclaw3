@@ -58,6 +58,52 @@ def _escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
+def _sample(value: float) -> str:
+    """Render one sample *value* in the Prometheus text format.
+
+    Every numeric emission in `render` goes through here, because `:g` — which every one of them
+    used to use — is wrong in two independent ways and only one of them is visible.
+
+    The loud way: `f"{float('inf'):g}"` is `inf` and `f"{float('nan'):g}"` is `nan`, where the
+    format requires `+Inf` and `NaN`. A bound gauge whose source computes a ratio with a zero
+    denominator therefore emitted a token Prometheus rejects, and a rejected sample does not fail
+    alone — it fails the *scrape*, so one unreadable gauge loses every metric this pod has. The
+    histogram path already spelled `le="+Inf"` correctly, which is what made this look like a
+    convention rather than the inconsistency inside one renderer that it was.
+
+    The quiet way, and the reason this function exists rather than three `if` arms: **`:g` carries
+    six significant digits.** A counter at 1,234,567 rendered as `1.23457e+06` — a number
+    Prometheus accepts, stores, and graphs, wrong by three. Every counter in this process was
+    exact until its millionth observation and silently rounded afterwards, which is the point at
+    which a long-running pod's numbers stop being worth reading. `chemclaw_tool_calls_total` on the
+    shipped fleet crosses that in days. Histogram `_sum` and `_count` had the same defect.
+
+    `repr` is the fix, because it is the shortest string that round-trips a float exactly.
+
+    **The coercion on the first line is load-bearing and this function shipped without it.** It
+    opened with `if isinstance(value, int): return str(value)`, whose comment claimed bool "renders
+    0/1 — correct here". It does not: `bool` is an `int`, so `str(True)` is `True`, and a gauge
+    that ever handed this a flag would emit `chemclaw_x True` and take the whole scrape with it —
+    the same total loss the `inf` paragraph above is about. The branch was also dead: instrumented
+    across every emission site, `render` hands this `float` and nothing else, because `_counts` is
+    seeded `0.0`, labelled series start at `0.0`, histogram slots are `[0.0] * n` and both gauge
+    paths already call `float(...)`. So it defended nothing and risked everything.
+
+    Coercing is not a narrowing, either, which is why the "exact int" claim went with it rather
+    than being repaired: a Prometheus sample **is** a float64, so an integer past 2**53 cannot be
+    stored by the server whatever this function prints. Rendering what Prometheus can hold is the
+    honest answer, and it is what `prometheus_client` does.
+    """
+    value = float(value)
+    if value != value:  # NaN is the only value unequal to itself
+        return "NaN"
+    if value == float("inf"):
+        return "+Inf"
+    if value == float("-inf"):
+        return "-Inf"
+    return repr(value)
+
+
 # Metric name -> help text. Declared up front so every metric is documented at its definition and
 # the exposition always carries HELP/TYPE lines (a scrape without them is much harder to read).
 _COUNTERS: dict[str, str] = {
@@ -244,6 +290,13 @@ _COUNTERS: dict[str, str] = {
     ),
     "chemclaw_audit_sink_failures_total": (
         "Audit records that could not be persisted (the trail is incomplete)."
+    ),
+    # Separate from the series above, and the separation is the point: that one says the database
+    # refused a batch, this one says the database could not keep up with the producer and the
+    # oldest buffered rows were shed to bound memory. Pooled, they would read as one incident with
+    # two remedies — reachability against throughput — and the shed case has no exception to log.
+    "chemclaw_audit_events_shed_total": (
+        "Audit records dropped from the write buffer because it reached its bound."
     ),
     # The durable subsystem's counterpart to `chemclaw_connectors_unreachable_total`. It did not
     # exist, and a comment in `api/runner.py` asserted that the connector counter covered this —
@@ -769,6 +822,19 @@ _COUNTERS: dict[str, str] = {
         "three because the skill name is the first segment of a model-written path and the "
         "visibility predicate only ever narrows, so an unconfigured deployment permits every "
         "string a model can invent, and `skills/README.md` resolves."
+    ),
+    "chemclaw_local_skill_loads_total": (
+        "Skill bodies a chemist's *own* tier delivered — the same question as the counter above, "
+        "asked of the tier that counter cannot see. `chemclaw_skill_loads_total` lives on "
+        "`NarrowedSkillsBackend`, and the personal tier is a `StoreBackend`, so a local skill load "
+        "moved nothing at all: measured, a shipped skill and a personal one read through the same "
+        "mount in one process left one series at 1 and the other absent. **Bare, and that is the "
+        "whole reason it is a second series rather than a label.** A local skill's name is written "
+        "by a person, clamped by nothing, and would be a per-chemist identifier minting a series "
+        "per private project name in a shared exposition — the rule `Chemclaw3-mcp` states for its "
+        "own fleet, which this repository had no occasion to state until a caller-named skill "
+        "existed. What an operator needs from this is whether the tier is used at all, and a bare "
+        "count answers it; who used which is a question for that person's own listing route."
     ),
     # --- the turn ------------------------------------------------------------------------------
     "chemclaw_turns_finished_total": (
@@ -1635,7 +1701,7 @@ class Metrics:
         for name, help_text in _COUNTERS.items():
             lines += [f"# HELP {name} {help_text}", f"# TYPE {name} counter"]
             if name not in _COUNTER_LABELS:
-                lines.append(f"{name} {counts[name]:g}")
+                lines.append(f"{name} {_sample(counts[name])}")
                 continue
             # A labelled counter emits one line per observed series and never a bare one — the
             # bare sample cannot exist, because `increment` requires the declared labels. A
@@ -1643,7 +1709,7 @@ class Metrics:
             # which is the Prometheus convention and this module's own rule for gauges.
             for key, total in sorted(series.get(name, {}).items()):
                 rendered = ",".join(f'{label}="{_escape(value)}"' for label, value in key)
-                lines.append(f"{name}{{{rendered}}} {total:g}")
+                lines.append(f"{name}{{{rendered}}} {_sample(total)}")
         for name, help_text in _GAUGES.items():
             source = gauges.get(name)
             if source is None:
@@ -1669,7 +1735,7 @@ class Metrics:
             lines += [
                 f"# HELP {name} {help_text}",
                 f"# TYPE {name} gauge",
-                f"{name} {reading:g}",
+                f"{name} {_sample(reading)}",
             ]
         for name, help_text in _GAUGE_FAMILIES.items():
             family = families.get(name)
@@ -1684,7 +1750,7 @@ class Metrics:
                 continue
             lines += [f"# HELP {name} {help_text}", f"# TYPE {name} gauge"]
             for value, reading in sorted(readings.items()):
-                lines.append(f'{name}{{{label}="{_escape(str(value))}"}} {float(reading):g}')
+                lines.append(f'{name}{{{label}="{_escape(str(value))}"}} {_sample(float(reading))}')
         for name, help_text in _HISTOGRAMS.items():
             lines += [f"# HELP {name} {help_text}", f"# TYPE {name} histogram"]
             boundaries = _HISTOGRAM_BUCKETS[name]
@@ -1699,14 +1765,23 @@ class Metrics:
                 # per-bucket tallies are summed as they are emitted; the final `+Inf` bucket
                 # equals the count.
                 cumulative = 0.0
+                # `le` stays on `:g` while every *sample* moved to `_sample`, and the asymmetry is
+                # deliberate: `le` is a label, so its rendered text is part of the series identity.
+                # Re-spelling `3600` as `3600.0` would mint a new series beside the old one on every
+                # dashboard and recording rule that already reads this histogram. The two reasons
+                # `_sample` exists do not reach here — every boundary in `_HISTOGRAM_BUCKETS` is a
+                # small human-chosen number well inside six significant digits, and the `+Inf`
+                # bucket is spelled literally on the next line rather than formatted.
                 for boundary, tally in zip(boundaries, buckets[:-1], strict=True):
                     cumulative += tally
-                    lines.append(f'{name}_bucket{{{declared}le="{boundary:g}"}} {cumulative:g}')
+                    lines.append(
+                        f'{name}_bucket{{{declared}le="{boundary:g}"}} {_sample(cumulative)}'
+                    )
                 cumulative += buckets[-1]  # the overflow slot: samples past the last boundary
                 lines += [
-                    f'{name}_bucket{{{declared}le="+Inf"}} {cumulative:g}',
-                    f"{name}_sum{braced} {histogram_sums[name][key]:g}",
-                    f"{name}_count{braced} {cumulative:g}",
+                    f'{name}_bucket{{{declared}le="+Inf"}} {_sample(cumulative)}',
+                    f"{name}_sum{braced} {_sample(histogram_sums[name][key])}",
+                    f"{name}_count{braced} {_sample(cumulative)}",
                 ]
         return "\n".join(lines) + "\n"
 

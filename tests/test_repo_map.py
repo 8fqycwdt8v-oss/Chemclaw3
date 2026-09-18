@@ -20,6 +20,7 @@ Deliberately about *presence*, not content: whether a README is any good is a re
 test that graded prose would be gamed by padding.
 """
 
+import ast
 import re
 import subprocess
 from pathlib import Path
@@ -482,6 +483,69 @@ def test_the_calc_bundle_teaches_its_shape_without_counting_its_jobs() -> None:
     )
 
 
+#: A complete tool surface, counted: "all fifteen tools", "Fifteen tools", "all fifteen of its
+#: tools". The quantifier is what makes it a claim about the *whole* surface rather than about a
+#: subset somebody measured — "two tools on the server are like this" counts a subset and is not
+#: what went stale here.
+_COUNTED_SURFACE = re.compile(
+    rf"\b(?:all\s+)?(?:{_CARDINAL})\b(?:\s+of\s+(?:its|the|them|these))?\s+tools?\b",
+    re.IGNORECASE,
+)
+#: The bundle by name, as every sentence that got this wrong wrote it.
+_CALC_BUNDLE = re.compile(r"`?calc`?\s+bundle", re.IGNORECASE)
+#: Records, not descriptions. A merged ADR is never edited (CLAUDE.md), and an archive or a task
+#: directory is a dated account of an afternoon; each is *supposed* to hold the number that was
+#: true when it was written.
+_HISTORICAL = ("docs/archive/", "docs/decisions/", "tasks/")
+_CALC_SERVER_PACKAGE = "src/chemclaw/connectors/calc/server/"
+
+
+def test_the_calc_tool_surface_is_not_counted_in_prose() -> None:
+    """Three live sentences said "fifteen" over a surface of seventeen.
+
+    The bundle's own module docstring opened "Fifteen tools", and both live-lane scripts taught
+    that Chemclaw3 keeps its own bundle and "all fifteen tools" — measured at HEAD,
+    `connector.yaml` declares seventeen and the module decorates the same seventeen. Nothing
+    failed, because nothing read those sentences: the count is a second answer to a question the
+    manifest already answers, which is `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose`
+    over a tool surface instead of a `make` target.
+
+    So the count is refused rather than corrected, and no number is reasserted here — the
+    declared-equals-served half is already held, in both directions, by
+    `tests/test_validate_connectors.py::test_the_shipped_bundles_pass_their_own_gate` over
+    `validate_connectors`'s rule 5, and duplicating it here would be the same defect one layer up.
+
+    Scope is derived rather than listed: the bundle's server package, where the surface is defined,
+    plus any live file naming the bundle in the same sentence as the count — which is how the
+    identical sentence reached two scripts. Historical records are exempt because their job is to
+    hold what was true when they were written.
+    """
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=_ROOT, capture_output=True, text=True, check=True
+    ).stdout.split("\0")
+
+    offenders = []
+    for name in filter(None, tracked):
+        if name.startswith(_HISTORICAL):
+            continue
+        try:
+            content = (_ROOT / name).read_text(encoding="utf-8")
+        except (UnicodeDecodeError, FileNotFoundError, IsADirectoryError):
+            continue  # binary, or a symlink into a tree this checkout does not have
+        for sentence in re.split(r"(?<=[.:!?])\s", content):
+            if not _COUNTED_SURFACE.search(sentence):
+                continue
+            if name.startswith(_CALC_SERVER_PACKAGE) or _CALC_BUNDLE.search(sentence):
+                offenders.append(f"{name}: {' '.join(sentence.split())[:120]}")
+
+    assert not offenders, (
+        f"the calc bundle's tool surface is counted in prose: {offenders}. The manifest declares "
+        "it and validate_connectors holds the declaration against what the module serves; a "
+        "number here is a second answer that goes stale on its own, as 'fifteen' did over "
+        "seventeen."
+    )
+
+
 def _ci_validators() -> set[str]:
     """Every `*-validate` target `make ci` runs, read off the recipe itself."""
     makefile = (_ROOT / "Makefile").read_text(encoding="utf-8")
@@ -684,3 +748,80 @@ def test_both_maps_of_data_name_every_corpus_that_exists() -> None:
         named = {match.rstrip("/") for match in re.findall(r"`([a-z0-9][a-z0-9-]*/)`", text)}
         gone = sorted(named - on_disk - {"data"})
         assert not gone, f"{document} names corpora that are not there: {gone}"
+
+
+# The `assert` statements in `src/` that are **type narrowing** rather than invariant enforcement,
+# each with the reason a reader needs to agree it belongs here. The distinction is the whole point:
+# `python -O` deletes every `assert`, so one that *enforces* something is a control conditional on
+# how an operator started the process, while one that merely tells mypy a value is not `None` loses
+# nothing when it vanishes — the code after it was already correct or already broken.
+#
+# `Chemclaw3-mcp` states this rule outright for its serving code and holds it with a test
+# (`D-2026-09-12-an-assert-is-a-control-with-an-off-switch`). This repository had no equivalent, and
+# the one assert that carried a consequence — `operations/activity.py`'s guard on SQL built by
+# `str.replace()` — sat among these three looking exactly like them.
+#
+# **The key is the assert's own source text, not its file, and the first version got that wrong.**
+# Keyed by file, an allowlisted module could gain any number of further asserts — enforcing ones
+# included — and this test stayed green, which re-creates the exact failure the paragraph above
+# describes one file narrower: a consequential assert hiding among narrowing ones. The text is what
+# was reviewed, so the text is what is allowed; editing one of these lines fails this test and asks
+# for the argument again.
+_NARROWING_ASSERTS = {
+    "science/labels/store.py": {
+        "assert row.labelled_at is not None  # the caller filtered on it": "narrows for mypy",
+    },
+    "agent/chemclaw_agent.py": {
+        "assert profile.tool_names is not None  # only called when the profile narrows": (
+            "narrows for mypy"
+        ),
+    },
+    "cli/live_data.py": {
+        "assert dataset.dataset_id is not None": "set by the request that just created it",
+    },
+}
+
+
+def test_no_assert_in_src_enforces_an_invariant() -> None:
+    """An invariant enforced by `assert` is a control with an off switch, and `-O` is the switch.
+
+    This does not ban `assert` outright, because the three that remain genuinely narrow a type for
+    mypy and nothing depends on them running. It bans a *fourth* appearing without an argument: a
+    new one has to be justified in the same commit, which is the moment to notice the statement
+    should have been `if ...: raise`.
+
+    **Parsed rather than grepped**, and the allowlist is keyed by the statement's own text. The
+    line regex this started as had both failure directions: a docstring line beginning with the
+    word `assert` was a false positive, and `if x: assert y` or an `assert` after a `;` was a false
+    negative. `ast` has neither, and it hands over the exact line for the message. Both of those
+    were benign on the tree as it stood — which is the reason to fix them now rather than after a
+    commit makes one of them matter.
+    """
+    found: dict[str, dict[str, int]] = {}
+    for path in sorted((_ROOT / "src").rglob("*.py")):
+        relative = path.relative_to(_ROOT / "src" / "chemclaw").as_posix()
+        source = path.read_text(encoding="utf-8")
+        lines = source.splitlines()
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Assert):
+                found.setdefault(relative, {})[lines[node.lineno - 1].strip()] = node.lineno
+
+    unargued = {
+        name: {text: line for text, line in statements.items() if text not in argued}
+        for name, statements in found.items()
+        for argued in [_NARROWING_ASSERTS.get(name, {})]
+    }
+    unargued = {name: statements for name, statements in unargued.items() if statements}
+    assert not unargued, (
+        "an `assert` in src/ that is not in _NARROWING_ASSERTS: "
+        f"{unargued}. `python -O` deletes it. If it narrows a type, add its exact text to the list "
+        "with the reason; if it enforces anything at all, write `if ...: raise` instead."
+    )
+
+    stale = sorted(
+        f"{name}: {text}"
+        for name, statements in _NARROWING_ASSERTS.items()
+        for text in statements
+        if text not in found.get(name, {})
+    )
+    assert not stale, f"_NARROWING_ASSERTS names asserts that are no longer in src/: {stale}"

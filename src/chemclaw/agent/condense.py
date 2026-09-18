@@ -53,9 +53,10 @@ from pydantic import BaseModel, Field
 
 from chemclaw.agent.framing import ENVELOPE_TAG, defang, frame_untrusted, safe_id
 from chemclaw.core.config import settings
+from chemclaw.core.markdown import MISSING, render_table
 from chemclaw.core.metrics_bridge import degraded, record_metric
 from chemclaw.kg.note import ProcessConditions
-from chemclaw.memory.comparison import MISSING, cell, date_cell, drop_empty_columns, render_table
+from chemclaw.memory.comparison import cell, date_cell, drop_empty_columns
 from chemclaw.memory.progression import (
     ConditionChange,
     both_recorded,
@@ -636,7 +637,7 @@ def _table(protocols: list[Protocol], rows: list[ProtocolDigest]) -> str:
         [name for name, _ in columns],
         [[cells[index] for _, cells in columns] for index in range(len(rows))],
     )
-    return f"{_ordering_caveat(protocols)}\n\n{table}"
+    return f"{_ordering_caveat(protocols)}\n\n{table}\n"
 
 
 async def condense_protocols(

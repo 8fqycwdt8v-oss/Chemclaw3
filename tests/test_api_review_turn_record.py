@@ -134,7 +134,7 @@ class _OneTokenAgent(ScriptedTurn):
         yield " never"  # pragma: no cover - the turn is always torn down first
 
 
-def test_a_stop_just_short_of_the_deadline_is_not_a_timeout(
+async def test_a_stop_just_short_of_the_deadline_is_not_a_timeout(
     booked: list[TurnCost], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The claim was "an exact test rather than a tolerance"; the reading was taken too late.
@@ -158,29 +158,26 @@ def test_a_stop_just_short_of_the_deadline_is_not_a_timeout(
     monkeypatch.setattr(runner, "_roll_back_unfinished", _slow_rollback)
     deadline_box: list[float] = []
 
-    async def _run() -> None:
-        deadline = asyncio.get_running_loop().time() + horizon
-        deadline_box.append(deadline)
-        turn = cast(
-            "AsyncGenerator[Any, None]",
-            run_turn(
-                TurnSession(session_id="s-stop"),
-                "go",
-                connectors=[],
-                graph_factory=_OneTokenAgent().graph_factory,
-                deadline=deadline,
-            ),
-        )
-        await turn.asend(None)  # the first event: the turn is demonstrably running
-        # The Stop button, delivered exactly as the pump delivers it — inside the deadline.
-        assert asyncio.get_running_loop().time() < deadline, (
-            f"building the graph took longer than the {horizon}s horizon; raise it"
-        )
-        with suppress(asyncio.CancelledError):
-            await turn.athrow(asyncio.CancelledError())
-        await asyncio.sleep(0)
-
-    asyncio.run(_run())
+    deadline = asyncio.get_running_loop().time() + horizon
+    deadline_box.append(deadline)
+    turn = cast(
+        "AsyncGenerator[Any, None]",
+        run_turn(
+            TurnSession(session_id="s-stop"),
+            "go",
+            connectors=[],
+            graph_factory=_OneTokenAgent().graph_factory,
+            deadline=deadline,
+        ),
+    )
+    await turn.asend(None)  # the first event: the turn is demonstrably running
+    # The Stop button, delivered exactly as the pump delivers it — inside the deadline.
+    assert asyncio.get_running_loop().time() < deadline, (
+        f"building the graph took longer than the {horizon}s horizon; raise it"
+    )
+    with suppress(asyncio.CancelledError):
+        await turn.athrow(asyncio.CancelledError())
+    await asyncio.sleep(0)
 
     (row,) = booked
     assert row.outcome == "abandoned", (

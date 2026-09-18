@@ -30,7 +30,6 @@ carrying an argument nobody checked.
 """
 
 import ast
-import asyncio
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -236,7 +235,7 @@ class Job:
     assert ok[0][1] & _QUEUE_BOUNDS
 
 
-def test_an_activity_nobody_polls_fails_instead_of_waiting_forever(
+async def test_an_activity_nobody_polls_fails_instead_of_waiting_forever(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A workflow whose activity queue is unserved fails on the queue bound, and says so.
@@ -249,27 +248,24 @@ def test_an_activity_nobody_polls_fails_instead_of_waiting_forever(
     """
     monkeypatch.setattr(settings, "activity_queue_wait_seconds", 5.0)
 
-    async def _run() -> None:
-        async with await start_env_or_skip() as env:
-            client: Client = pydantic_client(env)
-            async with Worker(
-                client,
-                task_queue=settings.background_task_queue,
-                workflows=[NoteReindexWorkflow],
-            ):
-                with pytest.raises(WorkflowFailureError) as failure:
-                    await client.execute_workflow(
-                        NoteReindexWorkflow.run,
-                        id="unserved-activity-queue",
-                        task_queue=settings.background_task_queue,
-                    )
-        cause = failure.value.cause
-        assert isinstance(cause, ActivityError)
-        timeout = cause.cause
-        assert isinstance(timeout, TemporalTimeoutError)
-        assert timeout.type is TimeoutType.SCHEDULE_TO_START
-
-    asyncio.run(_run())
+    async with await start_env_or_skip() as env:
+        client: Client = pydantic_client(env)
+        async with Worker(
+            client,
+            task_queue=settings.background_task_queue,
+            workflows=[NoteReindexWorkflow],
+        ):
+            with pytest.raises(WorkflowFailureError) as failure:
+                await client.execute_workflow(
+                    NoteReindexWorkflow.run,
+                    id="unserved-activity-queue",
+                    task_queue=settings.background_task_queue,
+                )
+    cause = failure.value.cause
+    assert isinstance(cause, ActivityError)
+    timeout = cause.cause
+    assert isinstance(timeout, TemporalTimeoutError)
+    assert timeout.type is TimeoutType.SCHEDULE_TO_START
 
 
 @pytest.mark.parametrize("ceiling", [3600.0, 25200.0, 86400.0])

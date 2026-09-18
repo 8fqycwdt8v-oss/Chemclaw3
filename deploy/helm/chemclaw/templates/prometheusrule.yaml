@@ -37,8 +37,13 @@
        claim it did.** `increase(c[10m]) > 0` keeps returning a sample for the whole ten minutes
        after a *single* increment, so any `for:` shorter than the range window is satisfied by one
        blip: the alert is not suppressed, only late. Where a rule means "more than the odd blip",
-       the count is the threshold and `for:` is `0m`. The three `increase(...) > 0` + `for: 0m`
-       alerts are correct as written — their intent *is* the first increment. */ -}}
+       the count is the threshold and `for:` is `0m`. An `increase(...) > 0` rule with `for: 0m` is
+       correct as written wherever its intent *is* the first increment, which is most of them.
+
+       No count of them is written here. The sentence this replaced said "the three", and `main`
+       already carried nineteen `increase(` rules before this branch made it twenty — the same
+       failure the rest of this tree refuses a number in prose for. `grep -c 'expr: increase(' `
+       on this file answers, and the answer is right on the day it is asked. */ -}}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -68,6 +73,28 @@ spec:
               The audit sink failed to record at least one tool call in the last 10 minutes, so the
               trail is incomplete. Tool calls keep succeeding, which is why this is invisible
               without an alert. Check the `audit_sink_failure` log marker for the affected trail.
+
+        {{- /* The same hole from the other cause, and the reason it is a second alert rather than
+               a second contributor to the one above: that one means the database refused a batch,
+               this one means it could not keep up with the producer and the oldest buffered rows
+               were dropped to bound memory. Unreachable and cannot-keep-up have different
+               remedies — one is a connection, the other is capacity — and pooled they would read
+               as one incident. This arm also has no exception to log, so an operator following
+               the sink-failure runbook would find no traceback and conclude the alert was wrong. */}}
+        - alert: ChemclawAuditTrailShedding
+          expr: increase(chemclaw_audit_events_shed_total[10m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawaudittrailshedding
+            summary: Audit records are being dropped because the write buffer is full
+            description: >-
+              The audit write buffer reached `CHEMCLAW_AGENT_AUDIT_BUFFER_MAX_EVENTS` and shed its
+              oldest records, so the trail has a gap. The database is reachable but slower than the
+              producer — check write latency and pool saturation rather than connectivity. Every
+              shed event still reached the stdlib log; the `audit_buffer_full` marker names how
+              many and at what bound.
 
         {{- /* Outbound delivery, which shipped with no signal at all: no logger and no metric
                anywhere in `chemclaw.deliver`, a per-channel failure swallowed so one broken

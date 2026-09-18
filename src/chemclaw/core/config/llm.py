@@ -155,6 +155,24 @@ class LlmSettings(BaseSettings):
     # window is a property of the endpoint every task shares. A deployment that routes tasks across
     # models with different windows should declare the smallest.
     llm_context_window_tokens: int = Field(default=0, ge=0)
+    # **The BPE encoding the endpoint's meter uses, as far as this deployment can state it.**
+    # `agent/context_budget.py` counts the request prefix with it instead of chars/4: measured
+    # 2026-09-16 on the `default` profile, that estimator is 18% high on the system message and
+    # 0.05% low on the tool schemas, and the clamp in `estimator_ratio` means an over-estimate is
+    # never refunded — so the 1,161 tokens between the two counts were thread the policy cut for
+    # nothing.
+    #
+    # **A name rather than a model id, because the model is deliberately unknowable.** Every call
+    # goes to one OpenAI-compatible gateway (`D-2026-09-04-a-gateway-is-the-only-provider`) that
+    # does not say what it fronts, so `tiktoken.encoding_for_model` has nothing to be handed. A
+    # gateway fronting a non-OpenAI vendor therefore gets a closer approximation rather than the
+    # bill, which is why the measured calibration ratio stays in front of it.
+    #
+    # **It must resolve from a cache baked into the image** (`TIKTOKEN_CACHE_DIR`): production is
+    # air-gapped and `tiktoken` fetches its merge table over HTTPS on a miss. With no cache the
+    # budget says so once at INFO and counts with chars/4 as before, so this never fails a turn and
+    # never reaches the network. Set it to the empty string to keep the estimator deliberately.
+    llm_token_encoding: str = "o200k_base"
     # Per-task model routing (plan F10-E). Maps a task name to the model id to use for it, so a
     # cheap model can run high-throughput/secondary steps (verification, classification) while
     # the frontier model drives the main reasoning turn — without a second provider or a second
