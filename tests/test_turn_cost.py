@@ -293,6 +293,9 @@ def test_every_turn_cost_reader_has_the_surface_that_asks_it() -> None:
 
     - `operations/activity.py` — the aggregate read model, reached by the `review_activity` tool.
     - `operations/evidence_pack.py` — `assemble`, the context-of-use record for one session.
+    - `cli/distill.py` — `make distill`, which reads `skills_loaded` and nothing else: it is the
+      self-confirmation guard's input, and the guard is why that column exists at all
+      (`D-2026-09-18-a-guard-with-nothing-to-read-is-not-a-guard`).
     - `cli/explain.py` — `python -m chemclaw.cli.explain`, the audit reconstruction.
     - `cli/live_turn_cost.py` — `make live-turn-cost`, which drives a fixed workload and scores
       what the ledger says it cost. Its surface is the command itself, and it reads back only the
@@ -312,6 +315,7 @@ def test_every_turn_cost_reader_has_the_surface_that_asks_it() -> None:
         if "FROM turn_costs" in path.read_text(encoding="utf-8")
     )
     assert readers == [
+        "cli/distill.py",
         "cli/explain.py",
         "cli/live_turn_cost.py",
         "operations/activity.py",

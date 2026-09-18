@@ -131,6 +131,20 @@ def test_no_tool_description_tells_the_model_about_a_tier_that_is_gone() -> None
     )
 
 
+#: Tools whose description may say a person decides, because for them one does.
+#:
+#: Not an escape hatch for the check above: each entry names the test that holds the gate real, and
+#: an entry whose gate stops existing fails there rather than going quiet here. The machinery
+#: patterns still apply to everything in this map — what is exempted is *promising a decision*, not
+#: describing the control that was deleted.
+_A_LIVE_GATE = {
+    # `POST /proposals/{kind}/{name}` is the decision, and `tests/test_api_proposals.py` holds that
+    # no tool can take it. A proposal changes nothing until a person accepts it, so a description
+    # that did not say so would have the model report a behaviour change that has not happened.
+    "propose_skill": "tests/test_api_proposals.py::test_no_tool_can_decide_a_proposal",
+}
+
+
 def test_no_tool_description_tells_the_model_to_expect_a_review_gate() -> None:
     """The same failure as the tier above, on the control that was removed instead of the hardware.
 
@@ -144,18 +158,29 @@ def test_no_tool_description_tells_the_model_to_expect_a_review_gate() -> None:
 
     Scanned over the same surface and with the same argument: what is asserted is the text, not the
     binding.
+
+    **One tool proposes for a person to decide, and says so, and that is not this defect.** The ADR
+    above drew an axis rather than banning a word: knowledge is recorded because it does not change
+    what the agent does, and a *skill* is gated because it does. `propose_skill` is the gated side
+    (`D-2026-09-18-a-proposal-is-not-a-skill-and-a-route-is-not-a-tool`), so telling the model its
+    proposal waits for the chemist is the opposite failure to the one here — it is true, and a model
+    that did not know it would report a change that has not happened.
+
+    So the exemption is per tool and partial, never per pattern: `_A_LIVE_GATE` names it with the
+    test that holds the gate real, and the machinery words below still apply to it, because a
+    description naming a *pull request* or a `NoteProposal` is describing the deleted control
+    whatever tool it belongs to.
     """
     import re
 
-    retired = re.compile(
-        r"\bPR[- ]gate\b|pull request|propose[sd]? (?:what|it|them|the)|for review|NoteProposal",
-        re.IGNORECASE,
-    )
-    offenders = {
-        name: match.group(0)
-        for name, text in _model_facing_descriptions().items()
-        if (match := retired.search(text))
-    }
+    machinery = re.compile(r"\bPR[- ]gate\b|pull request|NoteProposal", re.IGNORECASE)
+    promises = re.compile(r"propose[sd]? (?:what|it|them|the)|for review", re.IGNORECASE)
+    offenders: dict[str, str] = {}
+    for name, text in _model_facing_descriptions().items():
+        if match := machinery.search(text):
+            offenders[name] = match.group(0)
+        elif name not in _A_LIVE_GATE and (match := promises.search(text)):
+            offenders[name] = match.group(0)
     assert not offenders, (
         f"{offenders} promise the model a review step that "
         "`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted. A note is recorded, not "

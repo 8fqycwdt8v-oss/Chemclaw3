@@ -66,6 +66,13 @@ _BAD_DATA_TYPES = [
     # transient: the parent has taken no turn, so there is no thread to copy, and retrying finds
     # exactly the same absence — nothing about waiting makes a checkpoint appear.
     "SessionForkError",
+    # The proposal store finding neither an inserted row nor an existing one after its own
+    # insert-or-conflict (`agent/behaviour_proposals.py`). Unreachable by construction and listed
+    # anyway, because the walk in `tests/test_publish.py` asks about every subclass rather than
+    # about the ones that happen to cross an activity boundary today — and the answer here is the
+    # same one it would be if something durable ever did write a proposal: the statements are
+    # deterministic against the same rows, so a retry finds the identical impossibility.
+    "ProposalStoreError",
     # A `reaction_records.conditions` payload that is not a JSON object at all
     # (`ingest/eln/records.py`). Bad data rather than transient — no build of this ingest writes
     # one, and retrying re-reads the same row. Distinct from the *extra field* a newer build
