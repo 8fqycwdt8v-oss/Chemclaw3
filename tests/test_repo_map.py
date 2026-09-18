@@ -21,6 +21,7 @@ test that graded prose would be gamed by padding.
 """
 
 import ast
+import importlib.util
 import re
 import subprocess
 from pathlib import Path
@@ -520,7 +521,31 @@ _HISTORICAL = ("docs/archive/", "docs/decisions/", "tasks/")
 #: wording and nothing warned the next editor; restoring that one word red the suite. Derived from
 #: `__file__` rather than spelled out, so renaming this module carries the exemption with it.
 _NAMES_WHAT_IT_FORBIDS = (Path(__file__).resolve().relative_to(_ROOT).as_posix(),)
-_CALC_SERVER_PACKAGE = "src/chemclaw/connectors/calc/server/"
+
+#: The module that *defines* the calc tool surface — the thing the package half of the scope is
+#: about. Named as an import path and resolved to a file, rather than spelled as a path, because a
+#: spelled path is an unanchored string: `_CALC_SERVER_PACKAGE` used to be one, the whole half went
+#: empty when the package moved, and the fix for that was an `assert scanned_in_package` which is
+#: an *any* basis — the package holds four tracked files and moving only `tools.py` out left the
+#: other three satisfying it, driven, `1 passed` over a docstring counting the whole surface.
+#:
+#: Resolution is what closes that rather than a stronger assertion. `find_spec` returns the
+#: module's origin without executing it, the scope is the directory that origin sits in, so a
+#: rename *carries* the scope instead of emptying it — and a rename this constant does not follow
+#: fails here by name instead of shrinking the scan in silence.
+_CALC_SURFACE_MODULE = "chemclaw.connectors.calc.server.tools"
+
+
+def _calc_surface_file() -> str:
+    """Where the calc tool surface is defined, as a repository-relative path."""
+    spec = importlib.util.find_spec(_CALC_SURFACE_MODULE)
+    assert spec is not None and spec.origin is not None, (
+        f"{_CALC_SURFACE_MODULE} does not resolve to a file. It is the module that defines the "
+        "calc tool surface and the package half of the prose scan's scope is derived from it, so "
+        "this is the rename that would otherwise take that half of the scope away in silence. "
+        "Point the constant at wherever the surface lives now."
+    )
+    return Path(spec.origin).resolve().relative_to(_ROOT).as_posix()
 
 
 def test_the_calc_tool_surface_is_not_counted_in_prose() -> None:
@@ -538,11 +563,21 @@ def test_the_calc_tool_surface_is_not_counted_in_prose() -> None:
     `tests/test_validate_connectors.py::test_the_shipped_bundles_pass_their_own_gate` over
     `validate_connectors`'s rule 5, and duplicating it here would be the same defect one layer up.
 
-    Scope is derived rather than listed: the bundle's server package, where the surface is defined,
-    plus any live file naming the bundle in the same sentence as the count — which is how the
-    identical sentence reached two scripts. Historical records are exempt because their job is to
-    hold what was true when they were written.
+    Scope is derived rather than listed: the package holding the module that defines the surface —
+    resolved through `find_spec` rather than spelled, so a rename carries the scope with it instead
+    of emptying it — plus any live file naming the bundle in the same sentence as the count, which
+    is how the identical sentence reached two scripts. Historical records are exempt because their
+    job is to hold what was true when they were written.
+
+    **The package half's basis used to be `assert scanned_in_package`, which is an *any* basis.**
+    The package holds four tracked files and one of them carries the surface, so moving `tools.py`
+    out with the stale sentence restored was `1 passed` — half the scope going mostly empty, in
+    silence, which is the failure the basis was added to refuse. A basis that merely counts what a
+    scan read cannot tell a full scope from a rump one; what it has to name is the thing the scope
+    is *about*.
     """
+    surface_file = _calc_surface_file()
+    package = surface_file.rsplit("/", 1)[0] + "/"
     tracked = subprocess.run(
         ["git", "ls-files", "-z"], cwd=_ROOT, capture_output=True, text=True, check=True
     ).stdout.split("\0")
@@ -556,19 +591,22 @@ def test_the_calc_tool_surface_is_not_counted_in_prose() -> None:
             content = (_ROOT / name).read_text(encoding="utf-8")
         except (UnicodeDecodeError, FileNotFoundError, IsADirectoryError):
             continue  # binary, or a symlink into a tree this checkout does not have
-        if name.startswith(_CALC_SERVER_PACKAGE):
+        if name.startswith(package):
             scanned_in_package.append(name)
         for sentence in re.split(r"(?<=[.:!?])\s", content):
             if not _COUNTED_SURFACE.search(sentence):
                 continue
-            if name.startswith(_CALC_SERVER_PACKAGE) or _CALC_BUNDLE.search(sentence):
+            if name.startswith(package) or _CALC_BUNDLE.search(sentence):
                 offenders.append(f"{name}: {' '.join(sentence.split())[:120]}")
 
-    assert scanned_in_package, (
-        f"nothing tracked was read under {_CALC_SERVER_PACKAGE}; the package has been renamed or "
-        "moved. The constant is an unanchored string, so half this scan's scope went empty in "
-        "silence and `assert not offenders` below would pass over a docstring counting the whole "
-        "surface — which is the shape of guard this test exists to refuse."
+    assert surface_file in scanned_in_package, (
+        f"{surface_file} defines the calc tool surface and this scan did not read it, although "
+        f"{len(scanned_in_package)} other file(s) under {package} were read. It is "
+        "untracked, or unreadable as text. An *any* basis over the package is what this replaced: "
+        "the package holds four tracked files, only one carries the surface, and moving that one "
+        "out left the other three satisfying the basis while a docstring counted the whole "
+        "surface — half the scope going mostly empty, in silence, which is the shape of guard "
+        "this test exists to refuse."
     )
 
     assert not offenders, (
