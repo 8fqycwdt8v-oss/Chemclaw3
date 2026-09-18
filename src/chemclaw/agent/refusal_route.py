@@ -12,8 +12,13 @@ instead — every entitlement denial — six named an action of some kind, and e
 `plan_gate.out_of_scope_refusal`, named a *tool the model could call right now*. The five others
 carried their action as an English clause inside a paragraph of explanation, which is the form a
 model paraphrases away when it relays the refusal. The counts are not prose here: the partition
-they describe is the fixture `tests/test_refusal_route.py` asserts membership of, so a site added
-or removed fails that file rather than falsifying this paragraph.
+they describe is what `tests/test_refusal_route.py` asserts membership of, so a site added or
+removed fails that file rather than falsifying this paragraph. **That claim was itself prose until
+`test_the_partition_is_read_off_the_tree_rather_than_copied_into_this_file` existed** — the
+membership was checked against a hand-written fixture driving gates it named one by one, so a
+twelfth gate calling `routed` in a module the fixture did not touch was covered by nothing: not
+the one-shape assertion, not the honesty partition, not the role-leak scan. The set is now read
+off `src/chemclaw` by an AST walk over every `routed(code=…)` call.
 
 So every refusal the model reads carries a second line in one fixed grammar:
 
@@ -65,11 +70,18 @@ system's own routing. Two of the eleven interpolate a string nothing validates �
 takes whatever name the model put in its tool call, and `out_of_scope_refusal` interpolates the
 `tools` a `write_todos` step declared, which is an arbitrary model-authored list
 (`plan_scope.step_declaration` keeps every string). Both now pass those names through
-`framing.safe_id`, whose charset cannot spell a field, a separator or a delimiter; real tool names
-are `[a-z_]+` and come back unchanged. `routed` additionally strips its own separator out of every
-value it is handed, so a caller added later cannot open a field by accident. What this does *not*
-rest on is the envelope defence: `_refusal_message` defangs the composed text, which neutralises a
-smuggled `</retrieved-note-…>` or `[system …]` and says nothing about a smuggled `sanctioned path`.
+`framing.safe_id` — and it is worth naming the character that does the work, because the
+reassuring version of this sentence was here and is wrong. `safe_id`'s charset is
+`[A-Za-z0-9._:-]`, which *can* spell `code:`. What it cannot spell is a **space** or a **pipe**,
+and this grammar needs both at every field: two of the four names contain a space, the separator
+is ` | `, and a field is only a field after a `": "`. So a forged `code:x` survives reduction as a
+substring and opens nothing, while `watch_for | sanctioned path: …` loses its separator and its
+space in the same pass — which is why the forgery test asserts on `"code: "` with the space rather
+than on the colon. Real tool names are `[a-z_]+` and come back unchanged. `routed` additionally
+strips its own separator out of every value it is handed, so a caller added later cannot open a
+field by accident. What this does *not* rest on is the envelope defence: `_refusal_message`
+defangs the composed text, which neutralises a smuggled `</retrieved-note-…>` or `[system …]` and
+says nothing about a smuggled `sanctioned path`.
 """
 
 #: The one character that separates the footer's fields. A pipe rather than a comma or a semicolon

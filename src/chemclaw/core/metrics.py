@@ -111,6 +111,19 @@ _COUNTERS: dict[str, str] = {
         "Turns whose answer was still unsupported after every allowed revision, and went out "
         "marked for review."
     ),
+    # **What happened to the person the escalation was supposed to reach**, which the counter above
+    # cannot say: it counts turns that went out flagged, and every one of the escalation's five
+    # outcomes looks identical from it. Four of them reached an operator as a log line only — and
+    # one, `joined`, is the outcome a busy deployment spends most of its time in, because the dedup
+    # subject is the *conversation*: every later exhausted turn of a thread already under review
+    # joins the open wait and asks nobody anything new. A deployment where `joined` dominates
+    # `opened` is one where reviews are piling into a handful of threads; one where `no_actor`
+    # dominates is running unauthenticated and escalating to nothing at all; `unavailable` is the
+    # broker, and is the only one that is also a `degraded` call.
+    "chemclaw_answer_review_escalations_total": (
+        "Attempts to ask a person to read an answer the revision rounds could not clear, by what "
+        "became of the request."
+    ),
     # Questions refused because the knowledge they rest on moved. Two ends and three reasons, both
     # labelled, because they are acted on differently and were previously indistinguishable: an
     # `ask` refusal is a model being told to rewrite its own citation, an `answer` refusal is a
@@ -1070,6 +1083,11 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # the two call sites, and `reason` is one of `BrokenPremise`'s three, fixed in `kg/premise.py`.
     # Neither can carry a note id, which would be a caller's string and unbounded.
     "chemclaw_premise_refusals_total": ("end", "reason"),
+    # Five series, and every value is a source literal in `api/runner._escalate_for_review`:
+    # `opened`, `joined`, `no_claims`, `no_actor`, `unavailable`. Nothing a caller supplies reaches
+    # it — a session id or an actor would be unbounded cardinality, and both are already in the log
+    # line beside each increment.
+    "chemclaw_answer_review_escalations_total": ("outcome",),
     # Three values, fixed in `agent/condense.py`'s own `DigestSource` literal rather than by a
     # caller: `extracted`, `degraded`, `oversized`. Bounded by the code that emits it, which is the
     # same guarantee `state` above gets from a CHECK constraint.

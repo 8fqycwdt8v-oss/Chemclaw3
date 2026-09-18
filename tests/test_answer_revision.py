@@ -968,3 +968,97 @@ def test_a_verdict_naming_no_claim_asks_nobody(monkeypatch: pytest.MonkeyPatch) 
 
     assert answer.review_required is True, "the premise: the verdict still flags the answer"
     assert asked == [], f"a review request was filed with no claim to act on: {asked}"
+
+
+def _escalation_series() -> dict[str, float]:
+    """The escalation counter's five series, by outcome, read off the exposition.
+
+    `METRICS.value` sums across label sets on purpose, which is exactly the distinction this
+    counter exists to make — so the series are parsed out of `render()` rather than summed.
+    """
+    import re as _re
+
+    found: dict[str, float] = {}
+    for line in METRICS.render().splitlines():
+        match = _re.match(
+            r'chemclaw_answer_review_escalations_total\{outcome="([a-z_]+)"\} ([0-9.]+)', line
+        )
+        if match is not None:
+            found[match.group(1)] = float(match.group(2))
+    return found
+
+
+def test_every_way_an_escalation_can_end_books_its_own_series(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Five outcomes, five series — and four of them were a log line and nothing else.
+
+    `chemclaw_answer_review_exhausted_total` counts turns that went out flagged, which is the same
+    number whether a person was actually asked, an already-open wait absorbed the ask, the turn had
+    no authenticated actor to ask as, the verdict named no claim to ask about, or the broker was
+    down. So an operator could not tell an escalation that is working from one that reaches nobody.
+
+    `joined` is the one worth the label rather than a boolean, because it is where a busy
+    deployment spends most of its time: the dedup subject is the *conversation*, so every later
+    exhausted turn of a thread already under review asks nobody anything new. A deployment where
+    `joined` dominates `opened` is piling reviews into a handful of threads.
+
+    Driven end to end through the runner for all five, so this asserts the escalation's own
+    branches rather than the helper's arithmetic — the helper is four lines and the branches are
+    what rot.
+    """
+    _grades_by_text(monkeypatch)
+    monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
+    before = _escalation_series()
+
+    opened = _asks(monkeypatch)
+    _drive_as(_StubbornAgent(), session_id="s-outcome-opened")
+    assert len(opened) == 1, "the fixture's premise: one wait was opened"
+
+    async def _join(request: AwaitRequest) -> tuple[str, bool]:
+        return request_id_for(request), False
+
+    monkeypatch.setattr(runner, "open_wait", _join)
+    _drive_as(_StubbornAgent(), session_id="s-outcome-joined")
+
+    async def _broker_down(_request: AwaitRequest) -> tuple[str, bool]:
+        raise RuntimeError("no broker")
+
+    monkeypatch.setattr(runner, "open_wait", _broker_down)
+    _drive_as(_StubbornAgent(), session_id="s-outcome-unavailable")
+
+    monkeypatch.setattr(runner, "open_wait", _join)
+    _drive_as(_StubbornAgent(), session_id="s-outcome-no-actor", authenticated=False)
+
+    # `no_claims` needs the *re-grade* to come back empty, not the first verdict: a contentless
+    # first verdict makes the loop refuse to revise, `rounds` stays 0, and the escalation is never
+    # reached at all. Which is why this arm is here rather than in
+    # `test_a_verdict_naming_no_claim_asks_nobody` — that test proves nobody is asked, and cannot
+    # prove how the refusal was booked, because on its path there is no refusal to book.
+    graded: list[str] = []
+
+    async def _empties_on_regrade(answer: str, *_: Any, **__: Any) -> VerificationResult:
+        graded.append(answer)
+        if len(graded) == 1:
+            return VerificationResult(
+                claims=[ClaimCheck(text="Yield was 90%", supported=False)],
+                confidence=0.2,
+                verified_by="judge",
+            )
+        return VerificationResult(claims=[], confidence=0.2, verified_by="judge")
+
+    monkeypatch.setattr(verifier_module, "verify_turn_answer", _empties_on_regrade)
+    _drive_as(_StubbornAgent(), session_id="s-outcome-no-claims")
+    assert len(graded) > 1, "the fixture's premise: a round ran and the answer was re-graded"
+
+    after = _escalation_series()
+    moved = {
+        outcome: after.get(outcome, 0.0) - before.get(outcome, 0.0)
+        for outcome in sorted(runner.ESCALATION_OUTCOMES)
+    }
+    assert moved == dict.fromkeys(sorted(runner.ESCALATION_OUTCOMES), 1.0), (
+        f"an escalation outcome was not booked, or was booked as another: {moved}"
+    )
+    assert set(after) <= runner.ESCALATION_OUTCOMES, (
+        f"an outcome outside the declared set reached the counter: {sorted(after)}"
+    )

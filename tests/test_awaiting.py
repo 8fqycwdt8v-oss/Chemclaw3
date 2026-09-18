@@ -24,10 +24,12 @@ with workflow.unsafe.imports_passed_through():
     from temporalio.workflow import ParentClosePolicy
 
     from chemclaw.core.config import settings
+    from chemclaw.durable import awaiting as awaiting_module
     from chemclaw.durable.awaiting import (
         AwaitAnswerWorkflow,
         AwaitOutcome,
         AwaitRequest,
+        open_wait,
         request_id_for,
     )
     from tests.temporal_env import (
@@ -769,8 +771,10 @@ def test_a_re_ask_of_an_answered_question_opens_through_the_activity() -> None:
     """The same question again is an ordinary act, and it used to fail the workflow.
 
     `D-2026-09-13-an-answer-is-archived-so-the-question-can-be-asked-again`. `request_id_for` keys
-    on `(kind, subject, asked_of)` alone and `request_external_input` sets
-    `WorkflowIDReusePolicy.ALLOW_DUPLICATE`, so re-asking a standing question — the monthly
+    on `(kind, subject, asked_of)` alone and `durable/awaiting.open_wait` sets
+    `WorkflowIDReusePolicy.ALLOW_DUPLICATE` — named here as the launcher rather than as
+    `request_external_input`, which is one of its two callers and has not owned that decision since
+    the launch idiom moved into one function — so re-asking a standing question — the monthly
     stability pull, the next campaign round's measurement, a re-launched approval — mints the same
     id on purpose. Meeting an `answered` row, `pending_store._OPEN` wrote nothing and this activity
     raised a **non-retryable** `ApplicationError`: the ask failed, and with it the workflow that
@@ -842,5 +846,83 @@ def test_a_re_ask_of_an_answered_question_opens_through_the_activity() -> None:
         assert archived == [("run-1", "u-2", {"reading": 4})], (
             f"the previous cycle's attribution is not in the archive: {archived}"
         )
+
+    asyncio.run(_run())
+
+
+def test_the_launch_idiom_joins_an_open_wait_and_reopens_a_settled_one(
+    monkeypatch: Any,
+) -> None:
+    """`open_wait`'s three coupled decisions, run rather than described.
+
+    **This function had no test at all.** Every caller's test patches `open_wait` away — the
+    runner's escalation suite says so in its own fixture docstring ("patched at `runner.open_wait`
+    rather than at the Temporal client, because the seam under test is the request the runner
+    *builds*"), which is right about that seam and leaves this one unexecuted. So the three
+    decisions its docstring argues for — the deterministic id, `ALLOW_DUPLICATE`, and the
+    already-started catch — were prose over a code path nothing ran.
+
+    The third arm is the one the argument turns on and the one no other test can reach. A wait that
+    nobody answers *expires*, and expiry completes the workflow **normally**, so under
+    `REJECT_DUPLICATE` or `ALLOW_DUPLICATE_FAILED_ONLY` a lapsed question would be unaskable
+    forever — the monthly stability pull, the next campaign round's measurement. Here the wait is
+    settled by an answer rather than by an expiry, which is the same completed state and far
+    cheaper to reach: the re-ask must mint the same id and come back `True`, having genuinely
+    started a second run.
+
+    The second arm is the join: while a wait is open, asking again is the same question, and the
+    `False` is what stops the caller putting a second start notice in front of whoever is already
+    being asked.
+    """
+
+    async def _run() -> None:
+        async with await start_env_or_skip() as env:
+            client = pydantic_client(env)
+
+            async def _client() -> Client:
+                return client
+
+            monkeypatch.setattr(awaiting_module, "connect", _client)
+            projection = _Projection()
+            async with _worker(client, projection):
+                request = AwaitRequest(
+                    kind="measurement", subject="the monthly stability pull", deadline_days=7
+                )
+
+                first_id, opened = await open_wait(request)
+                assert opened is True, "the first ask did not open the wait"
+                assert first_id == request_id_for(request), (
+                    "the launch minted an id `request_id_for` does not agree with, so a second "
+                    "asker joins nothing and the projection keys on a row nobody else can find"
+                )
+
+                joined_id, joined = await open_wait(request)
+                assert joined is False, (
+                    "asking again while the wait is open reported a fresh start; the caller would "
+                    "put a second notice in front of whoever is already being asked"
+                )
+                assert joined_id == first_id
+
+                handle: WorkflowHandle[Any, Any] = client.get_workflow_handle(first_id)
+                await handle.signal("provide", {"answered_by": "u-lab-1", "payload": {"n": 1}})
+                outcome = AwaitOutcome.model_validate(await handle.result())
+                assert outcome.state == "answered", "the fixture's premise: the wait is settled"
+
+                reopened_id, reopened = await open_wait(request)
+                assert reopened is True, (
+                    "a settled question could not be asked again. That is what "
+                    "REJECT_DUPLICATE and ALLOW_DUPLICATE_FAILED_ONLY do here, and it is why "
+                    "`open_wait` states ALLOW_DUPLICATE rather than leaning on the SDK default"
+                )
+                assert reopened_id == first_id, "the re-ask is the same question and the same id"
+                # And a *second run* genuinely exists under that id: the same id was `COMPLETED` a
+                # moment ago, so `RUNNING` is the fact `True` is claiming. Asserted through
+                # `describe` rather than through the projection recorder, because the recorder is
+                # driven by an activity the worker may not have dispatched yet — that is a race
+                # about this test's teardown rather than anything about the launch.
+                described = await client.get_workflow_handle(first_id).describe()
+                assert described.status == WorkflowExecutionStatus.RUNNING, (
+                    f"the re-ask returned True and started nothing: {described.status}"
+                )
 
     asyncio.run(_run())
