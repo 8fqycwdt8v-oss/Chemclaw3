@@ -670,31 +670,6 @@ topic).
 ---
 
 ## 5 — Where the field moved past us
-- [ ] **`CheckInOut` drops three fields the surface reading it wanted** — [S]. The UI card now
-      exists (`Chemclaw3_ui` #85), and building it found the wire model thinner than the shapes
-      behind it. `durable/check_in.py`'s `BlockedRequest` selects **`kind`**, and `_check_in` reads
-      `payload["requests"]` and drops the **`truncated`** flag the sweep records when a requester
-      had more than `_PAGE_ROWS` (200) open questions. Neither reaches `api/routes/streams`'s
-      `CheckInOut`, and **`session_id`** is on neither side.
-
-      Each has a consequence that is visible on one page: the pending inbox two sections up badges
-      every row by `kind` off `GET /pending` and a check-in cannot be badged; both other inboxes on
-      `/review` end in "open the conversation to decide" and a check-in row ends nowhere, because
-      matching `request_id` against `GET /pending` would be a join across two listings scoped to
-      opposite people; and a chemist with 200+ open questions gets a list that looks complete,
-      where the same page *does* say "this may be short" for plans off the two fields
-      `GET /plans/pending` sends.
-
-      **Additive fields on a model the ADR deliberately restates rather than imports from the
-      worker**, so adding one is a decision here rather than a leak — which is why this is a row
-      and not a patch. No timestamp is the fourth and is *not* in scope: a digest has none either
-      and the card says "claimed" rather than "asked", which is the honest word for a mailbox whose
-      read is the consume.
-
-      Anchors: `src/chemclaw/api/routes/streams.py::CheckInOut`, `durable/check_in.py`'s
-      `BlockedRequest` and `_check_in`, and `Chemclaw3_ui`'s `ISSUES.md` Issue 16, which is the
-      consumer's own statement of the same gap.
-
 
 Filed by the 2026-08-25 field benchmark — see
 [`docs/archive/REVIEW-2026-08-25-agentic-field-benchmark.md`](../archive/REVIEW-2026-08-25-agentic-field-benchmark.md)

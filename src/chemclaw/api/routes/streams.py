@@ -559,14 +559,38 @@ class CheckInOut(BaseModel):
     every other model in this module is: `durable/check_in.py` is a worker-side shape free to gain
     fields a client has no business seeing, and an API model that *is* a durable payload makes the
     two impossible to move apart. The fields here are the ones a person acts on.
+
+    **Three of them were missing and each cost the surface one thing it already does elsewhere**:
+    without `kind` a check-in could not be badged by the class of answer it wants, while the
+    pending inbox on the same page badges every row by exactly that field off `GET /pending`;
+    without `session_id` a check-in row ended nowhere, where both other inboxes on that page end in
+    "open the conversation", and matching `request_id` against `GET /pending` instead would be a
+    join across two listings scoped to opposite people; and without `truncated` a chemist with more
+    than `durable/check_in._PAGE_ROWS` open questions was shown a list that looks complete.
+
+    Restating the worker's shape is what made adding them a decision rather than a leak, and it is
+    also why two of the three needed a change on the worker side first: `session_id` was a column
+    `_BLOCKED` did not select, and `truncated` was a `CheckIn` field `_tell` never wrote into the
+    payload. Nothing here could have dropped what never arrived.
     """
 
     request_id: str = ""
+    #: What class of answer the question wants — the same bounded vocabulary `GET /pending` sends.
+    kind: str = ""
     subject: str = ""
     rationale: str = ""
     asked_of: str = ""
     open_days: int = 0
     days_left: int = 0
+    #: The conversation the question was asked in, or `""`. Always one of the caller's own: the
+    #: sweep's query is scoped to `requested_by` and this route claims only the caller's mailbox.
+    session_id: str = ""
+    #: Whether the notice this question arrived in was short of the asker's whole blocked set.
+    #:
+    #: A property of the claimed *row* rather than of the request, stamped onto every entry that
+    #: row carried, because the answer is unbounded and flattened across rows — a reader asking
+    #: "is this list complete" is looking at an entry, and that is where the answer has to be.
+    truncated: bool = False
 
 
 def _check_in(payload: dict[str, Any]) -> list[CheckInOut]:
@@ -587,6 +611,10 @@ def _check_in(payload: dict[str, Any]) -> list[CheckInOut]:
     requests = payload.get("requests")
     if not isinstance(requests, list):
         return []
+    # `is True` rather than truthiness, for `_whole`'s reason one field over: the key is additive,
+    # so a row an older sweep wrote has none, and neither a missing key nor a stray string may
+    # become a claim that a chemist's list was short.
+    truncated = payload.get("truncated") is True
     out: list[CheckInOut] = []
     for item in requests:
         if not isinstance(item, dict):
@@ -594,11 +622,14 @@ def _check_in(payload: dict[str, Any]) -> list[CheckInOut]:
         out.append(
             CheckInOut(
                 request_id=str(item.get("request_id", "")),
+                kind=str(item.get("kind", "")),
                 subject=str(item.get("subject", "")),
                 rationale=str(item.get("rationale", "")),
                 asked_of=str(item.get("asked_of", "")),
                 open_days=_whole(item.get("open_days")),
                 days_left=_whole(item.get("days_left")),
+                session_id=str(item.get("session_id", "")),
+                truncated=truncated,
             )
         )
     return out
