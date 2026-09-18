@@ -433,9 +433,17 @@ class AgentSettings(BaseSettings):
     #
     # A separate number from `agent_max_tool_result_chars`, because it bounds a different resource.
     # That one is context — what a model is sent. This is storage: LangGraph writes the whole
-    # channel per superstep and again per version, so one 2 MB write costs **20,712 kB of
-    # checkpoint rows above baseline, 10.4x** — and a turn has many supersteps. 200,000 characters
-    # is ~2 MB of checkpoint rows per superstep at that amplification, and it is a *total*:
+    # channel per superstep and again per version, so a large write is amplified across a turn's
+    # supersteps.
+    #
+    # **The 10.4x this comment used to quote was mostly not this channel**, which is worth keeping
+    # because it is why the figure is gone rather than updated. One 2 MB helper write measured
+    # 20,712 kB of checkpoint rows above baseline, and
+    # `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer` attributed it: ~98% was the
+    # helper checkpointing its *own* thread onto the caller's saver, which this setting never
+    # touched and which is now closed. What this bound is actually charged against is the caller's
+    # `files` channel alone. No replacement number is written here, for the reason the paragraph
+    # below already gives about the discarded one. It is a *total*:
     # several files share it, the way a batch of tool calls shares `agent_max_tool_result_chars`,
     # because the resource is the channel and not the file.
     #
@@ -644,20 +652,43 @@ class AgentSettings(BaseSettings):
     # session cap**, and neither half of `api/budget.py` can see it — `check()` runs before a turn
     # and `record()` after it.
     #
-    # **So this ships as a runaway backstop, not as a budget.** 300,000 sits above the one runaway
-    # this tree has actually measured and well above a heavy ordinary turn, which is the right side
-    # to err on for a ceiling nobody has sized against a live corpus. It is explicitly *not* the
-    # number a deployment should keep: that one comes from its own `turn_costs.total_tokens`
-    # distribution, which `chemclaw.evals` and the cost ledger exist to give it, and a site whose
-    # real work runs heavier must raise this rather than discover it as refusals. The iteration cap
-    # stays on regardless, so this is a second ceiling rather than the only one.
+    # **So this ships as a runaway backstop, not as a budget — and the first number chosen for it
+    # was not one.** 300,000 shipped here on the strength of that 250,000 measurement, and a review
+    # four days later found it sat *below an ordinary turn*. The error is worth stating exactly,
+    # because it is a class this tree keeps finding: the 250,000 was measured when a model call
+    # carried roughly 10,000 tokens (`agent/spend_cap.py` records the shape: "25 gateway calls of
+    # 10,000 tokens"), and the static prefix has since grown sevenfold. Carrying a number across
+    # that change is `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` happening to a
+    # config default instead of a docstring.
+    #
+    # **What the prefix does to the arithmetic.** `agent/turn_usage.graph_usage_tokens` takes the
+    # provider's `total_tokens` — prompt *and* completion, cached prompt tokens included — so the
+    # whole static prefix is charged on every model call and prefix caching cannot reduce it.
+    # Measured on the shipped basis: `tests/test_context_floor.PREFIX_BOUND` is the repo ceiling
+    # plus what the sibling fleet serves, and at that figure 300,000 funded **three** model calls
+    # while `harness_max_loop_iterations` permits 25. One guard had made the other unreachable: a
+    # plan/tool/answer turn with a single correction did not finish, and the loop cap could no
+    # longer move at all.
+    #
+    # **Derived now, not chosen.** The ceiling of a *lawful* turn is what the two guards above
+    # already authorise — `harness_max_loop_iterations` model calls, each bounded by
+    # `agent_context_token_budget` — so anything at or under that is work this system said it would
+    # do, and only a bug exceeds it. That is what "runaway backstop" has to mean if the sentence
+    # below is to stay true. `tests/test_spend_cap.py` holds the relation, the way
+    # `tests/test_compaction.py` holds the two compaction defaults against the same basis, so the
+    # next prefix or loop-cap change cannot strand this one silently again.
+    #
+    # A deployment wanting a real *cost* ceiling sets a smaller number from its own
+    # `turn_costs.total_tokens` distribution — but it should know it is then buying refusals, not
+    # a backstop. The iteration cap stays on regardless, so this is a second ceiling rather than
+    # the only one.
     #
     # Billed rather than estimated tokens, because this is a *cost* ceiling and the estimator is
     # measured to undercount by a quarter to two thirds on exactly the payload class a runaway turn
     # is made of (`agent/context_budget.py` carries the 2026-09-06 re-measurement; the 0.45x this
     # line used to name did not reproduce). No conversion is needed here and none is done: the
     # provider reports is the number this compares.
-    agent_max_turn_billed_tokens: int = Field(default=300_000, ge=0)
+    agent_max_turn_billed_tokens: int = Field(default=3_000_000, ge=0)
 
     # Supersteps one model call costs, for deriving the graph's own step ceiling below.
     #

@@ -544,7 +544,9 @@ def _bounded_file(content: str, sharing: int, held: int = 0) -> str:
     `DeltaChannel` and accumulates, so without it a caller that delegates ten times stores ten
     times the setting. What is left of the budget is divided, and an exhausted budget cuts to
     `bounded_content`'s brief form rather than to nothing — a floor of 1 rather than 0, because 0
-    is how this setting is switched off entirely.
+    is how this setting is switched off entirely. **The floor is applied after the division**, for
+    the reason the comment below it gives: applied before, one integer division put it back to 0
+    and the cap failed open on the fullest channel.
 
     The tool name passed to the notice is `task`, because that is the call the caller sees in its
     own thread and the one an operator would go looking at.
@@ -559,8 +561,16 @@ def _bounded_file(content: str, sharing: int, held: int = 0) -> str:
     """
     budget = settings.agent_subagent_files_max_chars
     if budget > 0:
-        budget = max(budget - held, 1)
-    share = budget // max(sharing, 1)
+        # **The floor belongs on the share, not on the budget.** It was on the budget, and integer
+        # division then divided it away: with the channel already at the budget and two files
+        # crossing, `share` was `1 // 2 == 0` — and 0 is how this setting is switched *off*
+        # (`bounded_content` returns uncut at `limit <= 0`). Measured before the fix: two 500,000-
+        # character files against an exhausted budget stored 1,000,000 characters uncut, with no
+        # truncation logged and the counter unmoved, so the cap failed open exactly where the
+        # channel was fullest. `bounded_for_batch` already floors after dividing and says why.
+        share = max((budget - held) // max(sharing, 1), 1)
+    else:
+        share = 0
     bounded, removed = bounded_content(content, "task", share)
     if not removed:
         return content

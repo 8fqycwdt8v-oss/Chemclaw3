@@ -1347,6 +1347,32 @@ def _revision_message(claims: Sequence[str]) -> str:
     )
 
 
+#: The five things that can become of a request to have a person read a flagged answer. A frozen
+#: set rather than a comment, so `tests/test_answer_revision.py` can assert every one is reachable
+#: and `_escalation_outcome` cannot book a sixth by typo — the failure mode of a label typo is a
+#: silent second series, which is why `core/metrics.py` declares label *names* the same way.
+ESCALATION_OUTCOMES = frozenset({"opened", "joined", "no_claims", "no_actor", "unavailable"})
+
+
+def _escalation_outcome(outcome: str) -> None:
+    """Book what became of one escalation attempt.
+
+    Beside each of the five returns rather than once at the top, because the interesting outcomes
+    are the four that are *not* `opened`: each was a log line and nothing else, and
+    `chemclaw_answer_review_exhausted_total` counts turns that went out flagged, which is the same
+    number whether a person was asked, an existing wait absorbed the ask, or the broker was down.
+
+    **Raises rather than asserts**, per
+    `D-2026-09-16-an-assert-is-a-control-with-an-off-switch-in-this-repository-too`: `python -O`
+    deletes an assert, and what this checks is a *label value*, which the registry cannot check for
+    itself — it validates label **names** and would take a typo'd outcome as a silent sixth series
+    that no panel queries.
+    """
+    if outcome not in ESCALATION_OUTCOMES:
+        raise ValueError(f"undeclared escalation outcome {outcome!r}")
+    METRICS.increment("chemclaw_answer_review_escalations_total", labels={"outcome": outcome})
+
+
 def _record_review_rounds(session: TurnSession, answer: AnswerEvent, rounds: int) -> None:
     """Book what the revision loop did, including the case where it ran out of rounds.
 
@@ -1424,10 +1450,16 @@ async def _escalate_exhausted_review(
     the evidence) and would be the wrong one for an approval, where each act needs its own
     decision — which is why `durable/connector_job.py` keys its approval on the job id instead.
 
-    **Unrouted (`asked_of=""`), which means "whoever is entitled".** `connector_job.py` fails
-    closed on an unrouted *approval* because the requester could then approve their own
-    irreversible change; a review is not an authorization, and the chemist who received the
-    flagged answer is among the people best placed to read it. Nothing is released by answering.
+    **Routed to the requester, and this paragraph said the opposite until the routing changed.**
+    It read "unrouted (`asked_of=""`), which means whoever is entitled" — an argument about
+    *authorization* (a review is not an authorization, so the requester answering it is fine) that
+    never touched *visibility*. Unrouted does not mean "whoever is entitled" to a reader:
+    `_may_answer` returns `True` for any authenticated caller and `pending_store`'s list predicate
+    carries `OR asked_of = ''`, so the request was listed to the whole tenant carrying
+    model-authored claim text lifted out of a thread those readers cannot open. The argument the
+    old wording made is still sound and is now the reason the *requester* is a legitimate
+    answerer rather than the reason nobody is named. `connector_job.py` still fails closed on an
+    unrouted approval, for its own separate reason. Nothing is released by answering.
 
     **Best-effort, on the `deliver_best_effort`/`notify_session_best_effort` precedent.** The
     answer has already been built and is about to be yielded; a chemist must not lose it because
@@ -1441,7 +1473,14 @@ async def _escalate_exhausted_review(
             function emitting an event of its own.
         answer: The answer as it will ship. Only `review_required` is read: a loop that broke out
             after *fixing* the answer has nothing to escalate.
-        actor: The turn's authenticated principal, or `None` off the authenticated path.
+        actor: The turn's authenticated principal. **Checked against `entra_required` as well as
+            for emptiness**, because off the authenticated path it is not empty: `api/auth.py`
+            manufactures a stand-in principal whose `oid` is the literal `dev-user`, and
+            `Principal.oid` is `min_length=1`, so `not actor` is false in exactly the posture this
+            guard was written for. Raising a durable request as `dev-user` — and addressing its
+            notices to `dev-user` — is the attribution-nothing-can-write shape
+            `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` deletes on sight,
+            arriving through the branch meant to prevent it.
         claims: What the last verdict found unsupported, named in the rationale so the reviewer
             starts where the checks stopped.
         correlation_id: The turn's id, in the rationale because it is the join key to
@@ -1449,7 +1488,24 @@ async def _escalate_exhausted_review(
     """
     if not answer.review_required or not settings.answer_review_escalation_enabled:
         return
-    if not actor:
+    if not claims:
+        # **The loop refuses to revise on a contentless verdict and this must refuse to escalate on
+        # one, for the same reason.** The re-grade at the loop's bottom is a *fresh* verdict, so a
+        # turn can exit with rounds spent and `unsupported` empty — a judge outage
+        # (`verifier.py` sets `review_notes` and leaves the claims empty) or a low-confidence
+        # verdict whose every claim is supported. Both produced a rationale ending "What the checks
+        # could not ground: " with nothing after it. A judge outage is fleet-wide, so without this
+        # it files one contentless review request per active conversation — a verdict nobody can
+        # act on, which is the failure this whole escalation exists to end.
+        _escalation_outcome("no_claims")
+        logger.info(
+            "the answer for session %s stays marked for review and no person was asked: the "
+            "verdict named no unsupported claim for a reviewer to start from",
+            session.session_id,
+        )
+        return
+    if not actor or not settings.entra_required:
+        _escalation_outcome("no_actor")
         logger.info(
             "the answer for session %s stays marked for review and no person was asked: the turn "
             "has no authenticated actor to raise the request as",
@@ -1473,6 +1529,22 @@ async def _escalate_exhausted_review(
             f"flag, so a person is being asked to read it. Turn {correlation_id}. What the checks "
             "could not ground: " + "; ".join(claims)
         ),
+        # **Routed to the requester, and that is a visibility decision rather than a routing one.**
+        # An empty `asked_of` does not mean "whoever is entitled" to a reader — `_may_answer`
+        # returns `True` for any authenticated caller and `pending_store`'s list predicate carries
+        # `OR asked_of = ''`, so an unrouted request is listed to the whole tenant. This one's
+        # `rationale` is model-authored claim text lifted out of the answer, and its `subject`
+        # names the conversation — while that conversation is owner-scoped and 404s a non-owner
+        # with no existence leak. Unrouted, it published a fragment of a private thread fleet-wide
+        # to people who cannot open the thread to check it.
+        #
+        # So it goes to the one principal who can actually read what it points at. That makes the
+        # ask an honest self-review rather than a leaky appeal to nobody: a real reviewer
+        # population is a configured entitlement this deployment does not have, and inventing one
+        # here would be a control nobody asked for. `connectors/bo/workflows.py` leaves `asked_of`
+        # empty for a wait a *person* launched about work they chose to share; this one fires
+        # automatically, per conversation, carrying conversation content.
+        asked_of=actor,
         requested_by=actor,
         session_id=session.session_id,
         correlation_id=correlation_id,
@@ -1489,6 +1561,7 @@ async def _escalate_exhausted_review(
             open_wait(request), settings.connector_health_timeout_seconds
         )
     except Exception:
+        _escalation_outcome("unavailable")
         degraded(
             logger,
             "answer_review_escalation",
@@ -1497,6 +1570,7 @@ async def _escalate_exhausted_review(
             session.session_id,
         )
         return
+    _escalation_outcome("opened" if opened else "joined")
     if opened:
         logger.warning(
             "a person has been asked to review the answer for session %s, which stayed flagged "

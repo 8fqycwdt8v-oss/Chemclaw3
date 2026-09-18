@@ -63,33 +63,6 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
-- [ ] **A helper spawn costs 20,712 kB of checkpoint rows and nothing yet explains where they
-  go** — [M]. The cost is real and measured on a real `AsyncPostgresSaver` with incompressible
-  text: one helper writing 2 MB costs **20,712 kB** above a 296 kB baseline (10.4x), and
-  `D-2026-09-12-a-helpers-scratch-file-crosses-into-its-callers-state`'s cap reclaims **1,824 kB**,
-  8.8%.
-
-  **The explanation this row used to carry is false in both halves, checked rather than argued.**
-  It said the rest was "the helper's own `files` and `messages` channels in `checkpoint_blobs`".
-  The helper graph is compiled with **no checkpointer** — `agent/langgraph_agent.py` passes none
-  and says why, and `tests/test_subagents.py::test_the_helper_graph_is_compiled_without_a_checkpointer`
-  now holds it — so there are no helper checkpoints to account for anything. And `messages` is in
-  upstream's `_EXCLUDED_STATE_KEYS`, so a helper's thread never crosses into the caller's state at
-  all. The consequence for whoever picks this up: **one of the two levers this row used to offer is
-  already spent.** "Compiling a helper with no checkpointer" is the shipped configuration, not a
-  choice remaining, and looking for that object is a dead end.
-
-  What is left to do is attribute the 91% before bounding it, because the obvious candidate is also
-  bounded already: `agent_subagent_files_max_chars` caps the caller's whole `files` channel at
-  200,000 characters (`held` makes it a channel bound, not a per-call one), so a 2 MB helper write
-  cannot be 2 MB of crossed file. The remaining suspect is the caller's own channels re-serialised
-  per checkpoint version — `files` is a `DeltaChannel(snapshot_frequency=50)` — which is a property
-  of the caller's thread rather than of delegation, and would mean this row belongs beside the
-  checkpointer's write-volume row rather than beside the helper ones. Measure that attribution
-  first; the probe is `/tmp`-free and is the one in that ADR's table. The surviving lever, if the
-  attribution holds, is a bound on `write_file`'s *content argument* — which would also silently
-  truncate a chemist's own scratchpad, and is therefore still a decision rather than an edit.
-
 - [ ] **`max_concurrent_workflow_tasks` is set nowhere, so nothing this repository chose bounds
   workflow-task concurrency** — [M]. `durable/background_worker.py` sets `max_concurrent_activities`
   and stops there, so the workflow-task ceiling is whatever the SDK defaults to. A **child workflow
@@ -301,6 +274,37 @@ topic).
       to cut a leg, and that configuration finds three fewer gold notes.
 
 ## 3 — Work that is lost, dropped or invisible
+
+- [ ] **A chemist's own `/scratch/` writes are unbounded and, by default, permanent** — [M].
+  `agent_subagent_files_max_chars` bounds only what a *helper* hands back: it is applied in
+  `rewritten_command_files`, which rewrites a `task` return's `Command`. A caller's own
+  `write_file` goes through `StateBackend`, which writes the `files` channel directly as a channel
+  write and reaches no middleware, so nothing caps `write_file`'s `content` argument. The channel
+  is a `DeltaChannel` and accumulates; it is checkpointed under `thread_id`; and in the shipped
+  configuration nothing ever deletes it — `checkpoint_retain_per_thread` prunes *superseded*
+  copies only (the newest checkpoint still holds every file whole), `retention_enabled` is
+  `False` and `retention_checkpoints_days` is 0, so the only route that removes a scratch file is
+  `make user-erase`.
+
+  **This is what is left of the row `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer`
+  closed**, and it is worth stating separately because that row's framing is now wrong in the
+  reader's favour: the 20,712 kB it costed was ~98% the helper's inherited checkpointer, not this
+  channel, so the amplification argument for urgency is gone while the unbounded surface is not.
+  It stays a decision rather than an edit for the reason it always did — a cap here truncates a
+  chemist's own document, which is a different act from truncating a helper's. Anchors:
+  `agent/scratchpad.py`, `deepagents.backends.state.StateBackend`, `agent/tool_result_size.py::_bounded_file`.
+
+- [ ] **A parallel `task` fan-out multiplies the helper file budget by its width** — [S].
+  `_bounded_file` divides `agent_subagent_files_max_chars` by the files inside *one* `Command`, and
+  `_files_already_held` reads `request.state["files"]` — which `batch_width`'s own docstring says is
+  a **pre-batch snapshot**. So N concurrent `task` calls in one superstep each see the same `held`
+  and each take the whole remaining budget, up to N x the setting into the channel. It is the same
+  shape `test_a_second_delegation_shares_the_budget_the_first_one_spent` closed for *sequential*
+  delegation, still open for the concurrent case `general_purpose_helper`'s own description invites
+  ("Spawn one — or several at once"), and `agent_max_parallel_tool_calls` ships at 8. The sibling
+  `bounded_for_batch` already divides by `batch_width(request)` and is the shape to copy. Anchor:
+  `_bounded_file` and `_files_already_held` in `agent/tool_result_size.py`.
+
 
 - [ ] **The model-facing prose guards scan the in-process registry and four bundles, not the
       surface** — [M], found 2026-09-15 in the round-two review.

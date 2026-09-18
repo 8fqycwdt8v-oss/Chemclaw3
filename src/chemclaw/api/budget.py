@@ -15,10 +15,16 @@ observes is a turn spending while it runs — measured 2026-09-06 at **250,000 t
 against a 1,000-token session cap**, refused only on the turn after. That is the "$400 in twenty
 minutes" failure this module was written against, arriving through the door it left open, and it is
 `agent/spend_cap.py` that closes it: a per-turn ceiling enforced in `before_model` and metered off
-the response, configured by `agent_max_turn_billed_tokens`. It ships at 0 (no cap) for the reason
-that setting states, so **in the shipped configuration nothing bounds a single turn's spend** and
-`budget_max_tokens_per_user` is the only real ceiling. Read this module's caps as bounding a
-*sequence* of turns, never one of them.
+the response, configured by `agent_max_turn_billed_tokens`. **It no longer ships at 0.** This
+paragraph said it did and concluded in bold that "nothing bounds a single turn's spend" — true of
+an earlier default and false of this one, which is
+`D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`. A single turn's spend is bounded now,
+loosely: a runaway backstop *derived* from what the loop cap and the context budget already
+authorise, never a cost budget, and not a figure this file holds
+(`D-2026-09-16-a-setting-that-ships-off-is-a-feature-nobody-has` and
+`D-2026-09-18-a-cap-below-an-ordinary-turn-is-a-guard-that-kills-another`, which corrects the
+number that ADR chose). What remains true is the reason this module's own caps are not the answer:
+read them as bounding a *sequence* of turns, never one of them.
 
 **The per-user ceiling is durable since
 `D-2026-09-15-a-budget-a-restart-resets-is-not-a-quota`; the per-session one is not, deliberately.**

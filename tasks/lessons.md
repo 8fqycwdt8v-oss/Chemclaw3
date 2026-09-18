@@ -3018,3 +3018,68 @@ me until every reviewer has handed back. And when a reviewer is stopped mid-flig
 files it was scoped to before doing anything else — a mutation left behind is indistinguishable from
 my own work in a `git status` listing, and it is the one kind of leftover that is *designed* to make
 the tests pass while the code is wrong.
+
+## An absent keyword argument is a behaviour, and a test that reads the source can assert its opposite
+
+**2026-09-18.** Asked to look at context and workspace management, I went at the top `BACKLOG.md`
+row: one helper spawn costs 20,712 kB of checkpoint rows and 91% of it was unattributed. The row was
+confident about what the answer was *not* — the helper graph is compiled with no checkpointer, so
+"looking for that object is a dead end" — and it was wrong, along with the ADR sentence and the test
+behind it. `None` is not "no checkpointer" to LangGraph: a subgraph compiled with `None` inherits
+its parent's through the run config. Every helper had been checkpointing its own thread onto its
+caller's saver. One keyword changes 18,944 kB into 424 kB.
+
+**What made the belief durable was a test, and the test was the most convincing thing in the tree.**
+`test_the_helper_graph_is_compiled_without_a_checkpointer` parsed the AST, found no `checkpointer=`
+keyword, and concluded there was no checkpointer — reading the very absence that *causes* the
+inheritance as proof against it. It was green the whole time, it was cited in an ADR, and a
+`BACKLOG.md` row spent one of its two remaining levers on its authority.
+
+**The rule I want.** When a claim is about what a *framework* does with an argument I did not pass,
+the source cannot answer it — only the framework's own resolution can, and the cheapest form of that
+is the artefact it produces. Before believing a "we don't do X" claim, ask what row, file or byte
+would exist if we did, and go look for it. Here it was one `GROUP BY checkpoint_ns` away the whole
+time, and the attribution nobody had run took ten minutes.
+
+**The corollary that caught two more.** Two other modules had measured this exact namespace and
+written it down — `agent/checkpointer.py`'s prune carries a `PARTITION BY checkpoint_ns` whose
+comment describes the helper's `tools:<uuid>` namespace in the present tense, and a test drove a real
+`task` call to exercise it. The tree held both the claim and its refutation for weeks. So when a
+finding surprises me, grep for the *opposite* claim before writing it up: if another module already
+knows, the finding is not "nobody measured this", it is "two parts of this tree disagree", which is a
+sharper thing to say and points at which one to change.
+
+## A number is derived from a measurement, and the measurement's unit can move underneath it
+
+**2026-09-18.** I recommended `agent_max_turn_billed_tokens = 300_000` as a per-turn runaway
+backstop, argued as "above the one runaway this tree has measured" — a turn that billed 250,000
+tokens against a 1,000-token session cap. The argument is sound and the number was wrong by an
+order of magnitude: at this tree's current `PREFIX_BOUND` of 81,600 tokens per model call, 300,000
+funds **three** calls, while `harness_max_loop_iterations` permits 25 and
+`agent_context_token_budget` permits 118,700 on each of them. The backstop sat *below* the two
+guards it was supposed to sit above, so it would have ended ordinary heavy turns and made the
+iteration cap unreachable. One guard killing another, shipped on by default, in the commit whose
+whole subject was turning guards on.
+
+**Why the reasoning felt complete.** I checked the new number against the measured runaway and it
+was larger, which is the comparison the argument names. What I did not check is whether the
+measurement still meant what it meant when it was taken: 250,000 tokens was ~25 calls when a call
+carried ~10,000, and is ~3 calls now that the prefix has grown sevenfold. The figure survived the
+change that invalidated its unit, and comparing against it reproduced the staleness rather than
+catching it. This is
+`D-2026-09-05-a-ratchet-that-re-derives-half-its-basis-bounds-half-a-request` in a new place: a
+basis nobody re-derives agrees with itself forever.
+
+**Rule: a cap that must sit above another guard is *derived from that guard*, never chosen against
+a past measurement.** Here it is `harness_max_loop_iterations × agent_context_token_budget` — what
+a turn can lawfully spend with both existing guards holding. Write the relation, not the number.
+
+**Rule: pin the relation, in both directions, and mutate it.** `tests/test_spend_cap.py` now
+asserts the cap is at or above the lawful ceiling *and* funds at least
+`harness_max_loop_iterations` calls at `PREFIX_BOUND`. Both fail against 300,000, which is how I
+know the tests are about the defect rather than about the fix. A single-direction assertion would
+have passed against a cap set absurdly high, which is the other way to get this wrong.
+
+**Rule: when a setting's justification cites a measurement, name the measurement's unit in the same
+sentence.** "250,000 tokens" is not a fact about runaways; "25 model calls, at the ~10,000-token
+calls of the day" is. Only the second one visibly rots.
