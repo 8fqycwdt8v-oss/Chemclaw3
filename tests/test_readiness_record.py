@@ -192,15 +192,32 @@ def test_the_live_run_row_counts_what_its_transcripts_hold() -> None:
     )
 
 
-#: A claim in the record about what a *setting* ships as. Three shapes appear, because three rows
-#: make that claim: `` `name` ships at **0** ``, `` `name` **ships on** ``, and
-#: `` `retention_*_days` defaults to 0 `` — a glob standing for a family whose members must agree.
+#: A claim in the record about what a *setting* ships as, in the shapes the record writes it:
+#: `` `name` ships at **N** ``, `` `name` **ships on** ``, and `` `retention_*_days` defaults to
+#: 0 `` — a glob standing for a family whose members must agree. How many rows use each shape is
+#: the record's business and is deliberately not stated here: this comment said "three shapes,
+#: because three rows make that claim" over a record carrying two, which is the defect the guard
+#: below exists to catch, one document up. `_SETTING_SUBJECT` is what makes the population of rows
+#: derived instead.
 _SHIPPED_DEFAULT = re.compile(
     r"`([a-z][a-z0-9_]*(?:\*[a-z0-9_]*)?)`\s*"
     r"(?:\*\*)?(?:ships at|defaults to)(?:\*\*)?\s*"
     r"(?:\*\*)?(\d[\d_,]*)(?:\*\*)?"
     r"|`([a-z][a-z0-9_]*)`\s*\*\*ships on\*\*"
 )
+
+#: Every backticked token in the record that *could* name a setting. The claims above are checked
+#: to cover this population, so a subject whose claim is reworded out of `_SHIPPED_DEFAULT` is
+#: still here and still owed one — which is what makes a reword fail instead of pass.
+_SETTING_SUBJECT = re.compile(r"`([a-z][a-z0-9_]*(?:\*[a-z0-9_]*)?)`")
+
+#: Settings the record names without claiming what they ship as, each argued. `entra_required` is
+#: named as a *condition* ("under `entra_required`, the production app runs against a real HTTP
+#: JWKS", "an exposed bind without `entra_required`") rather than as a value, so there is no
+#: default for the config to disagree with. A new entry here is a deliberate exemption, not a
+#: default: a row that names a setting and says nothing about what it ships is a row a deployment
+#: team cannot act on.
+_NAMED_WITHOUT_A_SHIPPED_DEFAULT = {"entra_required"}
 
 
 def test_a_claim_about_a_shipped_default_agrees_with_the_setting() -> None:
@@ -214,11 +231,21 @@ def test_a_claim_about_a_shipped_default_agrees_with_the_setting() -> None:
     whether a named control *exists*, and this control existed the whole time. What changed was its
     default, which no assertion here could see.
 
-    So a row that states what a setting ships as is checked against the setting. Three shapes,
-    because three rows make the claim: "ships at N", "ships on" (non-zero, deliberately not a
-    number — the record's own preamble refuses figures that go stale on a commit), and a `*` glob
-    standing for a family every member of which must agree, which is how the retention row states
-    a posture over five settings at once.
+    So a row that states what a setting ships as is checked against the setting, in the shapes the
+    record writes: "ships at N", "ships on" (non-zero, deliberately not a number — the record's own
+    preamble refuses figures that go stale on a commit), and a `*` glob standing for a family every
+    member of which must agree, which is how the retention row states a posture over five settings
+    at once.
+
+    **The subjects are derived, not counted, and the first version of this counted.** It anchored
+    on `assert claims` — one parsed claim was enough — and only two parse, so rewording either left
+    the other satisfying the anchor. Driven: reword the spend row's `agent_max_turn_billed_tokens`
+    **ships on** to "is **on by default**", set the field back to `Field(default=0)`, and this was
+    `5 passed` while the record told a deployment team a spend ceiling was on that ships off — the
+    exact defect it was written for, in the reassuring direction, one layer up. So every backticked
+    token in the record that resolves to a real settings field must be claimed by one of those
+    shapes or be on `_NAMED_WITHOUT_A_SHIPPED_DEFAULT` with its reason. A reword drops the subject
+    out of the claimed set and leaves it in the named set, which fails.
 
     It cannot check the sentence around the claim. A row may say "which is off" beside a setting
     that is on and this will not see it; what it sees is the number, which is the half that moved
@@ -227,8 +254,27 @@ def test_a_claim_about_a_shipped_default_agrees_with_the_setting() -> None:
     from chemclaw.core.config import settings
 
     fields = type(settings).model_fields
-    claims = list(_SHIPPED_DEFAULT.finditer(_record_text()))
-    assert claims, "the record states no shipped default at all; the three rows that did have gone"
+    record = _record_text()
+    claims = list(_SHIPPED_DEFAULT.finditer(record))
+
+    def _fields_named(token: str) -> list[str]:
+        """The settings a backticked token names — one, or a family when it carries a `*`."""
+        return [field for field in fields if re.fullmatch(token.replace("*", ".*"), field)]
+
+    named = {token for token in _SETTING_SUBJECT.findall(record) if _fields_named(token)}
+    claimed = {match.group(1) or match.group(3) for match in claims}
+    assert named, (
+        "the record names no setting at all any more; the rows stating what this deployment ships "
+        "have gone, or they have stopped writing a setting's name in backticks, and the claims "
+        "below are then checked against nothing."
+    )
+    unclaimed = named - claimed - _NAMED_WITHOUT_A_SHIPPED_DEFAULT
+    assert not unclaimed, (
+        f"the record names {sorted(unclaimed)} without saying what it ships as in a shape this "
+        "reads. A row reworded out of that shape is how the spend row went stale in the "
+        "reassuring direction: say it as `name` ships at **N** or `name` **ships on**, or add the "
+        "setting to _NAMED_WITHOUT_A_SHIPPED_DEFAULT with the reason it makes no such claim."
+    )
 
     wrong = []
     for match in claims:
@@ -239,12 +285,13 @@ def test_a_claim_about_a_shipped_default_agrees_with_the_setting() -> None:
                 wrong.append(f"`{on}` is claimed to ship on and ships {value!r}")
             continue
         assert name is not None
-        matched = (
-            [field for field in fields if re.fullmatch(name.replace("*", ".*"), field)]
-            if "*" in name
-            else [name]
+        matched = _fields_named(name)
+        assert matched, (
+            f"the record names `{name}`, which is no setting on this config. This used to read "
+            "`matched = [name]` for a non-glob name, so it could not fire for the shape the record "
+            "actually writes and an unknown name raised a bare AttributeError from `getattr` "
+            "below instead."
         )
-        assert matched, f"the record names `{name}`, which is no setting on this config"
         expected = int(stated.replace("_", "").replace(",", ""))
         for field in matched:
             value = getattr(settings, field)
