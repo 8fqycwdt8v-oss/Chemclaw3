@@ -145,6 +145,24 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
+- [ ] **The substructure deadline test asserts a timing ratio where it means a record count** —
+      [S], `tests/test_molfp.py::test_a_scan_past_its_deadline_stops_instead_of_matching_the_rest_of_the_corpus`.
+      Its own docstring states the property as *"went on matching every remaining record"*, which is
+      a claim about records; the assertion is `bounded < unbounded / 2` over two live wall-clock
+      measurements. That is a proxy, and it is the kind that fails on somebody else's machine: the
+      bar was a quarter until it failed `main` twice in one morning at 0.270 and 0.271 while
+      measuring 0.186-0.206 on an idle developer machine, for no reason but fixed setup the bounded
+      run carries and the unbounded run amortises.
+
+      The bar is now a half, with the spread and a deadline-mutation table in the docstring, so the
+      control is measured rather than assumed — it still fails a leak to half the corpus (0.554).
+      What is left open is replacing the proxy. Counting records is **not** a test-only change: on
+      this corpus the scan takes the indexed path, and `substructure_index.labels_matching` chunks
+      by *time slice* rather than per record, so there is no counting point without changing the
+      module under test. The cheap shape is for `labels_matching` to return how many records it
+      reached beside its labels — `ScanOutcome` already carries two caveats and would carry a third
+      — after which the assertion is machine-independent and this row and the bar both go.
+
 - [ ] **A chemist's own skill is not scoped by the tools the turn can reach** — [S], opened by
       `D-2026-09-18-a-skill-a-chemist-keeps-is-behaviour-they-approved`. `ToolScopedSkills` hides a
       shared skill whose every declared tool is absent, because judgment about capability an agent
