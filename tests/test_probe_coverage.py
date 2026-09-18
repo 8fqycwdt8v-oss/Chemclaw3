@@ -516,9 +516,12 @@ def test_every_bucket_c_probe_names_the_capability_it_asserts_is_missing() -> No
     """A bucket-C probe's absence claim is a field, so that something other than a reader has it.
 
     Required on C, permitted on B — gr-27's *"alert screening is available; M7 classification and
-    TTC-based control limits are not"* is a B probe with an absence claim in it, and the corpus
-    should be able to say which half — and refused on A, where a probe would be asserting both that
-    the capability exists and that it does not.
+    TTC-based control limits are not"* is a B probe whose **`direction:` prose** carries an absence
+    claim, and the corpus should be able to say which half in a field instead — and refused on A,
+    where a probe would be asserting both that the capability exists and that it does not. (gr-27
+    carries no `asserts_absent` of its own; the sentence above is quoted from its direction, and
+    saying so matters because citing it as an example of the field is what the field exists to stop
+    a reader doing with prose.)
 
     The shape rules are the whole of what a machine can say about the marker arm: a marker carries a
     phrase rather than standing in for one, and a bare entry looks like a tool name rather than like
