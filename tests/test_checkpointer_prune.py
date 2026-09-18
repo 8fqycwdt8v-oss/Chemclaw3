@@ -96,6 +96,30 @@ async def _namespaces(thread: str) -> dict[str, int]:
         return {str(name): int(count) for name, count in await cur.fetchall()}
 
 
+async def _write_namespace(saver: Any, thread: str, namespace: str, count: int) -> None:
+    """Put `count` checkpoints on one thread under `namespace`, through the saver's own API.
+
+    A second namespace on a thread used to arrive for free, because a `task` helper inherited its
+    caller's saver and checkpointed under `tools:<uuid>`.
+    `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer` closed that — it was 98% of
+    what a spawn cost — so the partition below has to be driven rather than observed as a side
+    effect. Written through `aput` rather than as raw `INSERT`s so the rows carry the real
+    `channel_versions` the prune's floor is computed from.
+    """
+    from langgraph.checkpoint.base import empty_checkpoint
+
+    config = {"configurable": {"thread_id": thread, "checkpoint_ns": namespace}}
+    checkpoint = empty_checkpoint()
+    for index in range(count):
+        versions: dict[str, str | int | float] = {"messages": f"{index + 1:032d}.0"}
+        checkpoint = {
+            **checkpoint,
+            "id": f"{index:032d}-0000-0000-0000",
+            "channel_versions": versions,
+        }
+        config = await saver.aput(config, checkpoint, {"source": "loop"}, versions)
+
+
 async def _ready(monkeypatch: pytest.MonkeyPatch, keep: int) -> Any:
     """A migrated schema with the checkpoint tables, a fresh saver, and the retention set."""
     await migrated_db_or_skip()
@@ -152,63 +176,62 @@ def test_a_thread_stops_growing_with_the_square_of_its_turns(
 def test_every_namespace_of_a_thread_is_bounded_and_not_only_the_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A `task` helper writes its own `checkpoint_ns` on the caller's `thread_id`, and it counts.
+    """A thread can carry more than one `checkpoint_ns`, and the prune must bound each of them.
 
-    Measured on a real helper: one `tools:<uuid>` namespace per `task` call, seven `checkpoints` and
-    three `checkpoint_blobs` each, all under the caller's thread — and a *new* namespace every call,
-    so namespace count grows with helper use for the life of the session.
+    **This test used to get its second namespace for free, and that is the thing that changed.**
+    A `task` helper inherited its caller's saver and checkpointed under `tools:<uuid>` on the
+    caller's own `thread_id` — one new namespace per call, seven `checkpoints` each.
+    `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer` closed that, because it was
+    98% of what a spawn cost in checkpoint rows, and the assertion that no such namespace appears
+    now lives in `tests/test_subagents.py` where the helper is built.
 
-    **The direction the review expected is not the direction this statement fails in, and the
-    measurement is why the assertion below is the shape it is.** The caveat was written as
-    over-pruning: take the newest K checkpoints across namespaces and a live helper's namespace goes
-    whole. That is the failure of a *thread-wide* floor, and this statement does not have one — its
-    `oldest_kept` groups by `checkpoint_ns`, so a namespace with no row in the global top-K gets no
-    floor and is never touched. Measured with the `PARTITION BY` removed and everything else
-    identical, on two threads driven the same way: the root namespace went 52 → 3 in both arms,
-    while every helper namespace went 7 → 3 partitioned and stayed at **7** unpartitioned. So the
-    real failure is a leak that grows with `task` calls rather than a loss, and over-pruning stays
-    possible only in the window where a helper's own checkpoints are the newest on the thread.
-    One `PARTITION BY` closes both, and this test fails if it is dropped.
+    So the namespace is written deliberately here. The guard is worth keeping without a shipped
+    subgraph behind it: the statement is generic over namespaces, LangGraph writes one for *any*
+    subgraph that inherits a saver, and the failure it prevents is silent.
+
+    **The direction the review expected is not the direction this statement fails in.** The caveat
+    was written as over-pruning: take the newest K checkpoints across namespaces and a live
+    namespace goes whole. That is the failure of a *thread-wide* floor, and this statement does not
+    have one — its `oldest_kept` groups by `checkpoint_ns`, so a namespace with no row in the
+    global top-K gets no floor and is never touched. The real failure is a leak that grows with
+    namespaces rather than a loss, and this test fails if the `PARTITION BY` is dropped.
     """
 
     async def _run() -> tuple[dict[str, int], dict[str, int], list[str]]:
         saver = await _ready(monkeypatch, 3)
         try:
-            conversation = await _drive(saver, "prune-helper", 4, _TASK_TURN)
-            partitioned = await _namespaces("prune-helper")
+            conversation = await _drive(saver, "prune-ns", 4, _TOOL_TURN)
+            await _write_namespace(saver, "prune-ns", "tools:probe", 7)
+            async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+                await cur.execute(ckpt._PRUNE_SUPERSEDED, {"thread": "prune-ns", "keep": 3})
+                await conn.commit()
+            partitioned = await _namespaces("prune-ns")
             # A second thread driven identically, pruned by hand with the partition removed. Two
             # threads rather than one, because the first has already been pruned correctly and
             # could not show what the broken form would have left.
-            await _drive(saver, "prune-helper-flat", 4, _TASK_TURN)
+            await _drive(saver, "prune-ns-flat", 4, _TOOL_TURN)
+            await _write_namespace(saver, "prune-ns-flat", "tools:probe", 7)
             flat = ckpt._PRUNE_SUPERSEDED.replace("PARTITION BY checkpoint_ns ", "")
             async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
-                await cur.execute(flat, {"thread": "prune-helper-flat", "keep": 3})
+                await cur.execute(flat, {"thread": "prune-ns-flat", "keep": 3})
                 await conn.commit()
-            return partitioned, await _namespaces("prune-helper-flat"), conversation
+            return partitioned, await _namespaces("prune-ns-flat"), conversation
         finally:
             await ckpt.close_checkpointer()
 
     partitioned, unpartitioned, conversation = asyncio.run(_run())
 
-    helpers = [name for name in partitioned if name]
-    assert helpers, (
-        "no subgraph namespace was written, so this fixture never exercised a helper and the "
-        "partition is untested — check that the `task` call in `_TASK_TURN` still runs"
+    extra = [name for name in partitioned if name]
+    assert extra, (
+        "no second namespace was written, so the partition is untested — check that "
+        "`_write_namespace` still reaches the saver"
     )
-    # All but one: the prune runs once a turn, on the root namespace's input checkpoint, so the
-    # helper the *last* turn spawned has not been reached yet and still holds its full seven. That
-    # is the residual the implementation states — a thread is bounded at the retained checkpoints
-    # plus one turn's writes, not at the retained checkpoints.
-    settled = sorted(partitioned[name] for name in helpers)[:-1]
-    assert settled and all(count == 3 for count in settled), (
-        f"a settled helper namespace is not bounded at the retained count: {partitioned}"
-    )
-    assert max(partitioned[name] for name in helpers) <= 7, (
-        f"a helper namespace grew past one turn's own writes: {partitioned}"
+    assert all(partitioned[name] == 3 for name in extra), (
+        f"a non-root namespace is not bounded at the retained count: {partitioned}"
     )
     assert partitioned[""] > 0, "the root namespace was emptied"
     assert any(count > 3 for name, count in unpartitioned.items() if name), (
-        "the unpartitioned form bounded the helper namespaces too, so this test cannot tell the "
+        "the unpartitioned form bounded the second namespace too, so this test cannot tell the "
         f"two statements apart and proves nothing about the partition: {unpartitioned}"
     )
     assert len(conversation) > 4

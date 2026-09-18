@@ -38,10 +38,20 @@ needs no partition — `task` tells the model to launch several agents concurren
 are independent, so a parallel evidence sweep is N invocations of one name, named or not. What a
 roster adds is a *view*: three prompts over three surfaces, each an intersection of the caller's.
 
-**What a helper does not inherit, and where each bound is enforced.** No checkpointer, because
-upstream's contract is that a helper sees only the prompt it was given and returns one report. No
+**What a helper does not inherit, and where each bound is enforced.** No checkpointer —
+`checkpointer=False`, which is not the same as passing nothing, and for a while this line described
+a bound that was not in force. Upstream's contract is that a helper sees only the prompt it was
+given and returns one report, but `None` is how a LangGraph subgraph asks to *inherit* its parent's
+saver, so every helper checkpointed its own thread onto its caller's under a `tools:<uuid>`
+namespace (`D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer`, which measured it at
+98% of what a spawn cost). No
 helpers of its own, which is the recursion guard `build_langgraph_agent(helper=…)` carries. No
-store, so there is no `/memories/` route and nothing it writes outlives the turn.
+store, so there is no `/memories/` route and nothing it writes reaches the knowledge graph or the
+memory tiers — which is **not** the same as "nothing it writes outlives the turn", the claim this
+sentence used to make. A helper's `/scratch/` file crosses into its caller's `files` channel and is
+checkpointed under the caller's thread, so a later turn can read it back
+(`D-2026-09-04-a-helpers-file-crosses-back-and-stays`); what bounds it is
+`agent_subagent_files_max_chars`, not its lifetime.
 
 **It does reach a connector, since
 `D-2026-09-15-a-helper-shares-the-session-its-caller-already-opened`, and for two rounds it did

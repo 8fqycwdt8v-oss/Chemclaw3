@@ -433,9 +433,17 @@ class AgentSettings(BaseSettings):
     #
     # A separate number from `agent_max_tool_result_chars`, because it bounds a different resource.
     # That one is context — what a model is sent. This is storage: LangGraph writes the whole
-    # channel per superstep and again per version, so one 2 MB write costs **20,712 kB of
-    # checkpoint rows above baseline, 10.4x** — and a turn has many supersteps. 200,000 characters
-    # is ~2 MB of checkpoint rows per superstep at that amplification, and it is a *total*:
+    # channel per superstep and again per version, so a large write is amplified across a turn's
+    # supersteps.
+    #
+    # **The 10.4x this comment used to quote was mostly not this channel**, which is worth keeping
+    # because it is why the figure is gone rather than updated. One 2 MB helper write measured
+    # 20,712 kB of checkpoint rows above baseline, and
+    # `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer` attributed it: ~98% was the
+    # helper checkpointing its *own* thread onto the caller's saver, which this setting never
+    # touched and which is now closed. What this bound is actually charged against is the caller's
+    # `files` channel alone. No replacement number is written here, for the reason the paragraph
+    # below already gives about the discarded one. It is a *total*:
     # several files share it, the way a batch of tool calls shares `agent_max_tool_result_chars`,
     # because the resource is the channel and not the file.
     #

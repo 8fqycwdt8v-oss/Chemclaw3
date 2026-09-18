@@ -3019,6 +3019,36 @@ files it was scoped to before doing anything else — a mutation left behind is 
 my own work in a `git status` listing, and it is the one kind of leftover that is *designed* to make
 the tests pass while the code is wrong.
 
+## An absent keyword argument is a behaviour, and a test that reads the source can assert its opposite
+
+**2026-09-18.** Asked to look at context and workspace management, I went at the top `BACKLOG.md`
+row: one helper spawn costs 20,712 kB of checkpoint rows and 91% of it was unattributed. The row was
+confident about what the answer was *not* — the helper graph is compiled with no checkpointer, so
+"looking for that object is a dead end" — and it was wrong, along with the ADR sentence and the test
+behind it. `None` is not "no checkpointer" to LangGraph: a subgraph compiled with `None` inherits
+its parent's through the run config. Every helper had been checkpointing its own thread onto its
+caller's saver. One keyword changes 18,944 kB into 424 kB.
+
+**What made the belief durable was a test, and the test was the most convincing thing in the tree.**
+`test_the_helper_graph_is_compiled_without_a_checkpointer` parsed the AST, found no `checkpointer=`
+keyword, and concluded there was no checkpointer — reading the very absence that *causes* the
+inheritance as proof against it. It was green the whole time, it was cited in an ADR, and a
+`BACKLOG.md` row spent one of its two remaining levers on its authority.
+
+**The rule I want.** When a claim is about what a *framework* does with an argument I did not pass,
+the source cannot answer it — only the framework's own resolution can, and the cheapest form of that
+is the artefact it produces. Before believing a "we don't do X" claim, ask what row, file or byte
+would exist if we did, and go look for it. Here it was one `GROUP BY checkpoint_ns` away the whole
+time, and the attribution nobody had run took ten minutes.
+
+**The corollary that caught two more.** Two other modules had measured this exact namespace and
+written it down — `agent/checkpointer.py`'s prune carries a `PARTITION BY checkpoint_ns` whose
+comment describes the helper's `tools:<uuid>` namespace in the present tense, and a test drove a real
+`task` call to exercise it. The tree held both the claim and its refutation for weeks. So when a
+finding surprises me, grep for the *opposite* claim before writing it up: if another module already
+knows, the finding is not "nobody measured this", it is "two parts of this tree disagree", which is a
+sharper thing to say and points at which one to change.
+
 ## A number is derived from a measurement, and the measurement's unit can move underneath it
 
 **2026-09-18.** I recommended `agent_max_turn_billed_tokens = 300_000` as a per-turn runaway
