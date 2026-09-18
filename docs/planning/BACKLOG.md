@@ -231,6 +231,39 @@ topic).
       measurement from scratch, and the baseline itself moved 4.38 → 4.69 between 2026-09-14 and
       2026-09-15 with no retrieval code changed, because the corpus grew.
 
+- [ ] **What `graph` means as a retrieval source: a lexical rule of its own, or the leg that reads
+      the index** — [M], measured 2026-09-16 by the dependency audit that proposed deleting one of
+      the two lexical rankers and had to withdraw it. Anchors: `agent/graph_tools.py::_scan_notes`
+      and its `_relevance`, `retrieval/retrievers.py::LexicalRetriever`,
+      `retrieval/vector_index.py::note_reindex_effective`, `CHEMCLAW_DATA_SOURCES`.
+
+      Two lexical rankers run over one corpus, and `_scan_notes` justified its 151 ms event-loop
+      stall (836 ms at eight concurrent, 10k-note corpus) by saying there is no database to push the
+      scan into — which is false: `note_index` exists with a GIN `tsvector` and `search_lexical`
+      reads it. **The removable leg is the opposite of the obvious one.** Ablated at a *matched slot
+      budget* — three legs at k=8 deliver 24 slots against one leg's 8, so comparing them unmatched
+      measures the budget rather than the ranker — the Postgres `ts_rank` leg strictly dominates the
+      in-process BM25-lite: 42 gold notes found to 40, 24 in the top 3 to 19, and the graph leg
+      contributes **zero** gold notes the Postgres leg misses.
+
+      **It is still not removable, for a reason that is not about ranking.**
+      `note_reindex_effective` schedules the reindex only when `lexical` or `vector` is in
+      `CHEMCLAW_DATA_SOURCES`, and the shipped default is `graph,eln-json` — so in the default
+      deployment the index nothing maintains is the one the survivor would read, and deleting the
+      graph leg's own ranking retrieves nothing from the knowledge graph. The narrower removal that
+      fits inside one file is a measured regression on its own: dropping just `_relevance` moves
+      graph-alone mean gold rank 4.72 → 5.67 and loses a gold note from the shipped three-leg arm,
+      39 → 38, which `retrieval_recall` gates on. The two rules are also not one rule in two
+      spellings — driven against live Postgres, `couplings`, `coupled`, `dry` and `films` hit
+      `ts_rank` and miss the substring rule, while `ester` matches `polyester` for `term_coverage`
+      and produces no lexeme at all for the server; `tests/test_note_search.py` pins both directions.
+
+      What closes this is a decision and a default, not a retriever edit: either `graph` keeps
+      meaning a lexical rule of its own, or it becomes the leg that reads the index and the reindex
+      stops being conditional on a source nobody enables. Re-run `make retrieval-arms` on both sides
+      of it, and read the `hybrid` row above first — the audit quoted its 3.69 headline as a reason
+      to cut a leg, and that configuration finds three fewer gold notes.
+
 ## 3 — Work that is lost, dropped or invisible
 
 - [ ] **The model-facing prose guards scan the in-process registry and four bundles, not the
@@ -1005,6 +1038,57 @@ answer needs an ADR here and an issue there, in the same change.
 one question per row: *does upstream now do this, and better?* A row that changes answer needs an
 ADR, not an edit here. A capability upstream ships that this table does not mention is the gap this
 register exists to catch — add the row in the same pull request that notices it.
+
+#### Everything that is not the agent framework
+
+*Added 2026-09-16 by a dependency audit across all three repositories.* The two blocks above watch
+four Python distributions and one protocol. That is the axis this project revises most often, and it
+is **not** where the hand-written code was: an audit that read every package for "is this a library's
+job" found its results in units, encodings, path matching, tokenizers, substructure search, row
+mapping and table rendering — none of which any row above could ever have mentioned.
+
+The standing question is the same one, so the discipline is the same: *does a library already do
+this, and better?* What the audit added is the shape of a good answer, because three of its own
+proposals came back wrong on contact with the code.
+
+| Adopted | Standing |
+| --- | --- |
+| `httpx-sse`, `pathspec`, `charset-normalizer`, `pint`, `tiktoken` (prefix only), `bisect`, `networkx.utils.UnionFind`, `psycopg` `class_row`/`executemany`, `rdkit.rdSubstructLibrary`, numpy+scipy clustering | **adopted**, `D-2026-09-16-a-library-already-in-the-closure-is-a-declaration-not-a-dependency`. Most were already resolved in `uv.lock` through a *runtime* requirer, so the cost was a declaration line. **Resolved is not the same as in the image**, which this row first got wrong: `deploy/Containerfile` installs `uv sync --frozen --no-dev`, and `pathspec` arrived only through `mypy`, a dev-group tool — so it, like `pint`, is a new install in every shipped image. `uv export --frozen --no-dev` is what answers that, per package, for whatever the lock says today |
+| ruff `TID253` as a second layering belt | **declined here, adopted in `Chemclaw3-mcp`**, `D-2026-09-16-a-flat-ban-cannot-express-a-matrix` — this repository's policy is a `(package, stack)` matrix and `TID253` is one rule code over one global list, so `per-file-ignores` cannot narrow it per edge at all; it also sees one of the three import scopes the policy distinguishes |
+| deleting the second lexical ranker | **declined on measurement.** The duplication is real and *inverted* — the Postgres leg strictly dominates — but `note_reindex_effective` makes the index conditional on sources the default does not enable, so the survivor is unreachable. `graph` meaning "the leg that reads the index" is a `data_sources` decision, not a retriever edit |
+| fifteen libraries — listed with their reasons directly below, because a pointer is not a record | **declined.** This row used to say "each with a measurement, in the audit report and the ADR above", and neither held any of them: the ADR names none, and the audit report was a scratch file the next branch overwrites. A register whose whole purpose is that re-proposing one is a detectable failure cannot rest on a document that does not survive, so the reasons are written out here |
+
+**The fifteen declined, one line each.** Where the audit recorded a measurement it is here; where it
+did not, this says so rather than inventing one, because "declined, measurement not recorded" is a
+re-proposal a future session can settle in an afternoon and a fabricated number is one it cannot.
+
+| Declined | Would have replaced | Why not |
+| --- | --- | --- |
+| `tabulate` | the Markdown table emitters now behind `core/markdown.py` | The part worth having in one place is the *honesty rules* `memory/comparison.py` argued for — one spelling of an absent cell so `drop_empty_columns` can see it, escaping the backslash before the pipe, no width padding. A library that renders cells uniformly pushes those back out to every call site |
+| `detect-secrets` | `core/logging.py`'s `_STRUCTURAL_SECRETS` vendor-prefix regexes | Scan-shaped: it returns spans rather than redactions, has no equivalent of the `(?P<keep>…)` group that keeps a redacted line saying *which* credential failed, carries no ReDoS bounds of its own, and declares `requests`, which is on the sibling fleet's forbidden-import list. Its *pattern inventory* is still worth reconciling against — that is a live item, not this decline |
+| `rank_bm25` | `retrieval/retrievers.py`'s in-process lexical scan | It rebuilds its index per construction, so it pays exactly the cost being complained about — the scan measures 151 ms per call and 836 ms at eight concurrent on a 10k-note corpus. The answer is the GIN-indexed `tsvector` `retrieval/vector_index.py` already maintains, not a second in-process ranker |
+| `dimorphite-dl` | ionisable-site perception in `science/calc/logd.py` | The same rules exist three times across two repositories and a *fitted* pKa calibration sits on top of them. A fourth implementation desynchronises the three and invalidates the calibration; the taken fix is transcribing the existing rules to a SMARTS table that reproduces today's partition exactly |
+| `yoyo` / `alembic` | `core/migrate.py` plus `infra/sql/` | **Declined, measurement not recorded.** What a re-proposal has to weigh is on record in that module's docstring: whole-file sends through the simple-query protocol so a `DO $$ … $$` block applies intact, `pg_advisory_xact_lock` over the single-transaction run, and a `lock_timeout` that bounds the wait for a table lock without bounding the work |
+| `slowapi` | `api/rate_limit.py` | **Declined, measurement not recorded.** |
+| `secure` | the browser security headers in `api/middleware.py` | **Declined, measurement not recorded.** The header set and its ordering constraint (SEC-5: stamped by pure ASGI middleware that never buffers, installed so a default 500 still carries them) are that module's, and are what a swap would have to preserve |
+| `asgi-correlation-id` | the correlation id `api/middleware.py`'s `_RequestObservability` mints | **Declined, measurement not recorded.** Ours is not a log-decoration id: it is the key the audit trail joins on and the value `core/call_identity.py` sends to the connector fleet |
+| `pytest-postgresql`, `testcontainers` | `tests/pg.py`'s connect-check, migration and per-test schema isolation | **Declined, measurement not recorded.** The constraint a swap has to meet is in that module: every table is created in a dedicated schema, never the running system's, and an unreachable server has to become a *counted* skip rather than a failure |
+| `respx` | the `httpx.MockTransport` doubles in `tests/test_delivery.py`, `test_live_storm.py`, `test_live_benchmark.py` | **Declined, measurement not recorded.** |
+| `ase` / `cclib` | geometry and structure handling in `science/calc/geometry.py` and `structures.py` | **Declined, measurement not recorded.** Note the boundary rather than the library: after `D-2026-08-16-the-physics-leaves-the-cache-stays` what remains here is the cache, the ledger and the wire models — a parser adopted here would be adopted on the wrong side of that line |
+| `RestrictedPython`, `pebble` | nothing in this repository | **Declined, measurement not recorded**, and it is a scope decline rather than a library one: there is no code-execution tool here to sandbox. `agent/scratchpad.py` withholds `execute` deliberately and `pyexec` is served out of `Chemclaw3-mcp` |
+| `EnsembleRetriever` | `retrieval/hybrid.py`'s Reciprocal Rank Fusion | **Declined, measurement not recorded.** What a swap would have to keep is `hybrid.restated_as_position` overwriting `score` with the merged rank, which `retrieval/evidence.py` and `fanout.py` both read |
+
+**Three findings worth more than the adoptions**, because they generalise:
+
+1. **An adopted API's defaults are part of its surface.** `GetMatches` defaults `useChirality=True`
+   where `HasSubstructMatch` defaults it `False` — 514 matching molecules became 0, which reaches a
+   chemist as "no precedent exists". Diff the defaults, not the semantics you assume they share.
+2. **A number quoted from a row is not the row.** The audit cited a 3.69 mean gold rank against 4.69
+   to justify deleting a retrieval leg; that configuration finds **three fewer gold notes**, which is
+   what `retrieval_recall` gates on. A better mean over a smaller found-set is not a better retriever.
+3. **A cache key is a claim about what changes.** `molecule_fingerprints` has no revision column and
+   `_upsert` rewrites in place, so count, max id and max `created_at` are all unchanged when a
+   structure string changes. The honest key was a digest of the data already fetched.
 
 ---
 

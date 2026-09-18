@@ -118,7 +118,7 @@ _KEY = {
 }
 
 
-def test_a_persisted_result_is_never_recomputed_across_the_wire(
+async def test_a_persisted_result_is_never_recomputed_across_the_wire(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """D-011 is the reason the cache stayed behind; the split must not weaken it.
@@ -131,24 +131,19 @@ def test_a_persisted_result_is_never_recomputed_across_the_wire(
     fake = _FakeSession(_KEY, {"log_s_mol_per_l": -2.1268648})
     _session(monkeypatch, fake)
 
-    async def _run() -> None:
-        store = InMemoryStore()
-        first, cached_first = await cached_remote(
-            store, "predict_solubility", {"smiles": "c1ccccc1"}
-        )
-        second, cached_second = await cached_remote(
-            store, "predict_solubility", {"smiles": "c1ccccc1"}
-        )
+    store = InMemoryStore()
+    first, cached_first = await cached_remote(store, "predict_solubility", {"smiles": "c1ccccc1"})
+    second, cached_second = await cached_remote(store, "predict_solubility", {"smiles": "c1ccccc1"})
 
-        assert (cached_first, cached_second) == (False, True)
-        assert fake.compute_calls == 1, "a persisted result was recomputed"
-        assert fake.key_calls == 2, "the hit path must still ask the server for the key"
-        assert first == second
-
-    asyncio.run(_run())
+    assert (cached_first, cached_second) == (False, True)
+    assert fake.compute_calls == 1, "a persisted result was recomputed"
+    assert fake.key_calls == 2, "the hit path must still ask the server for the key"
+    assert first == second
 
 
-def test_a_version_carrying_both_delimiters_round_trips(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_version_carrying_both_delimiters_round_trips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The key crosses as four fields, so a version containing `@` and `:` survives it.
 
     This is why `remote_key` reads an object rather than splitting the flat form. With
@@ -159,37 +154,34 @@ def test_a_version_carrying_both_delimiters_round_trips(monkeypatch: pytest.Monk
     fake = _FakeSession(_KEY, {})
     _session(monkeypatch, fake)
 
-    async def _run() -> None:
-        from chemclaw.connectors.calc.remote import calc_session
+    from chemclaw.connectors.calc.remote import calc_session
 
-        async with calc_session() as session:
-            identity = await remote_key(session, "predict_solubility", {"smiles": "c1ccccc1"})
-        assert identity is not None
-        # `remote_key` answers with the key *and* the geometry the calculation runs on
-        # (D-2026-08-21) — the server reports both from one round trip and this client used to
-        # read only the first. A molecule-keyed calculator is about a compound and not about any
-        # particular geometry of it, so this one reports none, which is the honest value.
-        assert identity.structure_id == ""
-        key = identity.key
-        assert key.calc_version == _AWKWARD_VERSION
-        assert key.calc_type == "solubility"
-        # Three of the four parts are the server's verbatim; `params_hash` is deliberately not.
-        # `CALCULATION_EPOCH` is folded into it here because `CalculationKey.build` — the only
-        # place that ever folded it in — has no `calc` caller left since the physics moved, so a
-        # bump invalidated the DFT rows and nothing else while three documents prescribed it as the
-        # remedy for a changed payload meaning.
-        assert key.as_str().startswith(f"solubility@{_AWKWARD_VERSION}:07010a68dabf6858:")
-        assert key.params_hash != "a075a6029c28d314", (
-            "the epoch is not in the key: bumping CALCULATION_EPOCH would invalidate nothing"
-        )
-        assert key.params_hash == stable_hash(
-            {"epoch": CALCULATION_EPOCH, "remote_params": "a075a6029c28d314"}
-        )
-
-    asyncio.run(_run())
+    async with calc_session() as session:
+        identity = await remote_key(session, "predict_solubility", {"smiles": "c1ccccc1"})
+    assert identity is not None
+    # `remote_key` answers with the key *and* the geometry the calculation runs on
+    # (D-2026-08-21) — the server reports both from one round trip and this client used to
+    # read only the first. A molecule-keyed calculator is about a compound and not about any
+    # particular geometry of it, so this one reports none, which is the honest value.
+    assert identity.structure_id == ""
+    key = identity.key
+    assert key.calc_version == _AWKWARD_VERSION
+    assert key.calc_type == "solubility"
+    # Three of the four parts are the server's verbatim; `params_hash` is deliberately not.
+    # `CALCULATION_EPOCH` is folded into it here because `CalculationKey.build` — the only
+    # place that ever folded it in — has no `calc` caller left since the physics moved, so a
+    # bump invalidated the DFT rows and nothing else while three documents prescribed it as the
+    # remedy for a changed payload meaning.
+    assert key.as_str().startswith(f"solubility@{_AWKWARD_VERSION}:07010a68dabf6858:")
+    assert key.params_hash != "a075a6029c28d314", (
+        "the epoch is not in the key: bumping CALCULATION_EPOCH would invalidate nothing"
+    )
+    assert key.params_hash == stable_hash(
+        {"epoch": CALCULATION_EPOCH, "remote_params": "a075a6029c28d314"}
+    )
 
 
-def test_a_tool_the_server_will_not_key_is_refused_rather_than_quietly_recomputed(
+async def test_a_tool_the_server_will_not_key_is_refused_rather_than_quietly_recomputed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unkeyable tool reaching the cache is a miswiring, and it now says so.
@@ -210,18 +202,15 @@ def test_a_tool_the_server_will_not_key_is_refused_rather_than_quietly_recompute
     fake = _FakeSession(None, {"logd": 0.65})
     _session(monkeypatch, fake)
 
-    async def _run() -> None:
-        with pytest.raises(CalcToolError, match="no derivable cache key") as refused:
-            await cached_remote(InMemoryStore(), "predict_logd", {"smiles": "c1ccncc1"})
-        # It names the tool and what to do instead, because the reader is whoever miswired it.
-        assert "predict_logd" in str(refused.value)
-        assert "remote_call" in str(refused.value)
-        assert fake.compute_calls == 0, "a tool with no key must not be computed anyway"
-
-    asyncio.run(_run())
+    with pytest.raises(CalcToolError, match="no derivable cache key") as refused:
+        await cached_remote(InMemoryStore(), "predict_logd", {"smiles": "c1ccncc1"})
+    # It names the tool and what to do instead, because the reader is whoever miswired it.
+    assert "predict_logd" in str(refused.value)
+    assert "remote_call" in str(refused.value)
+    assert fake.compute_calls == 0, "a tool with no key must not be computed anyway"
 
 
-def test_a_refused_call_and_an_unreachable_server_are_different_failures(
+async def test_a_refused_call_and_an_unreachable_server_are_different_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The one distinction a durable job acts on, and the reason it is not one error any more.
@@ -247,19 +236,17 @@ def test_a_refused_call_and_an_unreachable_server_are_different_failures(
 
     _session(monkeypatch, _Failing(_KEY, {}))
 
-    async def _run() -> None:
-        with pytest.raises(CalcToolError, match="calculation_key failed") as refused:
-            await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
-        # The server's own message is the whole content of a refusal — which solvent, which index.
-        assert "unparameterised solvent" in str(refused.value)
+    with pytest.raises(CalcToolError, match="calculation_key failed") as refused:
+        await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+    # The server's own message is the whole content of a refusal — which solvent, which index.
+    assert "unparameterised solvent" in str(refused.value)
 
-    asyncio.run(_run())
     assert issubclass(CalcToolError, ChemclawError)
     assert issubclass(CalcServerError, SubsystemUnavailableError)
     assert not issubclass(CalcServerError, ChemclawError)
 
 
-def test_the_servers_internal_error_is_an_outage_not_bad_data(
+async def test_the_servers_internal_error_is_an_outage_not_bad_data(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An infrastructure fault on the calc server must stay retryable, though it arrives as isError.
@@ -288,15 +275,12 @@ def test_the_servers_internal_error_is_an_outage_not_bad_data(
 
     _session(monkeypatch, _Broken(_KEY, {}))
 
-    async def _run() -> None:
-        with pytest.raises(CalcServerError) as outage:
-            await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
-        assert "may work on a retry" in str(outage.value)
-
-    asyncio.run(_run())
+    with pytest.raises(CalcServerError) as outage:
+        await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+    assert "may work on a retry" in str(outage.value)
 
 
-def test_a_full_pod_is_backpressure_not_bad_data(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_full_pod_is_backpressure_not_bad_data(monkeypatch: pytest.MonkeyPatch) -> None:
     """The third state, and the one the taxonomy above did not have.
 
     `servers/calc` refuses when every calculation slot is taken, and that refusal arrived here
@@ -327,16 +311,13 @@ def test_a_full_pod_is_backpressure_not_bad_data(monkeypatch: pytest.MonkeyPatch
 
     _session(monkeypatch, _Full(_KEY, {}))
 
-    async def _run() -> None:
-        with pytest.raises(CalcBusyError) as busy:
-            await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
-        # What the chemist reads must not sound like a problem with their molecule, and must not
-        # repeat the server's advice to retry as if a person had to act on it.
-        assert "the calculation service is busy" in str(busy.value)
-        assert "Nothing is wrong with what was asked" in str(busy.value)
-        assert "CHEMCLAW_CALC_MAX_CONCURRENT_REQUESTS" not in str(busy.value)
-
-    asyncio.run(_run())
+    with pytest.raises(CalcBusyError) as busy:
+        await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+    # What the chemist reads must not sound like a problem with their molecule, and must not
+    # repeat the server's advice to retry as if a person had to act on it.
+    assert "the calculation service is busy" in str(busy.value)
+    assert "Nothing is wrong with what was asked" in str(busy.value)
+    assert "CHEMCLAW_CALC_MAX_CONCURRENT_REQUESTS" not in str(busy.value)
 
     # The classification, which is the whole fix: `SubsystemUnavailableError` is the hierarchy
     # `tests/test_publish.py` asserts is *absent* from `_BAD_DATA_TYPES`, so this is retryable by
@@ -348,7 +329,7 @@ def test_a_full_pod_is_backpressure_not_bad_data(monkeypatch: pytest.MonkeyPatch
     assert "CalcToolError" in _BAD_DATA_TYPES
 
 
-def test_a_domain_refusal_is_still_bad_data_when_the_marker_is_absent(
+async def test_a_domain_refusal_is_still_bad_data_when_the_marker_is_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The other direction, which is what stops the fix above from being a blanket loosening.
@@ -375,15 +356,12 @@ def test_a_domain_refusal_is_still_bad_data_when_the_marker_is_absent(
 
     _session(monkeypatch, _Wordy(_KEY, {}))
 
-    async def _run() -> None:
-        with pytest.raises(CalcToolError) as refused:
-            await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
-        assert not isinstance(refused.value, CalcBusyError)
-
-    asyncio.run(_run())
+    with pytest.raises(CalcToolError) as refused:
+        await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+    assert not isinstance(refused.value, CalcBusyError)
 
 
-def test_the_marker_cannot_be_forged_from_a_tool_argument(
+async def test_the_marker_cannot_be_forged_from_a_tool_argument(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The reachable half of the case above: a refusal that quotes the token back at us.
@@ -421,14 +399,11 @@ def test_the_marker_cannot_be_forged_from_a_tool_argument(
     _session(monkeypatch, _Echo(_KEY, {}))
     before = METRICS.value("chemclaw_calc_backend_at_capacity_total")
 
-    async def _run() -> None:
-        with pytest.raises(CalcToolError) as refused:
-            await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
-        assert not isinstance(refused.value, CalcBusyError), (
-            "a marker echoed back inside a domain refusal is not the server saying it is full"
-        )
-
-    asyncio.run(_run())
+    with pytest.raises(CalcToolError) as refused:
+        await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+    assert not isinstance(refused.value, CalcBusyError), (
+        "a marker echoed back inside a domain refusal is not the server saying it is full"
+    )
 
     assert METRICS.value("chemclaw_calc_backend_at_capacity_total") == before, (
         "a tool argument moved the saturation series the capacity alert pages on"
@@ -551,7 +526,7 @@ def _real_session(monkeypatch: pytest.MonkeyPatch, transport: _Transport) -> Non
         (ValueError("a bug in the composition code"), ValueError),
     ],
 )
-def test_a_failure_inside_the_session_body_is_not_relabelled_as_an_outage(
+async def test_a_failure_inside_the_session_body_is_not_relabelled_as_an_outage(
     monkeypatch: pytest.MonkeyPatch, raised: BaseException, expected: type[BaseException]
 ) -> None:
     """`calc_session` guards the *connection*, and nothing else — measured, not assumed.
@@ -566,12 +541,9 @@ def test_a_failure_inside_the_session_body_is_not_relabelled_as_an_outage(
     """
     _real_session(monkeypatch, _Transport())
 
-    async def _run() -> None:
-        with pytest.raises(expected) as caught:
-            await cached_remote(_RaisingStore(raised), "predict_solubility", {"smiles": "c1ccccc1"})
-        assert not isinstance(caught.value, CalcServerError)
-
-    asyncio.run(_run())
+    with pytest.raises(expected) as caught:
+        await cached_remote(_RaisingStore(raised), "predict_solubility", {"smiles": "c1ccccc1"})
+    assert not isinstance(caught.value, CalcServerError)
 
 
 @pytest.mark.parametrize(
@@ -585,7 +557,7 @@ def test_a_failure_inside_the_session_body_is_not_relabelled_as_an_outage(
         (INTERNAL_ERROR, CalcServerError, True),
     ],
 )
-def test_a_protocol_error_is_classified_by_who_is_at_fault(
+async def test_a_protocol_error_is_classified_by_who_is_at_fault(
     monkeypatch: pytest.MonkeyPatch, code: int, expected: type[Exception], retryable: bool
 ) -> None:
     """An `McpError` is two opposite failures wearing one type, told apart by its code.
@@ -597,13 +569,10 @@ def test_a_protocol_error_is_classified_by_who_is_at_fault(
     """
     _real_session(monkeypatch, _Transport(McpError(ErrorData(code=code, message="refused"))))
 
-    async def _run() -> None:
-        with pytest.raises(expected) as caught:
-            await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
-        # `ChemclawError` is the non-retryable hierarchy `durable/publish.py` matches on.
-        assert isinstance(caught.value, ChemclawError) is not retryable
-
-    asyncio.run(_run())
+    with pytest.raises(expected) as caught:
+        await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+    # `ChemclawError` is the non-retryable hierarchy `durable/publish.py` matches on.
+    assert isinstance(caught.value, ChemclawError) is not retryable
 
 
 # Every name whose value is or contains a `calc_version`. A local definition of any of these is the
@@ -1011,7 +980,7 @@ def test_a_held_calculation_session_is_visible_to_a_scrape(
     assert _in_flight() == 0.0
 
 
-def test_a_failed_open_does_not_leak_a_permanent_unit_of_load(
+async def test_a_failed_open_does_not_leak_a_permanent_unit_of_load(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The gauge must fall on every exit path, and an outage is the one that repeats.
@@ -1028,11 +997,9 @@ def test_a_failed_open_does_not_leak_a_permanent_unit_of_load(
 
     monkeypatch.setattr(remote, "open_session", _refused)
 
-    async def _run() -> None:
-        for _ in range(3):
-            with pytest.raises(CalcServerError):
-                async with remote.calc_session():
-                    pass  # pragma: no cover - the open never yields
+    for _ in range(3):
+        with pytest.raises(CalcServerError):
+            async with remote.calc_session():
+                pass  # pragma: no cover - the open never yields
 
-    asyncio.run(_run())
     assert _in_flight() == 0.0

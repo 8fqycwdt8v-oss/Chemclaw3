@@ -76,15 +76,41 @@ anywhere fails on the day it is written — which the list could not do for a cl
 of the four files it named. `httpx` defaults `trust_env` to True, which makes this a property that
 decays by omission — the one kind a docstring cannot hold.
 
-**And the boot refusal covers less than two backlog rows used to say.** It fires only where
-`_env_reading_destinations` charges something, and on this repository's own defaults
-(`entra_required=false`, `otel_enabled=false`) it charges nothing: measured today with a real
-loopback proxy, a plain `httpx.get` to an external host returned 200 with `_refused` at 0 before
-and after, the proxy's log showing the absolute-URI request line. The shipped Helm chart sets
-`CHEMCLAW_ENTRA_REQUIRED: "true"` on every component, so the refusal does fire in the OpenShift
-topology the sidecar argument is about. What is uncovered is `make chat`, `make connectors`, CI, a
-hand-started worker, and any site running identity off — which is precisely the "a policy that only
-one way of starting the process obeys" shape `core/egress.py` exists to reject.
+**And the boot refusal has two arms, because charging a destination stopped being able to carry
+it.** The first is `_env_reading_destinations`: a *named* destination on this settings object,
+dialled by something that reads the environment, refused with the destination, the reader and the
+variable in the message. That arm covers less than two backlog rows used to say — on this
+repository's own defaults (`entra_required=false`, `otel_enabled=false`) it charges nothing, and
+measured with a real loopback proxy a plain `httpx.get` to an external host returned 200 with
+`_refused` at 0 before and after, the proxy's log showing the absolute-URI request line.
+
+**The second arm exists because the first one emptied out for a whole class of deployment.** The
+JWKS fetch was the only destination `entra_required` implied, and `_HttpxJwkClient`'s
+`trust_env=False` made it immune, so the row had to go — leaving an `entra_required=true` +
+`otel_enabled=false` process charging **nothing**, measured: `charged: []`, boot proceeds, where
+the same settings refused the day before. That is not a configuration with nothing to carry. This
+process has carriers that read the environment and name **no destination this module can derive**,
+and the load-bearing one is measured rather than argued: `kg/git_writer._git_child_env` deliberately
+keeps every proxy variable in the `git` child's environment (verified — `HTTPS_PROXY` survives it
+while `CHEMCLAW_LLM_API_KEY` is scrubbed), and `git ls-remote` behind a loopback recorder standing
+in for a sidecar sent it `CONNECT notes.example.invalid:443`. The `git` destination is explicitly
+*not* charged above (its host is `"origin"`, not a URL on this object) and the `LD_PRELOAD`
+interposer exempts loopback by construction, so for a loopback sidecar there is no layer left. So
+under `entra_required` an **undeclared ambient proxy is itself the refusable condition**, with no
+destination needed — `refuse_proxied_egress`'s second arm.
+
+**Why that gate and not no gate:** `entra_required` is this repository's existing signal for "the
+deployment that believes it is in the enforced posture" (`publish/drivers/http.py`,
+`publish/drivers/postgres.py`, the broker-TLS and DSN-`sslmode` refusals in `core/config`), and a
+developer's checkout behind a corporate proxy must still import — which is a measured requirement
+here, not a courtesy. So what is uncovered is `make chat`, `make connectors`, CI, a hand-started
+worker **with identity off**; a hand-started worker in the enforced posture is now covered, which
+is what the sentence this replaces got wrong. It claimed the shipped Helm chart's
+`CHEMCLAW_ENTRA_REQUIRED: "true"` was why the refusal fired in the OpenShift topology the sidecar
+argument is about. It was not: `entra_required` charged nothing, and the only thing still firing in
+that topology was the chart's unrelated `CHEMCLAW_OTEL_ENABLED: "true"`. A causal claim about a
+control, resting on a value that is not the control's input, is the shape this repository keeps
+finding — and it shipped in the same commit that made it false.
 
 Armed once, at `chemclaw.core.config` import, beside `pin_langsmith_egress`, because that module is
 the one import every entrypoint makes (the front door, the CLI, the connector server, the durable
@@ -482,21 +508,33 @@ def _env_reading_destinations(settings: Any) -> list[tuple[str, str, tuple[str, 
     from a default in code — which is that guard working, and it caught this line.)
 
     So the question is not "which hosts does this process dial" but **"which of them are dialled by
-    something that reads the environment"**, and today that is two:
+    something that reads the environment"**, and today that is one:
 
     - **The OTLP span exporter.** `core/logging.py` uses the *gRPC* exporter, and grpc resolves
       `grpc_proxy` then `https_proxy` then `http_proxy` **regardless of the target's scheme** —
       measured, `http_proxy` alone carried a `https://` target, three `CONNECT` frames to the
       recorder. With `otel_include_sensitive_data` that traffic is prompts and completions.
-    - **The Entra JWKS endpoint.** `api/auth.py` builds a `PyJWKClient`, which fetches through
-      `urllib.request.urlopen` — no `trust_env`, and measured to follow `HTTP_PROXY`. It is the
-      anchor every bearer token is validated against.
 
-    **`git` is the third and is filed rather than charged** (`docs/planning/BACKLOG.md`). The KG
-    note writer shells out to `git push`, which inherits the environment and is measurably proxied —
-    but its URL is not on this object: `git_remote` is the string `"origin"`, and resolving it means
-    `git remote get-url` in a subprocess at *config import*, a cost every entrypoint would pay at
-    every start for a destination only one subsystem uses.
+    **The Entra JWKS endpoint was the second and is gone, which is a deletion this function had to
+    make rather than keep.** It was charged here because `api/auth.py` fetched the key set through
+    `urllib.request.urlopen`, which takes no `trust_env` and was measured following `HTTP_PROXY`.
+    `_HttpxJwkClient` now fetches it with `httpx` and `trust_env=False`, so that destination is
+    immune by construction — and a destination that is immune must leave this list, because what
+    this function feeds is a *refusal*. Keeping the row would refuse a pod to boot over a hazard
+    that no longer exists, which is the failure this module's own docstring names above: a refusal
+    for a reason that is not true is a pod that will not start.
+
+    **`git` is the third, it is still not charged here** (`docs/planning/BACKLOG.md`)**, and that is
+    no longer the end of it.** The KG note writer shells out to `git push`, which inherits the
+    environment and is measurably proxied — `_git_child_env` keeps every proxy variable on purpose,
+    and a `git ls-remote` behind a loopback recorder sent it
+    `CONNECT notes.example.invalid:443`. Its URL is still not on this
+    object (`git_remote` is the string `"origin"`, and resolving it means `git remote get-url` in a
+    subprocess at *config import*, a cost every entrypoint would pay at every start for a
+    destination only one subsystem uses), so it cannot be a row here — a row needs a host to put in
+    the message and to test `proxy_bypass` against. It is instead what `ambient_proxies` is for:
+    a carrier with no derivable destination refuses on the *proxy*, under the enforced posture only.
+    That is a narrower claim than a row would make and it is the one this function can support.
     """
     destinations: list[tuple[str, str, tuple[str, ...]]] = []
     if getattr(settings, "otel_enabled", False) and settings.otel_endpoint:
@@ -508,12 +546,35 @@ def _env_reading_destinations(settings: Any) -> list[tuple[str, str, tuple[str, 
                 ("grpc_proxy", "https_proxy", "http_proxy", "all_proxy"),
             )
         )
-    if getattr(settings, "entra_required", False):
-        jwks = getattr(settings, "entra_jwks_endpoint", "") or settings.entra_jwks_url
-        if jwks:
-            scheme = urlsplit(jwks).scheme or "https"
-            destinations.append((jwks, "the Entra JWKS fetch", (f"{scheme}_proxy", "all_proxy")))
     return destinations
+
+
+def ambient_proxies() -> dict[str, str]:
+    """Every proxy variable set in this environment, as variable name -> proxy host.
+
+    **The carriers this answers for name no destination, which is why it takes no settings.** A
+    `git` child (`kg/git_writer._git_child_env` keeps every proxy variable deliberately) and any
+    dependency that builds its own HTTP client read these variables and reach hosts
+    `_env_reading_destinations` cannot derive — so there is nothing to look up, and the only
+    question left is whether a proxy is configured at all.
+
+    **`no_proxy` is honoured only in its universal form, and that is a measurement rather than a
+    simplification.** `proxy_bypass` answers a *per-host* question and there is no host here to ask
+    it about; a sentinel host would be a fabrication that a specific `no_proxy` entry could match by
+    accident. What can be honoured is `*`, which is what CPython's `proxy_bypass_environment`
+    short-circuits on and what git implements: measured, `NO_PROXY=*` took the same `git ls-remote`
+    off the recorder entirely — it resolved the host directly and the recorder saw nothing, where
+    without it the recorder saw the `CONNECT`. Read through `_proxy_value` so the case rules are the
+    one set this module already has, rather than a second reading of the same variable.
+    """
+    if _proxy_value("no_proxy") == "*":
+        return {}
+    found: dict[str, str] = {}
+    for variable in _PROXY_VARIABLES:
+        host = _host_from_url(_proxy_value(variable))
+        if host:
+            found[variable.upper()] = host
+    return found
 
 
 def proxied_destinations(settings: Any) -> dict[str, tuple[str, str]]:
@@ -561,33 +622,72 @@ def refuse_proxied_egress(settings: Any) -> None:
     and four others), so a proxy variable cannot carry them and charging them refused deployments
     for a reason that was not true. What is charged is what reads the environment.
 
+    **The second arm is not about a destination at all, and it exists because the first one can be
+    empty while the hazard is not.** Measured: `entra_required=true` with `otel_enabled=false`
+    charges nothing, so this function returned silently for the exact deployment the sidecar
+    argument is about. The carriers that were left are the ones with no derivable destination — the
+    `git` child whose environment `kg/git_writer` deliberately keeps every proxy variable in, and
+    any dependency's own HTTP client — and for a **loopback** sidecar neither the allowlist (it sees
+    the dial to the proxy), nor the NetworkPolicy (a sidecar shares the pod's network namespace),
+    nor the `LD_PRELOAD` interposer (loopback is exempt by construction) can see the traffic. So
+    under the enforced posture an *undeclared* proxy is itself refusable. It is gated on
+    `entra_required` — this repository's existing signal for the deployment that believes it is in
+    the enforced posture — rather than run unconditionally, because a stock checkout behind a
+    corporate proxy must still import, which is a measured requirement here and not a courtesy.
+
+    **The two arms raise separately because their remedies differ.** The first can offer `NO_PROXY`
+    per destination, since it knows the destination; the second cannot, and offering it there would
+    be a remedy that does not clear the refusal. Both messages open on the same string, so an
+    operator greps one thing.
+
     Raises:
-        RuntimeError: naming the proxy, the destination, *what reads the environment for it*, and
-            the one edit that proceeds. Loud at boot rather than loud on the first turn, and it
-            reaches every process kind because it hangs off the `chemclaw.core.config` import every
-            entrypoint makes — which is the property the gateway guard beside it did *not* have
-            while it lived in `api/middleware.py`, and now has by being called from each entrypoint
-            instead (`core/llm_gateway.py`).
+        RuntimeError: naming the proxy, what would carry it, and the one edit that proceeds — plus
+            the destination and the reader where there is one. Loud at boot rather than loud on the
+            first turn, and it reaches every process kind because it hangs off the
+            `chemclaw.core.config` import every entrypoint makes — which is the property the gateway
+            guard beside it did *not* have while it lived in `api/middleware.py`, and now has by
+            being called from each entrypoint instead (`core/llm_gateway.py`).
     """
-    carried = proxied_destinations(settings)
-    if not carried:
-        return
     declared = {
         entry.strip().lower() for entry in (settings.egress_allow or "").split(",") if entry.strip()
     }
     undeclared = {
-        destination: proxy for destination, (proxy, _) in carried.items() if proxy not in declared
+        destination: proxy
+        for destination, (proxy, _) in proxied_destinations(settings).items()
+        if proxy not in declared
     }
-    if not undeclared:
+    if undeclared:
+        proxies = ", ".join(sorted(set(undeclared.values())))
+        destinations = "; ".join(sorted(undeclared))
+        raise RuntimeError(
+            f"SECURITY: a proxy is configured in this process's environment ({proxies}) and would "
+            f"carry traffic to {destinations} — that traffic would reach a host this deployment "
+            "has not declared, and the egress guard cannot see it because it sees only the dial to "
+            "the proxy. To proceed, add the proxy to CHEMCLAW_EGRESS_ALLOW as a bare host (no "
+            "scheme, no port) to say this is intended, add these destinations to NO_PROXY, or "
+            "unset the variable."
+        )
+    if not getattr(settings, "entra_required", False):
         return
-    proxies = ", ".join(sorted(set(undeclared.values())))
-    destinations = "; ".join(sorted(undeclared))
+    ambient = {
+        variable: proxy for variable, proxy in ambient_proxies().items() if proxy not in declared
+    }
+    if not ambient:
+        return
+    proxies = ", ".join(sorted(set(ambient.values())))
+    variables = ", ".join(sorted(ambient))
     raise RuntimeError(
-        f"SECURITY: a proxy is configured in this process's environment ({proxies}) and would "
-        f"carry traffic to {destinations} — that traffic would reach a host this deployment has "
-        "not declared, and the egress guard cannot see it because it sees only the dial to the "
-        "proxy. To proceed, add the proxy to CHEMCLAW_EGRESS_ALLOW as a bare host (no scheme, no "
-        "port) to say this is intended, add these destinations to NO_PROXY, or unset the variable."
+        f"SECURITY: a proxy is configured in this process's environment ({proxies}, via "
+        f"{variables}) and entra_required=true — the deployment that believes it is in the "
+        "enforced posture. This process has carriers that read the environment and reach hosts no "
+        "setting names: the `git push` kg/git_writer.py shells out to, whose child environment "
+        "deliberately keeps every proxy variable, and any dependency that builds its own HTTP "
+        "client. That traffic would leave with no layer able to observe it — the egress guard sees "
+        "only the dial to the proxy, a loopback sidecar shares the pod's network namespace so the "
+        "NetworkPolicy never sees it, and the LD_PRELOAD interposer exempts loopback by "
+        "construction. To proceed, add the proxy to CHEMCLAW_EGRESS_ALLOW as a bare host (no "
+        "scheme, no port) to say this is intended, set NO_PROXY=* to take every carrier off it, or "
+        "unset the variable."
     )
 
 

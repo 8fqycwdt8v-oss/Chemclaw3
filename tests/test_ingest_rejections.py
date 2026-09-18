@@ -196,80 +196,68 @@ async def _clear(source: str) -> None:
         await conn.commit()
 
 
-def test_the_119_percent_well_is_refused_and_lands_in_the_ledger(
+async def test_the_119_percent_well_is_refused_and_lands_in_the_ledger(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The defect itself: the one entry that can never arrive, now with its reason on file."""
+    await migrated_db_or_skip()
+    await _clear(LEDGER_SOURCE)
+    drop = _ord_source(monkeypatch, tmp_path)
+    _write(drop, _WELL_ID, 119.43)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clear(LEDGER_SOURCE)
-        drop = _ord_source(monkeypatch, tmp_path)
-        _write(drop, _WELL_ID, 119.43)
+    summary = await _drain()
 
-        summary = await _drain()
+    # The refusal is unchanged: the entry is still fetched, still refused by the mapper, and
+    # still reported in the sync's own summary exactly as before.
+    assert [entry.entry_id for entry in summary.rejected] == [_WELL_ID]
+    assert summary.ingested == []
 
-        # The refusal is unchanged: the entry is still fetched, still refused by the mapper, and
-        # still reported in the sync's own summary exactly as before.
-        assert [entry.entry_id for entry in summary.rejected] == [_WELL_ID]
-        assert summary.ingested == []
-
-        rows = await _rows(LEDGER_SOURCE)
-        assert len(rows) == 1, "the refused well must leave exactly one ledger row"
-        entry_id, reason, first_seen, last_seen, occurrences = rows[0]
-        assert entry_id == _WELL_ID
-        # The reason is what turns "I have no such record" into an answer: it has to carry both the
-        # value that was refused and the rule that refused it.
-        assert "119.43" in reason and "100" in reason
-        assert occurrences == 1 and first_seen == last_seen
-
-    asyncio.run(_run())
+    rows = await _rows(LEDGER_SOURCE)
+    assert len(rows) == 1, "the refused well must leave exactly one ledger row"
+    entry_id, reason, first_seen, last_seen, occurrences = rows[0]
+    assert entry_id == _WELL_ID
+    # The reason is what turns "I have no such record" into an answer: it has to carry both the
+    # value that was refused and the rule that refused it.
+    assert "119.43" in reason and "100" in reason
+    assert occurrences == 1 and first_seen == last_seen
 
 
-def test_re_offering_the_same_record_moves_last_seen_and_adds_no_row(
+async def test_re_offering_the_same_record_moves_last_seen_and_adds_no_row(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A ledger, not a second log: the row is the record, and the run is a timestamp on it."""
+    await migrated_db_or_skip()
+    await _clear(LEDGER_SOURCE)
+    drop = _ord_source(monkeypatch, tmp_path)
+    _write(drop, _WELL_ID, 119.43)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clear(LEDGER_SOURCE)
-        drop = _ord_source(monkeypatch, tmp_path)
-        _write(drop, _WELL_ID, 119.43)
+    await _drain()
+    first = await _rows(LEDGER_SOURCE)
+    await _drain()
+    second = await _rows(LEDGER_SOURCE)
 
-        await _drain()
-        first = await _rows(LEDGER_SOURCE)
-        await _drain()
-        second = await _rows(LEDGER_SOURCE)
-
-        assert len(second) == 1, "a record refused twice is one row, or this is a log again"
-        assert second[0][4] == 2, "occurrences must count the refusals"
-        assert second[0][3] > first[0][3], "last_seen must move when the record is re-offered"
-        assert second[0][2] == first[0][2], "first_seen must not move: it is when this started"
-
-    asyncio.run(_run())
+    assert len(second) == 1, "a record refused twice is one row, or this is a log again"
+    assert second[0][4] == 2, "occurrences must count the refusals"
+    assert second[0][3] > first[0][3], "last_seen must move when the record is re-offered"
+    assert second[0][2] == first[0][2], "first_seen must not move: it is when this started"
 
 
-def test_a_record_that_ingests_cleanly_leaves_no_ledger_row(
+async def test_a_record_that_ingests_cleanly_leaves_no_ledger_row(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The control. The ledger is about refusals, so a good corpus writes nothing at all."""
+    await migrated_db_or_skip()
+    await _clear(LEDGER_SOURCE)
+    drop = _ord_source(monkeypatch, tmp_path)
+    _write(drop, "well-ok", 84.0)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clear(LEDGER_SOURCE)
-        drop = _ord_source(monkeypatch, tmp_path)
-        _write(drop, "well-ok", 84.0)
+    summary = await _drain()
 
-        summary = await _drain()
-
-        assert summary.ingested == ["well-ok"] and summary.rejected == []
-        assert await _rows(LEDGER_SOURCE) == []
-
-    asyncio.run(_run())
+    assert summary.ingested == ["well-ok"] and summary.rejected == []
+    assert await _rows(LEDGER_SOURCE) == []
 
 
-def test_the_gr_08_question_reaches_the_refusal_through_gather_evidence(
+async def test_the_gr_08_question_reaches_the_refusal_through_gather_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The acceptance criterion: the chemist's own words, and the answer that was unreachable.
@@ -278,38 +266,34 @@ def test_the_gr_08_question_reaches_the_refusal_through_gather_evidence(
     well, since it never arrived — so what the tool returns about it comes from the ledger and
     from nowhere else.
     """
+    await migrated_db_or_skip()
+    await _clear(LEDGER_SOURCE)
+    drop = _ord_source(monkeypatch, tmp_path)
+    _write(drop, _WELL_ID, 119.43)
+    await _drain()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clear(LEDGER_SOURCE)
-        drop = _ord_source(monkeypatch, tmp_path)
-        _write(drop, _WELL_ID, 119.43)
-        await _drain()
+    monkeypatch.setattr(research_tools, "_sources", lambda _anchor: [("graph", _Empty())])
+    sweep = await research_tools.gather_evidence(query=_GR_08)
 
-        monkeypatch.setattr(research_tools, "_sources", lambda _anchor: [("graph", _Empty())])
-        sweep = await research_tools.gather_evidence(query=_GR_08)
-
-        assert sweep.chunks == [], "the well is genuinely absent; nothing may be cited for it"
-        assert sweep.refusals_unavailable == ""
-        assert [r.entry_id for r in sweep.refused_on_ingest] == [_WELL_ID]
-        rejection = sweep.refused_on_ingest[0]
-        assert "119.43" in rejection.reason
-        # Unmistakably a rejection: the discriminator is on the object the model reads, and the
-        # object carries nothing a reaction record carries — no yield, no structure, no body.
-        assert rejection.kind == "ingest-rejection"
-        assert not {"yield_percent", "body", "smiles", "conditions"} & set(
-            IngestRejection.model_fields
-        ), "a rejection that can carry a result can be read as one"
-        rendered = repr(sweep)
-        assert "refused_on_ingest" in rendered and "ingest-rejection" in rendered, (
-            "a pydantic tool return reaches the model as its repr, so the discriminator has to "
-            "survive into it (tests/test_upstream_surface.py)"
-        )
-
-    asyncio.run(_run())
+    assert sweep.chunks == [], "the well is genuinely absent; nothing may be cited for it"
+    assert sweep.refusals_unavailable == ""
+    assert [r.entry_id for r in sweep.refused_on_ingest] == [_WELL_ID]
+    rejection = sweep.refused_on_ingest[0]
+    assert "119.43" in rejection.reason
+    # Unmistakably a rejection: the discriminator is on the object the model reads, and the
+    # object carries nothing a reaction record carries — no yield, no structure, no body.
+    assert rejection.kind == "ingest-rejection"
+    assert not {"yield_percent", "body", "smiles", "conditions"} & set(
+        IngestRejection.model_fields
+    ), "a rejection that can carry a result can be read as one"
+    rendered = repr(sweep)
+    assert "refused_on_ingest" in rendered and "ingest-rejection" in rendered, (
+        "a pydantic tool return reaches the model as its repr, so the discriminator has to "
+        "survive into it (tests/test_upstream_surface.py)"
+    )
 
 
-def test_an_unreadable_ledger_is_reported_rather_than_rendered_as_nothing_refused(
+async def test_an_unreadable_ledger_is_reported_rather_than_rendered_as_nothing_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An outage and a clean corpus must not render alike — the `sources_failed` rule again."""
@@ -317,19 +301,16 @@ def test_an_unreadable_ledger_is_reported_rather_than_rendered_as_nothing_refuse
     async def _blows_up(_question: str) -> list[IngestRejection]:
         raise ConnectionError("Postgres unreachable")
 
-    async def _run() -> None:
-        monkeypatch.setattr(research_tools, "_sources", lambda _anchor: [("graph", _Empty())])
-        monkeypatch.setattr(research_tools, "refusals_matching", _blows_up)
+    monkeypatch.setattr(research_tools, "_sources", lambda _anchor: [("graph", _Empty())])
+    monkeypatch.setattr(research_tools, "refusals_matching", _blows_up)
 
-        sweep = await research_tools.gather_evidence(query=_GR_08)
+    sweep = await research_tools.gather_evidence(query=_GR_08)
 
-        assert sweep.refused_on_ingest == []
-        assert "ConnectionError" in sweep.refusals_unavailable
-
-    asyncio.run(_run())
+    assert sweep.refused_on_ingest == []
+    assert "ConnectionError" in sweep.refusals_unavailable
 
 
-def test_a_systematically_broken_source_cannot_grow_the_table_without_bound(
+async def test_a_systematically_broken_source_cannot_grow_the_table_without_bound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The growth bound *and* the policy it implements: the newest `cap` refusals are the survivors.
@@ -346,51 +327,43 @@ def test_a_systematically_broken_source_cannot_grow_the_table_without_bound(
     checks that they really did differ rather than assuming it, so a future single-transaction
     rewrite fails here instead of silently going back to testing the tie-break.
     """
+    await migrated_db_or_skip()
+    source = "test-broken-source"
+    await _clear(source)
+    monkeypatch.setattr(rejections, "_MAX_ROWS_PER_SOURCE", 3)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        source = "test-broken-source"
-        await _clear(source)
-        monkeypatch.setattr(rejections, "_MAX_ROWS_PER_SOURCE", 3)
+    await record_refusals(source, {f"entry-old-{index}": "always broken" for index in range(4)})
+    await record_refusals(source, {f"entry-new-{index}": "still broken" for index in range(2)})
 
-        await record_refusals(source, {f"entry-old-{index}": "always broken" for index in range(4)})
-        await record_refusals(source, {f"entry-new-{index}": "still broken" for index in range(2)})
-
-        rows = await _rows(source)
-        assert len(rows) == 3, "the per-source cap is what keeps this a ledger and not a log"
-        # Both of the newer refusals survive and only one older row does — the cap spent on
-        # recency first. Which older row is the `entry_id` tie-break inside its own batch, which is
-        # all that tie-break decides. Under the inverted ordering this list is the three
-        # `entry-old-*` rows instead, which is what makes the assertion mean something.
-        assert [row[0] for row in rows] == ["entry-new-0", "entry-new-1", "entry-old-0"]
-        by_id = {row[0]: row[3] for row in rows}
-        assert by_id["entry-new-0"] > by_id["entry-old-0"], (
-            "the two batches must land at different last_seen values, or this test is back to "
-            "asserting the tie-break"
-        )
-        await _clear(source)
-
-    asyncio.run(_run())
+    rows = await _rows(source)
+    assert len(rows) == 3, "the per-source cap is what keeps this a ledger and not a log"
+    # Both of the newer refusals survive and only one older row does — the cap spent on
+    # recency first. Which older row is the `entry_id` tie-break inside its own batch, which is
+    # all that tie-break decides. Under the inverted ordering this list is the three
+    # `entry-old-*` rows instead, which is what makes the assertion mean something.
+    assert [row[0] for row in rows] == ["entry-new-0", "entry-new-1", "entry-old-0"]
+    by_id = {row[0]: row[3] for row in rows}
+    assert by_id["entry-new-0"] > by_id["entry-old-0"], (
+        "the two batches must land at different last_seen values, or this test is back to "
+        "asserting the tie-break"
+    )
+    await _clear(source)
 
 
-def test_a_long_refusal_message_is_cut_and_says_so() -> None:
+async def test_a_long_refusal_message_is_cut_and_says_so() -> None:
     """A message cut without saying so reads as the whole of what the refusal said."""
+    await migrated_db_or_skip()
+    source = "test-verbose-source"
+    await _clear(source)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        source = "test-verbose-source"
-        await _clear(source)
+    await record_refusals(source, {"entry": "x" * 5_000})
 
-        await record_refusals(source, {"entry": "x" * 5_000})
-
-        rows = await _rows(source)
-        assert len(rows[0][1]) < 1_000 and "truncated" in rows[0][1]
-        await _clear(source)
-
-    asyncio.run(_run())
+    rows = await _rows(source)
+    assert len(rows[0][1]) < 1_000 and "truncated" in rows[0][1]
+    await _clear(source)
 
 
-def test_a_refusal_carrying_a_nul_byte_is_stored_rather_than_losing_the_batch() -> None:
+async def test_a_refusal_carrying_a_nul_byte_is_stored_rather_than_losing_the_batch() -> None:
     """A NUL in a refusal's own words must cost that character, never the batch's ledger.
 
     Postgres refuses a NUL byte in a `text` value outright, and a refusal reason is `str(exc)` over
@@ -405,34 +378,30 @@ def test_a_refusal_carrying_a_nul_byte_is_stored_rather_than_losing_the_batch() 
     under the closest spelling the database can hold answers the question, and no row answers
     nothing — and the reason field carries the source's own words beside it.
     """
+    await migrated_db_or_skip()
+    source = "test-poisoned-source"
+    await _clear(source)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        source = "test-poisoned-source"
-        await _clear(source)
+    await record_refusals(
+        source,
+        {
+            "well-1": "yield_percent 119.43 exceeds 100",
+            "well-2": "input_value=quenched with brine\x00 and dried",
+            "well\x00-3": "no product recorded",
+        },
+    )
 
-        await record_refusals(
-            source,
-            {
-                "well-1": "yield_percent 119.43 exceeds 100",
-                "well-2": "input_value=quenched with brine\x00 and dried",
-                "well\x00-3": "no product recorded",
-            },
-        )
-
-        rows = await _rows(source)
-        assert [row[0] for row in rows] == ["well-1", "well-2", "well-3"], (
-            "one unstorable character must not cost the other refusals their ledger rows"
-        )
-        assert "\x00" not in rows[1][1] and "quenched with brine" in rows[1][1], (
-            "the refusal's own words survive; only the byte the database cannot hold is dropped"
-        )
-        await _clear(source)
-
-    asyncio.run(_run())
+    rows = await _rows(source)
+    assert [row[0] for row in rows] == ["well-1", "well-2", "well-3"], (
+        "one unstorable character must not cost the other refusals their ledger rows"
+    )
+    assert "\x00" not in rows[1][1] and "quenched with brine" in rows[1][1], (
+        "the refusal's own words survive; only the byte the database cannot hold is dropped"
+    )
+    await _clear(source)
 
 
-def test_a_lone_surrogate_in_a_refusal_is_stored_as_a_visible_replacement() -> None:
+async def test_a_lone_surrogate_in_a_refusal_is_stored_as_a_visible_replacement() -> None:
     r"""The other half of `_storable`, which nothing held: psycopg refuses before Postgres does.
 
     A lone surrogate reaches a reason from a JSON export with a truncated `\u` escape —
@@ -445,34 +414,30 @@ def test_a_lone_surrogate_in_a_refusal_is_stored_as_a_visible_replacement() -> N
     green. `errors="replace"` rather than `"ignore"` is the assertion below — a reader sees a `?`
     where something was, rather than a seamless gap that reads as the source's own words.
     """
+    await migrated_db_or_skip()
+    source = "test-surrogate-source"
+    await _clear(source)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        source = "test-surrogate-source"
-        await _clear(source)
+    await record_refusals(
+        source,
+        {
+            "well-1": "yield_percent 119.43 exceeds 100",
+            "well-2": "input_value=quenched with brine\ud800 and dried",
+            "well\ud800-3": "no product recorded",
+        },
+    )
 
-        await record_refusals(
-            source,
-            {
-                "well-1": "yield_percent 119.43 exceeds 100",
-                "well-2": "input_value=quenched with brine\ud800 and dried",
-                "well\ud800-3": "no product recorded",
-            },
-        )
-
-        rows = await _rows(source)
-        assert [row[0] for row in rows] == ["well-1", "well-2", "well?-3"], (
-            "a lone surrogate must cost its own character, not the row and not the batch"
-        )
-        assert "quenched with brine? and dried" in rows[1][1], (
-            "the refusal's words survive with a visible mark where the surrogate was"
-        )
-        await _clear(source)
-
-    asyncio.run(_run())
+    rows = await _rows(source)
+    assert [row[0] for row in rows] == ["well-1", "well-2", "well?-3"], (
+        "a lone surrogate must cost its own character, not the row and not the batch"
+    )
+    assert "quenched with brine? and dried" in rows[1][1], (
+        "the refusal's words survive with a visible mark where the surrogate was"
+    )
+    await _clear(source)
 
 
-def test_one_row_the_database_will_not_take_costs_only_itself() -> None:
+async def test_one_row_the_database_will_not_take_costs_only_itself() -> None:
     """The belt-and-braces half: a row no sanitiser can repair must not take its neighbours.
 
     `_storable` knows two ways a value cannot be stored; the database knows more. An entry id
@@ -486,33 +451,29 @@ def test_one_row_the_database_will_not_take_costs_only_itself() -> None:
     has to cost one item rather than the pass. Here the pass is a ledger nothing will ever
     offer again.
     """
+    await migrated_db_or_skip()
+    source = "test-unindexable-source"
+    await _clear(source)
+    # Random hex rather than a repeated character: Postgres compresses an index entry before
+    # it measures it, so `"x" * 100_000` fits the btree happily and would test nothing.
+    unindexable = os.urandom(4_000).hex()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        source = "test-unindexable-source"
-        await _clear(source)
-        # Random hex rather than a repeated character: Postgres compresses an index entry before
-        # it measures it, so `"x" * 100_000` fits the btree happily and would test nothing.
-        unindexable = os.urandom(4_000).hex()
+    await record_refusals(
+        source,
+        {
+            "well-1": "yield_percent 119.43 exceeds 100",
+            unindexable: "an id no index can hold",
+            "well-2": "no product recorded",
+        },
+    )
 
-        await record_refusals(
-            source,
-            {
-                "well-1": "yield_percent 119.43 exceeds 100",
-                unindexable: "an id no index can hold",
-                "well-2": "no product recorded",
-            },
-        )
-
-        assert [row[0] for row in await _rows(source)] == ["well-1", "well-2"], (
-            "the row the database refuses is lost alone; the two it would take must be recorded"
-        )
-        await _clear(source)
-
-    asyncio.run(_run())
+    assert [row[0] for row in await _rows(source)] == ["well-1", "well-2"], (
+        "the row the database refuses is lost alone; the two it would take must be recorded"
+    )
+    await _clear(source)
 
 
-def test_a_nul_in_an_export_reaches_the_ledger_end_to_end(
+async def test_a_nul_in_an_export_reaches_the_ledger_end_to_end(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     r"""A NUL in an export costs one entry and reaches the ledger as a described refusal.
@@ -530,65 +491,55 @@ def test_a_nul_in_an_export_reaches_the_ledger_end_to_end(
     test beside it drive. The assertion below pins the escaping, so the corrected claim is checked
     rather than believed.
     """
+    await migrated_db_or_skip()
+    source = "ord-nul"
+    await _clear(source)
+    drop = _ord_source(monkeypatch, tmp_path, source)
+    # The real record store, against `_ord_source`'s in-memory default: the write Postgres
+    # refuses is the whole point, and an in-memory store takes a NUL happily.
+    monkeypatch.setattr(eln_sync, "_record_store", PostgresReactionRecordStore)
+    payload = _ord_payload("poisoned-well", 42.0)
+    payload["notes"] = {"procedure_details": "Quenched with brine\x00 and dried."}
+    (drop / "poisoned-well.json").write_text(json.dumps(payload), encoding="utf-8")
+    _write(drop, "clean-well", 42.0)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        source = "ord-nul"
-        await _clear(source)
-        drop = _ord_source(monkeypatch, tmp_path, source)
-        # The real record store, against `_ord_source`'s in-memory default: the write Postgres
-        # refuses is the whole point, and an in-memory store takes a NUL happily.
-        monkeypatch.setattr(eln_sync, "_record_store", PostgresReactionRecordStore)
-        payload = _ord_payload("poisoned-well", 42.0)
-        payload["notes"] = {"procedure_details": "Quenched with brine\x00 and dried."}
-        (drop / "poisoned-well.json").write_text(json.dumps(payload), encoding="utf-8")
-        _write(drop, "clean-well", 42.0)
+    summary = await _drain(source)
 
-        summary = await _drain(source)
-
-        assert summary.ingested == ["clean-well"], "one poisoned entry may not cost the batch"
-        assert [entry.entry_id for entry in summary.rejected] == ["poisoned-well"]
-        rows = await _rows(source)
-        assert [row[0] for row in rows] == ["poisoned-well"]
-        assert "NUL" in rows[0][1] and "\x00" not in rows[0][1]
-        assert "\\x00" in rows[0][1], (
-            "what travels this path is pydantic's repr of the offending value, not the byte — the "
-            "ledger's sanitiser has nothing to do here, and a test that believes otherwise is "
-            "asserting a mechanism it never exercises"
-        )
-        await _clear(source)
-        await _forget_records(source)
-
-    asyncio.run(_run())
+    assert summary.ingested == ["clean-well"], "one poisoned entry may not cost the batch"
+    assert [entry.entry_id for entry in summary.rejected] == ["poisoned-well"]
+    rows = await _rows(source)
+    assert [row[0] for row in rows] == ["poisoned-well"]
+    assert "NUL" in rows[0][1] and "\x00" not in rows[0][1]
+    assert "\\x00" in rows[0][1], (
+        "what travels this path is pydantic's repr of the offending value, not the byte — the "
+        "ledger's sanitiser has nothing to do here, and a test that believes otherwise is "
+        "asserting a mechanism it never exercises"
+    )
+    await _clear(source)
+    await _forget_records(source)
 
 
-def test_the_reader_matches_the_words_that_carry_the_question() -> None:
+async def test_the_reader_matches_the_words_that_carry_the_question() -> None:
     """Matching is on distinctive words, and a question about something else finds nothing."""
+    await migrated_db_or_skip()
+    source = "test-matching-source"
+    await _clear(source)
+    # And the ORD source's own rows, because matching deliberately spans sources: a question
+    # about data quality is about the corpus, and each row names the source it came from.
+    await _clear(LEDGER_SOURCE)
+    await record_refusals(source, {_WELL_ID: "yield_percent 119.43 exceeds 100"})
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        source = "test-matching-source"
-        await _clear(source)
-        # And the ORD source's own rows, because matching deliberately spans sources: a question
-        # about data quality is about the corpus, and each row names the source it came from.
-        await _clear(LEDGER_SOURCE)
-        await record_refusals(source, {_WELL_ID: "yield_percent 119.43 exceeds 100"})
-
-        assert [(r.source, r.entry_id) for r in (await refusals_matching(_GR_08)).rejections] == [
-            (source, _WELL_ID)
-        ]
-        assert (
-            await refusals_matching("what solvent did we use for the Boc removal")
-        ).rejections == []
-        # A short all-letter word matches nothing on its own, or every question would drag the
-        # whole ledger into the answer.
-        assert (await refusals_matching("is our data any good")).rejections == []
-        await _clear(source)
-
-    asyncio.run(_run())
+    assert [(r.source, r.entry_id) for r in (await refusals_matching(_GR_08)).rejections] == [
+        (source, _WELL_ID)
+    ]
+    assert (await refusals_matching("what solvent did we use for the Boc removal")).rejections == []
+    # A short all-letter word matches nothing on its own, or every question would drag the
+    # whole ledger into the answer.
+    assert (await refusals_matching("is our data any good")).rejections == []
+    await _clear(source)
 
 
-def test_two_ord_sources_file_their_refusals_under_their_own_names(
+async def test_two_ord_sources_file_their_refusals_under_their_own_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A refusal is filed under the manifest's name, so two ORD sources are two ledgers.
@@ -603,26 +554,22 @@ def test_two_ord_sources_file_their_refusals_under_their_own_names(
     manifest and asserting exactly one named this adapter, which fails the site rather than the
     code. Driven through the registry, because the registry is the half that was missing.
     """
+    await migrated_db_or_skip()
+    for name in ("ord-site-a", "ord-site-b"):
+        _write(_ord_source(monkeypatch, tmp_path, name), f"{name}-well", 119.43)
+        await _clear(name)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        for name in ("ord-site-a", "ord-site-b"):
-            _write(_ord_source(monkeypatch, tmp_path, name), f"{name}-well", 119.43)
-            await _clear(name)
+    for name in ("ord-site-a", "ord-site-b"):
+        await _drain(name)
 
-        for name in ("ord-site-a", "ord-site-b"):
-            await _drain(name)
-
-        for name in ("ord-site-a", "ord-site-b"):
-            assert [row[0] for row in await _rows(name)] == [f"{name}-well"], (
-                f"{name}'s refusal did not land under its own manifest name"
-            )
-            await _clear(name)
-
-    asyncio.run(_run())
+    for name in ("ord-site-a", "ord-site-b"):
+        assert [row[0] for row in await _rows(name)] == [f"{name}-well"], (
+            f"{name}'s refusal did not land under its own manifest name"
+        )
+        await _clear(name)
 
 
-def test_a_json_export_the_fetch_drops_leaves_a_ledger_row(tmp_path: Path) -> None:
+async def test_a_json_export_the_fetch_drops_leaves_a_ledger_row(tmp_path: Path) -> None:
     """The asymmetry `D-2026-08-29-a-bound-derived-twice-is-two-bounds` left standing, closed.
 
     `OrdJsonAdapter` recorded a file it could not read and a file that arrived too late;
@@ -630,31 +577,27 @@ def test_a_json_export_the_fetch_drops_leaves_a_ledger_row(tmp_path: Path) -> No
     so `durable/eln_sync.py`'s single writer over `IngestSummary.rejected` cannot see them either
     — which is why the recording is in the fetch, for this adapter as for the other one.
     """
+    await migrated_db_or_skip()
+    await _clear("eln-site-a")
+    (tmp_path / "truncated.json").write_text('{"id": "EXP-9", "timest', encoding="utf-8")
+    late = tmp_path / "late.json"
+    late.write_text(
+        json.dumps({"id": "EXP-4", "timestamp": "2026-01-01T00:00:00Z"}), encoding="utf-8"
+    )
+    stamp = datetime(2026, 6, 1, tzinfo=UTC).timestamp()
+    os.utime(late, (stamp, stamp))
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clear("eln-site-a")
-        (tmp_path / "truncated.json").write_text('{"id": "EXP-9", "timest', encoding="utf-8")
-        late = tmp_path / "late.json"
-        late.write_text(
-            json.dumps({"id": "EXP-4", "timestamp": "2026-01-01T00:00:00Z"}), encoding="utf-8"
-        )
-        stamp = datetime(2026, 6, 1, tzinfo=UTC).timestamp()
-        os.utime(late, (stamp, stamp))
+    adapter = JsonExportAdapter(str(tmp_path), name="eln-site-a")
+    assert await adapter.fetch_new_entries(datetime(2026, 3, 1, tzinfo=UTC)) == []
 
-        adapter = JsonExportAdapter(str(tmp_path), name="eln-site-a")
-        assert await adapter.fetch_new_entries(datetime(2026, 3, 1, tzinfo=UTC)) == []
-
-        rows = {row[0]: row[1] for row in await _rows("eln-site-a")}
-        assert sorted(rows) == ["late", "truncated"], "a dropped export left no question to answer"
-        assert "unreadable" in rows["truncated"]
-        assert "arrived after the sync cursor" in rows["late"]
-        await _clear("eln-site-a")
-
-    asyncio.run(_run())
+    rows = {row[0]: row[1] for row in await _rows("eln-site-a")}
+    assert sorted(rows) == ["late", "truncated"], "a dropped export left no question to answer"
+    assert "unreadable" in rows["truncated"]
+    assert "arrived after the sync cursor" in rows["late"]
+    await _clear("eln-site-a")
 
 
-def test_a_warehouse_row_the_fetch_cannot_order_leaves_a_ledger_row() -> None:
+async def test_a_warehouse_row_the_fetch_cannot_order_leaves_a_ledger_row() -> None:
     """The warehouse's own fetch-time refusal, which nothing downstream can see either.
 
     A row whose bound `created_at` is unreadable never becomes a `RawEntry`, so it is absent from
@@ -663,52 +606,48 @@ def test_a_warehouse_row_the_fetch_cannot_order_leaves_a_ledger_row() -> None:
     unrecorded: it raised out of the fetch and stopped the source. This is the same argument that
     keeps `ord_adapter`'s two fetch-time writers where they are, so it is asserted the same way.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clear("warehouse-site")
-        warehouse_fake.prime(
-            V_REACTION=[
-                {"REACTION_ID": "RX-1", "CREATED_TS": "2026-05-01T09:00:00Z"},
-                {"REACTION_ID": "RX-2", "CREATED_TS": "not a timestamp"},
-            ],
-            V_CHARGE=[],
-        )
-        adapter = WarehouseElnAdapter(
-            binding={
-                "connection": {"driver": "tests.warehouse_fake:open_fake"},
-                "ingest": {
-                    "entry": {
-                        "relation": "V_REACTION",
-                        "key": "REACTION_ID",
-                        "created_at": "CREATED_TS",
-                    },
-                    "related": [
-                        {"name": "charges", "relation": "V_CHARGE", "foreign_key": "REACTION_ID"}
-                    ],
-                    "reaction": {"reaction_id": {"path": "root.REACTION_ID"}},
-                    "components": [
-                        {
-                            "from": "charges",
-                            "smiles": {"path": "SMILES"},
-                            "role": {"path": "ROLE"},
-                        }
-                    ],
-                    "provenance": "wh:${root.REACTION_ID}",
+    await migrated_db_or_skip()
+    await _clear("warehouse-site")
+    warehouse_fake.prime(
+        V_REACTION=[
+            {"REACTION_ID": "RX-1", "CREATED_TS": "2026-05-01T09:00:00Z"},
+            {"REACTION_ID": "RX-2", "CREATED_TS": "not a timestamp"},
+        ],
+        V_CHARGE=[],
+    )
+    adapter = WarehouseElnAdapter(
+        binding={
+            "connection": {"driver": "tests.warehouse_fake:open_fake"},
+            "ingest": {
+                "entry": {
+                    "relation": "V_REACTION",
+                    "key": "REACTION_ID",
+                    "created_at": "CREATED_TS",
                 },
+                "related": [
+                    {"name": "charges", "relation": "V_CHARGE", "foreign_key": "REACTION_ID"}
+                ],
+                "reaction": {"reaction_id": {"path": "root.REACTION_ID"}},
+                "components": [
+                    {
+                        "from": "charges",
+                        "smiles": {"path": "SMILES"},
+                        "role": {"path": "ROLE"},
+                    }
+                ],
+                "provenance": "wh:${root.REACTION_ID}",
             },
-            name="warehouse-site",
-        )
+        },
+        name="warehouse-site",
+    )
 
-        entries = await adapter.fetch_new_entries(_EPOCH)
+    entries = await adapter.fetch_new_entries(_EPOCH)
 
-        assert [entry.entry_id for entry in entries] == ["RX-1"]
-        rows = await _rows("warehouse-site")
-        assert [row[0] for row in rows] == ["RX-2"]
-        assert "CREATED_TS" in rows[0][1], "the reason must name the column an operator has to fix"
-        await _clear("warehouse-site")
-
-    asyncio.run(_run())
+    assert [entry.entry_id for entry in entries] == ["RX-1"]
+    rows = await _rows("warehouse-site")
+    assert [row[0] for row in rows] == ["RX-2"]
+    assert "CREATED_TS" in rows[0][1], "the reason must name the column an operator has to fix"
+    await _clear("warehouse-site")
 
 
 def test_the_fetch_maps_nothing_at_all(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -751,7 +690,7 @@ def test_the_fetch_maps_nothing_at_all(tmp_path: Path, monkeypatch: pytest.Monke
     asyncio.run(_run())
 
 
-def test_every_processed_refusal_reaches_the_ledger(
+async def test_every_processed_refusal_reaches_the_ledger(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The drain's refusals and the ledger's rows are one set, over the overlap-plus-batch chunk.
@@ -773,57 +712,53 @@ def test_every_processed_refusal_reaches_the_ledger(
     Driven through the real activity with a real drop directory, because the bug lives in the
     *composition* of the two bounds and neither half can see it alone.
     """
+    await migrated_db_or_skip()
+    source = "ord-drain"
+    await _clear(source)
+    # In-memory stores: nothing here reaches one (every entry is refused at mapping), but the
+    # activity builds them before it knows that.
+    monkeypatch.setattr(eln_sync, "_reaction_store", InMemoryFingerprintStore)
+    monkeypatch.setattr(eln_sync, "_molecule_store", InMemoryFingerprintStore)
+    monkeypatch.setattr(eln_sync, "_record_store", InMemoryReactionRecordStore)
+    monkeypatch.setattr(eln_sync, "_label_index", InMemoryLabelIndex)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        source = "ord-drain"
-        await _clear(source)
-        # In-memory stores: nothing here reaches one (every entry is refused at mapping), but the
-        # activity builds them before it knows that.
-        monkeypatch.setattr(eln_sync, "_reaction_store", InMemoryFingerprintStore)
-        monkeypatch.setattr(eln_sync, "_molecule_store", InMemoryFingerprintStore)
-        monkeypatch.setattr(eln_sync, "_record_store", InMemoryReactionRecordStore)
-        monkeypatch.setattr(eln_sync, "_label_index", InMemoryLabelIndex)
+    drop = tmp_path / "drop"
+    drop.mkdir()
+    folder = tmp_path / "manifests" / source
+    folder.mkdir(parents=True)
+    (folder / "datasource.yaml").write_text(
+        f"name: {source}\n"
+        "description: An ORD drop directory drained in overlap-plus-batch chunks.\n"
+        "ingest: chemclaw.ingest.eln.ord_adapter:OrdJsonAdapter\n"
+        f"config:\n  export_dir: {drop}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "data_sources_dir", str(tmp_path / "manifests"))
+    monkeypatch.setattr(settings, "eln_sync_batch_size", 4)
 
-        drop = tmp_path / "drop"
-        drop.mkdir()
-        folder = tmp_path / "manifests" / source
-        folder.mkdir(parents=True)
-        (folder / "datasource.yaml").write_text(
-            f"name: {source}\n"
-            "description: An ORD drop directory drained in overlap-plus-batch chunks.\n"
-            "ingest: chemclaw.ingest.eln.ord_adapter:OrdJsonAdapter\n"
-            f"config:\n  export_dir: {drop}\n",
-            encoding="utf-8",
-        )
-        monkeypatch.setattr(settings, "data_sources_dir", str(tmp_path / "manifests"))
-        monkeypatch.setattr(settings, "eln_sync_batch_size", 4)
+    since = datetime(2026, 3, 10, tzinfo=UTC)
+    # Two entries inside the overlap window (at or behind the cursor) and six past it. Every
+    # one of them is the 119.43% well, so every entry the chunk processes is a refusal and the
+    # two sets are directly comparable.
+    for index in range(2):
+        _write_at(drop, f"overlap-{index}", since - timedelta(hours=index), 119.43)
+    for index in range(6):
+        _write_at(drop, f"new-{index}", since + timedelta(hours=index + 1), 119.43)
 
-        since = datetime(2026, 3, 10, tzinfo=UTC)
-        # Two entries inside the overlap window (at or behind the cursor) and six past it. Every
-        # one of them is the 119.43% well, so every entry the chunk processes is a refusal and the
-        # two sets are directly comparable.
-        for index in range(2):
-            _write_at(drop, f"overlap-{index}", since - timedelta(hours=index), 119.43)
-        for index in range(6):
-            _write_at(drop, f"new-{index}", since + timedelta(hours=index + 1), 119.43)
+    chunk = await ActivityEnvironment().run(eln_sync.sync_eln_entries, source, since, True)
 
-        chunk = await ActivityEnvironment().run(eln_sync.sync_eln_entries, source, since, True)
-
-        refused = {entry.entry_id for entry in chunk.summary.rejected}
-        assert refused == {f"overlap-{i}" for i in range(2)} | {f"new-{i}" for i in range(4)}, (
-            "the chunk must process the whole overlap window plus one batch of new entries"
-        )
-        assert {row[0] for row in await _rows(source)} == refused, (
-            "every entry this chunk refused must carry a ledger row: the cursor has already "
-            "advanced past it, so no later run will ever offer it again"
-        )
-        await _clear(source)
-
-    asyncio.run(_run())
+    refused = {entry.entry_id for entry in chunk.summary.rejected}
+    assert refused == {f"overlap-{i}" for i in range(2)} | {f"new-{i}" for i in range(4)}, (
+        "the chunk must process the whole overlap window plus one batch of new entries"
+    )
+    assert {row[0] for row in await _rows(source)} == refused, (
+        "every entry this chunk refused must carry a ledger row: the cursor has already "
+        "advanced past it, so no later run will ever offer it again"
+    )
+    await _clear(source)
 
 
-def test_a_bulk_backfill_does_not_re_refuse_the_files_it_has_already_ingested(
+async def test_a_bulk_backfill_does_not_re_refuse_the_files_it_has_already_ingested(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A ledger row that says an ingested entry was never fetched is a record of the opposite.
@@ -846,62 +781,58 @@ def test_a_bulk_backfill_does_not_re_refuse_the_files_it_has_already_ingested(
 
     Driven through the real activity over two chunks, because one chunk cannot show it.
     """
+    await migrated_db_or_skip()
+    source = "ord-backfill"
+    await _clear(source)
+    monkeypatch.setattr(eln_sync, "_reaction_store", InMemoryFingerprintStore)
+    monkeypatch.setattr(eln_sync, "_molecule_store", InMemoryFingerprintStore)
+    monkeypatch.setattr(eln_sync, "_record_store", InMemoryReactionRecordStore)
+    monkeypatch.setattr(eln_sync, "_label_index", InMemoryLabelIndex)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        source = "ord-backfill"
-        await _clear(source)
-        monkeypatch.setattr(eln_sync, "_reaction_store", InMemoryFingerprintStore)
-        monkeypatch.setattr(eln_sync, "_molecule_store", InMemoryFingerprintStore)
-        monkeypatch.setattr(eln_sync, "_record_store", InMemoryReactionRecordStore)
-        monkeypatch.setattr(eln_sync, "_label_index", InMemoryLabelIndex)
+    drop = tmp_path / "drop"
+    drop.mkdir()
+    folder = tmp_path / "manifests" / source
+    folder.mkdir(parents=True)
+    (folder / "datasource.yaml").write_text(
+        f"name: {source}\n"
+        "description: An ORD corpus bulk-copied into a drop directory.\n"
+        "ingest: chemclaw.ingest.eln.ord_adapter:OrdJsonAdapter\n"
+        f"config:\n  export_dir: {drop}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "data_sources_dir", str(tmp_path / "manifests"))
+    monkeypatch.setattr(settings, "eln_sync_batch_size", 4)
 
-        drop = tmp_path / "drop"
-        drop.mkdir()
-        folder = tmp_path / "manifests" / source
-        folder.mkdir(parents=True)
-        (folder / "datasource.yaml").write_text(
-            f"name: {source}\n"
-            "description: An ORD corpus bulk-copied into a drop directory.\n"
-            "ingest: chemclaw.ingest.eln.ord_adapter:OrdJsonAdapter\n"
-            f"config:\n  export_dir: {drop}\n",
-            encoding="utf-8",
-        )
-        monkeypatch.setattr(settings, "data_sources_dir", str(tmp_path / "manifests"))
-        monkeypatch.setattr(settings, "eln_sync_batch_size", 4)
+    since = datetime(2026, 3, 10, tzinfo=UTC)
+    copied_at = time.time()
+    for index in range(10):
+        _write_at(drop, f"copied-{index}", since + timedelta(hours=index + 1), 42.0)
+        # The copy time, which is what a bulk copy leaves on every file it writes.
+        os.utime(drop / f"copied-{index}.json", (copied_at, copied_at))
 
-        since = datetime(2026, 3, 10, tzinfo=UTC)
-        copied_at = time.time()
-        for index in range(10):
-            _write_at(drop, f"copied-{index}", since + timedelta(hours=index + 1), 42.0)
-            # The copy time, which is what a bulk copy leaves on every file it writes.
-            os.utime(drop / f"copied-{index}.json", (copied_at, copied_at))
+    first = await ActivityEnvironment().run(eln_sync.sync_eln_entries, source, since, True)
+    assert len(first.summary.ingested) == 4, "the first chunk takes one batch"
+    second = await ActivityEnvironment().run(
+        eln_sync.sync_eln_entries, source, first.summary.next_cursor, False
+    )
+    # Four new ones plus the boundary entry the inclusive cursor replays.
+    assert set(second.summary.ingested) >= {f"copied-{index}" for index in (4, 5, 6, 7)}, (
+        "the second chunk takes the next batch"
+    )
 
-        first = await ActivityEnvironment().run(eln_sync.sync_eln_entries, source, since, True)
-        assert len(first.summary.ingested) == 4, "the first chunk takes one batch"
-        second = await ActivityEnvironment().run(
-            eln_sync.sync_eln_entries, source, first.summary.next_cursor, False
-        )
-        # Four new ones plus the boundary entry the inclusive cursor replays.
-        assert set(second.summary.ingested) >= {f"copied-{index}" for index in (4, 5, 6, 7)}, (
-            "the second chunk takes the next batch"
-        )
-
-        ingested = set(first.summary.ingested) | set(second.summary.ingested)
-        refused = {row[0] for row in await _rows(source)}
-        assert refused.isdisjoint(ingested), (
-            f"{len(refused & ingested)} ledger row(s) say a scheduled run will never fetch an "
-            "entry this drain has already ingested — the ledger is what a chemist is shown when "
-            "they ask why a record is missing, and these rows are about records that are present"
-        )
-        assert refused == set(), "nothing in this corpus was refused at all"
-        await _clear(source)
-        await _forget_records(source)
-
-    asyncio.run(_run())
+    ingested = set(first.summary.ingested) | set(second.summary.ingested)
+    refused = {row[0] for row in await _rows(source)}
+    assert refused.isdisjoint(ingested), (
+        f"{len(refused & ingested)} ledger row(s) say a scheduled run will never fetch an "
+        "entry this drain has already ingested — the ledger is what a chemist is shown when "
+        "they ask why a record is missing, and these rows are about records that are present"
+    )
+    assert refused == set(), "nothing in this corpus was refused at all"
+    await _clear(source)
+    await _forget_records(source)
 
 
-def test_an_injected_refusal_reason_reaches_the_model_inside_the_data_envelope(
+async def test_an_injected_refusal_reason_reaches_the_model_inside_the_data_envelope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The reproduced attack: a payload written into an ELN field that fails validation.
@@ -914,42 +845,38 @@ def test_an_injected_refusal_reason_reaches_the_model_inside_the_data_envelope(
 
     Removing `frame_untrusted` from `research_tools._refused_on_ingest` fails this test.
     """
+    await migrated_db_or_skip()
+    await _clear(LEDGER_SOURCE)
+    _write_raw(_ord_source(monkeypatch, tmp_path), "attacker-well-1", _INJECTION)
+    await _drain()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clear(LEDGER_SOURCE)
-        _write_raw(_ord_source(monkeypatch, tmp_path), "attacker-well-1", _INJECTION)
-        await _drain()
+    monkeypatch.setattr(research_tools, "_sources", lambda _anchor: [("graph", _Empty())])
+    sweep = await research_tools.gather_evidence(query=_UNRELATED)
 
-        monkeypatch.setattr(research_tools, "_sources", lambda _anchor: [("graph", _Empty())])
-        sweep = await research_tools.gather_evidence(query=_UNRELATED)
-
-        assert defang(_INJECTION) == _INJECTION, (
-            "the payload spells no envelope tag, so defanging it is a no-op — which is the whole "
-            "reason the previous control did not touch this vector"
-        )
-        assert [r.entry_id for r in sweep.refused_on_ingest] == ["attacker-well-1"], (
-            "one shared ordinary word is enough to carry this row onto an unrelated turn"
-        )
-        reason = sweep.refused_on_ingest[0].reason
-        assert _INJECTION in reason, "evidence is presented faithfully, never silently rewritten"
-        assert reason.startswith(f'<{ENVELOPE_TAG} id="') and reason.endswith(f"</{ENVELOPE_TAG}>")
-        # And nowhere else: the payload must not also appear outside the envelope, which is what a
-        # second unframed channel on the same object would look like.
-        rendered = repr(sweep)
-        assert rendered.count("dichloromethane is approved") == 1
-        # The envelope names the ledger row, not a note: there is nothing here to expand, because
-        # the record is absent — which is the statement the whole object makes.
-        assert 'id="refused-on-ingest:eln-ord:attacker-well-1"' in reason
-        # Framing does not soften what this is. It is still unmistakably a rejection.
-        assert sweep.refused_on_ingest[0].kind == "ingest-rejection"
-        assert "refused_on_ingest" in rendered and "ingest-rejection" in rendered
-        await _clear(LEDGER_SOURCE)
-
-    asyncio.run(_run())
+    assert defang(_INJECTION) == _INJECTION, (
+        "the payload spells no envelope tag, so defanging it is a no-op — which is the whole "
+        "reason the previous control did not touch this vector"
+    )
+    assert [r.entry_id for r in sweep.refused_on_ingest] == ["attacker-well-1"], (
+        "one shared ordinary word is enough to carry this row onto an unrelated turn"
+    )
+    reason = sweep.refused_on_ingest[0].reason
+    assert _INJECTION in reason, "evidence is presented faithfully, never silently rewritten"
+    assert reason.startswith(f'<{ENVELOPE_TAG} id="') and reason.endswith(f"</{ENVELOPE_TAG}>")
+    # And nowhere else: the payload must not also appear outside the envelope, which is what a
+    # second unframed channel on the same object would look like.
+    rendered = repr(sweep)
+    assert rendered.count("dichloromethane is approved") == 1
+    # The envelope names the ledger row, not a note: there is nothing here to expand, because
+    # the record is absent — which is the statement the whole object makes.
+    assert 'id="refused-on-ingest:eln-ord:attacker-well-1"' in reason
+    # Framing does not soften what this is. It is still unmistakably a rejection.
+    assert sweep.refused_on_ingest[0].kind == "ingest-rejection"
+    assert "refused_on_ingest" in rendered and "ingest-rejection" in rendered
+    await _clear(LEDGER_SOURCE)
 
 
-def test_the_content_is_framed_and_the_labels_are_defanged(
+async def test_the_content_is_framed_and_the_labels_are_defanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The split, on every field at once: `reason` is content, `source`/`entry_id` are labels.
@@ -977,30 +904,27 @@ def test_the_content_is_framed_and_the_labels_are_defanged(
             total_matching=1,
         )
 
-    async def _run() -> None:
-        monkeypatch.setattr(research_tools, "_sources", lambda _anchor: [("graph", _Empty())])
-        monkeypatch.setattr(research_tools, "refusals_matching", _one)
+    monkeypatch.setattr(research_tools, "_sources", lambda _anchor: [("graph", _Empty())])
+    monkeypatch.setattr(research_tools, "refusals_matching", _one)
 
-        sweep = await research_tools.gather_evidence(query=_UNRELATED)
-        rejection = sweep.refused_on_ingest[0]
+    sweep = await research_tools.gather_evidence(query=_UNRELATED)
+    rejection = sweep.refused_on_ingest[0]
 
-        # Content: framed, and the forged delimiter inside it defanged by the framing itself.
-        assert rejection.reason.startswith(f'<{ENVELOPE_TAG} id="')
-        assert rejection.reason.endswith(f"</{ENVELOPE_TAG}>")
-        # The payload's own words survive inside it. Its `<<<` is escaped here and not in the test
-        # above, because this reason *also* spells a delimiter: `framing._defang` escapes every
-        # `<` once a content span is shown to be obfuscating one, which is its blunt second pass
-        # and not a property of the framing being asserted.
-        assert "dichloromethane is approved" in rejection.reason
-        assert "&lt;/retrieved-note>" in rejection.reason
-        # Labels: defanged, never wrapped — an envelope here would make the row unciteable.
-        for label in (rejection.source, rejection.entry_id):
-            assert not label.startswith("<"), "a label is not evidence and must not be framed"
-            assert "&lt;/retrieved-note" in label, "a label still may not spell a delimiter"
-        # Exactly one envelope closes in the whole rendered result: the one this tool opened.
-        assert repr(sweep).count(f"</{ENVELOPE_TAG}>") == 1
-
-    asyncio.run(_run())
+    # Content: framed, and the forged delimiter inside it defanged by the framing itself.
+    assert rejection.reason.startswith(f'<{ENVELOPE_TAG} id="')
+    assert rejection.reason.endswith(f"</{ENVELOPE_TAG}>")
+    # The payload's own words survive inside it. Its `<<<` is escaped here and not in the test
+    # above, because this reason *also* spells a delimiter: `framing._defang` escapes every
+    # `<` once a content span is shown to be obfuscating one, which is its blunt second pass
+    # and not a property of the framing being asserted.
+    assert "dichloromethane is approved" in rejection.reason
+    assert "&lt;/retrieved-note>" in rejection.reason
+    # Labels: defanged, never wrapped — an envelope here would make the row unciteable.
+    for label in (rejection.source, rejection.entry_id):
+        assert not label.startswith("<"), "a label is not evidence and must not be framed"
+        assert "&lt;/retrieved-note" in label, "a label still may not spell a delimiter"
+    # Exactly one envelope closes in the whole rendered result: the one this tool opened.
+    assert repr(sweep).count(f"</{ENVELOPE_TAG}>") == 1
 
 
 class _Empty:
@@ -1013,7 +937,7 @@ class _Empty:
         return []
 
 
-def test_a_database_that_is_away_costs_one_connection_and_not_one_per_refusal(
+async def test_a_database_that_is_away_costs_one_connection_and_not_one_per_refusal(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The fallback isolates a poison *row*; it must not re-attempt an absent *database* per row.
@@ -1029,33 +953,29 @@ def test_a_database_that_is_away_costs_one_connection_and_not_one_per_refusal(
     Counted rather than timed, because the count is the mechanism: one `db.failed` record is one
     connection attempt, and a refused socket is instant on some hosts and a full timeout on others.
     """
+    # A port nothing listens on: the case `record_refusals` swallows for the corpus's sake.
+    monkeypatch.setattr(
+        settings, "postgres_dsn", "postgresql://chemclaw:chemclaw@127.0.0.1:5999/chemclaw"
+    )
+    monkeypatch.setattr(settings, "pg_connect_timeout_seconds", 1)
+    refusals = {f"well-{index}": "yield_percent 119.43 exceeds 100" for index in range(5)}
 
-    async def _run() -> None:
-        # A port nothing listens on: the case `record_refusals` swallows for the corpus's sake.
-        monkeypatch.setattr(
-            settings, "postgres_dsn", "postgresql://chemclaw:chemclaw@127.0.0.1:5999/chemclaw"
-        )
-        monkeypatch.setattr(settings, "pg_connect_timeout_seconds", 1)
-        refusals = {f"well-{index}": "yield_percent 119.43 exceeds 100" for index in range(5)}
+    with caplog.at_level("WARNING"):
+        await record_refusals("test-absent-database", refusals)
 
-        with caplog.at_level("WARNING"):
-            await record_refusals("test-absent-database", refusals)
-
-        attempts = [r for r in caplog.records if getattr(r, "event", "") == "db.failed"]
-        assert len(attempts) == 1, (
-            f"an unreachable database was dialled {len(attempts)} times for 5 refusals; the "
-            "row-by-row fallback is for a row the database refuses, not for a database that is "
-            "not there"
-        )
-        ours = [r for r in caplog.records if r.name == rejections.__name__]
-        assert len(ours) == 1 and "unreachable" in ours[0].getMessage(), (
-            f"one warning naming the outage, not one per row: {[r.getMessage()[:60] for r in ours]}"
-        )
-
-    asyncio.run(_run())
+    attempts = [r for r in caplog.records if getattr(r, "event", "") == "db.failed"]
+    assert len(attempts) == 1, (
+        f"an unreachable database was dialled {len(attempts)} times for 5 refusals; the "
+        "row-by-row fallback is for a row the database refuses, not for a database that is "
+        "not there"
+    )
+    ours = [r for r in caplog.records if r.name == rejections.__name__]
+    assert len(ours) == 1 and "unreachable" in ours[0].getMessage(), (
+        f"one warning naming the outage, not one per row: {[r.getMessage()[:60] for r in ours]}"
+    )
 
 
-def test_the_reader_says_how_many_refusals_it_did_not_show() -> None:
+async def test_the_reader_says_how_many_refusals_it_did_not_show() -> None:
     """`_MAX_MATCHES` is 5 and the bound is argued; what was missing is that a caller can tell.
 
     The bound itself is a decision this test does not reopen — the module states it plainly ("Both
@@ -1067,33 +987,26 @@ def test_the_reader_says_how_many_refusals_it_did_not_show() -> None:
     `total_matching` comes from a window function in the same statement rather than a second
     query, so the number and the rows are one snapshot of one scan.
     """
+    await migrated_db_or_skip()
+    source = "test-many-matches"
+    await _clear(source)
+    await _clear(LEDGER_SOURCE)
+    # A nonce in the reason, so this assertion counts *these* rows: matching deliberately
+    # spans sources, and a shared schema carries other tests' refusals.
+    nonce = "plateaux77713"
+    await record_refusals(
+        source,
+        {f"plate-{index:02d}-well": f"{nonce}: yield_percent exceeds 100" for index in range(12)},
+    )
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        source = "test-many-matches"
-        await _clear(source)
-        await _clear(LEDGER_SOURCE)
-        # A nonce in the reason, so this assertion counts *these* rows: matching deliberately
-        # spans sources, and a shared schema carries other tests' refusals.
-        nonce = "plateaux77713"
-        await record_refusals(
-            source,
-            {
-                f"plate-{index:02d}-well": f"{nonce}: yield_percent exceeds 100"
-                for index in range(12)
-            },
-        )
-
-        found = await refusals_matching(f"why is there no record of the {nonce} run")
-        assert len(found.rejections) == rejections._MAX_MATCHES
-        assert found.total_matching == 12
-        assert found.truncated
-        await _clear(source)
-
-    asyncio.run(_run())
+    found = await refusals_matching(f"why is there no record of the {nonce} run")
+    assert len(found.rejections) == rejections._MAX_MATCHES
+    assert found.total_matching == 12
+    assert found.truncated
+    await _clear(source)
 
 
-def test_evicting_a_source_s_oldest_refusals_is_recorded_rather_than_silent(
+async def test_evicting_a_source_s_oldest_refusals_is_recorded_rather_than_silent(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """`_MAX_ROWS_PER_SOURCE` **deletes**, and nothing counted what it deleted.
@@ -1108,26 +1021,20 @@ def test_evicting_a_source_s_oldest_refusals_is_recorded_rather_than_silent(
     A log line is what this repository can hold today; the counter that would make the assumption
     alertable across runs needs a series declared in `core/metrics.py`.
     """
+    await migrated_db_or_skip()
+    source = "test-evict-record"
+    await _clear(source)
+    monkeypatch.setattr(rejections, "_MAX_ROWS_PER_SOURCE", 3)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        source = "test-evict-record"
-        await _clear(source)
-        monkeypatch.setattr(rejections, "_MAX_ROWS_PER_SOURCE", 3)
+    with caplog.at_level("WARNING", logger="chemclaw.ingest.rejections"):
+        await record_refusals(source, {f"entry-{index}": "broken" for index in range(4)})
+        await record_refusals(source, {f"later-{index}": "still broken" for index in range(3)})
 
-        with caplog.at_level("WARNING", logger="chemclaw.ingest.rejections"):
-            await record_refusals(source, {f"entry-{index}": "broken" for index in range(4)})
-            await record_refusals(source, {f"later-{index}": "still broken" for index in range(3)})
-
-        evicted = [
-            record.getMessage() for record in caplog.records if "evicted" in record.getMessage()
-        ]
-        assert evicted, "the eviction deleted rows and left no record that it had"
-        # Four rows written against a cap of three, so one goes; then three more arrive and three
-        # of the six go. Both are reported, because both destroyed a record.
-        assert "evicted 1 ingest rejection(s)" in evicted[0]
-        assert "evicted 3 ingest rejection(s)" in evicted[1]
-        assert all(source in message for message in evicted)
-        await _clear(source)
-
-    asyncio.run(_run())
+    evicted = [record.getMessage() for record in caplog.records if "evicted" in record.getMessage()]
+    assert evicted, "the eviction deleted rows and left no record that it had"
+    # Four rows written against a cap of three, so one goes; then three more arrive and three
+    # of the six go. Both are reported, because both destroyed a record.
+    assert "evicted 1 ingest rejection(s)" in evicted[0]
+    assert "evicted 3 ingest rejection(s)" in evicted[1]
+    assert all(source in message for message in evicted)
+    await _clear(source)

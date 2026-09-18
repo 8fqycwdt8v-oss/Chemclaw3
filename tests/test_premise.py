@@ -131,7 +131,7 @@ def test_an_empty_premise_never_reads_the_corpus(monkeypatch: pytest.MonkeyPatch
     assert asyncio.run(premise_breaks([])) == []
 
 
-def test_a_question_on_retired_knowledge_is_refused_at_the_ask(
+async def test_a_question_on_retired_knowledge_is_refused_at_the_ask(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The ask-time half, and it is what makes the answer-time half mean "since".
@@ -144,14 +144,11 @@ def test_a_question_on_retired_knowledge_is_refused_at_the_ask(
     _corpus(tmp_path, monkeypatch, _retired())
     monkeypatch.setattr(settings, "entra_required", False)
 
-    async def _run() -> None:
-        with pytest.raises(ChemclawError, match="no longer holds"):
-            await request_external_input(
-                subject="re-run the degassing from [[playbook-degassing]]",
-                rationale="the campaign is suspended on it",
-            )
-
-    asyncio.run(_run())
+    with pytest.raises(ChemclawError, match="no longer holds"):
+        await request_external_input(
+            subject="re-run the degassing from [[playbook-degassing]]",
+            rationale="the campaign is suspended on it",
+        )
 
 
 def test_the_premise_is_derived_from_what_the_question_cites(
@@ -177,68 +174,62 @@ def test_the_premise_is_derived_from_what_the_question_cites(
     )
 
 
-def test_the_store_round_trips_the_premise(tmp_path: Path) -> None:
+async def test_the_store_round_trips_the_premise(tmp_path: Path) -> None:
     """The column, the upsert's tuple and the read projection are positional and move together.
 
     `_row` maps `_COLUMNS` by index, so a column added to one and not the other does not fail — it
     silently mis-assigns every field after it. This is the cheapest assertion that catches that.
     """
+    await migrated_db_or_skip()
+    await _clear("premise-roundtrip")
+    await pending_store.open_request(
+        request_id="premise-roundtrip",
+        kind="approval",
+        subject="approve the run",
+        rationale="it cites [[playbook-degassing]]",
+        asked_of="",
+        requested_by="u-asker",
+        session_id="s-1",
+        correlation_id="c-1",
+        due_at=datetime.now(UTC) + timedelta(days=7),
+        premise_note_ids=["playbook-degassing"],
+    )
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clear("premise-roundtrip")
-        await pending_store.open_request(
-            request_id="premise-roundtrip",
-            kind="approval",
-            subject="approve the run",
-            rationale="it cites [[playbook-degassing]]",
-            asked_of="",
-            requested_by="u-asker",
-            session_id="s-1",
-            correlation_id="c-1",
-            due_at=datetime.now(UTC) + timedelta(days=7),
-            premise_note_ids=["playbook-degassing"],
-        )
-
-        stored = await pending_store.get_request("premise-roundtrip")
-        assert stored is not None
-        assert stored.premise_note_ids == ["playbook-degassing"]
-        assert stored.subject == "approve the run", "the projection shifted by a column"
-
-    asyncio.run(_run())
+    stored = await pending_store.get_request("premise-roundtrip")
+    assert stored is not None
+    assert stored.premise_note_ids == ["playbook-degassing"]
+    assert stored.subject == "approve the run", "the projection shifted by a column"
 
 
-def test_a_re_ask_replaces_the_premise_rather_than_keeping_the_old_one(tmp_path: Path) -> None:
+async def test_a_re_ask_replaces_the_premise_rather_than_keeping_the_old_one(
+    tmp_path: Path,
+) -> None:
     """A re-ask is a new question, validated against today's corpus.
 
     Keeping the previous cycle's premise would check an answer against notes this question never
     rested on — and where the old cycle cited a note that has since been retired, would refuse every
     answer to a question whose own premise is whole.
     """
+    await migrated_db_or_skip()
+    await _clear("premise-reask")
+    for premise, run in (["old-note"], "run-1"), (["new-note"], "run-2"):
+        await pending_store.open_request(
+            request_id="premise-reask",
+            kind="measurement",
+            subject="run it",
+            rationale="",
+            asked_of="",
+            requested_by="u-asker",
+            session_id="s-1",
+            correlation_id="c-1",
+            due_at=datetime.now(UTC) + timedelta(days=7),
+            premise_note_ids=premise,
+            run_id=run,
+        )
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clear("premise-reask")
-        for premise, run in (["old-note"], "run-1"), (["new-note"], "run-2"):
-            await pending_store.open_request(
-                request_id="premise-reask",
-                kind="measurement",
-                subject="run it",
-                rationale="",
-                asked_of="",
-                requested_by="u-asker",
-                session_id="s-1",
-                correlation_id="c-1",
-                due_at=datetime.now(UTC) + timedelta(days=7),
-                premise_note_ids=premise,
-                run_id=run,
-            )
-
-        stored = await pending_store.get_request("premise-reask")
-        assert stored is not None
-        assert stored.premise_note_ids == ["new-note"]
-
-    asyncio.run(_run())
+    stored = await pending_store.get_request("premise-reask")
+    assert stored is not None
+    assert stored.premise_note_ids == ["new-note"]
 
 
 def test_an_answer_is_refused_once_its_premise_has_gone(
@@ -289,7 +280,7 @@ def test_an_answer_is_refused_once_its_premise_has_gone(
     asyncio.run(_still_open())
 
 
-def test_an_answer_goes_through_while_its_premise_stands(
+async def test_an_answer_goes_through_while_its_premise_stands(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The guard against a check that refuses everything.
@@ -298,24 +289,21 @@ def test_an_answer_goes_through_while_its_premise_stands(
     test in this file. The 503 is the *broker* being absent in this test environment, which is
     exactly the point: the request got past the premise check and died at the signal.
     """
+    await migrated_db_or_skip()
+    await _clear("premise-stands")
+    await pending_store.open_request(
+        request_id="premise-stands",
+        kind="measurement",
+        subject="re-run the degassing",
+        rationale="",
+        asked_of="",
+        requested_by="u-someone-else",
+        session_id="s-1",
+        correlation_id="c-1",
+        due_at=datetime.now(UTC) + timedelta(days=7),
+        premise_note_ids=["playbook-degassing"],
+    )
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clear("premise-stands")
-        await pending_store.open_request(
-            request_id="premise-stands",
-            kind="measurement",
-            subject="re-run the degassing",
-            rationale="",
-            asked_of="",
-            requested_by="u-someone-else",
-            session_id="s-1",
-            correlation_id="c-1",
-            due_at=datetime.now(UTC) + timedelta(days=7),
-            premise_note_ids=["playbook-degassing"],
-        )
-
-    asyncio.run(_run())
     _corpus(tmp_path, monkeypatch, _standing())
 
     app = create_app(connector_factory=_no_connectors, graph_factory=_no_graph)
@@ -449,7 +437,7 @@ def test_a_citation_that_cannot_be_a_note_id_is_not_carried_into_the_premise() -
     )
 
 
-def test_the_activity_carries_the_premise_onto_the_row(tmp_path: Path) -> None:
+async def test_the_activity_carries_the_premise_onto_the_row(tmp_path: Path) -> None:
     """The one line that puts the derived premise on the stored row, driven end to end.
 
     Nothing covered it. `open_pending_request_activity` is the single caller of `open_request`, and
@@ -461,27 +449,24 @@ def test_the_activity_carries_the_premise_onto_the_row(tmp_path: Path) -> None:
     """
     from chemclaw.durable.awaiting import AwaitRequest, _OpenInput, open_pending_request_activity
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clear("premise-carried")
-        await open_pending_request_activity(
-            _OpenInput(
-                request_id="premise-carried",
-                request=AwaitRequest(
-                    kind="measurement",
-                    subject="confirm the degassing step in [[playbook-degassing]]",
-                    rationale="it gates [[campaign-7]]",
-                    requested_by="u-alice",
-                    session_id="s-1",
-                ),
-                started_at=datetime.now(UTC).isoformat(),
-            )
+    await migrated_db_or_skip()
+    await _clear("premise-carried")
+    await open_pending_request_activity(
+        _OpenInput(
+            request_id="premise-carried",
+            request=AwaitRequest(
+                kind="measurement",
+                subject="confirm the degassing step in [[playbook-degassing]]",
+                rationale="it gates [[campaign-7]]",
+                requested_by="u-alice",
+                session_id="s-1",
+            ),
+            started_at=datetime.now(UTC).isoformat(),
         )
-        stored = await pending_store.get_request("premise-carried")
-        assert stored is not None
-        assert stored.premise_note_ids == ["playbook-degassing", "campaign-7"], (
-            "the premise the question derived must reach the row a later answer is checked against"
-        )
-        await _clear("premise-carried")
-
-    asyncio.run(_run())
+    )
+    stored = await pending_store.get_request("premise-carried")
+    assert stored is not None
+    assert stored.premise_note_ids == ["playbook-degassing", "campaign-7"], (
+        "the premise the question derived must reach the row a later answer is checked against"
+    )
+    await _clear("premise-carried")

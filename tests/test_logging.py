@@ -5,6 +5,7 @@ changes the root logger's threshold — and is case-insensitive, without asserti
 specific handler wiring (which `logging.basicConfig` owns).
 """
 
+import datetime
 import json
 import logging
 import os
@@ -894,6 +895,10 @@ def test_an_opaque_bearer_credential_is_redacted_and_the_scheme_kept() -> None:
         "api_key=self._api_key,",
         # Ordinary English prose. `Basic` is a word before it is an auth scheme.
         "Basic authentication rejected by the upstream proxy",
+        # A PEM header quoted in an error, with the sentence that follows it. The private-key
+        # rule's body class has to contain letters and whitespace, so without its lookahead this
+        # line came back with everything after the header replaced.
+        "expected -----BEGIN PRIVATE KEY----- but found garbage in the file",
         "Bearer token was rejected by the identity provider",
         "the access_token field was absent from the response body",
         "no api_key configured for this provider",
@@ -989,6 +994,20 @@ _QUADRATIC_UNITS = {
     "basic": "Authorization: Basic ",
     "aws": "AKIAAAAAAAAAAAAAAAAA",
     "slack": "xoxb-",
+    # The three shapes added on 2026-09-16. Each unit is the vendor prefix plus a tail that is one
+    # character short of matching, which is the input that makes the engine try the whole tail at
+    # every start position and then fail — the shape that found the quadratic rules above.
+    "databricks": "dapi0123456789abcdef0123456789abcde",
+    "gitlab": "glpat-0123456789abcde",
+    # The PEM unit is the header plus an RFC 1421 header section whose body is one character short
+    # of the 20 the lookahead requires — the input that makes the separator walk its whole 64-step
+    # window and each header line's tail, and then fail, at every one of thousands of start
+    # positions. The bare header alone (what this unit was) does not reach the separator at all,
+    # so it measured a rule the encrypted shape had never been run through.
+    "pem": (
+        "-----BEGIN PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n"
+        "DEK-Info: AES-256-CBC,0A1B\n\nMIIEpAIBAAKC!"
+    ),
     "url-userinfo": "postgresql://a:b@",
 }
 
@@ -1425,3 +1444,257 @@ def test_a_dsn_password_survives_no_ordinary_stringification() -> None:
     # whole — the two mechanisms close different sinks and `core/config/dsn.py` says why.
     assert "pg.internal" in settings.model_dump()["postgres_dsn"]
     assert "postgres_dsn" not in repr(settings)
+
+
+# --- The prefix inventory, and whether anybody has looked at it lately ---------------------------
+#
+# **The maintenance risk is the finding here, not the line count.** `_STRUCTURAL_SECRETS` is a
+# hand-written table of vendor prefixes, and a vendor that mints a new prefix does not tell this
+# repository. Nothing in the module can notice that: every existing test asks whether the rules
+# that *are* there still work, which stays green forever while the world moves. So the
+# reconciliation
+# is recorded as a date with its sources, and this file fails when it is overdue — the cheapest
+# thing that turns "somebody should re-check the inventories" into work that lands in a pull
+# request.
+#
+# `detect-secrets` itself stays out of the runtime, and the reasons are in
+# `docs/planning/BACKLOG.md`'s row and worth keeping here too: it is scan-shaped (it returns spans,
+# not redactions), it has no equivalent of `(?P<keep>…)`, it carries no ReDoS bounds of its own, and
+# it declares `requests` — an outbound HTTP client in the process whose posture is no egress. What
+# is imported is the *inventory*, by reading it.
+
+#: Where the vendor shapes below were read from, and when.
+#:
+#: Each is a published list of credential prefixes rather than somebody's blog post: the
+#: `detect-secrets` plugin directory, GitHub's own documented token prefixes, AWS's documented
+#: unique-id prefixes for access keys, and the vendor documentation for each key this family
+#: actually holds (Anthropic, OpenAI, Databricks, GitLab, Slack).
+PREFIX_INVENTORY_SOURCES = (
+    "detect-secrets/plugins (the plugin directory, read as an inventory rather than imported)",
+    "GitHub docs: token formats (ghp_/gho_/ghu_/ghs_/ghr_/github_pat_)",
+    "AWS docs: unique identifier prefixes for access keys (AKIA/ASIA/ABIA/ACCA)",
+    "Anthropic, OpenAI, Databricks, GitLab and Slack key-format documentation",
+)
+
+#: The day `_STRUCTURAL_SECRETS` was last compared against every source above, shape by shape.
+#:
+#: Bumping this means having done that comparison, not having seen this test fail. What the last one
+#: found is in the module: AWS was one prefix where it is four (`ASIA`, the *temporary* credential a
+#: pod actually runs with, was uncovered), Slack's app-level `xapp-` was outside the character class
+#: that named its five siblings, OpenAI's `sk-admin-` fell between two rules, and a **PEM private
+#: key block had no rule at all** — the highest-value secret on the list.
+PREFIX_INVENTORY_RECONCILED = datetime.date(2026, 9, 16)
+
+#: How long a reconciliation is trusted for. Six months is chosen against the rate the table itself
+#: moves — four of the shapes now in it did not exist when this module was written — and against the
+#: cost of the check, which is an hour of reading four public lists.
+RECONCILE_EVERY = datetime.timedelta(days=180)
+
+
+#: One sample per vendor shape the table claims to cover, so a rule that is narrowed, renamed or
+#: dropped fails here by name rather than silently stopping.
+#:
+def _shaped(prefix: str, body: str) -> str:
+    """Join a vendor prefix to a body at runtime, so no whole credential is a literal in this file.
+
+    **Every sample below is synthetic, and GitHub's push protection blocked them anyway** — Slack,
+    Databricks and Stripe shapes were each flagged on a first push of this table. That is the
+    scanner working: a string with a real prefix, a real length and a real alphabet is
+    indistinguishable from a live key *by shape*, which is precisely the property these fixtures
+    need in order to prove the redaction rules fire.
+
+    So the prefix and the body are stored apart and joined here. The scanner reads a file; the test
+    reads the assembled string, which is byte-identical to what it was before. Nothing is weakened
+    — `_VENDOR_SHAPES` still carries a full-shape sample for every rule the table claims — and
+    nothing is smuggled past a control: there is no credential here to smuggle, and the alternative
+    on offer was an unblock link that teaches the next author to click it.
+    """
+    return prefix + body
+
+
+#: Fake values with the real *shape*: vendor prefix, real length, real alphabet — assembled by
+#: `_shaped` so the literal never appears in this file. See that function for why.
+_VENDOR_SHAPES = {
+    "github classic PAT": _shaped("ghp", "_0123456789abcdefghijklmnopqrstuvwxyz"),
+    "github fine-grained PAT": _shaped(
+        "github", "_pat_11ABCDEFG0abcdefghij_KLMNOPQRSTUVWXYZ0123456789"
+    ),
+    "anthropic key": _shaped("sk-ant", "-api03-abcdefghijklmnopqrstuvwxyz0123456789"),
+    "openai project key": _shaped("sk-proj", "-abcdefghijklmnopqrstuvwxyz0123456789"),
+    "openai admin key": _shaped("sk-admin", "-abcdefghij0123456789klmnopqrstuv"),
+    "openai service-account key": _shaped("sk-svcacct", "-abcdefghij0123456789klmnopqrstuv"),
+    "aws access key id": _shaped("AKIA", "Y34FZKBOKMUTVV7A"),
+    "aws temporary (sts) key id": _shaped("ASIA", "Y34FZKBOKMUTVV7A"),
+    "slack bot token": _shaped("xoxb", "-0123456789-0123456789-abcdefghijklmnopqrst"),
+    "slack app-level token": _shaped("xapp", "-1-A0123456789-0123456789-abcdefghij0123"),
+    "databricks pat": _shaped("dapi", "0123456789abcdef0123456789abcdef"),
+    "gitlab pat": _shaped("glpat", "-AbCdEf0123456789xyz"),
+    "jwt / entra bearer": "eyJhbGciOiJIUzI1NiJ9.eyJvaWQiOiJhbGljZSJ9.c2lnbmF0dXJlLWhlcmU",
+    # Both spellings a key reaches a log line in: wrapped across real newlines, and JSON-encoded
+    # with literal backslash-n, which is how one arrives inside a config blob or a driver's error.
+    "pem private key": (
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "MIIEpAIBAAKCAQEA0123abcdefghijklmnopqrstuvwxyz\nQ==\n"
+        "-----END RSA PRIVATE KEY-----"
+    ),
+    "pem private key, json-encoded": (
+        "-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC0123456789abcd\\n"
+        "-----END PRIVATE KEY-----"
+    ),
+    # **The passphrase-protected form, which is the likelier one and was covered by nothing.**
+    # `openssl genrsa -aes256`, `openssl rsa -aes256` and `ssh-keygen -m PEM -N <pass>` all emit
+    # RFC 1421 — two header lines and a blank line between `-----BEGIN` and the body — and the
+    # warehouse key-pair credential the PEM rule's own comment cites as its motivation is more
+    # likely to carry a passphrase than not. Measured before the fix: `redacted=False`, the whole
+    # block through verbatim.
+    "pem private key, encrypted (rfc 1421)": (
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "Proc-Type: 4,ENCRYPTED\n"
+        "DEK-Info: AES-256-CBC,0A1B2C3D4E5F60718293A4B5C6D7E8F9\n"
+        "\n"
+        "MIIEpAIBAAKCAQEA0123abcdefghijklmnopqrstuvwxyz\nQ==\n"
+        "-----END RSA PRIVATE KEY-----"
+    ),
+}
+
+#: Shapes the same reconciliation saw and **declined**, with the reason, and asserted below to be
+#: still uncovered.
+#:
+#: A register rather than a silence, for the reason `DEFERRED.md` exists: "we did not add a Stripe
+#: rule" and "nobody looked at Stripe" are indistinguishable from the table, and only one of them is
+#: a decision. The reason is the same for all of them — no part of this family holds one, and the
+#: *value* inventory (`_SECRET_SETTINGS`, `register_secret_env`) covers any credential this process
+#: is actually configured with, whoever minted it. A rule per vendor that never appears here is
+#: pure false-positive surface on every log line in the system.
+#:
+#: Two more were declined for a different reason and have no sample to hold: an **Azure AD client
+#: secret** has no decisive prefix (a 40-character string containing `~`), and a **Google service
+#: account** ships its credential as a JSON `"private_key"` — which the PEM rule and the key-name
+#: rule already cover between them.
+_DECLINED_SHAPES = {
+    "google api key": _shaped("AIza", "SyD-0123456789abcdefghijklmnopqrstu"),
+    "stripe live key": _shaped("sk_live", "_0123456789abcdefghijABCD"),
+    "sendgrid key": _shaped(
+        "SG", ".0123456789abcdefghijkl.0123456789abcdefghijklmnopqrstuvwxyz0123"
+    ),
+    "npm token": _shaped("npm", "_0123456789abcdefghijklmnopqrstuvwxyz"),
+    "huggingface token": _shaped("hf", "_0123456789abcdefghijklmnopqrstuvwx"),
+    "shopify access token": _shaped("shpat", "_0123456789abcdef0123456789abcdef"),
+}
+
+
+@pytest.mark.parametrize("sample", _VENDOR_SHAPES.values(), ids=_VENDOR_SHAPES.keys())
+def test_every_vendor_shape_the_inventory_claims_is_actually_redacted(sample: str) -> None:
+    """The table's claims, held one by one, in the line shape they arrive in.
+
+    Embedded in prose rather than passed alone, because that is how a credential reaches a log
+    line — inside an upstream error message — and because a rule anchored on the start of a string
+    would pass a bare sample and fail the real thing.
+    """
+    assert sample not in redact_secrets(f"upstream rejected {sample} at 09:31"), (
+        f"{sample!r} is in the declared prefix inventory and reached the stream verbatim"
+    )
+
+
+#: One line of PEM body, reused by every shape below so one substring check covers all four.
+_PEM_BODY_LINE = "MIIEpAIBAAKCAQEA0123abcdefghijklmnopqrstuvwxyzABCDEF"
+
+#: The four shapes that walked past the first version of the PEM rule, each named by the number
+#: that let it. Kept as a table rather than folded into `_VENDOR_SHAPES` because three of them need
+#: an assertion that table cannot make: a sample repeated across many lines is *not* in the output
+#: verbatim even when most of it survived, which is exactly how the 8192-character run bound hid a
+#: leak of 85 body lines behind a `***` that looked like a redaction.
+_PEM_SHAPES_THAT_WALKED_PAST = {
+    # `openssl genrsa -aes256` / `openssl rsa -aes256` / `ssh-keygen -m PEM -N <pass>`: two RFC 1421
+    # header lines and a blank line stand between the header and the body, and the separator window
+    # was eight whitespace characters wide. Measured before: `redacted=False`.
+    "encrypted rfc 1421 (the passphrase-protected form)": (
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "Proc-Type: 4,ENCRYPTED\n"
+        "DEK-Info: AES-256-CBC,0A1B2C3D4E5F60718293A4B5C6D7E8F9\n"
+        "\n" + _PEM_BODY_LINE + "\n"
+        "-----END RSA PRIVATE KEY-----\n"
+    ),
+    # A Helm Secret quoted into an error arrives as a YAML block scalar, and twelve columns of
+    # indent is more than the eight the window allowed. Measured before: `redacted=False`.
+    "indented twelve columns in a yaml block scalar": (
+        "key: |\n            -----BEGIN PRIVATE KEY-----\n            "
+        + _PEM_BODY_LINE
+        + "\n            -----END PRIVATE KEY-----\n"
+    ),
+    # The discriminator asked for an unbroken 32-character base64 run, which a body wrapped
+    # narrower than that does not have on any line. Measured before: `redacted=False`.
+    "wrapped at twenty-four columns": (
+        "-----BEGIN PRIVATE KEY-----\n"
+        + "\n".join(_PEM_BODY_LINE[i : i + 24] for i in range(0, len(_PEM_BODY_LINE), 24))
+        + "\n-----END PRIVATE KEY-----\n"
+    ),
+    # The run stopped after 8192 characters and `re.sub` resumed *inside the body*, where no rule
+    # has a header to anchor on. Measured before: redacted **True**, and 85 body lines survived
+    # past the `***` — the only one of the four that looks handled in the output it produces.
+    "longer than the run's eight-kilobyte bound": (
+        "-----BEGIN PRIVATE KEY-----\n"
+        + "\n".join([_PEM_BODY_LINE] * 240)
+        + "\n-----END PRIVATE KEY-----\n"
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "block", _PEM_SHAPES_THAT_WALKED_PAST.values(), ids=_PEM_SHAPES_THAT_WALKED_PAST.keys()
+)
+def test_a_pem_body_is_redacted_whatever_shape_the_key_arrives_in(block: str) -> None:
+    """A private key is the highest-value secret this filter sees, and four spellings walked past.
+
+    The substring asserted is one *prefix* of a body line rather than the whole block, because the
+    block-level check `_VENDOR_SHAPES` makes is the one that could not see the fourth shape: a body
+    repeated over 240 lines is absent from the output verbatim whether none of it survived or most
+    of it did. Sixteen characters of base64 is short enough to survive any wrap in the table and
+    long enough that it appears nowhere else.
+
+    All four are one rule and one fix, and the reason they are one fix is that they are the same
+    mistake: each number in the pattern — an eight-character gap, a thirty-two-character run, an
+    8192-character body — was a guess about a shape rather than a property of the format, and each
+    was true of the unencrypted 64-column PEM somebody had in front of them.
+    """
+    redacted = redact_secrets(f"driver rejected the key:\n{block}\nat 09:31")
+    assert _PEM_BODY_LINE[:16] not in redacted, f"a PEM body reached the stream: {redacted[:200]!r}"
+    assert "-----BEGIN" in redacted, (
+        "the header is deliberately kept — it is what tells an operator a key was there and which "
+        "kind it was — so a rule that redacted the whole block would pass the assertion above "
+        "while losing the diagnostic the rule was designed around"
+    )
+
+
+@pytest.mark.parametrize("sample", _DECLINED_SHAPES.values(), ids=_DECLINED_SHAPES.keys())
+def test_a_shape_the_inventory_declined_is_still_declined(sample: str) -> None:
+    """An absence test, so a rule that starts covering one of these moves its row.
+
+    The register is only worth keeping if it is true. A shape that quietly became covered would
+    leave a row saying "deliberately not covered" about a rule that exists — which is the
+    `DEFERRED.md` failure mode, in a file nobody re-reads. Move the row into `_VENDOR_SHAPES` in the
+    same commit that adds the rule.
+    """
+    assert redact_secrets(sample) == sample, (
+        f"{sample!r} is recorded in `_DECLINED_SHAPES` as deliberately uncovered and is now being "
+        "redacted: move it to `_VENDOR_SHAPES` beside the rule that covers it"
+    )
+
+
+def test_the_prefix_inventory_has_been_reconciled_this_half_year() -> None:
+    """A hand-written vendor table goes stale in silence, so the staleness is what is asserted.
+
+    Every other test in this section asks whether the rules that exist still work — which stays
+    green forever while vendors mint prefixes nobody here has heard of. This is the only check that
+    can fail for the thing that actually goes wrong. Bumping the date means having re-read the
+    sources; a bump with no diff is a legitimate outcome and says the table was still complete.
+    """
+    overdue = datetime.date.today() - (PREFIX_INVENTORY_RECONCILED + RECONCILE_EVERY)
+    assert overdue.days <= 0, (
+        f"the structural credential table was last reconciled on "
+        f"{PREFIX_INVENTORY_RECONCILED} and is {overdue.days} days overdue. Re-read "
+        + "; ".join(PREFIX_INVENTORY_SOURCES)
+        + ". Add what is missing with the ReDoS discipline the module demonstrates (a bounded "
+        "tail, `_NOT_MID_TOKEN`, a pathological unit in `_QUADRATIC_UNITS`), record what you "
+        "decline in `_DECLINED_SHAPES`, and set `PREFIX_INVENTORY_RECONCILED` to today."
+    )

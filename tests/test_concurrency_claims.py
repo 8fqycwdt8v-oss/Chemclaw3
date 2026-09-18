@@ -45,7 +45,7 @@ async def _claims_or_skip() -> SessionTurnClaims:
     return SessionTurnClaims()
 
 
-def test_only_one_of_many_racing_workers_claims_a_session() -> None:
+async def test_only_one_of_many_racing_workers_claims_a_session() -> None:
     """Thirty-two workers reach for one session at once; exactly one may get it.
 
     The sequential version of this test (`test_session_store.py`) passes whether `claim` is one
@@ -57,31 +57,25 @@ def test_only_one_of_many_racing_workers_claims_a_session() -> None:
     Every claimant is its own store — a separate connection, as a separate pod would be — because
     a shared connection would serialize them in the client and test nothing.
     """
+    await _claims_or_skip()
+    session_id = "sess-race-exclusive"
+    # Any residue from an earlier run would decide the outcome before the race starts.
+    async with await connect(settings.postgres_dsn) as conn:
+        await conn.execute("DELETE FROM session_turns WHERE session_id = %s", (session_id,))
+        await conn.commit()
 
-    async def _run() -> None:
-        await _claims_or_skip()
-        session_id = "sess-race-exclusive"
-        # Any residue from an earlier run would decide the outcome before the race starts.
-        async with await connect(settings.postgres_dsn) as conn:
-            await conn.execute("DELETE FROM session_turns WHERE session_id = %s", (session_id,))
-            await conn.commit()
-
-        holders = [f"worker-{index}" for index in range(32)]
-        winners = await asyncio.gather(
-            *(SessionTurnClaims().claim(session_id, holder, 60.0) for holder in holders)
-        )
-        try:
-            assert sum(winners) == 1, (
-                f"{sum(winners)} of {len(holders)} workers claimed one session"
-            )
-        finally:
-            for holder in holders:
-                await SessionTurnClaims().release(session_id, holder)
-
-    asyncio.run(_run())
+    holders = [f"worker-{index}" for index in range(32)]
+    winners = await asyncio.gather(
+        *(SessionTurnClaims().claim(session_id, holder, 60.0) for holder in holders)
+    )
+    try:
+        assert sum(winners) == 1, f"{sum(winners)} of {len(holders)} workers claimed one session"
+    finally:
+        for holder in holders:
+            await SessionTurnClaims().release(session_id, holder)
 
 
-def test_a_lapsed_holder_can_neither_refresh_nor_release_the_new_owners_claim() -> None:
+async def test_a_lapsed_holder_can_neither_refresh_nor_release_the_new_owners_claim() -> None:
     """The two guards that keep a slow worker from corrupting the one that replaced it.
 
     Both operations are `WHERE session_id = %s AND holder = %s`, and both docstrings explain why:
@@ -90,35 +84,31 @@ def test_a_lapsed_holder_can_neither_refresh_nor_release_the_new_owners_claim() 
     interesting case is not that they are no-ops when the row is *gone*; it is that they are
     no-ops when the row is *someone else's*, which is the only state that can cause damage.
     """
+    claims = await _claims_or_skip()
+    session_id = "sess-race-stale-holder"
+    await claims.release(session_id, "slow")
+    await claims.release(session_id, "new")
 
-    async def _run() -> None:
-        claims = await _claims_or_skip()
-        session_id = "sess-race-stale-holder"
-        await claims.release(session_id, "slow")
-        await claims.release(session_id, "new")
+    assert await claims.claim(session_id, "slow", -1.0) is True  # already lapsed
+    assert await claims.claim(session_id, "new", 60.0) is True  # taken over
 
-        assert await claims.claim(session_id, "slow", -1.0) is True  # already lapsed
-        assert await claims.claim(session_id, "new", 60.0) is True  # taken over
+    # The lapsed worker, still running, doing exactly what a live holder does. `refresh`
+    # reports that the claim is no longer its own — the signal `_hold_turn_claim` acts on, and
+    # the thing that was silently discarded until the 2026-08-05 review: the UPDATE matched no
+    # row, raised nothing, and the caller could not tell a takeover from a healthy heartbeat.
+    assert await claims.refresh(session_id, "slow", 600.0) is False
+    await claims.release(session_id, "slow")
 
-        # The lapsed worker, still running, doing exactly what a live holder does. `refresh`
-        # reports that the claim is no longer its own — the signal `_hold_turn_claim` acts on, and
-        # the thing that was silently discarded until the 2026-08-05 review: the UPDATE matched no
-        # row, raised nothing, and the caller could not tell a takeover from a healthy heartbeat.
-        assert await claims.refresh(session_id, "slow", 600.0) is False
-        await claims.release(session_id, "slow")
+    # And the other direction, or `is False` above would pass against a `refresh` that always
+    # said no — which would stop every heartbeat in the system on its first beat.
+    assert await claims.refresh(session_id, "new", 60.0) is True
 
-        # And the other direction, or `is False` above would pass against a `refresh` that always
-        # said no — which would stop every heartbeat in the system on its first beat.
-        assert await claims.refresh(session_id, "new", 60.0) is True
-
-        # If either had landed, this would succeed — the slot would be free (release) or held by
-        # a holder nobody is running (refresh under the wrong name).
-        assert await claims.claim(session_id, "third", 60.0) is False, (
-            "a lapsed holder's refresh or release reached the new owner's claim"
-        )
-        await claims.release(session_id, "new")
-
-    asyncio.run(_run())
+    # If either had landed, this would succeed — the slot would be free (release) or held by
+    # a holder nobody is running (refresh under the wrong name).
+    assert await claims.claim(session_id, "third", 60.0) is False, (
+        "a lapsed holder's refresh or release reached the new owner's claim"
+    )
+    await claims.release(session_id, "new")
 
 
 @pytest.fixture
@@ -349,7 +339,7 @@ def test_the_installed_pool_is_wider_than_the_caps_that_can_fill_it() -> None:
     assert asyncio.run(_install()) == reserved + settings.service_thread_pool_headroom
 
 
-def test_two_turns_in_one_process_are_two_holders_not_one() -> None:
+async def test_two_turns_in_one_process_are_two_holders_not_one() -> None:
     """The same-worker arm the test above misses by using two different holder names.
 
     `test_a_lapsed_holder_can_neither_refresh_nor_release_the_new_owners_claim` proves the guards
@@ -368,30 +358,26 @@ def test_two_turns_in_one_process_are_two_holders_not_one() -> None:
     `api/state.claim_holder` is what makes two turns in one process two holders, so this drives the
     two turns the way the routes now do — through that function — rather than by inventing names.
     """
+    claims = await _claims_or_skip()
+    session_id = "sess-race-same-worker"
+    first = claim_holder(uuid.uuid4().hex)
+    second = claim_holder(uuid.uuid4().hex)
+    await claims.release(session_id, first)
+    await claims.release(session_id, second)
 
-    async def _run() -> None:
-        claims = await _claims_or_skip()
-        session_id = "sess-race-same-worker"
-        first = claim_holder(uuid.uuid4().hex)
-        second = claim_holder(uuid.uuid4().hex)
-        await claims.release(session_id, first)
-        await claims.release(session_id, second)
+    assert first != second, (
+        "two turns in one process resolved to one holder, so the durable claim cannot tell "
+        "a lapsed turn's teardown from the live turn's"
+    )
+    assert await claims.claim(session_id, first, -1.0) is True  # already lapsed
+    assert await claims.claim(session_id, second, 60.0) is True  # a successor took the slot
 
-        assert first != second, (
-            "two turns in one process resolved to one holder, so the durable claim cannot tell "
-            "a lapsed turn's teardown from the live turn's"
-        )
-        assert await claims.claim(session_id, first, -1.0) is True  # already lapsed
-        assert await claims.claim(session_id, second, 60.0) is True  # a successor took the slot
-
-        assert await claims.refresh(session_id, first, 600.0) is False, (
-            "the lapsed turn extended its successor's lease"
-        )
-        await claims.release(session_id, first)
-        assert await claims.claim(session_id, "another-replica", 60.0) is False, (
-            "the lapsed turn's teardown deleted the live turn's claim, so a second replica was "
-            "admitted beside it"
-        )
-        await claims.release(session_id, second)
-
-    asyncio.run(_run())
+    assert await claims.refresh(session_id, first, 600.0) is False, (
+        "the lapsed turn extended its successor's lease"
+    )
+    await claims.release(session_id, first)
+    assert await claims.claim(session_id, "another-replica", 60.0) is False, (
+        "the lapsed turn's teardown deleted the live turn's claim, so a second replica was "
+        "admitted beside it"
+    )
+    await claims.release(session_id, second)

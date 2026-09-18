@@ -148,6 +148,17 @@ RUN sh ./build-netguard-preload.sh \
 # problem and a fixable one.
 RUN uv sync --frozen --no-dev \
     && uv cache clean \
+    # **Bake the BPE merge table, because the alternative is a request-time fetch.**
+    # `agent/context_budget.py` counts the request prefix exactly where an encoding resolves, and
+    # tiktoken downloads its merge table on first use — which the no-egress posture forbids and
+    # `core/netguard.py` would refuse. Fetched here, at build time, where a network is legitimate:
+    # ~3.6 MB, once. Without it the budget logs one INFO line and falls back to its chars/4
+    # estimator, which is correct but leaves the measured 1,161 tokens of thread on the table.
+    && mkdir -p /opt/tiktoken \
+    && TIKTOKEN_CACHE_DIR=/opt/tiktoken /app/.venv/bin/python -c \
+       "import tiktoken; tiktoken.get_encoding('o200k_base')" \
+    && chown -R 1001:0 /opt/tiktoken \
+    && chmod -R g=u /opt/tiktoken \
     && chmod +x /usr/local/bin/chemclaw-entrypoint /usr/local/bin/chemclaw-knowledge-sync \
     && chown -R 1001:0 /app \
     && chmod -R g=u /app
@@ -223,6 +234,7 @@ USER 1001
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
     CHEMCLAW_COMPONENT=service \
-    CHEMCLAW_DEPLOYMENT_REVISION=${CHEMCLAW_REVISION}
+    CHEMCLAW_DEPLOYMENT_REVISION=${CHEMCLAW_REVISION} \
+    TIKTOKEN_CACHE_DIR=/opt/tiktoken
 
 ENTRYPOINT ["/usr/local/bin/chemclaw-entrypoint"]

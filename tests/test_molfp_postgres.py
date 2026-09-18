@@ -37,32 +37,27 @@ async def _store_or_skip() -> PostgresFingerprintStore:
     )
 
 
-def test_similarity_ranking_in_sql() -> None:
+async def test_similarity_ranking_in_sql() -> None:
     """The SQL backend ranks Tanimoto neighbors most-similar-first, honoring threshold."""
+    store = await _store_or_skip()
+    for cid, smiles in [
+        ("pg-ethanol", "CCO"),
+        ("pg-propanol", "CCCO"),
+        ("pg-butanol", "CCCCO"),
+        ("pg-benzene", "c1ccccc1"),
+    ]:
+        await store.add(record_for(cid, smiles))
 
-    async def _run() -> None:
-        store = await _store_or_skip()
-        for cid, smiles in [
-            ("pg-ethanol", "CCO"),
-            ("pg-propanol", "CCCO"),
-            ("pg-butanol", "CCCCO"),
-            ("pg-benzene", "c1ccccc1"),
-        ]:
-            await store.add(record_for(cid, smiles))
-
-        hits = (await find_similar_molecules(store, "CCO", top_k=3, threshold=0.1)).hits
-        assert hits[0].smiles == "CCO"
-        assert hits[0].similarity == pytest.approx(1.0)
-        assert "c1ccccc1" not in {h.smiles for h in hits}  # disjoint, below threshold
-        assert all(
-            (hits[i].similarity or 0.0) >= (hits[i + 1].similarity or 0.0)
-            for i in range(len(hits) - 1)
-        )
-
-    asyncio.run(_run())
+    hits = (await find_similar_molecules(store, "CCO", top_k=3, threshold=0.1)).hits
+    assert hits[0].smiles == "CCO"
+    assert hits[0].similarity == pytest.approx(1.0)
+    assert "c1ccccc1" not in {h.smiles for h in hits}  # disjoint, below threshold
+    assert all(
+        (hits[i].similarity or 0.0) >= (hits[i + 1].similarity or 0.0) for i in range(len(hits) - 1)
+    )
 
 
-def test_tie_break_order_matches_the_in_memory_backend() -> None:
+async def test_tie_break_order_matches_the_in_memory_backend() -> None:
     """Equal-similarity hits come back in the same id order from both backends.
 
     The in-memory reference tie-breaks by Python's code-point sort; the SQL side must
@@ -74,26 +69,22 @@ def test_tie_break_order_matches_the_in_memory_backend() -> None:
     only level that can see it: two records sharing one structure differ solely by id, and the
     molecule search presents a hit by its structure and the note it cites, not by its row id.
     """
+    pg_store = await _store_or_skip()
+    mem_store = InMemoryFingerprintStore(definition=molecule_definition())
+    octanol = "CCCCCCCCO"  # unique to this test so a high threshold isolates the tie
+    for cid in ["pg-collate-a1", "pg-collate-B1"]:
+        await pg_store.add(record_for(cid, octanol))
+        await mem_store.add(record_for(cid, octanol))
 
-    async def _run() -> None:
-        pg_store = await _store_or_skip()
-        mem_store = InMemoryFingerprintStore(definition=molecule_definition())
-        octanol = "CCCCCCCCO"  # unique to this test so a high threshold isolates the tie
-        for cid in ["pg-collate-a1", "pg-collate-B1"]:
-            await pg_store.add(record_for(cid, octanol))
-            await mem_store.add(record_for(cid, octanol))
-
-        bits = ecfp_bitstring(octanol)
-        pg_hits, _ = await find_matches(pg_store, bits, top_k=None, threshold=0.99)
-        mem_hits, _ = await find_matches(mem_store, bits, top_k=None, threshold=0.99)
-        pg_ids = [h.id for h in pg_hits if h.id.startswith("pg-collate-")]
-        mem_ids = [h.id for h in mem_hits]
-        assert pg_ids == mem_ids == ["pg-collate-B1", "pg-collate-a1"]  # code-point order
-
-    asyncio.run(_run())
+    bits = ecfp_bitstring(octanol)
+    pg_hits, _ = await find_matches(pg_store, bits, top_k=None, threshold=0.99)
+    mem_hits, _ = await find_matches(mem_store, bits, top_k=None, threshold=0.99)
+    pg_ids = [h.id for h in pg_hits if h.id.startswith("pg-collate-")]
+    mem_ids = [h.id for h in mem_hits]
+    assert pg_ids == mem_ids == ["pg-collate-B1", "pg-collate-a1"]  # code-point order
 
 
-def test_the_durable_page_is_the_exact_top_k_not_an_approximation() -> None:
+async def test_the_durable_page_is_the_exact_top_k_not_an_approximation() -> None:
     """The durable search returns the *exact* page, ties included — the property an ANN loses.
 
     `PostgresFingerprintStore`'s docstring used to say this search was "accelerated by the table's
@@ -118,36 +109,32 @@ def test_the_durable_page_is_the_exact_top_k_not_an_approximation() -> None:
     assertion bites wherever a restructure makes an index-ordered candidate set the answer, which
     is every corpus large enough for the change to be worth making.
     """
+    store = await _store_or_skip()
+    mem_store = InMemoryFingerprintStore(definition=molecule_definition())
+    # A structure with no near neighbour among this suite's fixtures, so a 0.99 threshold
+    # isolates these rows from every other row in the shared table and the whole page is one
+    # tie. A long alkanol is *not* usable here even though it looks unique: ECFP4 over a chain
+    # of identical CH2 environments makes C8-ol and C13-ol tie at 1.0, and the sibling test's
+    # octanol rows then take two slots in this page.
+    structure = "Clc1ccc(cc1)C(=O)Nc1ccc(cc1)S(=O)(=O)N"
+    ids = [f"pg-exact-{index:03d}" for index in range(200)]
+    records = [record_for(cid, structure) for cid in ids]
+    await store.add_many(records)
+    for record in records:
+        await mem_store.add(record)
 
-    async def _run() -> None:
-        store = await _store_or_skip()
-        mem_store = InMemoryFingerprintStore(definition=molecule_definition())
-        # A structure with no near neighbour among this suite's fixtures, so a 0.99 threshold
-        # isolates these rows from every other row in the shared table and the whole page is one
-        # tie. A long alkanol is *not* usable here even though it looks unique: ECFP4 over a chain
-        # of identical CH2 environments makes C8-ol and C13-ol tie at 1.0, and the sibling test's
-        # octanol rows then take two slots in this page.
-        structure = "Clc1ccc(cc1)C(=O)Nc1ccc(cc1)S(=O)(=O)N"
-        ids = [f"pg-exact-{index:03d}" for index in range(200)]
-        records = [record_for(cid, structure) for cid in ids]
-        await store.add_many(records)
-        for record in records:
-            await mem_store.add(record)
+    bits = ecfp_bitstring(structure)
+    page, truncated = await find_matches(store, bits, top_k=50, threshold=0.99)
+    reference, _ = await find_matches(mem_store, bits, top_k=50, threshold=0.99)
 
-        bits = ecfp_bitstring(structure)
-        page, truncated = await find_matches(store, bits, top_k=50, threshold=0.99)
-        reference, _ = await find_matches(mem_store, bits, top_k=50, threshold=0.99)
-
-        assert [hit.id for hit in page] == sorted(ids)[:50], (
-            "the durable page is not the exact lowest-id half of the tie — an approximate scan "
-            "returns 50 equally-similar rows in whatever order it found them"
-        )
-        assert [hit.id for hit in page] == [hit.id for hit in reference], (
-            "the two backends disagree about which 50 of 200 tied rows the page holds"
-        )
-        assert truncated, "150 rows over the page went unreported"
-
-    asyncio.run(_run())
+    assert [hit.id for hit in page] == sorted(ids)[:50], (
+        "the durable page is not the exact lowest-id half of the tie — an approximate scan "
+        "returns 50 equally-similar rows in whatever order it found them"
+    )
+    assert [hit.id for hit in page] == [hit.id for hit in reference], (
+        "the two backends disagree about which 50 of 200 tied rows the page holds"
+    )
+    assert truncated, "150 rows over the page went unreported"
 
 
 def test_the_capped_scan_reads_in_key_order_without_sorting_the_table() -> None:
@@ -202,21 +189,17 @@ def test_the_capped_scan_reads_in_key_order_without_sorting_the_table() -> None:
     )
 
 
-def test_upsert_and_substructure_over_postgres() -> None:
+async def test_upsert_and_substructure_over_postgres() -> None:
     """Re-adding an id replaces it; substructure search works over the durable backend."""
+    store = await _store_or_skip()
+    await store.add(record_for("pg-mol", "CCO"))
+    await store.add(record_for("pg-mol", "CC(=O)O"))  # replace ethanol with acetic acid
 
-    async def _run() -> None:
-        store = await _store_or_skip()
-        await store.add(record_for("pg-mol", "CCO"))
-        await store.add(record_for("pg-mol", "CC(=O)O"))  # replace ethanol with acetic acid
-
-        acids = {r.smiles for r in (await find_substructure_matches(store, "C(=O)[OH]")).hits}
-        assert "CC(=O)O" in acids  # the replaced record now matches the acid pattern
-
-    asyncio.run(_run())
+    acids = {r.smiles for r in (await find_substructure_matches(store, "C(=O)[OH]")).hits}
+    assert "CC(=O)O" in acids  # the replaced record now matches the acid pattern
 
 
-def test_emptiness_and_count_are_scoped_to_the_stores_definition() -> None:
+async def test_emptiness_and_count_are_scoped_to_the_stores_definition() -> None:
     """The durable backend must answer "is anything searchable here?" as honestly as memory does.
 
     Asserted through a store pinned to a definition nothing was ever indexed under, which is both
@@ -224,28 +207,24 @@ def test_emptiness_and_count_are_scoped_to_the_stores_definition() -> None:
     it) and a real deployment state: after a fingerprint-definition change every existing row falls
     out of search (runbook (vi)), so a table full of stale rows is an index that answers nothing.
     """
+    await migrated_db_or_skip()
+    orphaned = PostgresFingerprintStore(
+        "molecule_fingerprints", settings.ecfp_bits, "ecfp:never-indexed:b2048"
+    )
+    assert await orphaned.is_empty() is True
+    assert await orphaned.count() == 0
+    # And the honesty travels all the way out to the search a chemist sees.
+    search = await find_similar_molecules(orphaned, "CCO", threshold=0.1)
+    assert search.hits == []
+    assert search.index_empty is True
+    assert "SEARCH NOT RUN" in search.model_dump()["verdict"]
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        orphaned = PostgresFingerprintStore(
-            "molecule_fingerprints", settings.ecfp_bits, "ecfp:never-indexed:b2048"
-        )
-        assert await orphaned.is_empty() is True
-        assert await orphaned.count() == 0
-        # And the honesty travels all the way out to the search a chemist sees.
-        search = await find_similar_molecules(orphaned, "CCO", threshold=0.1)
-        assert search.hits == []
-        assert search.index_empty is True
-        assert "SEARCH NOT RUN" in search.model_dump()["verdict"]
-
-        current = await _store_or_skip()
-        await current.add(record_for("pg-count", "CCO"))
-        assert await current.is_empty() is False
-        assert await current.count() >= 1
-        populated = await find_similar_molecules(current, "CCO", threshold=0.1)
-        assert populated.index_empty is False
-
-    asyncio.run(_run())
+    current = await _store_or_skip()
+    await current.add(record_for("pg-count", "CCO"))
+    assert await current.is_empty() is False
+    assert await current.count() >= 1
+    populated = await find_similar_molecules(current, "CCO", threshold=0.1)
+    assert populated.index_empty is False
 
 
 _ANN_TABLE = "molfp_approximate_probe"
@@ -507,7 +486,7 @@ def test_the_arm_survives_a_truncated_page(monkeypatch: pytest.MonkeyPatch) -> N
     )
 
 
-def test_the_superseded_probe_agrees_with_the_reference_and_costs_no_scan() -> None:
+async def test_the_superseded_probe_agrees_with_the_reference_and_costs_no_scan() -> None:
     """The durable half of the partial-index probe, both of the properties it has to hold.
 
     `D-2026-09-09-a-rebuild-nothing-counts-reports-as-finished`.
@@ -524,69 +503,61 @@ def test_the_superseded_probe_agrees_with_the_reference_and_costs_no_scan() -> N
     `molecule_fingerprints_definition_idx` (046), so the plan is what is asserted here rather than
     a timing that would depend on how much this test inserted.
     """
+    store = await _store_or_skip()
+    reference = InMemoryFingerprintStore(molecule_definition())
+    current = record_for("pg-superseded-current", "CCO")
+    old = record_for("pg-superseded-old", "CCCO")
+    old = old.model_copy(update={"definition": old.definition + "-superseded"})
 
-    async def _run() -> None:
-        store = await _store_or_skip()
-        reference = InMemoryFingerprintStore(molecule_definition())
-        current = record_for("pg-superseded-current", "CCO")
-        old = record_for("pg-superseded-old", "CCCO")
-        old = old.model_copy(update={"definition": old.definition + "-superseded"})
+    for record in (current, old):
+        await store.add(record)
+        await reference.add(record)
+    assert await store.has_superseded_records() is await reference.has_superseded_records()
+    assert await store.has_superseded_records() is True
+    # A count, not a boolean: the durable table is shared with the rest of this schema, so the
+    # assertion is that this store's own superseded row is in it.
+    assert await store.superseded_count() >= 1
 
-        for record in (current, old):
-            await store.add(record)
-            await reference.add(record)
-        assert await store.has_superseded_records() is await reference.has_superseded_records()
-        assert await store.has_superseded_records() is True
-        # A count, not a boolean: the durable table is shared with the rest of this schema, so the
-        # assertion is that this store's own superseded row is in it.
-        assert await store.superseded_count() >= 1
-
-        async with await db.connect(settings.postgres_dsn) as conn, conn.cursor() as cur:
-            await cur.execute("SET LOCAL enable_seqscan = off")
-            await cur.execute(f"EXPLAIN (COSTS OFF) {store._definition_extremes}")
-            plan = "\n".join(str(row[0]) for row in await cur.fetchall())
-        assert "molecule_fingerprints_definition_idx" in plan, (
-            "the superseded probe no longer reaches its index; the plan was:\n" + plan
-        )
-        assert "Seq Scan" not in plan
-
-    asyncio.run(_run())
+    async with await db.connect(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute("SET LOCAL enable_seqscan = off")
+        await cur.execute(f"EXPLAIN (COSTS OFF) {store._definition_extremes}")
+        plan = "\n".join(str(row[0]) for row in await cur.fetchall())
+    assert "molecule_fingerprints_definition_idx" in plan, (
+        "the superseded probe no longer reaches its index; the plan was:\n" + plan
+    )
+    assert "Seq Scan" not in plan
 
 
-def test_a_fully_rebuilt_durable_index_reports_no_superseded_rows() -> None:
+async def test_a_fully_rebuilt_durable_index_reports_no_superseded_rows() -> None:
     """The counterfactual, on a table of this store's own rows only.
 
     Run against a scratch table rather than the shared one, because "no superseded rows anywhere"
     is not assertable in a schema every other test writes into — and it is the half that would
     otherwise pass on a build whose probe always answered True.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
+    await migrated_db_or_skip()
+    async with await db.connect(settings.postgres_dsn) as conn:
+        await conn.execute(
+            "CREATE TABLE IF NOT EXISTS molfp_rebuilt_probe "
+            "(id TEXT NOT NULL, label TEXT NOT NULL, "
+            f"bits BIT({settings.ecfp_bits}) NOT NULL, definition TEXT NOT NULL, "
+            "PRIMARY KEY (id, definition))"
+        )
+        await conn.commit()
+    try:
+        store = PostgresFingerprintStore(
+            "molfp_rebuilt_probe", settings.ecfp_bits, molecule_definition()
+        )
+        assert await store.has_superseded_records() is False, "an empty table holds nothing"
+        for name, smiles in [("a", "CCO"), ("b", "CCCO")]:
+            await store.add(record_for(name, smiles))
+        assert await store.has_superseded_records() is False
+        assert await store.superseded_count() == 0
+        assert (await find_similar_molecules(store, "CCO")).index_partial is False
+    finally:
         async with await db.connect(settings.postgres_dsn) as conn:
-            await conn.execute(
-                "CREATE TABLE IF NOT EXISTS molfp_rebuilt_probe "
-                "(id TEXT NOT NULL, label TEXT NOT NULL, "
-                f"bits BIT({settings.ecfp_bits}) NOT NULL, definition TEXT NOT NULL, "
-                "PRIMARY KEY (id, definition))"
-            )
+            await conn.execute("DROP TABLE IF EXISTS molfp_rebuilt_probe")
             await conn.commit()
-        try:
-            store = PostgresFingerprintStore(
-                "molfp_rebuilt_probe", settings.ecfp_bits, molecule_definition()
-            )
-            assert await store.has_superseded_records() is False, "an empty table holds nothing"
-            for name, smiles in [("a", "CCO"), ("b", "CCCO")]:
-                await store.add(record_for(name, smiles))
-            assert await store.has_superseded_records() is False
-            assert await store.superseded_count() == 0
-            assert (await find_similar_molecules(store, "CCO")).index_partial is False
-        finally:
-            async with await db.connect(settings.postgres_dsn) as conn:
-                await conn.execute("DROP TABLE IF EXISTS molfp_rebuilt_probe")
-                await conn.commit()
-
-    asyncio.run(_run())
 
 
 # Two fingerprint definitions that are *both* plausible: a radius bump is a one-character config
@@ -595,7 +566,7 @@ _OLD_DEFINITION = "ecfp:r2:b2048"
 _NEW_DEFINITION = "ecfp:r3:b2048"
 
 
-def test_a_second_definitions_write_shelves_the_first_instead_of_deleting_it() -> None:
+async def test_a_second_definitions_write_shelves_the_first_instead_of_deleting_it() -> None:
     """A definition change must *shelve* the rows it supersedes, not destroy them.
 
     `004_fingerprint_definition.sql` states the safety property as "a mismatched backfill only
@@ -620,59 +591,53 @@ def test_a_second_definitions_write_shelves_the_first_instead_of_deleting_it() -
     So the key is `(id, definition)` — the shape `document_chunks` took in `041` and `note_index`
     in `039`, one directory over. The two generations coexist; each store answers over its own.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        old = PostgresFingerprintStore("molecule_fingerprints", settings.ecfp_bits, _OLD_DEFINITION)
-        new = PostgresFingerprintStore("molecule_fingerprints", settings.ecfp_bits, _NEW_DEFINITION)
-        # One id, two generations, deliberately different structures: which row answers is then
-        # observable rather than inferred from a count.
-        was = "Brc1ccc(cc1)C(=O)Nc1ccc(cc1)C(F)(F)F"
-        now = "O=C(Nc1ccccc1)c1ccc(cc1)N1CCOCC1"
-        await old.add(
-            FingerprintRecord(
-                id="pg-shelved", label=was, bits=ecfp_bitstring(was), definition=_OLD_DEFINITION
-            )
+    await migrated_db_or_skip()
+    old = PostgresFingerprintStore("molecule_fingerprints", settings.ecfp_bits, _OLD_DEFINITION)
+    new = PostgresFingerprintStore("molecule_fingerprints", settings.ecfp_bits, _NEW_DEFINITION)
+    # One id, two generations, deliberately different structures: which row answers is then
+    # observable rather than inferred from a count.
+    was = "Brc1ccc(cc1)C(=O)Nc1ccc(cc1)C(F)(F)F"
+    now = "O=C(Nc1ccccc1)c1ccc(cc1)N1CCOCC1"
+    await old.add(
+        FingerprintRecord(
+            id="pg-shelved", label=was, bits=ecfp_bitstring(was), definition=_OLD_DEFINITION
         )
-        await new.add(
-            FingerprintRecord(
-                id="pg-shelved", label=now, bits=ecfp_bitstring(now), definition=_NEW_DEFINITION
-            )
+    )
+    await new.add(
+        FingerprintRecord(
+            id="pg-shelved", label=now, bits=ecfp_bitstring(now), definition=_NEW_DEFINITION
         )
+    )
 
-        after_new = await old.find_similar(ecfp_bitstring(was), 5, 0.99)
-        assert [hit.id for hit in after_new] == ["pg-shelved"], (
-            "the newer definition's write destroyed the older generation's row; there is no state "
-            "left for either side to re-index from"
+    after_new = await old.find_similar(ecfp_bitstring(was), 5, 0.99)
+    assert [hit.id for hit in after_new] == ["pg-shelved"], (
+        "the newer definition's write destroyed the older generation's row; there is no state "
+        "left for either side to re-index from"
+    )
+    assert [hit.label for hit in after_new] == [was]
+    # And the new generation is the one *its* store answers over — the shelf is scoped, not a
+    # second copy of the same row.
+    assert [hit.label for hit in await new.find_similar(ecfp_bitstring(now), 5, 0.99)] == [now]
+    assert await new.find_similar(ecfp_bitstring(was), 5, 0.99) == []
+
+    # And the other half of the key change, which is what keeps a re-index from doubling the
+    # table on every sync: a re-write under *one* definition still updates in place.
+    async with await db.connect(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute("SELECT count(*) FROM molecule_fingerprints WHERE id = 'pg-shelved'")
+        shelved = await cur.fetchone()
+        assert shelved is not None and shelved[0] == 2
+    await new.add(
+        FingerprintRecord(
+            id="pg-shelved", label=now, bits=ecfp_bitstring(now), definition=_NEW_DEFINITION
         )
-        assert [hit.label for hit in after_new] == [was]
-        # And the new generation is the one *its* store answers over — the shelf is scoped, not a
-        # second copy of the same row.
-        assert [hit.label for hit in await new.find_similar(ecfp_bitstring(now), 5, 0.99)] == [now]
-        assert await new.find_similar(ecfp_bitstring(was), 5, 0.99) == []
-
-        # And the other half of the key change, which is what keeps a re-index from doubling the
-        # table on every sync: a re-write under *one* definition still updates in place.
-        async with await db.connect(settings.postgres_dsn) as conn, conn.cursor() as cur:
-            await cur.execute("SELECT count(*) FROM molecule_fingerprints WHERE id = 'pg-shelved'")
-            shelved = await cur.fetchone()
-            assert shelved is not None and shelved[0] == 2
-        await new.add(
-            FingerprintRecord(
-                id="pg-shelved", label=now, bits=ecfp_bitstring(now), definition=_NEW_DEFINITION
-            )
-        )
-        async with await db.connect(settings.postgres_dsn) as conn, conn.cursor() as cur:
-            await cur.execute("SELECT count(*) FROM molecule_fingerprints WHERE id = 'pg-shelved'")
-            after = await cur.fetchone()
-            assert after is not None and after[0] == 2, (
-                "a repeat write under one definition inserted"
-            )
-
-    asyncio.run(_run())
+    )
+    async with await db.connect(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute("SELECT count(*) FROM molecule_fingerprints WHERE id = 'pg-shelved'")
+        after = await cur.fetchone()
+        assert after is not None and after[0] == 2, "a repeat write under one definition inserted"
 
 
-def test_a_shelved_generation_is_one_molecule_to_the_substructure_scan() -> None:
+async def test_a_shelved_generation_is_one_molecule_to_the_substructure_scan() -> None:
     """`all_records` is unfiltered by definition, so a shelf must not double the corpus.
 
     Two things break if it does, and both are chemist-visible. The scan's hits are built one per
@@ -691,30 +656,26 @@ def test_a_shelved_generation_is_one_molecule_to_the_substructure_scan() -> None
     five molecules held under two generations came back as **10 rows**, against 5 through the
     shipped `DISTINCT ON`.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        old = PostgresFingerprintStore("molecule_fingerprints", settings.ecfp_bits, _OLD_DEFINITION)
-        current = await _store_or_skip()
-        structure = "Ic1ccc(cc1)C(=O)N1CCN(CC1)C(=O)c1ccccc1"
-        for definition, store in ((_OLD_DEFINITION, old), (molecule_definition(), current)):
-            await store.add(
-                FingerprintRecord(
-                    id="pg-shelf-scan",
-                    label=structure,
-                    bits=ecfp_bitstring(structure),
-                    definition=definition,
-                )
+    await migrated_db_or_skip()
+    old = PostgresFingerprintStore("molecule_fingerprints", settings.ecfp_bits, _OLD_DEFINITION)
+    current = await _store_or_skip()
+    structure = "Ic1ccc(cc1)C(=O)N1CCN(CC1)C(=O)c1ccccc1"
+    for definition, store in ((_OLD_DEFINITION, old), (molecule_definition(), current)):
+        await store.add(
+            FingerprintRecord(
+                id="pg-shelf-scan",
+                label=structure,
+                bits=ecfp_bitstring(structure),
+                definition=definition,
             )
+        )
 
-        rows = [r for r in await current.all_records(limit=10_000) if r.id == "pg-shelf-scan"]
-        assert len(rows) == 1, f"one molecule reached the substructure scan as {len(rows)} rows"
-        assert rows[0].definition == molecule_definition()
-
-    asyncio.run(_run())
+    rows = [r for r in await current.all_records(limit=10_000) if r.id == "pg-shelf-scan"]
+    assert len(rows) == 1, f"one molecule reached the substructure scan as {len(rows)} rows"
+    assert rows[0].definition == molecule_definition()
 
 
-def test_a_table_still_keyed_without_its_definition_refuses_the_write() -> None:
+async def test_a_table_still_keyed_without_its_definition_refuses_the_write() -> None:
     """Binding this store to a table whose key omits `definition` fails loudly, not quietly.
 
     The constructor says so about `source_keyed` and `094` says it about the definition half:
@@ -725,26 +686,22 @@ def test_a_table_still_keyed_without_its_definition_refuses_the_write() -> None:
     A scratch table with the *old* key, so what is asserted is the store's conflict target against
     a schema, not a statement against itself.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
+    await migrated_db_or_skip()
+    async with await db.connect(settings.postgres_dsn) as conn:
+        await conn.execute(
+            "CREATE TABLE IF NOT EXISTS molfp_old_key_probe "
+            "(id TEXT PRIMARY KEY, label TEXT NOT NULL, "
+            f"bits BIT({settings.ecfp_bits}) NOT NULL, definition TEXT NOT NULL)"
+        )
+        await conn.commit()
+    try:
+        store = PostgresFingerprintStore(
+            "molfp_old_key_probe", settings.ecfp_bits, molecule_definition()
+        )
+        with pytest.raises(psycopg.errors.InvalidColumnReference) as refusal:
+            await store.add(record_for("probe", "CCO"))
+        assert "ON CONFLICT" in str(refusal.value)
+    finally:
         async with await db.connect(settings.postgres_dsn) as conn:
-            await conn.execute(
-                "CREATE TABLE IF NOT EXISTS molfp_old_key_probe "
-                "(id TEXT PRIMARY KEY, label TEXT NOT NULL, "
-                f"bits BIT({settings.ecfp_bits}) NOT NULL, definition TEXT NOT NULL)"
-            )
+            await conn.execute("DROP TABLE IF EXISTS molfp_old_key_probe")
             await conn.commit()
-        try:
-            store = PostgresFingerprintStore(
-                "molfp_old_key_probe", settings.ecfp_bits, molecule_definition()
-            )
-            with pytest.raises(psycopg.errors.InvalidColumnReference) as refusal:
-                await store.add(record_for("probe", "CCO"))
-            assert "ON CONFLICT" in str(refusal.value)
-        finally:
-            async with await db.connect(settings.postgres_dsn) as conn:
-                await conn.execute("DROP TABLE IF EXISTS molfp_old_key_probe")
-                await conn.commit()
-
-    asyncio.run(_run())

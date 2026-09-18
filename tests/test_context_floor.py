@@ -872,6 +872,13 @@ SERVED_ELSEWHERE_ALLOWANCE = 11_000
 #: tokens by deleting the units from a scale-up correlation's arguments, which is the trade this
 #: entry exists to make visible rather than take quietly.
 #:
+#: **And the six library adoptions that landed next door in the same week moved this by zero.**
+#: Subtract `unitops` and the fleet is 25,695 — the exact figure the paragraph above recorded
+#: before either merge. A review that replaced a periodic table, an optimizer and a set of physical
+#: constants across seven servers changed no tool's schema, which is what a dependency swap behind
+#: a stable surface is supposed to look like and is not something anybody could have asserted
+#: without measuring it here. The whole breach is `unitops`.
+#:
 #: `SERVED_ELSEWHERE_ALLOWANCE` did not move for the fourth time, and for the fourth time because
 #: this tree declares no such bundle.
 FLEET_PUBLISHED_ALLOWANCE = 36_700

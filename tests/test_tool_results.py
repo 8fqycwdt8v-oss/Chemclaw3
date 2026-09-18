@@ -60,73 +60,65 @@ def _returned(trace: runner_trace.ToolCallTrace, call_id: str, tool: str, text: 
 # --- the store ---------------------------------------------------------------------------------
 
 
-def test_a_stored_result_comes_back_byte_for_byte() -> None:
+async def test_a_stored_result_comes_back_byte_for_byte() -> None:
     """The round trip the whole surface rests on: what a tool returned, read back unchanged.
 
     Not a paraphrase and not the preview — a client that fetches a ref must get the exact text the
     answer verifier scored the turn against, or the two surfaces disagree about what a tool said.
     """
+    await migrated_db_or_skip()
+    ref = await store_tool_result(
+        session_id="tr-roundtrip", correlation_id="corr-1", tool="screen_hazards", text=_SCREEN
+    )
+    assert ref == content_address(_SCREEN)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        ref = await store_tool_result(
-            session_id="tr-roundtrip", correlation_id="corr-1", tool="screen_hazards", text=_SCREEN
-        )
-        assert ref == content_address(_SCREEN)
-
-        stored = await load_tool_result("tr-roundtrip", ref)
-        assert stored is not None
-        assert stored.text == _SCREEN
-        assert stored.tool == "screen_hazards"
-        assert stored.correlation_id == "corr-1"
-        assert stored.byte_size == len(_SCREEN.encode("utf-8"))
-
-    asyncio.run(_run())
+    stored = await load_tool_result("tr-roundtrip", ref)
+    assert stored is not None
+    assert stored.text == _SCREEN
+    assert stored.tool == "screen_hazards"
+    assert stored.correlation_id == "corr-1"
+    assert stored.byte_size == len(_SCREEN.encode("utf-8"))
 
 
-def test_an_identical_result_stores_one_blob_and_keeps_one_link() -> None:
+async def test_an_identical_result_stores_one_blob_and_keeps_one_link() -> None:
     """Content addressing, so a repeated identical call stores nothing (D-011, applied to bytes).
 
     Asserted on the row counts rather than on the ref alone: two equal refs prove the *address* is
     stable, and only the counts prove the second write did not duplicate the payload.
     """
+    await migrated_db_or_skip()
+    from chemclaw.core import db
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        from chemclaw.core import db
+    first = await store_tool_result(
+        session_id="tr-dedup", correlation_id="corr-1", tool="screen_hazards", text=_SCREEN
+    )
+    second = await store_tool_result(
+        session_id="tr-dedup", correlation_id="corr-2", tool="screen_hazards", text=_SCREEN
+    )
+    assert first == second
 
-        first = await store_tool_result(
-            session_id="tr-dedup", correlation_id="corr-1", tool="screen_hazards", text=_SCREEN
-        )
-        second = await store_tool_result(
-            session_id="tr-dedup", correlation_id="corr-2", tool="screen_hazards", text=_SCREEN
-        )
-        assert first == second
-
-        async with db.connection(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT count(*) FROM tool_result_blobs WHERE content_hash = %s", (first,)
-                )
-                blobs = await cur.fetchone()
-                await cur.execute(
-                    "SELECT count(*), max(correlation_id) FROM tool_result_links "
-                    "WHERE session_id = %s AND content_hash = %s",
-                    ("tr-dedup", first),
-                )
-                links = await cur.fetchone()
-        assert blobs is not None and blobs[0] == 1
-        assert links is not None and links[0] == 1
-        # And the label the dedup cost is **empty**, not the last writer's. The row is one row for
-        # two turns, so no correlation id belongs to it; `SET correlation_id = EXCLUDED
-        # .correlation_id` made the fetch route answer with the right bytes under the wrong turn's
-        # id, which is the near-miss pairing this whole surface refuses on the read side.
-        assert links[1] == ""
-
-    asyncio.run(_run())
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT count(*) FROM tool_result_blobs WHERE content_hash = %s", (first,)
+            )
+            blobs = await cur.fetchone()
+            await cur.execute(
+                "SELECT count(*), max(correlation_id) FROM tool_result_links "
+                "WHERE session_id = %s AND content_hash = %s",
+                ("tr-dedup", first),
+            )
+            links = await cur.fetchone()
+    assert blobs is not None and blobs[0] == 1
+    assert links is not None and links[0] == 1
+    # And the label the dedup cost is **empty**, not the last writer's. The row is one row for
+    # two turns, so no correlation id belongs to it; `SET correlation_id = EXCLUDED
+    # .correlation_id` made the fetch route answer with the right bytes under the wrong turn's
+    # id, which is the near-miss pairing this whole surface refuses on the read side.
+    assert links[1] == ""
 
 
-def test_a_result_two_calls_produced_names_neither_of_them() -> None:
+async def test_a_result_two_calls_produced_names_neither_of_them() -> None:
     """The label is dropped rather than guessed, and the bytes are still exactly right.
 
     This is not a corner case. `include_detailed_errors` is off (`agent/tool_authz.py` says why),
@@ -139,38 +131,34 @@ def test_a_result_two_calls_produced_names_neither_of_them() -> None:
     Asserted through `load_tool_result` rather than on the row, because what matters is what a
     *reviewer* is handed: unknown where it is unknown, and the result text where it is not.
     """
+    await migrated_db_or_skip()
+    failure = "Error: Function failed."
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        failure = "Error: Function failed."
+    ref = await store_tool_result(
+        session_id="tr-ambiguous", correlation_id="corr-1", tool="predict_pka", text=failure
+    )
+    await store_tool_result(
+        session_id="tr-ambiguous",
+        correlation_id="corr-2",
+        tool="screen_hazards",
+        text=failure,
+    )
 
-        ref = await store_tool_result(
-            session_id="tr-ambiguous", correlation_id="corr-1", tool="predict_pka", text=failure
-        )
-        await store_tool_result(
-            session_id="tr-ambiguous",
-            correlation_id="corr-2",
-            tool="screen_hazards",
-            text=failure,
-        )
+    stored = await load_tool_result("tr-ambiguous", ref)
+    assert stored is not None
+    assert (stored.tool, stored.correlation_id) == ("", "")
+    assert stored.text == failure
 
-        stored = await load_tool_result("tr-ambiguous", ref)
-        assert stored is not None
-        assert (stored.tool, stored.correlation_id) == ("", "")
-        assert stored.text == failure
-
-        # A third disagreeing write must not un-collapse it: `''` disagrees with every value, so
-        # the column stays empty once it has been emptied.
-        await store_tool_result(
-            session_id="tr-ambiguous", correlation_id="corr-1", tool="predict_pka", text=failure
-        )
-        again = await load_tool_result("tr-ambiguous", ref)
-        assert again is not None and (again.tool, again.correlation_id) == ("", "")
-
-    asyncio.run(_run())
+    # A third disagreeing write must not un-collapse it: `''` disagrees with every value, so
+    # the column stays empty once it has been emptied.
+    await store_tool_result(
+        session_id="tr-ambiguous", correlation_id="corr-1", tool="predict_pka", text=failure
+    )
+    again = await load_tool_result("tr-ambiguous", ref)
+    assert again is not None and (again.tool, again.correlation_id) == ("", "")
 
 
-def test_the_same_call_written_twice_keeps_the_labels_it_agrees_with() -> None:
+async def test_the_same_call_written_twice_keeps_the_labels_it_agrees_with() -> None:
     """The other half of the rule: only *disagreement* costs the labels.
 
     A turn that re-runs the same tool with the same arguments — a retry after a transient failure,
@@ -178,38 +166,30 @@ def test_the_same_call_written_twice_keeps_the_labels_it_agrees_with() -> None:
     correlation id. There is nothing ambiguous about that row, and emptying it would throw away a
     join that is correct, which is the opposite error.
     """
+    await migrated_db_or_skip()
+    for _ in range(2):
+        ref = await store_tool_result(
+            session_id="tr-repeat", correlation_id="corr-9", tool="screen_hazards", text=_SCREEN
+        )
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        for _ in range(2):
-            ref = await store_tool_result(
-                session_id="tr-repeat", correlation_id="corr-9", tool="screen_hazards", text=_SCREEN
-            )
-
-        stored = await load_tool_result("tr-repeat", ref)
-        assert stored is not None
-        assert (stored.tool, stored.correlation_id) == ("screen_hazards", "corr-9")
-
-    asyncio.run(_run())
+    stored = await load_tool_result("tr-repeat", ref)
+    assert stored is not None
+    assert (stored.tool, stored.correlation_id) == ("screen_hazards", "corr-9")
 
 
-def test_a_ref_from_another_session_is_a_miss() -> None:
+async def test_a_ref_from_another_session_is_a_miss() -> None:
     """The read joins the link, and that join is the second half of the ownership story.
 
     `resolve_session` proves the caller owns the conversation; this proves the conversation owns
     the bytes. Without it a ref — which is only the SHA-256 of a result, so anyone able to
     reproduce the text can compute it — would read as a bearer token for any session.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        ref = await store_tool_result(
-            session_id="tr-mine", correlation_id="c", tool="find_notes", text="mine"
-        )
-        assert await load_tool_result("tr-mine", ref) is not None
-        assert await load_tool_result("tr-theirs", ref) is None
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    ref = await store_tool_result(
+        session_id="tr-mine", correlation_id="c", tool="find_notes", text="mine"
+    )
+    assert await load_tool_result("tr-mine", ref) is not None
+    assert await load_tool_result("tr-theirs", ref) is None
 
 
 def test_a_write_that_fails_costs_the_turn_nothing(
@@ -908,27 +888,23 @@ def test_the_transcript_route_carries_the_ref_the_store_reports(
     assert call["result_ref"] == ref
 
 
-def test_the_refs_a_session_can_fetch_are_its_own() -> None:
+async def test_the_refs_a_session_can_fetch_are_its_own() -> None:
     """`fetchable_refs` is scoped by the link row's session, like every other read of this store.
 
     Otherwise the transcript would advertise a ref that `load_tool_result` then refuses — the same
     ownership boundary applied twice, and it must give the same answer both times or a surface
     renders a link that cannot resolve.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        mine = await store_tool_result(
-            session_id="tr-refs-mine", correlation_id="c", tool="screen_hazards", text=_SCREEN
-        )
-        theirs = await store_tool_result(
-            session_id="tr-refs-theirs", correlation_id="c", tool="find_notes", text="[]"
-        )
-        refs = await fetchable_refs("tr-refs-mine")
-        assert mine in refs
-        assert theirs not in refs
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    mine = await store_tool_result(
+        session_id="tr-refs-mine", correlation_id="c", tool="screen_hazards", text=_SCREEN
+    )
+    theirs = await store_tool_result(
+        session_id="tr-refs-theirs", correlation_id="c", tool="find_notes", text="[]"
+    )
+    refs = await fetchable_refs("tr-refs-mine")
+    assert mine in refs
+    assert theirs not in refs
 
 
 def test_a_store_that_cannot_be_read_costs_the_transcript_only_its_refs(

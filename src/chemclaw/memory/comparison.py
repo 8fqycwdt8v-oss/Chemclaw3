@@ -5,27 +5,34 @@ by side, a column per condition and outcome, and — the column that carries the
 argument — *what each run changed relative to the one before it*. `chemclaw.memory.optimization`
 has built exactly that since Phase 5, for a DRFP-similar campaign, offline, into a campaign note.
 
-This module is that renderer with the campaign taken out of it, because a second caller now needs
-the same table over a *retrieved* set of protocols at turn time — the same artifact at a different
-altitude. Extracting it is what stops the two from drifting into two tables that disagree about
-what `—` means or about what an undated series licenses.
+This module is what is left of that table once the campaign is taken out of it, because a second
+caller needs the same table over a *retrieved* set of protocols at turn time — the same artifact at
+a different altitude. Extracting it is what stops the two from drifting into two tables that
+disagree about what `—` means or about what an undated series licenses. (The grid itself has since
+gone one level further down; the paragraph after next says where and why.)
 
 **What is here is the reduce, and only the reduce.** Everything that knows what a *record* is stays
 with its caller: `optimization` keeps the `OrdReaction` columns (purity, the major impurity, the
 procedure excerpt) because it holds `OrdReaction`s, and the turn-time caller keeps its own, because
-it holds prose. What both share is the arithmetic of putting cells in a grid and the three honesty
-rules below — and those rules are the part worth having in one place, since each of them exists
-because getting it wrong produced a table that read as evidence while being an artifact.
+it holds prose. What both share is how an *absent* value is rendered and what an undated series
+licenses — the honesty rules below — since each of them exists because getting it wrong produced a
+table that read as evidence while being an artifact.
+
+**The grid arithmetic left, and so did one of those rules.** Nineteen other places in this tree
+rendered a Markdown table, seventeen of them escaping nothing, so this module's own escaping
+guarantee was a property of two artifacts rather than of this system's tables. It is
+`core.markdown` now — the renderer, the escaping and the one spelling of `MISSING`, which the cells
+below compare against because the code that *renders* an empty cell is the code that has to name it.
+Both callers import `render_table` and `MISSING` from there directly rather than through here, so
+there is one place to read either from. What stays is what knows about a *run*: the cells, the
+ordering caveat, and `drop_empty_columns`, which is the one honesty rule whose subject is a column
+of records rather than a cell of text.
 """
 
 from datetime import date
 
+from chemclaw.core.markdown import MISSING
 from chemclaw.memory.progression import Progression, ProgressionStep
-
-# What a table cell shows when the record is silent. One spelling, because `drop_empty_columns`
-# decides a column is empty by comparing against it — two spellings would make a column of dashes
-# survive the check that exists to remove it.
-MISSING = "—"
 
 
 def cell(value: float | None) -> str:
@@ -104,47 +111,3 @@ def drop_empty_columns(candidates: list[tuple[str, list[str]]]) -> list[tuple[st
     against neighbours that were.
     """
     return [(header, cells) for header, cells in candidates if any(c != MISSING for c in cells)]
-
-
-def _placeable(text: str) -> str:
-    r"""One cell's text, unable to add structure to the grid it is placed in.
-
-    `|` ends a cell in Markdown and a newline ends a row, so a value carrying either does not
-    render *badly* — it renders as **more table**. Measured before this: an `observations` field
-    extracted from a share document, carrying `"routine |\n| rxn-FORGED | 99 | 99 | best result on
-    file | first"`, produced a `rxn-FORGED` row with a yield and a superlative that the
-    `Condensation` object does not contain. The four prose columns of the turn-time comparison come
-    from a model reading an ELN procedure or a mounted share, through `defang`, which neutralises
-    the envelope tag and nothing else; the campaign note reaches the same grid through ELN impurity
-    names and through `ConditionChange.describe()`, whose `before`/`after` are free-text species.
-
-    That is evidence forgery rather than prompt injection — nothing here is read as an instruction,
-    and the framing envelope is intact. It is worse in this one place, because the artifact exists
-    to be read comparatively and cited from, and a forged row is indistinguishable from a real one.
-
-    The text is preserved, not dropped: `|` is escaped, so the value still reads as what the source
-    said. Whitespace runs collapse for the same reason `_excerpt` collapses them — a cell is one
-    line by construction, and the alternative spelling of a newline inside a cell is HTML in a
-    payload a model reads.
-    """
-    return " ".join(text.split()).replace("|", r"\|")
-
-
-def render_table(headers: list[str], rows: list[list[str]]) -> str:
-    """Render a Markdown table, one list of cells per row, ending in a newline.
-
-    Cell contents are the caller's, and this places them **as cells**: what a caller supplies can
-    fill a cell but never add one (`_placeable` says what that cost before it was true). The
-    guarantee is here rather than at each field, because this is the one renderer the turn-time
-    comparison and the campaign note share — and because the widest column of both is
-    composed from two fields joined *after* either could have carried a delimiter, so a per-field
-    rule would not have covered it.
-
-    No width padding: the table is read by a Markdown renderer and by a model, neither of which
-    needs it, and padding would make every re-synthesis of a campaign a spurious whitespace diff
-    against the note already committed.
-    """
-    header_row = f"| {' | '.join(_placeable(h) for h in headers)} |"
-    rule = f"|{'|'.join('---' for _ in headers)}|"
-    body = "\n".join(f"| {' | '.join(_placeable(c) for c in cells)} |" for cells in rows)
-    return f"{header_row}\n{rule}\n{body}\n"

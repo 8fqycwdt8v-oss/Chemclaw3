@@ -46,7 +46,9 @@ async def _scalar(sql: str) -> str:
 _CALLS = 20
 
 
-def test_pooling_reuses_backends_across_sequential_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_pooling_reuses_backends_across_sequential_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Twenty sequential `connection()` calls use at most `pg_pool_max_size` backends.
 
     Counterfactual: with connect-per-call each one is its own backend — the churn the load test
@@ -58,31 +60,24 @@ def test_pooling_reuses_backends_across_sequential_calls(monkeypatch: pytest.Mon
     monkeypatch.setattr(settings, "pg_pool_min_size", 1)
     monkeypatch.setattr(settings, "pg_pool_max_size", 4)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with db.pooling():
-            pids = [await _scalar("SELECT pg_backend_pid()") for _ in range(_CALLS)]
-        assert len(set(pids)) <= settings.pg_pool_max_size, sorted(set(pids))
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    async with db.pooling():
+        pids = [await _scalar("SELECT pg_backend_pid()") for _ in range(_CALLS)]
+    assert len(set(pids)) <= settings.pg_pool_max_size, sorted(set(pids))
 
 
-def test_unpooled_connections_do_not_share_a_backend() -> None:
+async def test_unpooled_connections_do_not_share_a_backend() -> None:
     """The same calls without a pool are one backend each — the behavior being replaced.
 
     Pins the contrast the test above depends on, so a bounded pid count cannot pass for the
     trivial reason that Postgres happened to reuse pids.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        pids = [await _scalar("SELECT pg_backend_pid()") for _ in range(_CALLS)]
-        assert len(set(pids)) == _CALLS
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    pids = [await _scalar("SELECT pg_backend_pid()") for _ in range(_CALLS)]
+    assert len(set(pids)) == _CALLS
 
 
-def test_pooled_connections_keep_the_dsn_search_path_and_our_statement_timeout(
+async def test_pooled_connections_keep_the_dsn_search_path_and_our_statement_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A pooled connection carries the DSN's own libpq `options` *and* our statement timeout.
@@ -94,18 +89,15 @@ def test_pooled_connections_keep_the_dsn_search_path_and_our_statement_timeout(
     # A fractional value so Postgres renders it in milliseconds — the units our merge computes in.
     monkeypatch.setattr(settings, "pg_statement_timeout_seconds", 1.5)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with db.pooling():
-            search_path = await _scalar("SHOW search_path")
-            statement_timeout = await _scalar("SHOW statement_timeout")
-        assert "chemclaw_test_" in search_path
-        assert statement_timeout == "1500ms"
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    async with db.pooling():
+        search_path = await _scalar("SHOW search_path")
+        statement_timeout = await _scalar("SHOW statement_timeout")
+    assert "chemclaw_test_" in search_path
+    assert statement_timeout == "1500ms"
 
 
-def test_a_caller_that_asks_for_no_timeout_still_gets_the_configured_one(
+async def test_a_caller_that_asks_for_no_timeout_still_gets_the_configured_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`connection()` bounds the statement even when the call site says nothing about a timeout.
@@ -121,35 +113,30 @@ def test_a_caller_that_asks_for_no_timeout_still_gets_the_configured_one(
     """
     monkeypatch.setattr(settings, "pg_statement_timeout_seconds", 7.5)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        assert await _scalar("SHOW statement_timeout") == "7500ms"  # unpooled
-        async with db.pooling():
-            assert await _scalar("SHOW statement_timeout") == "7500ms"  # pooled
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    assert await _scalar("SHOW statement_timeout") == "7500ms"  # unpooled
+    async with db.pooling():
+        assert await _scalar("SHOW statement_timeout") == "7500ms"  # pooled
 
 
-def test_an_explicit_timeout_still_overrides_the_default() -> None:
+async def test_an_explicit_timeout_still_overrides_the_default() -> None:
     """A call site that needs a different bound keeps it — the readiness probe is the live one.
 
     `/readyz` deliberately bounds its `SELECT 1` at `service_readiness_db_timeout_seconds` (2 s), a
     tighter budget than the stores'. A default that silently replaced an explicit argument would
     turn that probe into a 30-second hang, which is the failure it exists to avoid.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with db.connection(settings.postgres_dsn, statement_timeout_seconds=2.5) as conn:
-            cursor = await conn.execute("SHOW statement_timeout")
-            row = await cursor.fetchone()
-        assert row is not None
-        assert row[0] == "2500ms"
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    async with db.connection(settings.postgres_dsn, statement_timeout_seconds=2.5) as conn:
+        cursor = await conn.execute("SHOW statement_timeout")
+        row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] == "2500ms"
 
 
-def test_pool_exhaustion_surfaces_as_a_connection_error(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_pool_exhaustion_surfaces_as_a_connection_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A caller that cannot get a connection in time fails the same way an unreachable DB does.
 
     Same exception type on purpose: from the caller's side "no free connection" and "no database"
@@ -160,38 +147,31 @@ def test_pool_exhaustion_surfaces_as_a_connection_error(monkeypatch: pytest.Monk
     monkeypatch.setattr(settings, "pg_pool_max_size", 1)
     monkeypatch.setattr(settings, "pg_pool_timeout_seconds", 0.2)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with db.pooling():
-            async with db.connection(settings.postgres_dsn):
-                with pytest.raises(ConnectionError) as exc_info:
-                    async with db.connection(settings.postgres_dsn):
-                        pass
-        assert "Postgres unreachable" in str(exc_info.value)
-        # The password must not leak through the new failure path either.
-        assert "chemclaw:chemclaw" not in str(exc_info.value)
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    async with db.pooling():
+        async with db.connection(settings.postgres_dsn):
+            with pytest.raises(ConnectionError) as exc_info:
+                async with db.connection(settings.postgres_dsn):
+                    pass
+    assert "Postgres unreachable" in str(exc_info.value)
+    # The password must not leak through the new failure path either.
+    assert "chemclaw:chemclaw" not in str(exc_info.value)
 
 
-def test_pool_saturation_is_visible_as_a_gauge() -> None:
+async def test_pool_saturation_is_visible_as_a_gauge() -> None:
     """`requests_waiting` above zero is the only reading that says "the pool is too small".
 
     Without it, an undersized pool looks exactly like an unreachable database from the outside —
     which is the confusion the load test ran into, where connects timed out against an idle server.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        assert db.pool_stats() == {"pool_size": 0, "pool_available": 0, "requests_waiting": 0}
-        async with db.pooling():
-            async with db.connection(settings.postgres_dsn):
-                stats = db.pool_stats()
-        assert stats["pool_size"] >= 1
-        # Borrowed for the duration of the block, so it is not among the available ones.
-        assert stats["pool_available"] < stats["pool_size"]
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    assert db.pool_stats() == {"pool_size": 0, "pool_available": 0, "requests_waiting": 0}
+    async with db.pooling():
+        async with db.connection(settings.postgres_dsn):
+            stats = db.pool_stats()
+    assert stats["pool_size"] >= 1
+    # Borrowed for the duration of the block, so it is not among the available ones.
+    assert stats["pool_available"] < stats["pool_size"]
 
 
 _POOL_GAUGES = (
@@ -204,7 +184,7 @@ _POOL_GAUGES = (
 )
 
 
-def test_pooling_binds_the_pool_gauges_so_every_pooled_process_reports_them(
+async def test_pooling_binds_the_pool_gauges_so_every_pooled_process_reports_them(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A process that opens a pool cannot do so without also exposing the readings that describe it.
@@ -221,23 +201,19 @@ def test_pooling_binds_the_pool_gauges_so_every_pooled_process_reports_them(
     than rendered as 0 — on the shared singleton this would pass in any session where some earlier
     test happened to build the front door, which is precisely the accident it exists to rule out.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        registry = Metrics()
-        # `bind_pool_metrics` resolves METRICS at call time (the declared lazy import that keeps
-        # `core` free of module-scope sibling imports), so patching the module attribute reaches it.
-        monkeypatch.setattr("chemclaw.core.metrics.METRICS", registry)
-        assert not any(name in registry.render() for name in _POOL_GAUGES), (
-            "a fresh registry must expose no pool gauge, or this test proves nothing"
-        )
-        # No front door, no worker, no connector server — just the pool itself.
-        async with db.pooling():
-            rendered = registry.render()
-        for name in _POOL_GAUGES:
-            assert name in rendered, f"{name} is not exposed by a process that opened a pool"
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    registry = Metrics()
+    # `bind_pool_metrics` resolves METRICS at call time (the declared lazy import that keeps
+    # `core` free of module-scope sibling imports), so patching the module attribute reaches it.
+    monkeypatch.setattr("chemclaw.core.metrics.METRICS", registry)
+    assert not any(name in registry.render() for name in _POOL_GAUGES), (
+        "a fresh registry must expose no pool gauge, or this test proves nothing"
+    )
+    # No front door, no worker, no connector server — just the pool itself.
+    async with db.pooling():
+        rendered = registry.render()
+    for name in _POOL_GAUGES:
+        assert name in rendered, f"{name} is not exposed by a process that opened a pool"
 
 
 def test_a_second_event_loop_gets_its_own_pool_rather_than_borrowing_a_broken_one(
@@ -289,7 +265,7 @@ def test_a_second_event_loop_gets_its_own_pool_rather_than_borrowing_a_broken_on
     asyncio.run(_run())
 
 
-def test_a_nested_loop_that_opened_a_pool_still_ends(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_nested_loop_that_opened_a_pool_still_ends(monkeypatch: pytest.MonkeyPatch) -> None:
     """A loop that abandons its pool does not merely leak it — it can fail to end at all.
 
     `D-2026-09-13-a-loop-that-abandons-its-pool-can-fail-to-end`. `asyncio.run` shuts its loop down
@@ -323,48 +299,45 @@ def test_a_nested_loop_that_opened_a_pool_still_ends(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(settings, "pg_pool_min_size", 8)
     monkeypatch.setattr(settings, "pg_pool_max_size", 16)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with db.pooling():
-            # The parent loop has to hold a pool too, or the process is not the pooled one the
-            # defect needs: `connection()` outside `pooling()` opens a dedicated connection and no
-            # pool exists to be abandoned anywhere.
+    await migrated_db_or_skip()
+    async with db.pooling():
+        # The parent loop has to hold a pool too, or the process is not the pooled one the
+        # defect needs: `connection()` outside `pooling()` opens a dedicated connection and no
+        # pool exists to be abandoned anywhere.
+        async with db.connection(settings.postgres_dsn):
+            pass
+        returned = threading.Event()
+
+        async def _touch() -> None:
             async with db.connection(settings.postgres_dsn):
                 pass
-            returned = threading.Event()
 
-            async def _touch() -> None:
-                async with db.connection(settings.postgres_dsn):
-                    pass
+        def _nested_loop() -> None:
+            """`evals/retrieval._run_sync` itself, on a thread with no loop of its own.
 
-            def _nested_loop() -> None:
-                """`evals/retrieval._run_sync` itself, on a thread with no loop of its own.
+            The real function rather than its wrapper, and that is the difference between this
+            test and a vacuous one: `_closing_this_loops_pools` could be perfect and `_run_sync`
+            could stop calling it, which is the arm a test driving the wrapper directly cannot
+            see. This is also production's own arm — `durable/eval_drift` reaches `_run_sync`
+            through `asyncio.to_thread` from inside the worker's `pooling()`, so the thread it
+            lands on has no running loop and the process has pools.
+            """
+            try:
+                _run_sync(_touch())
+            finally:
+                returned.set()
 
-                The real function rather than its wrapper, and that is the difference between this
-                test and a vacuous one: `_closing_this_loops_pools` could be perfect and `_run_sync`
-                could stop calling it, which is the arm a test driving the wrapper directly cannot
-                see. This is also production's own arm — `durable/eval_drift` reaches `_run_sync`
-                through `asyncio.to_thread` from inside the worker's `pooling()`, so the thread it
-                lands on has no running loop and the process has pools.
-                """
-                try:
-                    _run_sync(_touch())
-                finally:
-                    returned.set()
+        thread = threading.Thread(target=_nested_loop, daemon=True)
+        thread.start()
+        # Daemon and generously bounded: a hang here is the defect, and a test that hung with it
+        # would report as a timeout in whatever ran next rather than as this assertion.
+        joined = returned.wait(timeout=30.0)
 
-            thread = threading.Thread(target=_nested_loop, daemon=True)
-            thread.start()
-            # Daemon and generously bounded: a hang here is the defect, and a test that hung with it
-            # would report as a timeout in whatever ran next rather than as this assertion.
-            joined = returned.wait(timeout=30.0)
-
-        assert joined, (
-            "the nested asyncio.run never returned: its loop is in _cancel_all_tasks awaiting "
-            "psycopg_pool's background workers, which a cancelled mid-reconnect worker does not "
-            "leave — so the thread that called a live metric is wedged for the life of the process"
-        )
-
-    asyncio.run(_run())
+    assert joined, (
+        "the nested asyncio.run never returned: its loop is in _cancel_all_tasks awaiting "
+        "psycopg_pool's background workers, which a cancelled mid-reconnect worker does not "
+        "leave — so the thread that called a live metric is wedged for the life of the process"
+    )
 
 
 def test_a_pool_whose_loop_has_ended_is_neither_counted_nor_left_holding_backends(
@@ -436,7 +409,7 @@ def test_a_pool_whose_loop_has_ended_is_neither_counted_nor_left_holding_backend
     asyncio.run(_run())
 
 
-def test_the_reported_per_process_ceiling_counts_pools_and_not_processes(
+async def test_the_reported_per_process_ceiling_counts_pools_and_not_processes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`chemclaw_pg_pool_max_size` is the per-process half of the fleet budget, so it must be true.
@@ -457,41 +430,38 @@ def test_the_reported_per_process_ceiling_counts_pools_and_not_processes(
     """
     monkeypatch.setattr(settings, "pg_pool_max_size", 4)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        registry = Metrics()
-        monkeypatch.setattr("chemclaw.core.metrics.METRICS", registry)
-        async with db.pooling():
-            # The stores' pool and `/readyz`'s differently-bounded one: two keys, by design.
-            async with db.connection(settings.postgres_dsn):
-                pass
-            async with db.connection(settings.postgres_dsn, statement_timeout_seconds=2.0):
-                pass
-            # And the pool `core.db` does not build — the checkpointer's shape.
-            foreign = AsyncConnectionPool(
-                conninfo=settings.postgres_dsn,
-                kwargs={"autocommit": True},
-                min_size=0,
-                max_size=settings.pg_pool_max_size,
-                open=False,
-            )
-            await foreign.open()
-            db.register_pool(foreign)
-            try:
-                reported = _gauge(registry.render(), "chemclaw_pg_pool_max_size")
-                stats = db.pool_stats()
-            finally:
-                db.unregister_pool(foreign)
-                await foreign.close()
-
-        assert reported == 3 * settings.pg_pool_max_size, (
-            f"this process may open {3 * settings.pg_pool_max_size} connections and reports "
-            f"{reported:.0f}; the fleet budget check is made against this number"
+    await migrated_db_or_skip()
+    registry = Metrics()
+    monkeypatch.setattr("chemclaw.core.metrics.METRICS", registry)
+    async with db.pooling():
+        # The stores' pool and `/readyz`'s differently-bounded one: two keys, by design.
+        async with db.connection(settings.postgres_dsn):
+            pass
+        async with db.connection(settings.postgres_dsn, statement_timeout_seconds=2.0):
+            pass
+        # And the pool `core.db` does not build — the checkpointer's shape.
+        foreign = AsyncConnectionPool(
+            conninfo=settings.postgres_dsn,
+            kwargs={"autocommit": True},
+            min_size=0,
+            max_size=settings.pg_pool_max_size,
+            open=False,
         )
-        # And the foreign pool's saturation is legible at all, which it was not before.
-        assert stats["pool_size"] >= 1
+        await foreign.open()
+        db.register_pool(foreign)
+        try:
+            reported = _gauge(registry.render(), "chemclaw_pg_pool_max_size")
+            stats = db.pool_stats()
+        finally:
+            db.unregister_pool(foreign)
+            await foreign.close()
 
-    asyncio.run(_run())
+    assert reported == 3 * settings.pg_pool_max_size, (
+        f"this process may open {3 * settings.pg_pool_max_size} connections and reports "
+        f"{reported:.0f}; the fleet budget check is made against this number"
+    )
+    # And the foreign pool's saturation is legible at all, which it was not before.
+    assert stats["pool_size"] >= 1
 
 
 def _gauge(rendered: str, name: str) -> float:
@@ -502,7 +472,7 @@ def _gauge(rendered: str, name: str) -> float:
     raise AssertionError(f"{name} is not in the exposition")
 
 
-def test_the_two_pool_ceiling_gauges_partition_this_process_by_server(
+async def test_the_two_pool_ceiling_gauges_partition_this_process_by_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`ChemclawFleetAboveItsConnectionCeiling` checks each server, so the gauges have to split.
@@ -525,47 +495,44 @@ def test_the_two_pool_ceiling_gauges_partition_this_process_by_server(
     """
     monkeypatch.setattr(settings, "pg_pool_max_size", 8)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        registry = Metrics()
-        monkeypatch.setattr("chemclaw.core.metrics.METRICS", registry)
-        # A second *endpoint* for the same database. `tests/test_fleet_pools.py` splits on
-        # `application_name`, which is enough to mint a second *pool* and is deliberately not
-        # enough here: these gauges partition by the server `pg_endpoint` says a DSN dials, and
-        # two spellings of one host are exactly the pair that has to land on opposite sides. The
-        # loopback aliases are the one such pair that is also connectable from any runner.
-        host = str(conninfo.conninfo_to_dict(settings.postgres_dsn).get("host") or "").lower()
-        if host not in {"localhost", "127.0.0.1"}:
-            pytest.skip(f"needs a loopback postgres_dsn to spell twice; this one dials {host!r}")
-        split = conninfo.make_conninfo(
-            settings.postgres_dsn, host="127.0.0.1" if host == "localhost" else "localhost"
-        )
-        monkeypatch.setattr(settings, "session_store_dsn", split)
-        async with db.pooling():
-            async with db.connection(settings.postgres_dsn):
-                pass
-            async with db.connection(split, statement_timeout_seconds=2.0, pool_max_size=1):
-                pass
-            async with db.connection(split):
-                pass
-            rendered = registry.render()
-            total = _gauge(rendered, "chemclaw_pg_pool_max_size")
-            elsewhere = _gauge(rendered, "chemclaw_pg_session_pool_max_size")
+    await migrated_db_or_skip()
+    registry = Metrics()
+    monkeypatch.setattr("chemclaw.core.metrics.METRICS", registry)
+    # A second *endpoint* for the same database. `tests/test_fleet_pools.py` splits on
+    # `application_name`, which is enough to mint a second *pool* and is deliberately not
+    # enough here: these gauges partition by the server `pg_endpoint` says a DSN dials, and
+    # two spellings of one host are exactly the pair that has to land on opposite sides. The
+    # loopback aliases are the one such pair that is also connectable from any runner.
+    host = str(conninfo.conninfo_to_dict(settings.postgres_dsn).get("host") or "").lower()
+    if host not in {"localhost", "127.0.0.1"}:
+        pytest.skip(f"needs a loopback postgres_dsn to spell twice; this one dials {host!r}")
+    split = conninfo.make_conninfo(
+        settings.postgres_dsn, host="127.0.0.1" if host == "localhost" else "localhost"
+    )
+    monkeypatch.setattr(settings, "session_store_dsn", split)
+    async with db.pooling():
+        async with db.connection(settings.postgres_dsn):
+            pass
+        async with db.connection(split, statement_timeout_seconds=2.0, pool_max_size=1):
+            pass
+        async with db.connection(split):
+            pass
+        rendered = registry.render()
+        total = _gauge(rendered, "chemclaw_pg_pool_max_size")
+        elsewhere = _gauge(rendered, "chemclaw_pg_session_pool_max_size")
 
-        assert (total, elsewhere) == (17.0, 9.0), (
-            f"the front door's split shape holds 8 + 1 + 8 = 17 connections, 9 of them on the "
-            f"session store's server; the gauges report {total:.0f} and {elsewhere:.0f}, and the "
-            "alert reads the primary's side as their difference"
-        )
+    assert (total, elsewhere) == (17.0, 9.0), (
+        f"the front door's split shape holds 8 + 1 + 8 = 17 connections, 9 of them on the "
+        f"session store's server; the gauges report {total:.0f} and {elsewhere:.0f}, and the "
+        "alert reads the primary's side as their difference"
+    )
 
-        # And nothing lands on a second server when there is not one.
-        monkeypatch.setattr(settings, "session_store_dsn", "")
-        async with db.pooling():
-            async with db.connection(settings.postgres_dsn):
-                pass
-            assert _gauge(registry.render(), "chemclaw_pg_session_pool_max_size") == 0.0
-
-    asyncio.run(_run())
+    # And nothing lands on a second server when there is not one.
+    monkeypatch.setattr(settings, "session_store_dsn", "")
+    async with db.pooling():
+        async with db.connection(settings.postgres_dsn):
+            pass
+        assert _gauge(registry.render(), "chemclaw_pg_session_pool_max_size") == 0.0
 
 
 def test_a_sized_pool_is_not_the_pool_the_next_caller_borrows(

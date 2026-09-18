@@ -84,6 +84,14 @@ class FingerprintSettings(BaseSettings):
     # order) and logs a warning when it hits the cap so a truncated result is never silent.
     # Raise it for a larger corpus, or add a pattern-fingerprint prefilter (deferred) when it
     # starts truncating.
+    #
+    # **Raising it costs time, and the two budgets below are what it is spent against.** Measured
+    # on this branch over NCI molecules: the per-record scan runs at ~0.10 ms/record (2.01 s at
+    # 20,000) and building the `rdSubstructLibrary` index at ~0.25 ms/record (~5 s at 20,000). So a
+    # cap raised past what `substructure_index_build_timeout_seconds` allows means the index is
+    # skipped and every query is the per-record scan, and a cap raised past what
+    # `substructure_match_timeout_seconds` allows *that* scan means the search fails. Raise the two
+    # timeouts with it.
     substructure_scan_max_records: int = Field(default=5000, gt=0)
     # Bound on the length of a model-supplied substructure query string (SEC-4). SMARTS matching
     # is subgraph isomorphism (worst-case exponential) run in-process over the scanned corpus
@@ -112,3 +120,46 @@ class FingerprintSettings(BaseSettings):
     # Killing the work outright would need a subprocess — over-engineering until a real abuse
     # case is measured. Seconds; normally ms.
     substructure_match_timeout_seconds: float = Field(default=5.0, gt=0.0)
+    # How long building the substructure index may take before the scan answers without one.
+    # **A separate number from the match bound above because it answers a separate question**, and
+    # sharing one was a permanent failure rather than a slow answer: charged against the 5.0 s
+    # match bound, a 19,996-record corpus ran out of budget while indexing on three attempts out of
+    # three and nothing is cached when a build is abandoned, so the search could never succeed —
+    # over a corpus the per-record scan answered in 2.01 s. The build is now skipped rather than
+    # fatal (`substructure_index.index_for` returns None and the scan matches record by record), so
+    # this bounds an *optimisation*: lowering it costs speed on a large corpus, never an answer.
+    #
+    # 3.0 s: the build runs at ~0.25 ms/record, so this covers the shipped
+    # `substructure_scan_max_records` of 5,000 (~1.2-2.6 s measured, busy box included) with
+    # headroom, and still leaves the 5.0 s match bound enough for the per-record scan to answer if
+    # the build is refused (~0.5 s at 5,000 records). It is a projection rather than a stopwatch —
+    # a build gives up as soon as its own measured rate says it will exceed this — so a corpus far
+    # over it costs tens of milliseconds to reject, not 3.0 s.
+    substructure_index_build_timeout_seconds: float = Field(default=3.0, gt=0.0)
+    # How long one chunk of a substructure scan may run before the deadline is consulted again.
+    # The scan matches through `rdSubstructLibrary`, whose `GetMatches` is a C++ call that cannot be
+    # interrupted, so the wall-clock bound above can only be enforced *between* calls — and the
+    # chunk is therefore sized in **time**, not in records. That unit is the whole point: measured
+    # on this branch, one molecule costs ~6 us for a functional-group SMARTS on caffeine and ~117 ms
+    # for a 16-atom recursive pattern on a 121-atom dendrimer, so a fixed chunk of 500 records is
+    # 7 ms of overrun on one corpus and ~58 s on another. Sized in time, the same 500-record chunk
+    # becomes one or two molecules on the second corpus — the granularity the per-record loop this
+    # replaced had — and the whole corpus in ~7 calls on the first.
+    #
+    # 0.25 s: a twentieth of the shipped `substructure_match_timeout_seconds`, so a scan that
+    # overruns its bound overruns it by a slice a caller will not notice, while the per-call cost it
+    # buys back (the query's own pattern fingerprint, ~69 us) stays invisible. Lower it for a
+    # tighter bound on an abandoned thread; the cost is one fingerprint per chunk.
+    substructure_scan_deadline_slice_seconds: float = Field(default=0.25, gt=0.0)
+    # How many built substructure indexes are held in memory at once (D-080 follow-up). An index is
+    # the corpus slice pre-parsed into `rdSubstructLibrary` — 1.16 s to build for 5,000 molecules
+    # against 13-41 ms to search, so it is only worth building if it is kept — and it is keyed by a
+    # digest of the labels it was built from, because nothing in the schema moves when an upsert
+    # rewrites a row's SMILES in place.
+    #
+    # 2, not 1: an ingest that changes the corpus invalidates the key, and holding one generation
+    # behind means the queries already in flight against the old slice do not each rebuild it. Not
+    # more, because nothing reads a third generation and the memory is real — measured at 863 bytes
+    # per molecule (binary molecules plus pattern fingerprints), so this bound times
+    # `substructure_scan_max_records` is the ceiling: ~8.4 MB at the shipped defaults.
+    substructure_index_cache_entries: int = Field(default=2, ge=1)

@@ -83,7 +83,7 @@ def test_a_failed_checkpoint_write_is_counted_and_retryable(
     assert "degraded[checkpointer]" in caplog.text
 
 
-def test_a_working_write_still_stamps_the_channels_and_counts_nothing(
+async def test_a_working_write_still_stamps_the_channels_and_counts_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The guard is a `try` around the existing write, not a change to what it writes.
@@ -102,15 +102,12 @@ def test_a_working_write_still_stamps_the_channels_and_counts_nothing(
     monkeypatch.setattr(AsyncPostgresSaver, "aput", _record)
     saver = SchemaStampedSaver.__new__(SchemaStampedSaver)
 
-    async def _write() -> None:
-        await saver.aput(
-            {"configurable": {"thread_id": "session-42"}},
-            Checkpoint(),  # type: ignore[typeddict-item]
-            CheckpointMetadata(),
-            {},
-        )
-
-    asyncio.run(_write())
+    await saver.aput(
+        {"configurable": {"thread_id": "session-42"}},
+        Checkpoint(),  # type: ignore[typeddict-item]
+        CheckpointMetadata(),
+        {},
+    )
 
     assert STATE_CHANNELS_KEY in seen[0]
     assert METRICS.value("chemclaw_degraded_total") == before

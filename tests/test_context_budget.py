@@ -20,17 +20,22 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages.utils import count_tokens_approximately
 
 from chemclaw.agent.context_budget import (
     _MAX_REPORTED_FLOORS,
     _SCHEMA_TOKENS,
     MeasureRequestPrefix,
+    _baked_cache_dir,
     _Calibration,
+    _encoding,
+    _message_tokens,
     _prefix,
     begin_context_watch,
     current_context,
@@ -41,6 +46,7 @@ from chemclaw.agent.context_budget import (
     note_model_call,
     prefix_tokens,
     reset_calibration,
+    reset_encoding,
     reset_floor_reports,
 )
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
@@ -941,4 +947,366 @@ def test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable() -> No
         f"against {on_loop_worst * 1000:.0f} ms when the same measurement runs on the loop "
         f"(wall {on_loop_wall * 1000:.0f} ms): the sweep is running on the loop that serves every "
         "other turn's stream and both kubelet probes"
+    )
+
+
+# ---------------------------------------------------------------------------------------------
+# Counting the prefix exactly, where that can be done without reaching the network.
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _clean_encoding() -> Any:
+    """No test inherits another's resolved encoding or its memoised schema sweep."""
+    reset_encoding()
+    _SCHEMA_TOKENS.clear()
+    yield
+    reset_encoding()
+    _SCHEMA_TOKENS.clear()
+
+
+def _encoding_or_skip() -> Any:
+    """The configured encoding, or a skip saying what this run is therefore not evidence about.
+
+    A skip rather than a failure because the merge table is a *deployment* artefact: an image bakes
+    it and `TIKTOKEN_CACHE_DIR` names it, and a checkout with neither is exactly the fallback the
+    tests below this one cover. Loud, because a check that quietly shrinks is worse than one that
+    says what it did not look at.
+    """
+    encoding = _encoding()
+    if encoding is None:
+        pytest.skip(
+            "no tiktoken merge table is cached here, so the exact-counting half of the budget "
+            "is not exercised by this run; bake one and set TIKTOKEN_CACHE_DIR"
+        )
+    return encoding
+
+
+def test_the_prompt_is_counted_with_the_encoding_rather_than_estimated(
+    _clean_encoding: None,
+) -> None:
+    """The system message is a *block list*, and counting only strings was a silent no-op.
+
+    This is the assertion the first implementation needed and did not have. `_message_tokens`
+    tested `isinstance(content, str)` and fell back otherwise — and the prompt `create_agent` hands
+    a model arrives as `[{"type": "text", "text": ...}]`, so the exact path was never taken and the
+    measured prefix was byte-for-byte the estimator's. A fallback that is never taken and one that
+    is always taken produce the same number, so the property to assert is that the count *moved*,
+    and moved in the direction chars/4 is wrong in: it over-charges prose. Measured 2026-09-16 on
+    the observed `default` prompt, 7,755 estimated against 6,574 billed by `o200k_base` — 18%.
+    """
+    encoding = _encoding_or_skip()
+    from chemclaw.agent.chemclaw_agent import instructions_for
+    from chemclaw.agent.profile_discovery import load_profiles
+    from chemclaw.agent.profiles import get_profile
+
+    load_profiles()
+    # This repository's own instructions, not invented prose: a hand-written string repeated 200
+    # times tokenises at 1.0000x and the first version of this test asserted against that, which
+    # measured the fixture rather than the prompt.
+    text = instructions_for(get_profile("default"))
+    prompt = SystemMessage(content=[{"type": "text", "text": text}])
+
+    exact = _message_tokens(prompt)
+    estimated = int(count_tokens_approximately([prompt]))
+
+    assert exact < estimated, (
+        f"the block-list prompt counted {exact} against the estimator's {estimated}: on this "
+        "repository's own prose chars/4 over-charges by ~15%, so a count that did not fall is a "
+        "count that fell back to the estimator"
+    )
+    envelope = int(count_tokens_approximately([prompt.model_copy(update={"content": ""})]))
+    assert exact == envelope + len(encoding.encode_ordinary(text))
+
+
+def test_the_schema_half_is_counted_with_the_encoding_too(_clean_encoding: None) -> None:
+    """And it barely moves, which is the finding rather than a weak assertion.
+
+    Measured 2026-09-16 over the `default` profile's 98 bound tools: 61,123 against 61,093
+    estimated — chars/4 is within 0.05% on JSON schemas. So this asserts the two agree *closely*
+    rather than that one is smaller, because the direction is not the property and pinning a
+    direction here would fail on a schema whose punctuation happened to tokenise the other way.
+    """
+    _encoding_or_skip()
+    from chemclaw.agent.chemclaw_agent import _capability_tools
+    from chemclaw.agent.profile_discovery import load_profiles
+    from chemclaw.agent.profiles import get_profile
+
+    load_profiles()
+    # Real schemas, for the reason the test above gives: `"x " * 500` measures 1.94x because a
+    # repeated two-character token is nothing like a JSON schema, and asserting against it would
+    # be asserting a property of the fixture.
+    tools = _capability_tools(get_profile("default"))
+
+    exact = estimate_tool_schemas(tools)
+    _SCHEMA_TOKENS.clear()
+    with_estimator = _with_encoding("", lambda: estimate_tool_schemas(tools))
+
+    assert exact > 10_000 and with_estimator > 10_000
+    assert abs(exact - with_estimator) < with_estimator * 0.05, (
+        f"{exact} exact against {with_estimator} estimated over {len(tools)} schemas: these two "
+        "counters disagree far more on JSON than the 1.3% this surface measured on 2026-09-16 "
+        "(29,879 against 29,489) and the 0.05% the bound surface measured"
+    )
+
+
+def _with_encoding(name: str, call: Callable[[], int]) -> int:
+    """Run `call` with `llm_token_encoding` set to `name`, putting the setting back afterwards."""
+    previous = settings.llm_token_encoding
+    settings.llm_token_encoding = name
+    reset_encoding()
+    try:
+        return call()
+    finally:
+        settings.llm_token_encoding = previous
+        reset_encoding()
+
+
+def test_a_special_token_spelling_is_counted_rather_than_raising(_clean_encoding: None) -> None:
+    """A tool result is text a server wrote, and `Encoding.encode` refuses some of it.
+
+    `encode` raises `ValueError` on `<|endoftext|>` and the other special-token spellings; a
+    connector could return one in a document, a SMILES comment or an error string. A counter that
+    raises on its own input would fail the turn it exists to make cheaper, so this path uses
+    `encode_ordinary`, which has no such refusal.
+    """
+    _encoding_or_skip()
+
+    tokens = _message_tokens(SystemMessage(content="<|endoftext|> and <|fim_prefix|> in a result"))
+
+    assert tokens > 0
+
+
+def test_an_unpriceable_block_falls_back_to_the_estimator_whole(_clean_encoding: None) -> None:
+    """An image is 85 tokens to the estimator and nothing at all to an encoding.
+
+    So a message carrying one is counted by the estimator entirely rather than half each way,
+    which is what `_text_tokens` returning `None` buys: the two counters are never mixed *inside*
+    one message.
+    """
+    _encoding_or_skip()
+    picture = SystemMessage(
+        content=[{"type": "text", "text": "look"}, {"type": "image_url", "image_url": {"url": "x"}}]
+    )
+
+    assert _message_tokens(picture) == int(count_tokens_approximately([picture]))
+
+
+def test_no_baked_cache_means_the_estimator_and_no_socket(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any, _clean_encoding: None
+) -> None:
+    """Production is air-gapped, so the fallback must not be "try the network and recover".
+
+    `tiktoken.get_encoding` fetches its merge table over HTTPS on a miss. Measured here with an
+    empty cache directory and no network namespace, that is a `requests.exceptions.ProxyError` —
+    an `OSError` — after 0.03 s where the proxy refuses at once; on a network that *drops* the
+    packet instead it is a connect timeout, on the thread measuring the prefix. So the question
+    `_baked_cache_dir` asks is whether a table was baked at all, and this test is what proves the
+    common misconfiguration never dials: every socket constructor and every name lookup fails the
+    test if it is reached.
+    """
+    import socket
+
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path))
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the context budget reached the network to resolve an encoding")
+
+    monkeypatch.setattr(socket, "getaddrinfo", refuse)
+    monkeypatch.setattr(socket, "create_connection", refuse)
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+
+    assert _encoding() is None
+    message = SystemMessage(content="counted the old way")
+    assert _message_tokens(message) == int(count_tokens_approximately([message]))
+
+
+def test_an_encoding_nobody_baked_costs_accuracy_and_nothing_else(
+    monkeypatch: pytest.MonkeyPatch, _clean_encoding: None
+) -> None:
+    """A name that cannot be resolved degrades to the estimator instead of failing the turn.
+
+    The residual `_baked_cache_dir` cannot close — a populated cache that does not hold the
+    *configured* encoding — is this one, and what it must cost is one swallowed attempt per process
+    and a WARNING naming the encoding. Driven through a resolution that raises rather than by
+    unsetting the cache, so it covers the arm the directory check lets through.
+    """
+
+    def explode(name: str) -> Any:
+        raise RuntimeError(f"no merge table for {name}")
+
+    import tiktoken
+
+    monkeypatch.setattr(tiktoken, "get_encoding", explode)
+    monkeypatch.setattr(
+        "chemclaw.agent.context_budget._baked_cache_dir", lambda: __import__("pathlib").Path(".")
+    )
+
+    assert _encoding() is None
+    message = SystemMessage(content="counted the old way")
+    assert _message_tokens(message) == int(count_tokens_approximately([message]))
+
+
+def test_the_cache_directory_this_module_asks_about_is_the_one_tiktoken_reads() -> None:
+    """An upstream shape, pinned: `_baked_cache_dir` transcribes `read_file_cached`'s resolution.
+
+    That function takes a blob path rather than answering "where would you look", so the steps are
+    copied into this module. A bump that renames or reorders them would leave `_baked_cache_dir`
+    pointing at a directory nothing bakes into, and the only symptom would be a budget quietly
+    counting with chars/4 again.
+
+    **Two of the five strings below are the ones this test used to be missing**, and their absence
+    is the whole of the defect the test beside it now drives: upstream decides on *presence*
+    (`"TIKTOKEN_CACHE_DIR" in os.environ`) and treats an empty value as *caching disabled — fetch
+    every time* (`cache_dir == ""`), where this module asked `os.environ.get(...) or ...` and so
+    read an empty value as "not set". Pinning the three directory names could not see that,
+    because the three names were never the part that was wrong.
+    """
+    import inspect
+
+    import tiktoken.load
+
+    source = inspect.getsource(tiktoken.load.read_file_cached)
+
+    for expected in (
+        '"TIKTOKEN_CACHE_DIR"',
+        '"DATA_GYM_CACHE_DIR"',
+        '"data-gym-cache"',
+        '"TIKTOKEN_CACHE_DIR" in os.environ',
+        'cache_dir == ""',
+    ):
+        assert expected in source, (
+            f"tiktoken.load.read_file_cached no longer mentions {expected}: "
+            "`context_budget._baked_cache_dir` transcribes that resolution and is now wrong"
+        )
+
+
+def test_the_baked_cache_question_is_answered_the_way_tiktoken_answers_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any, _clean_encoding: None
+) -> None:
+    """Every arm of the resolution, driven — because the string pin above agreed with a dial.
+
+    `_baked_cache_dir` is the whole air-gap precondition: `_resolve_encoding` calls `tiktoken` only
+    where this says a table is baked, so a `Path` returned here is this module saying "loading is
+    safe, nothing will be fetched". The assertion that used to stand behind that claim read three
+    string literals out of upstream's source, which is evidence about upstream and none at all
+    about this function. Measured with `TIKTOKEN_CACHE_DIR=""` and a populated
+    `/tmp/data-gym-cache`, with that assertion green: this returned `/tmp/data-gym-cache`,
+    `tiktoken` ignored it exactly as upstream documents, and the resolve dialled `127.0.0.1` — the
+    guard was the reason the fetch happened.
+
+    So the arms are driven instead. The empty-string one is the regression, and it is driven
+    through `_encoding()` as well as through the return value, because what the return value is
+    *for* is deciding whether a socket is opened.
+
+    **The egress guard is not what asserts that here, and the reason is worth recording.**
+    `core/netguard.py` is armed in this process, and it did not see the dial above: a proxy
+    variable moved the destination to loopback, which `_check` exempts by construction and must
+    keep exempting. So `_refused` stayed 0 through the defect it exists to catch, and the sentinel
+    below — which fails on *any* host, loopback included — is the assertion that holds.
+    """
+    import socket
+    import tempfile
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the context budget reached the network to resolve an encoding")
+
+    for target, name in (
+        (socket, "getaddrinfo"),
+        (socket, "gethostbyname"),
+        (socket, "create_connection"),
+        (socket.socket, "connect"),
+        (socket.socket, "connect_ex"),
+    ):
+        monkeypatch.setattr(target, name, refuse)
+
+    baked = tmp_path / "baked"
+    baked.mkdir()
+    (baked / "fb374d419588a4632f3f557e76b4b70aebbca790").write_bytes(b"a merge table")
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    # The no-variable arm resolves through `tempfile.gettempdir()`, so the temp directory is moved
+    # under the fixture rather than the host's — otherwise this arm answers with whatever the
+    # machine running the suite happens to have cached, which is exactly how the defect hid.
+    temp = tmp_path / "tmp"
+    (temp / "data-gym-cache").mkdir(parents=True)
+    (temp / "data-gym-cache" / "blob").write_bytes(b"a merge table")
+    monkeypatch.setattr(tempfile, "tempdir", str(temp))
+
+    monkeypatch.delenv("DATA_GYM_CACHE_DIR", raising=False)
+
+    # An empty value is upstream's "caching disabled", never "fall through to the next spelling".
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", "")
+    assert _baked_cache_dir() is None, (
+        "an empty TIKTOKEN_CACHE_DIR is tiktoken's 'caching disabled, fetch every time'; reading "
+        "it as 'unset' hands `_resolve_encoding` a directory tiktoken will not read and a fetch "
+        "it will make"
+    )
+    assert _encoding() is None
+    reset_encoding()
+
+    # …and it still means that when the next spelling is populated, because upstream branches on
+    # presence and never reaches `DATA_GYM_CACHE_DIR` at all.
+    monkeypatch.setenv("DATA_GYM_CACHE_DIR", str(baked))
+    assert _baked_cache_dir() is None
+    monkeypatch.delenv("DATA_GYM_CACHE_DIR")
+
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(baked))
+    assert _baked_cache_dir() == baked
+
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(bare))
+    assert _baked_cache_dir() is None, "an empty directory holds no merge table to load"
+
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path / "never-created"))
+    assert _baked_cache_dir() is None
+
+    monkeypatch.delenv("TIKTOKEN_CACHE_DIR")
+    assert _baked_cache_dir() == temp / "data-gym-cache", (
+        "with neither variable set the cache is `data-gym-cache` under the system temp directory, "
+        "which is where a `tiktoken` that has ever run puts it"
+    )
+
+
+def test_the_encoding_the_image_bakes_is_the_encoding_the_config_asks_for() -> None:
+    """The one declaration that decides whether a shipped pod ever reaches the network.
+
+    Two files name this encoding and nothing joined them: `deploy/Containerfile` bakes a merge
+    table under `TIKTOKEN_CACHE_DIR` as a literal, and `llm_token_encoding` is what
+    `_resolve_encoding` then asks for. They agreeing is not a tidiness property — it is the
+    residual `_baked_cache_dir` cannot close, because a *populated* cache that does not hold the
+    configured encoding is precisely the case where this module says "safe to load" and `tiktoken`
+    fetches. On a dropping network that fetch has no timeout (`tiktoken.load.read_file` calls
+    `requests.get` with none), so changing the config default alone would put every pod on that
+    path at its first model call, with the only symptom a slow one.
+
+    The cache *directory* is asserted for the same reason and in the same breath: a bake into one
+    path and an `ENV` naming another leaves the image with a table no runtime reads, which is the
+    same fetch by a different route.
+    """
+    import re
+
+    containerfile = (Path(__file__).resolve().parents[1] / "deploy" / "Containerfile").read_text(
+        encoding="utf-8"
+    )
+
+    baked = re.search(r"tiktoken\.get_encoding\(['\"]([^'\"]+)['\"]\)", containerfile)
+    assert baked, (
+        "deploy/Containerfile no longer bakes a tiktoken merge table, so every pod resolves its "
+        "encoding over the network on its first model call — or, air-gapped, never resolves one"
+    )
+    configured = cast(str, type(settings).model_fields["llm_token_encoding"].default)
+    assert baked.group(1) == configured, (
+        f"deploy/Containerfile bakes {baked.group(1)!r} and llm_token_encoding defaults to "
+        f"{configured!r}: a shipped pod would find a populated cache without the table it wants "
+        "and fetch it, which the air-gapped posture turns into a hang with no timeout"
+    )
+
+    bake_dir = re.search(r"TIKTOKEN_CACHE_DIR=(\S+) ", containerfile)
+    run_dir = re.search(r"^\s+TIKTOKEN_CACHE_DIR=(\S+)\s*$", containerfile, flags=re.MULTILINE)
+    assert bake_dir and run_dir, (
+        "deploy/Containerfile no longer both bakes into and exports a cache dir"
+    )
+    assert bake_dir.group(1) == run_dir.group(1), (
+        f"the image bakes the merge table into {bake_dir.group(1)} and runs with "
+        f"TIKTOKEN_CACHE_DIR={run_dir.group(1)}: the baked table is never read"
     )

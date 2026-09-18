@@ -11,7 +11,6 @@ The rule the two share is the one the omission filter was missing: *writing down
 find* is right for a column that merely records more, and wrong for a column the value lives in.
 """
 
-import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -102,7 +101,7 @@ async def _counts(conn: psycopg.AsyncConnection[Any]) -> tuple[int, int]:
     return int(calculations[0]), int(values[0])
 
 
-def test_an_unseeded_store_is_refused_before_a_spine_row_is_written() -> None:
+async def test_an_unseeded_store_is_refused_before_a_spine_row_is_written() -> None:
     """Applying the directory alone must fail loudly, not leave calculations with no facts.
 
     `schema/result-store/` holds the DDL; the registry rows come from `sink_schema --seed`, which
@@ -118,33 +117,31 @@ def test_an_unseeded_store_is_refused_before_a_spine_row_is_written() -> None:
 
     The assertion is therefore about the *residue* as much as the raise.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
-        try:
-            schema = f"{TEST_SCHEMA}_unseeded"
-            await _build_store(conn, schema, seed=False)
-            sink = _sink(schema)
-            with pytest.raises(SinkRejectedError) as refusal:
-                await sink.deliver([_record()])
-            await sink.aclose()
-            assert "--seed" in str(refusal.value), (
-                "a bootstrap failure must name the command that fixes it"
-            )
-            assert await _counts(conn) == (0, 0), (
-                "the refusal must come before the first write: the sink writes row-by-row on an "
-                "autocommit connection, so a spine row written ahead of the refusal is permanent"
-            )
-        finally:
-            await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-            await conn.commit()
-            await conn.close()
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
+    try:
+        schema = f"{TEST_SCHEMA}_unseeded"
+        await _build_store(conn, schema, seed=False)
+        sink = _sink(schema)
+        with pytest.raises(SinkRejectedError) as refusal:
+            await sink.deliver([_record()])
+        await sink.aclose()
+        assert "--seed" in str(refusal.value), (
+            "a bootstrap failure must name the command that fixes it"
+        )
+        assert await _counts(conn) == (0, 0), (
+            "the refusal must come before the first write: the sink writes row-by-row on an "
+            "autocommit connection, so a spine row written ahead of the refusal is permanent"
+        )
+    finally:
+        await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        await conn.commit()
+        await conn.close()
 
 
-def test_a_store_missing_a_measurement_column_is_refused_rather_than_written_down_to() -> None:
+async def test_a_store_missing_a_measurement_column_is_refused_rather_than_written_down_to() -> (
+    None
+):
     """A column the value lives in is not an optional column, and its absence is not "not recorded".
 
     Measured on the unfixed driver against a `property_value` without `value_canonical` and
@@ -153,64 +150,56 @@ def test_a_store_missing_a_measurement_column_is_refused_rather_than_written_dow
     `value_canonical` — the column the DDL calls *"THE predicate column"*, so the store's headline
     range query silently returns nothing for it.
     """
+    await migrated_db_or_skip()
+    conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
+    try:
+        schema = f"{TEST_SCHEMA}_novalue"
+        await _build_store(conn, schema, seed=True)
+        await conn.execute("ALTER TABLE property_value DROP COLUMN value_canonical")
+        await conn.execute("ALTER TABLE property_value DROP COLUMN uncertainty")
+        await conn.commit()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
-        try:
-            schema = f"{TEST_SCHEMA}_novalue"
-            await _build_store(conn, schema, seed=True)
-            await conn.execute("ALTER TABLE property_value DROP COLUMN value_canonical")
-            await conn.execute("ALTER TABLE property_value DROP COLUMN uncertainty")
-            await conn.commit()
-
-            sink = _sink(schema)
-            with pytest.raises(SinkRejectedError) as refusal:
-                await sink.deliver([_record()])
-            await sink.aclose()
-            assert "value_canonical" in str(refusal.value)
-            assert "sink_schema" in str(refusal.value)
-            assert await _counts(conn) == (0, 0), "nothing may be written down to a hole"
-        finally:
-            await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-            await conn.commit()
-            await conn.close()
-
-    asyncio.run(_run())
+        sink = _sink(schema)
+        with pytest.raises(SinkRejectedError) as refusal:
+            await sink.deliver([_record()])
+        await sink.aclose()
+        assert "value_canonical" in str(refusal.value)
+        assert "sink_schema" in str(refusal.value)
+        assert await _counts(conn) == (0, 0), "nothing may be written down to a hole"
+    finally:
+        await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        await conn.commit()
+        await conn.close()
 
 
-def test_a_store_missing_only_a_provenance_column_still_publishes() -> None:
+async def test_a_store_missing_only_a_provenance_column_still_publishes() -> None:
     """The additive-migration rule stands: an *optional* column absent is "not recorded".
 
     This is the case the omission filter exists for, and it must not be collateral damage of the
     two refusals above — a site one release behind on a provenance column must keep publishing its
     science rather than lose all of it.
     """
+    await migrated_db_or_skip()
+    conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
+    try:
+        schema = f"{TEST_SCHEMA}_optional"
+        await _build_store(conn, schema, seed=True)
+        await conn.execute("ALTER TABLE property_value DROP COLUMN in_domain")
+        await conn.commit()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
-        try:
-            schema = f"{TEST_SCHEMA}_optional"
-            await _build_store(conn, schema, seed=True)
-            await conn.execute("ALTER TABLE property_value DROP COLUMN in_domain")
-            await conn.commit()
-
-            sink = _sink(schema)
-            await sink.deliver([_record()])
-            await sink.aclose()
-            assert await _counts(conn) == (1, 1), (
-                "an optional column's absence must cost the row that column, not the row"
-            )
-        finally:
-            await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-            await conn.commit()
-            await conn.close()
-
-    asyncio.run(_run())
+        sink = _sink(schema)
+        await sink.deliver([_record()])
+        await sink.aclose()
+        assert await _counts(conn) == (1, 1), (
+            "an optional column's absence must cost the row that column, not the row"
+        )
+    finally:
+        await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        await conn.commit()
+        await conn.close()
 
 
-def test_the_schema_lag_report_is_once_per_table_not_once_per_row(
+async def test_the_schema_lag_report_is_once_per_table_not_once_per_row(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A hundred rows behind one migration produced a hundred identical lines per table per pass.
@@ -218,31 +207,27 @@ def test_the_schema_lag_report_is_once_per_table_not_once_per_row(
     And none of them was counted — it was a bare `logger.warning`, so nothing alerted on a site
     that had been quietly dropping a column for a month. `degraded()` counts first, then logs.
     """
+    await migrated_db_or_skip()
+    conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
+    try:
+        schema = f"{TEST_SCHEMA}_flood"
+        await _build_store(conn, schema, seed=True)
+        await conn.execute("ALTER TABLE property_value DROP COLUMN in_domain")
+        await conn.commit()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
-        try:
-            schema = f"{TEST_SCHEMA}_flood"
-            await _build_store(conn, schema, seed=True)
-            await conn.execute("ALTER TABLE property_value DROP COLUMN in_domain")
-            await conn.commit()
+        sink = _sink(schema)
+        with caplog.at_level("WARNING"):
+            for ordinal in range(5):
+                record = _record().model_copy(update={"calc_ref": f"lag-{ordinal}"})
+                await sink.deliver([record])
+        await sink.aclose()
+    finally:
+        await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        await conn.commit()
+        await conn.close()
 
-            sink = _sink(schema)
-            with caplog.at_level("WARNING"):
-                for ordinal in range(5):
-                    record = _record().model_copy(update={"calc_ref": f"lag-{ordinal}"})
-                    await sink.deliver([record])
-            await sink.aclose()
-        finally:
-            await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-            await conn.commit()
-            await conn.close()
-
-        lag_lines = [r for r in caplog.records if "in_domain" in r.getMessage()]
-        assert len(lag_lines) == 1, (
-            f"the schema lag was reported {len(lag_lines)} times for one sink and one table; at "
-            "result_publish_batch_size=100 that is a log flood, not a signal"
-        )
-
-    asyncio.run(_run())
+    lag_lines = [r for r in caplog.records if "in_domain" in r.getMessage()]
+    assert len(lag_lines) == 1, (
+        f"the schema lag was reported {len(lag_lines)} times for one sink and one table; at "
+        "result_publish_batch_size=100 that is a log flood, not a signal"
+    )

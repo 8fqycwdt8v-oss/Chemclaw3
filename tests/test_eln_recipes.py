@@ -12,7 +12,6 @@ reaction note renders the numbered procedure so the recipe survives to the graph
 without a server, database, or git.
 """
 
-import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -131,23 +130,19 @@ def test_decimal_amounts_do_not_split_steps() -> None:
 # --- structured ORD adapter -----------------------------------------------------------
 
 
-def test_ord_adapter_maps_detailed_recipe() -> None:
+async def test_ord_adapter_maps_detailed_recipe() -> None:
     """The example ORD message maps to inputs, products, headline conditions, and steps."""
+    adapter = OrdJsonAdapter(str(_ORD_EXAMPLE.parent))
+    entries = await adapter.fetch_new_entries(_EPOCH)
+    reaction = adapter.map_to_ord(entries[0])
 
-    async def _run() -> None:
-        adapter = OrdJsonAdapter(str(_ORD_EXAMPLE.parent))
-        entries = await adapter.fetch_new_entries(_EPOCH)
-        reaction = adapter.map_to_ord(entries[0])
-
-        assert reaction.reaction_id == "ord-2026-001"
-        assert {c.smiles for c in reaction.inputs} == {"CCO", "CC(=O)O", "OS(=O)(=O)O"}
-        assert [c.smiles for c in reaction.outcomes] == ["CCOC(C)=O"]
-        assert reaction.temperature_c == 80.0
-        assert reaction.yield_percent == 85.0
-        assert reaction.provenance == "ord:chemist-c"
-        assert reaction.procedure_text is not None and "Charge ethanol" in reaction.procedure_text
-
-    asyncio.run(_run())
+    assert reaction.reaction_id == "ord-2026-001"
+    assert {c.smiles for c in reaction.inputs} == {"CCO", "CC(=O)O", "OS(=O)(=O)O"}
+    assert [c.smiles for c in reaction.outcomes] == ["CCOC(C)=O"]
+    assert reaction.temperature_c == 80.0
+    assert reaction.yield_percent == 85.0
+    assert reaction.provenance == "ord:chemist-c"
+    assert reaction.procedure_text is not None and "Charge ethanol" in reaction.procedure_text
 
 
 def test_ord_addition_steps_link_components_and_convert_units() -> None:
@@ -422,30 +417,24 @@ def test_ord_auxiliary_role_collapses_to_reagent_not_reactant() -> None:
     assert roles["CC(=O)O"] == Role.REACTANT  # unstated role → the input default
 
 
-def test_ord_fetch_skips_file_without_timestamp(tmp_path: Path) -> None:
+async def test_ord_fetch_skips_file_without_timestamp(tmp_path: Path) -> None:
     """An ORD file with no creation time is skipped, not allowed to abort the fetch (G4)."""
-
-    async def _run() -> None:
-        (tmp_path / "no-time.json").write_text(json.dumps({"inputs": {}}), encoding="utf-8")
-        (tmp_path / "ok.json").write_text(
-            json.dumps(
-                {
-                    "reaction_id": "ok",
-                    "inputs": {
-                        "a": {"components": [{"identifiers": [{"type": "SMILES", "value": "CCO"}]}]}
-                    },
-                    "outcomes": [
-                        {"products": [{"identifiers": [{"type": "SMILES", "value": "CCO"}]}]}
-                    ],
-                    "provenance": {"record_created": {"time": {"value": "2026-01-01T00:00:00Z"}}},
-                }
-            ),
-            encoding="utf-8",
-        )
-        entries = await OrdJsonAdapter(str(tmp_path)).fetch_new_entries(_EPOCH)
-        assert [e.entry_id for e in entries] == ["ok"]
-
-    asyncio.run(_run())
+    (tmp_path / "no-time.json").write_text(json.dumps({"inputs": {}}), encoding="utf-8")
+    (tmp_path / "ok.json").write_text(
+        json.dumps(
+            {
+                "reaction_id": "ok",
+                "inputs": {
+                    "a": {"components": [{"identifiers": [{"type": "SMILES", "value": "CCO"}]}]}
+                },
+                "outcomes": [{"products": [{"identifiers": [{"type": "SMILES", "value": "CCO"}]}]}],
+                "provenance": {"record_created": {"time": {"value": "2026-01-01T00:00:00Z"}}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    entries = await OrdJsonAdapter(str(tmp_path)).fetch_new_entries(_EPOCH)
+    assert [e.entry_id for e in entries] == ["ok"]
 
 
 def _ord_example_entry() -> RawEntry:
@@ -502,25 +491,21 @@ def test_note_renders_numbered_procedure() -> None:
     assert "6. Concentrate and recrystallize from heptane (_purification_)" in body
 
 
-def test_ord_recipe_flows_through_sync() -> None:
+async def test_ord_recipe_flows_through_sync() -> None:
     """An ORD-format entry ingests through the same sync pipeline as free-text entries."""
-
-    async def _run() -> None:
-        adapter = OrdJsonAdapter(str(_ORD_EXAMPLE.parent))
-        rxn, mol, rec = (
-            InMemoryFingerprintStore(),
-            InMemoryFingerprintStore(),
-            InMemoryReactionRecordStore(),
-        )
-        summary = await sync_entries(
-            adapter, rxn, mol, rec, _EPOCH, label_index=InMemoryLabelIndex(), source="eln-ord"
-        )
-        assert summary.ingested == ["ord-2026-001"]
-        assert summary.rejected == []
-        assert len(await rec.all_records()) == 1
-        assert "## Procedure" in (await rec.all_records())[0].body  # recipe reached the record
-
-    asyncio.run(_run())
+    adapter = OrdJsonAdapter(str(_ORD_EXAMPLE.parent))
+    rxn, mol, rec = (
+        InMemoryFingerprintStore(),
+        InMemoryFingerprintStore(),
+        InMemoryReactionRecordStore(),
+    )
+    summary = await sync_entries(
+        adapter, rxn, mol, rec, _EPOCH, label_index=InMemoryLabelIndex(), source="eln-ord"
+    )
+    assert summary.ingested == ["ord-2026-001"]
+    assert summary.rejected == []
+    assert len(await rec.all_records()) == 1
+    assert "## Procedure" in (await rec.all_records())[0].body  # recipe reached the record
 
 
 def _warehouse_shaped(procedure: str) -> OrdReaction:
@@ -662,7 +647,7 @@ def test_the_frontmatter_tells_three_outcomes_apart() -> None:
     assert failed.outcome == "failure"
 
 
-def test_the_conditions_block_round_trips_through_the_stored_form() -> None:
+async def test_the_conditions_block_round_trips_through_the_stored_form() -> None:
     """Structure that does not survive the store is structure nobody has.
 
     The claim is unchanged from when a record was a file — persistence that silently drops the
@@ -683,19 +668,16 @@ def test_the_conditions_block_round_trips_through_the_stored_form() -> None:
     record = record_from_ord_reaction(reaction)
     assert record.conditions is not None
 
-    async def _run() -> None:
-        memory = InMemoryReactionRecordStore()
-        await memory.record([record], "eln-json")
-        from_memory = await memory.read("R4")
-        assert from_memory is not None and from_memory.conditions == record.conditions
+    memory = InMemoryReactionRecordStore()
+    await memory.record([record], "eln-json")
+    from_memory = await memory.read("R4")
+    assert from_memory is not None and from_memory.conditions == record.conditions
 
-        await migrated_db_or_skip()
-        durable = PostgresReactionRecordStore()
-        await durable.record([record], "eln-json")
-        from_pg = await durable.read("R4")
-        assert from_pg is not None and from_pg.conditions == record.conditions
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    durable = PostgresReactionRecordStore()
+    await durable.record([record], "eln-json")
+    from_pg = await durable.read("R4")
+    assert from_pg is not None and from_pg.conditions == record.conditions
 
 
 def test_a_new_outcome_class_member_fails_the_type_check_rather_than_the_sync() -> None:

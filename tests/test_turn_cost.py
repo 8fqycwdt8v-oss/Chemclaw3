@@ -73,33 +73,31 @@ def test_the_metric_registry_refuses_an_unbounded_label_which_is_why_this_is_a_t
     assert len(series) < 200, "the registry accepted unbounded label cardinality"
 
 
-def test_a_turn_cost_carries_the_identity_the_metric_cannot(
+async def test_a_turn_cost_carries_the_identity_the_metric_cannot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The gap the table closes: spend booked against an actor, not only a profile."""
     sink = _RecordingSink()
     monkeypatch.setattr("chemclaw.agent.turn_cost.default_turn_cost_sink", lambda: sink)
 
-    async def _run() -> None:
-        record_turn_cost(
-            TurnCost(
-                correlation_id="cid-1",
-                session_id="s-1",
-                actor="oid-abc",
-                profile="synthesis",
-                input_tokens=100,
-                output_tokens=20,
-                duration_seconds=4.5,
-            )
+    record_turn_cost(
+        TurnCost(
+            correlation_id="cid-1",
+            session_id="s-1",
+            actor="oid-abc",
+            profile="synthesis",
+            input_tokens=100,
+            output_tokens=20,
+            duration_seconds=4.5,
         )
-        await _drain()
+    )
+    await _drain()
 
-    asyncio.run(_run())
     assert [c.actor for c in sink.costs] == ["oid-abc"]
     assert sink.costs[0].input_tokens == 100
 
 
-def test_recording_a_cost_never_awaits(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_recording_a_cost_never_awaits(monkeypatch: pytest.MonkeyPatch) -> None:
     """The runner books this from a `finally` in which an `await` re-raises a pending cancellation.
 
     That block runs on the disconnect path too (D-130), and an `await` there would skip the five
@@ -110,27 +108,25 @@ def test_recording_a_cost_never_awaits(monkeypatch: pytest.MonkeyPatch) -> None:
     sink = _RecordingSink()
     monkeypatch.setattr("chemclaw.agent.turn_cost.default_turn_cost_sink", lambda: sink)
 
-    async def _run() -> None:
-        async def _turn() -> None:
-            try:
-                await asyncio.Event().wait()  # never completes; cancelled from outside
-            finally:
-                record_turn_cost(TurnCost(correlation_id="cid-cancelled", actor="oid-x"))
+    async def _turn() -> None:
+        try:
+            await asyncio.Event().wait()  # never completes; cancelled from outside
+        finally:
+            record_turn_cost(TurnCost(correlation_id="cid-cancelled", actor="oid-x"))
 
-        task = asyncio.create_task(_turn())
-        await asyncio.sleep(0)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        await _drain()
+    task = asyncio.create_task(_turn())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await _drain()
 
-    asyncio.run(_run())
     assert [c.correlation_id for c in sink.costs] == ["cid-cancelled"], (
         "a turn torn down by a disconnect was not billed — the runaway case the ledger exists for"
     )
 
 
-def test_a_failed_write_is_logged_and_never_escapes(
+async def test_a_failed_write_is_logged_and_never_escapes(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Telemetry booked off the hot path must not escalate into the turn's teardown.
@@ -140,12 +136,10 @@ def test_a_failed_write_is_logged_and_never_escapes(
     """
     monkeypatch.setattr("chemclaw.agent.turn_cost.default_turn_cost_sink", _FailingSink)
 
-    async def _run() -> None:
-        with caplog.at_level(logging.WARNING):
-            record_turn_cost(TurnCost(correlation_id="cid-doomed"))
-            await _drain()
+    with caplog.at_level(logging.WARNING):
+        record_turn_cost(TurnCost(correlation_id="cid-doomed"))
+        await _drain()
 
-    asyncio.run(_run())
     assert "cid-doomed" in caplog.text
 
 

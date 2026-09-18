@@ -341,7 +341,7 @@ def test_plan_shows_no_approvable_identity_rather_than_the_empty_constant(
 # --- The checkpointer the CLI documented and did not have -------------------------------------
 
 
-def test_a_second_turn_continues_the_first(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_second_turn_continues_the_first(monkeypatch: pytest.MonkeyPatch) -> None:
     """The CLI is a multi-turn conversation, which it was not.
 
     `converse` documented that reusing one `session_id` "continues the thread the last one left",
@@ -363,16 +363,13 @@ def test_a_second_turn_continues_the_first(monkeypatch: pytest.MonkeyPatch) -> N
 
     _Recording.seen = []
 
-    async def _run() -> None:
-        saver = await process_checkpointer()
-        agent = build_langgraph_agent(
-            model=_Recording(messages=iter([AIMessage(content="one"), AIMessage(content="two")])),
-            checkpointer=saver,
-        )
-        await cli.converse(agent, "first question")
-        await cli.converse(agent, "second question")
-
-    asyncio.run(_run())
+    saver = await process_checkpointer()
+    agent = build_langgraph_agent(
+        model=_Recording(messages=iter([AIMessage(content="one"), AIMessage(content="two")])),
+        checkpointer=saver,
+    )
+    await cli.converse(agent, "first question")
+    await cli.converse(agent, "second question")
 
     second = _Recording.seen[1]
     assert any("first question" in str(m.content) for m in second), (

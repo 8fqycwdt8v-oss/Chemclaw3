@@ -66,7 +66,7 @@ def _commits(clone: Path) -> int:
     return int(_run("git", "-C", str(clone), "rev-list", "--count", "HEAD"))
 
 
-def test_a_batch_of_notes_lands_in_one_commit(
+async def test_a_batch_of_notes_lands_in_one_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Six notes at a batch size of three are two commits, not six — and every note is on disk.
@@ -79,13 +79,10 @@ def test_a_batch_of_notes_lands_in_one_commit(
     inner = GitNoteWriter(repo_dir=str(clone), base_branch="main", remote="origin")
     before = _commits(clone)
 
-    async def _run_backfill() -> None:
-        writer = BatchingNoteWriter(inner, batch_size=3)
-        for index in range(6):
-            await record_note(_note(index), writer)
-        await writer.flush()
-
-    asyncio.run(_run_backfill())
+    writer = BatchingNoteWriter(inner, batch_size=3)
+    for index in range(6):
+        await record_note(_note(index), writer)
+    await writer.flush()
 
     assert _commits(clone) - before == 2, "six notes at three to a commit must be two commits"
     written = sorted(p.stem for p in (clone / settings.knowledge_dir).rglob("*.md"))
@@ -314,7 +311,7 @@ def test_a_backfill_that_dies_mid_run_still_commits_what_it_already_counted(
     )
 
 
-def test_a_dependency_in_a_batch_does_not_overwrite_a_subject_written_earlier_in_it(
+async def test_a_dependency_in_a_batch_does_not_overwrite_a_subject_written_earlier_in_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Batching must reproduce the sequence it replaces, and it did not.
@@ -337,27 +334,22 @@ def test_a_dependency_in_a_batch_does_not_overwrite_a_subject_written_earlier_in
     inner = GitNoteWriter(repo_dir=str(clone), base_branch="main", remote="origin")
     shared = f"{settings.knowledge_dir}/playbook-shared.md"
 
-    async def _run_batch() -> None:
-        writer = BatchingNoteWriter(inner, batch_size=10)
-        await writer.write(
-            NoteWrite(
-                files=[NoteFile(path=shared, content="THE REAL SUBJECT BODY.\n", overwrite=True)],
-                message="the subject",
-            )
+    writer = BatchingNoteWriter(inner, batch_size=10)
+    await writer.write(
+        NoteWrite(
+            files=[NoteFile(path=shared, content="THE REAL SUBJECT BODY.\n", overwrite=True)],
+            message="the subject",
         )
-        await writer.write(
-            NoteWrite(
-                files=[
-                    NoteFile(
-                        path=shared, content="a stale dependency rendering.\n", overwrite=False
-                    )
-                ],
-                message="a later note's dependency copy",
-            )
+    )
+    await writer.write(
+        NoteWrite(
+            files=[
+                NoteFile(path=shared, content="a stale dependency rendering.\n", overwrite=False)
+            ],
+            message="a later note's dependency copy",
         )
-        await writer.flush()
-
-    asyncio.run(_run_batch())
+    )
+    await writer.flush()
 
     body = (clone / shared).read_text(encoding="utf-8")
     assert body == "THE REAL SUBJECT BODY.\n", (

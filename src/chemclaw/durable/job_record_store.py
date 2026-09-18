@@ -32,7 +32,7 @@ one. Which of the two a failure is depends on the failure — see `_says_nothing
 from contextlib import AbstractAsyncContextManager
 
 import psycopg
-from psycopg.rows import TupleRow
+from psycopg.rows import TupleRow, class_row
 from psycopg.types.json import Jsonb
 
 from chemclaw.core import db
@@ -219,33 +219,25 @@ class PostgresJobRecordSink:
 
 
 async def read_job_record(job_id: str) -> JobRecord | None:
-    """The full record for one job, or None when the table has no row for it."""
+    """The full record for one job, or None when the table has no row for it.
+
+    **Built by name, not by position.** This was nineteen `row[n]` subscripts restating the order of
+    `_SELECT_ONE` a second time in Python, on a projection of nine adjacent `TEXT` columns — so
+    editing the SELECT list swapped fields silently, type-checked, and produced a record that reads
+    as a record. `class_row` passes each selected column as a keyword argument, which makes the
+    column list and the model one declaration instead of two that agree by inspection.
+
+    Raises:
+        pydantic.ValidationError: The SELECT and the model no longer describe the same row —
+            `JobRecord` is `extra="forbid"`, so a column that is not a field of it is an error at
+            the read rather than a value silently landing in the wrong field. Deliberately not
+            caught: every caller of this is a tool or a route that reports an exception, and there
+            is no answer to give instead of the record.
+    """
     async with _connect() as conn:
-        cursor = await conn.execute(_SELECT_ONE, (job_id,))
-        row = await cursor.fetchone()
-    if row is None:
-        return None
-    return JobRecord(
-        job_id=row[0],
-        connector=row[1],
-        job=row[2],
-        rationale=row[3],
-        requested_by=row[4],
-        session_id=row[5],
-        correlation_id=row[6],
-        plan_step=row[7],
-        plan_hash=row[8],
-        payload=row[9],
-        summary=row[10],
-        result=row[11],
-        note_id=row[12],
-        calc_refs=list(row[13] or []),
-        runtime_seconds=row[14],
-        payload_kind=row[15],
-        state=row[16],
-        failure_reason=row[17],
-        completed_at=row[18],
-    )
+        async with conn.cursor(row_factory=class_row(JobRecord)) as cursor:
+            await cursor.execute(_SELECT_ONE, (job_id,))
+            return await cursor.fetchone()
 
 
 async def read_job_record_summaries(
@@ -273,25 +265,11 @@ async def read_job_record_summaries(
     """
     pattern = f"%{text}%"
     async with _connect() as conn:
-        cursor = await conn.execute(
-            _SEARCH,
-            (connector, connector, text, pattern, pattern, pattern, after, after, limit + 1),
-        )
-        rows = await cursor.fetchall()
-    return JobRecordSearch(
-        hits=[
-            JobRecordSummary(
-                job_id=row[0],
-                connector=row[1],
-                job=row[2],
-                rationale=row[3],
-                summary=row[4],
-                note_id=row[5],
-                plan_step=row[6],
-                state=row[7],
-                completed_at=row[8],
+        async with conn.cursor(row_factory=class_row(JobRecordSummary)) as cursor:
+            await cursor.execute(
+                _SEARCH,
+                (connector, connector, text, pattern, pattern, pattern, after, after, limit + 1),
             )
-            for row in rows[:limit]
-        ],
-        hits_truncated=len(rows) > limit,
-    )
+            rows = await cursor.fetchall()
+    # The extra row is dropped here rather than in SQL — see the docstring for why it is fetched.
+    return JobRecordSearch(hits=rows[:limit], hits_truncated=len(rows) > limit)

@@ -14,8 +14,6 @@ it. That is the same instrumentation the wave-6 review used to find this, kept h
 that cannot produce the interleaving cannot tell the two orders apart: both are green without it.
 """
 
-import asyncio
-
 import pytest
 
 from chemclaw.agent.checkpointer import (
@@ -79,68 +77,60 @@ async def _delete_with_a_turn_landing_midway(
         await deleter.commit()
 
 
-def test_a_session_delete_leaves_no_checkpoint_whose_payload_it_took() -> None:
+async def test_a_session_delete_leaves_no_checkpoint_whose_payload_it_took() -> None:
     """A turn landing mid-delete keeps its checkpoint *and* the blob that checkpoint needs.
 
     Before the re-ask this left `checkpoints=1, blobs=0` — a thread that reads back as a bricked
     conversation (`CheckpointValuesMissing`) produced by an operation that reported success.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await create_checkpoint_tables()
-        await _seed(_SESSION_THREAD, "c1")
-        await _delete_with_a_turn_landing_midway(
-            tuple(
-                (table, statement)
-                for table, statement in _session_delete_statements()
-                if table in CHECKPOINT_TABLES
-            ),
-            {"session_id": _SESSION_THREAD},
-            _SESSION_THREAD,
-        )
-        surviving = await _count("checkpoints", _SESSION_THREAD)
-        blobs = await _count("checkpoint_blobs", _SESSION_THREAD)
-        assert surviving == 1, "the turn's own checkpoint should survive a delete it raced"
-        assert blobs >= 1, (
-            "a surviving checkpoint whose blobs were taken is a thread nobody can resume; "
-            f"checkpoints={surviving} blobs={blobs}"
-        )
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    await create_checkpoint_tables()
+    await _seed(_SESSION_THREAD, "c1")
+    await _delete_with_a_turn_landing_midway(
+        tuple(
+            (table, statement)
+            for table, statement in _session_delete_statements()
+            if table in CHECKPOINT_TABLES
+        ),
+        {"session_id": _SESSION_THREAD},
+        _SESSION_THREAD,
+    )
+    surviving = await _count("checkpoints", _SESSION_THREAD)
+    blobs = await _count("checkpoint_blobs", _SESSION_THREAD)
+    assert surviving == 1, "the turn's own checkpoint should survive a delete it raced"
+    assert blobs >= 1, (
+        "a surviving checkpoint whose blobs were taken is a thread nobody can resume; "
+        f"checkpoints={surviving} blobs={blobs}"
+    )
 
 
-def test_an_erasure_leaves_no_checkpoint_whose_payload_it_took() -> None:
+async def test_an_erasure_leaves_no_checkpoint_whose_payload_it_took() -> None:
     """The same statements the erasure sweep runs, against the same interleaving.
 
     `leaver` reaches its threads through a `session_owners` subselect rather than by id, so the
     predicate differs and the rule does not: the two dependent statements must re-ask whether the
     thread still has a `checkpoints` row.
     """
+    await migrated_db_or_skip()
+    await create_checkpoint_tables()
+    from chemclaw.agent.leaver import _CHECKPOINT_ERASE
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await create_checkpoint_tables()
-        from chemclaw.agent.leaver import _CHECKPOINT_ERASE
-
-        async with await connect(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "INSERT INTO session_owners (session_id, owner) VALUES (%s, %s) "
-                    "ON CONFLICT (session_id) DO UPDATE SET owner = EXCLUDED.owner",
-                    (_ERASE_THREAD, "oid-delete-order"),
-                )
-            await conn.commit()
-        await _seed(_ERASE_THREAD, "c1")
-        await _delete_with_a_turn_landing_midway(
-            _CHECKPOINT_ERASE, {"actors": ["oid-delete-order"]}, _ERASE_THREAD
-        )
-        surviving = await _count("checkpoints", _ERASE_THREAD)
-        blobs = await _count("checkpoint_blobs", _ERASE_THREAD)
-        assert surviving == 1
-        assert blobs >= 1, f"checkpoints={surviving} blobs={blobs}"
-
-    asyncio.run(_run())
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO session_owners (session_id, owner) VALUES (%s, %s) "
+                "ON CONFLICT (session_id) DO UPDATE SET owner = EXCLUDED.owner",
+                (_ERASE_THREAD, "oid-delete-order"),
+            )
+        await conn.commit()
+    await _seed(_ERASE_THREAD, "c1")
+    await _delete_with_a_turn_landing_midway(
+        _CHECKPOINT_ERASE, {"actors": ["oid-delete-order"]}, _ERASE_THREAD
+    )
+    surviving = await _count("checkpoints", _ERASE_THREAD)
+    blobs = await _count("checkpoint_blobs", _ERASE_THREAD)
+    assert surviving == 1
+    assert blobs >= 1, f"checkpoints={surviving} blobs={blobs}"
 
 
 @pytest.mark.parametrize("table", [t for t in CHECKPOINT_TABLES if t != "checkpoints"])

@@ -52,6 +52,31 @@ from tests.pg import create_test_schema, drop_test_schema, schema_dsn
 pytest_plugins = ["pytester"]
 
 
+@pytest.fixture(scope="session")
+def anyio_backend() -> str:
+    """Pin anyio's pytest plugin to asyncio, which is the only loop anything here runs on.
+
+    `anyio_mode = "auto"` in `pyproject.toml` is what makes an `async def test_*` run at all; this
+    fixture decides *how*. The plugin ships its own `anyio_backend`, parametrized over every
+    installed backend, so without this override an async test is an id with an `[asyncio]` suffix
+    today — four files already carried one — and a second, failing `[trio]` arm the day anything
+    pulls trio into the closure. Nothing here is trio-compatible: psycopg, the Temporal client and
+    the LangGraph checkpointer are all asyncio, so that second arm would never be a signal about
+    this system.
+
+    **It is the same teardown `asyncio.run` gives, which is the property the durable layer needs.**
+    The asyncio backend's `TestRunner` is an `asyncio.Runner`, and the plugin takes its lease
+    inside `pytest_pyfunc_call` and drops it there, so each test still gets a fresh loop that is
+    cancelled, `shutdown_asyncgens`-ed and closed on the way out. `core/db.py` caches its pools
+    *per event loop* and sweeps the ones whose loop has ended
+    (`D-2026-09-13-a-loop-that-abandons-its-pool-can-fail-to-end`); a plugin that reused one loop
+    across the session, or left it open, would quietly defeat both. Driven against a real database
+    before the conversion: two tests that open a pool and abandon it get two distinct, closed
+    loops and the session ends in under a second.
+    """
+    return "asyncio"
+
+
 def _free_port() -> int:
     """An unused localhost port, so concurrent test runs cannot collide on a fixed one."""
     with socket.socket() as sock:

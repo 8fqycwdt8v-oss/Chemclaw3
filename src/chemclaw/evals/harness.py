@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.markdown import MISSING, render_table
 from chemclaw.evals.baseline import (
     CaseSetMismatchError,
     compare_to_baseline,
@@ -197,31 +198,34 @@ def _load_case(path: Path) -> EvalCase:
         raise EvalCaseError(f"{path}: invalid eval case: {exc}") from exc
 
 
-def _cell(text: str) -> str:
-    """Escape Markdown table delimiters so cell content cannot split its row.
-
-    Provenance legitimately contains literal pipes (the set-cardinality/absolute-value
-    notation of `precision`/`recall`/`prediction_error`), which would otherwise shift
-    values under the wrong headers of the citable table (G5).
-    """
-    return text.replace("|", "\\|")
-
-
 def render_report(report: EvalReport) -> str:
-    """Render the report as a citable Markdown table (case id + provenance per row)."""
+    """Render the report as a citable Markdown table (case id + provenance per row).
+
+    The escaping this used to carry itself is `core.markdown`'s: provenance legitimately contains
+    literal pipes (the set-cardinality/absolute-value notation of
+    `precision`/`recall`/`prediction_error`), which would otherwise shift values under the wrong
+    headers of the citable table (G5). A metric with no unit now renders `MISSING` rather than a
+    blank cell, which is the one deliberate change here — a blank reads as a measured nothing and
+    is the second spelling of absence this tree had.
+    """
     lines = [
         f"# Eval report (case-set {report.case_set_version})",
         "",
-        "| Case | Metric | Value | Unit | Pass | Provenance |",
-        "| --- | --- | --- | --- | --- | --- |",
+        render_table(
+            ["Case", "Metric", "Value", "Unit", "Pass", "Provenance"],
+            [
+                [
+                    r.case_id,
+                    r.result_metric,
+                    f"{r.value:.4g}",
+                    r.unit or "",
+                    MISSING if r.passed is None else ("pass" if r.passed else "**FAIL**"),
+                    r.provenance,
+                ]
+                for r in report.results
+            ],
+        ),
     ]
-    for r in report.results:
-        gate = "—" if r.passed is None else ("pass" if r.passed else "**FAIL**")
-        unit = _cell(r.unit or "")
-        lines.append(
-            f"| {_cell(r.case_id)} | {_cell(r.result_metric)} | {r.value:.4g} | {unit} | {gate} "
-            f"| {_cell(r.provenance)} |"
-        )
     failed = report.failed()
     regressions = report.regressions()
     demonstrated = len(failed) - len(regressions)

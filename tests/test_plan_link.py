@@ -71,20 +71,17 @@ def test_the_middleware_binds_the_link_around_the_tool_body_and_resets_after() -
     asyncio.run(_run())
 
 
-def test_a_raising_tool_body_still_resets_the_link() -> None:
+async def test_a_raising_tool_body_still_resets_the_link() -> None:
     """`try/finally`, proven: one call's link must not leak into the next call's job."""
 
-    async def _run() -> None:
-        async def _handler(_request: Any) -> Any:
-            raise RuntimeError("the tool fell over")
+    async def _handler(_request: Any) -> Any:
+        raise RuntimeError("the tool fell over")
 
-        request = tool_request("run_calculation")
-        object.__setattr__(request, "state", {"todos": _TODOS})
-        with pytest.raises(RuntimeError):
-            await run_middleware(stamp_plan_link, request, _handler)
-        assert get_current_plan_link() == ("", "")
-
-    asyncio.run(_run())
+    request = tool_request("run_calculation")
+    object.__setattr__(request, "state", {"todos": _TODOS})
+    with pytest.raises(RuntimeError):
+        await run_middleware(stamp_plan_link, request, _handler)
+    assert get_current_plan_link() == ("", "")
 
 
 def test_an_absent_todos_key_binds_the_empty_link_rather_than_reaching_elsewhere() -> None:
@@ -122,25 +119,22 @@ def test_the_middleware_reads_the_plan_and_never_writes_it() -> None:
     asyncio.run(_run())
 
 
-def test_the_job_started_announcement_carries_the_ambient_step() -> None:
+async def test_the_job_started_announcement_carries_the_ambient_step() -> None:
     """Every launcher that announces a job announces its step — folded in at the one emit site."""
 
     async def _announce() -> None:
         record_job_started("job-1", "run_calculation")
 
-    async def _run() -> None:
-        token = set_current_plan_link("run the conformer search", "hash-1")
-        try:
-            _, signals = await collect_signals(_announce)
-        finally:
-            from chemclaw.core.plan_context import reset_current_plan_link
+    token = set_current_plan_link("run the conformer search", "hash-1")
+    try:
+        _, signals = await collect_signals(_announce)
+    finally:
+        from chemclaw.core.plan_context import reset_current_plan_link
 
-            reset_current_plan_link(token)
-        assert signals == [
-            JobSignal(job_id="job-1", kind="run_calculation", plan_step="run the conformer search")
-        ]
-
-    asyncio.run(_run())
+        reset_current_plan_link(token)
+    assert signals == [
+        JobSignal(job_id="job-1", kind="run_calculation", plan_step="run the conformer search")
+    ]
 
 
 def test_the_stamp_reads_the_batchs_own_rewrite_not_the_pre_batch_snapshot() -> None:

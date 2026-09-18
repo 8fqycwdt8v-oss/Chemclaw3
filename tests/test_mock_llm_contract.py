@@ -296,7 +296,7 @@ def test_a_cached_prefix_reaches_the_price_split_through_the_service_tier_prefix
     assert usage.total == 1020
 
 
-def test_the_default_request_is_unchanged_on_the_wire() -> None:
+async def test_the_default_request_is_unchanged_on_the_wire() -> None:
     """A behaviour that names none of the new knobs emits exactly what every lane already gets.
 
     The regression guard on all of the above: `prompt_tokens_details` and `service_tier` are
@@ -307,25 +307,22 @@ def test_the_default_request_is_unchanged_on_the_wire() -> None:
 
     frames: list[dict[str, Any]] = []
 
-    async def _drive() -> None:
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://mock"
-        ) as client:
-            async with client.stream(
-                "POST",
-                "/v1/chat/completions",
-                json={
-                    "model": "mock",
-                    "stream": True,
-                    "stream_options": {"include_usage": True},
-                    "messages": [{"role": "user", "content": "[[plain]]"}],
-                },
-            ) as response:
-                async for line in response.aiter_lines():
-                    if line.startswith("data: ") and line[6:].strip() != "[DONE]":
-                        frames.append(json.loads(line[6:]))
-
-    asyncio.run(_drive())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://mock"
+    ) as client:
+        async with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            json={
+                "model": "mock",
+                "stream": True,
+                "stream_options": {"include_usage": True},
+                "messages": [{"role": "user", "content": "[[plain]]"}],
+            },
+        ) as response:
+            async for line in response.aiter_lines():
+                if line.startswith("data: ") and line[6:].strip() != "[DONE]":
+                    frames.append(json.loads(line[6:]))
 
     assert [frame.get("service_tier") for frame in frames] == [None] * len(frames)
     final = frames[-1]

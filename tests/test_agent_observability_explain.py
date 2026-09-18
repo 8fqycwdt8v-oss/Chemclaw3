@@ -13,7 +13,6 @@ Postgres-backed, because both claims are about columns: what the INSERT binds an
 orders by. Skipped where no database is configured — the run's own epilogue says so.
 """
 
-import asyncio
 from datetime import UTC, datetime, timedelta
 
 import psycopg
@@ -41,61 +40,49 @@ def _event(tool: str, *, ts: datetime, plan_step: str, session: str) -> AuditEve
     )
 
 
-def test_the_row_keeps_the_timestamp_the_middleware_stamped() -> None:
+async def test_the_row_keeps_the_timestamp_the_middleware_stamped() -> None:
     """The INSERT binds `ts` rather than letting the column default to the flush moment.
 
     A minute in the past is used deliberately: `now()` would be indistinguishable from a correct
     stamp taken a millisecond earlier, so the test would pass against the defect it exists to
     catch.
     """
+    await migrated_db_or_skip()
+    session = "explain-ts-session"
+    started = datetime.now(UTC) - timedelta(minutes=1)
+    sink = PostgresAuditSink()
+    await sink.record(_event("predict_pka", ts=started, plan_step="", session=session))
+    await sink.flush()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        session = "explain-ts-session"
-        started = datetime.now(UTC) - timedelta(minutes=1)
-        sink = PostgresAuditSink()
-        await sink.record(_event("predict_pka", ts=started, plan_step="", session=session))
-        await sink.flush()
-
-        conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
-        async with conn:
-            cursor = await conn.execute(
-                "SELECT ts FROM audit_events WHERE session_id = %s", (session,)
-            )
-            rows = await cursor.fetchall()
-        assert rows and abs((rows[0][0] - started).total_seconds()) < 1.0
-
-    asyncio.run(_run())
+    conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
+    async with conn:
+        cursor = await conn.execute("SELECT ts FROM audit_events WHERE session_id = %s", (session,))
+        rows = await cursor.fetchall()
+    assert rows and abs((rows[0][0] - started).total_seconds()) < 1.0
 
 
-def test_explain_orders_by_when_the_tool_ran_and_names_the_plan_step() -> None:
+async def test_explain_orders_by_when_the_tool_ran_and_names_the_plan_step() -> None:
     """Both halves of the reconstruction, over rows written in the *wrong* order on purpose.
 
     The second call is recorded first, so `id ASC` alone would report them backwards — which is
     exactly what a batching sink under load produces. Ordering by `ts` is what makes the
     reconstruction the turn's story rather than the flusher's.
     """
+    await migrated_db_or_skip()
+    session = "explain-order-session"
+    first = datetime.now(UTC) - timedelta(minutes=2)
+    second = first + timedelta(seconds=30)
+    sink = PostgresAuditSink()
+    # Recorded out of order, as a drained batch can be.
+    await sink.record(_event("record_note", ts=second, plan_step="write it up", session=session))
+    await sink.record(
+        _event("predict_pka", ts=first, plan_step="measure the amine", session=session)
+    )
+    await sink.flush()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        session = "explain-order-session"
-        first = datetime.now(UTC) - timedelta(minutes=2)
-        second = first + timedelta(seconds=30)
-        sink = PostgresAuditSink()
-        # Recorded out of order, as a drained batch can be.
-        await sink.record(
-            _event("record_note", ts=second, plan_step="write it up", session=session)
-        )
-        await sink.record(
-            _event("predict_pka", ts=first, plan_step="measure the amine", session=session)
-        )
-        await sink.flush()
+    lines = await explain(session)
 
-        lines = await explain(session)
-
-        rendered = [line for line in lines if line.strip().startswith("tool ")]
-        assert [line.split()[1] for line in rendered] == ["predict_pka", "record_note"]
-        assert "for step: measure the amine" in rendered[0]
-        assert "for step: write it up" in rendered[1]
-
-    asyncio.run(_run())
+    rendered = [line for line in lines if line.strip().startswith("tool ")]
+    assert [line.split()[1] for line in rendered] == ["predict_pka", "record_note"]
+    assert "for step: measure the amine" in rendered[0]
+    assert "for step: write it up" in rendered[1]

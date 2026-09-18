@@ -51,6 +51,7 @@ from chemclaw.core.db import _redact
 from chemclaw.core.db import connection as db_connection
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.logging import configure_logging
+from chemclaw.core.markdown import render_table
 from chemclaw.core.temporal_client import connect as temporal_connect
 
 logger = logging.getLogger(__name__)
@@ -379,12 +380,14 @@ def report(run: SmokeRun) -> str:
         "# Live durable-job smoke\n",
         f"Job `{SMOKE_JOB}` · workflow `{run.workflow_id}` · launched in {run.seconds:.1f}s",
         f"· Temporal `{settings.temporal_address}` · Postgres `{_redact(settings.postgres_dsn)}`\n",
-        "| check | result | observed |",
-        "| --- | --- | --- |",
+        render_table(
+            ["check", "result", "observed"],
+            [
+                [check.name, "PASS" if check.passed else "**FAIL**", check.observed]
+                for check in run.checks
+            ],
+        ),
     ]
-    for check in run.checks:
-        verdict = "PASS" if check.passed else "**FAIL**"
-        lines.append(f"| {check.name} | {verdict} | {check.observed} |")
     passed = sum(1 for check in run.checks if check.passed)
     lines.append(f"\n**{passed}/{len(run.checks)} checks passed.**")
     return "\n".join(lines)

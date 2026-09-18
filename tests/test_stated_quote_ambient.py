@@ -259,23 +259,21 @@ async def _drive(
             pass
 
 
-def test_a_constraint_stated_three_turns_ago_reaches_the_intake() -> None:
+async def test_a_constraint_stated_three_turns_ago_reaches_the_intake() -> None:
     """The row's scenario end to end: the words on turn 1, the intake on turn 3."""
     intake = _Intake("24 wells")
 
-    async def _body() -> None:
-        session = TurnSession(session_id="s-earlier-turn")
-        await _drive(
-            session,
-            InMemoryHistoryProvider(),
-            [
-                (_TURN_ONE, _Quiet()),
-                ("what about the base?", _Quiet()),
-                ("ok go ahead", intake),
-            ],
-        )
+    session = TurnSession(session_id="s-earlier-turn")
+    await _drive(
+        session,
+        InMemoryHistoryProvider(),
+        [
+            (_TURN_ONE, _Quiet()),
+            ("what about the base?", _Quiet()),
+            ("ok go ahead", intake),
+        ],
+    )
 
-    asyncio.run(_body())
     assert intake.saw == (_TURN_ONE, "what about the base?", "ok go ahead")
     assert intake.refusal is None, intake.refusal
 
@@ -374,7 +372,7 @@ def test_the_window_the_runner_reads_is_the_configured_one(
     assert off.refusal is not None
 
 
-def test_the_agents_own_earlier_prose_is_not_quotable_as_the_chemist() -> None:
+async def test_the_agents_own_earlier_prose_is_not_quotable_as_the_chemist() -> None:
     """A model quoting itself back as `stated` is the fabrication the check exists to refuse.
 
     The assistant says "let us run 96 wells" on turn 1 and the intake quotes it on turn 2. Nothing
@@ -384,24 +382,22 @@ def test_the_agents_own_earlier_prose_is_not_quotable_as_the_chemist() -> None:
     """
     intake = _Intake("96 wells", value="96")
 
-    async def _body() -> None:
-        session = TurnSession(session_id="s-model-prose")
-        await _drive(
-            session,
-            InMemoryHistoryProvider(),
-            [
-                ("what should we run?", _Quiet("Let us run 96 wells on the deactivated chloride.")),
-                ("ok go ahead", intake),
-            ],
-        )
+    session = TurnSession(session_id="s-model-prose")
+    await _drive(
+        session,
+        InMemoryHistoryProvider(),
+        [
+            ("what should we run?", _Quiet("Let us run 96 wells on the deactivated chloride.")),
+            ("ok go ahead", intake),
+        ],
+    )
 
-    asyncio.run(_body())
     assert intake.saw == ("what should we run?", "ok go ahead")
     assert intake.refusal is not None
     assert "not in anything the chemist has written" in intake.refusal
 
 
-def test_a_store_that_cannot_be_read_refuses_rather_than_waives(
+async def test_a_store_that_cannot_be_read_refuses_rather_than_waives(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The degraded direction is the strict one — an outage must not open the check.
@@ -416,42 +412,38 @@ def test_a_store_that_cannot_be_read_refuses_rather_than_waives(
         async def recent_user_texts(self, session_id: Any, *, limit: int, state: Any = None) -> Any:
             raise ConnectionError("the session store is unreachable")
 
-    async def _body() -> None:
-        session = TurnSession(session_id="s-broken-store")
-        await _drive(session, _Broken(), [(_TURN_ONE, _Quiet()), ("ok go ahead", intake)])
+    session = TurnSession(session_id="s-broken-store")
+    await _drive(session, _Broken(), [(_TURN_ONE, _Quiet()), ("ok go ahead", intake)])
 
-    asyncio.run(_body())
     assert intake.saw == ("ok go ahead",)
     assert intake.refusal is not None
 
 
-def test_the_durable_transcript_serves_the_same_window() -> None:
+async def test_the_durable_transcript_serves_the_same_window() -> None:
     """The deployed path: `session_store="postgres"`, over rows a previous turn actually wrote."""
     intake = _Intake("24 wells")
 
-    async def _body() -> None:
-        await migrated_db_or_skip()
-        history = PostgresHistoryProvider()
-        session = TurnSession(session_id="s-durable-stated-quote")
-        try:
-            await _drive(
-                session,
-                history,
-                [
-                    (_TURN_ONE, _Quiet()),
-                    ("what about the base?", _Quiet()),
-                    ("ok go ahead", intake),
-                ],
-            )
-        finally:
-            from chemclaw.core import db
+    await migrated_db_or_skip()
+    history = PostgresHistoryProvider()
+    session = TurnSession(session_id="s-durable-stated-quote")
+    try:
+        await _drive(
+            session,
+            history,
+            [
+                (_TURN_ONE, _Quiet()),
+                ("what about the base?", _Quiet()),
+                ("ok go ahead", intake),
+            ],
+        )
+    finally:
+        from chemclaw.core import db
 
-            async with db.connection(settings.postgres_dsn) as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "DELETE FROM session_messages WHERE session_id = %s", (session.session_id,)
-                    )
+        async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "DELETE FROM session_messages WHERE session_id = %s", (session.session_id,)
+                )
 
-    asyncio.run(_body())
     assert intake.saw == (_TURN_ONE, "what about the base?", "ok go ahead")
     assert intake.refusal is None, intake.refusal

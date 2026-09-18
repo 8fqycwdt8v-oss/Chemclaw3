@@ -12,7 +12,8 @@ tenant", which was never true: an issuer is a JWKS document served over HTTP, an
 one.
 
 Nothing here is patched inside the module under test. `_JwksIssuer` is a real HTTP server on a real
-port; `settings.entra_jwks_url` points at it; `PyJWKClient` fetches from it with its own urllib;
+port; `settings.entra_jwks_url` points at it; `api/auth._HttpxJwkClient` fetches from it over
+real httpx;
 `create_app()` is the production app with `entra_required=True`. The only fake is the model, through
 the `graph_factory` seam every other front-door test uses.
 
@@ -463,10 +464,15 @@ def test_an_issuer_answering_with_something_that_is_not_a_key_set_answers_503(
     used to be a bare HTTP 500: the wrong contract for the client ("this request is broken, do not
     retry"), a page for the on-call as an application bug, and a 5xx spike naming nothing.
 
-    Two shapes because they fail in two different libraries: the HTML page dies in `json.load`
-    (`json.JSONDecodeError`, a `ValueError`, which PyJWT's client does not convert), and the JSON
-    one dies in `PyJWKSet.from_dict` (`PyJWKSetError` — a `PyJWTError` that is neither a
-    `PyJWKClientError` nor an `InvalidTokenError`, so every handler in `api/auth.py` missed it).
+    Two shapes because they fail in two different places, and the two are refused by two different
+    frames. The HTML page fails the decode in `_HttpxJwkClient.fetch_data` — it used to die in
+    PyJWT's own `json.load`, whose `json.JSONDecodeError` that client does not convert, and moving
+    the fetch onto httpx moved the refusal to where the decoding now happens. The JSON one dies in
+    `PyJWKSet.from_dict` (`PyJWKSetError` — a `PyJWTError` that is neither a `PyJWKClientError` nor
+    an `InvalidTokenError`, so every handler in `api/auth.py` missed it), which runs on data that
+    was fetched perfectly well: the transport change did nothing for it, and `_signing_key`'s last
+    arm is still what catches it. Both must stay 503 whichever frame refuses them, which is why
+    this test drives the app rather than either function.
     """
     token = _sign(_KEY_A, "kid-a", oid="u-alice")
     issuer.publish(body)

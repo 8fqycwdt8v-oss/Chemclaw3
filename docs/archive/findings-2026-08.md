@@ -1252,9 +1252,10 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       at fixture scale and unmeasured at a million chunks. *Trigger:* a real corpus is indexed —
       then compare a filtered top-k against the same query with the index disabled.
 
-- [ ] **Share exclusion globs are case-sensitive, and CIFS is not** — [S]. `_is_excluded` uses
-      `fnmatch`, so `Archive`, `ARCHIVE` and `archive` are three strings here and one folder to the
-      file server. An operator who excluded a restricted folder by name gets it indexed if anyone
+- [ ] **Share exclusion globs are case-sensitive, and CIFS is not** — [S]. `_is_excluded` matches
+      with gitignore semantics (`pathspec`), which is case-sensitive exactly as the `fnmatch` it
+      replaced was, so `Archive`, `ARCHIVE` and `archive` are three strings here and one folder to
+      the file server. An operator who excluded a restricted folder by name gets it indexed if anyone
       ever created it with different casing. Not fixed with the leading-slash anchoring in
       `D-2026-08-07-a-manifest-must-say-who-may-read-it`, because case-folding every pattern would
       quietly *widen* exclusions a deployment already relies on — that is a change to make

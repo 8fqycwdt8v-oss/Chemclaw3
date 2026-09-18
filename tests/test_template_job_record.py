@@ -184,7 +184,7 @@ def test_a_run_off_the_service_path_records_an_empty_session_rather_than_failing
 # --- the workflow actually writes it ------------------------------------------------------------
 
 
-def test_a_real_template_run_writes_the_row_and_a_failing_one_writes_its_own() -> None:
+async def test_a_real_template_run_writes_the_row_and_a_failing_one_writes_its_own() -> None:
     """Driven on a real broker, because the builders being right proves nothing about the caller.
 
     This is the test that would have caught the original defect. Both records above could have been
@@ -196,7 +196,6 @@ def test_a_real_template_run_writes_the_row_and_a_failing_one_writes_its_own() -
     the workflow *asks* for a record on both paths and with the right content, not that the store
     can write one — `tests/test_job_record_postgres.py` owns that half.
     """
-    import asyncio
     from datetime import timedelta
 
     from temporalio import activity
@@ -240,36 +239,33 @@ def test_a_real_template_run_writes_the_row_and_a_failing_one_writes_its_own() -
             }
         )
 
-    async def _drive() -> None:
-        async with await start_env_or_skip() as env:
-            client = pydantic_client(env)
-            async with Worker(
-                client,
+    async with await start_env_or_skip() as env:
+        client = pydantic_client(env)
+        async with Worker(
+            client,
+            task_queue=settings.background_task_queue,
+            workflows=[TemplateWorkflow],
+            activities=[_capture, _agent, _resume],
+        ):
+            await client.execute_workflow(
+                TemplateWorkflow.run,
+                TemplateRunInput(
+                    template=_one_agent_step("good", "write it up"), requested_by="tester"
+                ),
+                id="template-record-ok",
                 task_queue=settings.background_task_queue,
-                workflows=[TemplateWorkflow],
-                activities=[_capture, _agent, _resume],
-            ):
+                execution_timeout=timedelta(seconds=60),
+            )
+            with pytest.raises(WorkflowFailureError):
                 await client.execute_workflow(
                     TemplateWorkflow.run,
                     TemplateRunInput(
-                        template=_one_agent_step("good", "write it up"), requested_by="tester"
+                        template=_one_agent_step("bad", "boom"), requested_by="tester"
                     ),
-                    id="template-record-ok",
+                    id="template-record-fail",
                     task_queue=settings.background_task_queue,
                     execution_timeout=timedelta(seconds=60),
                 )
-                with pytest.raises(WorkflowFailureError):
-                    await client.execute_workflow(
-                        TemplateWorkflow.run,
-                        TemplateRunInput(
-                            template=_one_agent_step("bad", "boom"), requested_by="tester"
-                        ),
-                        id="template-record-fail",
-                        task_queue=settings.background_task_queue,
-                        execution_timeout=timedelta(seconds=60),
-                    )
-
-    asyncio.run(_drive())
 
     assert len(written) == 2, (
         f"expected a record from the finished run and from the failed one, got {len(written)} — "
@@ -286,7 +282,7 @@ def test_a_real_template_run_writes_the_row_and_a_failing_one_writes_its_own() -
 # --- what the resume read will and will not hand back --------------------------------------------
 
 
-def test_the_resume_read_answers_only_for_a_failed_run_of_the_same_template(
+async def test_the_resume_read_answers_only_for_a_failed_run_of_the_same_template(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The three conditions, against a real row rather than a stubbed store.
@@ -296,8 +292,6 @@ def test_the_resume_read_answers_only_for_a_failed_run_of_the_same_template(
     otherwise be replayed as a resume of itself; and a run's id is a hash of the template name and
     its inputs, so an edited file relaunches under the same id carrying a different procedure.
     """
-    import asyncio
-
     from chemclaw.core.config import settings
     from chemclaw.durable.job_record import record_job
     from chemclaw.durable.template_activities import ResumeRequest, completed_steps
@@ -308,34 +302,31 @@ def test_the_resume_read_answers_only_for_a_failed_run_of_the_same_template(
     # assertion below would pass for the wrong reason.
     monkeypatch.setattr(settings, "session_store", "postgres")
 
-    async def _drive() -> None:
-        await migrated_db_or_skip()
-        job_id = f"template-resume-probe-{uuid4().hex[:12]}"
-        steps = {"one": {"ok": "two"}}
+    await migrated_db_or_skip()
+    job_id = f"template-resume-probe-{uuid4().hex[:12]}"
+    steps = {"one": {"ok": "two"}}
 
-        failed = JobRecord(
-            job_id=job_id,
-            connector="template",
-            job="probe",
-            requested_by="tester",
-            correlation_id=job_id,
-            payload={"smiles": "CCO"},
-            result={"steps": steps, "template_fingerprint": "fp-1"},
-            payload_kind="template",
-            state="failed",
-            failure_reason="step 'two': boom",
-        )
-        await record_job(failed)
+    failed = JobRecord(
+        job_id=job_id,
+        connector="template",
+        job="probe",
+        requested_by="tester",
+        correlation_id=job_id,
+        payload={"smiles": "CCO"},
+        result={"steps": steps, "template_fingerprint": "fp-1"},
+        payload_kind="template",
+        state="failed",
+        failure_reason="step 'two': boom",
+    )
+    await record_job(failed)
 
-        assert await completed_steps(ResumeRequest(job_id=job_id, fingerprint="fp-1")) == steps
-        # A different definition under the same id.
-        assert await completed_steps(ResumeRequest(job_id=job_id, fingerprint="fp-2")) == {}
-        # An id nothing has ever recorded.
-        assert await completed_steps(ResumeRequest(job_id="nope", fingerprint="fp-1")) == {}
+    assert await completed_steps(ResumeRequest(job_id=job_id, fingerprint="fp-1")) == steps
+    # A different definition under the same id.
+    assert await completed_steps(ResumeRequest(job_id=job_id, fingerprint="fp-2")) == {}
+    # An id nothing has ever recorded.
+    assert await completed_steps(ResumeRequest(job_id="nope", fingerprint="fp-1")) == {}
 
-        # And once the run succeeds, its row is upserted to `completed` — which must not read back
-        # as something to resume, or every re-ask of a finished procedure would skip its own work.
-        await record_job(failed.model_copy(update={"state": "completed"}))
-        assert await completed_steps(ResumeRequest(job_id=job_id, fingerprint="fp-1")) == {}
-
-    asyncio.run(_drive())
+    # And once the run succeeds, its row is upserted to `completed` — which must not read back
+    # as something to resume, or every re-ask of a finished procedure would skip its own work.
+    await record_job(failed.model_copy(update={"state": "completed"}))
+    assert await completed_steps(ResumeRequest(job_id=job_id, fingerprint="fp-1")) == {}

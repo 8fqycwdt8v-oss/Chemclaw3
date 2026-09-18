@@ -15,6 +15,9 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
+from pydantic import ValidationError
+
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from chemclaw.durable import pending_store
@@ -56,141 +59,117 @@ async def _open(
     )
 
 
-def test_a_wait_can_be_settled_exactly_once() -> None:
+async def test_a_wait_can_be_settled_exactly_once() -> None:
     """The first writer wins; the second is told it did not settle, and the row is unchanged.
 
     The return value is the whole point. An expiry that silently no-ops looks identical to one that
     succeeded, so the workflow could not tell "somebody answered while I was timing out" from "I
     ended this", and the inbox and the outcome would disagree.
     """
+    await migrated_db_or_skip()
+    await _clean()
+    await _open("pending-race")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean()
-        await _open("pending-race")
+    answered = await pending_store.settle_request(
+        "pending-race", state="answered", answered_by="u-lab", answer={"yield": 0.7}
+    )
+    expired = await pending_store.settle_request(
+        "pending-race", state="expired", answered_by="", answer={}
+    )
 
-        answered = await pending_store.settle_request(
-            "pending-race", state="answered", answered_by="u-lab", answer={"yield": 0.7}
-        )
-        expired = await pending_store.settle_request(
-            "pending-race", state="expired", answered_by="", answer={}
-        )
-
-        assert answered is True
-        assert expired is False
-        stored = await pending_store.get_request("pending-race")
-        assert stored is not None
-        assert stored.state == "answered"
-        assert stored.answered_by == "u-lab"
-        assert stored.answer == {"yield": 0.7}
-
-    asyncio.run(_run())
+    assert answered is True
+    assert expired is False
+    stored = await pending_store.get_request("pending-race")
+    assert stored is not None
+    assert stored.state == "answered"
+    assert stored.answered_by == "u-lab"
+    assert stored.answer == {"yield": 0.7}
 
 
-def test_reopening_a_settled_request_does_nothing() -> None:
+async def test_reopening_a_settled_request_does_nothing() -> None:
     """`open_request` is idempotent for a retry and inert for a decided wait.
 
     The activity that opens the projection runs at-least-once, so it must be replayable. It must
     also never resurrect a settled request: a retry arriving after somebody answered would put the
     question back in their inbox with the answer already recorded.
     """
+    await migrated_db_or_skip()
+    await _clean()
+    await _open("pending-reopen")
+    await pending_store.settle_request(
+        "pending-reopen", state="answered", answered_by="u-1", answer={}
+    )
+    await _open("pending-reopen", days=99.0)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean()
-        await _open("pending-reopen")
-        await pending_store.settle_request(
-            "pending-reopen", state="answered", answered_by="u-1", answer={}
-        )
-        await _open("pending-reopen", days=99.0)
-
-        stored = await pending_store.get_request("pending-reopen")
-        assert stored is not None
-        assert stored.state == "answered"
-
-    asyncio.run(_run())
+    stored = await pending_store.get_request("pending-reopen")
+    assert stored is not None
+    assert stored.state == "answered"
 
 
-def test_the_inbox_shows_what_is_routed_to_you_and_what_is_routed_to_nobody() -> None:
+async def test_the_inbox_shows_what_is_routed_to_you_and_what_is_routed_to_nobody() -> None:
     """An unrouted request is waiting on whoever is entitled, so it appears in a named query.
 
     Hiding it would make the common case invisible: a question raised without knowing the right
     name is the default, and an inbox that only showed personally-addressed rows would show
     almost nothing.
     """
+    await migrated_db_or_skip()
+    await _clean()
+    await _open("pending-mine", asked_of="u-me", days=1)
+    await _open("pending-anyone", asked_of="", days=2)
+    await _open("pending-theirs", asked_of="u-them", days=3)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean()
-        await _open("pending-mine", asked_of="u-me", days=1)
-        await _open("pending-anyone", asked_of="", days=2)
-        await _open("pending-theirs", asked_of="u-them", days=3)
+    mine = {row.request_id for row in (await pending_store.open_requests(asked_of="u-me")).requests}
+    assert "pending-mine" in mine
+    assert "pending-anyone" in mine
+    assert "pending-theirs" not in mine
 
-        mine = {
-            row.request_id for row in (await pending_store.open_requests(asked_of="u-me")).requests
-        }
-        assert "pending-mine" in mine
-        assert "pending-anyone" in mine
-        assert "pending-theirs" not in mine
-
-        # Unnarrowed, everything open is listed — the operator's view.
-        everything = {row.request_id for row in (await pending_store.open_requests()).requests}
-        assert {"pending-mine", "pending-anyone", "pending-theirs"} <= everything
-
-    asyncio.run(_run())
+    # Unnarrowed, everything open is listed — the operator's view.
+    everything = {row.request_id for row in (await pending_store.open_requests()).requests}
+    assert {"pending-mine", "pending-anyone", "pending-theirs"} <= everything
 
 
-def test_the_inbox_is_ordered_by_deadline_and_drops_what_is_settled() -> None:
+async def test_the_inbox_is_ordered_by_deadline_and_drops_what_is_settled() -> None:
     """Soonest first, and a settled request leaves the list."""
+    await migrated_db_or_skip()
+    await _clean()
+    await _open("pending-late", asked_of="u-order", days=30)
+    await _open("pending-soon", asked_of="u-order", days=1)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean()
-        await _open("pending-late", asked_of="u-order", days=30)
-        await _open("pending-soon", asked_of="u-order", days=1)
+    order = [
+        row.request_id
+        for row in (await pending_store.open_requests(asked_of="u-order")).requests
+        if row.requested_by == REQUESTER
+    ]
+    assert order == ["pending-soon", "pending-late"]
 
-        order = [
-            row.request_id
-            for row in (await pending_store.open_requests(asked_of="u-order")).requests
-            if row.requested_by == REQUESTER
-        ]
-        assert order == ["pending-soon", "pending-late"]
-
-        await pending_store.settle_request(
-            "pending-soon", state="answered", answered_by="u-order", answer={}
-        )
-        remaining = [
-            row.request_id
-            for row in (await pending_store.open_requests(asked_of="u-order")).requests
-            if row.requested_by == REQUESTER
-        ]
-        assert remaining == ["pending-late"]
-
-    asyncio.run(_run())
+    await pending_store.settle_request(
+        "pending-soon", state="answered", answered_by="u-order", answer={}
+    )
+    remaining = [
+        row.request_id
+        for row in (await pending_store.open_requests(asked_of="u-order")).requests
+        if row.requested_by == REQUESTER
+    ]
+    assert remaining == ["pending-late"]
 
 
-def test_a_reminder_counts_only_while_the_request_is_open() -> None:
+async def test_a_reminder_counts_only_while_the_request_is_open() -> None:
     """Chasing a settled request is a no-op, so the count means what it says."""
+    await migrated_db_or_skip()
+    await _clean()
+    await _open("pending-chase")
+    await pending_store.record_reminder("pending-chase", 1)
+    await pending_store.record_reminder("pending-chase", 2)
+    await pending_store.settle_request("pending-chase", state="expired", answered_by="", answer={})
+    await pending_store.record_reminder("pending-chase", 3)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean()
-        await _open("pending-chase")
-        await pending_store.record_reminder("pending-chase", 1)
-        await pending_store.record_reminder("pending-chase", 2)
-        await pending_store.settle_request(
-            "pending-chase", state="expired", answered_by="", answer={}
-        )
-        await pending_store.record_reminder("pending-chase", 3)
-
-        stored = await pending_store.get_request("pending-chase")
-        assert stored is not None
-        assert stored.reminders == 2
-
-    asyncio.run(_run())
+    stored = await pending_store.get_request("pending-chase")
+    assert stored is not None
+    assert stored.reminders == 2
 
 
-def test_asking_again_after_a_deadline_lapsed_reopens_the_row() -> None:
+async def test_asking_again_after_a_deadline_lapsed_reopens_the_row() -> None:
     """The case `ALLOW_DUPLICATE` exists for, which the projection used to drop on the floor.
 
     `request_id_for` is deterministic, so a re-ask reuses the workflow id; `request_external_input`
@@ -201,61 +180,53 @@ def test_asking_again_after_a_deadline_lapsed_reopens_the_row() -> None:
 
     The run id is what separates a retry from a re-ask, so both halves are asserted here.
     """
+    await migrated_db_or_skip()
+    request_id = "req-reask"
+    await _clean()
+    await _open(request_id, days=1, run_id="run-1")
+    await pending_store.record_reminder(request_id, 1)
+    await pending_store.settle_request(request_id, state="expired", answered_by="", answer={})
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        request_id = "req-reask"
-        await _clean()
-        await _open(request_id, days=1, run_id="run-1")
-        await pending_store.record_reminder(request_id, 1)
-        await pending_store.settle_request(request_id, state="expired", answered_by="", answer={})
+    stored = await pending_store.get_request(request_id)
+    assert stored is not None and stored.state == "expired"
 
-        stored = await pending_store.get_request(request_id)
-        assert stored is not None and stored.state == "expired"
+    # The same question, asked again: a new Temporal run under the same workflow id.
+    await _open(request_id, days=7, run_id="run-2")
 
-        # The same question, asked again: a new Temporal run under the same workflow id.
-        await _open(request_id, days=7, run_id="run-2")
-
-        stored = await pending_store.get_request(request_id)
-        assert stored is not None
-        assert stored.state == "waiting", (
-            "the re-asked question kept the lapsed cycle's state, so nobody can see or answer it"
-        )
-        assert not stored.answered_at and stored.answered_by == ""
-        assert stored.reminders == 0, "the new cycle inherited the old one's chase count"
-        # Membership, not equality: these tables are shared by the whole suite and another file's
-        # open request is not this test's business. Asserting the whole list is what made an
-        # unrelated file fail this one in a full run and pass it alone.
-        assert request_id in [r.request_id for r in (await pending_store.open_requests()).requests]
-
-    asyncio.run(_run())
+    stored = await pending_store.get_request(request_id)
+    assert stored is not None
+    assert stored.state == "waiting", (
+        "the re-asked question kept the lapsed cycle's state, so nobody can see or answer it"
+    )
+    assert not stored.answered_at and stored.answered_by == ""
+    assert stored.reminders == 0, "the new cycle inherited the old one's chase count"
+    # Membership, not equality: these tables are shared by the whole suite and another file's
+    # open request is not this test's business. Asserting the whole list is what made an
+    # unrelated file fail this one in a full run and pass it alone.
+    assert request_id in [r.request_id for r in (await pending_store.open_requests()).requests]
 
 
-def test_a_retry_of_the_opening_activity_does_not_disturb_a_settled_row() -> None:
+async def test_a_retry_of_the_opening_activity_does_not_disturb_a_settled_row() -> None:
     """The case the original guard was written for, which must survive the fix.
 
     An activity retry carries the *same* run. If that reopened a settled row, an at-least-once
     delivery could resurrect a wait the workflow had already answered — which is why the reopen is
     keyed on the run id changing rather than on the state alone.
     """
+    await migrated_db_or_skip()
+    request_id = "req-retry"
+    await _clean()
+    await _open(request_id, days=1, run_id="run-1")
+    await pending_store.settle_request(
+        request_id, state="answered", answered_by="u-2", answer={"ok": True}
+    )
+    await _open(request_id, days=1, run_id="run-1")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        request_id = "req-retry"
-        await _clean()
-        await _open(request_id, days=1, run_id="run-1")
-        await pending_store.settle_request(
-            request_id, state="answered", answered_by="u-2", answer={"ok": True}
-        )
-        await _open(request_id, days=1, run_id="run-1")
-
-        stored = await pending_store.get_request(request_id)
-        assert stored is not None
-        assert (stored.state, stored.answered_by) == ("answered", "u-2"), (
-            "a retry of the opening activity resurrected a wait that was already answered"
-        )
-
-    asyncio.run(_run())
+    stored = await pending_store.get_request(request_id)
+    assert stored is not None
+    assert (stored.state, stored.answered_by) == ("answered", "u-2"), (
+        "a retry of the opening activity resurrected a wait that was already answered"
+    )
 
 
 def test_a_re_ask_of_an_answered_question_opens_and_the_answer_is_archived() -> None:
@@ -351,7 +322,7 @@ def test_a_re_ask_of_an_answered_question_opens_and_the_answer_is_archived() -> 
     asyncio.run(_run())
 
 
-def test_an_expiry_does_not_claim_somebody_answered() -> None:
+async def test_an_expiry_does_not_claim_somebody_answered() -> None:
     """`answered_at` is a fact about a person, not about a state transition.
 
     It was stamped on every settle, so an `expired` row carried a timestamp beside an empty
@@ -359,30 +330,26 @@ def test_an_expiry_does_not_claim_somebody_answered() -> None:
     point". Migration 076's `pending_requests_answer_is_attributed` exists to prevent exactly that
     claim and only fires on `state = 'answered'`; the write walked around it from the other side.
     """
+    await migrated_db_or_skip()
+    await _clean()
+    await _open("req-expiry-stamp", days=1)
+    await pending_store.settle_request(
+        "req-expiry-stamp", state="expired", answered_by="", answer={}
+    )
+    stored = await pending_store.get_request("req-expiry-stamp")
+    assert stored is not None
+    assert stored.state == "expired"
+    assert not stored.answered_at, "an unanswered request carries an answered-at timestamp"
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean()
-        await _open("req-expiry-stamp", days=1)
-        await pending_store.settle_request(
-            "req-expiry-stamp", state="expired", answered_by="", answer={}
-        )
-        stored = await pending_store.get_request("req-expiry-stamp")
-        assert stored is not None
-        assert stored.state == "expired"
-        assert not stored.answered_at, "an unanswered request carries an answered-at timestamp"
-
-        await _open("req-answered-stamp", days=1)
-        await pending_store.settle_request(
-            "req-answered-stamp", state="answered", answered_by="u-2", answer={"ok": True}
-        )
-        answered = await pending_store.get_request("req-answered-stamp")
-        assert answered is not None and answered.answered_at, "a real answer lost its timestamp"
-
-    asyncio.run(_run())
+    await _open("req-answered-stamp", days=1)
+    await pending_store.settle_request(
+        "req-answered-stamp", state="answered", answered_by="u-2", answer={"ok": True}
+    )
+    answered = await pending_store.get_request("req-answered-stamp")
+    assert answered is not None and answered.answered_at, "a real answer lost its timestamp"
 
 
-def test_a_redelivered_reminder_does_not_count_one_escalation_twice() -> None:
+async def test_a_redelivered_reminder_does_not_count_one_escalation_twice() -> None:
     """A Temporal activity is at-least-once, so the write it makes has to be.
 
     `record_reminder_activity` ran `reminders = reminders + 1` under a 5-attempt retry policy, and
@@ -398,32 +365,28 @@ def test_a_redelivered_reminder_does_not_count_one_escalation_twice() -> None:
     The second half is the one that keeps the fix honest — a `GREATEST` that never advanced would
     pass the first assertion and record nothing.
     """
+    await migrated_db_or_skip()
+    await _clean()
+    await _open("pending-redelivered")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean()
-        await _open("pending-redelivered")
+    # One escalation, delivered twice: the workflow's own count is 1 on both attempts.
+    await pending_store.record_reminder("pending-redelivered", 1)
+    await pending_store.record_reminder("pending-redelivered", 1)
+    stored = await pending_store.get_request("pending-redelivered")
+    assert stored is not None
+    assert stored.reminders == 1, (
+        "the redelivered attempt counted the same escalation a second time, so the row and "
+        "the workflow disagree about how often somebody was chased"
+    )
 
-        # One escalation, delivered twice: the workflow's own count is 1 on both attempts.
-        await pending_store.record_reminder("pending-redelivered", 1)
-        await pending_store.record_reminder("pending-redelivered", 1)
-        stored = await pending_store.get_request("pending-redelivered")
-        assert stored is not None
-        assert stored.reminders == 1, (
-            "the redelivered attempt counted the same escalation a second time, so the row and "
-            "the workflow disagree about how often somebody was chased"
-        )
-
-        # And the next escalation still lands, including after a redelivery it did not see.
-        await pending_store.record_reminder("pending-redelivered", 2)
-        stored = await pending_store.get_request("pending-redelivered")
-        assert stored is not None
-        assert stored.reminders == 2
-
-    asyncio.run(_run())
+    # And the next escalation still lands, including after a redelivery it did not see.
+    await pending_store.record_reminder("pending-redelivered", 2)
+    stored = await pending_store.get_request("pending-redelivered")
+    assert stored is not None
+    assert stored.reminders == 2
 
 
-def test_the_inbox_query_says_how_much_it_did_not_return() -> None:
+async def test_the_inbox_query_says_how_much_it_did_not_return() -> None:
     """A page of the inbox used to be byte-identical to the whole of it.
 
     Measured against a real database: 35 rows waiting, `open_requests(limit=20)` returned 20, and
@@ -434,25 +397,64 @@ def test_the_inbox_query_says_how_much_it_did_not_return() -> None:
     `limit_applied` is the second half: the store clamps to 200, so a caller asking for 10,000
     silently got 200 and had no way to tell that from a corpus of 200.
     """
+    await migrated_db_or_skip()
+    await _clean()
+    for index in range(35):
+        await _open(f"pending-page-{index:02d}", days=index + 1)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clean()
-        for index in range(35):
-            await _open(f"pending-page-{index:02d}", days=index + 1)
+    page = await pending_store.open_requests(limit=20)
+    assert len(page.requests) == 20
+    assert page.total_waiting >= 35
+    assert page.limit_applied == 20
+    assert page.truncated
 
-        page = await pending_store.open_requests(limit=20)
-        assert len(page.requests) == 20
-        assert page.total_waiting >= 35
-        assert page.limit_applied == 20
-        assert page.truncated
+    # ...and asking for more than the store will serve is visible as the clamp it is.
+    clamped = await pending_store.open_requests(limit=10_000)
+    assert clamped.limit_applied == 200
 
-        # ...and asking for more than the store will serve is visible as the clamp it is.
-        clamped = await pending_store.open_requests(limit=10_000)
-        assert clamped.limit_applied == 200
+    # The ordinary case must read as complete, or the marker means nothing.
+    whole = await pending_store.open_requests(limit=200)
+    assert not whole.truncated
 
-        # The ordinary case must read as complete, or the marker means nothing.
-        whole = await pending_store.open_requests(limit=200)
-        assert not whole.truncated
 
-    asyncio.run(_run())
+async def test_a_request_is_built_from_the_columns_by_name_and_keeps_its_iso_stamps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reversing `_COLUMNS` must change nothing, and the three timestamps stay ISO strings.
+
+    `_COLUMNS` and `PendingRequest`'s field list are now one declaration — fifteen positional
+    subscripts used to be the second copy, over seven adjacent `TEXT` columns. The stamps are
+    asserted alongside because a row factory converts nothing: `due_at`, `answered_at` and
+    `created_at` are `TIMESTAMPTZ` and reach `GET /pending` as `datetime.isoformat()` spells them,
+    which is now a `BeforeValidator` and deliberately not a SQL `::text` that would spell them
+    otherwise.
+    """
+    from chemclaw.durable import pending_store as store
+
+    await migrated_db_or_skip()
+    await _clean()
+    await _open("pending-by-name")
+    straight = await store.get_request("pending-by-name")
+    assert straight is not None
+    assert straight.due_at.count("T") == 1 and straight.created_at.count("T") == 1
+    assert straight.answered_at == "", "a NULL answered_at reads as 'still waiting'"
+
+    columns = [name.strip() for name in store._COLUMNS.split(",")]
+    monkeypatch.setattr(store, "_COLUMNS", ", ".join(reversed(columns)))
+    assert await store.get_request("pending-by-name") == straight, (
+        "the column order must not be able to decide which field a value lands in"
+    )
+    # The inbox is global — other files leave waiting rows behind — so this asserts membership
+    # and the count's relationship to the page rather than an exact roster. What it is here to
+    # prove is that the page and its count survived being split across two cursors, which they
+    # had to be: a row factory belongs to a cursor and `count(*)` is not a `PendingRequest`.
+    page = await store.open_requests(limit=store._MAX_PAGE)
+    assert "pending-by-name" in [row.request_id for row in page.requests]
+    assert page.total_waiting >= len(page.requests) >= 1, (
+        "the count must still be read, and it is the population the page is a page of"
+    )
+
+    monkeypatch.setattr(store, "_COLUMNS", f"{', '.join(columns)}, kind AS surplus")
+    with pytest.raises(ValidationError, match="surplus"):
+        await store.get_request("pending-by-name")
+    await _clean()
