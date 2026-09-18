@@ -500,6 +500,29 @@ _COUNTED_SURFACE = re.compile(
 )
 
 
+#: The window the count and the bundle's name have to share. It was one *sentence*, and a full
+#: stop is the most ordinary edit a prose author makes: splitting the live-lane comment into
+#: "…and its whole tool surface. All fifteen tools stay here." took the claim out of scope and the
+#: guard was `1 passed` over the file that carried the original defect. The count and the subject
+#: it is a count *of* are rarely one sentence apart on purpose, so the window is the paragraph —
+#: a blank-line-delimited block, which in the shell scripts that carried the defect means a whole
+#: run of comment lines, since a lone `#` is not a blank line. Measured over the tree, widening
+#: from sentence to paragraph costs **zero** new offenders.
+_PARAGRAPH = re.compile(r"\n\s*\n")
+
+#: One sentence out of the paragraph, for the failure message — the paragraph is the *pairing*
+#: window, not what a reader wants quoted back at them.
+_SENTENCE = re.compile(r"(?<=[.:!?])\s")
+
+
+def _quote(paragraph: str, counted: re.Match[str]) -> str:
+    """The sentence inside `paragraph` that carries the count, flattened for a failure message."""
+    for sentence in _SENTENCE.split(paragraph):
+        if _COUNTED_SURFACE.search(sentence):
+            return " ".join(sentence.split())[:120]
+    return " ".join(counted.group(0).split())[:120]
+
+
 def _calc_bundle_pattern(name: str) -> re.Pattern[str]:
     """A sentence naming the bundle, from the name its own manifest declares.
 
@@ -621,6 +644,13 @@ def test_the_calc_tool_surface_is_not_counted_in_prose() -> None:
     that discuss a bundle from outside are not a derivable set. What carries the weight instead is
     that the predicate itself is derived — the name from the manifest, and a modifier run so an
     inserted word is not an exemption.
+
+    **The window the two have to share is a paragraph, and it was a sentence.** A full stop is the
+    most ordinary edit a prose author makes, and it was an exemption: splitting the live-lane
+    comment into "…and its whole tool surface. All fifteen tools stay here." was `1 passed` over
+    the file that carried the original defect. Widening to the paragraph costs zero new offenders,
+    measured; the quoted sentence in the failure message is still a sentence, because the paragraph
+    is the pairing window rather than what a reader wants quoted back at them.
     """
     surface_file = _calc_surface_file()
     package = surface_file.rsplit("/", 1)[0] + "/"
@@ -643,11 +673,12 @@ def test_the_calc_tool_surface_is_not_counted_in_prose() -> None:
             scanned_in_package.append(name)
         elif names_the_bundle.search(content):
             scanned_naming_the_bundle.append(name)
-        for sentence in re.split(r"(?<=[.:!?])\s", content):
-            if not _COUNTED_SURFACE.search(sentence):
+        for paragraph in _PARAGRAPH.split(content):
+            counted = _COUNTED_SURFACE.search(paragraph)
+            if not counted:
                 continue
-            if name.startswith(package) or names_the_bundle.search(sentence):
-                offenders.append(f"{name}: {' '.join(sentence.split())[:120]}")
+            if name.startswith(package) or names_the_bundle.search(paragraph):
+                offenders.append(f"{name}: {_quote(paragraph, counted)}")
 
     assert surface_file in scanned_in_package, (
         f"{surface_file} defines the calc tool surface and this scan did not read it, although "
