@@ -689,6 +689,19 @@ def test_the_calc_tool_surface_is_not_counted_in_prose() -> None:
     measured; the quoted sentence in the failure message is still a sentence, because the paragraph
     is the pairing window rather than what a reader wants quoted back at them.
 
+    **The scope stops at the surface package and does not take the whole bundle, which is a
+    decision rather than an oversight.** `connectors/calc/connector.yaml` carries a live subset
+    count — "the composition of the two tools that were never shipped whole
+    (`compute_thermochemistry`, `predict_logd`)" — and it is the one place a reader looks for this
+    rule being applied to itself. It is out of scope and stays there. Measured, widening the
+    package half from the surface package to the bundle directory catches **four** paragraphs, and
+    two of them count something else entirely: `remote.py` counts tools on the *sibling server*,
+    and the bundle's own skill counts *reaction* tools. Buying one sentence for three exemptions is
+    the allowlist-of-its-own-exceptions CLAUDE.md refuses. And the sentence is the remedy this rule
+    asks for as well as the thing it refuses: it names both members in the same parenthesis, so the
+    count cannot drift from the names it sits beside — a third one arriving edits that parenthesis,
+    with the cardinal in view.
+
     **This module is exempt only where it quotes.** It has to write the sentences it refuses, to
     say what they are; the implementation of that was a whole-file skip, and a fresh count in
     another test's docstring here passed. `a0573397` existed solely to hand-delete two such counts
