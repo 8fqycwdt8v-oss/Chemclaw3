@@ -615,12 +615,20 @@ def test_an_ungrounded_method_parameter_marks_the_answer_for_review(
     assert answer.confidence is None  # nothing was *scored*; the scan is not a measurement
 
 
-def test_the_shape_gate_is_off_unless_the_deployment_asks_for_it(
+def test_the_shape_gate_turned_off_marks_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Default-off, because a heuristic that fires on a legitimate answer is worse than none."""
+    """A deployment that turns the gate off gets no mark from it, on the same answer that trips it.
+
+    **This asserted that off was the shipped default, and the default is now on** — the gate is
+    paired with `answer_review_max_rounds`, so a mark leads to a revision and, failing that, to a
+    person, which is the trade `core/config/llm.py` argues. The heuristic's over-firing is
+    unchanged and still pinned in `tests/test_verifier.py`. What survives the flip is the half that
+    is about the code: the knob really does turn the scan off, asserted against the very answer the
+    arm above shows it marking, so "off" cannot quietly become "on with nothing to say".
+    """
     monkeypatch.setattr(settings, "verifier_enabled", False)
-    assert settings.answer_shape_gate_enabled is False, "the gate must be off unless asked for"
+    monkeypatch.setattr(settings, "answer_shape_gate_enabled", False)
     answer = _verified_answer(_CitingAgent(_METHOD_ANSWER))
     assert answer.review_required is False
     assert answer.unsupported_claims == []

@@ -30,6 +30,7 @@ from temporalio.exceptions import ApplicationError
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from chemclaw.core.config import settings
+from chemclaw.durable.check_in import CheckInWorkflow
 from chemclaw.durable.digest import DigestWorkflow
 from chemclaw.durable.eln_sync import ElnSyncWorkflow
 from chemclaw.durable.eval_drift import EvalDriftWorkflow
@@ -111,10 +112,26 @@ def test_plan_covers_all_periodic_jobs() -> None:
     `test_a_watch_says_so_when_nothing_will_evaluate_it` is what holds the tool honest when it
     does; with no subscribers the run is one indexed read.
 
+    The fourth is the check-in, on by the same argument one step further along.
+    `durable/awaiting.py` re-notifies `asked_of` and writes to the *requester* exactly once, on
+    expiry — so at
+    `awaiting_max_days = 90` a chemist can hear nothing about their own suspended campaign for
+    three months and then hear it failed. It shipped off because the sweep wrote to a mailbox with
+    no
+    reader and grew without bound; `GET /check-ins` is the reader, and the sweep now supersedes a
+    requester's unread notice instead of adding to it, so both halves of that objection are spent.
+    A deployment may still turn it off, and `tests/test_check_in.py`'s
+    `test_the_schedule_is_planned_only_when_a_deployment_asks` drives both arms.
+
     Everything else in this file is gated on a setting or a second declaration.
     """
     plan = planned_schedules()
-    assert {p.workflow for p in plan} == {ElnSyncWorkflow, ReactionLabelWorkflow, DigestWorkflow}
+    assert {p.workflow for p in plan} == {
+        ElnSyncWorkflow,
+        ReactionLabelWorkflow,
+        DigestWorkflow,
+        CheckInWorkflow,
+    }
     assert len({p.schedule_id for p in plan}) == len(plan)  # unique ids
 
 
@@ -223,6 +240,15 @@ def test_planned_ids_stay_inside_owned_namespace(monkeypatch: pytest.MonkeyPatch
     number chosen to pass: every job in this file is conditional, so `planned` and the count below
     move together, and adding a job without enabling it here fails on the count before it can fail
     silently in a deployment.
+
+    **And it happened a third time, which is why the paragraph above is not the end of the story.**
+    `check_in_enabled` was never patched here, so while it defaulted off `agent-check-in` was absent
+    from `planned` and this test never compared it against the namespace at all — the count said 12
+    and read as complete. It was registered, so nothing shipped broken; what was broken is this
+    test's claim to be exhaustive. The count catches a job *added* without being enabled here, and
+    does not catch one that was already conditional when the list was written. Patch the flag, do
+    not rely on its default: a default is a deployment's decision and this assertion is about the
+    namespace.
     """
     from chemclaw.durable import schedules as schedules_module
 
@@ -232,6 +258,7 @@ def test_planned_ids_stay_inside_owned_namespace(monkeypatch: pytest.MonkeyPatch
         "digest_enabled",
         "retention_enabled",
         "observations_enabled",
+        "check_in_enabled",
     ):
         monkeypatch.setattr(settings, flag, True)
     monkeypatch.setattr(settings, "retention_session_events_days", 30)
@@ -247,8 +274,8 @@ def test_planned_ids_stay_inside_owned_namespace(monkeypatch: pytest.MonkeyPatch
     planned = {p.schedule_id for p in planned_schedules()}
 
     # The guard is only worth anything if the plan is actually full — an empty plan is a subset of
-    # everything. Every job in this file is conditional, and all twelve are enabled above.
-    assert len(planned) == 12, (
+    # everything. Every job in this file is conditional, and all thirteen are enabled above.
+    assert len(planned) == 13, (
         f"the plan is not fully enabled, so the subset below is vacuous: {sorted(planned)}"
     )
     assert planned <= OWNED_SCHEDULE_IDS, (

@@ -13,7 +13,11 @@ called.
 D-2026-08-16 found `RubricMiddleware` lacking — its `_finalize_evaluation` rewrites the result to
 `max_iterations_reached` and mutates no message, so a grader outage ships every answer ungraded with
 a log line nothing reads. Here, running out of rounds must leave the answer exactly as it would have
-been with the loop off: shipped, and still marked.
+been with the loop off: shipped, and still marked — **and now, a person asked to read it**. That
+last half is Paperclip's `maxReviewRounds`, whose bound ends in an escalation to a named human
+rather than in a counter; the arms at the bottom of this file drive it through the real
+`run_turn` and assert on the `AwaitRequest` the runner hands `durable/awaiting.open_wait`, because
+the request is the whole contract — who it is raised as, what it says, and what two of them join.
 """
 
 import asyncio
@@ -38,6 +42,7 @@ from chemclaw.agent.verifier import ClaimCheck, VerificationResult
 from chemclaw.api.events import AnswerEvent, ErrorEvent, ToolFailedEvent
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
+from chemclaw.durable.awaiting import AwaitRequest, request_id_for
 from tests.fakes_langgraph import ScriptedChatModel
 from tests.fakes_turn import Chunk, Piece, ScriptedTurn
 from tests.pg import create_checkpoint_tables, migrated_db_or_skip
@@ -165,14 +170,19 @@ def test_a_revision_that_does_not_help_still_answers_and_stays_flagged(
     assert METRICS.value("chemclaw_answer_review_exhausted_total") == before + 1
 
 
-def test_the_loop_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_loop_turned_off_is_a_complete_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
     """At 0 rounds the turn is byte-for-byte what it was before this loop existed.
 
-    The shipped configuration, so this is the arm that says the feature costs nothing until a
-    deployment asks for it.
+    **This asserted that 0 was the shipped default until the default became 2.** The deployment now
+    turns the loop on, paired with `answer_shape_gate_enabled` so that it is reachable at all —
+    `core/config/llm.py` carries both arguments. What the test was really pinning survives that
+    flip and is the part worth keeping: a deployment that sets 0 gets the un-looped turn exactly,
+    with no second model call and no counter movement. Re-expressed as a monkeypatched arm rather
+    than deleted, because "the off path costs nothing" is a claim about the code, which is still
+    true, and not about the default, which is not.
     """
     _grades_by_text(monkeypatch)
-    assert settings.answer_review_max_rounds == 0, "the loop must ship off"
+    monkeypatch.setattr(settings, "answer_review_max_rounds", 0)
     agent = _StubbornAgent()
 
     before = METRICS.value("chemclaw_answer_revisions_total")
@@ -659,3 +669,223 @@ def test_a_round_that_bought_nothing_leaves_the_thread_exactly_as_it_was(
     assert kinds == [("human", "what was the yield?"), ("ai", _FLAGGED)], (
         f"the thread does not end on the answer that shipped ({label}): {kinds}"
     )
+
+
+# --------------------------------------------------------------------------------------------
+# The escalation: what happens when the rounds run out.
+# --------------------------------------------------------------------------------------------
+
+#: The authenticated principal the escalating turns run as — an Entra `oid`, which is what the
+#: front door passes `run_turn` and the only thing the wait may be raised as.
+_CHEMIST = "oid-chemist-7"
+
+
+def _asks(monkeypatch: pytest.MonkeyPatch) -> list[AwaitRequest]:
+    """Capture every wait the runner opens, in place of the broker.
+
+    Patched at `runner.open_wait` rather than at the Temporal client, because the seam under test
+    is the request the runner *builds* — who it is raised as, what its subject dedups on, what its
+    rationale says. A fake broker would assert the same thing through two more layers of
+    serialisation and would need a live task queue to be honest about the rest.
+    """
+    asked: list[AwaitRequest] = []
+
+    async def _open(request: AwaitRequest) -> tuple[str, bool]:
+        asked.append(request)
+        return request_id_for(request), True
+
+    monkeypatch.setattr(runner, "open_wait", _open)
+    return asked
+
+
+def _drive_as(
+    agent: ScriptedTurn, *, actor: str | None = _CHEMIST, session_id: str = "s-escalate"
+) -> list[Any]:
+    """One turn's events, run as an authenticated chemist — what `_drive` deliberately is not.
+
+    Every other arm in this file drives an unauthenticated turn, which is why none of them opens a
+    wait: the escalation refuses to invent a requester. Kept as a second helper rather than as
+    parameters on `_drive` so that stays obvious at each call site.
+    """
+
+    async def _collect() -> list[Any]:
+        session = TurnSession(session_id=session_id)
+        return [
+            event
+            async for event in runner.run_turn(
+                session,
+                "what was the yield?",
+                actor=actor,
+                connectors=[],
+                graph_factory=agent.graph_factory,
+            )
+        ]
+
+    return asyncio.run(_collect())
+
+
+def test_an_exhausted_revision_loop_asks_a_person_to_read_the_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gap this closes: the rounds were spent, the answer shipped flagged, and nobody was told.
+
+    `_record_review_rounds` counted the exhaustion and warned into a log, which is the
+    `RubricMiddleware` shape this file's header rejects one level up: a verdict nobody acted on.
+    The whole of the assertion is on the request, because that is what a person receives.
+    """
+    _grades_by_text(monkeypatch)
+    monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
+    asked = _asks(monkeypatch)
+
+    events = _drive_as(_StubbornAgent())
+
+    answer = _answer(events)
+    assert answer.text == _FLAGGED, "the answer still ships, exactly as before"
+    assert answer.review_required is True, "and still carries the verdict"
+    assert len(asked) == 1, f"the exhausted loop asked nobody: {asked}"
+    request = asked[0]
+    assert request.kind == "review"
+    assert request.requested_by == _CHEMIST, "the wait must be raised as the turn's own principal"
+    assert request.session_id == "s-escalate"
+    assert "Yield was 90%" in request.rationale, (
+        "a reviewer must be told what the checks could not ground, not merely that something failed"
+    )
+
+
+def test_a_revision_that_worked_asks_nobody(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The trigger is the surviving flag, not the loop having run.
+
+    Without this, an escalation placed one line higher would file a review request for every
+    flagged turn in the deployment — including every turn the loop successfully fixed, which is
+    the case the loop exists to produce.
+    """
+    _grades_by_text(monkeypatch)
+    monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
+    asked = _asks(monkeypatch)
+
+    answer = _answer(_drive_as(_RevisingAgent()))
+
+    assert answer.review_required is False, "the fixture's premise: the revision worked"
+    assert asked == [], "a grounded answer was escalated anyway"
+
+
+def test_the_loop_turned_off_asks_nobody_and_makes_no_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`answer_review_max_rounds = 0` stays a complete no-op, escalation included.
+
+    The escalation hangs off `if rounds:` rather than off a second reading of the setting, so this
+    is the arm that would catch a future author moving it out of that block: at 0 rounds the turn
+    never enters the loop, so there is nothing to exhaust and nobody to ask — even though the
+    answer is flagged and `answer_review_escalation_enabled` ships on.
+    """
+    _grades_by_text(monkeypatch)
+    monkeypatch.setattr(settings, "answer_review_max_rounds", 0)
+    asked = _asks(monkeypatch)
+    agent = _StubbornAgent()
+
+    answer = _answer(_drive_as(agent))
+
+    assert answer.review_required is True, "the fixture's premise: the answer is flagged"
+    assert agent.runs == 1, "no revision may run with the loop off"
+    assert asked == [], "the off path opened a durable wait"
+
+
+def test_an_escalation_that_cannot_be_filed_still_ships_the_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A chemist must never lose an answer because a review request could not be opened.
+
+    Best-effort on the `deliver_best_effort` / `notify_session_best_effort` precedent: the answer
+    is built and about to be yielded, and a broker that is down must cost the review request and
+    nothing else. Counted through `degraded()` rather than swallowed silently, because an
+    escalation that never happens is invisible from outside — it looks exactly like a deployment
+    that turned the escalation off.
+    """
+    _grades_by_text(monkeypatch)
+    monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
+
+    async def _broker_down(_request: AwaitRequest) -> tuple[str, bool]:
+        raise RuntimeError("no broker")
+
+    monkeypatch.setattr(runner, "open_wait", _broker_down)
+    before = METRICS.value("chemclaw_degraded_total")
+
+    events = _drive_as(_StubbornAgent())
+
+    assert not [e for e in events if isinstance(e, ErrorEvent) and e.code == "internal"], (
+        "a failed escalation sank the turn"
+    )
+    answer = _answer(events)
+    assert answer.text == _FLAGGED
+    assert answer.review_required is True
+    assert METRICS.value("chemclaw_degraded_total") > before, (
+        "a review request that was never filed must not be silent"
+    )
+
+
+def test_a_turn_with_no_authenticated_actor_invents_nobody(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`require_actor`'s reject-if-absent rule, at the one place a runner could quietly break it.
+
+    A wait carries `requested_by`, and `pending_requests` puts it in front of people as the person
+    who asked. Off the authenticated path there is nobody to name, and the two available
+    fabrications are both refused elsewhere in this tree for the same reason: synthesizing an
+    identity (`D-2026-09-15-the-requester-hears-nothing-until-it-is-too-late`, which declined a
+    whole scheduled agent over exactly this) or writing an attribution nothing can produce
+    (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`). So the escalation is
+    skipped, and the answer ships exactly as it does everywhere else in this file.
+    """
+    _grades_by_text(monkeypatch)
+    monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
+    asked = _asks(monkeypatch)
+
+    answer = _answer(_drive_as(_StubbornAgent(), actor=None))
+
+    assert answer.text == _FLAGGED, "the turn must still answer"
+    assert answer.review_required is True
+    assert asked == [], "a wait was raised with no authenticated actor behind it"
+
+
+def test_the_escalation_can_be_turned_off_without_turning_the_loop_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The setting is a knob over the same exhausted turn, not a second trigger.
+
+    Asserted against a turn that *does* exhaust, so what is pinned is the switch rather than the
+    absence of an exhaustion.
+    """
+    _grades_by_text(monkeypatch)
+    monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
+    monkeypatch.setattr(settings, "answer_review_escalation_enabled", False)
+    asked = _asks(monkeypatch)
+
+    assert _answer(_drive_as(_StubbornAgent())).review_required is True
+    assert asked == [], "the switch is off and a wait was opened anyway"
+
+
+def test_two_exhausted_turns_in_one_conversation_join_one_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dedup subject, asserted as an id rather than described in a docstring.
+
+    `request_id_for` keys on `(kind, subject, asked_of)`, so the subject *is* the dedup policy.
+    Naming the conversation makes the unit of review a thread: a chemist who pushes the same
+    ungroundable question three times raises one review request, not three, which is what keeps an
+    over-firing shape gate from becoming a notification storm. Two different conversations are two
+    different reviews, because they are two different things to read — the control half, without
+    which "always the same id" would pass just as well.
+    """
+    _grades_by_text(monkeypatch)
+    monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
+    asked = _asks(monkeypatch)
+
+    _drive_as(_StubbornAgent(), session_id="s-thread-a")
+    _drive_as(_StubbornAgent(), session_id="s-thread-a")
+    _drive_as(_StubbornAgent(), session_id="s-thread-b")
+
+    ids = [request_id_for(request) for request in asked]
+    assert len(ids) == 3, "the fixture's premise: three exhausted turns"
+    assert ids[0] == ids[1], "two turns of one conversation opened two review requests"
+    assert ids[2] != ids[0], "two conversations were collapsed into one review request"

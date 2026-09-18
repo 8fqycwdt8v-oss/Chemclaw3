@@ -25,6 +25,8 @@ from collections.abc import Mapping
 from functools import cache
 from typing import Any
 
+from chemclaw.agent.framing import safe_id
+from chemclaw.agent.refusal_route import routed
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor, get_current_roles
 
@@ -512,6 +514,15 @@ def authorize_tool(tool: str) -> None:
     (add an entry to `tool_role_gates`, or grant a privileged role) belongs in the runbook and this
     docstring, not in a message a chemist reads.
 
+    **All three now also carry the routed footer** (`agent/refusal_route`), and all three declare
+    `sanctioned path: none from here` — which is the honest value and is the reason the footer is
+    worth attaching to a refusal nobody can route around. An agent cannot grant itself a role, so
+    every path it might invent is a retry against a wall that has not moved; saying so is
+    information the model otherwise has to infer from prose. `who can act` names a *kind* of account
+    and never a role name: enumerating what the account lacks would answer "which roles exist here"
+    for anyone able to call a tool, and this gate refuses tools that do not exist as readily as
+    tools that do.
+
     Args:
         tool: The tool's registered name (e.g. `"record_knowledge_note"`, `"gather_evidence"`).
 
@@ -522,12 +533,24 @@ def authorize_tool(tool: str) -> None:
     """
     if not settings.entra_required:
         return  # dev: no tenant, open gate
+    # The name as a *message* may carry, which is not the name the decision is made on: every
+    # lookup below still reads `tool` verbatim. This gate is the one refusal site reachable with a
+    # name nothing validated — under a `deny` default it refuses whatever the model put in its tool
+    # call, including a string spelling this system's own refusal footer — so the interpolated copy
+    # is reduced to a charset that cannot open a field (`agent/refusal_route`). A registered tool
+    # name is `[a-z_]+` and comes back unchanged.
+    named = safe_id(tool)
     required = settings.tool_role_gates.get(tool)
     if required is not None:
         if not _has_required_role(frozenset(required)):
             raise AuthorizationError(
-                f"{_actor()} is not authorized to use {tool}: the account holds none of the "
-                "roles this tool requires"
+                routed(
+                    f"{_actor()} is not authorized to use {named}: the account holds none of the "
+                    "roles this tool requires",
+                    code="tool_role_not_held",
+                    boundary="this deployment's per-tool authorization",
+                    who_can_act=f"an account holding one of the roles {named} requires here",
+                )
             )
         return
     if settings.tool_authz_default == "deny":
@@ -535,8 +558,13 @@ def authorize_tool(tool: str) -> None:
         # gate so a privileged role can never open an unlisted write tool under `deny` —
         # that would invert the allowlist for exactly the dangerous tools.
         raise AuthorizationError(
-            f"{_actor()} is not authorized to use {tool}: this deployment permits only an "
-            "approved list of tools, and this one is not on it"
+            routed(
+                f"{_actor()} is not authorized to use {named}: this deployment permits only an "
+                "approved list of tools, and this one is not on it",
+                code="tool_not_permitted_here",
+                boundary="this deployment's list of permitted tools",
+                who_can_act=f"an account this deployment has permitted for {named}",
+            )
         )
     if tool in DEFAULT_WRITE_TOOL_GATES:
         privileged = settings.entra_privileged_role_set
@@ -545,8 +573,13 @@ def authorize_tool(tool: str) -> None:
         # silently void the built-in write gate on an unconfigured deployment.
         if not privileged or not _has_required_role(privileged):
             raise AuthorizationError(
-                f"{_actor()} is not authorized to use {tool}: it changes stored data, so it "
-                "requires a privileged role the account does not hold"
+                routed(
+                    f"{_actor()} is not authorized to use {named}: it changes stored data, so it "
+                    "requires a privileged role the account does not hold",
+                    code="privileged_role_not_held",
+                    boundary="the built-in gate on tools that change stored data",
+                    who_can_act="an account holding a privileged role in this deployment",
+                )
             )
 
 
@@ -568,7 +601,14 @@ def authorize_trigger(action: str) -> None:
         return  # not a gated action
     actor = get_current_actor()
     if actor is None:
-        raise AuthorizationError(f"{action} requires an authenticated user")
+        raise AuthorizationError(
+            routed(
+                f"{action} requires an authenticated user",
+                code="expensive_action_unauthenticated",
+                boundary="the entitlement gate on expensive actions",
+                who_can_act="an authenticated user holding a privileged role",
+            )
+        )
     privileged = settings.entra_privileged_role_set
     # An empty privileged set means fail closed, not open — the same rule the built-in write gate
     # in `authorize_tool` states, and now reachable for the same reason: `_has_required_role` treats
@@ -578,7 +618,14 @@ def authorize_trigger(action: str) -> None:
     # whenever `entra_expensive_actions` names anything, and a *declared* expensive job needs no
     # entry in either, so the shipped shape passes validation with both empty.
     if not privileged or not _has_required_role(privileged):
-        raise AuthorizationError(f"user {actor} lacks a privileged role for {action}")
+        raise AuthorizationError(
+            routed(
+                f"user {actor} lacks a privileged role for {action}",
+                code="expensive_action_role_not_held",
+                boundary="the entitlement gate on expensive actions",
+                who_can_act="an account holding a privileged role in this deployment",
+            )
+        )
 
 
 def require_actor() -> str:
