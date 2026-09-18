@@ -5685,3 +5685,175 @@ def test_no_alert_reads_a_series_this_prometheus_cannot_see() -> None:
             "*platform* Prometheus in `openshift-monitoring`. A user-workload PrometheusRule "
             "cannot see those series, so this rule is green forever."
         )
+
+
+#: What the front door holds before it parses anything, in MiB of *unique* pages.
+#:
+#: Measured on the real serving object — `uvicorn chemclaw.api.app:create_app --factory` against the
+#: dev Postgres, lifespan run, `/healthz` served — at 445,204 kB resident and 442,270 kB of `Pss`,
+#: which is 431.9 MiB. `Pss` rather than `VmRSS` throughout this budget because a cgroup is charged
+#: for unique physical pages once, and the parent, the forkserver and every parse child map the same
+#: interpreter and the same shared objects: summing `VmRSS` counts libpython three times.
+#:
+#: A floor rather than a ceiling, and deliberately so: that process had compiled no agent graph,
+#: opened no connector session and served no turn. What it does not include is the subject of a
+#: `docs/planning/BACKLOG.md` row of its own.
+FRONT_DOOR_RESIDENT_MIB = 432
+
+#: The same for the background worker (`python -m chemclaw.durable.background_worker`), which starts
+#: a forkserver too — `ingest/documents/sync.py` parses every crawled document in one. Measured at
+#: 284,880 kB of `Pss` with every activity module imported, which is 278.2 MiB.
+WORKER_RESIDENT_MIB = 279
+
+#: What warming the parse forkserver costs the pod, in MiB.
+#:
+#: The forkserver's own `Pss`, which is a rigorous *upper* bound on the pod's marginal charge: the
+#: parent's `Pss` can only fall when a second process starts sharing its file-backed pages, so the
+#: pod's delta is this number minus that giveback. Measured, the delta is 76.1 MiB under pytest,
+#: 79.1 MiB under the worker and 83.5 MiB under the front door, against a forkserver `Pss` of
+#: 90.0–91.0 MiB across five parents and two virtualenvs.
+#:
+#: **It is not the 109 MiB `docs/planning/BACKLOG.md` carried**, which was `VmRSS`. The process
+#: really is a second full resident copy of pypdf, python-docx, openpyxl and python-pptx —
+#: `forkserver` starts its server by fork *and exec*, so nothing is copy-on-write — but 18.6 MiB of
+#: what `VmRSS` attributes to it is a shared object the front door already has mapped, and the pod's
+#: measured delta is 23–30% below it.
+#:
+#: `test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_against` is the live guard
+#: on it, and it measures `VmRSS` rather than this number — see that test for why.
+FORKSERVER_POD_COST_MIB = 91
+
+#: What a warm forkserver's `VmRSS` may be, in MiB — the live guard on the constant above.
+#:
+#: `VmRSS` and not `Pss` because this is the quantity that belongs to the process alone: measured
+#: 108.9–109.1 MiB across five different parents and two virtualenvs, a 0.2% spread, where the same
+#: forkserver's `Pss` read 90.0–91.0 MiB in five runs and above 95 in the sixth — a ratchet whose
+#: reading depends on what else happens to be mapping the same pages is one that reds for a
+#: scheduling artefact, which is what that sixth run did. Both numbers move with
+#: `isolate._PRELOAD`'s import closure, which is the only thing that moves either: driven, adding
+#: `chemclaw.agent.langgraph_agent` to the preload list measures 406.6 MiB.
+#:
+#: The 3 MiB of margin is what keeps a pypdf patch release out of the gate. It is not a bound on
+#: `FORKSERVER_POD_COST_MIB` — `Pss` is only ever below `VmRSS`, never pinned to it — it is a bound
+#: on the closure both of them are measured from.
+FORKSERVER_RSS_CEILING_MIB = 112
+
+#: What one parse in flight costs the pod, per MiB of the document's *expanded* size.
+#:
+#: The child is forked from the forkserver, so the parsers themselves are copy-on-write and what it
+#: adds is the text: measured as the pod's peak `Pss` over its warm-idle baseline, sampled at 3 ms
+#: across the whole parse. Two concurrent 29.7 MB-expanded workbooks (the largest a legal 2 MB
+#: upload reaches, 1.69 MB on the wire, 12.6 M characters each) peaked 169,532 kB above idle in the
+#: front door and 178,054 kB in a bare parent — 82.8 and 86.9 MiB each. One 59.9 MB-expanded
+#: workbook, the share path's shape, peaked 166,966 kB — 163.1 MiB, for 2.01× the expansion.
+#:
+#: So it is linear in the expanded size, which is what makes it a coefficient rather than a table:
+#: 3.07 and 2.86 MiB per expanded MiB. The larger, rounded up.
+PARSE_MIB_PER_EXPANDED_MIB = 3.1
+
+
+def _declared_mib(resources: dict[str, Any], kind: str) -> int:
+    """The `requests`/`limits` memory a `resources` block declares, in MiB."""
+    declared = str(resources[kind]["memory"])
+    units = {"Mi": 1, "Gi": 1024}
+    suffix = declared[-2:]
+    assert suffix in units, f"unhandled memory unit in {declared!r}"
+    return int(declared[:-2]) * units[suffix]
+
+
+def _parse_peak_mib(concurrent: int) -> float:
+    """What `concurrent` parses at the expansion ceiling peak at, in MiB."""
+    from chemclaw.core.config import settings
+
+    return concurrent * PARSE_MIB_PER_EXPANDED_MIB * settings.document_max_expanded_bytes / 1024**2
+
+
+def test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares() -> None:
+    """Both components that parse documents are sized against the second process they start.
+
+    Written as an inequality over measured constants and the settings that bound the work, rather
+    than as a number somebody typed, because the failure it replaces is precisely a number typed
+    before `ingest/documents/isolate.py` existed: `resources.service` was sized when a parse ran on
+    a worker thread inside the front door, and a `forkserver` started by fork *and exec* shares no
+    page with it.
+
+    Measured, the request did not satisfy this: 432 MiB resident plus 91 MiB of warm forkserver is
+    523 MiB against a 512Mi request, exceeded while the pod is idle — which is a node oversubscribed
+    by the difference and a pod first in line for eviction, with nothing anywhere saying so.
+
+    The *limit* was never the problem and is unchanged: the worst legal pair of concurrent parses is
+    920 MiB of the 1024 MiB it allows. Raising `attachment_max_concurrent_parses` or
+    `document_max_expanded_bytes`, or lowering either declaration, fails here instead of in an
+    OOMKill that takes every other connected turn with it.
+    """
+    from chemclaw.core.config import settings
+
+    resources = _values()["resources"]
+    front_door = FRONT_DOOR_RESIDENT_MIB + FORKSERVER_POD_COST_MIB
+    worker = WORKER_RESIDENT_MIB + FORKSERVER_POD_COST_MIB
+
+    for label, key, idle, concurrent in (
+        ("front door", "service", front_door, settings.attachment_max_concurrent_parses),
+        # One, not a cap: `ingest/documents/sync.py` awaits each `_read_and_parse` in turn, so a
+        # crawl never has two children alive at once however many files the batch holds.
+        ("background worker", "worker", worker, 1),
+    ):
+        request = _declared_mib(resources[key], "requests")
+        limit = _declared_mib(resources[key], "limits")
+        assert idle <= request, (
+            f"the {label} holds {idle} MiB with its parse forkserver warm and nothing in flight, "
+            f"against a memory request of {request} MiB. A pod over its request while idle is "
+            "scheduled onto a node that does not have the memory it uses, and is the first thing "
+            "evicted when that node comes under pressure"
+        )
+        needed = idle + _parse_peak_mib(concurrent)
+        assert needed <= limit, (
+            f"{concurrent} concurrent parse(s) at the {settings.document_max_expanded_bytes}-byte "
+            f"expansion ceiling need {needed:.0f} MiB in the {label} — the resident set and the "
+            f"warm forkserver included — against the {limit} MiB its container declares. That is "
+            "an OOMKill of the whole pod, not a refused upload"
+        )
+
+
+@pytest.mark.skipif(not Path("/proc/self/status").exists(), reason="needs a Linux /proc")
+def test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_against() -> None:
+    """The constant the chart rests on is re-measured here, against the shipped preload list.
+
+    `FORKSERVER_POD_COST_MIB` is the one input to the budget above that is a property of this tree
+    rather than of a declaration: it is whatever `isolate._PRELOAD` drags in, and adding a module to
+    that list — or an import to `ingest/documents/parse.py` — moves it with nothing else changing. A
+    constant transcribed from a measurement five days old is exactly what `docs/planning/BACKLOG.md`
+    carried, and it was 30% out.
+
+    So the closure is measured off a running forkserver rather than restated — this process's own,
+    since `parse_context` is a singleton and every other parse test in this suite shares it.
+
+    **What is measured is `VmRSS`, and the first draft of this test measured `Pss` and flaked.**
+    `Pss` is the right unit for the *budget*, because a cgroup is charged once for a unique page; it
+    is the wrong unit for a *ratchet*, because a page's share depends on how many other processes
+    happen to map it. Observed: the first run of that draft inside a freshly created virtualenv read
+    above its 95 MiB ceiling and failed, and five later runs of the identical assertion read
+    90.0–91.0 MiB and passed. `VmRSS` belongs to the process alone and moves with the same closure.
+    """
+    from multiprocessing import forkserver
+
+    from chemclaw.ingest.documents.isolate import parse_document_isolated
+
+    parse_document_isolated("budget.csv", b"id,yield\nR-1,88\n", None, 60.0)
+    # Read through `getattr` because the pid is not on typeshed's `ForkServer`: upstream keeps no
+    # public handle on the process it starts, and the alternative — matching a `/proc` child by its
+    # command line — would be a second private shape with more code around it. The `is not None`
+    # below is what turns an upstream rename into a named failure rather than a silent skip.
+    pid = getattr(forkserver._forkserver, "_forkserver_pid", None)
+    assert pid is not None, "a parse ran without a forkserver; this budget describes another shape"
+    status = Path(f"/proc/{pid}/status").read_text()
+    lines = status.splitlines()
+    rss_kib = next(int(line.split()[1]) for line in lines if line.startswith("VmRSS:"))
+    measured = rss_kib / 1024
+    assert measured <= FORKSERVER_RSS_CEILING_MIB, (
+        f"a warm parse forkserver is resident at {measured:.1f} MiB where the budget above was "
+        f"derived against a closure measured at {FORKSERVER_RSS_CEILING_MIB}. Whatever grew "
+        "`isolate._PRELOAD`'s closure has moved what every front door and every background worker "
+        "costs its node, and `FORKSERVER_POD_COST_MIB` — with `resources.service` and "
+        "`resources.worker` under it — needs re-deriving before it ships"
+    )

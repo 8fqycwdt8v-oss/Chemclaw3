@@ -57,10 +57,17 @@ entry point that starts a server, opens a connection or writes a file at module 
 same thing invisibly. Anything this process may be started as must keep its work behind a guard.
 
 **A warm forkserver is a second resident copy of the parsers, not a shared one.** It is started by
-fork **and exec**, so none of its pages are copy-on-write with the front door's: measured on this
-tree, the front door holds 111,140 kB and the forkserver 111,188 kB, ~109 MB of *new* resident
-memory in a pod whose `resources.service` requests 512Mi. `docs/planning/BACKLOG.md` carries that
-against the chart.
+fork **and exec**, so none of its pages are copy-on-write with the front door's: the parsers are
+resident in the parent too (`agent/attachments.py` imports this module, which imports `parse`), and
+the forkserver imports them again. **What that costs the pod is smaller than its `VmRSS` and is not
+a number this docstring may hold** — a cgroup is charged once for a unique physical page, so the
+109 MiB this paragraph used to quote double-counted the shared objects the parent already had
+mapped, and `resources.service` was sized against neither figure.
+`tests/test_deploy_chart.py::test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_against`
+measures it off a running forkserver and is what the chart's memory request is derived from;
+`D-2026-09-18-a-second-process-in-the-pod-is-memory-the-chart-never-declared` has the tables. Adding
+a module to `_PRELOAD` moves what every front door and every background worker costs its node, and
+reds there.
 
 **What a child reads from `Settings` is the forkserver's, not the caller's.** The server is exec'd
 once with the process's environment and imports `parse` at that moment, so a child's

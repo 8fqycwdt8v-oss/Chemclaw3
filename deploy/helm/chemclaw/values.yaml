@@ -743,7 +743,30 @@ resources:
     # not guaranteeing it is latency on every turn rather than a failure anyone can point at. The
     # limit already allowed the burst; what was missing was the reservation. This raises what each
     # front-door pod reserves, and at `maxReplicas: 6` that is 6 CPUs reserved rather than 3.
-    requests: { cpu: "1", memory: "512Mi" }
+    #
+    # **The memory request is 640Mi because a warm parse forkserver is a second process in this
+    # pod, and 512Mi did not cover the idle pair.** `ingest/documents/isolate.py` runs every upload
+    # in a killable child forked from a `forkserver` that is started by fork *and exec*, so none of
+    # its pages are copy-on-write with the front door's. Measured on this tree: the real front door
+    # under uvicorn, lifespan started, holds 442,270 kB of unique pages (432 MiB), and warming the
+    # forkserver adds 91 MiB on top — 523 MiB *before a single turn or upload*, against a request
+    # of 512. A pod over its request while idle is a node oversubscribed by the difference and the
+    # first thing evicted under memory pressure, and nothing said so because the chart was sized
+    # before that process existed.
+    #
+    # The limit stays 1Gi and is not the thing that was wrong: two concurrent parses at
+    # `CHEMCLAW_DOCUMENT_MAX_EXPANDED_BYTES` cost 3.1 MiB per expanded MiB, so the worst legal pair
+    # is 920 MiB of the 1024 the limit allows. `tests/test_deploy_chart.py` holds both inequalities
+    # against the measured constants rather than against these numbers, and measures the
+    # forkserver's own cost live, so a preload that grew would red there rather than in an eviction.
+    #
+    # `mcpFace` shares this key and never parses — it serves no upload route, so `parse_context`
+    # never starts one there. **Driven rather than asserted**: all five shipped entrypoints report no
+    # forkserver after import, and nothing in the suite would notice if one of them started warming
+    # it, because no bound here would break if it did. So the face pays the extra 128Mi for nothing:
+    # 128Mi on one optional replica, against its own 404 MiB resident set, which is why the key is
+    # not split.
+    requests: { cpu: "1", memory: "640Mi" }
     limits: { cpu: "2", memory: "1Gi" }
   # The default for every worker Deployment, core's and a bundle's. A bundle that needs different
   # sizing overrides it with its own `resources:` under `connectors.<name>` rather than growing a
