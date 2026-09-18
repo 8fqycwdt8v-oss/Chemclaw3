@@ -744,7 +744,7 @@ them the top `BACKLOG.md` row, plus five prose claims the measurement falsified.
 
 - [x] Attribute the 91% of a helper spawn's checkpoint cost that `D-2026-09-12` could not reach.
       Grouped the rows by `(checkpoint_ns, channel)` — the step neither the ADR nor the row took.
-      ~15.7 MB of 18.9 MB sits under a `tools:<uuid>` namespace **on the caller's own `thread_id`**:
+      17,760 kB of 18,944 sits under a `tools:<uuid>` namespace **on the caller's own `thread_id`**:
       a helper compiled with `checkpointer=None` *inherits* its caller's saver.
 - [x] Fix it — `checkpointer=False`, upstream's documented opt-out. A spawn: 18,944 kB → **424 kB**.
       The caller still gets its capped 200,000-char file and its 57-character thread.

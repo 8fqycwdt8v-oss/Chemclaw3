@@ -2105,3 +2105,81 @@ def test_a_pyjwt_client_still_fills_its_key_set_cache_from_fetch_data() -> None:
         "api/auth.py::_HttpxJwkClient.fetch_data is no longer what makes the second one free, so "
         "every token validation is an outbound request to the tenant"
     )
+
+
+def test_a_subgraph_compiled_without_a_checkpointer_inherits_its_parents() -> None:
+    """The semantics one line of this tree turns on, asserted against the installed distribution.
+
+    `None` is not "no checkpointer" to LangGraph — it is *inherit*. Every `task` helper this
+    repository ever spawned checkpointed its own thread onto its caller's saver because the call
+    site passed nothing, and `retrieval/fanout.py` did the same with 195 kB of retrieved corpus
+    (`D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer`, and the fan-out instance
+    that proved its "the class is closed" bullet wrong).
+
+    Asserted here because it is a *promise upstream makes in a docstring*, which is the weakest
+    kind: if a future version made `None` mean "none", every `checkpointer=False` in this tree
+    would become a no-op that reads as deliberate.
+    """
+    import inspect
+
+    from langgraph import types as lg_types
+    from langgraph.pregel import Pregel
+
+    # Read the source rather than `__doc__`: `Checkpointer` is a type alias, so the string under it
+    # is a module-level literal that never becomes an attribute. Asserting `__doc__` here passed
+    # vacuously on the union's own docstring until this comment was written.
+    doc = inspect.getsource(lg_types)
+    assert "inherits checkpointer from the parent graph" in doc, (
+        "upstream no longer documents `None` as inheriting the parent's checkpointer, so the "
+        "`checkpointer=False` call sites in this tree may now be saying something else"
+    )
+    assert "disables checkpointing, even if the parent graph has a checkpointer" in doc, (
+        "upstream no longer documents `False` as the opt-out; `agent/langgraph_agent.py` and "
+        "`retrieval/fanout.py` both rely on it"
+    )
+    assert "if self.checkpointer is False" in inspect.getsource(Pregel._defaults), (
+        "`Pregel._defaults` no longer short-circuits on `checkpointer is False` before reading "
+        "the parent's saver out of the run config, which is where the opt-out is resolved"
+    )
+
+
+def test_every_compiled_graph_in_this_tree_names_its_checkpointer() -> None:
+    """A bare `.compile()` is a graph that silently adopts whatever saver its caller holds.
+
+    **The class, not the instance.**
+    `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer`
+    fixed the helper and its Consequences bullet claimed no shipped path wrote a second namespace
+    any more. `retrieval/fanout.py:299` was `graph.compile()` the whole time, reached from
+    `gather_evidence` on both the caller's and the helper's surface, and measured at 195 kB of the
+    `ranked` channel in its own `n:<uuid>` namespace on the chemist's thread. One instance was
+    fixed and the class declared closed, which is the shape this assertion exists to stop.
+
+    Syntactic on purpose, and that is defensible *here* where an AST reading of a keyword's absence
+    was not: the hazard **is** the default. What this asks is that every compile site states what it
+    wants, so a reviewer sees the choice rather than inheriting one.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent / "src"
+    bare: list[str] = []
+    for path in root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr != "compile":
+                continue
+            # `re.compile` is the other `.compile` in this tree and has nothing to do with graphs.
+            if isinstance(node.func.value, ast.Name) and node.func.value.id == "re":
+                continue
+            if any(keyword.arg == "checkpointer" for keyword in node.keywords):
+                continue
+            bare.append(f"{path.relative_to(root)}:{node.lineno}")
+
+    assert not bare, (
+        f"{len(bare)} graph compile site(s) name no checkpointer: {bare}. `None` means *inherit*, "
+        "so a graph invoked inside a turn adopts the chemist's Postgres saver and checkpoints "
+        "whatever it carries under its own namespace. Pass `checkpointer=False` for a graph "
+        "nothing resumes, or name the saver."
+    )

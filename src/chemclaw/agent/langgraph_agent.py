@@ -379,8 +379,13 @@ def build_langgraph_agent(
         # `CONFIG_KEY_CHECKPOINTER: checkpointer or configurable.get(CONFIG_KEY_CHECKPOINTER)`,
         # so every helper was checkpointing its own thread onto the
         # caller's saver under a `tools:<uuid>` namespace on the caller's `thread_id`. `False` is
-        # upstream's documented opt-out — `find_subgraph_pregel` skips "subgraphs that disabled
-        # checkpointing". See `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer`.
+        # upstream's documented opt-out: `langgraph.types.Checkpointer` says `False` "disables
+        # checkpointing, even if the parent graph has a checkpointer" and `None` "inherits
+        # checkpointer from the parent graph", and `Pregel._defaults` is where that is resolved —
+        # `if self.checkpointer is False` *before* the config lookup. This comment first cited
+        # `find_subgraph_pregel`, which scans node-bound runnables and is never consulted for a
+        # graph invoked from inside a tool, so it could not have been the mechanism either way.
+        # See `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer`.
         "checkpointer": False if helper else checkpointer,
         "response_format": response_format,
     }
@@ -585,9 +590,10 @@ def _subagents(
       thread to resume would be a second conversation nobody addresses. This bullet said exactly
       that while the call site passed `None`, and `None` is how a subgraph asks to inherit its
       parent's saver: measured, one 2 MB helper write cost 18,944 kB of checkpoint rows, of which
-      15.7 MB sat under a `tools:<uuid>` namespace on the caller's own `thread_id`. With `False` the
-      same turn costs 424 kB. What is given up is resuming a turn *inside* a helper, which nothing
-      here can reach: `interrupt()` has no caller in `src/`, and the two tools that could ask a
+      17,760 kB — 93.8% — sat under a `tools:<uuid>` namespace on the caller's own `thread_id`.
+      With `False` the same turn costs 424 kB. What is given up is resuming a turn *inside* a
+      helper, which nothing here can reach: `interrupt()` has no caller in `src/`, and the two
+      tools that could ask a
       question are subtracted from every helper's surface. No byte count belongs in this comment
       either — see the ADR, which cannot be edited.
     - **No durable memory and no store.** `store=` is not forwarded, so the helper's backend has no

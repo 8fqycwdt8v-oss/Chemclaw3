@@ -1114,15 +1114,54 @@ def test_an_exhausted_budget_still_cuts_when_more_than_one_file_crosses() -> Non
     channel would add a second way to spell `held`, not evidence.
     """
     from chemclaw.agent.tool_result_size import _bounded_file
+    from chemclaw.core.metrics import METRICS
 
     budget = settings.agent_subagent_files_max_chars
     content = "z" * (budget * 4)
+    before = METRICS.value("chemclaw_subagent_file_truncations_total")
     stored = sum(len(_bounded_file(content, sharing=2, held=budget)) for _ in range(2))
 
     assert stored <= budget, (
         f"two files crossing into a channel already holding {budget} characters stored {stored} "
         f"characters against a {budget} budget, so the cap switched itself off at the point the "
         "channel was fullest"
+    )
+    # The docstring's other half: the old failure was *silent*. A cap that cut but recorded nothing
+    # would satisfy the assertion above while leaving an operator with no way to see it happen.
+    assert METRICS.value("chemclaw_subagent_file_truncations_total") > before, (
+        "the files were cut and `chemclaw_subagent_file_truncations_total` did not move, so the "
+        "truncation is invisible to an operator"
+    )
+
+
+def test_the_file_cap_set_to_zero_is_off_rather_than_absolute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """0 is this setting's documented off switch, and the branch that spells it had no test.
+
+    Before `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer` the behaviour fell out
+    of the arithmetic for free — `0 // sharing` is 0 and `bounded_content` treats a non-positive
+    limit as no cap. That commit made it an explicit `else: share = 0`, which is clearer and is
+    exactly the kind of branch that rots: mutated to `share = 1` it survives the whole suite, and
+    every deployment that switched the cap off would silently get a 44-character brief form in
+    place of every file a helper hands back.
+
+    Asserted at both ends, because either alone is passable: off stores the text whole, and on
+    cuts it.
+    """
+    from chemclaw.agent.tool_result_size import _bounded_file
+
+    content = "z" * 500_000
+
+    monkeypatch.setattr(settings, "agent_subagent_files_max_chars", 0)
+    assert len(_bounded_file(content, sharing=4, held=10**9)) == len(content), (
+        "`agent_subagent_files_max_chars = 0` is documented as switching the cap off, and a file "
+        "came back cut"
+    )
+
+    monkeypatch.setattr(settings, "agent_subagent_files_max_chars", 200_000)
+    assert len(_bounded_file(content, sharing=4, held=0)) < len(content), (
+        "the cap is configured and cut nothing, so the assertion above proves nothing"
     )
 
 
@@ -1135,7 +1174,7 @@ def test_a_second_delegation_shares_the_budget_the_first_one_spent() -> None:
     docstring rejects one level down ("a per-file cap times an unbounded number of files is not a
     bound"), one level up. It is a *storage* bound, so the cost is checkpoint rows, amplified by
     LangGraph rewriting the whole channel per superstep and again per version. The 10.4x this
-    docstring used to quote is not that amplification: it was a whole helper spawn, ~98% of which
+    docstring used to quote is not that amplification: it was a whole helper spawn, most of which
     was the helper checkpointing its own thread onto the caller's saver
     (`D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer`), a cost this bound never
     touched and which is now closed.
@@ -1318,7 +1357,7 @@ def test_a_helper_writes_no_checkpoint_of_its_own() -> None:
     parent's saver (`CONFIG_KEY_CHECKPOINTER: checkpointer or configurable.get(...)`), so every
     helper was checkpointing its own thread under a `tools:<uuid>` namespace on the caller's
     `thread_id`. Measured before the fix: 18,944 kB of checkpoint rows for one 2 MB helper write,
-    15.7 MB of it in that namespace; after, 424 kB.
+    17,760 kB of it in that namespace; after, 424 kB.
 
     That is the defect `tests/test_context_floor.py`'s own docstring names — "a basis that is
     re-derived rather than observed will agree with itself forever" — so this reads the rows the

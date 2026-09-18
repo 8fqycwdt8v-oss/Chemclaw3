@@ -260,8 +260,12 @@ CHECKPOINT_TABLES: tuple[str, ...] = ("checkpoints", "checkpoint_blobs", "checkp
 # `thread_id` — measured, one `tools:<uuid>` namespace per `task` call, 7 `checkpoints` and 3
 # `checkpoint_blobs` each, and a *new* namespace every call. That is exactly what
 # `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer` closed: the helper inherited its
-# caller's saver because the call site passed `None`, and it now passes `False`, so no shipped path
-# writes a second namespace. **The partition stays** — it is generic over namespaces, LangGraph
+# caller's saver because the call site passed `None`, and it now passes `False`. **That closed the
+# helper, not the class**, which this comment claimed for a day: any subgraph compiled with `None`
+# and invoked inside a turn inherits the same saver, and `retrieval/fanout.py` was doing exactly
+# that — one `gather_evidence` sweep wrote 195 kB of retrieved corpus into its own `n:<uuid>`
+# namespace on the chemist's thread. It passes `False` now too. **The partition stays** — it is
+# generic over namespaces, LangGraph
 # writes one for any subgraph that inherits a saver, and the leak it prevents is silent. What the
 # measurement below is about is therefore history, kept because it is the argument for keeping the
 # clause. The review that asked for the partition

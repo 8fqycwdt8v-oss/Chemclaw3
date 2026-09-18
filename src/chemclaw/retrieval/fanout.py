@@ -291,12 +291,24 @@ def _fan(state: FanState, config: RunnableConfig) -> list[Send]:
 
 
 def _build() -> Any:
-    """Compile the fan-out once per process — it is a constant, and compiling is not free."""
+    """Compile the fan-out once per process — it is a constant, and compiling is not free.
+
+    **`checkpointer=False`, because `None` means "inherit" and this graph runs inside a turn.**
+    `gather_evidence` calls `sweep_sources`, so this subgraph is invoked from inside a tool of a
+    graph that holds the chemist's Postgres saver — and a subgraph compiled with `None` takes that
+    saver from the run config (`Pregel._defaults`). Driven on a real saver before the change: one
+    sweep wrote its own `n:<uuid>` namespace on the chemist's own `thread_id` carrying **195 kB**
+    of the `ranked` channel, which is retrieved corpus, checkpointed, under no cap —
+    `agent_subagent_files_max_chars` does not reach it and the fan-in is pre-merge. Nothing resumes
+    a fan-out, so the persistence bought nothing.
+    `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer` fixed the helper and its first
+    consequence bullet claimed the class was closed; this is the instance that proved it was not.
+    """
     graph = StateGraph(FanState)
     graph.add_node("sweep", _sweep)
     graph.add_conditional_edges(START, _fan, ["sweep"])
     graph.add_edge("sweep", END)
-    return graph.compile()
+    return graph.compile(checkpointer=False)
 
 
 _FANOUT = _build()
