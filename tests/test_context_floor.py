@@ -473,7 +473,30 @@ load_profiles()
 #: union and neither branch's: **68,908**, which is 67,200 plus both pairs exactly. 69,800 leaves
 #: 892 of headroom — the ~856 the workflow branch argued for, restored on the merged basis, where
 #: its own 69,000 leaves 92 and is the 34-token tripwire it was written to escape.
-CEILINGS: dict[str, int] = {"__default__": 69_800}
+#: **Raised to 70,600 by the `task` roster**
+#: (`D-2026-09-16-a-roster-varies-the-two-dimensions-that-carry-no-authority`). Measured on this
+#: commit: 69,107 without the roster and **69,412** with it, +305, all of it the `task` tool's own
+#: description growing 592 -> 897 as upstream folds each entry's `{name}: {description}` into
+#: `{available_agents}`.
+#:
+#: The raise is 1,188 rather than 305, and the difference is stated because it is not slack.
+#: **This ratchet under-charges the roster by construction**, for the reason
+#: `D-2026-09-05-a-ratchet-that-binds-no-connectors-measures-a-smaller-system` gives one level out:
+#: each entry's description names the tools that entry's helper *binds*, and what a helper binds
+#: depends on which connector bundles a deployment enables. Here `safety` binds nothing and is not
+#: offered at all, and `computation` lists what this repository serves rather than what the fleet
+#: does. Measured against the full declared surface the `task` description is **902** tokens rather
+#: than 710 — so a real deployment pays ~192 tokens this file cannot see, and `safety` alone is
+#: +107 of them. That excess belongs to the `task` tool, which is first-party and inside this
+#: ceiling, so `SERVED_ELSEWHERE_ALLOWANCE` cannot absorb it and was not moved.
+#:
+#: 388 tokens of headroom was the alternative, against a file whose own history records a
+#: neighbouring merge drifting this floor by 326 on a `Raises:` paragraph
+#: (`D-2026-09-14-a-lowering-that-loses-a-merge-is-a-raising`). That is a tripwire rather than a
+#: bound. What the turn buys for it is in the ADR; what it costs every deployment is 1,188 tokens
+#: of thread allowance, and `core/config/agent.py` derives both compaction defaults from
+#: `PREFIX_BOUND`, so they move with it.
+CEILINGS: dict[str, int] = {"__default__": 70_600}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.

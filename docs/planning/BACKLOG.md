@@ -628,7 +628,31 @@ topic).
 ---
 
 ## 5 — Where the field moved past us
-- [ ] **`GET /check-ins` is served and no surface reads it** — [S], `Chemclaw3_ui`. `D-2026-09-15-the-requester-hears-nothing-until-it-is-too-late` added the sweep that tells a requester which of their own questions are still waiting, and the route that serves the mailbox it writes (`api/routes/streams.read_check_ins`, claiming `CHECK_IN_KIND`). The UI has no card for it, so with `CHECK_IN_ENABLED` set a deployment sees check-ins only through a configured outbound channel — and `CHEMCLAW_DELIVERY_CHANNELS` is empty in every shipped deployment. **This is not the `/schedules` case**, which the BFF refuses by name as operator surface a chemist has no business reaching (`D-2026-09-14-two-gaps-the-code-had-already-argued-shut`): a check-in is addressed to the chemist. The shape is `/digests`' `/review` card one kind over, and the response model is `CheckInOut`. Own PR against `Chemclaw3_ui`.
+- [ ] **`CheckInOut` drops three fields the surface reading it wanted** — [S]. The UI card now
+      exists (`Chemclaw3_ui` #85), and building it found the wire model thinner than the shapes
+      behind it. `durable/check_in.py`'s `BlockedRequest` selects **`kind`**, and `_check_in` reads
+      `payload["requests"]` and drops the **`truncated`** flag the sweep records when a requester
+      had more than `_PAGE_ROWS` (200) open questions. Neither reaches `api/routes/streams`'s
+      `CheckInOut`, and **`session_id`** is on neither side.
+
+      Each has a consequence that is visible on one page: the pending inbox two sections up badges
+      every row by `kind` off `GET /pending` and a check-in cannot be badged; both other inboxes on
+      `/review` end in "open the conversation to decide" and a check-in row ends nowhere, because
+      matching `request_id` against `GET /pending` would be a join across two listings scoped to
+      opposite people; and a chemist with 200+ open questions gets a list that looks complete,
+      where the same page *does* say "this may be short" for plans off the two fields
+      `GET /plans/pending` sends.
+
+      **Additive fields on a model the ADR deliberately restates rather than imports from the
+      worker**, so adding one is a decision here rather than a leak — which is why this is a row
+      and not a patch. No timestamp is the fourth and is *not* in scope: a digest has none either
+      and the card says "claimed" rather than "asked", which is the honest word for a mailbox whose
+      read is the consume.
+
+      Anchors: `src/chemclaw/api/routes/streams.py::CheckInOut`, `durable/check_in.py`'s
+      `BlockedRequest` and `_check_in`, and `Chemclaw3_ui`'s `ISSUES.md` Issue 16, which is the
+      consumer's own statement of the same gap.
+
 
 Filed by the 2026-08-25 field benchmark — see
 [`docs/archive/REVIEW-2026-08-25-agentic-field-benchmark.md`](../archive/REVIEW-2026-08-25-agentic-field-benchmark.md)
@@ -637,6 +661,20 @@ sections above: none of them names broken code. Each names a place where somethi
 repository now has a **measured** better answer to a problem this repository solved earlier and has
 not revisited. That is a different kind of debt and it needs its own section, because a queue that
 only holds defects can only ever restore the system to what it already intended to be.
+
+- [ ] **One sibling bundle that will not import takes the whole allowance bound with it** — [S].
+  `tests/test_context_floor.py::_sibling_tool_tokens` passes every name in `SERVED_ELSEWHERE` to
+  **one** subprocess and returns `{}` on any non-zero exit, so a single missing dependency in
+  `Chemclaw3-mcp`'s venv skips
+  `test_the_allowance_for_the_bundles_this_ratchet_cannot_serve_is_still_a_bound` for **all** of
+  them — and `PREFIX_BOUND`, which `core/config/agent.py` derives both compaction defaults from, is
+  that allowance plus the ceiling. Observed on 2026-09-16: the sibling's `.venv` lacked `molmass`,
+  which its own newest commit had just added to `servers/thermalsafety/pyproject.toml`, and the test
+  skipped. The skip is *counted* by `tests/conftest.py::_report_sibling_skips`, so it is honest — but
+  it is wider than it needs to be, and the file's own header argues that "a check that quietly
+  shrinks is worse than one that says what it did not look at". A per-bundle subprocess would skip
+  only the bundle that will not import and name it; the cost is one process spawn per bundle on a
+  test that already spawns one. Anchor: `_sibling_tool_tokens` in `tests/test_context_floor.py`.
 
 - [ ] **Nothing mines the edit a chemist makes to a generated protocol** — [M], and the data for it
       starts accumulating now. `experiment_protocol_revisions` is append-only and carries

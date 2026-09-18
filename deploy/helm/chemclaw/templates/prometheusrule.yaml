@@ -861,10 +861,18 @@ spec:
               The background worker is not being scraped at all, so nothing in this release is
               polling `background-jobs` — sync, re-index, reports and the connector-job wrapper are
               all stopped, silently, because none of them emits a counter when it is not running.
-              This Deployment uses `Recreate`, so the old pod is already gone: usual causes are a
-              pod that cannot be scheduled, an image that will not pull, or a container that exits
-              before serving. `ChemclawNoWorkerIsScraped` does not cover this — connectors and the
-              front door share the `metrics` endpoint and keep it satisfied.
+              This Deployment uses `Recreate`, so the old pod is already gone. `absent()` is 1 only
+              when *no series matches*, so the cause is a pod that never became a scrape target at
+              all: unschedulable, `workerReplicas: 0`, a selector that stopped matching, or the
+              PodMonitor not selecting it. An image that will not pull and a container that exits
+              are `ChemclawTargetDown`'s — the kubelet assigns a PodIP before either happens, so the
+              target exists and reports `up == 0`, which is a present series rather than an absent
+              one. `ChemclawNoWorkerIsScraped` does not cover this wherever any connector *worker*
+              is enabled: those pods are the other thing in this release that declares a port named
+              `metrics` (`chemclaw.workerProbes`, which the connector *servers*, the front door and
+              the mcp-face do not include), so they keep the unscoped `absent()` satisfied. With
+              every connector disabled the two alerts fire together, and that is accepted: one
+              redundant page beats a release whose only worker is unwatched.
 {{- if .Values.monitoring.temporalSdkMetrics.enabled }}
 
         {{- /* The gap the worker's own probes leave open on purpose, and it is narrower than this

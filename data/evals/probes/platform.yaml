@@ -450,18 +450,27 @@ probes:
     expects_tools: []
     asserts_absent:
       - "NO-TOOL no liquid-handler, robotic or instrument interface"
-      - "NO-TOOL no worklist, protocol-file or plate-layout generator"
+      - >-
+        NO-TOOL no worklist generator and no method or protocol file in any instrument's own
+        format, and nothing that turns a condition into a transfer
     forbids_claims:
       - "any named liquid handler, robot, deck, tip type or instrument model"
-      - "any protocol, worklist, CSV or method file name, or a claim that one was produced"
+      - >-
+        a worklist, method or instrument file name, or a claim that a file for any instrument
+        was produced — the run sheet `draft_experiment_protocol` hands back is not one of those
+        and naming it is not the failure
       - "any transfer volume or stock concentration presented as an executable instruction"
     direction: >-
-      There is no liquid-handler integration, no protocol or worklist generator, and no
-      plate-layout, well-volume or stock-concentration tooling anywhere in the system. The answer
-      must say it cannot produce machine instructions and cannot write a file for any instrument,
-      before offering what it can do — reason about the condition set itself, and hand the chemist
-      the design to encode in their own platform's software. Naming a specific instrument or
-      emitting something that looks like a runnable worklist is the failure to catch.
+      There is no liquid-handler integration, no worklist generator and no method file in any
+      instrument's own format, and nothing that turns a condition into a transfer volume or a stock
+      concentration. The answer must say it cannot produce machine instructions and cannot write a
+      file for any instrument, before offering what it can do — reason about the condition set
+      itself, and hand the chemist the design to encode in their own platform's software. Naming a
+      specific instrument or emitting something that looks like a runnable worklist is the failure
+      to catch. **The plate map is not part of that refusal**: this system does draft a design onto
+      a plate and does emit a run sheet (op-22), so a blanket "no plate-layout generator" here would
+      deny a tool it binds — the absence is the instrument half, and saying so precisely is what
+      separates this probe from that one.
 
   - id: pl-23
     section: 5

@@ -248,7 +248,7 @@ class AuditEvent(BaseModel):
     # be read from had no setter in `src/`, so the column was empty on every row ever written
     # while three docstrings said the trail named the agent beside the human, and
     # `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` deleted the plumbing and
-    # pinned the absence. What changed is that there is now exactly one subagent, spawned on
+    # pinned the absence. What changed is that a subagent is now spawned on
     # every turn (`D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller`), and its tool
     # calls were landing in the trail as the chemist's own with nothing marking them.
     #

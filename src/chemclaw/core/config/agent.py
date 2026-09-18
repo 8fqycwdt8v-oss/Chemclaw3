@@ -316,7 +316,7 @@ class AgentSettings(BaseSettings):
     # derived *upwards* from the ceiling, so it moves with the prefix and keeps the whole thread
     # allowance intact. The budget below cannot follow, because it is derived downwards from the
     # model's window — which is why a ceiling raise costs the budget's thread and never this one's.
-    agent_tool_result_clear_trigger: int = Field(default=110_800, ge=1)
+    agent_tool_result_clear_trigger: int = Field(default=111_600, ge=1)
     # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
     # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
     # dependent in one direction. Re-measured 2026-09-06 against real BPE encodings, on the observed
@@ -686,6 +686,28 @@ class AgentSettings(BaseSettings):
     # itself. 0 removes the bound.
     agent_max_parallel_tool_calls: int = Field(default=8, ge=0)
 
+    # Which agent profiles a turn may delegate to, beside the unnamed `general-purpose` helper —
+    # the `task` roster (`agent/subagents.py`). A pathsep-delimited list of profile names, because
+    # these are bare names like `skills_enabled` rather than config-carrying objects.
+    #
+    # **Every entry is still an attenuation.** A rostered helper's surface is what its *caller*
+    # holds, intersected with the named profile's tools, minus everything that acts — so a name
+    # here can only ever make a helper narrower, never reach past the agent that spawned it, and
+    # `D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor` needs no revisiting.
+    #
+    # **Which three, and why not the other three, is a measurement rather than a taste.** After
+    # `side_effecting_tools()` is subtracted, `reporting` keeps 3 of its 8 names and
+    # `property-lookup` 1 of 5, because their job *is* writing; `design` keeps 4 of 8 but loses
+    # `suggest_next_experiment`, which is the whole specialist. What is left coherent is `evidence`
+    # (14 of 15), `computation` (12 of 41 — the enumeration family, topology, the calibration
+    # ledger and calculation lookup, which is a real capability and is **not** "compute things")
+    # and `safety` (4 of 6). A name whose helper is empty is a menu entry that wastes a delegation.
+    #
+    # Empty disables the roster, leaving the single unnamed helper this repository shipped before —
+    # not a capability switch so much as the escape hatch for a deployment that measures the prefix
+    # and wants it back.
+    agent_helper_roster: str = "evidence" + os.pathsep + "computation" + os.pathsep + "safety"
+
     # How many of one reply's unparseable tool calls are promoted onto `tool_calls` and refused
     # individually (`agent/model_calls.PromoteInvalidToolCalls`); the rest are counted and named
     # for the operator without becoming calls. 0 removes the bound.
@@ -830,6 +852,19 @@ class AgentSettings(BaseSettings):
         team-skills` the same way they set `PATH`, no JSON quoting.
         """
         return [d for d in self.skills_dir.split(os.pathsep) if d]
+
+    @property
+    def helper_roster(self) -> list[str]:
+        """The profile names offered as `task` helpers; empty leaves the single unnamed helper.
+
+        Read through this property, never raw, for the reason `skills_dirs` states: the delimited
+        string is the ENV shape and the list is what every caller wants.
+        """
+        # Stripped, unlike the other pathsep lists here, because this one is the first whose typo
+        # is fatal: `refuse_an_unknown_roster` raises at startup, so `"evidence: computation"` —
+        # spaced the way a person writes a list — would not start the front door. Elsewhere a stray
+        # space makes an entry inert; here it makes the deployment dead.
+        return [name.strip() for name in self.agent_helper_roster.split(os.pathsep) if name.strip()]
 
     @property
     def skills_enabled_list(self) -> list[str]:

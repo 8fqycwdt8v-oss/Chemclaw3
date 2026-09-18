@@ -514,6 +514,14 @@ def test_a_compiled_agent_still_reaches_its_tool_node_at_nodes_tools_dot_bound()
     middleware chain into an upstream-surface assertion and make a first-party regression look
     like a dependency bump. `tests/test_langgraph_agent.py`, `test_middleware_order.py`,
     `test_subagents.py` and `test_tool_schema.py` read the same path and break with it.
+
+    **And since `D-2026-09-16-a-roster-varies-the-two-dimensions-that-carry-no-authority`, so does
+    `src/`** — `agent/langgraph_agent._bound_helper_names` is the first production reader of this
+    path, and it is the one whose failure is *quiet*. Every other reader is a measurement that dies
+    loudly; that one answers "what does this helper bind", and an empty answer is indistinguishable
+    from a helper a deployment has legitimately emptied, so a rename upstream would drop every
+    rostered helper with an INFO line and remove the feature with nothing red. It is named here
+    because this file's rule is that each pin names the module that breaks.
     """
     from langchain.agents import create_agent
     from langchain_core.language_models.fake_chat_models import GenericFakeChatModel

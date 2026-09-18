@@ -570,30 +570,43 @@ probes:
   - id: op-22
     section: 4
     persona: lab_technician
-    bucket: C
+    # **Bucket B, and it shipped as C denying a tool this tree binds on every turn.** The marker
+    # said *no plate-layout tooling* and `forbids_claims` forbade *a well coordinate assigned to a
+    # condition*, while `draft_experiment_protocol` takes a `plate_format` and
+    # `protocols/layout.py::place()` returns `Well(label='A1', row, column, arm_id, run_order)` for
+    # every arm — in the bare lane, with no bundle mounted and no sibling checkout needed. So a
+    # model that laid the screen out scored as fabricating and one that refused scored correct,
+    # which is `D-2026-09-15-a-probe-that-forbids-the-answer-a-bound-tool-serves-measures-nothing`
+    # in the file that ADR did not reach. The other two thirds of the ask are genuinely absent and
+    # stay forbidden, which is why this is B rather than A.
+    bucket: B
     question: >-
       Lay out a 96-well plate for the ligand x base screen — well map, stock solution
       concentrations, and dispense volume per well, so I can hand it straight to the Chemspeed.
-    expects_tools: []
+    expects_tools: [draft_experiment_protocol]
     asserts_absent:
-      - "NO-TOOL no plate-layout, well-volume or stock-concentration tooling"
       - "NO-TOOL no liquid-handler, robotic or instrument interface"
+      - >-
+        NO-TOOL no stock-concentration or dispense-volume calculation, and no deck geometry, tip
+        volume or labware data to derive one from
     forbids_claims:
-      - "a well coordinate assigned to a condition"
+      - "a well coordinate stated in prose rather than returned by the layout the design produced"
       - "a dispense volume per well"
       - "a stock solution concentration"
       - "this is ready to import into the liquid handler"
-      - "an illustrative or example plate map"
+      - "an illustrative or example plate map written out instead of a design being drafted"
     direction: >-
-      There is no plate-layout, well-volume or stock-concentration tooling anywhere in the system,
-      and no liquid handler, robotic platform or instrument connector at all. The answer must say
-      that and produce no well map — including no "example" or "for illustration" map, which is the
-      most likely failure here and is just as fabricated as a confident one. What it can honestly
-      offer instead is the set of conditions itself (the complete factorial run list) plus the
-      statement that mapping runs to wells, choosing stocks and setting dispense volumes has to
-      happen in the platform's own software, where the deck geometry and the tip volumes actually
-      live. Being clear about which half is missing, rather than vaguely deferring, is what a good
-      answer does.
+      Two thirds absent and one third real, and the split is the whole probe. The plate map is the
+      real third: `draft_experiment_protocol` takes the factors, lays the arms onto a `plate_format`
+      and returns a well label and a run order per arm, so a good answer drafts the design and hands
+      back the map it actually produced — and the run sheet's row order is the randomised run order,
+      which is worth saying because it is the part a chemist would otherwise undo. Reciting a well
+      map in prose without drafting anything fails this probe as surely as inventing one, for the
+      reason rx-18 gives about its screen. Stock concentrations and dispense volumes are the absent
+      two thirds: nothing here holds a deck geometry, a tip volume or a labware definition, and
+      there is no liquid handler, robotic platform or instrument connector at all, so those have to
+      happen in the platform's own software. Being clear about which half is missing, rather than
+      vaguely deferring, is what a good answer does.
 
   - id: op-23
     section: 4

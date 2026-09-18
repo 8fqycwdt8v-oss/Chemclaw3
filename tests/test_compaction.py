@@ -24,6 +24,7 @@ import re
 import threading
 from dataclasses import dataclass
 from typing import Any, cast
+from unittest import mock
 
 import pytest
 from langchain.agents.middleware import ClearToolUsesEdit, ContextEditingMiddleware
@@ -1186,7 +1187,17 @@ CLEAR_TRIGGER_THREAD_ALLOWANCE = 30_000
 #: to keep this number whole, and it is refused for the reason the paragraph above gives: the window
 #: is the input and this is the dependent number, so a budget that rose with the prefix would be
 #: spending head-room under a 128k model that the provider, not this repository, decides.
-BUDGET_THREAD_ALLOWANCE = 37_900
+#:
+#: **37,100 since `D-2026-09-16-a-roster-varies-the-two-dimensions-that-carry-no-authority`**, down
+#: a further 800 because the `task` roster took `CEILINGS["__default__"]` to 70,600. The same rule
+#: a third time, and this is the branch where following it was a live temptation rather than a
+#: formality: the roster's own measured cost is 305 tokens and the ceiling rose 1,188, because this
+#: ratchet under-charges a roster whose descriptions name what each helper *binds* and so grow with
+#: the bundles a deployment enables. Raising the budget to keep this number whole was tried in the
+#: commit before this one and reverted on the argument directly above — the window is the input, so
+#: a budget that rises with the prefix spends head-room a provider decides, and what buys the
+#: thread back is a narrower prefix rather than a raise here.
+BUDGET_THREAD_ALLOWANCE = 37_100
 
 #: The smallest context window this stack is designed against, in billed tokens.
 #:
@@ -2236,19 +2247,93 @@ def test_no_shipped_producer_of_a_human_message_reaches_the_offload_threshold() 
     )
     threshold = NUM_CHARS_PER_TOKEN * tokens
 
-    # The two bounds this repository sets. `cli/chat.py` is deliberately absent: it is an operator
-    # pasting into their own REPL, not a surface a deployment exposes, and bounding it would be a
-    # different decision from this one.
+    # **Summed, not compared one at a time, because one producer appends to another.**
+    # `_with_pushed_job_results` takes the front door's message and adds the job-push-back block to
+    # it, so what reaches the model is their total — and asserting each half separately passed
+    # while the sum was 235,377 characters, measured
+    # (`D-2026-09-16-a-mailbox-nobody-bounded-is-a-human-message-nobody-bounded`). That producer is
+    # also the one the argument above does not cover at all: the block is framed *because* it is
+    # untrusted, so "a strict substring of the chemist's own words" is false of it, and the
+    # preview's head-and-tail cut is by lines — with a five-line question it keeps the closing
+    # delimiter and drops the opening one.
+    #
+    # `cli/chat.py` is deliberately absent: it is an operator pasting into their own REPL, not a
+    # surface a deployment exposes, and bounding it would be a different decision from this one.
     producers = {
         "service_max_message_chars (the front door, a 422)": settings.service_max_message_chars,
-        "agent_max_tool_result_chars (template steps, via bounded_prompt)": (
+        "agent_max_tool_result_chars (template steps via bounded_prompt, and the job push-back "
+        "block `_with_pushed_job_results` appends to the front door's message)": (
             settings.agent_max_tool_result_chars
         ),
     }
-    for name, value in producers.items():
-        assert value < threshold, (
-            f"{name} is {value}, at or above deepagents' {threshold}-character offload threshold. "
-            "A message from that producer would now be written to a file and summarised back to "
-            "the model with an undefanged preview — which is safe for a chemist's own words and "
-            "not for anything else that reaches this path."
+    total = sum(producers.values())
+    assert total < threshold, (
+        f"the producers that can appear in one HumanMessage sum to {total}, at or above "
+        f"deepagents' {threshold}-character offload threshold: "
+        + "; ".join(f"{name} = {value}" for name, value in producers.items())
+        + ". A message that large is written to a file and summarised back to the model with an "
+        "undefanged preview — safe for a chemist's own words, and not for the framed workflow "
+        "output that rides along with them."
+    )
+
+
+def test_the_job_push_back_block_is_bounded_before_it_is_framed() -> None:
+    """The producer the inequality above did not cover, driven end to end.
+
+    `_with_pushed_job_results` is the only producer here that can make a `HumanMessage` of any size:
+    `claim_unconsumed` takes no limit and `ConnectorJobResult.summary` declares no maximum, so the
+    block it appends is as long as the mailbox happens to be. Measured before the bound, with one
+    unbounded summary beside a maximum-length chemist message: **235,377 characters**, past the
+    200,000-character offload threshold.
+
+    Two things make that worse than it is for the other producers, and both are asserted here:
+
+    1. The block is **not** the chemist's words. The safety argument for the undefanged preview is
+       that it is "a strict substring of a message that sat in the model's context verbatim", which
+       holds for a chemist and not for workflow output that is framed *because* it is untrusted.
+    2. The preview is head-and-tail **by lines**. With a five-line question the opening delimiter
+       falls in the truncated middle and the closing one survives — measured — so the model is
+       handed unframed job output terminated by a stray tag.
+
+    So the bound goes on the block, inside the frame, and the message stays one well-formed
+    envelope. `test_no_shipped_producer_of_a_human_message_reaches_the_offload_threshold` is the
+    arithmetic; this is the behaviour, because a sum of settings is satisfied by a setting that
+    nothing reads.
+    """
+    from deepagents.middleware.filesystem import NUM_CHARS_PER_TOKEN, FilesystemMiddleware
+
+    import chemclaw.api.runner as runner
+    from chemclaw.agent.session_events import SessionEvent
+
+    limit = FilesystemMiddleware.__init__.__kwdefaults__ or {}
+    threshold = NUM_CHARS_PER_TOKEN * limit["human_message_token_limit_before_evict"]
+
+    waiting = [
+        SessionEvent(
+            event_id=index,
+            session_id="s",
+            kind="job_completed",
+            payload={"job_id": f"j{index}", "summary": "S" * 400},
         )
+        for index in range(600)
+    ]
+
+    async def claimed(*_args: object, **_kwargs: object) -> list[SessionEvent]:
+        return waiting
+
+    # `settings` is re-exported through `runner` rather than being its own name, so the module
+    # object is not where mypy will let a test reach it; patch the one both sides read.
+    with (
+        mock.patch.object(settings, "session_store", "postgres"),
+        mock.patch.object(runner, "claim_unconsumed", claimed),
+    ):
+        chemist = "x" * settings.service_max_message_chars
+        message = asyncio.run(runner._with_pushed_job_results("s", chemist))
+
+    assert len(message) < threshold, (
+        f"the turn's input is {len(message)} characters against a {threshold}-character offload "
+        "threshold; an unbounded mailbox is back and the undefanged preview comes with it"
+    )
+    assert message.count("<retrieved-note-") == 1, "the push-back block lost its opening delimiter"
+    assert message.count("</retrieved-note-") == 1, "the push-back block lost its closing delimiter"
+    assert message.startswith(chemist), "the chemist's own words must still lead"

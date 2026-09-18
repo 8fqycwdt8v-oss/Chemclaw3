@@ -25,6 +25,7 @@ import logging
 import math
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -785,16 +786,28 @@ async def reindex_notes(
     The prune runs before the "nothing changed" exit below, because a run whose only news is a
     deletion has nothing to embed and must still remove it.
 
-    **Reads past the graph cache deliberately.** This runs while notes are landing in the tree
-    underneath it — on a Schedule, `durable/note_index.py` being Schedule-only since its webhook
-    starter was deleted — and the note list below is compared against a freshly scanned
-    `note_file_fingerprints`. Without the bust the two halves could come from different moments: a
-    graph cached before a write landed, diffed against fingerprints read after it, which computes
-    `changed` from a stale set of notes. The cost is one rescan on a
+    **Reads past the graph cache deliberately, and past the per-file parse cache too.** This runs
+    while notes are landing in the tree underneath it — on a Schedule, `durable/note_index.py` being
+    Schedule-only since its webhook starter was deleted — and the note list below is compared
+    against a freshly scanned `note_file_fingerprints`. Without the bust the two halves could come
+    from different moments: a graph cached before a write landed, diffed against fingerprints read
+    after it, which computes `changed` from a stale set of notes. The cost is one rescan on a
     job that is about to re-embed anyway.
+
+    **`reparse=True` is the half that was missing, and omitting it was worse than not busting at
+    all** (`D-2026-09-16-a-stat-cache-and-a-content-hash-do-not-agree-about-what-changed`).
+    `invalidate_cache` deliberately keeps `_PARSED_FILES`, whose key is `(mtime_ns, size)`, on the
+    argument that a write the stat cannot see the fingerprint cannot see either. Since
+    `note_file_fingerprints` became a hash of the file's bytes that argument is false, and the
+    disagreement runs the harmful way: measured, a same-size edit with the mtime restored moves the
+    fingerprint while `load_notes` returns the previous body. This function would then embed the
+    **old** text and store it under the **new** digest — after which the digest matches on every
+    later run and the row never heals. Before the fingerprint was a hash both halves were blind
+    together and nothing was re-embedded at all, so the fix belongs here rather than in the
+    comparison.
     """
     directory = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
-    await asyncio.to_thread(invalidate_cache, directory)
+    await asyncio.to_thread(partial(invalidate_cache, directory, reparse=True))
     notes = await asyncio.to_thread(load_notes, directory) if directory.exists() else []
     if not notes:
         # **A silent 0 here is what a mis-mounted knowledge volume looks like**, and it is also

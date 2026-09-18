@@ -30,6 +30,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from chemclaw.core.config import settings
+from chemclaw.core.connect import option_type_mismatch
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.manifest_io import read_manifest, resolve_driver, within_root
 from chemclaw.ingest.sources.base import DataSource, IngestHalf, RetrieveHalf, SourceSpec
@@ -154,8 +155,24 @@ def resolve_half(reference: str) -> Callable[..., Any]:
 
 
 def _build_half(manifest: DataSourceManifest, reference: str, **extra: Any) -> Any:
-    """Construct a half from its `module:callable`, the manifest `config`, and `extra` kwargs."""
+    """Construct a half from its `module:callable`, the manifest `config`, and `extra` kwargs.
+
+    **Two checks, and the second is not the first with values filled in.** The `except TypeError`
+    below catches a config *key* the callable will not take. `option_type_mismatch` catches a key it
+    takes and a *value* it will silently misread — measured, `snapshot: "false"` arms the
+    destructive sweep, because every non-empty string is truthy and nothing between the YAML and
+    the constructor coerces anything
+    (`D-2026-09-16-a-truthy-string-is-not-the-flag-somebody-wrote`). `extra` is this repository's
+    own keywords rather than a manifest's, so it is not judged: a defect there is a code defect and
+    fails in review.
+    """
     factory = resolve_half(reference)
+    mismatch = option_type_mismatch(factory, manifest.config)
+    if mismatch:
+        raise DataSourceError(
+            f"data source {manifest.name!r}: {reference} was given {mismatch} Fix the manifest's "
+            f"`config:` block; a value is passed through exactly as written."
+        )
     try:
         return factory(**manifest.config, **extra)
     except TypeError as exc:
