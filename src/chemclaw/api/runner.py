@@ -1350,8 +1350,15 @@ def _escalation_outcome(outcome: str) -> None:
     are the four that are *not* `opened`: each was a log line and nothing else, and
     `chemclaw_answer_review_exhausted_total` counts turns that went out flagged, which is the same
     number whether a person was asked, an existing wait absorbed the ask, or the broker was down.
+
+    **Raises rather than asserts**, per
+    `D-2026-09-16-an-assert-is-a-control-with-an-off-switch-in-this-repository-too`: `python -O`
+    deletes an assert, and what this checks is a *label value*, which the registry cannot check for
+    itself — it validates label **names** and would take a typo'd outcome as a silent sixth series
+    that no panel queries.
     """
-    assert outcome in ESCALATION_OUTCOMES, f"undeclared escalation outcome {outcome!r}"
+    if outcome not in ESCALATION_OUTCOMES:
+        raise ValueError(f"undeclared escalation outcome {outcome!r}")
     METRICS.increment("chemclaw_answer_review_escalations_total", labels={"outcome": outcome})
 
 
