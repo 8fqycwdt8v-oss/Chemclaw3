@@ -84,8 +84,10 @@ def rewritten_tool_messages(result: Any, rewrite: Callable[[ToolMessage], ToolMe
     return dataclasses.replace(result, update={**result.update, "messages": rewritten})
 
 
-def rewritten_command_files(result: Any, rewrite: Callable[[str, int], str]) -> Any:
-    """Apply `rewrite` to every file a `Command` writes into its caller's state.
+def rewritten_command_files(
+    result: Any, rewrite: Callable[[str, int], str], existing: Any = None
+) -> Any:
+    """Apply `rewrite` to every file a `Command` **changes** in its caller's state.
 
     **The other half of what `task` hands back, and nothing bounded it.**
     `rewritten_tool_messages` above covers the report — the part a model reads — and
@@ -102,13 +104,32 @@ def rewritten_command_files(result: Any, rewrite: Callable[[str, int], str]) -> 
     file is bounded against what a checkpoint costs, because LangGraph writes the whole channel
     per superstep and per version.
 
+    **Changes, not writes — and the difference is the caller's own documents.** deepagents hands a
+    subagent every non-excluded key of its caller's state and copies them all back
+    (`_EXCLUDED_STATE_KEYS` is `messages`, `todos`, `structured_response`), so the `files` this
+    `Command` carries is the caller's **whole** channel, not the helper's contribution to it.
+    Cutting all of it charged a chemist's own `/scratch/` documents against a budget that bounds
+    what a *helper* adds, and at an exhausted channel it destroyed them: measured, a chemist's
+    200,000-character file came back as 45 characters because a helper had returned, with the
+    truncation logged as "a file a helper wrote".
+
+    Skipping them is not merely kinder, it is what the channel does anyway. Upstream's reducer is
+    `result[key] = value`, so re-delivering a file whose text is unchanged is a no-op on the
+    channel — the bound could only ever have cost bytes, never saved any. What is left to bound is
+    exactly the set of paths whose text differs from what the caller already holds, and `sharing`
+    counts that set, so a helper that changed one file gets the whole remaining budget instead of a
+    share diluted by every document its caller happened to be carrying.
+
     Args:
         result: Whatever the tool handler returned.
         rewrite: Takes one file's text and how many files share the budget, and returns the text to
             store. Returning the same string is how a rewrite declines to change anything.
+        existing: The caller's `files` before this command lands. Files whose text it already holds
+            unchanged are passed through untouched. `None` bounds every file, which is the old
+            behaviour and is kept only for a caller that has no state to compare against.
 
     Returns:
-        The same shape, with its files rewritten.
+        The same shape, with its changed files rewritten.
     """
     if not isinstance(result, Command) or not isinstance(result.update, dict):
         return result
@@ -120,14 +141,28 @@ def rewritten_command_files(result: Any, rewrite: Callable[[str, int], str]) -> 
     # a file would restamp it. `tests/test_upstream_surface.py` asserts the shape, which is this
     # repository's discipline for every assumption about a library's data that the library does
     # not promise.
+    held = existing if isinstance(existing, dict) else {}
+
+    def _is_unchanged(path: str, content: str) -> bool:
+        """Does the caller already hold this exact text at this path?"""
+        before = held.get(path)
+        return isinstance(before, dict) and before.get("content") == content
+
+    sharing = sum(
+        1
+        for path, data in files.items()
+        if isinstance(data, dict)
+        and isinstance(data.get("content"), str)
+        and not _is_unchanged(path, str(data["content"]))
+    )
     rewritten: dict[str, Any] = {}
     changed = False
     for path, data in files.items():
         content = data.get("content") if isinstance(data, dict) else None
-        if not isinstance(content, str):
+        if not isinstance(content, str) or _is_unchanged(path, content):
             rewritten[path] = data
             continue
-        bounded = rewrite(content, len(files))
+        bounded = rewrite(content, sharing)
         rewritten[path] = data if bounded is content else {**data, "content": bounded}
         changed = changed or bounded is not content
     if not changed:

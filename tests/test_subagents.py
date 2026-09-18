@@ -1119,7 +1119,7 @@ def test_an_exhausted_budget_still_cuts_when_more_than_one_file_crosses() -> Non
     content = "z" * (budget * 4)
     stored = sum(len(_bounded_file(content, sharing=2, held=budget)) for _ in range(2))
 
-    assert stored < len(content), (
+    assert stored <= budget, (
         f"two files crossing into a channel already holding {budget} characters stored {stored} "
         f"characters against a {budget} budget, so the cap switched itself off at the point the "
         "channel was fullest"
@@ -1170,6 +1170,69 @@ def test_a_second_delegation_shares_the_budget_the_first_one_spent() -> None:
     assert landed < budget, (
         f"a second delegation added {landed} characters to a channel already holding {held}, so "
         f"the {budget}-character bound is per `task` call rather than per channel"
+    )
+
+
+def test_a_chemists_own_file_survives_a_delegation_it_had_nothing_to_do_with() -> None:
+    """The bound is on what a helper *adds*, and it was cutting what its caller already had.
+
+    **The shape is the finding.** deepagents hands a subagent every non-excluded key of its
+    caller's state and copies them all back — `_EXCLUDED_STATE_KEYS` is `messages`, `todos` and
+    `structured_response`, so `files` travels both ways whole. The `Command` that comes back
+    therefore carries the caller's **own** documents beside the helper's, and
+    `rewritten_command_files` cut all of them. The test above builds a `Command` holding only the
+    new file, which is not what the shipped path produces, and that unfaithful fixture is exactly
+    what hid this.
+
+    Measured before the fix, at a channel already at its budget: a chemist's 200,000-character
+    `/scratch/` file came back as **45 characters** — the brief form — because a helper had
+    returned, and the WARNING beside it read "cut 200000 character(s) from a file a helper wrote".
+    The helper had never touched it.
+
+    Cutting it could never have saved a byte, which is what makes this a plain defect rather than
+    a trade: upstream's reducer is `result[key] = value`, so re-delivering an unchanged file is a
+    no-op on the channel. Skipping those files also makes the bound *exact* — the helper's own
+    file gets the whole remaining budget instead of a share diluted by every document its caller
+    was carrying.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from deepagents.backends.utils import create_file_data
+    from langgraph.types import Command
+
+    from chemclaw.agent.tool_result_size import bound_tool_results
+
+    budget = settings.agent_subagent_files_max_chars
+    mine = "p" * budget
+    already = {"/scratch/mine.md": create_file_data(mine)}
+    request = SimpleNamespace(
+        tool_call={"id": "call-3", "name": "task"},
+        state={"messages": [], "files": already},
+    )
+
+    async def _handler(_request: Any) -> Any:
+        # What upstream actually returns: the caller's whole channel plus the helper's own file.
+        return Command(
+            update={
+                "files": {
+                    "/scratch/mine.md": create_file_data(mine),
+                    "/scratch/evidence.md": create_file_data("z" * budget * 4),
+                }
+            }
+        )
+
+    bounded = cast("Any", asyncio.run(bound_tool_results.awrap_tool_call(request, _handler)))  # type: ignore[arg-type]
+    files = bounded.update["files"]
+
+    assert str(files["/scratch/mine.md"]["content"]) == mine, (
+        f"a chemist's own {budget}-character scratch file came back as "
+        f"{len(str(files['/scratch/mine.md']['content']))} characters because a helper returned; "
+        "the budget bounds what a helper adds to the channel, not what its caller already wrote"
+    )
+    added = len(str(files["/scratch/evidence.md"]["content"]))
+    assert added <= budget, (
+        f"the helper added {added} characters against a {budget}-character budget"
     )
 
 
