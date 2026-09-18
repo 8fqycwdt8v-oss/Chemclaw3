@@ -458,6 +458,17 @@ def test_the_topic_cursor_is_not_ahead_of_the_record() -> None:
 # different claim — "this guarantee is enforced right now, here" — which is why it is checked here
 # and there rather than exempted with the paths.
 _RETIRED_TEST_CITATIONS: dict[str, str] = {
+    # Retired because it asserted the opposite of what it read. It parsed the AST for an absent
+    # `checkpointer=` keyword and concluded the helper graph held no checkpointer — and that absence
+    # is precisely how a LangGraph subgraph asks to *inherit* its parent's, so every helper was
+    # checkpointing onto its caller's saver while this stayed green.
+    # `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer` measured it at 98% of what a
+    # spawn cost, and the replacement observes the rows instead of re-deriving the fact.
+    "test_the_helper_graph_is_compiled_without_a_checkpointer": (
+        "replaced by `test_a_helper_writes_no_checkpoint_of_its_own` (tests/test_subagents.py), "
+        "which drives a real spawn against a real saver and reads the namespaces off `checkpoints` "
+        "rather than reading a keyword's absence off the source"
+    ),
     # Deleted with the destination it charged. `D-2026-09-12-an-ambient-proxy-is-a-destination-
     # nobody-declared` moved the JWKS fetch onto httpx with `trust_env=False`, so the row it drove
     # had to leave `_env_reading_destinations` — and with it the only destination an
