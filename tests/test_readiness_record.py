@@ -206,9 +206,23 @@ _SHIPPED_DEFAULT = re.compile(
     r"|`([a-z][a-z0-9_]*)`\s*\*\*ships on\*\*"
 )
 
-#: Every backticked token in the record that *could* name a setting. The claims above are checked
-#: to cover this population, so a subject whose claim is reworded out of `_SHIPPED_DEFAULT` is
-#: still here and still owed one — which is what makes a reword fail instead of pass.
+#: Every backticked token in the record that *could* name a setting — the half that also reaches a
+#: `*` glob, which no literal field name spells. The claims above are checked to cover this
+#: population, so a subject whose claim is reworded out of `_SHIPPED_DEFAULT` is still here and
+#: still owed one — which is what makes a reword fail instead of pass.
+#:
+#: **It is not the whole population, and reading it as one is how a reword still passed.** A reword
+#: that drops the backticks as well as the shape takes the subject out of `claimed` *and* out of
+#: this, so the row goes unowed and the guard is green over a false record — driven, byte-identical
+#: to the defect this file was written for. So the population below is this union a plain scan for
+#: any settings field name occurring literally in the record, which needs no markup at all.
+#: Measured at HEAD, exactly two field names occur that way (`entra_required`,
+#: `agent_max_turn_billed_tokens`), both already owned, so the union costs no new exemption.
+#:
+#: What the plain half cannot reach is a *glob* subject whose backticks are dropped:
+#: `retention_*_days` is no field name, so nothing spells it literally. That residual is stated
+#: rather than claimed closed — an overstated guard is read as covering the case it does not, which
+#: is `D-2026-09-18-a-default-and-an-implementation-are-not-one-defect-class` §1.
 _SETTING_SUBJECT = re.compile(r"`([a-z][a-z0-9_]*(?:\*[a-z0-9_]*)?)`")
 
 #: Settings the record names without claiming what they ship as, each argued. `entra_required` is
@@ -242,10 +256,27 @@ def test_a_claim_about_a_shipped_default_agrees_with_the_setting() -> None:
     the other satisfying the anchor. Driven: reword the spend row's `agent_max_turn_billed_tokens`
     **ships on** to "is **on by default**", set the field back to `Field(default=0)`, and this was
     `5 passed` while the record told a deployment team a spend ceiling was on that ships off — the
-    exact defect it was written for, in the reassuring direction, one layer up. So every backticked
-    token in the record that resolves to a real settings field must be claimed by one of those
-    shapes or be on `_NAMED_WITHOUT_A_SHIPPED_DEFAULT` with its reason. A reword drops the subject
-    out of the claimed set and leaves it in the named set, which fails.
+    exact defect it was written for, in the reassuring direction, one layer up. So every settings
+    field the record names must be claimed by one of those shapes or be on
+    `_NAMED_WITHOUT_A_SHIPPED_DEFAULT` with its reason. A reword drops the subject out of the
+    claimed set and leaves it in the named set, which fails.
+
+    **Then the second version was defeated by the same reword with the backticks also dropped, and
+    that is the lesson rather than the line.** The population was every *backticked* token, so a
+    reword that drops the markup takes the subject out of `named` as well as out of `claimed` and
+    the row goes unowed; `assert named` does not save it, because one surviving setting anywhere
+    satisfies it. Driven at the fixed HEAD, that mutation was `5 passed` over a record telling a
+    deployment team a spend ceiling is on that ships off — byte-identical to the defect above. The
+    first version's mutation had been watched failing and no *other* mutation of the same property
+    had been watched still failing, which is the whole of it.
+
+    So the population is a union: every settings field name occurring literally in the record, plus
+    everything the backticked tokens resolve to — and both halves are compared as resolved *fields*
+    rather than as tokens, so a `*` family and one of its members can no longer miss each other.
+    Three rewords of the same claim now red where one did: no backticks, `**bold**` instead of
+    backticks, and plain "defaults to on". What stays open is a glob subject whose backticks are
+    dropped, since `retention_*_days` is no field name for a literal scan to find; that is stated in
+    `_SETTING_SUBJECT`'s comment rather than claimed closed.
 
     It cannot check the sentence around the claim. A row may say "which is off" beside a setting
     that is on and this will not see it; what it sees is the number, which is the half that moved
@@ -261,12 +292,16 @@ def test_a_claim_about_a_shipped_default_agrees_with_the_setting() -> None:
         """The settings a backticked token names — one, or a family when it carries a `*`."""
         return [field for field in fields if re.fullmatch(token.replace("*", ".*"), field)]
 
-    named = {token for token in _SETTING_SUBJECT.findall(record) if _fields_named(token)}
-    claimed = {match.group(1) or match.group(3) for match in claims}
+    named = {field for field in fields if field in record}
+    for token in _SETTING_SUBJECT.findall(record):
+        named.update(_fields_named(token))
+    claimed = {
+        field for match in claims for field in _fields_named(str(match.group(1) or match.group(3)))
+    }
     assert named, (
         "the record names no setting at all any more; the rows stating what this deployment ships "
-        "have gone, or they have stopped writing a setting's name in backticks, and the claims "
-        "below are then checked against nothing."
+        "have gone, or they have stopped naming a setting, and the claims below are then checked "
+        "against nothing."
     )
     unclaimed = named - claimed - _NAMED_WITHOUT_A_SHIPPED_DEFAULT
     assert not unclaimed, (
