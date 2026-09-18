@@ -17,6 +17,7 @@ re-recording one.
 """
 
 import asyncio
+import logging
 
 import pytest
 
@@ -146,6 +147,61 @@ def test_the_control_still_detects_the_divergence_it_was_built_for(
     assert failure, (
         f"{archived} replayed clean against {archived.workflow_type}, and it must not: this "
         "fixture is the measured divergence the replay control exists to catch."
+    )
+
+
+async def test_a_divergence_the_sdk_logged_beats_a_replay_that_returned_quietly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control above can lose a race and report a divergent history as clean.
+
+    `replay_failure` races the replay against a watcher on the SDK's own log. `asyncio.wait` with
+    `FIRST_COMPLETED` returns *every* future that finished in that cycle, so when the SDK logs
+    `TMPRL1100` and the replay coroutine then completes without raising, both are done — and the
+    original branch order asked `replay` first, took its silence and returned "". That is
+    `test_the_control_still_detects_the_divergence_it_was_built_for` going green for the one reason
+    its own docstring says would be a real finding, while the finding is false.
+
+    Found by a full serial run, on a branch that does not touch this file: one failure, passing in
+    isolation and under every targeted ordering tried. So it is pinned as *logic* rather than as an
+    ordering — an order-dependent reproduction is exactly the kind that rots.
+
+    Driven through the real `replay_failure`, with only the `Replayer` replaced: a stand-in whose
+    `replay_workflow` logs the marker and returns cleanly, which is the shape that produced the
+    false clean. Both arms, because the fix must not turn every clean replay into a divergence.
+    """
+
+    class _Replayer:
+        """Stands in for the SDK's `Replayer`: logs a divergence, then finishes without raising."""
+
+        def __init__(self, **_: object) -> None:
+            """Accept and ignore whatever `replay_failure` constructs it with."""
+
+        async def replay_workflow(self, _history: object) -> None:
+            """Log the marker the watcher is armed for, then return quietly."""
+            logging.getLogger("temporalio.worker._workflow").debug(
+                "TMPRL1100 workflow task evicted: nondeterminism"
+            )
+
+    class _SilentReplayer(_Replayer):
+        """The same, logging nothing — a genuinely clean replay."""
+
+        async def replay_workflow(self, _history: object) -> None:
+            """Return without logging anything the watcher would trip on."""
+
+    archived = superseded_histories()[0]
+
+    monkeypatch.setattr("temporalio.worker.Replayer", _Replayer)
+    diverged = await replay_failure(archived, _workflow_for(archived))
+    assert "TMPRL1100" in diverged, (
+        "a logged non-determinism must outrank a replay that returned without raising — "
+        "otherwise the negative control reports a known-divergent history as clean, "
+        f"got {diverged!r}"
+    )
+
+    monkeypatch.setattr("temporalio.worker.Replayer", _SilentReplayer)
+    assert await replay_failure(archived, _workflow_for(archived)) == "", (
+        "with nothing logged, a replay that returns without raising is still clean"
     )
 
 
