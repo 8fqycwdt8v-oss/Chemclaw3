@@ -498,8 +498,29 @@ _COUNTED_SURFACE = re.compile(
     rf"\b(?:all\s+)?(?:{_CARDINAL})\b(?:\s+of\s+(?:its|the|them|these))?\s+tools?\b",
     re.IGNORECASE,
 )
-#: The bundle by name, as every sentence that got this wrong wrote it.
-_CALC_BUNDLE = re.compile(r"`?calc`?\s+bundle", re.IGNORECASE)
+
+
+def _calc_bundle_pattern(name: str) -> re.Pattern[str]:
+    """A sentence naming the bundle, from the name its own manifest declares.
+
+    Two things were spelled here and both are now derived, for the reason
+    `_CALC_SURFACE_MODULE`'s comment gives one constant up: a spelled string is a claim about a
+    tree that can change underneath it.
+
+    The **name** comes from `connector.yaml`, which is where a bundle's name is declared and what
+    `validate_connectors` holds the served surface against, so renaming the bundle carries this
+    with it instead of silently emptying half the scope.
+
+    The **phrasing** admits up to two modifiers between the name and "bundle", because the literal
+    `` `calc` bundle `` was the other half of that claim. Driven: rewording every live mention to
+    `` `calc` connector bundle `` and re-adding the original defect to `infra/live/processes.sh`
+    was `1 passed` — the script that carried the defect teaching "all fifteen tools" again, out of
+    scope because one word had been inserted. Measured over the tree, the modifier run costs
+    **zero** new offenders and picks up one further carrier file.
+    """
+    return re.compile(rf"`?{re.escape(name)}`?(?:\s+[a-z][a-z-]*){{0,2}}?\s+bundle", re.IGNORECASE)
+
+
 #: Records, not descriptions — and the axis is written out because it decides an asymmetry a
 #: reviewer asked about. A merged ADR is never edited (CLAUDE.md), `docs/archive/` is
 #: pre-implementation design, and `tasks/` is a dated account of an afternoon; each is *supposed*
@@ -536,6 +557,19 @@ _NAMES_WHAT_IT_FORBIDS = (Path(__file__).resolve().relative_to(_ROOT).as_posix()
 _CALC_SURFACE_MODULE = "chemclaw.connectors.calc.server.tools"
 
 
+def _calc_bundle_name(surface_file: str) -> str:
+    """The bundle's declared name, found by walking up from the module that serves it."""
+    for parent in (_ROOT / surface_file).resolve().parents:
+        manifest = parent / "connector.yaml"
+        if manifest.is_file():
+            declared = yaml.safe_load(manifest.read_text(encoding="utf-8"))["name"]
+            return str(declared)
+    raise AssertionError(
+        f"no connector.yaml above {surface_file}. The bundle's name is read from its manifest "
+        "rather than spelled here, so this scan cannot say which sentences are about it."
+    )
+
+
 def _calc_surface_file() -> str:
     """Where the calc tool surface is defined, as a repository-relative path."""
     spec = importlib.util.find_spec(_CALC_SURFACE_MODULE)
@@ -569,21 +603,35 @@ def test_the_calc_tool_surface_is_not_counted_in_prose() -> None:
     is how the identical sentence reached two scripts. Historical records are exempt because their
     job is to hold what was true when they were written.
 
-    **The package half's basis used to be `assert scanned_in_package`, which is an *any* basis.**
+    **Each half of that scope has a basis, and for one of them that is new.** The package half's
+    basis used to be `assert scanned_in_package`, which is an *any* basis;
     The package holds four tracked files and one of them carries the surface, so moving `tools.py`
     out with the stale sentence restored was `1 passed` — half the scope going mostly empty, in
     silence, which is the failure the basis was added to refuse. A basis that merely counts what a
     scan read cannot tell a full scope from a rump one; what it has to name is the thing the scope
     is *about*.
+
+    The bundle half had **no basis at all** — the identical hole, in the same function, on the half
+    that was not being fixed. Driven: reword every live `` `calc` bundle `` to `` `calc` connector
+    bundle `` and re-add the original defect to `infra/live/processes.sh`, and this was `1 passed`
+    with a live-lane script teaching "all fifteen tools" again. Its basis is that some live file
+    *outside* the package still names the bundle, because a match only inside it would be doing
+    nothing the package half does not already do. That is an *any* basis and is said to be one:
+    unlike the package half, whose subject is the one module that defines the surface, the files
+    that discuss a bundle from outside are not a derivable set. What carries the weight instead is
+    that the predicate itself is derived — the name from the manifest, and a modifier run so an
+    inserted word is not an exemption.
     """
     surface_file = _calc_surface_file()
     package = surface_file.rsplit("/", 1)[0] + "/"
+    names_the_bundle = _calc_bundle_pattern(_calc_bundle_name(surface_file))
     tracked = subprocess.run(
         ["git", "ls-files", "-z"], cwd=_ROOT, capture_output=True, text=True, check=True
     ).stdout.split("\0")
 
     offenders = []
     scanned_in_package = []
+    scanned_naming_the_bundle = []
     for name in filter(None, tracked):
         if name.startswith(_HISTORICAL) or name in _NAMES_WHAT_IT_FORBIDS:
             continue
@@ -593,10 +641,12 @@ def test_the_calc_tool_surface_is_not_counted_in_prose() -> None:
             continue  # binary, or a symlink into a tree this checkout does not have
         if name.startswith(package):
             scanned_in_package.append(name)
+        elif names_the_bundle.search(content):
+            scanned_naming_the_bundle.append(name)
         for sentence in re.split(r"(?<=[.:!?])\s", content):
             if not _COUNTED_SURFACE.search(sentence):
                 continue
-            if name.startswith(package) or _CALC_BUNDLE.search(sentence):
+            if name.startswith(package) or names_the_bundle.search(sentence):
                 offenders.append(f"{name}: {' '.join(sentence.split())[:120]}")
 
     assert surface_file in scanned_in_package, (
@@ -607,6 +657,16 @@ def test_the_calc_tool_surface_is_not_counted_in_prose() -> None:
         "out left the other three satisfying the basis while a docstring counted the whole "
         "surface — half the scope going mostly empty, in silence, which is the shape of guard "
         "this test exists to refuse."
+    )
+
+    assert scanned_naming_the_bundle, (
+        f"no live file outside {package} names the bundle any more, so the second half of this "
+        "scan's scope is reading nothing. That half exists because the identical stale sentence "
+        "reached two live-lane scripts, which are outside the package; a match only *inside* it "
+        "would be doing nothing the package half does not already do. Either every external "
+        "mention has been reworded past the pattern, or the bundle was renamed and its manifest "
+        "was not — this is the half that had no basis at all while the other one was being given "
+        "its second."
     )
 
     assert not offenders, (
