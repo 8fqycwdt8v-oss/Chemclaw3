@@ -1,6 +1,6 @@
 """The agent's calculator tools: the surface did not move, and the cache still decides.
 
-These fifteen tools are named by string in profiles, eval probes and `SKILL.md`s, so their
+These tools are named by string in profiles, eval probes and `SKILL.md`s, so their
 signatures and return types are a contract this suite has to hold still even though everything
 underneath them changed: after `D-2026-08-16-the-physics-leaves-the-cache-stays` not one of them
 computes anything. The physics answers over MCP, this side keys it, stores it and composes it.
