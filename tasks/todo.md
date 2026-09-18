@@ -1,5 +1,12 @@
 # Multi-agent team, evolving skills, and automatic expert selection
 
+**This file is the plan of the branch in hand, and it replaced one rather than joining it.** The
+2026-09-16 off-the-shelf dependency audit closed on its own terms: its header says every row carries
+a verdict, that nothing in it is a claim about work still to come, and that "what is still open left
+this file for `docs/planning/BACKLOG.md`". Keeping a closed plan beside a live one is a closed record
+reading as live state, which is what this repository's rules for `DEFERRED.md` forbid one directory
+over. `git log` is its history; `docs/planning/BACKLOG.md` is what survived it.
+
 Five phases, each its own PR, each green under `make lint type test` before merge.
 
 **The product requirement driving this** (owner, 2026-09-16): expert selection must happen

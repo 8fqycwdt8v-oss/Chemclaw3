@@ -236,8 +236,28 @@ def _scan_notes(notes_dir: Path, terms: Sequence[str], today: date, cap: int) ->
 
     It buys latency and jitter, **not throughput**: the scan is pure Python holding the GIL, so a
     thread pool runs eight of these no faster than one (measured elsewhere in this review at 0.91x
-    on four threads). The corpus is markdown in Git rather than rows in Postgres, so there is no
-    database to push the scan into either.
+    on four threads).
+
+    **There is a database to push it into, and this docstring used to deny there was one.** The
+    notes are indexed: `retrieval/vector_index.py` maintains `note_index` with a GIN-indexed
+    `tsvector` (`infra/sql/012_note_index.sql`) and serves `search_lexical` over it. What is true is
+    narrower, and it is two things rather than the one this said.
+
+    The index is *derived*, and only a deployment that reads it keeps it in step:
+    `settings.note_reindex_effective` schedules `NoteReindexWorkflow` exactly where `lexical` or
+    `vector` is in `CHEMCLAW_DATA_SOURCES`, and the shipped default is `graph,eln-json`. Pushing
+    this scan into Postgres would therefore answer `find_notes` on a graph-only deployment out of a
+    table nothing ever writes — a tool that reports "no note on that" about a corpus it never read,
+    which is the failure `NoteSearch.verdict` exists to make impossible.
+
+    And `search_lexical` is a *different* lexical rule, not a faster spelling of this one: stemmed
+    and stop-worded by a Postgres text-search configuration, against the substring rule
+    `term_coverage` applies here and in `GraphRetriever`. Measured on 2026-09-16 against live
+    PostgreSQL 16 over a two-note corpus, `couplings`, `coupled`, `dry` and `films` are hits for the
+    server and not for the substring rule, while `ester` is a hit for the substring rule (inside
+    `polyester`) and not for the server. Moving this reader alone re-opens D-2026-08-05 in its worst
+    direction — the model finds a note `gather_evidence` cannot then cite — so it moves with the
+    graph leg or not at all. `tests/test_note_search.py` pins both directions.
 
     `load_notes`, not `build_graph`: this is a substring sweep over each note's own metadata and
     body, and it never follows an edge. Assembling the graph made a cold call pay node and edge

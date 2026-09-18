@@ -13,8 +13,6 @@ the constraint is the guarantee behind "an observation can never corroborate its
 Skipped where no Postgres is reachable, so this is the offline sandbox's blind spot and CI's job.
 """
 
-import asyncio
-
 import psycopg
 import pytest
 
@@ -67,7 +65,7 @@ def _finding(statement: str = "s", **overrides: object) -> Observation:
     return Observation(**{**fields, **overrides})  # type: ignore[arg-type]
 
 
-def test_a_growing_finding_accumulates_the_support_its_run_observed() -> None:
+async def test_a_growing_finding_accumulates_the_support_its_run_observed() -> None:
     """The whole reason support means anything across runs.
 
     Support must follow the corpus: a finding seen again with another reaction behind it ends up
@@ -80,30 +78,26 @@ def test_a_growing_finding_accumulates_the_support_its_run_observed() -> None:
     whole corpus each time (`all_reactions()` reads from `datetime.min`) — which is what makes
     "supported by N notes" mean "what the record currently shows" rather than "what it ever showed".
     """
+    await _clean_db_or_skip()
+    await store.record([_finding()], complete=True)
+    await store.record(
+        [
+            _finding(
+                evidence_note_ids=["reaction-r1", "reaction-r2"],
+                projects_seen=["alpha", "beta"],
+            )
+        ],
+        complete=True,
+    )
 
-    async def _run() -> None:
-        await _clean_db_or_skip()
-        await store.record([_finding()], complete=True)
-        await store.record(
-            [
-                _finding(
-                    evidence_note_ids=["reaction-r1", "reaction-r2"],
-                    projects_seen=["alpha", "beta"],
-                )
-            ],
-            complete=True,
-        )
-
-        found = await store.open_observations()
-        assert len(found) == 1  # one row, not two — the id is the scope
-        assert found[0].evidence_note_ids == ["reaction-r1", "reaction-r2"]
-        assert found[0].projects_seen == ["alpha", "beta"]
-        assert found[0].support == 2
-
-    asyncio.run(_run())
+    found = await store.open_observations()
+    assert len(found) == 1  # one row, not two — the id is the scope
+    assert found[0].evidence_note_ids == ["reaction-r1", "reaction-r2"]
+    assert found[0].projects_seen == ["alpha", "beta"]
+    assert found[0].support == 2
 
 
-def test_a_run_drops_the_evidence_the_corpus_has_since_retracted(
+async def test_a_run_drops_the_evidence_the_corpus_has_since_retracted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Support must not count a reaction that has left the cluster.
@@ -123,32 +117,29 @@ def test_a_run_drops_the_evidence_the_corpus_has_since_retracted(
     monkeypatch.setattr(settings, "observation_promote_min_evidence", 3)
     monkeypatch.setattr(settings, "observation_promote_min_projects", 2)
 
-    async def _run() -> None:
-        await _clean_db_or_skip()
-        corpus = [
-            _esterification("ddd1", "alpha", OutcomeClass.FAILURE),
-            _esterification("ddd2", "beta", OutcomeClass.FAILURE),
-            _esterification("ddd3", "gamma", OutcomeClass.FAILURE),
-        ]
-        await store.record(mine_corpus(corpus), complete=True)
-        promoted = await store.promotable()
-        assert len(promoted) == 1 and promoted[0].support == 3
+    await _clean_db_or_skip()
+    corpus = [
+        _esterification("ddd1", "alpha", OutcomeClass.FAILURE),
+        _esterification("ddd2", "beta", OutcomeClass.FAILURE),
+        _esterification("ddd3", "gamma", OutcomeClass.FAILURE),
+    ]
+    await store.record(mine_corpus(corpus), complete=True)
+    promoted = await store.promotable()
+    assert len(promoted) == 1 and promoted[0].support == 3
 
-        # The re-assay: ddd3 succeeded after all, so the next full pass never fingerprints it.
-        corpus[2] = _esterification("ddd3", "gamma", OutcomeClass.SUCCESS)
-        await store.record(mine_corpus(corpus), complete=True)
+    # The re-assay: ddd3 succeeded after all, so the next full pass never fingerprints it.
+    corpus[2] = _esterification("ddd3", "gamma", OutcomeClass.SUCCESS)
+    await store.record(mine_corpus(corpus), complete=True)
 
-        found = await store.open_observations()
-        assert len(found) == 1
-        assert found[0].evidence_note_ids == ["reaction-ddd1", "reaction-ddd2"]
-        assert found[0].projects_seen == ["alpha", "beta"]
-        assert found[0].support == 2
-        assert await store.promotable() == []  # and it drops back below the threshold
-
-    asyncio.run(_run())
+    found = await store.open_observations()
+    assert len(found) == 1
+    assert found[0].evidence_note_ids == ["reaction-ddd1", "reaction-ddd2"]
+    assert found[0].projects_seen == ["alpha", "beta"]
+    assert found[0].support == 2
+    assert await store.promotable() == []  # and it drops back below the threshold
 
 
-def test_a_partial_pass_may_not_rewrite_an_observation_down() -> None:
+async def test_a_partial_pass_may_not_rewrite_an_observation_down() -> None:
     """Replacement is what an *authoritative* pass earns, and a degraded pass has not earned it.
 
     The retraction fix made every pass replace the stored arrays. But a pass is only authoritative
@@ -161,122 +152,102 @@ def test_a_partial_pass_may_not_rewrite_an_observation_down() -> None:
     Both halves are pinned here: a partial pass may only add (the old union, now scoped to the case
     that needs it), and a complete pass still drops what the corpus retracted.
     """
+    await _clean_db_or_skip()
+    await store.record(
+        [
+            _finding(
+                "three projects",
+                evidence_note_ids=["reaction-r1", "reaction-r2", "reaction-r3"],
+                projects_seen=["alpha", "beta", "gamma"],
+            )
+        ],
+        complete=True,
+    )
 
-    async def _run() -> None:
-        await _clean_db_or_skip()
-        await store.record(
-            [
-                _finding(
-                    "three projects",
-                    evidence_note_ids=["reaction-r1", "reaction-r2", "reaction-r3"],
-                    projects_seen=["alpha", "beta", "gamma"],
-                )
-            ],
-            complete=True,
-        )
+    # A degraded pass: one source answered, the rest of the corpus was never read.
+    await store.record(
+        [_finding("one project", evidence_note_ids=["reaction-r1"], projects_seen=["alpha"])],
+        complete=False,
+    )
+    found = (await store.open_observations())[0]
+    assert found.evidence_note_ids == ["reaction-r1", "reaction-r2", "reaction-r3"]
+    assert found.projects_seen == ["alpha", "beta", "gamma"]
+    # The statement is not refreshed either: rewriting it to "one project" beside three-project
+    # evidence is the self-contradiction the replacement was introduced to remove.
+    assert found.statement == "three projects"
 
-        # A degraded pass: one source answered, the rest of the corpus was never read.
-        await store.record(
-            [_finding("one project", evidence_note_ids=["reaction-r1"], projects_seen=["alpha"])],
-            complete=False,
-        )
-        found = (await store.open_observations())[0]
-        assert found.evidence_note_ids == ["reaction-r1", "reaction-r2", "reaction-r3"]
-        assert found.projects_seen == ["alpha", "beta", "gamma"]
-        # The statement is not refreshed either: rewriting it to "one project" beside three-project
-        # evidence is the self-contradiction the replacement was introduced to remove.
-        assert found.statement == "three projects"
+    # A partial pass still *adds* what it did see — accumulation is unaffected.
+    await store.record(
+        [_finding("new note", evidence_note_ids=["reaction-r4"], projects_seen=["delta"])],
+        complete=False,
+    )
+    found = (await store.open_observations())[0]
+    assert found.evidence_note_ids == [
+        "reaction-r1",
+        "reaction-r2",
+        "reaction-r3",
+        "reaction-r4",
+    ]
+    assert found.projects_seen == ["alpha", "beta", "delta", "gamma"]
 
-        # A partial pass still *adds* what it did see — accumulation is unaffected.
-        await store.record(
-            [_finding("new note", evidence_note_ids=["reaction-r4"], projects_seen=["delta"])],
-            complete=False,
-        )
-        found = (await store.open_observations())[0]
-        assert found.evidence_note_ids == [
-            "reaction-r1",
-            "reaction-r2",
-            "reaction-r3",
-            "reaction-r4",
-        ]
-        assert found.projects_seen == ["alpha", "beta", "delta", "gamma"]
-
-        # And a complete pass is still authoritative: the retraction fix is untouched.
-        await store.record(
-            [_finding("two", evidence_note_ids=["reaction-r1"], projects_seen=["alpha"])],
-            complete=True,
-        )
-        found = (await store.open_observations())[0]
-        assert found.evidence_note_ids == ["reaction-r1"] and found.statement == "two"
-
-    asyncio.run(_run())
+    # And a complete pass is still authoritative: the retraction fix is untouched.
+    await store.record(
+        [_finding("two", evidence_note_ids=["reaction-r1"], projects_seen=["alpha"])],
+        complete=True,
+    )
+    found = (await store.open_observations())[0]
+    assert found.evidence_note_ids == ["reaction-r1"] and found.statement == "two"
 
 
-def test_the_statement_follows_the_evidence_it_accumulated() -> None:
+async def test_the_statement_follows_the_evidence_it_accumulated() -> None:
     """A row backed by two projects must not still read as though it were backed by one.
 
     The statement is the mutable part now that identity is the scope, so the upsert refreshes it.
     Keeping the first run's wording would leave the tier saying one thing and its own evidence
     column saying another — and the statement is what a reviewer reads on a promotion PR.
     """
+    await _clean_db_or_skip()
+    await store.record([_finding("seen in 1 project")], complete=True)
+    await store.record(
+        [_finding("seen in 2 projects", evidence_note_ids=["reaction-r2"], projects_seen=["beta"])],
+        complete=True,
+    )
 
-    async def _run() -> None:
-        await _clean_db_or_skip()
-        await store.record([_finding("seen in 1 project")], complete=True)
-        await store.record(
-            [
-                _finding(
-                    "seen in 2 projects", evidence_note_ids=["reaction-r2"], projects_seen=["beta"]
-                )
-            ],
-            complete=True,
-        )
-
-        found = await store.open_observations()
-        assert len(found) == 1
-        assert found[0].statement == "seen in 2 projects"
-
-    asyncio.run(_run())
+    found = await store.open_observations()
+    assert len(found) == 1
+    assert found[0].statement == "seen in 2 projects"
 
 
-def test_re_recording_an_identical_finding_changes_nothing_but_last_seen() -> None:
+async def test_re_recording_an_identical_finding_changes_nothing_but_last_seen() -> None:
     """A nightly no-op must stay a no-op, or every run would look like new support."""
+    await _clean_db_or_skip()
+    await store.record([_finding()], complete=True)
+    await store.record([_finding()], complete=True)
 
-    async def _run() -> None:
-        await _clean_db_or_skip()
-        await store.record([_finding()], complete=True)
-        await store.record([_finding()], complete=True)
-
-        found = await store.open_observations()
-        assert len(found) == 1
-        assert found[0].evidence_note_ids == ["reaction-r1"]
-        assert found[0].last_seen is not None and found[0].first_seen is not None
-
-    asyncio.run(_run())
+    found = await store.open_observations()
+    assert len(found) == 1
+    assert found[0].evidence_note_ids == ["reaction-r1"]
+    assert found[0].last_seen is not None and found[0].first_seen is not None
 
 
-def test_the_database_refuses_an_observation_citing_an_observation() -> None:
+async def test_the_database_refuses_an_observation_citing_an_observation() -> None:
     """The guarantee, not the courtesy.
 
     `Observation` refuses this at construction so a miner fails where it is written. That protects
     the path that goes through the model; this protects the *table*, including from a future
     writer that does not. The insert is made deliberately around the validator to prove it.
     """
-
-    async def _run() -> None:
-        await _clean_db_or_skip()
-        async with await psycopg.AsyncConnection.connect(settings.postgres_dsn) as conn:
-            with pytest.raises(psycopg.errors.CheckViolation):
-                await conn.execute(
-                    "INSERT INTO observations (id, statement, scope, evidence_note_ids, origin) "
-                    "VALUES (%s, %s, %s, %s, %s)",
-                    ("observation-x", "s", "t", ["observation-y"], "corpus-mining"),
-                )
-
-    asyncio.run(_run())
+    await _clean_db_or_skip()
+    async with await psycopg.AsyncConnection.connect(settings.postgres_dsn) as conn:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            await conn.execute(
+                "INSERT INTO observations (id, statement, scope, evidence_note_ids, origin) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                ("observation-x", "s", "t", ["observation-y"], "corpus-mining"),
+            )
 
 
-def test_only_a_finding_over_both_thresholds_is_promotable(
+async def test_only_a_finding_over_both_thresholds_is_promotable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Two thresholds because they answer different questions, and neither alone is enough.
@@ -287,56 +258,49 @@ def test_only_a_finding_over_both_thresholds_is_promotable(
     monkeypatch.setattr(settings, "observation_promote_min_evidence", 3)
     monkeypatch.setattr(settings, "observation_promote_min_projects", 2)
 
-    async def _run() -> None:
-        await _clean_db_or_skip()
-        await store.record(
-            [
-                # Enough notes, one project.
-                _finding(
-                    "deep but local",
-                    scope="a",
-                    evidence_note_ids=["reaction-1", "reaction-2", "reaction-3"],
-                    projects_seen=["alpha"],
-                ),
-                # Enough projects, too few notes.
-                _finding(
-                    "broad but thin",
-                    scope="b",
-                    evidence_note_ids=["reaction-4"],
-                    projects_seen=["alpha", "beta"],
-                ),
-                # Both.
-                _finding(
-                    "real",
-                    scope="c",
-                    evidence_note_ids=["reaction-5", "reaction-6", "reaction-7"],
-                    projects_seen=["alpha", "beta"],
-                ),
-            ],
-            complete=True,
-        )
-        assert [o.statement for o in await store.promotable()] == ["real"]
-
-    asyncio.run(_run())
+    await _clean_db_or_skip()
+    await store.record(
+        [
+            # Enough notes, one project.
+            _finding(
+                "deep but local",
+                scope="a",
+                evidence_note_ids=["reaction-1", "reaction-2", "reaction-3"],
+                projects_seen=["alpha"],
+            ),
+            # Enough projects, too few notes.
+            _finding(
+                "broad but thin",
+                scope="b",
+                evidence_note_ids=["reaction-4"],
+                projects_seen=["alpha", "beta"],
+            ),
+            # Both.
+            _finding(
+                "real",
+                scope="c",
+                evidence_note_ids=["reaction-5", "reaction-6", "reaction-7"],
+                projects_seen=["alpha", "beta"],
+            ),
+        ],
+        complete=True,
+    )
+    assert [o.statement for o in await store.promotable()] == ["real"]
 
 
-def test_a_promoted_observation_leaves_the_open_set() -> None:
+async def test_a_promoted_observation_leaves_the_open_set() -> None:
     """Otherwise it would be re-promoted every night, opening the same PR forever."""
+    await _clean_db_or_skip()
+    await store.record([_finding()], complete=True)
+    observation = (await store.open_observations())[0]
 
-    async def _run() -> None:
-        await _clean_db_or_skip()
-        await store.record([_finding()], complete=True)
-        observation = (await store.open_observations())[0]
-
-        await store.set_status(observation.id, "promoted")
-        assert await store.open_observations() == []
-        assert await store.promotable() == []
-
-    asyncio.run(_run())
+    await store.set_status(observation.id, "promoted")
+    assert await store.open_observations() == []
+    assert await store.promotable() == []
 
 
 @pytest.mark.parametrize("complete", [True, False], ids=["replace", "accumulate"])
-def test_a_retired_observation_comes_back_when_the_corpus_does(
+async def test_a_retired_observation_comes_back_when_the_corpus_does(
     complete: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Retirement has to be reversible, or the tier empties permanently instead of breathing.
@@ -354,48 +318,41 @@ def test_a_retired_observation_comes_back_when_the_corpus_does(
     """
     monkeypatch.setattr(settings, "observation_retire_after_days", 30)
 
-    async def _run() -> None:
-        await _clean_db_or_skip()
-        await store.record([_finding()], complete=complete)
-        async with await psycopg.AsyncConnection.connect(settings.postgres_dsn) as conn:
-            await conn.execute("UPDATE observations SET last_seen = now() - interval '90 days'")
-            await conn.commit()
+    await _clean_db_or_skip()
+    await store.record([_finding()], complete=complete)
+    async with await psycopg.AsyncConnection.connect(settings.postgres_dsn) as conn:
+        await conn.execute("UPDATE observations SET last_seen = now() - interval '90 days'")
+        await conn.commit()
 
-        assert await store.retire_stale() == 1
-        assert await store.open_observations() == []
+    assert await store.retire_stale() == 1
+    assert await store.open_observations() == []
 
-        # The corpus produces the finding again: it must return to the open set.
-        await store.record([_finding()], complete=complete)
-        revived = await store.open_observations()
-        assert len(revived) == 1, "a re-observed finding must leave the retired state"
-        assert revived[0].status == "open"
-
-    asyncio.run(_run())
+    # The corpus produces the finding again: it must return to the open set.
+    await store.record([_finding()], complete=complete)
+    revived = await store.open_observations()
+    assert len(revived) == 1, "a re-observed finding must leave the retired state"
+    assert revived[0].status == "open"
 
 
 @pytest.mark.parametrize("complete", [True, False], ids=["replace", "accumulate"])
-def test_re_observing_a_promoted_observation_does_not_reopen_it(complete: bool) -> None:
+async def test_re_observing_a_promoted_observation_does_not_reopen_it(complete: bool) -> None:
     """Revival must reach `retired` only — `promoted` is the state that stops the nightly PR.
 
     `test_a_promoted_observation_leaves_the_open_set` pins why: a promoted finding that returned to
     the open set would be re-promoted on the next pass and open the same PR forever. The miners
     keep re-observing a promoted finding by construction, so this is the routine case, not an edge.
     """
+    await _clean_db_or_skip()
+    await store.record([_finding()], complete=complete)
+    promoted = (await store.open_observations())[0]
+    await store.set_status(promoted.id, "promoted")
 
-    async def _run() -> None:
-        await _clean_db_or_skip()
-        await store.record([_finding()], complete=complete)
-        promoted = (await store.open_observations())[0]
-        await store.set_status(promoted.id, "promoted")
-
-        await store.record([_finding()], complete=complete)
-        assert await store.open_observations() == []
-        assert await store.promotable() == []
-
-    asyncio.run(_run())
+    await store.record([_finding()], complete=complete)
+    assert await store.open_observations() == []
+    assert await store.promotable() == []
 
 
-def test_retirement_spares_what_was_just_re_observed(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_retirement_spares_what_was_just_re_observed(monkeypatch: pytest.MonkeyPatch) -> None:
     """`last_seen` is refreshed by every run that still finds the finding.
 
     That is what makes retirement mean "the corpus stopped supporting this" rather than "this is
@@ -403,46 +360,36 @@ def test_retirement_spares_what_was_just_re_observed(monkeypatch: pytest.MonkeyP
     """
     monkeypatch.setattr(settings, "observation_retire_after_days", 30)
 
-    async def _run() -> None:
-        await _clean_db_or_skip()
-        await store.record([_finding()], complete=True)
-        assert await store.retire_stale() == 0  # just recorded, so nothing is stale
-        assert len(await store.open_observations()) == 1
-
-    asyncio.run(_run())
+    await _clean_db_or_skip()
+    await store.record([_finding()], complete=True)
+    assert await store.retire_stale() == 0  # just recorded, so nothing is stale
+    assert len(await store.open_observations()) == 1
 
 
-def test_retirement_is_off_when_the_window_is_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_retirement_is_off_when_the_window_is_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     """A deployment that wants observations to persist indefinitely must be able to say so."""
     monkeypatch.setattr(settings, "observation_retire_after_days", 0)
 
-    async def _run() -> None:
-        await _clean_db_or_skip()
-        await store.record([_finding()], complete=True)
-        assert await store.retire_stale() == 0
-        assert len(await store.open_observations()) == 1
-
-    asyncio.run(_run())
+    await _clean_db_or_skip()
+    await store.record([_finding()], complete=True)
+    assert await store.retire_stale() == 0
+    assert len(await store.open_observations()) == 1
 
 
-def test_the_best_supported_observation_is_read_first() -> None:
+async def test_the_best_supported_observation_is_read_first() -> None:
     """The page is small, so the ordering decides what is seen at all."""
-
-    async def _run() -> None:
-        await _clean_db_or_skip()
-        await store.record(
-            [
-                _finding("thin", scope="a", evidence_note_ids=["reaction-1"]),
-                _finding("solid", scope="b", evidence_note_ids=[f"reaction-{i}" for i in range(4)]),
-            ],
-            complete=True,
-        )
-        assert [o.statement for o in await store.open_observations()] == ["solid", "thin"]
-
-    asyncio.run(_run())
+    await _clean_db_or_skip()
+    await store.record(
+        [
+            _finding("thin", scope="a", evidence_note_ids=["reaction-1"]),
+            _finding("solid", scope="b", evidence_note_ids=[f"reaction-{i}" for i in range(4)]),
+        ],
+        complete=True,
+    )
+    assert [o.statement for o in await store.open_observations()] == ["solid", "thin"]
 
 
-def test_the_recall_page_says_how_much_of_the_tier_it_is(
+async def test_the_recall_page_says_how_much_of_the_tier_it_is(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`open_observations` clamps to `observation_max_results`, and nothing counted the rest.
@@ -455,47 +402,41 @@ def test_the_recall_page_says_how_much_of_the_tier_it_is(
     """
     monkeypatch.setattr(settings, "observations_enabled", True)
 
-    async def _run() -> None:
-        await _clean_db_or_skip()
-        page = settings.observation_max_results
-        await store.record(
-            [
-                _finding(statement=f"finding {index}", scope=f"transformation:{index}")
-                for index in range(page + 5)
-            ],
-            complete=True,
-        )
+    await _clean_db_or_skip()
+    page = settings.observation_max_results
+    await store.record(
+        [
+            _finding(statement=f"finding {index}", scope=f"transformation:{index}")
+            for index in range(page + 5)
+        ],
+        complete=True,
+    )
 
-        assert await store.count_open_observations() == page + 5
-        assert len(await store.open_observations()) == page
+    assert await store.count_open_observations() == page + 5
+    assert len(await store.open_observations()) == page
 
-        from chemclaw.agent import memory_tools
+    from chemclaw.agent import memory_tools
 
-        recall = await memory_tools.recall_observations()
-        assert recall.enabled is True
-        assert len(recall.observations) == page
-        assert recall.total_open == page + 5
-        payload = recall.model_dump()
-        assert "PARTIAL" in payload["verdict"]
-        assert str(page + 5) in payload["verdict"]
-
-    asyncio.run(_run())
+    recall = await memory_tools.recall_observations()
+    assert recall.enabled is True
+    assert len(recall.observations) == page
+    assert recall.total_open == page + 5
+    payload = recall.model_dump()
+    assert "PARTIAL" in payload["verdict"]
+    assert str(page + 5) in payload["verdict"]
 
 
-def test_an_enabled_tier_that_has_noticed_nothing_says_so_as_itself(
+async def test_an_enabled_tier_that_has_noticed_nothing_says_so_as_itself(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Enabled-and-empty and disabled must not render alike, nor either look like the other."""
     monkeypatch.setattr(settings, "observations_enabled", True)
 
-    async def _run() -> None:
-        await _clean_db_or_skip()
-        from chemclaw.agent import memory_tools
+    await _clean_db_or_skip()
+    from chemclaw.agent import memory_tools
 
-        recall = await memory_tools.recall_observations()
-        assert recall.enabled is True
-        assert recall.observations == []
-        assert recall.total_open == 0
-        assert "NOTHING NOTICED" in recall.model_dump()["verdict"]
-
-    asyncio.run(_run())
+    recall = await memory_tools.recall_observations()
+    assert recall.enabled is True
+    assert recall.observations == []
+    assert recall.total_open == 0
+    assert "NOTHING NOTICED" in recall.model_dump()["verdict"]

@@ -321,7 +321,11 @@ def test_the_unhealthy_gauge_counts_an_unpolled_bundle_and_not_an_unknown_one(
         exposition = client.get("/metrics").text
 
     # Exactly one: `unpolled` counts, and `healthy`, `unprobed` and `unknown` do not.
-    assert "\nchemclaw_connectors_unhealthy 1\n" in exposition, exposition
+    # `1.0` rather than `1` because a gauge holds a float and the exposition renders it with
+    # `repr` — the same text `prometheus_client.floatToGoString` produces for 1.0. The old
+    # `:g` spelling printed `1` and lost the counted digits past a million, which is why it
+    # went (`D-2026-09-16-six-significant-digits-is-not-the-number-that-was-counted`).
+    assert "\nchemclaw_connectors_unhealthy 1.0\n" in exposition, exposition
 
 
 def test_the_queue_half_spends_one_budget_rather_than_one_per_step(

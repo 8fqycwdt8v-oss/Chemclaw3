@@ -24,16 +24,15 @@ from datetime import date
 from pydantic import BaseModel
 
 from chemclaw.core.config import settings
+from chemclaw.core.markdown import MISSING, render_table
 from chemclaw.ingest.eln.ord import Impurity, OrdReaction
 from chemclaw.kg.note import Note, strip_links
 from chemclaw.memory.comparison import (
-    MISSING,
     cell,
     changes_cell,
     date_cell,
     drop_empty_columns,
     ordering_caveat,
-    render_table,
 )
 from chemclaw.memory.progression import progression
 from chemclaw.memory.similarity import cluster_by_similarity, reaction_fingerprints
@@ -125,7 +124,7 @@ def optimization_campaign_note(
         f"Optimization campaign: {len(members)} runs of the same transformation "
         f"(DRFP-similar), representative `{members[0].reaction_smiles()}`.\n\n"
         f"{ordering_caveat(series)}\n\n"
-        f"{render_table(headers, rows)}"
+        f"{render_table(headers, rows)}\n"
     )
     detail = "\n".join(block for r in members if (block := _run_detail(r)))
     if detail:

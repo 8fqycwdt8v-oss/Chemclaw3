@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from chemclaw.core.markdown import render_table
+
 # Below four points an ordinary-least-squares standard error is not worth reporting: with n=3 the
 # fit has one degree of freedom and the error term is dominated by whichever sample was unlucky.
 _MIN_POINTS_TO_FIT = 4
@@ -160,8 +162,6 @@ def report(rounds: Sequence[dict[str, Any]]) -> str:
     lines = [
         f"# Soak: {len(rounds)} round(s), rounds {rounds[0]['round']}–{rounds[-1]['round']}",
         "",
-        "| series | first | last | verdict |",
-        "| --- | ---: | ---: | --- |",
     ]
     tables = sorted({key for row in rounds for key in row.get("rows", {})})
     gauges = sorted({key for row in rounds for key in (row.get("gauges") or {})})
@@ -172,11 +172,12 @@ def report(rounds: Sequence[dict[str, Any]]) -> str:
         *[(name, ("gauges", name), "") for name in gauges],
         *[(f"rows {name}", ("rows", name), "rows") for name in tables],
     ]
-    for label, path, unit in watched:
-        values = _series(rounds, *path)
-        if not values:
-            continue
-        lines.append(f"| {label} | {values[0]:.0f} | {values[-1]:.0f} | {describe(values, unit)} |")
+    rows = [
+        [label, f"{values[0]:.0f}", f"{values[-1]:.0f}", describe(values, unit)]
+        for label, path, unit in watched
+        if (values := _series(rounds, *path))
+    ]
+    lines.append(render_table(["series", "first", "last", "verdict"], rows, align="lrrl"))
     failed = [row["round"] for row in rounds if row.get("rc") != 0]
     lines += ["", f"rounds with a non-zero exit: {failed or 'none'}"]
     return "\n".join(lines)

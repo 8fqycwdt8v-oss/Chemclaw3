@@ -36,101 +36,81 @@ def test_default_artifact_store_is_postgres_backed() -> None:
     assert isinstance(store, PostgresArtifactStore)
 
 
-def test_round_trip_returns_exactly_what_was_put() -> None:
+async def test_round_trip_returns_exactly_what_was_put() -> None:
     """`open(content_hash)` must hand back the original bytes, not a codec's idea of them."""
+    store = await _store_or_skip()
+    data = b"3\nwater\nO 0.0 0.0 0.0\nH 0.0 0.0 0.96\nH 0.93 0.0 -0.24\n" * 50
+    ref = await store.put("pgart-roundtrip:1", "xtbopt.xyz", data, media_type="chemical/x-xyz")
 
-    async def _run() -> None:
-        store = await _store_or_skip()
-        data = b"3\nwater\nO 0.0 0.0 0.0\nH 0.0 0.0 0.96\nH 0.93 0.0 -0.24\n" * 50
-        ref = await store.put("pgart-roundtrip:1", "xtbopt.xyz", data, media_type="chemical/x-xyz")
+    assert ref is not None
+    assert ref.content_hash == content_address(data)
+    assert ref.byte_size == len(data)
 
-        assert ref is not None
-        assert ref.content_hash == content_address(data)
-        assert ref.byte_size == len(data)
-
-        got = await store.open(ref.content_hash)
-        assert got == data
-
-    asyncio.run(_run())
+    got = await store.open(ref.content_hash)
+    assert got == data
 
 
-def test_a_miss_returns_none() -> None:
+async def test_a_miss_returns_none() -> None:
     """An address nothing ever stored answers `None`, matching `InMemoryArtifactStore`."""
-
-    async def _run() -> None:
-        store = await _store_or_skip()
-        assert await store.open("no-such-hash-was-ever-stored") is None
-
-    asyncio.run(_run())
+    store = await _store_or_skip()
+    assert await store.open("no-such-hash-was-ever-stored") is None
 
 
-def test_two_different_payloads_do_not_collide() -> None:
+async def test_two_different_payloads_do_not_collide() -> None:
     """Content addressing must not fold distinct bytes onto the same hash or the same bytes back."""
+    store = await _store_or_skip()
+    calc_key = "pgart-distinct:1"
+    first = await store.put(calc_key, "hessian", b"first payload" * 10)
+    second = await store.put(calc_key, "vibspectrum", b"second, different payload" * 10)
 
-    async def _run() -> None:
-        store = await _store_or_skip()
-        calc_key = "pgart-distinct:1"
-        first = await store.put(calc_key, "hessian", b"first payload" * 10)
-        second = await store.put(calc_key, "vibspectrum", b"second, different payload" * 10)
+    assert first is not None and second is not None
+    assert first.content_hash != second.content_hash
 
-        assert first is not None and second is not None
-        assert first.content_hash != second.content_hash
-
-        assert await store.open(first.content_hash) == b"first payload" * 10
-        assert await store.open(second.content_hash) == b"second, different payload" * 10
-
-    asyncio.run(_run())
+    assert await store.open(first.content_hash) == b"first payload" * 10
+    assert await store.open(second.content_hash) == b"second, different payload" * 10
 
 
-def test_identical_bytes_dedupe_to_one_blob_but_keep_both_links() -> None:
+async def test_identical_bytes_dedupe_to_one_blob_but_keep_both_links() -> None:
     """Two calculations producing the same geometry store one blob, addressed identically.
 
     The whole point of content addressing (module docstring): `list_for` still reports both names
     against the calculation that produced them, and both resolve to the same stored bytes.
     """
+    store = await _store_or_skip()
+    calc_key = "pgart-dedupe:1"
+    payload = b"identical geometry\n" * 20
+    a = await store.put(calc_key, "xtbopt.xyz", payload)
+    b = await store.put(calc_key, "crest_conformers.xyz", payload)
 
-    async def _run() -> None:
-        store = await _store_or_skip()
-        calc_key = "pgart-dedupe:1"
-        payload = b"identical geometry\n" * 20
-        a = await store.put(calc_key, "xtbopt.xyz", payload)
-        b = await store.put(calc_key, "crest_conformers.xyz", payload)
+    assert a is not None and b is not None
+    assert a.content_hash == b.content_hash == content_address(payload)
 
-        assert a is not None and b is not None
-        assert a.content_hash == b.content_hash == content_address(payload)
-
-        refs = await store.list_for(calc_key)
-        assert {ref.name for ref in refs} == {"xtbopt.xyz", "crest_conformers.xyz"}
-        for ref in refs:
-            assert await store.open(ref.content_hash) == payload
-
-    asyncio.run(_run())
+    refs = await store.list_for(calc_key)
+    assert {ref.name for ref in refs} == {"xtbopt.xyz", "crest_conformers.xyz"}
+    for ref in refs:
+        assert await store.open(ref.content_hash) == payload
 
 
-def test_overwriting_a_name_repoints_the_link_without_losing_the_old_blob() -> None:
+async def test_overwriting_a_name_repoints_the_link_without_losing_the_old_blob() -> None:
     """A second `put` under the same `(calc_key, name)` updates the link (D-124's upsert).
 
     `_UPSERT_LINK` is `ON CONFLICT (calc_key, name) DO UPDATE`, never a second row — so the link
     must resolve to the *new* content afterwards, while the old blob (addressed by its own hash)
     stays retrievable on its own hash, since eviction — not an overwrite — is what reclaims it.
     """
+    store = await _store_or_skip()
+    calc_key = "pgart-overwrite:1"
+    first = await store.put(calc_key, "hessian", b"stale hessian" * 5)
+    second = await store.put(calc_key, "hessian", b"refreshed hessian" * 5)
 
-    async def _run() -> None:
-        store = await _store_or_skip()
-        calc_key = "pgart-overwrite:1"
-        first = await store.put(calc_key, "hessian", b"stale hessian" * 5)
-        second = await store.put(calc_key, "hessian", b"refreshed hessian" * 5)
+    assert first is not None and second is not None
+    assert first.content_hash != second.content_hash
 
-        assert first is not None and second is not None
-        assert first.content_hash != second.content_hash
+    [ref] = await store.list_for(calc_key)
+    assert ref.content_hash == second.content_hash
 
-        [ref] = await store.list_for(calc_key)
-        assert ref.content_hash == second.content_hash
-
-        assert await store.open(first.content_hash) == b"stale hessian" * 5
-        assert await store.open(second.content_hash) == b"refreshed hessian" * 5
-
-    asyncio.run(_run())
+    assert await store.open(first.content_hash) == b"stale hessian" * 5
+    assert await store.open(second.content_hash) == b"refreshed hessian" * 5
 
 
 def test_relinking_an_artifact_without_a_cost_keeps_what_the_original_run_measured() -> None:
@@ -180,50 +160,38 @@ async def _recorded_cost(calc_key: str) -> float | None:
     return None if row is None or row[0] is None else float(row[0])
 
 
-def test_list_for_orders_by_name_and_is_scoped_to_its_own_calculation() -> None:
+async def test_list_for_orders_by_name_and_is_scoped_to_its_own_calculation() -> None:
     """The reader a note cites by `calc_key` must not see another calculation's by-products."""
+    store = await _store_or_skip()
+    mine, other = "pgart-listing:mine", "pgart-listing:other"
+    await store.put(mine, "vibspectrum", b"v" * 8)
+    await store.put(mine, "hessian", b"h" * 8)
+    await store.put(other, "xtbopt.xyz", b"x" * 8)
 
-    async def _run() -> None:
-        store = await _store_or_skip()
-        mine, other = "pgart-listing:mine", "pgart-listing:other"
-        await store.put(mine, "vibspectrum", b"v" * 8)
-        await store.put(mine, "hessian", b"h" * 8)
-        await store.put(other, "xtbopt.xyz", b"x" * 8)
-
-        refs = await store.list_for(mine)
-        assert [ref.name for ref in refs] == ["hessian", "vibspectrum"]  # alphabetical
-        assert {ref.calc_key for ref in refs} == {mine}
-
-    asyncio.run(_run())
+    refs = await store.list_for(mine)
+    assert [ref.name for ref in refs] == ["hessian", "vibspectrum"]  # alphabetical
+    assert {ref.calc_key for ref in refs} == {mine}
 
 
-def test_a_payload_over_the_cap_is_refused_and_never_reaches_the_table(
+async def test_a_payload_over_the_cap_is_refused_and_never_reaches_the_table(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`too_large` refuses on the write side; nothing durable should exist for the refused bytes."""
+    store = await _store_or_skip()
+    monkeypatch.setattr(settings, "artifact_max_bytes", 16)
+    data = b"far more than sixteen bytes of payload"
 
-    async def _run() -> None:
-        store = await _store_or_skip()
-        monkeypatch.setattr(settings, "artifact_max_bytes", 16)
-        data = b"far more than sixteen bytes of payload"
+    ref = await store.put("pgart-oversize:1", "hessian", data)
 
-        ref = await store.put("pgart-oversize:1", "hessian", data)
-
-        assert ref is None
-        assert await store.list_for("pgart-oversize:1") == []
-        assert await store.open(content_address(data)) is None
-
-    asyncio.run(_run())
+    assert ref is None
+    assert await store.list_for("pgart-oversize:1") == []
+    assert await store.open(content_address(data)) is None
 
 
-def test_a_disabled_store_refuses_every_write(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_disabled_store_refuses_every_write(monkeypatch: pytest.MonkeyPatch) -> None:
     """`artifact_store_enabled = False` is the other refusal path, checked before the size cap."""
+    store = await _store_or_skip()
+    monkeypatch.setattr(settings, "artifact_store_enabled", False)
 
-    async def _run() -> None:
-        store = await _store_or_skip()
-        monkeypatch.setattr(settings, "artifact_store_enabled", False)
-
-        assert await store.put("pgart-disabled:1", "hessian", b"anything") is None
-        assert await store.list_for("pgart-disabled:1") == []
-
-    asyncio.run(_run())
+    assert await store.put("pgart-disabled:1", "hessian", b"anything") is None
+    assert await store.list_for("pgart-disabled:1") == []

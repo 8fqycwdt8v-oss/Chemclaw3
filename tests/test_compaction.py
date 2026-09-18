@@ -24,6 +24,7 @@ import re
 import threading
 from dataclasses import dataclass
 from typing import Any, cast
+from unittest import mock
 
 import pytest
 from langchain.agents.middleware import ClearToolUsesEdit, ContextEditingMiddleware
@@ -54,6 +55,7 @@ from chemclaw.agent.compaction import (
 )
 from chemclaw.agent.context_budget import (
     MeasureRequestPrefix,
+    _message_tokens,
     effective_trigger,
     estimate_tool_schemas,
     reset_calibration,
@@ -70,6 +72,22 @@ from chemclaw.core.metrics import METRICS
 def _count(messages: Any) -> int:
     """The estimator the middleware uses, so a test's trigger arithmetic matches production's."""
     return count_tokens_approximately(messages)
+
+
+def _measured_prefix(system: list[Any]) -> int:
+    """The prefix as production measures it, through production's own two functions.
+
+    **Not `_count(system) + estimate_tool_schemas(...)`, which is what this file used to write.**
+    `MeasureRequestPrefix._measure` counts the system message with `_message_tokens` — the
+    configured BPE encoding where one is baked — and the estimator over the same prompt measures
+    ~15% higher. A budget written here as "the prefix plus n" is wrong by that whole difference:
+    measured, the lossless edit stopped firing at all in
+    `test_the_lossless_edit_fires_alone_between_its_trigger_and_the_budget`, because its trigger
+    was ~1,200 tokens above the thread it was written to sit under. The same re-derivation defect
+    `_graph_prefix`'s own docstring records one file over, arriving through the counter instead of
+    through the tool surface.
+    """
+    return sum(_message_tokens(message) for message in system) + estimate_tool_schemas(_BOUND)
 
 
 def _group(index: int, *, with_tool_call: bool = False, filler: str = "") -> list[AnyMessage]:
@@ -394,7 +412,7 @@ def _graph_prefix() -> int:
         )
         asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="hello")]}))
         system = [m for m in _RECEIVED if isinstance(m, SystemMessage)]
-        _PREFIX.append(_count(system) + estimate_tool_schemas(_BOUND))
+        _PREFIX.append(_measured_prefix(system))
     return _PREFIX[0]
 
 
@@ -964,7 +982,7 @@ def _drive(window: int, thread: list[AnyMessage]) -> tuple[int, int, float]:
     asyncio.run(graph.ainvoke({"messages": list(thread)}))
     system = [m for m in _RECEIVED if isinstance(m, SystemMessage)]
     rest = [m for m in _RECEIVED if not isinstance(m, SystemMessage)]
-    prefix = _count(system) + estimate_tool_schemas(_BOUND)
+    prefix = _measured_prefix(system)
     delta = METRICS.value("chemclaw_context_unreducible_total") - before
     return prefix, _count(rest), delta
 
@@ -1567,7 +1585,7 @@ def test_a_calibrated_process_does_not_bill_past_its_budget(
             asyncio.run(graph.ainvoke({"messages": list(thread)}))
         billed = _BILLED[-1]
         system = [m for m in _RECEIVED if isinstance(m, SystemMessage)]
-        prefix = _count(system) + estimate_tool_schemas(_BOUND)
+        prefix = _measured_prefix(system)
         sent = _count([m for m in _RECEIVED if not isinstance(m, SystemMessage)])
     finally:
         reset_calibration()
@@ -2229,19 +2247,93 @@ def test_no_shipped_producer_of_a_human_message_reaches_the_offload_threshold() 
     )
     threshold = NUM_CHARS_PER_TOKEN * tokens
 
-    # The two bounds this repository sets. `cli/chat.py` is deliberately absent: it is an operator
-    # pasting into their own REPL, not a surface a deployment exposes, and bounding it would be a
-    # different decision from this one.
+    # **Summed, not compared one at a time, because one producer appends to another.**
+    # `_with_pushed_job_results` takes the front door's message and adds the job-push-back block to
+    # it, so what reaches the model is their total — and asserting each half separately passed
+    # while the sum was 235,377 characters, measured
+    # (`D-2026-09-16-a-mailbox-nobody-bounded-is-a-human-message-nobody-bounded`). That producer is
+    # also the one the argument above does not cover at all: the block is framed *because* it is
+    # untrusted, so "a strict substring of the chemist's own words" is false of it, and the
+    # preview's head-and-tail cut is by lines — with a five-line question it keeps the closing
+    # delimiter and drops the opening one.
+    #
+    # `cli/chat.py` is deliberately absent: it is an operator pasting into their own REPL, not a
+    # surface a deployment exposes, and bounding it would be a different decision from this one.
     producers = {
         "service_max_message_chars (the front door, a 422)": settings.service_max_message_chars,
-        "agent_max_tool_result_chars (template steps, via bounded_prompt)": (
+        "agent_max_tool_result_chars (template steps via bounded_prompt, and the job push-back "
+        "block `_with_pushed_job_results` appends to the front door's message)": (
             settings.agent_max_tool_result_chars
         ),
     }
-    for name, value in producers.items():
-        assert value < threshold, (
-            f"{name} is {value}, at or above deepagents' {threshold}-character offload threshold. "
-            "A message from that producer would now be written to a file and summarised back to "
-            "the model with an undefanged preview — which is safe for a chemist's own words and "
-            "not for anything else that reaches this path."
+    total = sum(producers.values())
+    assert total < threshold, (
+        f"the producers that can appear in one HumanMessage sum to {total}, at or above "
+        f"deepagents' {threshold}-character offload threshold: "
+        + "; ".join(f"{name} = {value}" for name, value in producers.items())
+        + ". A message that large is written to a file and summarised back to the model with an "
+        "undefanged preview — safe for a chemist's own words, and not for the framed workflow "
+        "output that rides along with them."
+    )
+
+
+def test_the_job_push_back_block_is_bounded_before_it_is_framed() -> None:
+    """The producer the inequality above did not cover, driven end to end.
+
+    `_with_pushed_job_results` is the only producer here that can make a `HumanMessage` of any size:
+    `claim_unconsumed` takes no limit and `ConnectorJobResult.summary` declares no maximum, so the
+    block it appends is as long as the mailbox happens to be. Measured before the bound, with one
+    unbounded summary beside a maximum-length chemist message: **235,377 characters**, past the
+    200,000-character offload threshold.
+
+    Two things make that worse than it is for the other producers, and both are asserted here:
+
+    1. The block is **not** the chemist's words. The safety argument for the undefanged preview is
+       that it is "a strict substring of a message that sat in the model's context verbatim", which
+       holds for a chemist and not for workflow output that is framed *because* it is untrusted.
+    2. The preview is head-and-tail **by lines**. With a five-line question the opening delimiter
+       falls in the truncated middle and the closing one survives — measured — so the model is
+       handed unframed job output terminated by a stray tag.
+
+    So the bound goes on the block, inside the frame, and the message stays one well-formed
+    envelope. `test_no_shipped_producer_of_a_human_message_reaches_the_offload_threshold` is the
+    arithmetic; this is the behaviour, because a sum of settings is satisfied by a setting that
+    nothing reads.
+    """
+    from deepagents.middleware.filesystem import NUM_CHARS_PER_TOKEN, FilesystemMiddleware
+
+    import chemclaw.api.runner as runner
+    from chemclaw.agent.session_events import SessionEvent
+
+    limit = FilesystemMiddleware.__init__.__kwdefaults__ or {}
+    threshold = NUM_CHARS_PER_TOKEN * limit["human_message_token_limit_before_evict"]
+
+    waiting = [
+        SessionEvent(
+            event_id=index,
+            session_id="s",
+            kind="job_completed",
+            payload={"job_id": f"j{index}", "summary": "S" * 400},
         )
+        for index in range(600)
+    ]
+
+    async def claimed(*_args: object, **_kwargs: object) -> list[SessionEvent]:
+        return waiting
+
+    # `settings` is re-exported through `runner` rather than being its own name, so the module
+    # object is not where mypy will let a test reach it; patch the one both sides read.
+    with (
+        mock.patch.object(settings, "session_store", "postgres"),
+        mock.patch.object(runner, "claim_unconsumed", claimed),
+    ):
+        chemist = "x" * settings.service_max_message_chars
+        message = asyncio.run(runner._with_pushed_job_results("s", chemist))
+
+    assert len(message) < threshold, (
+        f"the turn's input is {len(message)} characters against a {threshold}-character offload "
+        "threshold; an unbounded mailbox is back and the undefanged preview comes with it"
+    )
+    assert message.count("<retrieved-note-") == 1, "the push-back block lost its opening delimiter"
+    assert message.count("</retrieved-note-") == 1, "the push-back block lost its closing delimiter"
+    assert message.startswith(chemist), "the chemist's own words must still lead"

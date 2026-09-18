@@ -131,7 +131,7 @@ def test_a_calibration_says_which_of_its_four_states_it_is_in() -> None:
     assert "too few" not in meaningful.lower() and "NOT RECORDED" not in meaningful
 
 
-def test_a_calibration_read_that_failed_raises_instead_of_reporting_a_clean_ledger() -> None:
+async def test_a_calibration_read_that_failed_raises_instead_of_reporting_a_clean_ledger() -> None:
     """A database outage must not be served as "this calculator has never missed".
 
     The write half of this argument was settled by
@@ -140,15 +140,11 @@ def test_a_calibration_read_that_failed_raises_instead_of_reporting_a_clean_ledg
     trust tools whose entire deliverable *is* the ledger read — so there was no primary result
     the swallow was protecting.
     """
-
-    async def _run() -> None:
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(settings, "calibration_enabled", True)
-            patch.setattr(settings, "postgres_dsn", "postgresql://nobody@127.0.0.1:1/none")
-            with pytest.raises(Exception, match="Postgres unreachable"):
-                await calibration_for("pka", "v1", unit="pKa")
-
-    asyncio.run(_run())
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(settings, "calibration_enabled", True)
+        patch.setattr(settings, "postgres_dsn", "postgresql://nobody@127.0.0.1:1/none")
+        with pytest.raises(Exception, match="Postgres unreachable"):
+            await calibration_for("pka", "v1", unit="pKa")
 
 
 # --- AGT-3: file ingress ----------------------------------------------------------------------

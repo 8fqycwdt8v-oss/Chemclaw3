@@ -75,9 +75,16 @@ def tanimoto_bits(a: int, b: int) -> float:
     **Split out because the parse, not the popcount, is what a pairwise sweep repeats.** Each
     bitstring is 2,048 characters, and `int(bits, 2)` over one costs more than the two `bit_count`s
     that follow it — so a clustering pass over n fingerprints parsed n² strings to make n²/2
-    comparisons of n distinct values (`memory/similarity.cluster_by_similarity`), and a query over a
-    store re-parsed the *query* once per stored record. Callers that hold many comparisons parse
-    once and call this; `tanimoto` stays the two-string form for everyone else.
+    comparisons of n distinct values, and a query over a store re-parsed the *query* once per
+    stored record. Callers that hold many comparisons parse once and call this; `tanimoto` stays
+    the two-string form for everyone else.
+
+    **The clustering pass is no longer one of those callers**, and the example is removed rather
+    than corrected: `memory/similarity.cluster_by_similarity` now takes the whole comparison into
+    scipy sparse arithmetic and does not call this at all. The split still earns its keep for
+    `InMemoryFingerprintStore` below, which is a differential oracle rather than a backend
+    (`D-2026-09-07-a-reference-implementation-is-a-test-oracle-not-a-backend`) — its readability is
+    the point, and it is what the SQL is asserted against.
 
     No width check here: an int has no width, so the only place that check can be made is where the
     strings still are. Callers of this form are pre-parsing their own equal-width corpus.

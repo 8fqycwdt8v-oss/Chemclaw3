@@ -16,7 +16,6 @@ The tests below hold three claims that are easy to state and easy to get subtly 
 """
 
 import ast
-import asyncio
 from pathlib import Path
 
 import pytest
@@ -66,7 +65,7 @@ def test_no_structural_domain_check_is_reimplemented_here() -> None:
     )
 
 
-def test_an_out_of_domain_flag_survives_the_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_an_out_of_domain_flag_survives_the_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     """The row's own example, end to end — and the half of it this repository still owns.
 
     The ESOL prediction itself is the calculation server's since
@@ -98,19 +97,16 @@ def test_an_out_of_domain_flag_survives_the_cache(monkeypatch: pytest.MonkeyPatc
     server = install(monkeypatch, FakeCalcServer())
     server.overrides["predict_solubility"] = lambda _arguments: salt_payload
 
-    async def _run() -> None:
-        store = InMemoryStore()
-        fresh, _ = await cached_remote(store, "predict_solubility", {"smiles": "CCN.Cl"})
-        served, cached = await cached_remote(store, "predict_solubility", {"smiles": "CCN.Cl"})
-        assert cached is True
-        first = SolubilityResult.model_validate(fresh)
-        second = SolubilityResult.model_validate(served)
-        assert second.estimate is not None
-        assert second.estimate.trustworthy is False
-        assert second.estimate.domain_reasons, "an out-of-domain prediction gave no reason"
-        assert second.estimate == first.estimate
-
-    asyncio.run(_run())
+    store = InMemoryStore()
+    fresh, _ = await cached_remote(store, "predict_solubility", {"smiles": "CCN.Cl"})
+    served, cached = await cached_remote(store, "predict_solubility", {"smiles": "CCN.Cl"})
+    assert cached is True
+    first = SolubilityResult.model_validate(fresh)
+    second = SolubilityResult.model_validate(served)
+    assert second.estimate is not None
+    assert second.estimate.trustworthy is False
+    assert second.estimate.domain_reasons, "an out-of-domain prediction gave no reason"
+    assert second.estimate == first.estimate
 
 
 def test_the_trust_rides_on_the_value_line_because_the_excerpt_truncates() -> None:

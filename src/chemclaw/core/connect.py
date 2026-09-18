@@ -145,6 +145,78 @@ def resolve_driver(reference: str, *, error: type[Exception], what: str = "drive
     return driver
 
 
+#: The annotations `option_type_mismatch` is willing to judge, and what a YAML scalar may be for
+#: each. Deliberately only the four scalars: a union, an `Optional`, a container or a bare
+#: parameter is a shape a one-line check cannot get right, and a checker that guesses at those
+#: would refuse correct manifests, which is worse than the hole it closes.
+#:
+#: `bool` accepts only `bool`. That is stricter than Python and it is the whole point — `0` and
+#: `1` read as a flag by a human and arrive as `int`, and accepting them would mean accepting the
+#: coercion that hides the defect this exists for. `int` refuses `bool` for the mirror reason:
+#: `True` is an `int` in Python and is never an integer anybody wrote down.
+_ACCEPTED_SCALARS: dict[type, tuple[type, ...]] = {
+    bool: (bool,),
+    int: (int,),
+    float: (int, float),
+    str: (str,),
+}
+
+
+def option_type_mismatch(target: Any, options: Mapping[str, Any]) -> str:
+    """Empty if every option's value fits the parameter's annotation; a message naming the first.
+
+    **The half of "the callable's signature is the schema" that was never read.**
+    `signature_mismatch` binds names with empty strings — its own docstring says "values are
+    irrelevant here" — which is right for a `connection:` block, where the values are addresses and
+    secrets and the question is only whether the driver takes the keyword. It is wrong for a
+    `config:` block, whose values are *behaviour*.
+
+    Measured on the shipped `commitments-json` source
+    (`D-2026-09-16-a-truthy-string-is-not-the-flag-somebody-wrote`): `snapshot: "false"` in a
+    manifest parses as the string `'false'`, which is truthy, so the flag that licenses a
+    **destructive** sweep is armed by writing the word that turns it off. `snapshot: false` and
+    `snapshot: 0` behave; `"false"` and `"no"` invert. Nothing in either validator or the build path
+    could see it, because both asked what the callable *accepts* and never what it was *given*.
+
+    Only the four scalar annotations in `_ACCEPTED_SCALARS` are judged, and anything else — a
+    union, a container, an unannotated parameter, a string annotation this function will not
+    evaluate — is passed over rather than guessed at. A checker that refuses a correct manifest is
+    worse than this hole, and the hole is specific: every wrong spelling of a `bool` is *silently*
+    the opposite of what was written, which is not true of the other three.
+
+    Args:
+        target: The callable the options will be passed to.
+        options: The manifest's block, as parsed.
+
+    Returns:
+        An empty string when nothing is judged wrong, else one sentence naming the key, what was
+        written, and what the parameter is annotated as.
+    """
+    try:
+        parameters = inspect.signature(target).parameters
+    except (TypeError, ValueError):
+        # Same reason `signature_mismatch` returns empty: a callable with no introspectable
+        # signature is "nothing to say", not a failure. A C `connect` is the ordinary case.
+        return ""
+    for key, value in options.items():
+        parameter = parameters.get(key)
+        if parameter is None:
+            continue  # `signature_mismatch` owns the unknown-key case, and names it better.
+        accepted = _ACCEPTED_SCALARS.get(parameter.annotation)
+        if accepted is None or isinstance(value, accepted):
+            continue
+        written = f"{value!r}"
+        got = type(value).__name__
+        article = "an" if got[0] in "aeiou" else "a"
+        return (
+            f"{key}={written} is {article} {got} where {parameter.annotation.__name__} is "
+            f"declared. A manifest value reaches the callable exactly as YAML parsed it, so "
+            f"{written} is not coerced — and for a flag that means a quoted word is truthy and "
+            f"does the opposite of what it says. Write a flag as `true` or `false`."
+        )
+    return ""
+
+
 def signature_mismatch(driver: Any, connection: Mapping[str, Any]) -> str:
     """Empty if `driver` accepts this block's keys; a message naming what it will not take if not.
 

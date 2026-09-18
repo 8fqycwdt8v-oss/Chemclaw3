@@ -6,8 +6,6 @@ generic fingerprint store, so ranking correctness is already covered by test_mol
 we prove the DRFP-specific fingerprinting and that it plugs into the shared store.
 """
 
-import asyncio
-
 import pytest
 from drfp import DrfpEncoder
 
@@ -54,27 +52,23 @@ def test_empty_fingerprint_raises() -> None:
         drfp_bitstring(">>>")
 
 
-def test_find_similar_reactions_ranks_by_tanimoto() -> None:
+async def test_find_similar_reactions_ranks_by_tanimoto() -> None:
     """A reaction query returns the most similar reactions first, filtering the unrelated."""
+    store = InMemoryFingerprintStore()
+    for rid, rxn in [
+        ("ethyl", _ESTER_ETHYL),
+        ("propyl", _ESTER_PROPYL),
+        ("butyl", _ESTER_BUTYL),
+        ("halogenation", _HALOGENATION),
+    ]:
+        await store.add(record_for_reaction(rid, rxn))
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        for rid, rxn in [
-            ("ethyl", _ESTER_ETHYL),
-            ("propyl", _ESTER_PROPYL),
-            ("butyl", _ESTER_BUTYL),
-            ("halogenation", _HALOGENATION),
-        ]:
-            await store.add(record_for_reaction(rid, rxn))
-
-        hits = (await find_similar_reactions(store, _ESTER_ETHYL, threshold=0.1)).hits
-        assert hits[0].id == "ethyl"  # exact match ranks first
-        assert hits[0].similarity == pytest.approx(1.0)
-        assert "halogenation" not in {h.id for h in hits}  # unrelated reaction excluded
-        assert all(hits[i].similarity >= hits[i + 1].similarity for i in range(len(hits) - 1))
-        assert hits[0].label == _ESTER_ETHYL  # the label carries the reaction SMILES
-
-    asyncio.run(_run())
+    hits = (await find_similar_reactions(store, _ESTER_ETHYL, threshold=0.1)).hits
+    assert hits[0].id == "ethyl"  # exact match ranks first
+    assert hits[0].similarity == pytest.approx(1.0)
+    assert "halogenation" not in {h.id for h in hits}  # unrelated reaction excluded
+    assert all(hits[i].similarity >= hits[i + 1].similarity for i in range(len(hits) - 1))
+    assert hits[0].label == _ESTER_ETHYL  # the label carries the reaction SMILES
 
 
 # --- The agent slot has to change the bits, not just the notation --------------------------------
@@ -212,7 +206,7 @@ def test_the_definition_retires_rows_built_under_the_old_encoding() -> None:
 # --- REV-1: a query is standardized the same way the index is ------------------------------------
 
 
-def test_a_charged_species_query_matches_the_row_indexed_from_its_neutral_form() -> None:
+async def test_a_charged_species_query_matches_the_row_indexed_from_its_neutral_form() -> None:
     """A query spelling one reagent as its charged form still finds the standardized row.
 
     The index is built from `transformation_smiles()`, which runs every species through
@@ -221,57 +215,49 @@ def test_a_charged_species_query_matches_the_row_indexed_from_its_neutral_form()
     argued: acetate and acetic acid are different molecules to a DRFP that has not standardized
     them, so a match here can only come from the query being standardized the same way.
     """
+    store = InMemoryFingerprintStore()
+    indexed = OrdReaction(
+        reaction_id="ester",
+        inputs=[
+            Component(smiles="CCO", role=Role.REACTANT),
+            Component(smiles="CC(=O)O", role=Role.REACTANT),
+        ],
+        outcomes=[Component(smiles="CCOC(C)=O", role=Role.PRODUCT)],
+        provenance="eln:chemist-a",
+    )
+    await store.add(record_for_reaction("ester", indexed.transformation_smiles()))
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        indexed = OrdReaction(
-            reaction_id="ester",
-            inputs=[
-                Component(smiles="CCO", role=Role.REACTANT),
-                Component(smiles="CC(=O)O", role=Role.REACTANT),
-            ],
-            outcomes=[Component(smiles="CCOC(C)=O", role=Role.PRODUCT)],
-            provenance="eln:chemist-a",
-        )
-        await store.add(record_for_reaction("ester", indexed.transformation_smiles()))
-
-        # The query spells the acid as its conjugate base (acetate), not the neutral form the
-        # index was built from.
-        charged_query = "CCO.CC(=O)[O-]>>CCOC(C)=O"
-        hits = (await find_similar_reactions(store, charged_query, threshold=0.99)).hits
-        assert hits and hits[0].id == "ester"
-        assert hits[0].similarity == pytest.approx(1.0)
-
-    asyncio.run(_run())
+    # The query spells the acid as its conjugate base (acetate), not the neutral form the
+    # index was built from.
+    charged_query = "CCO.CC(=O)[O-]>>CCOC(C)=O"
+    hits = (await find_similar_reactions(store, charged_query, threshold=0.99)).hits
+    assert hits and hits[0].id == "ester"
+    assert hits[0].similarity == pytest.approx(1.0)
 
 
-def test_a_tautomer_query_matches_the_row_indexed_from_its_canonical_tautomer() -> None:
+async def test_a_tautomer_query_matches_the_row_indexed_from_its_canonical_tautomer() -> None:
     """A query spelling one reagent as another tautomer still finds the standardized row.
 
     Acetylacetone's enol and keto forms are different SMILES for the same substance;
     `standard_smiles` canonicalizes to one, and a query in the other tautomer must land on the
     same row.
     """
+    store = InMemoryFingerprintStore()
+    indexed = OrdReaction(
+        reaction_id="acac-amine",
+        inputs=[
+            Component(smiles="CC(=O)CC(C)=O", role=Role.REACTANT),  # keto
+            Component(smiles="CCN", role=Role.REACTANT),
+        ],
+        outcomes=[Component(smiles="CCNC(C)=CC(C)=O", role=Role.PRODUCT)],
+        provenance="eln:chemist-a",
+    )
+    await store.add(record_for_reaction("acac-amine", indexed.transformation_smiles()))
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        indexed = OrdReaction(
-            reaction_id="acac-amine",
-            inputs=[
-                Component(smiles="CC(=O)CC(C)=O", role=Role.REACTANT),  # keto
-                Component(smiles="CCN", role=Role.REACTANT),
-            ],
-            outcomes=[Component(smiles="CCNC(C)=CC(C)=O", role=Role.PRODUCT)],
-            provenance="eln:chemist-a",
-        )
-        await store.add(record_for_reaction("acac-amine", indexed.transformation_smiles()))
-
-        enol_query = "CC(O)=CC(C)=O.CCN>>CCNC(C)=CC(C)=O"
-        hits = (await find_similar_reactions(store, enol_query, threshold=0.99)).hits
-        assert hits and hits[0].id == "acac-amine"
-        assert hits[0].similarity == pytest.approx(1.0)
-
-    asyncio.run(_run())
+    enol_query = "CC(O)=CC(C)=O.CCN>>CCNC(C)=CC(C)=O"
+    hits = (await find_similar_reactions(store, enol_query, threshold=0.99)).hits
+    assert hits and hits[0].id == "acac-amine"
+    assert hits[0].similarity == pytest.approx(1.0)
 
 
 def test_an_already_standardized_query_is_bits_neutral() -> None:
@@ -290,51 +276,39 @@ def test_an_already_standardized_query_is_bits_neutral() -> None:
 # --- An empty index must not answer "we have never run this" -------------------------------------
 
 
-def test_an_empty_reaction_index_reports_that_the_search_was_not_run() -> None:
+async def test_an_empty_reaction_index_reports_that_the_search_was_not_run() -> None:
     """The live-run defect, on the exact tool that produced it (finding 6 of the grounded run).
 
     `similar_reactions` returning `{"result": []}` over a never-backfilled table was read as "we
     have no precedent for this transformation". The empty index must say so itself.
     """
-
-    async def _run() -> None:
-        search = await find_similar_reactions(InMemoryFingerprintStore(), _ESTER_ETHYL)
-        assert search.hits == []
-        assert search.index_empty is True
-        payload = search.model_dump()  # what MCP ships to the model
-        assert "SEARCH NOT RUN" in payload["verdict"]
-        assert "NOT evidence" in payload["verdict"]
-
-    asyncio.run(_run())
+    search = await find_similar_reactions(InMemoryFingerprintStore(), _ESTER_ETHYL)
+    assert search.hits == []
+    assert search.index_empty is True
+    payload = search.model_dump()  # what MCP ships to the model
+    assert "SEARCH NOT RUN" in payload["verdict"]
+    assert "NOT evidence" in payload["verdict"]
 
 
-def test_a_populated_reaction_index_with_no_match_is_a_genuine_negative() -> None:
+async def test_a_populated_reaction_index_with_no_match_is_a_genuine_negative() -> None:
     """An indexed corpus that simply holds nothing similar reads as a real answer, not a gap."""
-
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        await store.add(record_for_reaction("halogenation", _HALOGENATION))
-        search = await find_similar_reactions(store, _ESTER_ETHYL, threshold=0.9)
-        assert search.hits == []
-        assert search.index_empty is False
-        assert "genuine negative" in search.verdict
-        assert "SEARCH NOT RUN" not in search.verdict
-
-    asyncio.run(_run())
+    store = InMemoryFingerprintStore()
+    await store.add(record_for_reaction("halogenation", _HALOGENATION))
+    search = await find_similar_reactions(store, _ESTER_ETHYL, threshold=0.9)
+    assert search.hits == []
+    assert search.index_empty is False
+    assert "genuine negative" in search.verdict
+    assert "SEARCH NOT RUN" not in search.verdict
 
 
-def test_a_reaction_hit_is_unaffected() -> None:
+async def test_a_reaction_hit_is_unaffected() -> None:
     """Regression guard: a real precedent still comes back, with the index not flagged empty."""
-
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        await store.add(record_for_reaction("ethyl", _ESTER_ETHYL))
-        search = await find_similar_reactions(store, _ESTER_ETHYL, threshold=0.1)
-        assert [h.id for h in search.hits] == ["ethyl"]
-        assert search.index_empty is False
-        assert search.verdict.startswith("1 indexed reaction(s) matched")
-
-    asyncio.run(_run())
+    store = InMemoryFingerprintStore()
+    await store.add(record_for_reaction("ethyl", _ESTER_ETHYL))
+    search = await find_similar_reactions(store, _ESTER_ETHYL, threshold=0.1)
+    assert [h.id for h in search.hits] == ["ethyl"]
+    assert search.index_empty is False
+    assert search.verdict.startswith("1 indexed reaction(s) matched")
 
 
 # --- one entry id, two ELNs ----------------------------------------------------------------------
@@ -345,7 +319,7 @@ def _sited(reaction_id: str, source: str, reaction_smiles: str) -> FingerprintRe
     return record_for_reaction(reaction_id, reaction_smiles).model_copy(update={"source": source})
 
 
-def test_two_sources_sharing_an_entry_id_keep_two_fingerprints() -> None:
+async def test_two_sources_sharing_an_entry_id_keep_two_fingerprints() -> None:
     """`EXP-1001` at two sites is two experiments, and the index key has to be able to say so.
 
     Keyed on the bare id, the second ingest overwrote the first and the first site's chemistry
@@ -355,21 +329,17 @@ def test_two_sources_sharing_an_entry_id_keep_two_fingerprints() -> None:
     reference the Postgres backend is required to match, and `tests/test_rxnfp_postgres.py` runs
     the identical scenario in SQL.
     """
+    store = InMemoryFingerprintStore()
+    await store.add(_sited("EXP-1001", "eln-a", _ESTER_ETHYL))
+    await store.add(_sited("EXP-1001", "eln-b", _HALOGENATION))
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        await store.add(_sited("EXP-1001", "eln-a", _ESTER_ETHYL))
-        await store.add(_sited("EXP-1001", "eln-b", _HALOGENATION))
-
-        assert len(await store.all_records()) == 2, "one site's chemistry was overwritten"
-        for smiles, source in ((_ESTER_ETHYL, "eln-a"), (_HALOGENATION, "eln-b")):
-            hits = (await find_similar_reactions(store, smiles, threshold=0.99)).hits
-            assert [(h.id, h.source) for h in hits] == [("EXP-1001", source)]
-
-    asyncio.run(_run())
+    assert len(await store.all_records()) == 2, "one site's chemistry was overwritten"
+    for smiles, source in ((_ESTER_ETHYL, "eln-a"), (_HALOGENATION, "eln-b")):
+        hits = (await find_similar_reactions(store, smiles, threshold=0.99)).hits
+        assert [(h.id, h.source) for h in hits] == [("EXP-1001", source)]
 
 
-def test_a_hit_carries_the_source_a_citation_would_need() -> None:
+async def test_a_hit_carries_the_source_a_citation_would_need() -> None:
     """A search knows which site it matched, which a bare `reaction-<id>` citation cannot say.
 
     The *spelling* that consumed this is gone: `note_id_for_reaction` had an optional `source`
@@ -379,61 +349,49 @@ def test_a_hit_carries_the_source_a_citation_would_need() -> None:
     such a citation would be built *from* on the day those readers accept one, and it is what
     `ingest.eln.records._one_of` refuses to guess at.
     """
+    store = InMemoryFingerprintStore()
+    await store.add(_sited("EXP-1001", "eln-a", _ESTER_ETHYL))
+    await store.add(_sited("EXP-1001", "eln-b", _HALOGENATION))
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        await store.add(_sited("EXP-1001", "eln-a", _ESTER_ETHYL))
-        await store.add(_sited("EXP-1001", "eln-b", _HALOGENATION))
-
-        matched = {
-            (hit.id, hit.source)
-            for smiles in (_ESTER_ETHYL, _HALOGENATION)
-            for hit in (await find_similar_reactions(store, smiles, threshold=0.99)).hits
-        }
-        assert matched == {("EXP-1001", "eln-a"), ("EXP-1001", "eln-b")}
-        assert note_id_for_reaction("EXP-1001") == "reaction-EXP-1001"
-
-    asyncio.run(_run())
+    matched = {
+        (hit.id, hit.source)
+        for smiles in (_ESTER_ETHYL, _HALOGENATION)
+        for hit in (await find_similar_reactions(store, smiles, threshold=0.99)).hits
+    }
+    assert matched == {("EXP-1001", "eln-a"), ("EXP-1001", "eln-b")}
+    assert note_id_for_reaction("EXP-1001") == "reaction-EXP-1001"
 
 
-def test_a_single_source_deployment_is_unchanged() -> None:
+async def test_a_single_source_deployment_is_unchanged() -> None:
     """One enabled ELN has nothing to disambiguate, and pays nothing for the key change.
 
     One row per entry id, and the citation is the bare `reaction-<id>` every merged note already
     carries — the property that makes this migration safe to apply to a deployment that will never
     enable a second source.
     """
+    store = InMemoryFingerprintStore()
+    await store.add(_sited("EXP-1001", "eln-a", _ESTER_ETHYL))
+    await store.add(_sited("EXP-1001", "eln-a", _ESTER_PROPYL))  # the entry, amended
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        await store.add(_sited("EXP-1001", "eln-a", _ESTER_ETHYL))
-        await store.add(_sited("EXP-1001", "eln-a", _ESTER_PROPYL))  # the entry, amended
-
-        records = await store.all_records()
-        assert len(records) == 1
-        assert records[0].label == _ESTER_PROPYL
-        assert note_id_for_reaction("EXP-1001") == "reaction-EXP-1001"
-
-    asyncio.run(_run())
+    records = await store.all_records()
+    assert len(records) == 1
+    assert records[0].label == _ESTER_PROPYL
+    assert note_id_for_reaction("EXP-1001") == "reaction-EXP-1001"
 
 
-def test_a_sourced_write_supersedes_the_row_migration_063_could_not_name() -> None:
+async def test_a_sourced_write_supersedes_the_row_migration_063_could_not_name() -> None:
     """A row stored before the key had a source half is replaced, never duplicated.
 
     `063` backfills every row a single-claimant `reaction_labels` row can name; what it leaves
     under the empty source would otherwise sit beside its own replacement with identical bits and
     one label, so a similarity search would report two precedents where a chemist has one run.
     """
+    store = InMemoryFingerprintStore()
+    await store.add(record_for_reaction("EXP-1001", _ESTER_ETHYL))  # pre-063 row
+    await store.add(_sited("EXP-1001", "eln-a", _ESTER_ETHYL))
 
-    async def _run() -> None:
-        store = InMemoryFingerprintStore()
-        await store.add(record_for_reaction("EXP-1001", _ESTER_ETHYL))  # pre-063 row
-        await store.add(_sited("EXP-1001", "eln-a", _ESTER_ETHYL))
-
-        hits = (await find_similar_reactions(store, _ESTER_ETHYL, threshold=0.99)).hits
-        assert [(h.id, h.source) for h in hits] == [("EXP-1001", "eln-a")]
-
-    asyncio.run(_run())
+    hits = (await find_similar_reactions(store, _ESTER_ETHYL, threshold=0.99)).hits
+    assert [(h.id, h.source) for h in hits] == [("EXP-1001", "eln-a")]
 
 
 # --- atom maps are reaction bookkeeping, not structure (D-2026-09-09) --------------------------

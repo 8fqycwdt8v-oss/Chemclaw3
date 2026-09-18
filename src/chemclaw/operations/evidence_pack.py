@@ -51,9 +51,11 @@ Three limits are carried **on the object**, in `limits`, rather than left for a 
   `Coverage` exists to make one module over.
 """
 
-from typing import Any
+from datetime import datetime
+from typing import Annotated, Any, TypeVar
 
-from pydantic import BaseModel, Field
+from psycopg.rows import class_row
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -80,15 +82,49 @@ LIMITS: tuple[str, ...] = (
 )
 
 
+def _stamp(value: Any) -> Any:
+    """A timestamp column as this pack's ISO string, leaving anything else to be validated.
+
+    **A validator rather than a SQL-side cast, because the string is on the wire.** A pack is read
+    by `agent/evidence_tools.py` and served as JSON; `recorded_at::text` would have spelled the
+    same instant `2026-09-16 10:00:00+00` where every pack ever assembled carries
+    `2026-09-16T10:00:00+00:00`. A row factory binds by name and converts nothing, so the
+    conversion moves here — the one place it can move without changing what a reader is handed.
+    """
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return "" if value is None else value
+
+
+#: A `TIMESTAMPTZ` column carried as the ISO string a pack has always exposed. Empty for a NULL,
+#: which is the reading `LIMITS` already gives a gap: recorded nothing, not "happened at no time".
+Stamp = Annotated[str, BeforeValidator(_stamp)]
+
+#: `audit_events.tool` is the model's own string rather than a registered name, so it is bounded
+#: **on the field** rather than at one of its two readers. That placement is the point: the note on
+#: `assemble` used to record that the sanitisation "went into one reader of this column and not its
+#: sibling in the same package", and a bound applied to one reader is not a bound. Now the model
+#: cannot hold an unsanitised name, whoever builds it — including `class_row`, which builds one
+#: straight out of a row and calls no code of this module's on the way.
+SafeToolName = Annotated[str, BeforeValidator(lambda value: safe_tool_name(str(value)))]
+
+
 class ToolCall(BaseModel):
     """One recorded call: what ran, how it ended, and how long it took."""
 
-    tool: str
+    #: `extra="forbid"` because this model is built by `class_row` straight out of a SELECT: with
+    #: pydantic's default a column nobody added a field for is *ignored*, so the read that was
+    #: supposed to catch the SELECT and the model drifting apart would silently drop it. Forbidding
+    #: makes the drift an error naming the column, which is the whole reason for the row factory.
+    model_config = ConfigDict(extra="forbid")
+
+    tool: SafeToolName
     outcome: str
     actor: str
-    at: str
+    at: Stamp
     latency_ms: float = 0.0
     #: Why the call did not run, for a refusal. The gates working are part of the record.
+    #: Restricted to refusals in the SELECT rather than after it — see `assemble`.
     detail: str = ""
 
 
@@ -104,6 +140,12 @@ class PackJob(BaseModel):
     table; the pack reproduced that.
     """
 
+    #: `extra="forbid"` because this model is built by `class_row` straight out of a SELECT: with
+    #: pydantic's default a column nobody added a field for is *ignored*, so the read that was
+    #: supposed to catch the SELECT and the model drifting apart would silently drop it. Forbidding
+    #: makes the drift an error naming the column, which is the whole reason for the row factory.
+    model_config = ConfigDict(extra="forbid")
+
     job_id: str
     connector: str
     job: str
@@ -113,11 +155,17 @@ class PackJob(BaseModel):
     state: str = ""
     failure_reason: str = ""
     note_id: str = ""
-    completed_at: str = ""
+    completed_at: Stamp = ""
 
 
 class PackEffect(BaseModel):
     """One change made in a system this deployment does not own."""
+
+    #: `extra="forbid"` because this model is built by `class_row` straight out of a SELECT: with
+    #: pydantic's default a column nobody added a field for is *ignored*, so the read that was
+    #: supposed to catch the SELECT and the model drifting apart would silently drop it. Forbidding
+    #: makes the drift an error naming the column, which is the whole reason for the row factory.
+    model_config = ConfigDict(extra="forbid")
 
     effect_id: str
     system: str
@@ -126,7 +174,7 @@ class PackEffect(BaseModel):
     state: str
     approved_by: str = ""
     external_ref: str = ""
-    attempted_at: str = ""
+    attempted_at: Stamp = ""
 
 
 class PackTurn(BaseModel):
@@ -150,10 +198,16 @@ class PackTurn(BaseModel):
     value.
     """
 
+    #: `extra="forbid"` because this model is built by `class_row` straight out of a SELECT: with
+    #: pydantic's default a column nobody added a field for is *ignored*, so the read that was
+    #: supposed to catch the SELECT and the model drifting apart would silently drop it. Forbidding
+    #: makes the drift an error naming the column, which is the whole reason for the row factory.
+    model_config = ConfigDict(extra="forbid")
+
     correlation_id: str
     outcome: str
     completed: bool = True
-    at: str = ""
+    at: Stamp = ""
     compacted: bool = False
     context_unreducible: bool = False
     answer_confidence: float | None = None
@@ -179,10 +233,16 @@ class PackTurn(BaseModel):
 class PackApproval(BaseModel):
     """One plan a human approved or refused, bound to the plan they were shown."""
 
+    #: `extra="forbid"` because this model is built by `class_row` straight out of a SELECT: with
+    #: pydantic's default a column nobody added a field for is *ignored*, so the read that was
+    #: supposed to catch the SELECT and the model drifting apart would silently drop it. Forbidding
+    #: makes the drift an error naming the column, which is the whole reason for the row factory.
+    model_config = ConfigDict(extra="forbid")
+
     plan_hash: str
     approved: bool
     actor: str
-    at: str = ""
+    at: Stamp = ""
 
 
 class EvidencePack(BaseModel):
@@ -250,17 +310,30 @@ class EvidencePack(BaseModel):
         return not (self.tool_calls or self.jobs or self.effects or self.approvals or self.turns)
 
 
-async def _rows(sql: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
-    """Every row the query returned, as plain tuples."""
+_Section = TypeVar("_Section", bound=BaseModel)
+
+
+async def _section(model: type[_Section], sql: str, params: tuple[Any, ...]) -> list[_Section]:
+    """Every row the query returned, already the model it belongs to.
+
+    **The section models are built by name, which is what the five comprehensions this replaced
+    could not do.** They unpacked tuples of up to ten elements — nine of `PackJob`'s ten adjacent
+    and all `TEXT` — so the SELECT list's order was restated a second time in Python and reordering
+    the SELECT swapped fields silently, type-checked, and produced a plausible-looking pack. That
+    is the fault this whole module exists to be trusted against. `class_row` passes each selected
+    column as a keyword argument, so the SELECT list and the model are one declaration: a column
+    whose name is not a field is a `ValidationError` naming it, at the read.
+
+    Raises:
+        pydantic.ValidationError: A SELECT here and its model have stopped describing the same row.
+            Deliberately uncaught: a pack that cannot be assembled must not be returned partially
+            assembled, because `is_empty` and `truncated` are how a reader is told what the pack
+            does *not* say, and neither can express "this section failed to build".
+    """
     async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
-        async with conn.cursor() as cur:
+        async with conn.cursor(row_factory=class_row(model)) as cur:
             await cur.execute(sql, params)
-            return [tuple(row) for row in await cur.fetchall()]
-
-
-def _stamp(value: Any) -> str:
-    """An ISO timestamp, or '' when the column was NULL."""
-    return value.isoformat() if value is not None else ""
+            return await cur.fetchall()
 
 
 async def assemble(session_id: str, *, limit: int = 200) -> EvidencePack:
@@ -271,117 +344,49 @@ async def assemble(session_id: str, *, limit: int = 200) -> EvidencePack:
     join would silently drop a row whose partner had been disposed of under a different retention
     rule.
     """
-    calls = [
-        ToolCall(
-            # Bounded the same way `activity.tool_usage` bounds it, and for the same reason:
-            # `audit_events.tool` is the model's raw string, not a registered name. The
-            # sanitisation went into one reader of this column and not its sibling in the same
-            # package — the ownership gate narrows this to same-session replay rather than
-            # cross-session, but the pack is also the artefact a person reads.
-            tool=safe_tool_name(str(tool)),
-            outcome=str(outcome),
-            actor=str(actor),
-            at=_stamp(ts),
-            latency_ms=float(latency or 0.0),
-            detail=str(detail or "") if str(outcome) == "refused" else "",
-        )
-        for tool, outcome, actor, ts, latency, detail in await _rows(
-            "SELECT tool, outcome, actor, ts, latency_ms, detail FROM audit_events "
-            "WHERE session_id = %s ORDER BY ts LIMIT %s",
-            (session_id, limit),
-        )
-    ]
-    jobs = [
-        PackJob(
-            job_id=str(job_id),
-            connector=str(connector),
-            job=str(job),
-            rationale=str(rationale),
-            requested_by=str(requested_by),
-            summary=str(summary),
-            state=str(state or ""),
-            failure_reason=str(failure_reason or ""),
-            note_id=str(note_id or ""),
-            completed_at=_stamp(completed_at),
-        )
-        for (
-            job_id,
-            connector,
-            job,
-            rationale,
-            requested_by,
-            summary,
-            state,
-            failure_reason,
-            note_id,
-            completed_at,
-        ) in (
-            await _rows(
-                "SELECT job_id, connector, job, rationale, requested_by, summary, state, "
-                "failure_reason, note_id, completed_at FROM job_records WHERE session_id = %s "
-                "ORDER BY completed_at LIMIT %s",
-                (session_id, limit),
-            )
-        )
-    ]
-    effects = [
-        PackEffect(
-            effect_id=str(effect_id),
-            system=str(system),
-            job=str(job),
-            reversal=str(reversal),
-            state=str(state),
-            approved_by=str(approved_by or ""),
-            external_ref=str(external_ref or ""),
-            attempted_at=_stamp(attempted_at),
-        )
-        for effect_id, system, job, reversal, state, approved_by, external_ref, attempted_at in (
-            await _rows(
-                "SELECT effect_id, system, job, reversal, state, approved_by, external_ref, "
-                "attempted_at FROM effects WHERE session_id = %s ORDER BY attempted_at LIMIT %s",
-                (session_id, limit),
-            )
-        )
-    ]
-    approvals = [
-        PackApproval(
-            plan_hash=str(plan_hash), approved=bool(approved), actor=str(actor), at=_stamp(at)
-        )
-        for plan_hash, approved, actor, at in await _rows(
-            "SELECT plan_hash, approved, actor, decided_at FROM plan_approvals "
-            "WHERE session_id = %s ORDER BY decided_at LIMIT %s",
-            (session_id, limit),
-        )
-    ]
-    turns = [
-        PackTurn(
-            correlation_id=str(correlation_id),
-            outcome=str(outcome or "unknown"),
-            completed=bool(completed),
-            at=_stamp(recorded_at),
-            compacted=bool(compacted),
-            context_unreducible=bool(context_unreducible),
-            answer_confidence=None if confidence is None else float(confidence),
-            review_required=bool(review_required),
-            error_code=str(error_code or ""),
-        )
-        for (
-            correlation_id,
-            outcome,
-            completed,
-            recorded_at,
-            compacted,
-            context_unreducible,
-            confidence,
-            review_required,
-            error_code,
-        ) in await _rows(
-            "SELECT correlation_id, outcome, completed, recorded_at, compacted, "
-            "context_unreducible, answer_confidence, review_required, error_code "
-            "FROM turn_costs WHERE session_id = %s ORDER BY recorded_at LIMIT %s",
-            (session_id, limit),
-        )
-    ]
+    calls = await _section(
+        ToolCall,
+        # **`detail` is narrowed to refusals in the statement rather than after it.** It used to be
+        # blanked in the comprehension, and a comprehension is exactly what a row factory removes;
+        # a `CASE` keeps the restriction where it cannot be lost and makes it visible to anyone
+        # reading the query. `ts AS at` because `class_row` binds by name and the model's field is
+        # `at` — the column keeps the name the trail gave it.
+        "SELECT tool, outcome, actor, ts AS at, latency_ms, "
+        "CASE WHEN outcome = 'refused' THEN detail ELSE '' END AS detail "
+        "FROM audit_events WHERE session_id = %s ORDER BY ts LIMIT %s",
+        (session_id, limit),
+    )
+    jobs = await _section(
+        PackJob,
+        "SELECT job_id, connector, job, rationale, requested_by, summary, state, "
+        "failure_reason, note_id, completed_at FROM job_records WHERE session_id = %s "
+        "ORDER BY completed_at LIMIT %s",
+        (session_id, limit),
+    )
+    effects = await _section(
+        PackEffect,
+        "SELECT effect_id, system, job, reversal, state, approved_by, external_ref, "
+        "attempted_at FROM effects WHERE session_id = %s ORDER BY attempted_at LIMIT %s",
+        (session_id, limit),
+    )
+    approvals = await _section(
+        PackApproval,
+        "SELECT plan_hash, approved, actor, decided_at AS at FROM plan_approvals "
+        "WHERE session_id = %s ORDER BY decided_at LIMIT %s",
+        (session_id, limit),
+    )
+    turns = await _section(
+        PackTurn,
+        # `COALESCE(review_required, false)`: migration 082 added the column nullable, and a row
+        # written before it holds NULL where `PackTurn.review_required` is a `bool`. The
+        # comprehension this replaced coerced it with `bool(...)`, which read NULL as False — the
+        # same answer, and this is where it now has to be said out loud.
+        "SELECT correlation_id, outcome, completed, recorded_at AS at, compacted, "
+        "context_unreducible, answer_confidence, COALESCE(review_required, false) AS "
+        "review_required, error_code "
+        "FROM turn_costs WHERE session_id = %s ORDER BY recorded_at LIMIT %s",
+        (session_id, limit),
+    )
     # A section that came back exactly full is a section that may have more behind it. Reported
     # rather than inferred by the caller, because the caller cannot see `limit`.
     sections: list[tuple[str, int]] = [

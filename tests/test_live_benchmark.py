@@ -390,3 +390,97 @@ def test_a_decimal_is_not_a_choice_and_a_full_stop_is_not_a_decimal() -> None:
     # And the ordinary case still scores, so a lookbehind tightened until nothing
     # matches is red rather than quietly conservative.
     assert _chosen("the answer is 4", digits) == "4"
+
+
+def test_ask_reads_the_same_awkward_stream_the_probe_harness_does() -> None:
+    """The third of the three readers, against the fixture the other two are held to.
+
+    This one carried `line[5:].strip()` where the storm carried `line[6:]` and `evals/live` carried
+    a third spelling — three readings of one wire format, none of which handled a `data:` field
+    split over two lines. The cost here is specific: `_ask` collects the `answer` event and the
+    `error` event and nothing else, so a dropped `answer` frame scores as the model declining to
+    name an option, which `Answered.unparsed` reports as a fact about chemistry.
+
+    The fixture is `tests/test_live_probes.AWKWARD_STREAM`, imported rather than copied, so the
+    claim that the three agree is a shared object rather than three transcriptions of one.
+    """
+    import asyncio
+
+    import httpx
+
+    from chemclaw.cli.live_benchmark import _ask
+    from tests.test_live_probes import AWKWARD_STREAM, SSE_HEADERS
+
+    question = BenchmarkQuestion(
+        id="q1",
+        category="solvents",
+        question="which solvent?",
+        options=["ethanol", "toluene"],
+        answer="ethanol",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s1"})
+        return httpx.Response(200, content=AWKWARD_STREAM, headers=SSE_HEADERS)
+
+    async def go() -> tuple[str, str]:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://front-door"
+        ) as client:
+            return await _ask(client, question, None)
+
+    answer, error_code = asyncio.run(go())
+    assert answer == "the corpus says ethanol."
+    assert error_code == ""
+    # And the scorer gets what it needs out of it, which is the reason the frame mattering is not
+    # an internal detail: a dropped answer is an abstention in the published table.
+    assert _chosen(answer, question.options) == "ethanol"
+
+
+def test_ask_records_a_200_that_is_not_a_stream_as_an_empty_answer_rather_than_ending_the_run(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`_ask` holds no handler, so anything the reader raises costs every question already asked.
+
+    `_run` collects its `Answered` rows in a local list and `_ask` wraps nothing in a `try`, so an
+    exception out of the stream reader does not cost one question — it ends the run and takes the
+    whole partial result set with it. That is why the reader refuses a 200 whose content type is
+    not `text/event-stream` by yielding nothing and naming it in the log rather than by raising:
+    one misconfigured proxy in front of the front door should cost the benchmark one abstention,
+    not the afternoon.
+
+    The row it produces is the honest one — `chosen` empty, `unparsed` True — because the question
+    genuinely was not answered. `error_code` stays empty: no `error` event arrived, and inventing
+    one here would put a claim about the *agent* in the column that reads as one.
+    """
+    import asyncio
+    import logging
+
+    import httpx
+
+    from chemclaw.cli.live_benchmark import _ask
+
+    question = BenchmarkQuestion(
+        id="q1",
+        category="solvents",
+        question="which solvent?",
+        options=["ethanol", "toluene"],
+        answer="ethanol",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s1"})
+        return httpx.Response(200, json={"detail": "a proxy answered instead"})
+
+    async def go() -> tuple[str, str]:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://front-door"
+        ) as client:
+            return await _ask(client, question, None)
+
+    with caplog.at_level(logging.WARNING, logger="chemclaw.evals.live"):
+        answer, error_code = asyncio.run(go())
+    assert (answer, error_code) == ("", "")
+    assert "application/json" in caplog.text

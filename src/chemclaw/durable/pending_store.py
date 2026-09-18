@@ -17,18 +17,46 @@ import json
 from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 
 import psycopg
-from psycopg.rows import TupleRow
-from pydantic import BaseModel, Field
+from psycopg.rows import TupleRow, class_row
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
 
 
+def _stamp(value: Any) -> Any:
+    """A timestamp column as this model's ISO string, leaving anything else to be validated.
+
+    **A validator rather than a SQL-side cast, because the string is on the wire.** These three
+    fields reach `GET /pending` and the agent's own inbox tool as `datetime.isoformat()` spells
+    them; `::text` in the SELECT would have converted them in the server and spelled them
+    differently, which is a change to an API response rather than to a row factory.
+    """
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return "" if value is None else value
+
+
+#: A `TIMESTAMPTZ` column carried as the ISO string this seam has always exposed. `answered_at` is
+#: nullable, and NULL reads as the empty string — which is what "still waiting" looks like here.
+Stamp = Annotated[str, BeforeValidator(_stamp)]
+
+
 class PendingRequest(BaseModel):
-    """One open or settled wait, as a surface reads it."""
+    """One open or settled wait, as a surface reads it.
+
+    Read back by `class_row`, so every field name here is a column name in `_COLUMNS` and in that
+    order: the two are one declaration rather than two that agreed by inspection.
+    """
+
+    #: `extra="forbid"` because this model is built by `class_row` straight out of a SELECT: with
+    #: pydantic's default a column nobody added a field for is *ignored*, so the read that was
+    #: supposed to catch the SELECT and the model drifting apart would silently drop it. Forbidding
+    #: makes the drift an error naming the column, which is the whole reason for the row factory.
+    model_config = ConfigDict(extra="forbid")
 
     request_id: str
     kind: str
@@ -38,12 +66,12 @@ class PendingRequest(BaseModel):
     requested_by: str = ""
     session_id: str = ""
     state: str = "waiting"
-    due_at: str = ""
+    due_at: Stamp = ""
     reminders: int = 0
-    answered_at: str = ""
+    answered_at: Stamp = ""
     answered_by: str = ""
     answer: dict[str, Any] = Field(default_factory=dict)
-    created_at: str = ""
+    created_at: Stamp = ""
     #: The knowledge notes the question rests on, so the answer route can ask whether they still
     #: hold (`kg/premise.py`). Read out of the row rather than recomputed from `subject`, because a
     #: re-ask may reword the question and the premise that was *validated* at ask time is the one an
@@ -319,36 +347,22 @@ async def record_reminder(request_id: str, count: int) -> None:
         await conn.execute(_REMIND, (count, request_id))
 
 
-def _row(values: tuple[Any, ...]) -> PendingRequest:
-    """One database row as the model a surface reads."""
-    return PendingRequest(
-        request_id=str(values[0]),
-        kind=str(values[1]),
-        subject=str(values[2]),
-        rationale=str(values[3]),
-        asked_of=str(values[4]),
-        requested_by=str(values[5]),
-        session_id=str(values[6]),
-        state=str(values[7]),
-        due_at=values[8].isoformat() if values[8] else "",
-        reminders=int(values[9]),
-        answered_at=values[10].isoformat() if values[10] else "",
-        answered_by=str(values[11]),
-        answer=dict(values[12] or {}),
-        created_at=values[13].isoformat() if values[13] else "",
-        premise_note_ids=list(values[14] or []),
-    )
-
-
 async def get_request(request_id: str) -> PendingRequest | None:
-    """One request by id, whatever state it is in."""
+    """One request by id, whatever state it is in.
+
+    Raises:
+        pydantic.ValidationError: `_COLUMNS` and `PendingRequest` have stopped describing the same
+            row. `answer` and `premise_note_ids` are `NOT NULL DEFAULT` in the table (076), so the
+            `or {}` / `or []` the positional builder carried had no reachable cause and is not
+            restated here; a NULL in either would be a schema this code should refuse rather than
+            paper over.
+    """
     async with _connect() as conn:
-        async with conn.cursor() as cur:
+        async with conn.cursor(row_factory=class_row(PendingRequest)) as cur:
             await cur.execute(
                 f"SELECT {_COLUMNS} FROM pending_requests WHERE request_id = %s", (request_id,)
             )
-            row = await cur.fetchone()
-    return _row(tuple(row)) if row else None
+            return await cur.fetchone()
 
 
 async def open_requests(
@@ -381,14 +395,18 @@ async def open_requests(
         params.append(routes)
     page = max(1, min(limit, _MAX_PAGE))
     async with _connect() as conn:
-        async with conn.cursor() as cur:
+        # Two cursors on one connection, which is still one transaction — a row factory is a
+        # property of the cursor, and the count is a bare scalar rather than a `PendingRequest`.
+        # The docstring's "same transaction" claim is about the connection and is unaffected.
+        async with conn.cursor(row_factory=class_row(PendingRequest)) as cur:
             await cur.execute(
                 f"SELECT {_COLUMNS} FROM pending_requests {where} ORDER BY due_at LIMIT %s",
                 (*params, page),
             )
-            rows = [_row(tuple(row)) for row in await cur.fetchall()]
-            await cur.execute(f"SELECT count(*) FROM pending_requests {where}", tuple(params))
-            counted = await cur.fetchone()
+            rows = await cur.fetchall()
+        async with conn.cursor() as counter:
+            await counter.execute(f"SELECT count(*) FROM pending_requests {where}", tuple(params))
+            counted = await counter.fetchone()
     return OpenRequests(
         requests=rows,
         total_waiting=int(counted[0]) if counted else len(rows),

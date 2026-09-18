@@ -661,7 +661,7 @@ def test_git_command_timeout_kills_the_child_and_raises(
     assert killed["value"] is True
 
 
-def test_a_cancelled_git_read_kills_its_child_like_every_other_git_command(
+async def test_a_cancelled_git_read_kills_its_child_like_every_other_git_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Cancellation must not orphan a git process, whichever helper issued the command.
@@ -698,14 +698,11 @@ def test_a_cancelled_git_read_kills_its_child_like_every_other_git_command(
     monkeypatch.setattr("chemclaw.kg.git_writer.asyncio.create_subprocess_exec", _fake_exec)
     writer = GitNoteWriter(repo_dir=str(tmp_path), base_branch="main", remote="origin")
 
-    async def _run() -> None:
-        reading = asyncio.create_task(writer._read("refs/remotes/origin/note/x"))
-        await asyncio.sleep(0.05)
-        reading.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await reading
-
-    asyncio.run(_run())
+    reading = asyncio.create_task(writer._read("refs/remotes/origin/note/x"))
+    await asyncio.sleep(0.05)
+    reading.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reading
 
     assert killed["value"] is True, (
         "a cancelled `_read` left its git child running — the orphan `_run` has an arm for"

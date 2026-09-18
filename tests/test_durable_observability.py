@@ -446,7 +446,7 @@ def test_a_failed_run_produces_a_record_carrying_its_reason() -> None:
     assert record.summary == ""
 
 
-def test_a_finished_job_moves_a_counter_and_a_duration_in_both_outcomes() -> None:
+async def test_a_finished_job_moves_a_counter_and_a_duration_in_both_outcomes() -> None:
     """A finished job moves an outcome counter and a duration, either way it ended.
 
     `chemclaw_jobs_started_total` had no counterpart of any kind, so a connector whose every
@@ -464,12 +464,10 @@ def test_a_finished_job_moves_a_counter_and_a_duration_in_both_outcomes() -> Non
     )
     failed = failed_job_record("job-bad", _JOB, "unknown ALPB solvent", 3.0)
 
-    async def _run() -> None:
-        with _using(metrics):
-            await record_job(completed)
-            await record_job(failed)
+    with _using(metrics):
+        await record_job(completed)
+        await record_job(failed)
 
-    asyncio.run(_run())
     rendered = metrics.render()
     assert 'chemclaw_jobs_finished_total{connector="calc",outcome="completed"} 1' in rendered
     assert 'chemclaw_jobs_finished_total{connector="calc",outcome="failed"} 1' in rendered
@@ -507,29 +505,25 @@ def test_no_workflow_body_can_write_the_in_flight_reading() -> None:
     assert ConnectorJobWorkflow.__name__ in job_metrics._OPEN_JOBS_QUERY
 
 
-def test_a_failed_run_round_trips_through_postgres() -> None:
+async def test_a_failed_run_round_trips_through_postgres() -> None:
     """The columns exist and carry the two facts back — the half only a database can prove."""
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        # A connector name no other test's filter can match. `job_records` is not truncated
-        # between tests, and `test_job_record_postgres.py` asserts an *exact* listing for
-        # `connector="calc"` — so a row this file leaves behind under a shared name is a failure
-        # in somebody else's test, which is the worst kind to debug.
-        record = failed_job_record(
-            "pg-job-failed",
-            _JOB.model_copy(update={"connector": "durable-observability-probe"}),
-            "unknown ALPB solvent '2-MeTHF'",
-            4.5,
-        )
-        await PostgresJobRecordSink().record(record)
-        stored = await read_job_record("pg-job-failed")
-        assert stored is not None
-        assert stored.state == "failed"
-        assert stored.failure_reason == "unknown ALPB solvent '2-MeTHF'"
-        assert stored.rationale == _JOB.rationale
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    # A connector name no other test's filter can match. `job_records` is not truncated
+    # between tests, and `test_job_record_postgres.py` asserts an *exact* listing for
+    # `connector="calc"` — so a row this file leaves behind under a shared name is a failure
+    # in somebody else's test, which is the worst kind to debug.
+    record = failed_job_record(
+        "pg-job-failed",
+        _JOB.model_copy(update={"connector": "durable-observability-probe"}),
+        "unknown ALPB solvent '2-MeTHF'",
+        4.5,
+    )
+    await PostgresJobRecordSink().record(record)
+    stored = await read_job_record("pg-job-failed")
+    assert stored is not None
+    assert stored.state == "failed"
+    assert stored.failure_reason == "unknown ALPB solvent '2-MeTHF'"
+    assert stored.rationale == _JOB.rationale
 
 
 def test_an_existing_row_reads_as_completed() -> None:
@@ -932,7 +926,7 @@ async def _until_not_running(handle: Any, timeout: float = 20.0) -> Any:
     raise AssertionError("the probe workflow never left RUNNING")
 
 
-def test_a_failure_record_never_erases_a_finished_run_s_result() -> None:
+async def test_a_failure_record_never_erases_a_finished_run_s_result() -> None:
     """The durable copy of a finished run survives the bookkeeping of the step that failed after it.
 
     Measured on 2026-08-28 against a live database, writing a failure record over the completed row
@@ -948,45 +942,41 @@ def test_a_failure_record_never_erases_a_finished_run_s_result() -> None:
     where the upsert commits and the activity then overruns its timeout, which leaves a row behind
     while the workflow believes there is none.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        probe = _JOB.model_copy(update={"connector": "durable-observability-probe"})
-        finished = JobRecord(
-            job_id="pg-job-not-erased",
-            connector=probe.connector,
-            job=probe.job,
-            rationale=probe.rationale,
-            requested_by=probe.requested_by,
-            summary="dG = -12.3 kJ/mol",
-            result={"dg_kj_per_mol": -12.3},
-            note_id="note-1",
-            calc_refs=["k1", "k2"],
-            payload_kind="SolventScreen",
-            runtime_seconds=9.0,
-        )
-        sink = PostgresJobRecordSink()
-        await sink.record(finished)
-        await sink.record(failed_job_record("pg-job-not-erased", probe, "Cancelled", 9.1))
-        stored = await read_job_record("pg-job-not-erased")
-        assert stored is not None
-        # How it ended is refreshed…
-        assert (stored.state, stored.failure_reason) == ("failed", "Cancelled")
-        # …and what it produced is not touched, because a failure record has nothing to say about
-        # a result and must not say it loudly enough to erase one.
-        assert stored.summary == "dG = -12.3 kJ/mol"
-        assert stored.result == {"dg_kj_per_mol": -12.3}
-        assert stored.note_id == "note-1"
-        assert stored.calc_refs == ["k1", "k2"]
-        assert stored.payload_kind == "SolventScreen"
-        # And the reverse still replaces the row entire: a failed run that is re-run and succeeds
-        # is the case the whole-row upsert exists for (D-011 lets only a failed id re-execute).
-        await sink.record(finished.model_copy(update={"summary": "second run"}))
-        again = await read_job_record("pg-job-not-erased")
-        assert again is not None
-        assert (again.state, again.summary, again.failure_reason) == ("completed", "second run", "")
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    probe = _JOB.model_copy(update={"connector": "durable-observability-probe"})
+    finished = JobRecord(
+        job_id="pg-job-not-erased",
+        connector=probe.connector,
+        job=probe.job,
+        rationale=probe.rationale,
+        requested_by=probe.requested_by,
+        summary="dG = -12.3 kJ/mol",
+        result={"dg_kj_per_mol": -12.3},
+        note_id="note-1",
+        calc_refs=["k1", "k2"],
+        payload_kind="SolventScreen",
+        runtime_seconds=9.0,
+    )
+    sink = PostgresJobRecordSink()
+    await sink.record(finished)
+    await sink.record(failed_job_record("pg-job-not-erased", probe, "Cancelled", 9.1))
+    stored = await read_job_record("pg-job-not-erased")
+    assert stored is not None
+    # How it ended is refreshed…
+    assert (stored.state, stored.failure_reason) == ("failed", "Cancelled")
+    # …and what it produced is not touched, because a failure record has nothing to say about
+    # a result and must not say it loudly enough to erase one.
+    assert stored.summary == "dG = -12.3 kJ/mol"
+    assert stored.result == {"dg_kj_per_mol": -12.3}
+    assert stored.note_id == "note-1"
+    assert stored.calc_refs == ["k1", "k2"]
+    assert stored.payload_kind == "SolventScreen"
+    # And the reverse still replaces the row entire: a failed run that is re-run and succeeds
+    # is the case the whole-row upsert exists for (D-011 lets only a failed id re-execute).
+    await sink.record(finished.model_copy(update={"summary": "second run"}))
+    again = await read_job_record("pg-job-not-erased")
+    assert again is not None
+    assert (again.state, again.summary, again.failure_reason) == ("completed", "second run", "")
 
 
 def test_a_run_that_fails_after_recording_is_not_recorded_a_second_time() -> None:

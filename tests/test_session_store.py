@@ -72,48 +72,36 @@ async def _clear(session_id: str) -> None:
             await cur.execute("DELETE FROM session_messages WHERE session_id = %s", (session_id,))
 
 
-def test_messages_survive_a_new_provider_instance() -> None:
+async def test_messages_survive_a_new_provider_instance() -> None:
     """Saved messages reload through a fresh provider over the same DSN (proxy for a restart)."""
+    writer = await _provider_or_skip()
+    session_id = "sess-f3-roundtrip"
+    turn = [HumanMessage(content="what is the pKa of phenol?")]
+    await writer.save_messages(session_id, turn)
 
-    async def _run() -> None:
-        writer = await _provider_or_skip()
-        session_id = "sess-f3-roundtrip"
-        turn = [HumanMessage(content="what is the pKa of phenol?")]
-        await writer.save_messages(session_id, turn)
-
-        # A brand-new provider instance (as a restarted pod would build) sees the persisted turn.
-        reader = PostgresHistoryProvider()
-        loaded = await reader.get_messages(session_id)
-        assert any("phenol" in str(m.content) for m in loaded)
-
-    asyncio.run(_run())
+    # A brand-new provider instance (as a restarted pod would build) sees the persisted turn.
+    reader = PostgresHistoryProvider()
+    loaded = await reader.get_messages(session_id)
+    assert any("phenol" in str(m.content) for m in loaded)
 
 
-def test_unknown_session_loads_empty() -> None:
+async def test_unknown_session_loads_empty() -> None:
     """A session with no rows (or a None id) loads to an empty thread, never an error."""
-
-    async def _run() -> None:
-        provider = await _provider_or_skip()
-        assert await provider.get_messages("sess-does-not-exist") == []
-        assert await provider.get_messages(None) == []
-
-    asyncio.run(_run())
+    provider = await _provider_or_skip()
+    assert await provider.get_messages("sess-does-not-exist") == []
+    assert await provider.get_messages(None) == []
 
 
-def test_session_owner_records_and_reattaches() -> None:
+async def test_session_owner_records_and_reattaches() -> None:
     """Ownership persists and a fresh store instance looks it up — the reattach path (F3)."""
+    await migrated_db_or_skip()
+    writer = SessionOwnerStore()
+    await writer.record("sess-owner-1", "alice")
+    await writer.record("sess-owner-1", "mallory")  # idempotent: first writer wins
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        writer = SessionOwnerStore()
-        await writer.record("sess-owner-1", "alice")
-        await writer.record("sess-owner-1", "mallory")  # idempotent: first writer wins
-
-        reader = SessionOwnerStore()  # a restarted pod would build a fresh instance
-        assert await reader.lookup("sess-owner-1") == (True, "alice", None)
-        assert await reader.lookup("sess-never-created") == (False, None, None)
-
-    asyncio.run(_run())
+    reader = SessionOwnerStore()  # a restarted pod would build a fresh instance
+    assert await reader.lookup("sess-owner-1") == (True, "alice", None)
+    assert await reader.lookup("sess-never-created") == (False, None, None)
 
 
 async def _spoke_in(session_id: str, text: str = "a turn") -> None:
@@ -125,7 +113,7 @@ async def _spoke_in(session_id: str, text: str = "a turn") -> None:
     await PostgresHistoryProvider().save_messages(session_id, [HumanMessage(content=text)])
 
 
-def test_session_owner_lists_only_its_own_sessions_most_recently_used_first() -> None:
+async def test_session_owner_lists_only_its_own_sessions_most_recently_used_first() -> None:
     """Listing is owner-scoped and most-recently-used first — the sidebar `GET /sessions` renders.
 
     A dedicated owner string per test: the table is shared across this module's cases, so scoping
@@ -135,31 +123,27 @@ def test_session_owner_lists_only_its_own_sessions_most_recently_used_first() ->
     the conversation a chemist is most likely to want — an old one they have come back to — which
     under the previous ordering was pinned to the bottom of the list forever.
     """
+    await migrated_db_or_skip()
+    store = SessionOwnerStore()
+    await store.record("sess-list-a", "owner-list-test")
+    await store.record("sess-list-b", "owner-list-test")
+    await store.record("sess-list-other", "someone-else")
+    await _spoke_in("sess-list-a")
+    await _spoke_in("sess-list-b")
+    await _spoke_in("sess-list-other")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        store = SessionOwnerStore()
-        await store.record("sess-list-a", "owner-list-test")
-        await store.record("sess-list-b", "owner-list-test")
-        await store.record("sess-list-other", "someone-else")
-        await _spoke_in("sess-list-a")
-        await _spoke_in("sess-list-b")
-        await _spoke_in("sess-list-other")
+    listed = await store.list_for_owner("owner-list-test")
+    assert [session_id for session_id, *_ in listed] == ["sess-list-b", "sess-list-a"]
+    assert [row[2] for row in listed] == sorted((row[2] for row in listed), reverse=True)
+    assert await store.list_for_owner("owner-with-no-sessions") == []
 
-        listed = await store.list_for_owner("owner-list-test")
-        assert [session_id for session_id, *_ in listed] == ["sess-list-b", "sess-list-a"]
-        assert [row[2] for row in listed] == sorted((row[2] for row in listed), reverse=True)
-        assert await store.list_for_owner("owner-with-no-sessions") == []
-
-        # The older conversation, returned to, comes back to the top.
-        await _spoke_in("sess-list-a", "and one more thing")
-        listed = await store.list_for_owner("owner-list-test")
-        assert [session_id for session_id, *_ in listed] == ["sess-list-a", "sess-list-b"]
-
-    asyncio.run(_run())
+    # The older conversation, returned to, comes back to the top.
+    await _spoke_in("sess-list-a", "and one more thing")
+    listed = await store.list_for_owner("owner-list-test")
+    assert [session_id for session_id, *_ in listed] == ["sess-list-a", "sess-list-b"]
 
 
-def test_session_owner_does_not_list_a_session_nobody_spoke_in() -> None:
+async def test_session_owner_does_not_list_a_session_nobody_spoke_in() -> None:
     """A created-but-unused session is not a conversation and is not listed as one.
 
     The companion UI creates the session on the first keystroke so the first message costs one
@@ -167,63 +151,51 @@ def test_session_owner_does_not_list_a_session_nobody_spoke_in() -> None:
     join that establishes last-activity is what drops them: no messages, no `max(created_at)`, no
     row. Deriving the two facts in one query is why this needs no separate cleanup job.
     """
+    await migrated_db_or_skip()
+    store = SessionOwnerStore()
+    await store.record("sess-warmed-unused", "owner-warmed-test")
+    await store.record("sess-warmed-used", "owner-warmed-test")
+    await _spoke_in("sess-warmed-used")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        store = SessionOwnerStore()
-        await store.record("sess-warmed-unused", "owner-warmed-test")
-        await store.record("sess-warmed-used", "owner-warmed-test")
-        await _spoke_in("sess-warmed-used")
-
-        listed = [session_id for session_id, *_ in await store.list_for_owner("owner-warmed-test")]
-        assert listed == ["sess-warmed-used"]
-
-    asyncio.run(_run())
+    listed = [session_id for session_id, *_ in await store.list_for_owner("owner-warmed-test")]
+    assert listed == ["sess-warmed-used"]
 
 
-def test_session_owner_keeps_the_title_its_first_turn_gave_it() -> None:
+async def test_session_owner_keeps_the_title_its_first_turn_gave_it() -> None:
     """A conversation is named by how it started, and a later turn must not rename it.
 
     The route calls this on every turn — it has no cheap way to know which one is first — so the
     `title IS NULL` guard is what makes that safe. Without it a sidebar entry would change under a
     chemist on every message, which is the one thing a navigation label must not do.
     """
+    await migrated_db_or_skip()
+    store = SessionOwnerStore()
+    await store.record("sess-title", "owner-title-test")
+    await _spoke_in("sess-title")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        store = SessionOwnerStore()
-        await store.record("sess-title", "owner-title-test")
-        await _spoke_in("sess-title")
+    await store.set_title_if_absent("sess-title", "What is the pKa of acetic acid?")
+    await store.set_title_if_absent("sess-title", "And in DMSO?")
 
-        await store.set_title_if_absent("sess-title", "What is the pKa of acetic acid?")
-        await store.set_title_if_absent("sess-title", "And in DMSO?")
-
-        listed = await store.list_for_owner("owner-title-test")
-        assert [row[3] for row in listed] == ["What is the pKa of acetic acid?"]
-
-    asyncio.run(_run())
+    listed = await store.list_for_owner("owner-title-test")
+    assert [row[3] for row in listed] == ["What is the pKa of acetic acid?"]
 
 
-def test_session_owner_lists_an_unnamed_session_rather_than_dropping_it() -> None:
+async def test_session_owner_lists_an_unnamed_session_rather_than_dropping_it() -> None:
     """A session whose first turn predates the title column is listed with `title=None`.
 
     Null is the honest value and the row still belongs in the list — hiding a conversation because
     the service cannot name it would lose history to a schema change.
     """
+    await migrated_db_or_skip()
+    store = SessionOwnerStore()
+    await store.record("sess-untitled", "owner-untitled-test")
+    await _spoke_in("sess-untitled")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        store = SessionOwnerStore()
-        await store.record("sess-untitled", "owner-untitled-test")
-        await _spoke_in("sess-untitled")
-
-        listed = await store.list_for_owner("owner-untitled-test")
-        assert [(row[0], row[3]) for row in listed] == [("sess-untitled", None)]
-
-    asyncio.run(_run())
+    listed = await store.list_for_owner("owner-untitled-test")
+    assert [(row[0], row[3]) for row in listed] == [("sess-untitled", None)]
 
 
-def test_session_owner_listing_carries_the_profile_each_session_runs_under() -> None:
+async def test_session_owner_listing_carries_the_profile_each_session_runs_under() -> None:
     """The listing returns `profile`, which is what `GET /plans/pending` filters on.
 
     Not cosmetic and not for the sidebar: it is the one column that says whether a session can be
@@ -232,25 +204,21 @@ def test_session_owner_listing_carries_the_profile_each_session_runs_under() -> 
     means the default profile — `agent.profiles.get_profile(None)` resolves exactly that — so it
     must come back rather than being normalised into a name the row does not hold.
     """
+    await migrated_db_or_skip()
+    store = SessionOwnerStore()
+    await store.record("sess-profiled", "owner-profile-list-test", "property-lookup")
+    await store.record("sess-unprofiled", "owner-profile-list-test")
+    await _spoke_in("sess-profiled")
+    await _spoke_in("sess-unprofiled")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        store = SessionOwnerStore()
-        await store.record("sess-profiled", "owner-profile-list-test", "property-lookup")
-        await store.record("sess-unprofiled", "owner-profile-list-test")
-        await _spoke_in("sess-profiled")
-        await _spoke_in("sess-unprofiled")
-
-        listed = await store.list_for_owner("owner-profile-list-test")
-        assert {row[0]: row[4] for row in listed} == {
-            "sess-profiled": "property-lookup",
-            "sess-unprofiled": None,
-        }
-
-    asyncio.run(_run())
+    listed = await store.list_for_owner("owner-profile-list-test")
+    assert {row[0]: row[4] for row in listed} == {
+        "sess-profiled": "property-lookup",
+        "sess-unprofiled": None,
+    }
 
 
-def test_session_owner_lists_the_null_owner_sessions() -> None:
+async def test_session_owner_lists_the_null_owner_sessions() -> None:
     """A NULL owner matches itself when listing — `owner = NULL` would silently return nothing.
 
     The shared dev principal records a real SQL NULL, and three-valued logic makes `= %s` false for
@@ -259,16 +227,12 @@ def test_session_owner_lists_the_null_owner_sessions() -> None:
     %s::text IS NULL` — is what makes this row come back; it used to be `IS NOT DISTINCT FROM`, and
     the two match exactly the same rows (see `test_the_owner_predicate_stays_indexable`).
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        store = SessionOwnerStore()
-        await store.record("sess-list-null", None)
-        await _spoke_in("sess-list-null")
-        listed = await store.list_for_owner(None)
-        assert "sess-list-null" in {session_id for session_id, *_ in listed}
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    store = SessionOwnerStore()
+    await store.record("sess-list-null", None)
+    await _spoke_in("sess-list-null")
+    listed = await store.list_for_owner(None)
+    assert "sess-list-null" in {session_id for session_id, *_ in listed}
 
 
 def test_the_owner_predicate_stays_indexable() -> None:
@@ -288,7 +252,7 @@ def test_the_owner_predicate_stays_indexable() -> None:
     assert "(o.owner = %s OR (o.owner IS NULL AND %s::text IS NULL))" in _OWNER_LIST
 
 
-def test_the_session_listing_uses_the_owner_index() -> None:
+async def test_the_session_listing_uses_the_owner_index() -> None:
     """The live half: the planner actually reaches `session_owners_owner_idx` for this statement.
 
     `enable_seqscan = off` rather than a seeded corpus large enough to make the index the cheaper
@@ -304,52 +268,44 @@ def test_the_session_listing_uses_the_owner_index() -> None:
     workaround has outlived its reason — the same shape `tests/test_upstream_surface.py` uses for
     an absence.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        store = SessionOwnerStore()
-        await store.record("sess-plan-owner", "owner-plan-test")
-        await _spoke_in("sess-plan-owner")
-        retired = "SELECT o.session_id FROM session_owners o WHERE o.owner IS NOT DISTINCT FROM %s"
-        async with await db.connect(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute("SET LOCAL enable_seqscan = off")
-                await cur.execute(
-                    f"EXPLAIN (COSTS OFF) {_OWNER_LIST}",
-                    ("owner-plan-test", "owner-plan-test", None, None, None, 20),
-                )
-                shipped = "\n".join(str(row[0]) for row in await cur.fetchall())
-                await cur.execute(f"EXPLAIN (COSTS OFF) {retired}", ("owner-plan-test",))
-                before = "\n".join(str(row[0]) for row in await cur.fetchall())
-        # **Either owner-scoped index, and the reason is migration 092.** The property is that the
-        # listing is *served from an index on `owner`* rather than scanning every session in the
-        # table; which index serves it is the planner's choice between two that both do. Before 092
-        # there was one candidate, so naming it was the same claim. 092 added
-        # `(owner, updated_at DESC, session_id DESC)` to take the sort key off a lateral the keyset
-        # cursor could not prune — 158 ms to 0.46 ms at 20,000 lifetime sessions — and the planner
-        # now prefers it, measured. Pinning the older name would fail on a *better* plan, which is
-        # a test asserting an implementation detail while claiming to assert a property.
-        assert (
-            "session_owners_owner_idx" in shipped or "session_owners_owner_updated_idx" in shipped
-        ), "GET /sessions reaches no owner-scoped index; the plan was:\n" + shipped
-        assert "session_owners_owner_idx" not in before, (
-            "IS NOT DISTINCT FROM now reaches the index, so the two-arm predicate in _OWNER_LIST "
-            "(and the notes in migrations 039 and 046) no longer describe this Postgres:\n" + before
-        )
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    store = SessionOwnerStore()
+    await store.record("sess-plan-owner", "owner-plan-test")
+    await _spoke_in("sess-plan-owner")
+    retired = "SELECT o.session_id FROM session_owners o WHERE o.owner IS NOT DISTINCT FROM %s"
+    async with await db.connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SET LOCAL enable_seqscan = off")
+            await cur.execute(
+                f"EXPLAIN (COSTS OFF) {_OWNER_LIST}",
+                ("owner-plan-test", "owner-plan-test", None, None, None, 20),
+            )
+            shipped = "\n".join(str(row[0]) for row in await cur.fetchall())
+            await cur.execute(f"EXPLAIN (COSTS OFF) {retired}", ("owner-plan-test",))
+            before = "\n".join(str(row[0]) for row in await cur.fetchall())
+    # **Either owner-scoped index, and the reason is migration 092.** The property is that the
+    # listing is *served from an index on `owner`* rather than scanning every session in the
+    # table; which index serves it is the planner's choice between two that both do. Before 092
+    # there was one candidate, so naming it was the same claim. 092 added
+    # `(owner, updated_at DESC, session_id DESC)` to take the sort key off a lateral the keyset
+    # cursor could not prune — 158 ms to 0.46 ms at 20,000 lifetime sessions — and the planner
+    # now prefers it, measured. Pinning the older name would fail on a *better* plan, which is
+    # a test asserting an implementation detail while claiming to assert a property.
+    assert "session_owners_owner_idx" in shipped or "session_owners_owner_updated_idx" in shipped, (
+        "GET /sessions reaches no owner-scoped index; the plan was:\n" + shipped
+    )
+    assert "session_owners_owner_idx" not in before, (
+        "IS NOT DISTINCT FROM now reaches the index, so the two-arm predicate in _OWNER_LIST "
+        "(and the notes in migrations 039 and 046) no longer describe this Postgres:\n" + before
+    )
 
 
-def test_session_owner_records_null_owner() -> None:
+async def test_session_owner_records_null_owner() -> None:
     """A session with no Entra oid (the shared dev principal) is still recorded and found."""
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        store = SessionOwnerStore()
-        await store.record("sess-owner-null", None)
-        assert await store.lookup("sess-owner-null") == (True, None, None)
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    store = SessionOwnerStore()
+    await store.record("sess-owner-null", None)
+    assert await store.lookup("sess-owner-null") == (True, None, None)
 
 
 async def _claims_or_skip() -> SessionTurnClaims:
@@ -358,7 +314,7 @@ async def _claims_or_skip() -> SessionTurnClaims:
     return SessionTurnClaims()
 
 
-def test_a_second_process_cannot_claim_a_session_that_is_already_running() -> None:
+async def test_a_second_process_cannot_claim_a_session_that_is_already_running() -> None:
     """Two *separate* claim stores — the model of two workers — cannot both hold one session.
 
     This is the guarantee the in-process `active_turns` set could not give: the shipped chart runs
@@ -366,53 +322,45 @@ def test_a_second_process_cannot_claim_a_session_that_is_already_running() -> No
     never heard of the first. The claim is one statement so the check and the take cannot be
     interleaved; releasing hands the slot to the next caller.
     """
+    worker_a = await _claims_or_skip()
+    worker_b = SessionTurnClaims()
+    session_id = "sess-d120-exclusive"
+    await worker_a.release(session_id, "a")  # a previous run's residue must not decide this
 
-    async def _run() -> None:
-        worker_a = await _claims_or_skip()
-        worker_b = SessionTurnClaims()
-        session_id = "sess-d120-exclusive"
-        await worker_a.release(session_id, "a")  # a previous run's residue must not decide this
-
-        assert await worker_a.claim(session_id, "a", 60.0) is True
-        assert await worker_b.claim(session_id, "b", 60.0) is False
-        await worker_a.release(session_id, "a")
-        assert await worker_b.claim(session_id, "b", 60.0) is True
-        await worker_b.release(session_id, "b")
-
-    asyncio.run(_run())
+    assert await worker_a.claim(session_id, "a", 60.0) is True
+    assert await worker_b.claim(session_id, "b", 60.0) is False
+    await worker_a.release(session_id, "a")
+    assert await worker_b.claim(session_id, "b", 60.0) is True
+    await worker_b.release(session_id, "b")
 
 
-def test_a_crashed_workers_claim_ages_out_and_a_refresh_holds_it() -> None:
+async def test_a_crashed_workers_claim_ages_out_and_a_refresh_holds_it() -> None:
     """An expired lease is takeable; a refreshed one is not — the two halves of the lease.
 
     Expiry is why this is a lease and not a lock: a worker SIGKILLed mid-turn runs no cleanup, and
     without expiry its session would 409 forever. Refresh is the other half — a turn that
     legitimately outlives one lease must not be declared dead while it is still streaming.
     """
+    claims = await _claims_or_skip()
+    session_id = "sess-d120-lease"
+    await claims.release(session_id, "dead")
 
-    async def _run() -> None:
-        claims = await _claims_or_skip()
-        session_id = "sess-d120-lease"
-        await claims.release(session_id, "dead")
+    # A lease that has already elapsed: the holder is gone and nothing released it.
+    assert await claims.claim(session_id, "dead", -1.0) is True
+    assert await claims.claim(session_id, "live", 60.0) is True  # taken over, not blocked
 
-        # A lease that has already elapsed: the holder is gone and nothing released it.
-        assert await claims.claim(session_id, "dead", -1.0) is True
-        assert await claims.claim(session_id, "live", 60.0) is True  # taken over, not blocked
+    # Now the live holder keeps it, and a refresh by the *dead* holder cannot steal it back.
+    assert await claims.claim(session_id, "other", 60.0) is False
+    await claims.refresh(session_id, "dead", 600.0)
+    await claims.release(session_id, "dead")  # wrong holder: must not free someone else's slot
+    assert await claims.claim(session_id, "other", 60.0) is False
 
-        # Now the live holder keeps it, and a refresh by the *dead* holder cannot steal it back.
-        assert await claims.claim(session_id, "other", 60.0) is False
-        await claims.refresh(session_id, "dead", 600.0)
-        await claims.release(session_id, "dead")  # wrong holder: must not free someone else's slot
-        assert await claims.claim(session_id, "other", 60.0) is False
-
-        await claims.release(session_id, "live")
-        assert await claims.claim(session_id, "other", 60.0) is True
-        await claims.release(session_id, "other")
-
-    asyncio.run(_run())
+    await claims.release(session_id, "live")
+    assert await claims.claim(session_id, "other", 60.0) is True
+    await claims.release(session_id, "other")
 
 
-def test_the_transcript_read_returns_the_whole_session_not_a_window() -> None:
+async def test_the_transcript_read_returns_the_whole_session_not_a_window() -> None:
     """`get_messages` still has no `LIMIT`, for a reason that changed under it.
 
     It used to be a data-safety rule: the read repaired orphaned pairings and *wrote the repair
@@ -431,30 +379,24 @@ def test_the_transcript_read_returns_the_whole_session_not_a_window() -> None:
     (the write-back was unobservable without a database). A window would show up here as a short
     list, however it were implemented.
     """
+    await migrated_db_or_skip()
+    provider = PostgresHistoryProvider()
+    session_id = "sess-no-window"
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("DELETE FROM session_messages WHERE session_id = %s", (session_id,))
+    turns = 80  # comfortably past any plausible default window
+    for index in range(turns):
+        await provider.save_messages(session_id, [HumanMessage(content=f"question {index}")])
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        provider = PostgresHistoryProvider()
-        session_id = "sess-no-window"
-        async with db.connection(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "DELETE FROM session_messages WHERE session_id = %s", (session_id,)
-                )
-        turns = 80  # comfortably past any plausible default window
-        for index in range(turns):
-            await provider.save_messages(session_id, [HumanMessage(content=f"question {index}")])
-
-        loaded = await provider.get_messages(session_id)
-        assert [m.content for m in loaded] == [f"question {index}" for index in range(turns)], (
-            f"the transcript read returned {len(loaded)} of {turns} messages — a window would "
-            "make a reloaded conversation look like it began later than it did"
-        )
-
-    asyncio.run(_run())
+    loaded = await provider.get_messages(session_id)
+    assert [m.content for m in loaded] == [f"question {index}" for index in range(turns)], (
+        f"the transcript read returned {len(loaded)} of {turns} messages — a window would "
+        "make a reloaded conversation look like it began later than it did"
+    )
 
 
-def test_a_structured_turn_survives_the_round_trip_with_its_calls_intact() -> None:
+async def test_a_structured_turn_survives_the_round_trip_with_its_calls_intact() -> None:
     """The shape stamp decides how a row is read, and nothing else asserted that it decides right.
 
     `test_messages_survive_a_new_provider_instance` asserts a substring, and a substring is exactly
@@ -471,38 +413,34 @@ def test_a_structured_turn_survives_the_round_trip_with_its_calls_intact() -> No
     unreadable legacy row" from "the reader is broken for everyone", and a reader that degrades
     every row looks identical to a healthy one unless something asserts the counter stays put.
     """
+    writer = await _provider_or_skip()
+    session_id = "sess-f3-structured"
+    await _clear(session_id)
+    turn = [
+        HumanMessage(content="what is the pKa of phenol?"),
+        AIMessage(
+            content="let me check",
+            tool_calls=[{"name": "predict_pka", "args": {"smiles": "Oc1ccccc1"}, "id": "c-1"}],
+        ),
+        ToolMessage(content="9.95", tool_call_id="c-1"),
+    ]
+    before = METRICS.value(_DEGRADED)
+    await writer.save_messages(session_id, turn)
 
-    async def _run() -> None:
-        writer = await _provider_or_skip()
-        session_id = "sess-f3-structured"
-        await _clear(session_id)
-        turn = [
-            HumanMessage(content="what is the pKa of phenol?"),
-            AIMessage(
-                content="let me check",
-                tool_calls=[{"name": "predict_pka", "args": {"smiles": "Oc1ccccc1"}, "id": "c-1"}],
-            ),
-            ToolMessage(content="9.95", tool_call_id="c-1"),
-        ]
-        before = METRICS.value(_DEGRADED)
-        await writer.save_messages(session_id, turn)
+    loaded = await PostgresHistoryProvider().get_messages(session_id)
 
-        loaded = await PostgresHistoryProvider().get_messages(session_id)
-
-        assert [type(message) for message in loaded] == [HumanMessage, AIMessage, ToolMessage], (
-            "the stored shape decided the reader wrong: a tool's answer came back in another voice"
-        )
-        assert [(c["name"], c["args"], c["id"]) for c in cast(Any, loaded[1]).tool_calls] == [
-            ("predict_pka", {"smiles": "Oc1ccccc1"}, "c-1")
-        ], "the call the model made is gone from the reloaded turn"
-        assert cast(Any, loaded[2]).tool_call_id == "c-1", "the answer no longer names its call"
-        assert not [m for m in loaded if is_degraded_render(m)], "a row was recovered, not decoded"
-        assert METRICS.value(_DEGRADED) == before, (
-            "reading a transcript this system itself wrote counted a degradation, which is the "
-            "reader being broken for everyone rather than one legacy row being unreadable"
-        )
-
-    asyncio.run(_run())
+    assert [type(message) for message in loaded] == [HumanMessage, AIMessage, ToolMessage], (
+        "the stored shape decided the reader wrong: a tool's answer came back in another voice"
+    )
+    assert [(c["name"], c["args"], c["id"]) for c in cast(Any, loaded[1]).tool_calls] == [
+        ("predict_pka", {"smiles": "Oc1ccccc1"}, "c-1")
+    ], "the call the model made is gone from the reloaded turn"
+    assert cast(Any, loaded[2]).tool_call_id == "c-1", "the answer no longer names its call"
+    assert not [m for m in loaded if is_degraded_render(m)], "a row was recovered, not decoded"
+    assert METRICS.value(_DEGRADED) == before, (
+        "reading a transcript this system itself wrote counted a degradation, which is the "
+        "reader being broken for everyone rather than one legacy row being unreadable"
+    )
 
 
 def test_a_row_that_will_not_convert_is_marked_as_recovered_rather_than_passing_as_a_message() -> (
@@ -526,7 +464,7 @@ def test_a_row_that_will_not_convert_is_marked_as_recovered_rather_than_passing_
     assert decoded.content == "hello"
 
 
-def test_the_bounded_user_read_returns_the_chemists_own_words_and_only_those() -> None:
+async def test_the_bounded_user_read_returns_the_chemists_own_words_and_only_those() -> None:
     """`recent_user_texts` is the other read of this table, and it answers a different question.
 
     `get_messages` renders a whole conversation for a person and must never grow a `LIMIT`; this
@@ -536,43 +474,39 @@ def test_the_bounded_user_read_returns_the_chemists_own_words_and_only_those() -
     exists to refuse, and a tool-heavy turn is where a naive "last N rows" would find nothing but
     them.
     """
+    writer = await _provider_or_skip()
+    session_id = "sess-stated-quote-window"
+    await _clear(session_id)
+    for turn in range(4):
+        await writer.save_messages(
+            session_id,
+            [
+                HumanMessage(content=f"turn {turn}: 24 wells, no DMF"),
+                AIMessage(
+                    content="checking",
+                    tool_calls=[{"name": "t", "args": {}, "id": f"c-{turn}"}],
+                ),
+                ToolMessage(content="the plate holds 384 wells", tool_call_id=f"c-{turn}"),
+                AIMessage(content="I would use 96 wells"),
+            ],
+        )
 
-    async def _run() -> None:
-        writer = await _provider_or_skip()
-        session_id = "sess-stated-quote-window"
-        await _clear(session_id)
-        for turn in range(4):
-            await writer.save_messages(
-                session_id,
-                [
-                    HumanMessage(content=f"turn {turn}: 24 wells, no DMF"),
-                    AIMessage(
-                        content="checking",
-                        tool_calls=[{"name": "t", "args": {}, "id": f"c-{turn}"}],
-                    ),
-                    ToolMessage(content="the plate holds 384 wells", tool_call_id=f"c-{turn}"),
-                    AIMessage(content="I would use 96 wells"),
-                ],
-            )
-
-        reader = PostgresHistoryProvider()
-        assert await reader.recent_user_texts(session_id, limit=10) == [
-            f"turn {turn}: 24 wells, no DMF" for turn in range(4)
-        ], "the read returned something other than the chemist's own messages, in order"
-        # Bounded, and the bound keeps the *newest* — an older constraint falling out of the window
-        # is a refusal a chemist can act on; a newer one falling out is the turn in flight going
-        # unquotable.
-        assert await reader.recent_user_texts(session_id, limit=2) == [
-            "turn 2: 24 wells, no DMF",
-            "turn 3: 24 wells, no DMF",
-        ]
-        assert await reader.recent_user_texts(session_id, limit=0) == []
-        assert await reader.recent_user_texts(None, limit=10) == []
-
-    asyncio.run(_run())
+    reader = PostgresHistoryProvider()
+    assert await reader.recent_user_texts(session_id, limit=10) == [
+        f"turn {turn}: 24 wells, no DMF" for turn in range(4)
+    ], "the read returned something other than the chemist's own messages, in order"
+    # Bounded, and the bound keeps the *newest* — an older constraint falling out of the window
+    # is a refusal a chemist can act on; a newer one falling out is the turn in flight going
+    # unquotable.
+    assert await reader.recent_user_texts(session_id, limit=2) == [
+        "turn 2: 24 wells, no DMF",
+        "turn 3: 24 wells, no DMF",
+    ]
+    assert await reader.recent_user_texts(session_id, limit=0) == []
+    assert await reader.recent_user_texts(None, limit=10) == []
 
 
-def test_an_unstamped_legacy_row_is_not_offered_as_the_chemists_own_words() -> None:
+async def test_an_unstamped_legacy_row_is_not_offered_as_the_chemists_own_words() -> None:
     """The conservative half of a rule about evidence, and it is a rule about *producers*.
 
     An unstamped row is MAF (`message_from_row`), written by an engine whose history provider was
@@ -581,30 +515,26 @@ def test_an_unstamped_legacy_row_is_not_offered_as_the_chemists_own_words() -> N
     which is a different promise: a reader is being shown a conversation, not being handed evidence
     to grade an attribution against.
     """
+    writer = await _provider_or_skip()
+    session_id = "sess-stated-quote-legacy"
+    await _clear(session_id)
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO session_messages (session_id, message) VALUES (%s, %s)",
+                (session_id, Jsonb(legacy_text("user", "24 wells, no DMF"))),
+            )
+    await writer.save_messages(session_id, [HumanMessage(content="ok go ahead")])
 
-    async def _run() -> None:
-        writer = await _provider_or_skip()
-        session_id = "sess-stated-quote-legacy"
-        await _clear(session_id)
-        async with db.connection(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "INSERT INTO session_messages (session_id, message) VALUES (%s, %s)",
-                    (session_id, Jsonb(legacy_text("user", "24 wells, no DMF"))),
-                )
-        await writer.save_messages(session_id, [HumanMessage(content="ok go ahead")])
-
-        reader = PostgresHistoryProvider()
-        assert [type(m) for m in await reader.get_messages(session_id)] == [
-            HumanMessage,
-            HumanMessage,
-        ], "the legacy row stopped rendering in the transcript, which is a separate promise"
-        assert await reader.recent_user_texts(session_id, limit=10) == ["ok go ahead"]
-
-    asyncio.run(_run())
+    reader = PostgresHistoryProvider()
+    assert [type(m) for m in await reader.get_messages(session_id)] == [
+        HumanMessage,
+        HumanMessage,
+    ], "the legacy row stopped rendering in the transcript, which is a separate promise"
+    assert await reader.recent_user_texts(session_id, limit=10) == ["ok go ahead"]
 
 
-def test_a_converted_legacy_row_is_still_not_offered_as_the_chemists_own_words() -> None:
+async def test_a_converted_legacy_row_is_still_not_offered_as_the_chemists_own_words() -> None:
     """The axis the test above holds constant: the migration that rewrites the row.
 
     `make db-migrate` and the chart's post-upgrade Job both run
@@ -620,80 +550,70 @@ def test_a_converted_legacy_row_is_still_not_offered_as_the_chemists_own_words()
     (`message_original`) is written by the migration's own UPDATE and a fixture that stamped the
     row by hand would only prove the test agrees with itself.
     """
+    writer = await _provider_or_skip()
+    session_id = "sess-stated-quote-converted"
+    await _clear(session_id)
+    # A MAF `user` row carrying text no person typed — which is the case that matters, since a
+    # converted row is indistinguishable from a typed one by shape alone.
+    tool_shaped = '{"tool": "screen_hazards", "result": "24 wells, no DMF"}'
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO session_messages (session_id, message) VALUES (%s, %s)",
+                (session_id, Jsonb(legacy_text("user", tool_shaped))),
+            )
+    await writer.save_messages(session_id, [HumanMessage(content="ok go ahead")])
 
-    async def _run() -> None:
-        writer = await _provider_or_skip()
-        session_id = "sess-stated-quote-converted"
-        await _clear(session_id)
-        # A MAF `user` row carrying text no person typed — which is the case that matters, since a
-        # converted row is indistinguishable from a typed one by shape alone.
-        tool_shaped = '{"tool": "screen_hazards", "result": "24 wells, no DMF"}'
-        async with db.connection(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "INSERT INTO session_messages (session_id, message) VALUES (%s, %s)",
-                    (session_id, Jsonb(legacy_text("user", tool_shaped))),
-                )
-        await writer.save_messages(session_id, [HumanMessage(content="ok go ahead")])
+    reader = PostgresHistoryProvider()
+    assert await reader.recent_user_texts(session_id, limit=10) == ["ok go ahead"], (
+        "the MAF row was quotable before the conversion, so this test proves nothing about it"
+    )
 
-        reader = PostgresHistoryProvider()
-        assert await reader.recent_user_texts(session_id, limit=10) == ["ok go ahead"], (
-            "the MAF row was quotable before the conversion, so this test proves nothing about it"
-        )
+    outcome = await convert_stored_messages()
+    assert outcome.converted >= 1, "the conversion pass rewrote nothing, so the axis never moved"
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT message_shape, message->>'type', message_original IS NOT NULL "
+                "FROM session_messages WHERE session_id = %s ORDER BY id LIMIT 1",
+                (session_id,),
+            )
+            converted = await cur.fetchone()
+    assert converted == (LANGCHAIN_SHAPE, "human", True), (
+        "the row under test was not converted, so the shape predicate would still exclude it"
+    )
 
-        outcome = await convert_stored_messages()
-        assert outcome.converted >= 1, (
-            "the conversion pass rewrote nothing, so the axis never moved"
-        )
-        async with db.connection(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT message_shape, message->>'type', message_original IS NOT NULL "
-                    "FROM session_messages WHERE session_id = %s ORDER BY id LIMIT 1",
-                    (session_id,),
-                )
-                converted = await cur.fetchone()
-        assert converted == (LANGCHAIN_SHAPE, "human", True), (
-            "the row under test was not converted, so the shape predicate would still exclude it"
-        )
-
-        assert await reader.recent_user_texts(session_id, limit=10) == ["ok go ahead"], (
-            "a converted MAF row became quotable as the chemist's own words"
-        )
-        assert [type(m) for m in await reader.get_messages(session_id)] == [
-            HumanMessage,
-            HumanMessage,
-        ], "the converted row stopped rendering in the transcript, which is a separate promise"
-
-    asyncio.run(_run())
+    assert await reader.recent_user_texts(session_id, limit=10) == ["ok go ahead"], (
+        "a converted MAF row became quotable as the chemist's own words"
+    )
+    assert [type(m) for m in await reader.get_messages(session_id)] == [
+        HumanMessage,
+        HumanMessage,
+    ], "the converted row stopped rendering in the transcript, which is a separate promise"
 
 
-def test_the_in_memory_provider_answers_the_bounded_read_the_same_way() -> None:
+async def test_the_in_memory_provider_answers_the_bounded_read_the_same_way() -> None:
     """A check that behaves differently under `session_store="memory"` is a check with a bypass."""
-
-    async def _run() -> None:
-        provider = InMemoryHistoryProvider()
-        state: dict[str, Any] = {}
-        await provider.save_messages(
-            "sess-mem",
-            [
-                HumanMessage(content="24 wells, no DMF"),
-                AIMessage(content="I would use 96 wells"),
-                HumanMessage(content="ok go ahead"),
-            ],
-            state=state,
-        )
-        assert await provider.recent_user_texts("sess-mem", limit=10, state=state) == [
-            "24 wells, no DMF",
-            "ok go ahead",
-        ]
-        assert await provider.recent_user_texts("sess-mem", limit=1, state=state) == ["ok go ahead"]
-        assert await provider.recent_user_texts("sess-mem", limit=10, state=None) == []
-
-    asyncio.run(_run())
+    provider = InMemoryHistoryProvider()
+    state: dict[str, Any] = {}
+    await provider.save_messages(
+        "sess-mem",
+        [
+            HumanMessage(content="24 wells, no DMF"),
+            AIMessage(content="I would use 96 wells"),
+            HumanMessage(content="ok go ahead"),
+        ],
+        state=state,
+    )
+    assert await provider.recent_user_texts("sess-mem", limit=10, state=state) == [
+        "24 wells, no DMF",
+        "ok go ahead",
+    ]
+    assert await provider.recent_user_texts("sess-mem", limit=1, state=state) == ["ok go ahead"]
+    assert await provider.recent_user_texts("sess-mem", limit=10, state=None) == []
 
 
-def test_a_stored_message_carries_the_correlation_id_of_the_turn_that_wrote_it() -> None:
+async def test_a_stored_message_carries_the_correlation_id_of_the_turn_that_wrote_it() -> None:
     """The only key between what was said and what was run, asserted at both ends.
 
     `save_messages` stamps `get_current_correlation_id()` so a transcript row joins to the audit
@@ -708,35 +628,31 @@ def test_a_stored_message_carries_the_correlation_id_of_the_turn_that_wrote_it()
     only the column: the existing renderer test builds `(role, text)` tuples by hand and never
     proves the two halves are joinable in the first place.
     """
+    writer = await _provider_or_skip()
+    session_id = "sess-correlated"
+    await _clear(session_id)
+    for correlation_id, question in (("corr-a", "first question"), ("corr-b", "second")):
+        token = set_current_correlation_id(correlation_id)
+        try:
+            await writer.save_messages(session_id, [HumanMessage(content=question)])
+        finally:
+            reset_current_correlation_id(token)
 
-    async def _run() -> None:
-        writer = await _provider_or_skip()
-        session_id = "sess-correlated"
-        await _clear(session_id)
-        for correlation_id, question in (("corr-a", "first question"), ("corr-b", "second")):
-            token = set_current_correlation_id(correlation_id)
-            try:
-                await writer.save_messages(session_id, [HumanMessage(content=question)])
-            finally:
-                reset_current_correlation_id(token)
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT correlation_id FROM session_messages WHERE session_id = %s ORDER BY id",
+                (session_id,),
+            )
+            stamped = [row[0] for row in await cur.fetchall()]
+    assert stamped == ["corr-a", "corr-b"], "a message cannot be joined to its own turn"
 
-        async with db.connection(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT correlation_id FROM session_messages WHERE session_id = %s ORDER BY id",
-                    (session_id,),
-                )
-                stamped = [row[0] for row in await cur.fetchall()]
-        assert stamped == ["corr-a", "corr-b"], "a message cannot be joined to its own turn"
-
-        report = "\n".join(await explain(session_id))
-        assert "── turn corr-a" in report and "── turn corr-b" in report
-        assert "unattributed" not in report, (
-            "the reconstruction collapsed two turns into one pseudo-turn, which is what an "
-            "unstamped row looks like to every reader of this table"
-        )
-
-    asyncio.run(_run())
+    report = "\n".join(await explain(session_id))
+    assert "── turn corr-a" in report and "── turn corr-b" in report
+    assert "unattributed" not in report, (
+        "the reconstruction collapsed two turns into one pseudo-turn, which is what an "
+        "unstamped row looks like to every reader of this table"
+    )
 
 
 def test_a_cursor_round_trips_its_position_exactly_and_refuses_anything_else() -> None:

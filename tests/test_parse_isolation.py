@@ -152,7 +152,7 @@ def test_a_parse_past_its_deadline_is_killed_and_counted() -> None:
     assert METRICS.value("chemclaw_document_parse_kills_total") - before == 1
 
 
-def test_a_parse_past_its_deadline_frees_its_slot_for_the_next_upload(
+async def test_a_parse_past_its_deadline_frees_its_slot_for_the_next_upload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The regression test for the wedge, stated as what a chemist experiences.
@@ -178,25 +178,22 @@ def test_a_parse_past_its_deadline_frees_its_slot_for_the_next_upload(
     monkeypatch.setattr(settings, "attachment_parse_queue_seconds", 0.5)
     monkeypatch.setattr(settings, "attachment_max_bytes", len(_SLOW_CSV) + 1)
 
-    async def _drive() -> None:
-        with pytest.raises(AttachmentError):
-            await parse_attachment_off_loop("slow.csv", _SLOW_CSV)
-        # The release rides `Future.add_done_callback`, which asyncio dispatches with `call_soon`,
-        # so it lands on the next turn of the loop rather than before this coroutine resumes.
-        await asyncio.sleep(0)
-        assert attachments._PARSE_SLOTS.in_flight == 0
+    with pytest.raises(AttachmentError):
+        await parse_attachment_off_loop("slow.csv", _SLOW_CSV)
+    # The release rides `Future.add_done_callback`, which asyncio dispatches with `call_soon`,
+    # so it lands on the next turn of the loop rather than before this coroutine resumes.
+    await asyncio.sleep(0)
+    assert attachments._PARSE_SLOTS.in_flight == 0
 
-        started = time.monotonic()
-        parsed = await parse_attachment_off_loop("small.csv", b"id,yield\nR-1,88\n")
-        assert parsed.rows == 1
-        # Served, not queued: the slot was free when it arrived. Bounded well under the queue wait
-        # so "it eventually got in" cannot pass for "it was never shed".
-        assert time.monotonic() - started < settings.attachment_parse_queue_seconds
-
-    asyncio.run(_drive())
+    started = time.monotonic()
+    parsed = await parse_attachment_off_loop("small.csv", b"id,yield\nR-1,88\n")
+    assert parsed.rows == 1
+    # Served, not queued: the slot was free when it arrived. Bounded well under the queue wait
+    # so "it eventually got in" cannot pass for "it was never shed".
+    assert time.monotonic() - started < settings.attachment_parse_queue_seconds
 
 
-def test_the_cap_still_sheds_when_the_slots_are_genuinely_busy(
+async def test_the_cap_still_sheds_when_the_slots_are_genuinely_busy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The other direction, so the test above cannot pass by the cap having quietly stopped working.
@@ -211,16 +208,13 @@ def test_the_cap_still_sheds_when_the_slots_are_genuinely_busy(
     monkeypatch.setattr(settings, "attachment_parse_queue_seconds", 0.1)
     monkeypatch.setattr(settings, "attachment_max_bytes", len(_SLOW_CSV) + 1)
 
-    async def _drive() -> None:
-        holder = asyncio.create_task(parse_attachment_off_loop("slow.csv", _SLOW_CSV))
-        # Let the holder take the slot before the second upload asks for one.
-        while attachments._PARSE_SLOTS.in_flight == 0:
-            await asyncio.sleep(0.01)
-        with pytest.raises(AttachmentUnavailable):
-            await parse_attachment_off_loop("second.csv", b"a,b\n1,2\n")
-        await holder
-
-    asyncio.run(_drive())
+    holder = asyncio.create_task(parse_attachment_off_loop("slow.csv", _SLOW_CSV))
+    # Let the holder take the slot before the second upload asks for one.
+    while attachments._PARSE_SLOTS.in_flight == 0:
+        await asyncio.sleep(0.01)
+    with pytest.raises(AttachmentUnavailable):
+        await parse_attachment_off_loop("second.csv", b"a,b\n1,2\n")
+    await holder
 
 
 def test_local_ipc_is_not_refused_as_egress(tmp_path: Path) -> None:

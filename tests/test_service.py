@@ -460,7 +460,7 @@ def test_readyz_bounds_the_whole_database_leg_not_just_the_statement_timeout(
     )
 
 
-def test_concurrent_readiness_probes_cost_one_connector_sweep(
+async def test_concurrent_readiness_probes_cost_one_connector_sweep(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Fifty simultaneous `/readyz` probes must cost one sweep, not fifty.
@@ -487,17 +487,15 @@ def test_concurrent_readiness_probes_cost_one_connector_sweep(
 
     monkeypatch.setattr("chemclaw.api.app.probe_connectors", _counting_probe)
 
-    async def _run() -> None:
-        app = _app()
-        async with asgi_client(app) as client:
-            responses = await asyncio.gather(*(client.get("/readyz") for _ in range(50)))
-        assert {res.status_code for res in responses} == {200}
+    app = _app()
+    async with asgi_client(app) as client:
+        responses = await asyncio.gather(*(client.get("/readyz") for _ in range(50)))
+    assert {res.status_code for res in responses} == {200}
 
-    asyncio.run(_run())
     assert sweeps == 1, f"50 concurrent probes triggered {sweeps} connector sweeps"
 
 
-def test_concurrent_readiness_probes_cost_one_database_checkout(
+async def test_concurrent_readiness_probes_cost_one_database_checkout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The same, for the probe that borrows from a 16-connection pool.
@@ -535,13 +533,11 @@ def test_concurrent_readiness_probes_cost_one_database_checkout(
 
     monkeypatch.setattr("chemclaw.api.routes.ops.db.connection", _counting_connection)
 
-    async def _run() -> None:
-        app = _app()
-        async with asgi_client(app) as client:
-            responses = await asyncio.gather(*(client.get("/readyz") for _ in range(50)))
-        assert {res.status_code for res in responses} == {200}
+    app = _app()
+    async with asgi_client(app) as client:
+        responses = await asyncio.gather(*(client.get("/readyz") for _ in range(50)))
+    assert {res.status_code for res in responses} == {200}
 
-    asyncio.run(_run())
     assert checkouts == 1, f"50 concurrent probes requested {checkouts} pooled connections"
 
 
@@ -581,7 +577,7 @@ def test_security_headers_reach_a_streaming_sse_response() -> None:
             assert "frame-ancestors 'none'" in res.headers["Content-Security-Policy"]
 
 
-def test_a_cancelled_request_closes_the_connection_instead_of_500ing() -> None:
+async def test_a_cancelled_request_closes_the_connection_instead_of_500ing() -> None:
     """A handler cancelled before it responds must not be turned into a 500 with a traceback.
 
     This is the multi-worker blocker, and it is not hypothetical: a 50-user load run logged 44
@@ -615,11 +611,9 @@ def test_a_cancelled_request_closes_the_connection_instead_of_500ing() -> None:
     async def _receive() -> MutableMapping[str, Any]:
         return {"type": "http.request", "body": b"", "more_body": False}
 
-    async def _drive() -> None:
-        with pytest.raises(asyncio.CancelledError):
-            await app(_ASGI_GET_SCOPE, _receive, _send)
+    with pytest.raises(asyncio.CancelledError):
+        await app(_ASGI_GET_SCOPE, _receive, _send)
 
-    asyncio.run(_drive())
     assert sent == [], f"a cancelled handler still emitted a response: {sent}"
 
 
@@ -1867,7 +1861,7 @@ def _gated_agent(gate: asyncio.Event, started: asyncio.Event, blocked_message: s
     return _GatedAgent()
 
 
-def test_concurrent_turn_on_same_session_is_409() -> None:
+async def test_concurrent_turn_on_same_session_is_409() -> None:
     """While one turn runs, a second POST to the same session is rejected with 409.
 
     Two concurrent turns would drive `agent.run` against the same TurnSession at once,
@@ -1875,48 +1869,40 @@ def test_concurrent_turn_on_same_session_is_409() -> None:
     (matching the admission semaphore's shed-don't-queue semantics), and the slot frees when
     the running turn's stream ends.
     """
-
-    async def _run() -> None:
-        gate = asyncio.Event()
-        started = asyncio.Event()
-        app = _app(_gated_agent(gate, started, "first"))
-        async with asgi_client(app) as client:
-            session_id = (await client.post("/sessions")).json()["session_id"]
-            first = asyncio.create_task(
-                client.post(f"/sessions/{session_id}/messages", json={"message": "first"})
-            )
-            await asyncio.wait_for(started.wait(), timeout=5)  # the first turn is mid-run
-            dup = await client.post(f"/sessions/{session_id}/messages", json={"message": "second"})
-            assert dup.status_code == 409
-            gate.set()
-            assert (await first).status_code == 200
-            # The slot is released with the stream — the next turn is admitted again.
-            ok = await client.post(f"/sessions/{session_id}/messages", json={"message": "third"})
-            assert ok.status_code == 200
-
-    asyncio.run(_run())
+    gate = asyncio.Event()
+    started = asyncio.Event()
+    app = _app(_gated_agent(gate, started, "first"))
+    async with asgi_client(app) as client:
+        session_id = (await client.post("/sessions")).json()["session_id"]
+        first = asyncio.create_task(
+            client.post(f"/sessions/{session_id}/messages", json={"message": "first"})
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)  # the first turn is mid-run
+        dup = await client.post(f"/sessions/{session_id}/messages", json={"message": "second"})
+        assert dup.status_code == 409
+        gate.set()
+        assert (await first).status_code == 200
+        # The slot is released with the stream — the next turn is admitted again.
+        ok = await client.post(f"/sessions/{session_id}/messages", json={"message": "third"})
+        assert ok.status_code == 200
 
 
-def test_concurrent_turns_on_different_sessions_are_admitted() -> None:
+async def test_concurrent_turns_on_different_sessions_are_admitted() -> None:
     """The per-session gate is per session: a turn on another session is not blocked."""
-
-    async def _run() -> None:
-        gate = asyncio.Event()
-        started = asyncio.Event()
-        app = _app(_gated_agent(gate, started, "blocked"))
-        async with asgi_client(app) as client:
-            first = (await client.post("/sessions")).json()["session_id"]
-            second = (await client.post("/sessions")).json()["session_id"]
-            blocked = asyncio.create_task(
-                client.post(f"/sessions/{first}/messages", json={"message": "blocked"})
-            )
-            await asyncio.wait_for(started.wait(), timeout=5)
-            other = await client.post(f"/sessions/{second}/messages", json={"message": "b"})
-            assert other.status_code == 200  # a different session's turn runs concurrently
-            gate.set()
-            assert (await blocked).status_code == 200
-
-    asyncio.run(_run())
+    gate = asyncio.Event()
+    started = asyncio.Event()
+    app = _app(_gated_agent(gate, started, "blocked"))
+    async with asgi_client(app) as client:
+        first = (await client.post("/sessions")).json()["session_id"]
+        second = (await client.post("/sessions")).json()["session_id"]
+        blocked = asyncio.create_task(
+            client.post(f"/sessions/{first}/messages", json={"message": "blocked"})
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+        other = await client.post(f"/sessions/{second}/messages", json={"message": "b"})
+        assert other.status_code == 200  # a different session's turn runs concurrently
+        gate.set()
+        assert (await blocked).status_code == 200
 
 
 def test_stalled_turn_times_out_and_frees_the_permit(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -2378,7 +2364,7 @@ def test_readyz_does_not_name_the_connector_fleet_to_an_unauthenticated_caller(
     assert body["connectors_unhealthy"] == 1
 
 
-def test_the_thread_pool_covers_the_tool_calls_one_admitted_turn_can_fan_out(
+async def test_the_thread_pool_covers_the_tool_calls_one_admitted_turn_can_fan_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`reserved` is the front door's claim about its own caps, and it charged a turn one thread.
@@ -2415,11 +2401,8 @@ def test_the_thread_pool_covers_the_tool_calls_one_admitted_turn_can_fan_out(
     monkeypatch.setattr(app_module, "install_default_executor", _spy)
     app = app_module.create_app(connector_factory=_no_connectors)
 
-    async def _boot() -> None:
-        async with app.router.lifespan_context(app):
-            pass
-
-    asyncio.run(_boot())
+    async with app.router.lifespan_context(app):
+        pass
 
     fan_out = settings.service_max_concurrent_turns * max(1, settings.agent_max_parallel_tool_calls)
     caps = fan_out + settings.attachment_max_concurrent_parses

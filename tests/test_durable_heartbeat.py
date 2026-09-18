@@ -116,7 +116,9 @@ def test_a_sub_second_timeout_still_beats_no_faster_than_once_a_second(
     assert len(beats) <= 1, f"a 0.4s heartbeat timeout beat {len(beats)} times in 1.3s"
 
 
-def test_cancelling_the_wrapper_cancels_the_work_it_wraps(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_cancelling_the_wrapper_cancels_the_work_it_wraps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`beating(x)` must behave like `await x` under cancellation, or adopting it is a regression.
 
     The awaitable has to run as a task so the timer can run beside it, and `asyncio.wait` does not
@@ -140,26 +142,23 @@ def test_cancelling_the_wrapper_cancels_the_work_it_wraps(monkeypatch: pytest.Mo
             raise
         return "done"
 
-    async def _cancel_mid_flight() -> None:
-        wrapped = asyncio.ensure_future(beating(_slow(), "interrupted", 600.0))
-        await asyncio.sleep(0.05)
-        wrapped.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await wrapped
-        # No sleep here, deliberately. A third version of this test had one — "let the inner task
-        # act on its cancellation" — and that sleep was doing the waiting the helper should do:
-        # `task.cancel()` only *requests* cancellation, so the wrapper was unwinding while the
-        # work was still in its `except`/`finally`. The helper now awaits the cancelled task, so
-        # by the time `await wrapped` returns the work has already finished unwinding.
-        # Asserted *inside* the loop, deliberately: `asyncio.run` cancels every pending task on
-        # its way out, so a check placed after it sees the work cancelled either way. That was the
-        # second version of this test, and it also passed against the unfixed helper.
-        assert reached_cancel, "the wrapped work was left running after the wrapper was cancelled"
-
-    asyncio.run(_cancel_mid_flight())
+    wrapped = asyncio.ensure_future(beating(_slow(), "interrupted", 600.0))
+    await asyncio.sleep(0.05)
+    wrapped.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await wrapped
+    # No sleep here, deliberately. A third version of this test had one — "let the inner task
+    # act on its cancellation" — and that sleep was doing the waiting the helper should do:
+    # `task.cancel()` only *requests* cancellation, so the wrapper was unwinding while the
+    # work was still in its `except`/`finally`. The helper now awaits the cancelled task, so
+    # by the time `await wrapped` returns the work has already finished unwinding.
+    # Asserted *inside* the loop, deliberately: `asyncio.run` cancels every pending task on
+    # its way out, so a check placed after it sees the work cancelled either way. That was the
+    # second version of this test, and it also passed against the unfixed helper.
+    assert reached_cancel, "the wrapped work was left running after the wrapper was cancelled"
 
 
-def test_cancellation_waits_for_the_work_to_finish_unwinding(
+async def test_cancellation_waits_for_the_work_to_finish_unwinding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The order, not just the fact: the work's cleanup completes *before* the caller unwinds.
@@ -188,19 +187,16 @@ def test_cancellation_waits_for_the_work_to_finish_unwinding(
             raise
         return "done"
 
-    async def _cancel_mid_flight() -> None:
-        wrapped = asyncio.ensure_future(beating(_slow(), "interrupted", 600.0))
-        await asyncio.sleep(0.05)
-        wrapped.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await wrapped
-        events.append("wrapper-returned")
-        assert events == ["cleanup-start", "cleanup-done", "wrapper-returned"], events
-
-    asyncio.run(_cancel_mid_flight())
+    wrapped = asyncio.ensure_future(beating(_slow(), "interrupted", 600.0))
+    await asyncio.sleep(0.05)
+    wrapped.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await wrapped
+    events.append("wrapper-returned")
+    assert events == ["cleanup-start", "cleanup-done", "wrapper-returned"], events
 
 
-def test_a_failing_heartbeat_does_not_leave_the_work_running(
+async def test_a_failing_heartbeat_does_not_leave_the_work_running(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cancellation is not the only way out of the loop, and the other way leaked the same work.
@@ -227,17 +223,14 @@ def test_a_failing_heartbeat_does_not_leave_the_work_running(
         outcome.append("ran to completion after the wrapper raised")
         return "done"
 
-    async def _run() -> None:
-        # 4 s timeout -> a 1 s beat interval, so the first beat lands while the work is still
-        # waiting and takes the wrapper out through the non-cancellation path. The work then
-        # outlives the wrapper by 0.4 s, which is what makes "still running" observable rather
-        # than a wall-clock guess — the trap the two earlier versions of the sibling test fell in.
-        with pytest.raises(RuntimeError, match="Not in activity context"):
-            await beating(_slow(), "interrupted", 4.0)
-        await asyncio.sleep(0.8)
-        assert outcome == ["cancelled"], outcome
-
-    asyncio.run(_run())
+    # 4 s timeout -> a 1 s beat interval, so the first beat lands while the work is still
+    # waiting and takes the wrapper out through the non-cancellation path. The work then
+    # outlives the wrapper by 0.4 s, which is what makes "still running" observable rather
+    # than a wall-clock guess — the trap the two earlier versions of the sibling test fell in.
+    with pytest.raises(RuntimeError, match="Not in activity context"):
+        await beating(_slow(), "interrupted", 4.0)
+    await asyncio.sleep(0.8)
+    assert outcome == ["cancelled"], outcome
 
 
 def test_the_beat_interval_has_exactly_one_derivation_in_the_tree() -> None:

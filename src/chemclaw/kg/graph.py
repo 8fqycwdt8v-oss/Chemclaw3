@@ -79,10 +79,18 @@ _NOTES_CACHE: dict[str, tuple[NotesFingerprint, list[Note]]] = {}
 # reused entry re-emits exactly the warning, the metric and the summary count a fresh parse would:
 # the log's denominator is a property of the corpus, not of what this process happened to re-read.
 #
-# **Not cleared by `invalidate_cache`, which is the whole point.** It holds no aggregate — every
-# entry is independently keyed on the file's own stat — so it cannot serve a stale corpus the way
-# `_NOTES_CACHE` can. Entries for files that are gone are dropped by the scan that no longer
+# **Not cleared by `invalidate_cache` by default, which is the whole point.** It holds no aggregate
+# — every entry is independently keyed on the file's own stat — so it cannot serve a stale corpus
+# the way `_NOTES_CACHE` can. Entries for files that are gone are dropped by the scan that no longer
 # mentions them. Memory is dict overhead over `Note` objects `_NOTES_CACHE` is holding anyway.
+#
+# **"By default" is new, and the exception is a caller that pairs this cache against a *content*
+# hash** (`D-2026-09-16-a-stat-cache-and-a-content-hash-do-not-agree-about-what-changed`). The
+# argument above turns on the two being wrong in the same cases: a write invisible to `(mtime_ns,
+# size)` was invisible to both. `note_file_fingerprints` stopped being a stat pair and became a
+# hash of the file's bytes, so it now sees a same-size, same-mtime edit that this cache does not —
+# measured, the fingerprint moves and `load_notes` returns the previous body. Anyone diffing the
+# two must ask for `reparse=True`.
 _PARSED_FILES: dict[str, dict[str, tuple[int, int, Note | str | None]]] = {}
 
 # Assembled-graph cache, same key and same fingerprint as `_NOTES_CACHE`. The notes cache spares the
@@ -144,7 +152,7 @@ def _corpus_lock(key: str) -> Iterator[None]:
         yield
 
 
-def invalidate_cache(notes_dir: Path | None = None) -> None:
+def invalidate_cache(notes_dir: Path | None = None, *, reparse: bool = False) -> None:
     """Drop cached notes/age so the next read re-scans immediately (the explicit bust hook).
 
     The TTL window trades a little freshness for latency, but a change this process *makes* should
@@ -165,19 +173,39 @@ def invalidate_cache(notes_dir: Path | None = None) -> None:
     It adds no class of staleness that is not already accepted: after this call a file whose
     `(mtime_ns, size)` has not moved is served from `_PARSED_FILES` unchanged
     (`D-2026-09-06-one-note-changed-is-not-the-corpus-changed`), so a write invisible to the
-    fingerprint is already invisible to the parse. The graph is keyed on the same two stat fields
-    and can therefore be wrong in exactly the same cases and no others.
+    *stat* is already invisible to the parse. The graph is keyed on the same two stat fields and can
+    therefore be wrong in exactly the same cases and no others.
+
+    **That was a claim about `note_file_fingerprints` too, and it stopped being true when that
+    function became a content hash** — which is what `reparse` is for
+    (`D-2026-09-16-a-stat-cache-and-a-content-hash-do-not-agree-about-what-changed`). A caller that
+    diffs a *hash* against the notes this returns is comparing two answers to "what changed" that
+    no longer agree, and the direction of the disagreement is the harmful one: the hash says
+    changed, the parse hands back the old body, and whatever is derived from the pair is written
+    under a digest that will match for ever. `reparse=True` drops the per-file parses as well, at
+    the cost of a full re-parse — which only the re-index job pays, because it is about to
+    re-embed the corpus anyway.
+
+    Args:
+        notes_dir: The corpus to drop, or `None` for every one this process has read.
+        reparse: Also drop the per-file parse cache, so the next read comes off disk. Needed only
+            by a caller that pairs the result against a content hash; a note write does not, and
+            paying it there is the cost `D-2026-09-06` measured and removed.
     """
     with _CACHE_LOCK:
         if notes_dir is None:
             _NOTES_CACHE.clear()
             _LAST_SCAN.clear()
             _NEWEST_MTIME.clear()
+            if reparse:
+                _PARSED_FILES.clear()
             return
         key = str(notes_dir)
         _NOTES_CACHE.pop(key, None)
         _LAST_SCAN.pop(key, None)
         _NEWEST_MTIME.pop(key, None)
+        if reparse:
+            _PARSED_FILES.pop(key, None)
 
 
 def scan_notes_dir(notes_dir: Path) -> Iterator[tuple[Path, os.stat_result]]:

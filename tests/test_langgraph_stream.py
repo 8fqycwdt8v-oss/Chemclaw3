@@ -772,7 +772,7 @@ def test_an_unparseable_tool_call_reaches_the_stream_as_a_real_tool_failed_event
     )
 
 
-def test_a_mid_turn_resume_continues_the_turns_caps_instead_of_restarting_them(
+async def test_a_mid_turn_resume_continues_the_turns_caps_instead_of_restarting_them(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One turn, two graph invocations, one allowance.
@@ -795,25 +795,23 @@ def test_a_mid_turn_resume_continues_the_turns_caps_instead_of_restarting_them(
     usage = _Usage()
     carry: dict[str, Any] = {}
 
-    async def _run() -> None:
-        graph = build_langgraph_agent(
-            ScriptedChatModel(["first", "second"]),
-            audit_sink=NullAuditSink(),
-        )
-        config = {"configurable": {"thread_id": "t-resume-caps"}}
-        for message in ("hello", "and the job results"):
-            async for _event in graph_events(
-                graph,
-                message,
-                config=config,
-                trace=trace,
-                on_signal=lambda _signal: None,
-                usage=usage,
-                carry=carry,
-            ):
-                pass
+    graph = build_langgraph_agent(
+        ScriptedChatModel(["first", "second"]),
+        audit_sink=NullAuditSink(),
+    )
+    config = {"configurable": {"thread_id": "t-resume-caps"}}
+    for message in ("hello", "and the job results"):
+        async for _event in graph_events(
+            graph,
+            message,
+            config=config,
+            trace=trace,
+            on_signal=lambda _signal: None,
+            usage=usage,
+            carry=carry,
+        ):
+            pass
 
-    asyncio.run(_run())
     assert carry.get("model_calls") == 2, (
         "the resume restarted the turn's model-call count, so one turn got two allowances of "
         f"both in-graph caps; the carry reads {carry}"

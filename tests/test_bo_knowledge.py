@@ -1,6 +1,5 @@
 """Tests for the BO recommendation → knowledge-graph bridge (plan step 1d.5)."""
 
-import asyncio
 import pathlib
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -195,7 +194,7 @@ def test_note_id_is_stable_for_the_same_recommendation() -> None:
     )
 
 
-def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.MonkeyPatch) -> None:
     """With publish_to_graph, a finished campaign proposes a bo-candidate note (bg queue).
 
     This test carried `@pytest.mark.timeout(600)` on the reasoning that it is "slow, not hung"
@@ -214,56 +213,53 @@ def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.MonkeyPa
     # The gate is core's now, so the submitter is patched where core publishes from.
     monkeypatch.setattr(memory_jobs, "default_writer", lambda: fake)
 
-    async def _run() -> None:
-        from chemclaw.science.bo.benchmarks.reizman_suzuki import build_problem, load_dataset
+    from chemclaw.science.bo.benchmarks.reizman_suzuki import build_problem, load_dataset
 
-        spec = CampaignSpec(
-            problem=build_problem(load_dataset()),
-            objective_name="reizman_suzuki",
-            n_initial=3,
-            n_rounds=1,
-        )
-        async with await start_env_or_skip() as env:
-            client: Client = pydantic_client(env)
-            async with (
-                Worker(
-                    client,
+    spec = CampaignSpec(
+        problem=build_problem(load_dataset()),
+        objective_name="reizman_suzuki",
+        n_initial=3,
+        n_rounds=1,
+    )
+    async with await start_env_or_skip() as env:
+        client: Client = pydantic_client(env)
+        async with (
+            Worker(
+                client,
+                task_queue="test-bo-pub",
+                workflows=[BoCampaignWorkflow],
+                activities=_BO_ACTIVITIES,
+            ),
+            # Core's wrapper runs HERE, so this worker must register it. Registering only
+            # the activity is what hung: Temporal keeps redelivering a workflow task whose
+            # type no worker knows, and the caller waits on a result that can never arrive.
+            Worker(
+                client,
+                task_queue=settings.background_task_queue,
+                workflows=[ConnectorJobWorkflow],
+                activities=[publish_memory_note_activity, record_job],
+            ),
+        ):
+            # The campaign now *builds* the note and core *publishes* it, so this drives the
+            # whole path: the connector's workflow as a child of core's wrapper, which PR-gates
+            # whatever note the envelope carries (D-093).
+            await client.execute_workflow(
+                ConnectorJobWorkflow.run,
+                ConnectorJobInput(
+                    connector="bo",
+                    job="start_optimization_campaign",
+                    workflow="BoCampaignWorkflow",
                     task_queue="test-bo-pub",
-                    workflows=[BoCampaignWorkflow],
-                    activities=_BO_ACTIVITIES,
+                    payload=spec.model_dump(mode="json"),
+                    requested_by="tester",
+                    rationale="find a higher-yielding condition set for the teaching example",
+                    publish_to_graph=True,
                 ),
-                # Core's wrapper runs HERE, so this worker must register it. Registering only
-                # the activity is what hung: Temporal keeps redelivering a workflow task whose
-                # type no worker knows, and the caller waits on a result that can never arrive.
-                Worker(
-                    client,
-                    task_queue=settings.background_task_queue,
-                    workflows=[ConnectorJobWorkflow],
-                    activities=[publish_memory_note_activity, record_job],
-                ),
-            ):
-                # The campaign now *builds* the note and core *publishes* it, so this drives the
-                # whole path: the connector's workflow as a child of core's wrapper, which PR-gates
-                # whatever note the envelope carries (D-093).
-                await client.execute_workflow(
-                    ConnectorJobWorkflow.run,
-                    ConnectorJobInput(
-                        connector="bo",
-                        job="start_optimization_campaign",
-                        workflow="BoCampaignWorkflow",
-                        task_queue="test-bo-pub",
-                        payload=spec.model_dump(mode="json"),
-                        requested_by="tester",
-                        rationale="find a higher-yielding condition set for the teaching example",
-                        publish_to_graph=True,
-                    ),
-                    id="bo-publish-test",
-                    task_queue=settings.background_task_queue,
-                )
-        assert len(fake.writes) == 1  # the recommendation was proposed as a note
-        assert fake.writes[0].files[0].path.startswith("knowledge/bo-candidate/bo-")
-
-    asyncio.run(_run())
+                id="bo-publish-test",
+                task_queue=settings.background_task_queue,
+            )
+    assert len(fake.writes) == 1  # the recommendation was proposed as a note
+    assert fake.writes[0].files[0].path.startswith("knowledge/bo-candidate/bo-")
 
 
 def test_a_library_campaigns_note_stays_readable(monkeypatch: pytest.MonkeyPatch) -> None:

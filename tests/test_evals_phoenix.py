@@ -368,3 +368,31 @@ def test_a_loud_failure_is_published_and_an_unobserved_one_is_not(tmp_path: Path
     clean = _publish_one(tmp_path, "clean", answer="here it is", answered=True)
     assert clean["failed_loudly"]["score"] == 0.0
     assert clean["failed_loudly"]["label"] == "clean"
+
+
+def test_the_premise_a_probe_was_scored_under_travels_with_it(archived: Path) -> None:
+    """Both halves of "what the system was assumed to be", on every published example.
+
+    `asserts_absent` says which capability the question was scored as *lacking*. `needs_bundle` says
+    which deployment it was scored *against* — and it is the harder of the two to reconstruct later,
+    because unlike a corpus field it changes with **no corpus edit at all**: pointing
+    `CHEMCLAW_CONNECTORS_DIR` somewhere else is enough for `evals/live._tool_expectation_applies` to
+    drop an expectation, silently, on the same probe text.
+
+    Without both on the example, two runs of one probe in two lanes are indistinguishable in the
+    published dataset, and whoever compares them is comparing two different questions.
+    """
+    client = _Client()
+    publish_run(archived, experiment_name="arm", client=client, probe_dir=_PROBE_DIR)
+    published = client.datasets.published[0]
+
+    for output in published["outputs"]:
+        assert "asserts_absent" in output, (
+            "an example published without its absence claim; a bucket-C verdict then has no "
+            "record of the premise it was scored under"
+        )
+    for metadata in published["metadata"]:
+        assert "needs_bundle" in metadata, (
+            "an example published without `needs_bundle`; a probe scored with the fleet mounted "
+            "and one scored without it are now the same row"
+        )

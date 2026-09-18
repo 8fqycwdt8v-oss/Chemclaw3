@@ -8,6 +8,8 @@ past run by the words a chemist would actually remember — the *reason* it was 
 
 import asyncio
 
+import pytest
+
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.durable.job_record import JobRecord
@@ -39,108 +41,92 @@ async def _sink_or_skip() -> PostgresJobRecordSink:
     return PostgresJobRecordSink()
 
 
-def test_a_campaigns_whole_history_survives_the_round_trip() -> None:
+async def test_a_campaigns_whole_history_survives_the_round_trip() -> None:
     """The point of the table: what Temporal's expiring history was the only copy of."""
+    sink = await _sink_or_skip()
+    await sink.record(_CAMPAIGN)
 
-    async def _run() -> None:
-        sink = await _sink_or_skip()
-        await sink.record(_CAMPAIGN)
-
-        stored = await read_job_record("pg-bo-campaign-1")
-        assert stored is not None
-        assert stored.rationale == _CAMPAIGN.rationale
-        assert stored.payload == {"objective_name": "solubility_max", "n_rounds": 4}
-        # Nested JSON, unflattened — every observation the campaign paid for.
-        assert stored.result["history"] == [{"value": -3.0}, {"value": -1.2}]
-        assert stored.note_id == "bo-solubility-max-abc123"
-        assert stored.requested_by == "oid-42" and stored.session_id == "sess-7"
-        # Stamped by the database's own clock, so rows order by the same clock that wrote them.
-        assert stored.completed_at is not None
-
-    asyncio.run(_run())
+    stored = await read_job_record("pg-bo-campaign-1")
+    assert stored is not None
+    assert stored.rationale == _CAMPAIGN.rationale
+    assert stored.payload == {"objective_name": "solubility_max", "n_rounds": 4}
+    # Nested JSON, unflattened — every observation the campaign paid for.
+    assert stored.result["history"] == [{"value": -3.0}, {"value": -1.2}]
+    assert stored.note_id == "bo-solubility-max-abc123"
+    assert stored.requested_by == "oid-42" and stored.session_id == "sess-7"
+    # Stamped by the database's own clock, so rows order by the same clock that wrote them.
+    assert stored.completed_at is not None
 
 
-def test_re_running_a_job_updates_its_row_rather_than_forking_it() -> None:
+async def test_re_running_a_job_updates_its_row_rather_than_forking_it() -> None:
     """The job id is the idempotency key, and an activity is at-least-once: one run, one row."""
+    sink = await _sink_or_skip()
+    await sink.record(_CAMPAIGN)
+    await sink.record(
+        _CAMPAIGN.model_copy(update={"summary": "re-run after the objective was fixed"})
+    )
 
-    async def _run() -> None:
-        sink = await _sink_or_skip()
-        await sink.record(_CAMPAIGN)
-        await sink.record(
-            _CAMPAIGN.model_copy(update={"summary": "re-run after the objective was fixed"})
-        )
-
-        stored = await read_job_record("pg-bo-campaign-1")
-        assert stored is not None
-        assert stored.summary == "re-run after the objective was fixed"
-        matches = (await read_job_record_summaries("", "bo", 50)).hits
-        assert [m.job_id for m in matches].count("pg-bo-campaign-1") == 1
-
-    asyncio.run(_run())
+    stored = await read_job_record("pg-bo-campaign-1")
+    assert stored is not None
+    assert stored.summary == "re-run after the objective was fixed"
+    matches = (await read_job_record_summaries("", "bo", 50)).hits
+    assert [m.job_id for m in matches].count("pg-bo-campaign-1") == 1
 
 
-def test_the_plan_step_survives_the_round_trip_and_reaches_the_listing() -> None:
+async def test_the_plan_step_survives_the_round_trip_and_reaches_the_listing() -> None:
     """The job↔step join (D-2026-08-27): the record keeps both halves, the summary shows the step.
 
     The listing carries `plan_step` so "which step was this run for" needs no second lookup;
     `plan_hash` stays on the full record, where a reader matching a superseded plan revision goes.
     """
+    sink = await _sink_or_skip()
+    stamped = _CAMPAIGN.model_copy(
+        update={
+            "job_id": "pg-plan-step-1",
+            # Its own reason, so the search-by-reason test's term matches exactly one row.
+            "rationale": "step two of the approved plan wants the campaign run",
+            "plan_step": "run the optimization campaign",
+            "plan_hash": "plan-rev-abc",
+        }
+    )
+    await sink.record(stamped)
 
-    async def _run() -> None:
-        sink = await _sink_or_skip()
-        stamped = _CAMPAIGN.model_copy(
+    stored = await read_job_record("pg-plan-step-1")
+    assert stored is not None
+    assert stored.plan_step == "run the optimization campaign"
+    assert stored.plan_hash == "plan-rev-abc"
+    summaries = (await read_job_record_summaries("", "bo", 50)).hits
+    by_id = {s.job_id: s for s in summaries}
+    assert by_id["pg-plan-step-1"].plan_step == "run the optimization campaign"
+
+
+async def test_a_past_run_is_found_by_the_reason_it_was_run() -> None:
+    """The retrospective question is "why did we do this", so the reason has to be searchable."""
+    sink = await _sink_or_skip()
+    await sink.record(_CAMPAIGN)
+    await sink.record(
+        _CAMPAIGN.model_copy(
             update={
-                "job_id": "pg-plan-step-1",
-                # Its own reason, so the search-by-reason test's term matches exactly one row.
-                "rationale": "step two of the approved plan wants the campaign run",
-                "plan_step": "run the optimization campaign",
-                "plan_hash": "plan-rev-abc",
+                "job_id": "pg-qm-barrier-1",
+                "connector": "calc",
+                "job": "sample_conformers",
+                "rationale": "the reviewer questioned the reported barrier",
+                "note_id": "",
             }
         )
-        await sink.record(stamped)
+    )
 
-        stored = await read_job_record("pg-plan-step-1")
-        assert stored is not None
-        assert stored.plan_step == "run the optimization campaign"
-        assert stored.plan_hash == "plan-rev-abc"
-        summaries = (await read_job_record_summaries("", "bo", 50)).hits
-        by_id = {s.job_id: s for s in summaries}
-        assert by_id["pg-plan-step-1"].plan_step == "run the optimization campaign"
+    by_reason = (await read_job_record_summaries("dissolves the amine", "", 50)).hits
+    assert [m.job_id for m in by_reason] == ["pg-bo-campaign-1"]
+    # A listing carries the reason itself, so a hit is recognisable without a second lookup.
+    assert by_reason[0].rationale.startswith("the Tuesday batch stalled")
 
-    asyncio.run(_run())
+    by_connector = (await read_job_record_summaries("", "calc", 50)).hits
+    assert [m.job_id for m in by_connector] == ["pg-qm-barrier-1"]
 
-
-def test_a_past_run_is_found_by_the_reason_it_was_run() -> None:
-    """The retrospective question is "why did we do this", so the reason has to be searchable."""
-
-    async def _run() -> None:
-        sink = await _sink_or_skip()
-        await sink.record(_CAMPAIGN)
-        await sink.record(
-            _CAMPAIGN.model_copy(
-                update={
-                    "job_id": "pg-qm-barrier-1",
-                    "connector": "calc",
-                    "job": "sample_conformers",
-                    "rationale": "the reviewer questioned the reported barrier",
-                    "note_id": "",
-                }
-            )
-        )
-
-        by_reason = (await read_job_record_summaries("dissolves the amine", "", 50)).hits
-        assert [m.job_id for m in by_reason] == ["pg-bo-campaign-1"]
-        # A listing carries the reason itself, so a hit is recognisable without a second lookup.
-        assert by_reason[0].rationale.startswith("the Tuesday batch stalled")
-
-        by_connector = (await read_job_record_summaries("", "calc", 50)).hits
-        assert [m.job_id for m in by_connector] == ["pg-qm-barrier-1"]
-
-        # Both filters empty = the recent runs, newest first, bounded by the limit.
-        recent = (await read_job_record_summaries("", "", 1)).hits
-        assert len(recent) == 1
-
-    asyncio.run(_run())
+    # Both filters empty = the recent runs, newest first, bounded by the limit.
+    recent = (await read_job_record_summaries("", "", 1)).hits
+    assert len(recent) == 1
 
 
 def test_the_search_is_a_substring_search_and_the_index_serves_that_predicate() -> None:
@@ -216,17 +202,13 @@ def test_the_search_is_a_substring_search_and_the_index_serves_that_predicate() 
     )
 
 
-def test_an_unknown_job_id_reads_as_absent_rather_than_raising() -> None:
+async def test_an_unknown_job_id_reads_as_absent_rather_than_raising() -> None:
     """`get_durable_job_status` distinguishes "expired" from "never existed" on this answer."""
-
-    async def _run() -> None:
-        await _sink_or_skip()
-        assert await read_job_record("pg-no-such-job") is None
-
-    asyncio.run(_run())
+    await _sink_or_skip()
+    assert await read_job_record("pg-no-such-job") is None
 
 
-def test_a_second_run_under_one_id_does_not_keep_the_first_runs_attribution() -> None:
+async def test_a_second_run_under_one_id_does_not_keep_the_first_runs_attribution() -> None:
     """A row must not carry run 2's reason beside run 1's name (review of D-157).
 
     Reachable, and on exactly the horizon this table exists for: once Temporal has expired an
@@ -235,45 +217,41 @@ def test_a_second_run_under_one_id_does_not_keep_the_first_runs_attribution() ->
     `requested_by`/`session_id`/`correlation_id`, so the row said Bob's question was asked by
     Alice — the worst possible answer for the field an audit joins on.
     """
-
-    async def _run() -> None:
-        sink = await _sink_or_skip()
-        first = _CAMPAIGN.model_copy(
+    sink = await _sink_or_skip()
+    first = _CAMPAIGN.model_copy(
+        update={
+            "job_id": "pg-reattributed-1",
+            "rationale": "alice: does 2-MeTHF dissolve the amine",
+            "requested_by": "oid-alice",
+            "session_id": "sess-alice",
+            "correlation_id": "turn-alice",
+        }
+    )
+    await sink.record(first)
+    await sink.record(
+        first.model_copy(
             update={
-                "job_id": "pg-reattributed-1",
-                "rationale": "alice: does 2-MeTHF dissolve the amine",
-                "requested_by": "oid-alice",
-                "session_id": "sess-alice",
-                "correlation_id": "turn-alice",
+                "rationale": "bob: re-run now the objective is fixed",
+                "requested_by": "oid-bob",
+                "session_id": "sess-bob",
+                "correlation_id": "turn-bob",
+                "summary": "re-run",
+                "result": {"best": {"value": -0.4}},
             }
         )
-        await sink.record(first)
-        await sink.record(
-            first.model_copy(
-                update={
-                    "rationale": "bob: re-run now the objective is fixed",
-                    "requested_by": "oid-bob",
-                    "session_id": "sess-bob",
-                    "correlation_id": "turn-bob",
-                    "summary": "re-run",
-                    "result": {"best": {"value": -0.4}},
-                }
-            )
-        )
+    )
 
-        stored = await read_job_record("pg-reattributed-1")
-        assert stored is not None
-        # The row is one run's story throughout, not a splice of two.
-        assert stored.rationale.startswith("bob:")
-        assert stored.requested_by == "oid-bob"
-        assert stored.session_id == "sess-bob"
-        assert stored.correlation_id == "turn-bob"
-        assert stored.result == {"best": {"value": -0.4}}
-
-    asyncio.run(_run())
+    stored = await read_job_record("pg-reattributed-1")
+    assert stored is not None
+    # The row is one run's story throughout, not a splice of two.
+    assert stored.rationale.startswith("bob:")
+    assert stored.requested_by == "oid-bob"
+    assert stored.session_id == "sess-bob"
+    assert stored.correlation_id == "turn-bob"
+    assert stored.result == {"best": {"value": -0.4}}
 
 
-def test_a_second_failed_template_run_states_its_own_steps_and_not_the_first_runs() -> None:
+async def test_a_second_failed_template_run_states_its_own_steps_and_not_the_first_runs() -> None:
     """The same splice again, through the columns the *failure* upsert refused to refresh.
 
     `_MUTABLE` closed this for `requested_by`; the result-column exclusion reopened it for the one
@@ -288,45 +266,41 @@ def test_a_second_failed_template_run_states_its_own_steps_and_not_the_first_run
     Both halves are asserted, because either alone is satisfiable by the wrong statement: the
     second run's steps must land, and the first run's must be gone.
     """
-
-    async def _run() -> None:
-        sink = await _sink_or_skip()
-        first = JobRecord(
-            job_id="pg-failed-template-1",
-            connector="template",
-            job="hazard-briefing",
-            requested_by="oid-alice",
-            payload={"smiles": "run-1"},
-            result={"steps": {"screen": "run1-screen", "write": "run1-write"}},
-            payload_kind="template",
-            state="failed",
-            failure_reason="step 'review': boom-1",
+    sink = await _sink_or_skip()
+    first = JobRecord(
+        job_id="pg-failed-template-1",
+        connector="template",
+        job="hazard-briefing",
+        requested_by="oid-alice",
+        payload={"smiles": "run-1"},
+        result={"steps": {"screen": "run1-screen", "write": "run1-write"}},
+        payload_kind="template",
+        state="failed",
+        failure_reason="step 'review': boom-1",
+    )
+    await sink.record(first)
+    await sink.record(
+        first.model_copy(
+            update={
+                "requested_by": "oid-bob",
+                "payload": {"smiles": "run-2"},
+                "result": {"steps": {"screen": "run2-screen"}},
+                "failure_reason": "step 'write': boom-2",
+            }
         )
-        await sink.record(first)
-        await sink.record(
-            first.model_copy(
-                update={
-                    "requested_by": "oid-bob",
-                    "payload": {"smiles": "run-2"},
-                    "result": {"steps": {"screen": "run2-screen"}},
-                    "failure_reason": "step 'write': boom-2",
-                }
-            )
-        )
+    )
 
-        stored = await read_job_record("pg-failed-template-1")
-        assert stored is not None
-        assert stored.requested_by == "oid-bob"
-        assert stored.failure_reason == "step 'write': boom-2"
-        assert stored.result == {"steps": {"screen": "run2-screen"}}, (
-            "the row states run 2's actor and failing step beside run 1's step results — a run "
-            "that never produced them"
-        )
-
-    asyncio.run(_run())
+    stored = await read_job_record("pg-failed-template-1")
+    assert stored is not None
+    assert stored.requested_by == "oid-bob"
+    assert stored.failure_reason == "step 'write': boom-2"
+    assert stored.result == {"steps": {"screen": "run2-screen"}}, (
+        "the row states run 2's actor and failing step beside run 1's step results — a run "
+        "that never produced them"
+    )
 
 
-def test_a_failure_that_produced_nothing_still_never_erases_a_landed_result() -> None:
+async def test_a_failure_that_produced_nothing_still_never_erases_a_landed_result() -> None:
     """And the protection the exclusion was built for, which the record-shaped test must keep.
 
     `connector_job._record_run` can commit and then overrun its own timeout, leaving a completed
@@ -335,33 +309,29 @@ def test_a_failure_that_produced_nothing_still_never_erases_a_landed_result() ->
     must refresh none of them. Asserted beside the test above because the two are the same
     decision read from opposite ends, and a fix for one that broke the other would look green.
     """
-
-    async def _run() -> None:
-        sink = await _sink_or_skip()
-        await sink.record(_CAMPAIGN.model_copy(update={"job_id": "pg-failure-over-result-1"}))
-        await sink.record(
-            JobRecord(
-                job_id="pg-failure-over-result-1",
-                connector="bo",
-                job="start_optimization_campaign",
-                requested_by="oid-42",
-                state="failed",
-                failure_reason="ValueError: the campaign blew up after recording",
-            )
+    sink = await _sink_or_skip()
+    await sink.record(_CAMPAIGN.model_copy(update={"job_id": "pg-failure-over-result-1"}))
+    await sink.record(
+        JobRecord(
+            job_id="pg-failure-over-result-1",
+            connector="bo",
+            job="start_optimization_campaign",
+            requested_by="oid-42",
+            state="failed",
+            failure_reason="ValueError: the campaign blew up after recording",
         )
+    )
 
-        stored = await read_job_record("pg-failure-over-result-1")
-        assert stored is not None
-        assert stored.state == "failed"
-        assert stored.failure_reason.startswith("ValueError:")
-        assert stored.result == _CAMPAIGN.result, "the bookkeeping erased the science"
-        assert stored.summary == _CAMPAIGN.summary
-        assert stored.note_id == _CAMPAIGN.note_id
-
-    asyncio.run(_run())
+    stored = await read_job_record("pg-failure-over-result-1")
+    assert stored is not None
+    assert stored.state == "failed"
+    assert stored.failure_reason.startswith("ValueError:")
+    assert stored.result == _CAMPAIGN.result, "the bookkeeping erased the science"
+    assert stored.summary == _CAMPAIGN.summary
+    assert stored.note_id == _CAMPAIGN.note_id
 
 
-def test_a_capped_search_says_it_was_capped_and_can_be_paged_past() -> None:
+async def test_a_capped_search_says_it_was_capped_and_can_be_paged_past() -> None:
     """The retrospective view answered "have we run this before?" over the newest page, silently.
 
     `job_record_search_limit` bounds the answer and nothing said so: measured against this table
@@ -374,60 +344,109 @@ def test_a_capped_search_says_it_was_capped_and_can_be_paged_past() -> None:
     is a *row* rather than an offset — rows are only ever appended to this table, but a listing
     counted in rows would still repeat and skip if two runs land in one `now()`.
     """
-
-    async def _run() -> None:
-        sink = await _sink_or_skip()
-        for i in range(25):
-            await sink.record(
-                JobRecord(
-                    job_id=f"pg-page-{i:03d}",
-                    connector="bo",
-                    job="start_optimization_campaign",
-                    rationale=f"Suzuki coupling screen, round {i}",
-                    requested_by="oid-1",
-                    payload={"i": i},
-                    summary=f"campaign {i} finished",
-                )
+    sink = await _sink_or_skip()
+    for i in range(25):
+        await sink.record(
+            JobRecord(
+                job_id=f"pg-page-{i:03d}",
+                connector="bo",
+                job="start_optimization_campaign",
+                rationale=f"Suzuki coupling screen, round {i}",
+                requested_by="oid-1",
+                payload={"i": i},
+                summary=f"campaign {i} finished",
             )
+        )
 
-        first = await read_job_record_summaries("Suzuki coupling", "", 10)
-        assert len(first.hits) == 10
-        assert first.hits_truncated is True, "a page that filled must say the count is a floor"
-        assert "floor" in first.verdict
+    first = await read_job_record_summaries("Suzuki coupling", "", 10)
+    assert len(first.hits) == 10
+    assert first.hits_truncated is True, "a page that filled must say the count is a floor"
+    assert "floor" in first.verdict
 
-        seen = [hit.job_id for hit in first.hits]
-        page = first
-        while page.hits_truncated:
-            page = await read_job_record_summaries(
-                "Suzuki coupling", "", 10, after=page.hits[-1].job_id
-            )
-            seen.extend(hit.job_id for hit in page.hits)
-        # Every row reached exactly once: no repeats across the boundary, nothing skipped.
-        assert len(seen) == len(set(seen)) == 25
-        assert page.hits_truncated is False
-
-    asyncio.run(_run())
+    seen = [hit.job_id for hit in first.hits]
+    page = first
+    while page.hits_truncated:
+        page = await read_job_record_summaries(
+            "Suzuki coupling", "", 10, after=page.hits[-1].job_id
+        )
+        seen.extend(hit.job_id for hit in page.hits)
+    # Every row reached exactly once: no repeats across the boundary, nothing skipped.
+    assert len(seen) == len(set(seen)) == 25
+    assert page.hits_truncated is False
 
 
-def test_a_search_that_fits_is_not_reported_as_truncated() -> None:
+async def test_a_search_that_fits_is_not_reported_as_truncated() -> None:
     """The flag must be evidence, not decoration: an exact-fit page is complete, and says so."""
-
-    async def _run() -> None:
-        sink = await _sink_or_skip()
-        for i in range(3):
-            await sink.record(
-                JobRecord(
-                    job_id=f"pg-exact-{i}",
-                    connector="calc",
-                    job="sample_conformers",
-                    rationale=f"exact fit probe {i}",
-                    requested_by="oid-1",
-                    summary="done",
-                )
+    sink = await _sink_or_skip()
+    for i in range(3):
+        await sink.record(
+            JobRecord(
+                job_id=f"pg-exact-{i}",
+                connector="calc",
+                job="sample_conformers",
+                rationale=f"exact fit probe {i}",
+                requested_by="oid-1",
+                summary="done",
             )
-        found = await read_job_record_summaries("exact fit probe", "", 3)
-        assert len(found.hits) == 3
-        assert found.hits_truncated is False
-        assert "floor" not in found.verdict
+        )
+    found = await read_job_record_summaries("exact fit probe", "", 3)
+    assert len(found.hits) == 3
+    assert found.hits_truncated is False
+    assert "floor" not in found.verdict
 
-    asyncio.run(_run())
+
+async def test_the_record_is_built_from_the_columns_by_name_and_not_by_their_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reversing the SELECT list must change nothing about the record it returns.
+
+    This was nineteen `row[n]` subscripts restating `_SELECT_ONE`'s order a second time in Python,
+    over a projection whose first five columns and whose `note_id`/`payload_kind`/`state`/
+    `failure_reason` are all `TEXT` — so an edit to the column list moved every value one field
+    along, type-checked, and returned a record that reads as a record. `class_row` passes each
+    column as a keyword argument, which is what this test drives: the same row, read through a
+    deliberately hostile column order, must be the same `JobRecord`.
+    """
+    from chemclaw.durable import job_record_store
+
+    sink = await _sink_or_skip()
+    await sink.record(_CAMPAIGN)
+    straight = await read_job_record("pg-bo-campaign-1")
+
+    columns = [name.strip() for name in job_record_store._COLUMNS.split(",")]
+    reversed_list = ", ".join(reversed([*columns, "completed_at"]))
+    monkeypatch.setattr(
+        job_record_store,
+        "_SELECT_ONE",
+        f"SELECT {reversed_list} FROM job_records WHERE job_id = %s",
+    )
+    scrambled = await read_job_record("pg-bo-campaign-1")
+
+    assert straight is not None and scrambled == straight, (
+        "the column order must not be able to decide which field a value lands in"
+    )
+
+
+async def test_a_column_the_record_has_no_field_for_is_an_error_at_the_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`JobRecord` is `extra="forbid"`, so the SELECT and the model cannot drift apart quietly.
+
+    The failure this converts: a migration adds a column, somebody adds it to `_COLUMNS` and not to
+    the model. Ignored, that value is simply absent from every record anybody reads; forbidden, the
+    read raises naming the column, which is the only version a caller can act on.
+    """
+    import pydantic
+
+    from chemclaw.durable import job_record_store
+
+    sink = await _sink_or_skip()
+    await sink.record(_CAMPAIGN)
+    monkeypatch.setattr(
+        job_record_store,
+        "_SELECT_ONE",
+        f"SELECT {job_record_store._COLUMNS}, completed_at, session_id AS surplus "
+        "FROM job_records WHERE job_id = %s",
+    )
+    with pytest.raises(pydantic.ValidationError, match="surplus"):
+        await read_job_record("pg-bo-campaign-1")

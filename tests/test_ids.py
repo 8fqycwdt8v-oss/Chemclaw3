@@ -5,8 +5,6 @@ canonicalization collapses equivalent SMILES to one key, and the hash is stable
 and order-independent. These back the D-011 "compute once, never twice" guarantee.
 """
 
-import asyncio
-
 import pytest
 
 from chemclaw.connectors.calc.remote import cached_remote
@@ -131,7 +129,7 @@ def test_calc_cache_key_collapses_equivalent_smiles() -> None:
         ("predict_solubility", ("CCO", "OCC")),
     ],
 )
-def test_a_calculator_serves_the_other_spelling_of_a_molecule_from_the_store(
+async def test_a_calculator_serves_the_other_spelling_of_a_molecule_from_the_store(
     tool: str, pair: tuple[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Every calculator computes once for a molecule, then serves the other spelling.
@@ -145,15 +143,13 @@ def test_a_calculator_serves_the_other_spelling_of_a_molecule_from_the_store(
     """
     server = install(monkeypatch, FakeCalcServer())
 
-    async def _run() -> None:
-        store = InMemoryStore()
-        first, second = pair
-        _, cached_first = await cached_remote(store, tool, {"smiles": first})
-        _, cached_second = await cached_remote(store, tool, {"smiles": second})
-        assert cached_first is False
-        assert cached_second is True
+    store = InMemoryStore()
+    first, second = pair
+    _, cached_first = await cached_remote(store, tool, {"smiles": first})
+    _, cached_second = await cached_remote(store, tool, {"smiles": second})
+    assert cached_first is False
+    assert cached_second is True
 
-    asyncio.run(_run())
     assert server.count(tool) == 1
 
 

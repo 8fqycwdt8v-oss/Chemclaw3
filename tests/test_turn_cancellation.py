@@ -216,7 +216,7 @@ class _RecordingBudget(BudgetTracker):
         super().record(session_id, user_id, tokens)
 
 
-def test_abandoned_turn_still_books_its_tokens() -> None:
+async def test_abandoned_turn_still_books_its_tokens() -> None:
     """Tokens spent before the client vanished count — otherwise abandon-and-retry is free.
 
     Without this, a user could bypass the token budget indefinitely by dropping each connection
@@ -248,32 +248,29 @@ def test_abandoned_turn_still_books_its_tokens() -> None:
     measured_before = METRICS.value("chemclaw_tokens_total")
     inferred_before = METRICS.value("chemclaw_estimated_tokens_total")
 
-    async def _abandon() -> None:
-        stream = _closable(
-            run_turn(
-                TurnSession(session_id="s1"),
-                "hi",
-                actor="u1",
-                budget=budget,
-                graph_factory=agent.graph_factory,
-                # Stated, because this test counts updates to decide when to abandon: defaulting
-                # means every enabled connector, none of which is running in a test process, and
-                # the resulting degradation event (D-139) is noise in that count.
-                connectors=[],
-            )
+    stream = _closable(
+        run_turn(
+            TurnSession(session_id="s1"),
+            "hi",
+            actor="u1",
+            budget=budget,
+            graph_factory=agent.graph_factory,
+            # Stated, because this test counts updates to decide when to abandon: defaulting
+            # means every enabled connector, none of which is running in a test process, and
+            # the resulting degradation event (D-139) is noise in that count.
+            connectors=[],
         )
-        # Tokens, not events. Counting every event coupled the cut-off to how many *non*-token
-        # events a turn happens to open with — the capability announcement alone moved it twice —
-        # so the number of metered updates the assertion below depends on silently changed with
-        # each. The turn's spend is carried by its tokens; count those.
-        consumed = 0
-        async for _event in stream:
-            consumed += _event.type == "token"
-            if consumed == 3:
-                break
-        await stream.aclose()  # sse-starlette's send-timeout teardown
-
-    asyncio.run(_abandon())
+    )
+    # Tokens, not events. Counting every event coupled the cut-off to how many *non*-token
+    # events a turn happens to open with — the capability announcement alone moved it twice —
+    # so the number of metered updates the assertion below depends on silently changed with
+    # each. The turn's spend is carried by its tokens; count those.
+    consumed = 0
+    async for _event in stream:
+        consumed += _event.type == "token"
+        if consumed == 3:
+            break
+    await stream.aclose()  # sse-starlette's send-timeout teardown
 
     assert budget.booked, "an abandoned turn booked nothing at all"
     session_id, user_id, tokens = budget.booked[0]
@@ -346,7 +343,7 @@ def test_a_prompt_that_cannot_be_estimated_books_nothing(
     assert _prompt_estimate(_Hostile()) == 0
 
 
-def test_abandoned_turn_releases_its_permit_and_turn_slot() -> None:
+async def test_abandoned_turn_releases_its_permit_and_turn_slot() -> None:
     """The permit and the per-session turn slot come back, so capacity is not lost."""
     active: set[str] = set()
     # Created inside the running loop: an asyncio.Semaphore binds to the loop that first awaits it.
@@ -372,17 +369,14 @@ def test_abandoned_turn_releases_its_permit_and_turn_slot() -> None:
             active.discard("s1")
         return seen
 
-    async def _drive() -> None:
-        await _guarded()
-        assert not semaphore.locked(), "the admission permit was not returned"
-        assert active == set(), "the session stayed marked as having a live turn (409-bricked)"
-        # And the freed permit is immediately reusable by the next turn.
-        await asyncio.wait_for(semaphore.acquire(), timeout=1)
-
-    asyncio.run(_drive())
+    await _guarded()
+    assert not semaphore.locked(), "the admission permit was not returned"
+    assert active == set(), "the session stayed marked as having a live turn (409-bricked)"
+    # And the freed permit is immediately reusable by the next turn.
+    await asyncio.wait_for(semaphore.acquire(), timeout=1)
 
 
-def test_client_disconnect_rolls_back_a_half_written_turn() -> None:
+async def test_client_disconnect_rolls_back_a_half_written_turn() -> None:
     """A disconnect mid-tool-call must not leave a dangling `tool_use` in the thread (ISSUE-B-10).
 
     Losing the interrupted turn is the cheap outcome. The expensive one is keeping it: a `tool_use`
@@ -396,19 +390,16 @@ def test_client_disconnect_rolls_back_a_half_written_turn() -> None:
 
     agent = _StatePoisoningAgent(session)
 
-    async def _abandon() -> None:
-        stream = _closable(run_turn(session, "hi", graph_factory=agent.graph_factory))
-        async for _event in stream:
-            break  # the client goes away after the first token
-        await stream.aclose()  # sse-starlette's send-timeout teardown
-
-    asyncio.run(_abandon())
+    stream = _closable(run_turn(session, "hi", graph_factory=agent.graph_factory))
+    async for _event in stream:
+        break  # the client goes away after the first token
+    await stream.aclose()  # sse-starlette's send-timeout teardown
 
     assert session.state == before, "the half-written turn was left in the session thread"
     assert session.state["messages"] == [{"role": "user", "text": "an earlier, completed turn"}]
 
 
-def test_a_cancelled_turn_rolls_back_a_half_written_turn() -> None:
+async def test_a_cancelled_turn_rolls_back_a_half_written_turn() -> None:
     """The same rollback, reached the way a real disconnect reaches it: by cancellation.
 
     This is the case that was missing, and its absence is why the runner's rollback clause could
@@ -420,33 +411,30 @@ def test_a_cancelled_turn_rolls_back_a_half_written_turn() -> None:
     session.state["messages"] = [{"role": "user", "text": "an earlier, completed turn"}]
     before = copy.deepcopy(session.state)
 
-    async def _drive() -> None:
-        agent = _StallingAgent(session, poison=True)
-        await _cancel_mid_turn(
-            run_turn(
-                session,
-                "hi",
-                # Stated, as every sibling in this file states it: defaulting means every enabled
-                # connector, none of which is running in a test process. It is no longer merely
-                # noise — the runner hands `connectors` straight to `build_langgraph_agent`, and
-                # the default is MAF's connector representation, which that builder cannot accept.
-                # See the M13 note in `tasks/todo.md`; the engines' connector wiring is a defect of
-                # its own and not this test's subject.
-                connectors=[],
-                graph_factory=agent.graph_factory,
-            ),
-            agent.stalled,
-        )
-        # Asserted *inside* the loop. After `asyncio.run` returns, its async-generator shutdown has
-        # closed every abandoned generator, which restores the state by the other path and would
-        # make this pass no matter what the runner does with cancellation.
-        assert session.state == before, "a cancelled turn left half-written state in the thread"
-        assert session.state["messages"] == [{"role": "user", "text": "an earlier, completed turn"}]
-
-    asyncio.run(_drive())
+    agent = _StallingAgent(session, poison=True)
+    await _cancel_mid_turn(
+        run_turn(
+            session,
+            "hi",
+            # Stated, as every sibling in this file states it: defaulting means every enabled
+            # connector, none of which is running in a test process. It is no longer merely
+            # noise — the runner hands `connectors` straight to `build_langgraph_agent`, and
+            # the default is MAF's connector representation, which that builder cannot accept.
+            # See the M13 note in `tasks/todo.md`; the engines' connector wiring is a defect of
+            # its own and not this test's subject.
+            connectors=[],
+            graph_factory=agent.graph_factory,
+        ),
+        agent.stalled,
+    )
+    # Asserted *inside* the loop. After `asyncio.run` returns, its async-generator shutdown has
+    # closed every abandoned generator, which restores the state by the other path and would
+    # make this pass no matter what the runner does with cancellation.
+    assert session.state == before, "a cancelled turn left half-written state in the thread"
+    assert session.state["messages"] == [{"role": "user", "text": "an earlier, completed turn"}]
 
 
-def test_a_disconnect_after_the_answer_keeps_the_completed_turn() -> None:
+async def test_a_disconnect_after_the_answer_keeps_the_completed_turn() -> None:
     """A turn that answered keeps its transcript, however the stream is then torn down.
 
     The window is one send plus one round trip and it was open on the only path production takes:
@@ -466,39 +454,37 @@ def test_a_disconnect_after_the_answer_keeps_the_completed_turn() -> None:
     history = _RecordingHistory()
     session = TurnSession(session_id="s6")
 
-    async def _drive() -> None:
-        for teardown in ("aclose", "cancel"):
-            agent = _AnsweringAgent()
-            stream = _closable(
-                run_turn(
-                    session,
-                    f"hi ({teardown})",
-                    history=history,
-                    connectors=[],
-                    graph_factory=agent.graph_factory,
-                )
+    for teardown in ("aclose", "cancel"):
+        agent = _AnsweringAgent()
+        stream = _closable(
+            run_turn(
+                session,
+                f"hi ({teardown})",
+                history=history,
+                connectors=[],
+                graph_factory=agent.graph_factory,
             )
-            seen: list[str] = []
-            async for event in stream:
-                seen.append(event.type)
-                if event.type == "answer":
-                    break  # the client goes away while the answer is being sent
-            assert seen[-1] == "answer", f"the turn never answered: {seen}"
-            if teardown == "aclose":
-                await stream.aclose()
-            else:
-                with pytest.raises(asyncio.CancelledError):
-                    await stream.athrow(asyncio.CancelledError())
-            assert history.rows[-1][1] == "assistant: the answer", (
-                f"the answered turn's committed rows did not survive a {teardown} teardown: "
-                f"{history.rows}"
-            )
+        )
+        seen: list[str] = []
+        async for event in stream:
+            seen.append(event.type)
+            if event.type == "answer":
+                break  # the client goes away while the answer is being sent
+        assert seen[-1] == "answer", f"the turn never answered: {seen}"
+        if teardown == "aclose":
+            await stream.aclose()
+        else:
+            with pytest.raises(asyncio.CancelledError):
+                await stream.athrow(asyncio.CancelledError())
+        assert history.rows[-1][1] == "assistant: the answer", (
+            f"the answered turn's committed rows did not survive a {teardown} teardown: "
+            f"{history.rows}"
+        )
 
-    asyncio.run(_drive())
     assert len(history.rows) == 4, f"both completed turns should be stored: {history.rows}"
 
 
-def test_a_disconnect_after_the_answer_is_billed_as_completed(
+async def test_a_disconnect_after_the_answer_is_billed_as_completed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`TurnCost.completed` means "the turn answered", not "the turn was never torn down".
@@ -522,27 +508,24 @@ def test_a_disconnect_after_the_answer_is_billed_as_completed(
     monkeypatch.setattr("chemclaw.agent.turn_cost.default_turn_cost_sink", _CapturingSink)
     history = _RecordingHistory()
 
-    async def _drive() -> None:
-        agent = _AnsweringAgent()
-        stream = _closable(
-            run_turn(
-                TurnSession(session_id="s-answered-cancel"),
-                "hi",
-                history=history,
-                connectors=[],
-                graph_factory=agent.graph_factory,
-            )
+    agent = _AnsweringAgent()
+    stream = _closable(
+        run_turn(
+            TurnSession(session_id="s-answered-cancel"),
+            "hi",
+            history=history,
+            connectors=[],
+            graph_factory=agent.graph_factory,
         )
-        async for event in stream:
-            if event.type == "answer":
-                break  # the client goes away while the answer is being sent
-        with pytest.raises(asyncio.CancelledError):
-            await stream.athrow(asyncio.CancelledError())
-        # The ledger write is scheduled on the loop rather than awaited (see `record_turn_cost`).
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-
-    asyncio.run(_drive())
+    )
+    async for event in stream:
+        if event.type == "answer":
+            break  # the client goes away while the answer is being sent
+    with pytest.raises(asyncio.CancelledError):
+        await stream.athrow(asyncio.CancelledError())
+    # The ledger write is scheduled on the loop rather than awaited (see `record_turn_cost`).
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
 
     assert len(booked) == 1, "a turn torn down after answering never reached the cost ledger"
     assert booked[0].completed is True, (
@@ -550,7 +533,7 @@ def test_a_disconnect_after_the_answer_is_billed_as_completed(
     )
 
 
-def test_a_cancelled_turn_still_books_its_tokens() -> None:
+async def test_a_cancelled_turn_still_books_its_tokens() -> None:
     """Cancellation is not a cheaper way to abandon a turn than closing the stream.
 
     The budget booking lives in the runner's `finally`, which runs under both teardowns — but
@@ -564,31 +547,28 @@ def test_a_cancelled_turn_still_books_its_tokens() -> None:
     budget = _RecordingBudget()
     session = TurnSession(session_id="s5")
 
-    async def _drive() -> None:
-        agent = _StallingAgent(session, updates=3)
-        await _cancel_mid_turn(
-            run_turn(
-                session,
-                "hi",
-                actor="u1",
-                budget=budget,
-                connectors=[],
-                graph_factory=agent.graph_factory,
-            ),
-            agent.stalled,
-            # The assertion below is about metered tokens, so the cancel waits for all three to
-            # have reached the runner as well as for the model to have stalled.
-            tokens=3,
-        )
-        assert budget.booked, "a cancelled turn booked nothing at all"
-        booked_session, user_id, tokens = budget.booked[0]
-        assert (booked_session, user_id) == ("s5", "u1")
-        assert tokens > 0, "a cancelled turn was billed nothing for the prompt it had sent"
-
-    asyncio.run(_drive())
+    agent = _StallingAgent(session, updates=3)
+    await _cancel_mid_turn(
+        run_turn(
+            session,
+            "hi",
+            actor="u1",
+            budget=budget,
+            connectors=[],
+            graph_factory=agent.graph_factory,
+        ),
+        agent.stalled,
+        # The assertion below is about metered tokens, so the cancel waits for all three to
+        # have reached the runner as well as for the model to have stalled.
+        tokens=3,
+    )
+    assert budget.booked, "a cancelled turn booked nothing at all"
+    booked_session, user_id, tokens = budget.booked[0]
+    assert (booked_session, user_id) == ("s5", "u1")
+    assert tokens > 0, "a cancelled turn was billed nothing for the prompt it had sent"
 
 
-def test_a_cancelled_turn_unstamps_every_ambient_it_stamped() -> None:
+async def test_a_cancelled_turn_unstamps_every_ambient_it_stamped() -> None:
     """The ambients a turn stamps are cleared on the disconnect path, asserted by driving one.
 
     **This is the behavioural half of a guarantee that used to be pinned only by reading source.**
@@ -617,40 +597,37 @@ def test_a_cancelled_turn_unstamps_every_ambient_it_stamped() -> None:
     """
     session = TurnSession(session_id="s-ambient")
 
-    async def _drive() -> None:
-        agent = _StallingAgent(session)
-        # `_closable` for its narrowing rather than for `aclose`: `run_turn` is declared
-        # `AsyncIterator`, and `athrow` — the delivery a real disconnect makes — is on the concrete
-        # async *generator*. The same cast every sibling here uses, for the same reason.
-        stream = _closable(
-            run_turn(
-                session,
-                "hi",
-                actor="oid-ambient",
-                roles=frozenset({"chemist"}),
-                dry_run=True,
-                connectors=[],
-                graph_factory=agent.graph_factory,
-            )
+    agent = _StallingAgent(session)
+    # `_closable` for its narrowing rather than for `aclose`: `run_turn` is declared
+    # `AsyncIterator`, and `athrow` — the delivery a real disconnect makes — is on the concrete
+    # async *generator*. The same cast every sibling here uses, for the same reason.
+    stream = _closable(
+        run_turn(
+            session,
+            "hi",
+            actor="oid-ambient",
+            roles=frozenset({"chemist"}),
+            dry_run=True,
+            connectors=[],
+            graph_factory=agent.graph_factory,
         )
-        await stream.__anext__()
-        assert get_current_session_id() == "s-ambient"
-        assert get_current_actor() == "oid-ambient"
-        assert get_current_roles() == frozenset({"chemist"})
-        assert get_current_correlation_id(), "the turn stamped no correlation id"
-        assert is_dry_run() is True
-        with pytest.raises(asyncio.CancelledError):
-            await stream.athrow(asyncio.CancelledError())
-        assert get_current_session_id() is None, "the session id outlived its turn"
-        assert get_current_actor() is None, "the turn's identity leaked past its teardown"
-        assert get_current_roles() == frozenset(), "the turn's roles leaked past its teardown"
-        assert get_current_correlation_id() is None, "the correlation id outlived its turn"
-        assert is_dry_run() is False, "the dry-run flag leaked past its turn"
+    )
+    await stream.__anext__()
+    assert get_current_session_id() == "s-ambient"
+    assert get_current_actor() == "oid-ambient"
+    assert get_current_roles() == frozenset({"chemist"})
+    assert get_current_correlation_id(), "the turn stamped no correlation id"
+    assert is_dry_run() is True
+    with pytest.raises(asyncio.CancelledError):
+        await stream.athrow(asyncio.CancelledError())
+    assert get_current_session_id() is None, "the session id outlived its turn"
+    assert get_current_actor() is None, "the turn's identity leaked past its teardown"
+    assert get_current_roles() == frozenset(), "the turn's roles leaked past its teardown"
+    assert get_current_correlation_id() is None, "the correlation id outlived its turn"
+    assert is_dry_run() is False, "the dry-run flag leaked past its turn"
 
-    asyncio.run(_drive())
 
-
-def test_a_turn_torn_down_before_answering_writes_no_transcript_row() -> None:
+async def test_a_turn_torn_down_before_answering_writes_no_transcript_row() -> None:
     """Nothing to roll back, because nothing was written — the other half of the deleted guard.
 
     The durable rollback existed for the opposite arrangement: MAF committed the thread as the turn
@@ -673,23 +650,20 @@ def test_a_turn_torn_down_before_answering_writes_no_transcript_row() -> None:
     before = list(history.rows)
     session = TurnSession(session_id="s-blind")
 
-    async def _drive() -> None:
-        agent = _StallingAgent(session, poison=True)
-        await _cancel_mid_turn(
-            run_turn(
-                session,
-                "hi",
-                history=history,
-                connectors=[],
-                graph_factory=agent.graph_factory,
-            ),
-            agent.stalled,
-        )
-        assert history.rows == before, (
-            f"a turn that never answered still committed a transcript row: {history.rows}"
-        )
-
-    asyncio.run(_drive())
+    agent = _StallingAgent(session, poison=True)
+    await _cancel_mid_turn(
+        run_turn(
+            session,
+            "hi",
+            history=history,
+            connectors=[],
+            graph_factory=agent.graph_factory,
+        ),
+        agent.stalled,
+    )
+    assert history.rows == before, (
+        f"a turn that never answered still committed a transcript row: {history.rows}"
+    )
 
 
 class _StateWritingAgent(ScriptedTurn):
@@ -710,7 +684,7 @@ class _StateWritingAgent(ScriptedTurn):
         yield Chunk("answer", output_tokens=5)
 
 
-def test_a_disconnect_during_a_slow_verifier_keeps_the_run_s_state(
+async def test_a_disconnect_during_a_slow_verifier_keeps_the_run_s_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The teardown predicate is "the model run returned", not "the answer was yielded".
@@ -741,20 +715,17 @@ def test_a_disconnect_during_a_slow_verifier_keeps_the_run_s_state(
 
     monkeypatch.setattr("chemclaw.agent.verifier.verify_turn_answer", _stalling_verify)
 
-    async def _drive() -> None:
-        agent = _StateWritingAgent(session)
-        await _cancel_mid_turn(
-            run_turn(session, "hi", connectors=[], graph_factory=agent.graph_factory),
-            stalled,
-        )
-        assert session.state.get("todos") == ["done"], (
-            f"a slow verifier made the teardown roll a finished run's state back: {session.state}"
-        )
-
-    asyncio.run(_drive())
+    agent = _StateWritingAgent(session)
+    await _cancel_mid_turn(
+        run_turn(session, "hi", connectors=[], graph_factory=agent.graph_factory),
+        stalled,
+    )
+    assert session.state.get("todos") == ["done"], (
+        f"a slow verifier made the teardown roll a finished run's state back: {session.state}"
+    )
 
 
-def test_a_disconnect_during_a_slow_job_result_wait_keeps_the_run_s_state(
+async def test_a_disconnect_during_a_slow_job_result_wait_keeps_the_run_s_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The other window between the run and the answer: `await_job_results` under mid-turn resume.
@@ -786,14 +757,11 @@ def test_a_disconnect_during_a_slow_job_result_wait_keeps_the_run_s_state(
 
     monkeypatch.setattr("chemclaw.api.runner.await_job_results", _stalling_wait)
 
-    async def _drive() -> None:
-        agent = _JobAgent(session)
-        await _cancel_mid_turn(
-            run_turn(session, "hi", connectors=[], graph_factory=agent.graph_factory),
-            stalled,
-        )
-        assert session.state.get("todos") == ["done"], (
-            f"a slow job-result wait rolled a finished run's state back: {session.state}"
-        )
-
-    asyncio.run(_drive())
+    agent = _JobAgent(session)
+    await _cancel_mid_turn(
+        run_turn(session, "hi", connectors=[], graph_factory=agent.graph_factory),
+        stalled,
+    )
+    assert session.state.get("todos") == ["done"], (
+        f"a slow job-result wait rolled a finished run's state back: {session.state}"
+    )

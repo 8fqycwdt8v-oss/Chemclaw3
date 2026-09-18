@@ -44,31 +44,23 @@ async def _reset(source: str) -> None:
         await conn.commit()
 
 
-def test_unseen_source_reads_epoch() -> None:
+async def test_unseen_source_reads_epoch() -> None:
     """A source that has never synced reads the epoch (ingest the whole backlog first run)."""
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        assert await load_cursor("source-never-synced") == _EPOCH
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    assert await load_cursor("source-never-synced") == _EPOCH
 
 
-def test_cursor_round_trips_and_advances() -> None:
+async def test_cursor_round_trips_and_advances() -> None:
     """A stored cursor is read back, and a later store overwrites it (high-water advance)."""
+    await migrated_db_or_skip()
+    source = "test-cursor-source"
+    first = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    await store_cursor(source, first)
+    assert await load_cursor(source) == first
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        source = "test-cursor-source"
-        first = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
-        await store_cursor(source, first)
-        assert await load_cursor(source) == first
-
-        later = datetime(2026, 6, 1, 9, 30, tzinfo=UTC)
-        await store_cursor(source, later)
-        assert await load_cursor(source) == later  # upsert advanced the mark
-
-    asyncio.run(_run())
+    later = datetime(2026, 6, 1, 9, 30, tzinfo=UTC)
+    await store_cursor(source, later)
+    assert await load_cursor(source) == later  # upsert advanced the mark
 
 
 @dataclass(frozen=True)
@@ -111,7 +103,7 @@ async def _drain(
         await store_cursor(source, cursor)
 
 
-def test_a_lagging_writer_cannot_pull_the_cursor_backwards() -> None:
+async def test_a_lagging_writer_cannot_pull_the_cursor_backwards() -> None:
     """The row lock serializes two concurrent advances; `GREATEST` also orders them by value.
 
     Both halves are asserted, because only the first was ever true. Postgres does make the second
@@ -127,30 +119,26 @@ def test_a_lagging_writer_cannot_pull_the_cursor_backwards() -> None:
     and the guarantee then belonged to a different module. `GREATEST(sync_cursors.cursor,
     EXCLUDED.cursor)` moves it into the statement, and this is where that is checked.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        source = "test-cursor-overlap"
-        await _reset(source)
-        ahead = datetime(2026, 6, 1, tzinfo=UTC)
-        behind = datetime(2026, 3, 1, tzinfo=UTC)
-        async with (
-            db.connection(settings.postgres_dsn) as leading,
-            db.connection(settings.postgres_dsn) as lagging,
-        ):
-            await leading.execute(_UPSERT, (source, ahead))
-            blocked = asyncio.ensure_future(lagging.execute(_UPSERT, (source, behind)))
-            await asyncio.sleep(0.2)
-            assert not blocked.done(), "the lagging upsert should be waiting on the row lock"
-            await leading.commit()
-            await blocked
-            await lagging.commit()
-        assert await load_cursor(source) == ahead
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    source = "test-cursor-overlap"
+    await _reset(source)
+    ahead = datetime(2026, 6, 1, tzinfo=UTC)
+    behind = datetime(2026, 3, 1, tzinfo=UTC)
+    async with (
+        db.connection(settings.postgres_dsn) as leading,
+        db.connection(settings.postgres_dsn) as lagging,
+    ):
+        await leading.execute(_UPSERT, (source, ahead))
+        blocked = asyncio.ensure_future(lagging.execute(_UPSERT, (source, behind)))
+        await asyncio.sleep(0.2)
+        assert not blocked.done(), "the lagging upsert should be waiting on the row lock"
+        await leading.commit()
+        await blocked
+        await lagging.commit()
+    assert await load_cursor(source) == ahead
 
 
-def test_the_lag_gauge_reports_the_stored_mark_and_not_the_losing_one() -> None:
+async def test_the_lag_gauge_reports_the_stored_mark_and_not_the_losing_one() -> None:
     """A store the table refused must not move `chemclaw_ingest_cursor_lag_seconds` backwards.
 
     `store_cursor` observes what the statement `RETURNING`s rather than what it was handed, and
@@ -158,24 +146,20 @@ def test_the_lag_gauge_reports_the_stored_mark_and_not_the_losing_one() -> None:
     gauge would report a regression the table had just refused — an alert firing on a cursor that
     never moved, which is worse than the silence it replaced because it names a source that is fine.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        source = "test-cursor-gauge"
-        await _reset(source)
-        ahead = datetime(2026, 6, 1, tzinfo=UTC)
-        behind = datetime(2026, 3, 1, tzinfo=UTC)
-        await store_cursor(source, ahead)
-        await store_cursor(source, behind)
-        assert _OBSERVED[source] == ahead
-        # And the lag derived from it is the leading mark's, not the losing one's.
-        observed_lag = _cursor_lags()[source]
-        assert observed_lag == pytest.approx((datetime.now(UTC) - ahead).total_seconds(), abs=60)
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    source = "test-cursor-gauge"
+    await _reset(source)
+    ahead = datetime(2026, 6, 1, tzinfo=UTC)
+    behind = datetime(2026, 3, 1, tzinfo=UTC)
+    await store_cursor(source, ahead)
+    await store_cursor(source, behind)
+    assert _OBSERVED[source] == ahead
+    # And the lag derived from it is the leading mark's, not the losing one's.
+    observed_lag = _cursor_lags()[source]
+    assert observed_lag == pytest.approx((datetime.now(UTC) - ahead).total_seconds(), abs=60)
 
 
-def test_a_drain_that_lost_a_race_neither_regresses_the_mark_nor_skips_an_entry() -> None:
+async def test_a_drain_that_lost_a_race_neither_regresses_the_mark_nor_skips_an_entry() -> None:
     """Two drains racing on one source: the mark stays at the leader's, and nothing is passed over.
 
     The interleaving: drain A loads the epoch and drains the whole corpus; drain B loaded the same
@@ -189,42 +173,38 @@ def test_a_drain_that_lost_a_race_neither_regresses_the_mark_nor_skips_an_entry(
     no entry is skipped either way; that invariant was never the thing at risk. What changed is that
     the duplicate work is gone and the guarantee no longer depends on the ingest being idempotent.
     """
+    await migrated_db_or_skip()
+    source = "test-cursor-race"
+    await _reset(source)
+    released = asyncio.Event()
+    first: list[str] = []
+    second: list[str] = []
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        source = "test-cursor-race"
-        await _reset(source)
-        released = asyncio.Event()
-        first: list[str] = []
-        second: list[str] = []
+    async def _lagging() -> None:
+        await _drain(source, second, batch=2, max_chunks=1, released=released)
 
-        async def _lagging() -> None:
-            await _drain(source, second, batch=2, max_chunks=1, released=released)
+    async def _leading() -> None:
+        await _drain(source, first)
+        released.set()
 
-        async def _leading() -> None:
-            await _drain(source, first)
-            released.set()
+    # Both load the epoch, then interleave: B's load happens first, its store happens last.
+    lagging = asyncio.ensure_future(_lagging())
+    await asyncio.sleep(0)  # let B reach its load before A advances the cursor
+    await _leading()
+    await lagging
 
-        # Both load the epoch, then interleave: B's load happens first, its store happens last.
-        lagging = asyncio.ensure_future(_lagging())
-        await asyncio.sleep(0)  # let B reach its load before A advances the cursor
-        await _leading()
-        await lagging
+    assert first == [entry.id for entry in _CORPUS]
+    assert second == ["e1", "e2"]
+    # The mark B stored is behind what A ingested, and the table kept A's.
+    assert await load_cursor(source) == _CORPUS[-1].created_at
 
-        assert first == [entry.id for entry in _CORPUS]
-        assert second == ["e1", "e2"]
-        # The mark B stored is behind what A ingested, and the table kept A's.
-        assert await load_cursor(source) == _CORPUS[-1].created_at
-
-        third: list[str] = []
-        await _drain(source, third)
-        assert third == []  # nothing to re-ingest: the mark never went back
-        assert set(first) | set(second) == {entry.id for entry in _CORPUS}
-
-    asyncio.run(_run())
+    third: list[str] = []
+    await _drain(source, third)
+    assert third == []  # nothing to re-ingest: the mark never went back
+    assert set(first) | set(second) == {entry.id for entry in _CORPUS}
 
 
-def test_the_keyset_cursor_is_deliberately_not_a_high_water_upsert() -> None:
+async def test_the_keyset_cursor_is_deliberately_not_a_high_water_upsert() -> None:
     """`ingest/labels/cursor.py` must keep its blind upsert, and the reason is measured here.
 
     The two modules' statements are the same shape over different column types, which is exactly
@@ -240,19 +220,15 @@ def test_the_keyset_cursor_is_deliberately_not_a_high_water_upsert() -> None:
     A `ge` comparison here would pass on `'9' >= '10'` being false for the wrong reason; the query
     is what says which value `GREATEST` picks.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with db.connection(settings.postgres_dsn) as conn:
-            result = await conn.execute("SELECT GREATEST(%s::text, %s::text)", ("9", "10"))
-            row = await result.fetchone()
-        assert row is not None and row[0] == "9", (
-            "GREATEST on text no longer orders lexicographically, so the reason this cursor "
-            "declines the high-water spelling needs re-deriving rather than re-reading"
-        )
-        assert "GREATEST" not in _KEYSET_UPSERT, (
-            "the keyset cursor grew the ELN cursor's high-water upsert; on a bigint feed that "
-            "pins the position at the first single-digit id and skips every row past it"
-        )
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    async with db.connection(settings.postgres_dsn) as conn:
+        result = await conn.execute("SELECT GREATEST(%s::text, %s::text)", ("9", "10"))
+        row = await result.fetchone()
+    assert row is not None and row[0] == "9", (
+        "GREATEST on text no longer orders lexicographically, so the reason this cursor "
+        "declines the high-water spelling needs re-deriving rather than re-reading"
+    )
+    assert "GREATEST" not in _KEYSET_UPSERT, (
+        "the keyset cursor grew the ELN cursor's high-water upsert; on a bigint feed that "
+        "pins the position at the first single-digit id and skips every row past it"
+    )

@@ -227,7 +227,7 @@ def test_an_unfeaturizable_category_names_itself() -> None:
         _featurized(problem)
 
 
-def test_featurization_is_cached(_calc_server: FakeCalcServer) -> None:
+async def test_featurization_is_cached(_calc_server: FakeCalcServer) -> None:
     """Re-featurizing the same molecules costs nothing — the second pass is all store hits.
 
     Asserted as the *call count* rather than as equal output, because equal output is what a broken
@@ -235,12 +235,9 @@ def test_featurization_is_cached(_calc_server: FakeCalcServer) -> None:
     featurized — which is the property a durable campaign depends on across rounds and worker
     restarts.
     """
+    store = InMemoryStore()
+    first = (await featurize_problem(properties_for(store), _ligand_problem())).problem
+    second = (await featurize_problem(properties_for(store), _ligand_problem())).problem
+    assert first == second
 
-    async def _run() -> None:
-        store = InMemoryStore()
-        first = (await featurize_problem(properties_for(store), _ligand_problem())).problem
-        second = (await featurize_problem(properties_for(store), _ligand_problem())).problem
-        assert first == second
-
-    asyncio.run(_run())
     assert _calc_server.count("compute_electronic_properties") == len(_LIGANDS)
