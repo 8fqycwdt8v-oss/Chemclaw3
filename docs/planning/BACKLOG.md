@@ -296,17 +296,6 @@ topic).
   chemist's own document, which is a different act from truncating a helper's. Anchors:
   `agent/scratchpad.py`, `deepagents.backends.state.StateBackend`, `agent/tool_result_size.py::_bounded_file`.
 
-- [ ] **A parallel `task` fan-out multiplies the helper file budget by its width** — [S].
-  `_bounded_file` divides `agent_subagent_files_max_chars` by the files inside *one* `Command`, and
-  `_files_already_held` reads `request.state["files"]` — which `batch_width`'s own docstring says is
-  a **pre-batch snapshot**. So N concurrent `task` calls in one superstep each see the same `held`
-  and each take the whole remaining budget, up to N x the setting into the channel. It is the same
-  shape `test_a_second_delegation_shares_the_budget_the_first_one_spent` closed for *sequential*
-  delegation, still open for the concurrent case `general_purpose_helper`'s own description invites
-  ("Spawn one — or several at once"), and `agent_max_parallel_tool_calls` ships at 8. The sibling
-  `bounded_for_batch` already divides by `batch_width(request)` and is the shape to copy. Anchor:
-  `_bounded_file` and `_files_already_held` in `agent/tool_result_size.py`.
-
 
 - [ ] **The model-facing prose guards scan the in-process registry and four bundles, not the
       surface** — [M], found 2026-09-15 in the round-two review.
