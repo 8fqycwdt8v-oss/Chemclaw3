@@ -69,6 +69,7 @@ from chemclaw.agent.spend_cap import (
     turn_billed_tokens,
 )
 from chemclaw.agent.state import turn_config
+from chemclaw.agent.tool_result_size import bounded_content
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_usage import (
     InFlightPrompts,
@@ -2315,6 +2316,23 @@ async def _with_pushed_job_results(session_id: str, user_message: str) -> str:
     (`chemclaw.agent.framing.frame_untrusted`) because a job summary is workflow output, not an
     instruction. Best-effort in both directions: a mailbox that cannot be read must not fail the
     turn, and a memory-backed deployment has no mailbox to read.
+
+    **Bounded, because this is the only producer here that can make a `HumanMessage` of any size**
+    (`D-2026-09-16-a-mailbox-nobody-bounded-is-a-human-message-nobody-bounded`). `claim_unconsumed`
+    takes no limit and `ConnectorJobResult.summary` declares no maximum, so the block appended below
+    is as long as the mailbox happens to be. Measured, one unbounded summary beside a
+    maximum-length chemist message is **235,377 characters** — past deepagents'
+    200,000-character `HumanMessage` offload threshold, which `agent/compaction.py` argues is
+    unreachable and whose safety argument is that the undefanged preview is "a strict substring of a
+    message that sat in the model's context verbatim, because a chemist's own message is not framed
+    as untrusted data". This block is precisely *not* the chemist's words — it is framed because it
+    is untrusted — and the preview is head-and-tail by *lines*, so with a five-line question it
+    keeps the closing delimiter and drops the opening one, handing the model unframed workflow
+    output terminated by a stray tag.
+
+    So the summary is cut to `agent_max_tool_result_chars` before it is framed, by the same function
+    that bounds one tool result, with a notice that names itself as system text. Cut *inside* the
+    frame rather than after it, so the delimiters cannot be what a cut removes.
     """
     if settings.session_store != "postgres":
         return user_message
@@ -2329,13 +2347,27 @@ async def _with_pushed_job_results(session_id: str, user_message: str) -> str:
         f"- {event.kind}: {json.dumps(event.payload, sort_keys=True, default=str)}"
         for event in pushed
     )
+    bounded, removed = bounded_content(
+        summary,
+        "the job push-back mailbox",
+        settings.agent_max_tool_result_chars,
+        remedy="call get_durable_job_status for the jobs whose outcomes were cut",
+    )
+    if removed:
+        logger.info(
+            "session %s's job push-back was cut by %d characters to stay inside the turn's "
+            "message bound; %d event(s) were waiting",
+            session_id,
+            removed,
+            len(pushed),
+        )
     return (
         f"{user_message}\n\n"
         "Since your previous turn, durable job(s) this session started have finished. Some may "
         "have failed: report any entry whose kind is 'job_failed' to the chemist rather than "
         "describing that work as done. Their outcomes follow as data; use "
         "get_durable_job_status for full results where needed.\n"
-        + frame_untrusted(summary, note_id="job-results")
+        + frame_untrusted(bounded, note_id="job-results")
     )
 
 

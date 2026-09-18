@@ -645,3 +645,56 @@ the arithmetic fixed the class; capping the document would have fixed the exampl
 **The process failure is in `tasks/lessons.md`.** A reviewer mutation-testing `template_job.py`
 restored it from its own scratch copy over my edits, and when stopped mid-restore left
 `if False:  # MUTATION` in the file. A subagent shares this working tree.
+
+---
+
+# Probe-corpus absence claims vs the fleet that now serves them (2026-09-16)
+
+Measured on this commit before any edit:
+- bare `available_tool_names()` = 119; fleet lane (own bundles + `Chemclaw3-mcp/manifests` +
+  the e2e harness manifests) = 155. `tests/test_probe_coverage.py` docstring said 114 / 121.
+- `Chemclaw3-mcp/MODULES.md`: `thermalsafety` (8851), `kinetics` (8852), `unitops` (8853) and
+  `suitability` (8892) are all **built** and published in `manifests/`.
+- Every tool on those three process servers takes a *measured* number as a required argument;
+  none of the probe questions supplies one. `oxygen_balance_screen` is the sole exception and is
+  already the probe that carries `needs_bundle:` (pc-06).
+
+## Items
+
+- [x] Verify claim 1 site by site against real signatures in `Chemclaw3-mcp/servers/*/tools.py`
+- [x] Verify claim 2: `draft_experiment_protocol` bound bare, `protocols/layout.py::place()` real
+- [x] Verify claim 3: the process-chemistry header contradicts itself
+- [x] Verify claim 4: measure both lanes
+- [x] Narrow the lane-dependent halves of the markers (shape (b)); re-bucket only op-22 (shape (a))
+- [x] Rewrite the process-chemistry header's "what does not exist" paragraph
+- [x] Replace the stale figures in `test_probe_coverage.py` with the property
+- [x] Add R2 (no tool in both `expects_tools` and `asserts_absent`) and N3 (near-miss inside markers)
+- [x] ADR + ledger row + topic filing
+- [x] `make lint type`, the three named suites
+
+## Review
+
+Seventeen markers narrowed across five files, op-22 re-bucketed C -> B, pl-22's `CSV` forbid
+narrowed too (`draft_experiment_protocol`'s receipt carries a `run-sheet.csv` path, so forbidding
+"a CSV file name" would have re-opened the same defect one field over). Two guards added, the stale
+fleet-lane figures deleted.
+
+One report claim **rejected**: the docstring's *"this passes without consulting the manifest at
+all"* is true. Measured with the fleet on `CHEMCLAW_CONNECTORS_DIR`, `unresolved` is empty and the
+function returns before `sibling_root`. What was false beside it is the *other* half — that the
+fleet lane is guarded by `test_every_agent_callable_tool_is_probed_or_exempt` instead, which does
+not pass in that lane at all (34 unprobed there, measured).
+
+One thing left alone deliberately: `run_python` on pc-07 and ws-12 fails in a lane that mounts
+`pyexec`. `D-2026-09-16-an-absence-claim-that-names-no-capability-cannot-be-refuted` argues that
+asymmetry shut on purpose, so only the false parenthesis in `NEAR_MISS_RATIO`'s comment was
+corrected. A BACKLOG row was drafted for it and reverted, for the reason
+`D-2026-09-14-two-gaps-the-code-had-already-argued-shut` gives.
+
+Ran: `make lint`, `make type`, `make prose-validate`, and `make test PYTEST_WORKERS=4` over the
+whole suite -- 9,334 passed, 76 skipped, one failure
+(`test_workflow_replay.py::test_the_control_still_detects_the_divergence_it_was_built_for
+[TemplateWorkflow-before-the-run-record.json]`) that passes serially and touches nothing this
+change reaches. The 76 skips are `helm`/`promtool` not installed, one IPv6-less host, two declared
+non-deployment surfaces, and one checkpointer-in-`public` case. Docker was started and
+`make up && make db-migrate` run first, so the Postgres-backed set is not among them.
