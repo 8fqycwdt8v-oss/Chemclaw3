@@ -7,10 +7,13 @@ left `tests/test_distiller.py tests/test_behaviour_proposals.py tests/test_api_p
 passed, and the commit message's "both miners run on demand and report zero on this corpus" was a
 claim about somebody's manual run.
 
-**What these assert is the shape of the run, not a mined result**, because a mined result needs a
-corpus and the honest answer on an empty database is zero. Zero is exactly what a first deployment
-sees, so it is the case worth pinning: the miner completes, says so in words a person can act on,
-and files nothing.
+**What these assert is the shape of the run, not a mined result**, and the first draft got that
+wrong in a way worth recording: it asserted the *empty-corpus* message, which is a claim about the
+database rather than about the miner. The Postgres arm of this suite is shared — by the time these
+ran in a full pass, 243 sessions written by other tests were in `turn_costs`, and the two tests that
+had passed alone failed. So what is pinned is what the miner is responsible for: it completes,
+exits 0, says something a person can act on, and its machine-readable form parses with the keys a
+report reads. Which branch of that prose it takes is the corpus's business, not this file's.
 """
 
 import asyncio
@@ -27,12 +30,15 @@ def _dry(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "session_store", "memory")
 
 
-def test_the_distiller_reports_zero_on_an_empty_corpus(capsys: pytest.CaptureFixture[str]) -> None:
-    """The first result a deployment gets, and the one the census says to expect."""
+def test_the_distiller_completes_and_says_what_it_found(capsys: pytest.CaptureFixture[str]) -> None:
+    """A dry run ends cleanly and reports, whatever the corpus holds."""
     from chemclaw.cli.distill import _run
 
     assert asyncio.run(_run(False, False)) == 0
-    assert "nothing to distil" in capsys.readouterr().out
+    printed = capsys.readouterr().out
+
+    assert printed.strip(), "the miner finished silently"
+    assert "nothing to distil" in printed or "sessions:" in printed
 
 
 def test_the_distiller_s_json_form_is_parseable(capsys: pytest.CaptureFixture[str]) -> None:
@@ -42,7 +48,11 @@ def test_the_distiller_s_json_form_is_parseable(capsys: pytest.CaptureFixture[st
     assert asyncio.run(_run(False, True)) == 0
     payload = json.loads(capsys.readouterr().out)
 
-    assert payload == {"sessions": 0, "candidates": []}
+    assert set(payload) == {"sessions", "candidates"}
+    assert isinstance(payload["candidates"], list)
+    # A dry run proposes nothing, whatever it found: every entry carries what it *would* file and
+    # no `state`, which is the field `--propose` writes. That is the property, not the count.
+    assert all("state" not in entry for entry in payload["candidates"])
 
 
 def test_the_distiller_refuses_to_file_where_nothing_can_accept(
@@ -61,10 +71,10 @@ def test_the_distiller_refuses_to_file_where_nothing_can_accept(
     assert "refusing to file" in capsys.readouterr().out
 
 
-def test_the_profile_miner_reports_zero_on_an_empty_corpus(
+def test_the_profile_miner_completes_and_says_what_it_found(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The same first result for the other miner."""
+    """The same for the other miner."""
     from chemclaw.cli.propose_profile import _run
 
     assert asyncio.run(_run(False, False)) == 0

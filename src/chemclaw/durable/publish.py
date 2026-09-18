@@ -73,6 +73,13 @@ _BAD_DATA_TYPES = [
     # same one it would be if something durable ever did write a proposal: the statements are
     # deterministic against the same rows, so a retry finds the identical impossibility.
     "ProposalStoreError",
+    # A document the personal skills tier will not keep (`agent/local_skills.py`) — a name already
+    # taken, a body over the cap, something that is not a `SKILL.md` at all. Bad data by the same
+    # argument as its neighbours: the admission rules are deterministic against the same bytes, so
+    # a retry finds the identical refusal. Listed although no activity writes a skill today,
+    # because `tests/test_publish.py` walks every subclass rather than the ones that cross an
+    # activity boundary at this commit.
+    "SkillRefused",
     # A `reaction_records.conditions` payload that is not a JSON object at all
     # (`ingest/eln/records.py`). Bad data rather than transient — no build of this ingest writes
     # one, and retrying re-reads the same row. Distinct from the *extra field* a newer build

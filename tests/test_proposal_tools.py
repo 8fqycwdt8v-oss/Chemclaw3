@@ -61,6 +61,16 @@ _ARGUED = {
     # The proposer imports the queue for `propose` and `content_hash`. It must not reach `decide`,
     # which the symbol check below is what actually holds.
     "chemclaw.agent.proposal_tools": {"behaviour_proposals"},
+    # The generated `run_*` job launchers, whose whole job is resolving a `module:attribute`
+    # reference a bundle's `connector.yaml` declares — so `importlib` is what this module is for,
+    # not a way around a static reader. It is guarded on its own terms by `check_driver_module`,
+    # and the symbol half of this test still covers it: it names none of `_WRITES_BEHAVIOUR`.
+    #
+    # It appears here only once `_register_generated_tools()` has run, which is why this entry was
+    # missing until a full-suite run — in isolation the registry holds no generated tool, so this
+    # test passed on a smaller surface than the one it claims to cover. That is the same defect as
+    # a ratchet whose fixture binds no connector, one file over.
+    "chemclaw.connectors.jobs": {"importlib"},
 }
 
 #: What a turn must not be able to reach. Two writes into the personal skills tier, and the one
@@ -73,8 +83,15 @@ def _tool_defining_modules() -> dict[str, pathlib.Path]:
     import inspect
 
     from chemclaw.agent import tool_modules  # noqa: F401 - populates the registry
+    from chemclaw.agent.chemclaw_agent import _capability_tools
     from chemclaw.core.tool_registry import registered_tools
 
+    # `_capability_tools` is what runs `_register_generated_tools()`, and calling it here is the
+    # difference between covering the shipped surface and covering whatever the import above
+    # happens to reach. Without it the generated `run_*` launchers are absent, so this test passed
+    # in isolation and failed in a full run — a control measuring a smaller system than the one it
+    # claims, which is the defect this file exists to stop shipping.
+    _capability_tools()
     found: dict[str, pathlib.Path] = {}
     for fn in registered_tools():
         module = inspect.getmodule(fn)
