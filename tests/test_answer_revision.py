@@ -699,13 +699,25 @@ def _asks(monkeypatch: pytest.MonkeyPatch) -> list[AwaitRequest]:
 
 
 def _drive_as(
-    agent: ScriptedTurn, *, actor: str | None = _CHEMIST, session_id: str = "s-escalate"
+    agent: ScriptedTurn,
+    *,
+    actor: str | None = _CHEMIST,
+    session_id: str = "s-escalate",
+    authenticated: bool = True,
 ) -> list[Any]:
     """One turn's events, run as an authenticated chemist — what `_drive` deliberately is not.
 
     Every other arm in this file drives an unauthenticated turn, which is why none of them opens a
     wait: the escalation refuses to invent a requester. Kept as a second helper rather than as
     parameters on `_drive` so that stays obvious at each call site.
+
+    **`authenticated` sets `entra_required`, and it has to, because `actor` alone does not say
+    what this file thought it said.** Off the authenticated path the front door does not pass
+    `None`: `api/auth.py` manufactures a stand-in whose `oid` is the literal `dev-user`, and
+    `Principal.oid` is `min_length=1`. So every arm here passed `actor=_CHEMIST` and exercised a
+    posture — a named actor with `entra_required` off — that no deployment runs, while the guard
+    the file believed it was testing keys on the setting. A review found the escalation firing as
+    `dev-user` in exactly the default posture.
     """
 
     async def _collect() -> list[Any]:
@@ -721,7 +733,9 @@ def _drive_as(
             )
         ]
 
-    return asyncio.run(_collect())
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(settings, "entra_required", authenticated)
+        return asyncio.run(_collect())
 
 
 def test_an_exhausted_revision_loop_asks_a_person_to_read_the_answer(
@@ -889,3 +903,162 @@ def test_two_exhausted_turns_in_one_conversation_join_one_wait(
     assert len(ids) == 3, "the fixture's premise: three exhausted turns"
     assert ids[0] == ids[1], "two turns of one conversation opened two review requests"
     assert ids[2] != ids[0], "two conversations were collapsed into one review request"
+
+
+def test_the_unauthenticated_posture_raises_no_request_as_the_stand_in_principal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dev principal is not an absent one, and the guard that thought so keyed on the wrong bit.
+
+    `test_a_turn_with_no_authenticated_actor_invents_nobody` passes `actor=None`, which the front
+    door never passes: with `entra_required` off, `api/auth.py` manufactures a stand-in whose `oid`
+    is the literal `dev-user`, and `Principal.oid` is `min_length=1`. So the escalation's
+    `if not actor` was false in exactly the posture it was written for, and every review request in
+    an unauthenticated deployment was raised as — and addressed to — `dev-user`. That is the
+    attribution-nothing-can-write shape `D-2026-08-26` deletes on sight, arriving through the
+    branch meant to prevent it.
+
+    Driven with a real actor string and `entra_required` off, which is the combination the old
+    guard could not tell from the authenticated one.
+    """
+    _grades_by_text(monkeypatch)
+    monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
+    asked = _asks(monkeypatch)
+
+    events = _drive_as(_StubbornAgent(), authenticated=False)
+    answer = next(e for e in events if isinstance(e, AnswerEvent))
+
+    assert answer.review_required is True, "the premise: this turn did exhaust its rounds"
+    assert asked == [], (
+        f"a review request was raised in an unauthenticated deployment: {asked}. The requester "
+        "would be a stand-in principal no directory can resolve."
+    )
+
+
+def test_a_verdict_naming_no_claim_asks_nobody(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The loop refuses to revise on a contentless verdict; the escalation must refuse to file one.
+
+    The re-grade at the loop's bottom is a *fresh* verdict, so a turn can exit with rounds spent
+    and `unsupported` empty — a judge outage leaves the claims empty and sets `review_required`, and
+    so does a low-confidence verdict whose every claim is supported. Both produced a rationale
+    ending `"What the checks could not ground: "` with nothing after it: a review request whose
+    entire stated reason is blank. A judge outage is fleet-wide, so unguarded this files one such
+    request per active conversation — a verdict nobody can act on, which is the failure the
+    escalation exists to end.
+    """
+    from chemclaw.agent.verifier import TurnReview
+    from chemclaw.api.events import AnswerEvent as _AnswerEvent
+
+    async def _flagged_naming_nothing(
+        answer: str, *args: object, **kwargs: object
+    ) -> tuple[_AnswerEvent, TurnReview]:
+        """The judge-outage and low-confidence shapes: flagged, with no claim named."""
+        review = TurnReview(review_required=True, review_notes=["verification did not run"])
+        return (
+            _AnswerEvent(text=answer, review_required=True, unsupported_claims=[]),
+            review,
+        )
+
+    monkeypatch.setattr(runner, "build_answer_event", _flagged_naming_nothing)
+    monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
+    asked = _asks(monkeypatch)
+
+    events = _drive_as(_StubbornAgent())
+    answer = next(e for e in events if isinstance(e, AnswerEvent))
+
+    assert answer.review_required is True, "the premise: the verdict still flags the answer"
+    assert asked == [], f"a review request was filed with no claim to act on: {asked}"
+
+
+def _escalation_series() -> dict[str, float]:
+    """The escalation counter's five series, by outcome, read off the exposition.
+
+    `METRICS.value` sums across label sets on purpose, which is exactly the distinction this
+    counter exists to make — so the series are parsed out of `render()` rather than summed.
+    """
+    import re as _re
+
+    found: dict[str, float] = {}
+    for line in METRICS.render().splitlines():
+        match = _re.match(
+            r'chemclaw_answer_review_escalations_total\{outcome="([a-z_]+)"\} ([0-9.]+)', line
+        )
+        if match is not None:
+            found[match.group(1)] = float(match.group(2))
+    return found
+
+
+def test_every_way_an_escalation_can_end_books_its_own_series(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Five outcomes, five series — and four of them were a log line and nothing else.
+
+    `chemclaw_answer_review_exhausted_total` counts turns that went out flagged, which is the same
+    number whether a person was actually asked, an already-open wait absorbed the ask, the turn had
+    no authenticated actor to ask as, the verdict named no claim to ask about, or the broker was
+    down. So an operator could not tell an escalation that is working from one that reaches nobody.
+
+    `joined` is the one worth the label rather than a boolean, because it is where a busy
+    deployment spends most of its time: the dedup subject is the *conversation*, so every later
+    exhausted turn of a thread already under review asks nobody anything new. A deployment where
+    `joined` dominates `opened` is piling reviews into a handful of threads.
+
+    Driven end to end through the runner for all five, so this asserts the escalation's own
+    branches rather than the helper's arithmetic — the helper is four lines and the branches are
+    what rot.
+    """
+    _grades_by_text(monkeypatch)
+    monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
+    before = _escalation_series()
+
+    opened = _asks(monkeypatch)
+    _drive_as(_StubbornAgent(), session_id="s-outcome-opened")
+    assert len(opened) == 1, "the fixture's premise: one wait was opened"
+
+    async def _join(request: AwaitRequest) -> tuple[str, bool]:
+        return request_id_for(request), False
+
+    monkeypatch.setattr(runner, "open_wait", _join)
+    _drive_as(_StubbornAgent(), session_id="s-outcome-joined")
+
+    async def _broker_down(_request: AwaitRequest) -> tuple[str, bool]:
+        raise RuntimeError("no broker")
+
+    monkeypatch.setattr(runner, "open_wait", _broker_down)
+    _drive_as(_StubbornAgent(), session_id="s-outcome-unavailable")
+
+    monkeypatch.setattr(runner, "open_wait", _join)
+    _drive_as(_StubbornAgent(), session_id="s-outcome-no-actor", authenticated=False)
+
+    # `no_claims` needs the *re-grade* to come back empty, not the first verdict: a contentless
+    # first verdict makes the loop refuse to revise, `rounds` stays 0, and the escalation is never
+    # reached at all. Which is why this arm is here rather than in
+    # `test_a_verdict_naming_no_claim_asks_nobody` — that test proves nobody is asked, and cannot
+    # prove how the refusal was booked, because on its path there is no refusal to book.
+    graded: list[str] = []
+
+    async def _empties_on_regrade(answer: str, *_: Any, **__: Any) -> VerificationResult:
+        graded.append(answer)
+        if len(graded) == 1:
+            return VerificationResult(
+                claims=[ClaimCheck(text="Yield was 90%", supported=False)],
+                confidence=0.2,
+                verified_by="judge",
+            )
+        return VerificationResult(claims=[], confidence=0.2, verified_by="judge")
+
+    monkeypatch.setattr(verifier_module, "verify_turn_answer", _empties_on_regrade)
+    _drive_as(_StubbornAgent(), session_id="s-outcome-no-claims")
+    assert len(graded) > 1, "the fixture's premise: a round ran and the answer was re-graded"
+
+    after = _escalation_series()
+    moved = {
+        outcome: after.get(outcome, 0.0) - before.get(outcome, 0.0)
+        for outcome in sorted(runner.ESCALATION_OUTCOMES)
+    }
+    assert moved == dict.fromkeys(sorted(runner.ESCALATION_OUTCOMES), 1.0), (
+        f"an escalation outcome was not booked, or was booked as another: {moved}"
+    )
+    assert set(after) <= runner.ESCALATION_OUTCOMES, (
+        f"an outcome outside the declared set reached the counter: {sorted(after)}"
+    )

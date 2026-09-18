@@ -306,7 +306,8 @@ class AnswerEvent(BaseModel):
     confidence did not run, so the turn is routed to review with an explicit reason appended to
     `unsupported_claims` rather than a bare flag beside a high `confidence`.
 
-    With every knob off — the default — the scored fields stay `None`/`False`/empty and
+    With every knob off — which is no longer the default, since `answer_shape_gate_enabled` ships
+    on — the scored fields stay `None`/`False`/empty and
     `verified_by` stays `None`. **What says the checks did not run is `checks_run`, and nothing
     said it before**: those defaults are what a check *finds*, so an answer the shape gate scanned
     and cleared serialized identically to one nothing looked at (measured: the same bytes,
@@ -316,7 +317,11 @@ class AnswerEvent(BaseModel):
 
     type: Literal["answer"] = "answer"
     text: str
-    # Which honesty checks ran on this answer — `[]` means none did, which is the shipped default.
+    # Which honesty checks ran on this answer — `[]` means none did. **Not the shipped default any
+    # more**: `answer_shape_gate_enabled` ships on, and `score_answer` appends `answer-shape`
+    # whenever it does, so a shipped deployment carries one entry on every answer and `[]` marks
+    # the deployment that turned the gate off. A surface built on the old reading has the common
+    # case and the exception the wrong way round.
     # Additive and defaulted, like `ToolFailedEvent.reason` and for the same reason: this shape is
     # a contract two other repositories read (`Chemclaw3_ui`, `Chemclaw3_mock`), so a surface that
     # ignores it is unchanged and one that switches on it can be exhaustive.

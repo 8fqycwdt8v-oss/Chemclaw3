@@ -570,7 +570,7 @@
       "id": 13,
       "type": "graph",
       "title": "Measured against inferred spend",
-      "description": "Tokens the provider reported, beside tokens it billed and never reported. A gateway puts a request's usage on the terminal chunk only, so a turn torn down mid-message — a disconnect, the Stop button, a wall-clock deadline — is billed and reported by nobody; the second series is this system's estimate of those requests' prompts. A rising inferred rate is turns being abandoned late, which is the cheapest way to spend money the measured series cannot see. Never add the two without saying which half is inferred.",
+      "description": "Tokens the provider reported, beside tokens it billed and never reported. A gateway puts a request's usage on the terminal chunk only, so a turn torn down mid-message \u2014 a disconnect, the Stop button, a wall-clock deadline \u2014 is billed and reported by nobody; the second series is this system's estimate of those requests' prompts. A rising inferred rate is turns being abandoned late, which is the cheapest way to spend money the measured series cannot see. Never add the two without saying which half is inferred.",
       "datasource": "prometheus",
       "gridPos": {
         "h": 8,
@@ -631,7 +631,7 @@
       "id": 14,
       "type": "graph",
       "title": "Answer revision: passes, turns and exhaustions",
-      "description": "What the revision loop costs and what it buys. `passes` is model calls — the spend; `turns` is flagged answers that entered the loop — the denominator the alert divides by; `exhausted` is turns that ran out of rounds and shipped still marked for review. Three series because passes and turns are different units and dividing one by the other made the alert's threshold move with `answer_review_max_rounds`. All three are flat at the shipped default, where the loop is off.",
+      "description": "What the revision loop costs and what it buys. `passes` is model calls \u2014 the spend; `turns` is flagged answers that entered the loop \u2014 the denominator the alert divides by; `exhausted` is turns that ran out of rounds and shipped still marked for review. Three series because passes and turns are different units and dividing one by the other made the alert's threshold move with `answer_review_max_rounds`. They are no longer flat at the shipped default: `answer_review_max_rounds` is 2 and the shape gate that reaches it ships on, so a deployment reading zero here has turned one of them off rather than having nothing to revise.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -653,6 +653,25 @@
           "expr": "sum(rate(chemclaw_answer_review_exhausted_total[15m]))",
           "legendFormat": "exhausted/s",
           "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "graph",
+      "title": "Exhausted reviews: what became of the ask",
+      "description": "Panel 14 says how many answers went out still marked for review; this says whether a person was actually asked to read one. Five outcomes, and four of them used to be a log line only. `opened` is a new durable request. `joined` is where a busy deployment spends most of its time \u2014 the dedup subject is the *conversation*, so every later exhausted turn of a thread already under review asks nobody anything new; `joined` dominating `opened` means reviews are piling into a handful of threads. `no_actor` dominating means the deployment is running unauthenticated and escalating to nothing at all. `no_claims` means the verdict named nothing to act on, which fleet-wide is a judge outage rather than a run of clean answers. `unavailable` is the broker, and is the only one that also raises `chemclaw_degraded_total`.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(chemclaw_answer_review_escalations_total[15m]))",
+          "legendFormat": "{{outcome}}/s",
+          "refId": "A"
         }
       ]
     }

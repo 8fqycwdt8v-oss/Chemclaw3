@@ -1014,15 +1014,26 @@ config:
   # And the alternative was never "no cap" but an unbounded one: measured, one turn billed 250,000
   # tokens against a 1,000-token session cap, which neither half of `BUDGET_ENABLED` can see.
   #
-  # **300,000 is a runaway backstop, not a budget.** It sits above the one runaway this system has
-  # measured and well above a heavy ordinary turn. It is explicitly not the number to keep: size it
-  # from this deployment's own `turn_costs.total_tokens` rows — the p99 of a turn that answered,
-  # with headroom — and set it then. `chemclaw_turn_spend_caps_total` is what says whether the
-  # number you chose is biting; if it moves on turns that were doing real work, this is too low.
+  # **3,000,000 is a runaway backstop, not a budget — and the first number here was not one.**
+  # This shipped at 300,000, chosen from a measured 250,000-token runaway. A review four days later
+  # found that measurement predated a sevenfold growth in the static prefix: because the provider
+  # bills prompt *and* completion on every call, with cached tokens included, 300,000 funded
+  # **three** model calls where `harness_max_loop_iterations` permits 25 — so a plan/tool/answer
+  # turn with one correction did not finish, and the loop cap could no longer move at all.
+  #
+  # The value is now derived rather than chosen: the ceiling of a *lawful* turn is what the two
+  # guards already authorise, `harness_max_loop_iterations` calls each bounded by
+  # `agent_context_token_budget`. Only a bug exceeds that. `tests/test_spend_cap.py` holds the
+  # relation so the next prefix change cannot strand it silently.
+  #
+  # A deployment that wants a real cost *budget* sets a smaller number from its own
+  # `turn_costs.total_tokens` rows — and should know it is then buying refusals rather than a
+  # backstop. `chemclaw_turn_spend_caps_total` is what says whether the number you chose is biting;
+  # if it moves on turns that were doing real work, it is too low.
   #
   # It is not what makes the deployment guarded: `harness_max_loop_iterations` still bounds the
   # loop, and that cap is on in every configuration.
-  CHEMCLAW_AGENT_MAX_TURN_BILLED_TOKENS: "300000"
+  CHEMCLAW_AGENT_MAX_TURN_BILLED_TOKENS: "3000000"
   # On in production, off in code, for the same reason `BUDGET_ENABLED` is (REV-16): a CLI, a test
   # and a single-user dev run have no reason to be throttled, and a deployment serving real users
   # over a shared endpoint has no reason not to be. The turn guards above bound what reaches the
