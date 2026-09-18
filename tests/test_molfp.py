@@ -482,6 +482,35 @@ def test_a_scan_past_its_deadline_stops_instead_of_matching_the_rest_of_the_corp
     on matching every remaining record in the background — at the shipped 5 000-record cap and the
     per-molecule cost measured above, ~10 minutes of one CPU per timed-out request, taken from the
     loop's default executor, which is also where `chemclaw.api.auth` validates every bearer token.
+
+    **The bar is a half rather than a quarter, and the spread is written down so the next person
+    does not rediscover it.** This assertion is a ratio of two live wall-clock measurements, and a
+    quarter was set against one machine's numbers. Driven eight times on an idle developer machine
+    the ratio measures **0.186-0.206**; on the GitHub runner it measures **0.260-0.271**, and it
+    failed `main` twice in one morning (runs 2838 and 2851, at 0.271 and 0.270) as well as the
+    branch that noticed. The gap is not the deadline leaking: it is fixed setup that the bounded run
+    carries and the unbounded run amortises over the whole corpus, so a slower machine tilts the
+    ratio without the bound doing anything different. At 0.27 the bounded scan is still ~3.7x faster
+    than the unbounded one.
+
+    What the bar has to separate is the bound *working* from the bound *gone*, and those are far
+    apart. Measured by mutating the deadline rather than reasoned about — the shipped bound against
+    two leaks, on one machine in one run:
+
+        shipped bound (~2 of 16)    ratio 0.187   passes
+        leaked to ~8 of 16          ratio 0.554   fails
+        leaked to ~14 of 16         ratio 0.931   fails
+
+    So a half passes every machine measured and still fails a deadline that leaked to *half* the
+    corpus. That is the same headroom a quarter gave over the one machine it was written on, and it
+    is why loosening the bar here is not weakening the control: nothing between 0.27 and 0.55
+    corresponds to a behaviour this scan can have.
+
+    **A ratio is a proxy and the honest assertion would count records** — "went on matching every
+    remaining record" is a claim about records. That was tried and is not a test-only change: on
+    this corpus the scan takes the *indexed* path, which chunks by time slice rather than per
+    record (`substructure_index.labels_matching`), so there is no counting point without changing
+    the module under test. `docs/planning/BACKLOG.md` carries the row.
     """
     pattern = substructure_pattern(_UNMATCHABLE)
     per_record = _one_match_seconds()
@@ -497,8 +526,11 @@ def test_a_scan_past_its_deadline_stops_instead_of_matching_the_rest_of_the_corp
     unbounded = time.perf_counter() - started
 
     assert outcome.hits == []  # unmatchable, so the unbounded run really did examine all 16
-    assert bounded < unbounded / 4, (
-        f"the scan ran {bounded:.3f}s of an unbounded {unbounded:.3f}s past its deadline"
+    assert bounded < unbounded / 2, (
+        f"the scan ran {bounded:.3f}s of an unbounded {unbounded:.3f}s past its deadline "
+        f"(ratio {bounded / unbounded:.3f}); a leaked deadline reads ~1.0 and stopping halfway "
+        "reads ~0.75, so this is the bound failing to reach the worker thread rather than a slow "
+        "machine — see the docstring for the measured spread"
     )
 
 
