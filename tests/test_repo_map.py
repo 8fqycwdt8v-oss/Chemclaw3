@@ -528,7 +528,7 @@ def test_the_calc_tool_surface_is_not_counted_in_prose() -> None:
 
     The bundle's own module docstring opened "Fifteen tools", and both live-lane scripts taught
     that Chemclaw3 keeps its own `calc` bundle and "all fifteen tools" — measured at HEAD,
-    `connector.yaml` declares seventeen and the module decorates the same seventeen. Nothing
+    `connector.yaml` and the module agreed with each other and with neither sentence. Nothing
     failed, because nothing read those sentences: the count is a second answer to a question the
     manifest already answers, which is `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose`
     over a tool surface instead of a `make` target.
