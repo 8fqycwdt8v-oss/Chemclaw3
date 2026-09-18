@@ -7,6 +7,7 @@ The Postgres backend reproduces the same ranking in SQL (tested in CI).
 """
 
 import asyncio
+import math
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -1569,30 +1570,74 @@ def test_a_build_that_cannot_meet_its_budget_costs_the_query_a_fraction_of_that_
     the build's own measured rate every `_BUILD_CHECK_STRIDE` records instead, the refusal lands
     after a few tens of records.
 
-    Asserted against the *loop's* cost on the same corpus rather than against a clock reading, so
-    the fixture's own speed is not the subject: finding out that an index is not worth building
-    must cost less than the scan that then answers without one.
+    **This asserted records and it used to assert a wall clock, and the wall clock was measuring a
+    third thing.** It timed `_scan_for_matches` whole against `_loop_matches`, at a ratio of 2 —
+    and `_scan_for_matches` ends by building a `MoleculeHit` per hit, which derives a compound note
+    id through `core.chem`'s canonicalisation, while `_loop_matches` derives none. Those caches are
+    process state: driven, the *same* call was 0.764 s cold and 0.109 s warm on the next two
+    repetitions, over a refusal costing 0.020 s and a fallback scan costing 0.080 s. So the run
+    reported on whether something earlier in the process had canonicalised these molecules, not on
+    how the refusal was taken — `tests/test_molfp.py` was `63 passed` as a file and `1 failed`
+    running this test alone, on the same tree, which is the signature of exactly that.
+
+    The clock could not have failed for the stated reason in any case. At a build budget of 0.001 s
+    a refusal taken by *exhaustion* also costs 0.001 s, so the two mechanisms this test exists to
+    distinguish were indistinguishable by time at its own fixture.
+
+    What separates them is **how much of the corpus the refused build parsed**, which is the
+    mechanism rather than a proxy for it. The budget is calibrated from a full build measured on
+    this machine in this run, so nothing here is a figure about one box: at half of what the whole
+    build costs, a projecting build gives up at the first check that can see past the budget —
+    `_BUILD_CHECK_STRIDE` records — while a build that merely watches its deadline runs until the
+    budget is half spent, which is half the corpus. Measured on the 1,200-record slice: **64**
+    records against **576**, a ninefold gap that no machine's speed moves, because both sides are
+    fractions of the same corpus.
+
+    The bar is a fraction of the **corpus**, not a multiple of `_BUILD_CHECK_STRIDE`, and that is
+    a deliberate second choice. Written against the stride, widening the stride would raise the bar
+    with it — driven at 512 it does, and a stride of 1,200 would let the refused build parse the
+    whole corpus with this still green, which is the defect back by another route. Against an
+    eighth of the corpus, the shipped stride leaves a 2.3x margin and a widened one reds, because
+    the property is that the refusal reads a small fraction of what it declined to index.
+
+    The cost half of the claim follows from the records half and is not separately asserted: 64
+    parses of 1,200 is the fraction, and a fraction of a scan is what "costs the query a fraction
+    of that budget" means.
     """
-    monkeypatch.setattr(settings, "substructure_index_build_timeout_seconds", 0.001)
     labels = _nci_corpus(1200)
     records = [
         FingerprintRecord(id=f"{index:05d}", label=label, bits="01")
         for index, label in enumerate(labels)
     ]
-    pattern = substructure_pattern("C(=O)N")
 
     started = time.perf_counter()
-    _loop_matches(labels, pattern)
-    loop_seconds = time.perf_counter() - started
+    substructure_index._build(labels, math.inf, time.monotonic() + 600)
+    whole_build_seconds = time.perf_counter() - started
+    monkeypatch.setattr(
+        settings, "substructure_index_build_timeout_seconds", whole_build_seconds / 2
+    )
 
-    started = time.perf_counter()
-    search._scan_for_matches(records, pattern, time.monotonic() + 600)
-    refused_and_scanned = time.perf_counter() - started
+    parsed = 0
+    real_parse = Chem.MolFromSmiles
 
-    assert refused_and_scanned < loop_seconds * 2, (
-        f"the refused build plus the fallback scan took {refused_and_scanned:.3f}s against "
-        f"{loop_seconds:.3f}s for the scan alone, so the refusal is being taken by burning the "
-        "budget rather than by projecting it"
+    def _counting_parse(label: str) -> Chem.Mol | None:
+        nonlocal parsed
+        parsed += 1
+        return real_parse(label)
+
+    monkeypatch.setattr(Chem, "MolFromSmiles", _counting_parse)
+    refused = substructure_index.index_for(records, time.monotonic() + 600)
+
+    assert refused is None, (
+        "the build met a budget of half what the whole build costs, so this fixture is not "
+        "exercising a refusal at all and everything below it is vacuous"
+    )
+    assert parsed <= len(labels) // 8, (
+        f"the refused build parsed {parsed} of {len(labels)} molecule(s) against a budget of half "
+        f"the whole build ({whole_build_seconds:.3f}s). A build that projects gives up at the "
+        f"first check past the budget, which is _BUILD_CHECK_STRIDE = "
+        f"{substructure_index._BUILD_CHECK_STRIDE} records; one that runs its deadline out reaches "
+        "half the corpus. This is the second."
     )
 
 
