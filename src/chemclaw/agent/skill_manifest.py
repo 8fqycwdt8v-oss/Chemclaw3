@@ -154,25 +154,47 @@ def _declared_tools(skills_dirs: tuple[str, ...]) -> dict[str, frozenset[str]]:
     declared: dict[str, frozenset[str]] = {}
     for directory in skills_dirs:
         for path in sorted(Path(directory).glob(f"*/{SKILL_FILENAME}")):
-            manifest = _read_manifest(path)
-            if manifest is not None:
-                declared.setdefault(manifest.name, frozenset(manifest.tools))
+            pair = _declared_pair(path)
+            if pair is not None:
+                declared.setdefault(pair[0], pair[1])
     return declared
 
 
-def _read_manifest(path: Path) -> SkillManifest | None:
-    """One skill's validated frontmatter, or None (logged) if it cannot be read.
+def _declared_pair(path: Path) -> tuple[str, frozenset[str]] | None:
+    """One skill's `(name, declared tools)`, or None (logged) if the file cannot be read at all.
 
     Separate from `declared_tools` so the "why swallow it" reasoning sits next to the `except`:
     both failure modes are reported properly by `make skill-validate`, and neither is worth raising
     on the path that serves a live turn.
 
+    **It reads the two keys the scoping needs rather than validating the whole manifest, and that
+    is a fix rather than a shortcut.** This used to run `SkillManifest.model_validate`, so *any*
+    frontmatter defect erased the `tools:` declaration — and `ToolScopedSkills` reads a missing
+    entry as "declares nothing", which it leaves **visible to every caller**. A read error was
+    therefore a *widening*, in a filter whose whole contract is that a declaration can only ever
+    cost a skill its visibility. Measured after `MAX_SKILL_DESCRIPTION_CHARS` arrived: a site skill
+    one character over the limit went from "scoped, description truncated by the loader" to
+    "unscoped", with nothing but a WARNING to say so. The length of a description is not evidence
+    about which tools a skill teaches, and neither is a misspelled `tags:` key.
+
     The catch is broad on purpose. `frontmatter.load` surfaces whatever the YAML parser raises,
-    which is not one type, and `model_validate` adds `ValidationError`; enumerating them would
-    leave the next parser error to break every conversation in the deployment.
+    which is not one type; enumerating them would leave the next parser error to break every
+    conversation in the deployment.
     """
     try:
-        return SkillManifest.model_validate(frontmatter.load(path).metadata)
+        metadata = frontmatter.load(path).metadata
+        name = metadata["name"]
+        tools = metadata.get("tools") or []
+        if not isinstance(name, str) or not isinstance(tools, list):
+            raise TypeError(
+                f"name must be a string and tools a list, got {type(name)}/{type(tools)}"
+            )
+        # Stripped and required non-empty, which is what `SkillManifest`'s `str_strip_whitespace`
+        # plus `min_length=1` did before this read the keys directly. An empty name cannot be the
+        # key of anything, so it stays out of the map rather than claiming `""`.
+        if not name.strip():
+            raise ValueError("a skill's `name` is empty")
+        return name.strip(), frozenset(str(tool) for tool in tools)
     except Exception as exc:
         # WARNING rather than the helper's ERROR default: `make skill-validate` is a CI gate over
         # exactly this, so an unreadable manifest is caught before it ships and a live occurrence

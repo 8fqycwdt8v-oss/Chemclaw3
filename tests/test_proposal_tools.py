@@ -6,6 +6,7 @@ way for a turn to write judgment into its own prompt.
 """
 
 import asyncio
+import pathlib
 
 import pytest
 
@@ -53,25 +54,103 @@ def test_proposing_is_state_changing_so_no_helper_holds_it() -> None:
     assert "propose_skill" in side_effecting_tools()
 
 
+#: Modules that define a registered tool and may nonetheless name one of `_WRITES_BEHAVIOUR`,
+#: each with the argument for it. An entry here is a reviewed exemption, not a waiver: the point is
+#: that adding one is a diff a reader sees.
+_ARGUED = {
+    # The proposer imports the queue for `propose` and `content_hash`. It must not reach `decide`,
+    # which the symbol check below is what actually holds.
+    "chemclaw.agent.proposal_tools": {"behaviour_proposals"},
+}
+
+#: What a turn must not be able to reach. Two writes into the personal skills tier, and the one
+#: call that turns a proposal into behaviour.
+_WRITES_BEHAVIOUR = frozenset({"save_local_skill", "delete_local_skill", "decide"})
+
+
+def _tool_defining_modules() -> dict[str, pathlib.Path]:
+    """Every module that registers a capability tool, by name, with its source file."""
+    import inspect
+
+    from chemclaw.agent import tool_modules  # noqa: F401 - populates the registry
+    from chemclaw.core.tool_registry import registered_tools
+
+    found: dict[str, pathlib.Path] = {}
+    for fn in registered_tools():
+        module = inspect.getmodule(fn)
+        source = getattr(module, "__file__", None)
+        if module is not None and source and "chemclaw" in module.__name__:
+            found[module.__name__] = pathlib.Path(source)
+    return found
+
+
 def test_no_turn_can_write_a_skill_even_now_that_it_can_propose_one() -> None:
-    """The absence this whole feature rests on, asserted rather than assumed.
+    """The absence this whole feature rests on, over every module that defines a tool.
 
     `agent/skill_backend.SkillsReadOnlyRefusal` refuses every write verb on the shared tree and
     `agent/local_skills.ReadOnlyStoreBackend` on the chemist's own. Adding a proposer must not have
-    opened a third path, so what a turn can reach is checked here too: the proposer writes
-    `behaviour_proposals` and touches neither tier.
+    opened a third path.
+
+    **This used to read one module's source with `in`, and that is not the property.** Driven: a
+    registered `settle_proposal` tool added to *that same module* — looking its caller's proposal
+    up,
+    writing it into their tier and calling `decide(accepted=True)` — left this file and
+    `tests/test_api_proposals.py` at 16 passed. A substring check over one file is a claim about
+    where somebody chose to put the code. So the subject is now the registry: every module that
+    defines a tool, and every name in it, against the calls that turn a proposal into behaviour.
+
+    **`importlib` is refused outright in this set**, because the one thing a static reader cannot
+    follow is a module name built at run time, and no tool module has a reason to build one.
     """
-    import inspect
+    import ast
 
-    from chemclaw.agent import proposal_tools
+    for name, path in sorted(_tool_defining_modules().items()):
+        tree = ast.parse(path.read_text())
+        named = {
+            node.id if isinstance(node, ast.Name) else node.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name | ast.Attribute)
+        }
+        imported = {
+            alias.name.rsplit(".", 1)[-1]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import | ast.ImportFrom)
+            for alias in node.names
+        } | {
+            node.module.rsplit(".", 1)[-1]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module
+        }
 
-    source = inspect.getsource(proposal_tools)
+        reaches = (named | imported) & _WRITES_BEHAVIOUR
+        assert not reaches, (
+            f"{name} defines a tool and names {sorted(reaches)}, which writes behaviour; a turn "
+            "proposes and a person decides"
+        )
+        forbidden_imports = (imported - _ARGUED.get(name, set())) & {
+            "local_skills",
+            "behaviour_proposals",
+            "importlib",
+        }
+        assert not forbidden_imports, (
+            f"{name} defines a tool and imports {sorted(forbidden_imports)}; add an argued "
+            "entry to "
+            "_ARGUED if that is really intended"
+        )
 
-    assert "save_local_skill" not in source, (
-        "the proposer reaches the skills tier directly, which is the write a person's route exists "
-        "to be the only one of"
-    )
-    assert "local_skills" not in source
+
+def test_the_symbols_that_absence_test_names_still_exist() -> None:
+    """A rename must red the guard above rather than quietly satisfying it.
+
+    An absence test passes trivially once the thing it forbids is called something else, which is
+    the failure mode `tests/test_upstream_surface.py` names for its two absence arms. So the names
+    are resolved against the modules that define them.
+    """
+    from chemclaw.agent import behaviour_proposals, local_skills
+
+    assert callable(local_skills.save_local_skill)
+    assert callable(local_skills.delete_local_skill)
+    assert callable(behaviour_proposals.ProposalStore.decide)
 
 
 def test_the_model_is_told_which_of_three_things_happened() -> None:

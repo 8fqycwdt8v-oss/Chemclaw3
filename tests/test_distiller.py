@@ -22,6 +22,7 @@ from chemclaw.agent.distiller import (
     independent_sessions,
     scaffold,
 )
+from chemclaw.agent.skill_fingerprint import skill_fingerprint
 from chemclaw.core.config import settings
 
 _TOOLS = ("find_notes", "expand_note", "gather_evidence")
@@ -61,7 +62,7 @@ def test_the_same_trajectory_is_not_a_candidate_where_the_skill_was_already_acti
     construction — propose, accept, observe the behaviour the acceptance caused, propose again with
     a larger count.
     """
-    already = {session: frozenset({_NAME}) for session in ("s1", "s2")}
+    already = {session: frozenset({skill_fingerprint(_NAME)}) for session in ("s1", "s2")}
 
     found = candidates(_report(), {_TOOLS: ["s1", "s2", "s3"]}, already)
 
@@ -80,7 +81,8 @@ def test_the_guard_only_ever_removes_evidence() -> None:
     """
     sessions = ["s1", "s2", "s3", "s4"]
 
-    for loaded in ({}, {"s1": frozenset({_NAME})}, {s: frozenset({_NAME}) for s in sessions}):
+    mine = skill_fingerprint(_NAME)
+    for loaded in ({}, {"s1": frozenset({mine})}, {s: frozenset({mine}) for s in sessions}):
         independent, discounted = independent_sessions(sessions, loaded, _NAME)
         assert len(independent) + len(discounted) == len(sessions)
         assert set(independent) | set(discounted) == set(sessions)
@@ -93,7 +95,10 @@ def test_a_skill_of_another_name_is_not_self_confirmation() -> None:
     A superset would discard evidence that is genuinely independent — a chemist who uses one skill
     heavily would have every other pattern they exhibit made invisible.
     """
-    elsewhere = {"s1": frozenset({"something-else"}), "s2": frozenset({"another-thing"})}
+    elsewhere = {
+        "s1": frozenset({skill_fingerprint("something-else")}),
+        "s2": frozenset({skill_fingerprint("another-thing")}),
+    }
 
     found = candidates(_report(), {_TOOLS: ["s1", "s2"]}, elsewhere)
 
@@ -160,3 +165,70 @@ def test_a_miner_cannot_fill_a_queue_past_what_a_person_could_accept(
 
     assert len(kept) == 2
     assert [candidate.occurrences for candidate in kept] == [10, 9], "not the strongest first"
+
+
+async def test_a_distilled_candidate_really_reaches_the_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`propose` had no test: replacing its store call with an undefined name left 27 green.
+
+    It is the only join between the miner and the queue, and the two things it decides are not
+    derivable anywhere else — which actor the row is filed under, and what the rationale says. A
+    proposal filed under the wrong actor lands in a queue its evidence did not come from, and one
+    filed under `""` lands where nobody looks.
+    """
+    from chemclaw.agent import behaviour_proposals
+    from chemclaw.agent.behaviour_proposals import InMemoryProposalStore, content_hash
+    from chemclaw.agent.distiller import propose, scaffold
+
+    monkeypatch.setattr(settings, "session_store", "memory")
+    store = InMemoryProposalStore()
+    monkeypatch.setattr(behaviour_proposals, "_IN_MEMORY", store)
+
+    candidate = Candidate(_TOOLS, ("s1", "s2"), 6, ("s3",))
+    filed = await propose(candidate, "a-chemist")
+
+    assert filed.state == "open"
+    assert filed.actor == "a-chemist"
+    assert filed.content_hash == content_hash(scaffold(candidate))
+    assert "1 further conversation(s) discounted" in filed.rationale, (
+        "the rationale dropped the discounted evidence, which is the guard's whole finding"
+    )
+    assert await store.one("a-chemist", "skill", candidate.name, filed.content_hash) is not None
+
+
+def test_the_guard_s_finding_is_carried_and_not_only_counted() -> None:
+    """`Candidate.self_confirming` is what `propose` reports and nothing asserted it non-empty.
+
+    Mutation: `candidates()` appending `()` instead of `discounted` stays green over the whole file.
+    That field is the guard's *output* — the trajectory that recurs only where a skill of its name
+    was already teaching it — and an empty one reads as "nothing was discounted", which is the
+    reassuring direction.
+    """
+    from chemclaw.agent.skill_fingerprint import skill_fingerprint
+
+    name = Candidate(_TOOLS, (), 0, ()).name
+    found = candidates(
+        _report(),
+        {_TOOLS: ["s1", "s2", "s3"]},
+        {"s3": frozenset({skill_fingerprint(name)})},
+    )
+
+    assert len(found) == 1
+    assert found[0].sessions == ("s1", "s2")
+    assert found[0].self_confirming == ("s3",), "the discounted session was not carried"
+
+
+def test_the_strongest_candidate_is_the_one_with_the_most_independent_sessions() -> None:
+    """`bounded`'s primary key is session count, and the old fixture held it constant at 3.
+
+    So ranking by occurrences alone passed, while the two keys answer different questions: a
+    trajectory repeated ten times in one conversation is one person doing one thing twice, and two
+    conversations is the bar the census itself sets.
+    """
+    from chemclaw.agent.distiller import bounded
+
+    many_occurrences = Candidate(("a", "b"), ("s1", "s2"), 99, ())
+    many_sessions = Candidate(("c", "d"), ("s1", "s2", "s3"), 3, ())
+
+    assert bounded([many_occurrences, many_sessions])[0] is many_sessions

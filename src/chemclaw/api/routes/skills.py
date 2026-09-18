@@ -31,21 +31,19 @@ switch for one resource, and `D-2026-09-16-a-setting-that-ships-off-is-a-feature
 reason it is not defaulted off besides.
 """
 
-import frontmatter
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
-from chemclaw.agent.langgraph_agent import shipped_skill_names
 from chemclaw.agent.local_skills import (
+    SkillRefused,
     delete_local_skill,
     list_local_skills,
     read_local_skill,
     save_local_skill,
+    validated_skill,
 )
-from chemclaw.agent.skill_manifest import SkillManifest
 from chemclaw.api.deps import CurrentUser
 from chemclaw.api.runner import turn_store
-from chemclaw.core.config import settings
 
 
 class LocalSkillIn(BaseModel):
@@ -83,64 +81,15 @@ class LocalSkillsOut(BaseModel):
     skills: list[str]
 
 
-def _validated_name(body: str) -> str:
-    """The skill name this body declares, or a 422 naming what is wrong with it.
+def _refused(error: SkillRefused) -> HTTPException:
+    """One refusal as this surface's status code — 409 for a taken name, 422 for a bad document.
 
-    Validated against the same `SkillManifest` the shared tree is, so a local skill cannot be a
-    document the listing then silently skips — which is the failure mode a tier with no validator
-    has: the person is told it was saved and no turn ever sees it.
-
-    The name comes *from the frontmatter* rather than from a separate field, for the reason
-    `agent/profile_discovery.py` refuses a `name:` key beside a filename: two sources of one name
-    can disagree, and the one the reader believes is whichever the code happens to consult.
-
-    **Three checks beyond the model, each because the name becomes a store key and a path.** A `/`
-    or a leading `.` are the traversal shapes. A control character — a NUL above all — is the one
-    that reached `store` and came back a 500 rather than a 422, because `AsyncPostgresStore`
-    rejects it at the driver and a person who pasted an invisible byte deserves to be told which
-    field. And a name longer than the Agent Skills spec allows is truncated by deepagents at load,
-    so accepting one stores a skill under a name the listing and the prompt then disagree about.
+    The admission rules live with the tier (`agent/local_skills.validated_skill`) rather than here,
+    because a rule stated at one surface is a rule the *other* surface does not have: measured, a
+    body this route refused with a 422 was written whole by `POST /proposals/skill/{name}`. What is
+    left here is the translation, which is genuinely this surface's.
     """
-    try:
-        parsed = frontmatter.loads(body)
-    except Exception as error:
-        raise HTTPException(422, f"the skill's frontmatter could not be parsed: {error}") from error
-    try:
-        manifest = SkillManifest.model_validate(parsed.metadata)
-    except ValidationError as error:
-        problems = "; ".join(
-            f"{'.'.join(str(part) for part in item['loc']) or '<root>'}: {item['msg']}"
-            for item in error.errors()
-        )
-        raise HTTPException(422, f"the skill's frontmatter is not valid: {problems}") from error
-    if "/" in manifest.name or manifest.name.startswith("."):
-        raise HTTPException(422, "a skill name may not contain '/' or start with '.'")
-    if any(character.isspace() or not character.isprintable() for character in manifest.name):
-        raise HTTPException(422, "a skill name may not contain whitespace or control characters")
-    return manifest.name
-
-
-def _refuse_a_collision(name: str) -> None:
-    """Refuse a personal skill that would take a reviewed skill's name — a 409, never a shadow.
-
-    **Upstream's rule is last-source-wins**, and this tier's source is one of several, so a name
-    collision silently decides which of two documents the model is given. Either outcome is a
-    behaviour change nobody was told about: a personal skill displacing a reviewed one is the tier
-    escaping its own bound, and a reviewed one displacing a personal one is a person's judgment
-    quietly ceasing to act while the listing still shows it.
-
-    So the collision is refused here, where there is a person to tell. The *other* half — a skill
-    added to `skills/` later, colliding with one already saved — has no route to refuse at, and
-    `langgraph_agent._skills_middleware` orders the sources so the reviewed tree wins it. That is
-    the safer of two silences and it is asserted rather than inherited
-    (`tests/test_local_skills.py::test_a_reviewed_skill_wins_a_name_a_personal_one_also_claims`).
-    """
-    if name in shipped_skill_names():
-        raise HTTPException(
-            409,
-            f"{name!r} is the name of a skill this deployment already ships; "
-            "give yours a different name so it is clear which judgment is acting",
-        )
+    return HTTPException(409 if error.conflict else 422, str(error))
 
 
 async def _store_or_refuse() -> object:
@@ -185,26 +134,16 @@ async def save_skill(payload: LocalSkillIn, principal: CurrentUser) -> LocalSkil
     was stored.
     """
     store = await _store_or_refuse()
-    if len(payload.body) > settings.agent_local_skill_max_chars:
-        raise HTTPException(
-            422,
-            f"a personal skill may be at most {settings.agent_local_skill_max_chars} characters "
-            f"and this one is {len(payload.body)}",
-        )
-    name = _validated_name(payload.body)
-    _refuse_a_collision(name)
-    held = await list_local_skills(store, principal.oid)
-    # Refused rather than evicted, and counted *before* the write so the cap binds the tier rather
-    # than trailing it by one. Replacing a skill already held is not a new row, so it is allowed at
-    # the cap — otherwise a chemist at twenty could not correct any of them.
-    if name not in held and len(held) >= settings.agent_local_skills_max:
-        raise HTTPException(
-            409,
-            f"you already keep {len(held)} personal skills, which is this deployment's limit of "
-            f"{settings.agent_local_skills_max}: every one of them is in the prompt of every turn "
-            "you take, so remove one before adding another",
-        )
-    await save_local_skill(store, principal.oid, name, payload.body)
+    try:
+        name = validated_skill(payload.body)
+    except SkillRefused as refusal:
+        raise _refused(refusal) from refusal
+    # The cap is the writer's, not this route's: it has to be counted and spent under one lock, and
+    # a check here would be the second copy that the acceptance door already proved goes stale.
+    try:
+        await save_local_skill(store, principal.oid, name, payload.body)
+    except SkillRefused as refusal:
+        raise _refused(refusal) from refusal
     return LocalSkillOut(name=name, body=payload.body)
 
 

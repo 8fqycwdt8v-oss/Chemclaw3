@@ -1913,8 +1913,9 @@ nothing", not "the database matches this image".
 | 092 | a session taking its **first** turn during the rollback window comes back with `session_owners.updated_at` NULL, so it is missing from `GET /sessions` until it is spoken in again; the pre-092 image derives the order and never maintains the column | **no — this one is silent.** Re-run 092's backfill by hand to restore it |
 | 093 | `record_observation` stops writing: the restored image's `ON CONFLICT (property, input_hash)` no longer plans against a key that now carries `source`, so no observation is recorded and no calibration is scored | yes — `InvalidColumnReference` in the log |
 | 094 | every fingerprint and corpus-reaction write stops: the restored image's `ON CONFLICT (id)` / `(source, id)` no longer plans against a key that now carries `definition` | yes — `InvalidColumnReference` in the log |
+| 106 | nothing — a plain GIN index on `turn_costs.skills_loaded` is dropped, and no `ON CONFLICT` names it and no query plans through it. Re-run 105 if you want it back | n/a |
 
-058 is exempted and does not actually break: its `CHECK` widens.
+058 and 106 are exempted and do not actually break: 058's `CHECK` widens, and 106 drops a plain index rather than a unique one — `DROP INDEX` is flagged because the pattern cannot tell the two apart.
 
 **This table is checked against the register rather than maintained beside it.** It shipped covering
 five of `_REVIEWED_ROLLBACK_BREAKS`'s eight entries and neither of `_REVIEWED_SEMANTIC_BREAKS`'s two

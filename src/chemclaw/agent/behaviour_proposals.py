@@ -210,6 +210,15 @@ _SUPERSEDE = (
     "WHERE actor = %s AND kind = %s AND name = %s AND content_hash <> %s AND state = 'open'"
 )
 
+# **The serializer for one name's queue.** `_SUPERSEDE` reads under READ COMMITTED before a peer's
+# insert is visible, so N concurrent proposes of N different bodies each found nothing to supersede
+# and left N open rows — measured at 8 concurrent, 7 open, no error and no deadlock, which is
+# silently the state the module says must never exist ("a reviewer who sees both has to guess which
+# one a decision applies to"). A transaction-scoped advisory lock keyed on the name is what makes
+# the read-then-write a critical section; it releases on commit, and it is per name so two chemists
+# and two skills never contend.
+_LOCK = "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))"
+
 _ONE = (
     f"SELECT {_COLUMNS} FROM behaviour_proposals "
     "WHERE actor = %s AND kind = %s AND name = %s AND content_hash = %s"
@@ -275,10 +284,11 @@ class PostgresProposalStore:
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    _SUPERSEDE,
-                    (proposal.actor, proposal.kind, proposal.name, proposal.content_hash),
+                    # `\x1f` (unit separator) rather than `\x00`: Postgres text may not carry a
+                    # NUL byte at all, so the obvious separator is a `DataError` on the first call.
+                    _LOCK,
+                    (f"{proposal.actor}\x1f{proposal.kind}\x1f{proposal.name}",),
                 )
-                superseded = max(cur.rowcount, 0)
                 await cur.execute(
                     _INSERT,
                     (
@@ -294,6 +304,19 @@ class PostgresProposalStore:
                     ),
                 )
                 inserted = cur.rowcount == 1
+                # **Only a genuinely new version supersedes anything**, which the first spelling
+                # got wrong by running the update unconditionally: re-proposing a body already
+                # stored killed the *open* sibling and revived nothing, so a queue holding one
+                # open proposal and one superseded one came back holding two superseded ones and
+                # nothing to decide. Measured — `OPEN rows: []` — while `propose_skill` went on
+                # telling the model its proposal was "already waiting".
+                superseded = 0
+                if inserted:
+                    await cur.execute(
+                        _SUPERSEDE,
+                        (proposal.actor, proposal.kind, proposal.name, proposal.content_hash),
+                    )
+                    superseded = max(cur.rowcount, 0)
                 await cur.execute(
                     _ONE,
                     (proposal.actor, proposal.kind, proposal.name, proposal.content_hash),
@@ -459,8 +482,14 @@ class InMemoryProposalStore:
             for held in self._held.values()
             if held.proposal.actor == actor and (not wanted or held.proposal.state in wanted)
         ]
+        # `reverse=True` on a stable sort keeps *insertion* order among equal timestamps, which is
+        # oldest-first — the opposite of what this method promises and of what `ORDER BY
+        # proposed_at DESC, id DESC` gives. Measured on three rows stamped identically: Postgres
+        # answered newest-first and this answered oldest-first. Reversing the list first makes the
+        # tiebreak arrival order descending, which is what the id does on the other backend.
+        mine.reverse()
         mine.sort(key=lambda proposal: proposal.proposed_at, reverse=True)
-        return mine[:limit]
+        return mine[: max(limit, 0)]
 
 
 #: The one in-process store for a `session_store="memory"` deployment.

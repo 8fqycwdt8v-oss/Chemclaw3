@@ -250,3 +250,54 @@ def test_the_backend_follows_the_session_store(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(settings, "session_store", "memory")
     assert isinstance(default_proposal_store(), InMemoryProposalStore)
+
+
+async def test_the_counter_distinguishes_the_three_arrivals_it_declares(
+    store: ProposalStore, actor: str
+) -> None:
+    """`_arrival`'s three outcomes reach the exposition, not just the tool's prose.
+
+    `test_a_proposer_can_tell_a_fresh_proposal_from_a_repeat`'s docstring says "the three outcomes
+    `_arrival` distinguishes, **which the counter labels** and the tool reports", and only the
+    second half was held: `_arrival` returning `"proposed"` unconditionally, and `_book` returning
+    without incrementing at all, both left this file and `tests/test_proposal_tools.py` at 19
+    passed. The one thing holding `chemclaw_behaviour_proposals_total` anywhere was
+    `test_every_declared_metric_is_named_somewhere_in_the_source` — the string's presence in a file.
+
+    That matters because this series' whole purpose is telling an operator whether anybody is
+    reading the queue, and a repeat booked as a fresh proposal reports it busier than it is — the
+    reassuring direction, and the one `_book`'s own docstring says it exists to avoid.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    def counted() -> dict[str, float]:
+        rendered = METRICS.render()
+        return {
+            outcome: float(line.rsplit(" ", 1)[1])
+            for line in rendered.splitlines()
+            if line.startswith("chemclaw_behaviour_proposals_total{")
+            for outcome in [line.split('outcome="')[1].split('"')[0]]
+        }
+
+    before = counted()
+    proposal = _proposal(actor=actor)
+
+    await store.propose(proposal)
+    await store.propose(proposal)
+    await store.decide(
+        actor,
+        "skill",
+        "cold-quench",
+        proposal.content_hash,
+        accepted=False,
+        decided_by=actor,
+        reason="too narrow",
+    )
+    await store.propose(proposal)
+
+    after = counted()
+    moved = {key: after.get(key, 0.0) - before.get(key, 0.0) for key in after}
+
+    assert moved.get("proposed") == 1.0, "a repeat or a settled re-propose booked as a proposal"
+    assert moved.get("already_open") == 1.0, "the repeat did not book as a repeat"
+    assert moved.get("already_decided") == 1.0, "re-proposing into a rejection booked as fresh"

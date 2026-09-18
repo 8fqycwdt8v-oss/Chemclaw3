@@ -84,7 +84,7 @@ def degraded(
     pass `WARNING`**, and one more (`agent/compaction.py::_degrade_once`) passes
     `ERROR if first else DEBUG` so a repeating degradation is not re-reported as news. The lowered
     level is for the case where the lost function is cosmetic or is already gated in CI, and four
-    of the seven argue exactly that where they pass it (`agent/skill_manifest.py::_read_manifest`,
+    of the seven argue exactly that where they pass it (`agent/skill_manifest.py::_declared_pair`,
     `publish/drivers/sql.py::SqlResultSink._report_dropped`, `api/tool_results.py::session_sink`,
     `core/db.py::_redact`). `publish/outbox.py::refresh_backlog` is the one that is neither
     cosmetic nor CI-gated — it asks an operator to re-enable a sink or discard the rows, at a level

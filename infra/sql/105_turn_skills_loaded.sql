@@ -22,17 +22,25 @@
 -- and a guard that saw only the reviewed tree would be blind to the tier most likely to be
 -- self-confirming, since that is the one the agent can propose into.
 --
--- **A chemist's own skill name is a person's words**, which is why `chemclaw_local_skill_loads_total`
--- is bare rather than labelled. It is safe here and not there for a reason worth stating: this is a
--- per-actor row in this system's own database, erased with that person by `agent/leaver.py`, rather
--- than a label on a shared Prometheus exposition that no erasure reaches.
+-- **This column holds fingerprints, not names** (`agent/skill_fingerprint.py`). A chemist's own
+-- skill name is a person's words, and this row is retained through erasure
+-- (`agent/leaver.py::_RETAINED`) and refused by `durable/retention.py` — so a name written here
+-- would be immortal and un-erasable, which is the opposite of what the personal tier's licence
+-- promises. The guard's question is equality ("was *this* skill acting"), which a digest answers
+-- exactly as well. `chemclaw_local_skill_loads_total` is bare for the neighbouring reason: a
+-- Prometheus label is a shared exposition no erasure reaches at all.
+--
+-- An earlier draft of this header said the row "is erased with that person by `agent/leaver.py`".
+-- It is not, and it never was — measured, a private skill name survived `erase_actor(apply=True)`
+-- reporting success.
 --
 -- Additive and defaulted, per `infra/sql/README.md`: every existing row keeps its meaning and the
 -- previous image can still write.
 ALTER TABLE turn_costs ADD COLUMN IF NOT EXISTS skills_loaded TEXT[] NOT NULL DEFAULT '{}';
 
--- The distiller's read is "every turn of this actor that loaded this skill", which is a containment
--- test over a per-actor slice. GIN on the array, because the alternative — scanning the actor's
--- turns and filtering in Python — is what the guard would cost on a corpus large enough for the
--- distiller to have anything to say.
+-- This index is dropped again by `106_drop_the_index_nobodys_query_uses.sql`, which measured that
+-- the containment read it was written for was never implemented: the one reader unions the whole
+-- corpus in Python, and `EXPLAIN` sequential-scans either way. Left here rather than removed
+-- because a deployment that has run this file already has the index, and a migration edited after
+-- it ships is a migration two sites disagree about.
 CREATE INDEX IF NOT EXISTS turn_costs_skills_loaded_idx ON turn_costs USING GIN (skills_loaded);

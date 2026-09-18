@@ -214,6 +214,18 @@ _REVIEWED_REPLAY_BREAKS: dict[str, tuple[str, tuple[str, ...], str]] = {
 # an exempted migration still fails — an exemption is granted to statements somebody read, not to a
 # filename.
 _REVIEWED_ROLLBACK_BREAKS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "106_drop_the_index_nobodys_query_uses.sql": (
+        # The over-flag the `DROP INDEX` comment above predicts, and the first one in this tree.
+        # `_BREAKS_PREVIOUS_IMAGE` cannot tell a unique index (whose drop breaks `ON CONFLICT`'s
+        # arbiter inference, exactly as dropping the constraint does) from a plain one (whose drop
+        # costs a plan). This is a plain GIN index on `turn_costs.skills_loaded`, no `ON CONFLICT`
+        # names it, and nothing reads through it — the containment query it was created for in
+        # `105` was never written, and the column's one reader scans the whole corpus in a single
+        # pass. So the previous image writes exactly as before, and the rollback is still "deploy
+        # the previous image"; re-running `105` restores the index if anybody ever wants it back.
+        "D-2026-09-18-a-control-that-names-a-module-is-a-claim-about-where-somebody-put-the-code",
+        ("DROP INDEX",),
+    ),
     "094_fingerprint_definition_identity.sql": (
         # The definition joins the key on all three fingerprint tables, so a superseded generation
         # is shelved instead of deleted. Unlike 056/063/093 this one genuinely stops the previous

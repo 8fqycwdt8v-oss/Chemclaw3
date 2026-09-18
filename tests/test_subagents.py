@@ -1858,21 +1858,10 @@ def test_a_named_helper_is_told_what_it_actually_holds(monkeypatch: pytest.Monke
     its prompt names 10 it lacks. The override is appended last, because a contradiction resolved
     in favour of whichever came first would resolve the wrong way.
     """
-    captured: list[str] = []
-
-    class _Capture(GenericFakeChatModel):
-        def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
-            return self
-
+    # No graph built here on purpose: this asserts the *text*, and the next test asserts that the
+    # model is sent it off the wire. A `_Capture` model and a compiled graph stood here and were
+    # `del`'d unread two lines later, which reads as a wire assertion and is not one.
     specialist = get_profile("computation")
-    graph = build_langgraph_agent(
-        model=_Capture(messages=iter([AIMessage(content="")])),
-        profile=AgentProfile(name="default"),
-        helper=True,
-        specialist=specialist,
-    )
-    del captured, graph
-
     override = specialist_override(specialist, ["describe_topology", "find_calculations"])
 
     assert "narrower than" in override
@@ -2088,3 +2077,94 @@ def test_the_file_share_bounds_the_superstep_at_every_width_this_deployment_allo
                 "helper's own bytes; past the crossover what remains must be the notice, or the "
                 f"superstep total grows linearly again ({len(stored)} characters each)"
             )
+
+
+def test_a_roster_entry_s_menu_is_bounded_by_what_it_lists_not_by_what_it_binds() -> None:
+    """`task`'s own schema must not grow with a surface this repository cannot measure.
+
+    `describe_helper` enumerates the tools the helper's *compiled* graph bound, which is the right
+    derivation and made `task`'s description a function of how many tools the sibling fleet serves.
+    `tests/test_context_floor.py`'s per-tool bound binds no fleet connector, so it read `task` at
+    897
+    against a 900-token ceiling while a deployment serving the `safety` bundle would send ~1,009 —
+    the `D-2026-09-05-a-ratchet-that-binds-no-connectors-measures-a-smaller-system` shape, one level
+    down. A ratchet blind to its input cannot hold this, so the bound is in the description.
+    """
+    from chemclaw.agent.profiles import AgentProfile
+    from chemclaw.agent.subagents import describe_helper
+    from chemclaw.core.config import settings
+
+    profile = AgentProfile(name="wide", description="Reads things.")
+    cap = settings.agent_helper_menu_tools
+    few = describe_helper(profile, [f"tool_{i:03d}" for i in range(cap)])
+    many = describe_helper(profile, [f"tool_{i:03d}" for i in range(400)])
+
+    assert "and " not in few.split("holds exactly:")[1], "an unbounded roster counted nothing"
+    assert many.count("tool_") == settings.agent_helper_menu_tools
+    assert f"and {400 - settings.agent_helper_menu_tools} more" in many, (
+        "the entry must say how many names it did not list"
+    )
+    assert len(many) < len(few) + 20, "400 tools grew the menu entry by more than the count suffix"
+
+
+def test_a_rostered_helpers_connectors_are_the_specialists_and_not_its_callers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The connector half of the roster intersection, asserted without re-deriving it.
+
+    Mutation: `helper_connectors` returning `kept` instead of the specialist intersection — so every
+    rostered helper holds *all* of its caller's reading connector tools regardless of the name the
+    model picked — left `tests/test_subagents.py` at 59 passed, and no other file imports it.
+
+    `test_the_predicted_surface_is_what_a_compiled_helper_binds` cannot catch it, because
+    `predicted_helper_surface` calls the same two functions the build calls, so both sides of that
+    equality move together: the "a basis that re-derives rather than observes will agree with itself
+    forever" defect that test's own docstring cites as its reason for existing, happening to it. The
+    `helper ⊆ caller` arms stay true because these tools *are* the caller's. So this asserts the
+    intersection against a literal.
+    """
+    from chemclaw.agent.authz import side_effecting_tools
+    from chemclaw.agent.profiles import AgentProfile
+    from chemclaw.agent.subagents import helper_connectors
+
+    class _Tool:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    acting = next(iter(side_effecting_tools()))
+    callers = [_Tool("reads_a"), _Tool("reads_b"), _Tool(acting)]
+    specialist = AgentProfile(name="narrow", tool_names=frozenset({"reads_a"}))
+
+    unnamed = helper_connectors(callers, None)
+    rostered = helper_connectors(callers, specialist)
+
+    assert unnamed is not None and sorted(t.name for t in unnamed) == ["reads_a", "reads_b"], (
+        "the unnamed helper's connector half is the caller's minus what acts"
+    )
+    assert rostered is not None and [t.name for t in rostered] == ["reads_a"], (
+        "a rostered helper held a connector tool its specialist does not name"
+    )
+
+
+def test_a_roster_description_names_the_bound_surface_and_nothing_beside_it() -> None:
+    """Both directions, because only one of them was asserted.
+
+    `test_every_roster_description_names_the_surface_its_graph_bound` asserts `bound ⊆ described`,
+    so `describe_helper` listing `bound | profile.tool_names` stayed green over the whole file — and
+    that is precisely the failure `D-2026-09-16` names: "a description written about the profile
+    would advertise a helper that computes, and the model would delegate a calculation and get back
+    a report saying it could not run one." The menu bound means the containment is now `described ⊆
+    bound` rather than equality, which is the safe direction: under-promising costs a delegation,
+    over-promising costs a wasted turn and a wrong report.
+    """
+    from chemclaw.agent.profiles import AgentProfile
+    from chemclaw.agent.subagents import describe_helper
+
+    profile = AgentProfile(name="p", description="Reads.", tool_names=frozenset({"a", "b", "c"}))
+    described = describe_helper(profile, ["a", "b"])
+    listed = {
+        word.strip(" .,") for word in described.split("holds exactly:")[1].replace(",", " ").split()
+    }
+
+    assert {"a", "b"} <= listed
+    assert "c" not in listed, "the description advertised a tool the helper does not bind"

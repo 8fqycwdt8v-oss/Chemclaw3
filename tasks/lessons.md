@@ -3083,3 +3083,31 @@ have passed against a cap set absurdly high, which is the other way to get this 
 **Rule: when a setting's justification cites a measurement, name the measurement's unit in the same
 sentence.** "250,000 tokens" is not a fact about runaways; "25 model calls, at the ~10,000-token
 calls of the day" is. Only the second one visibly rots.
+
+## A control's subject must be a behaviour, not a file (2026-09-18)
+
+Four fresh-context reviews of five merged commits found the engineering sound and **nine of its
+controls hollow**. Each had passed review. Each had the same shape: the test's subject was a file
+rather than a behaviour.
+
+- `assert "save_local_skill" not in inspect.getsource(proposal_tools)` — a claim about where
+  somebody chose to put the code. A registered tool doing exactly the forbidden thing, appended to
+  *that same module*, left it green.
+- `{name for name in registered_tool_names() if "accept" in name}` — a claim about vocabulary.
+- An assertion on the in-process ledger, one layer short of the row the guard actually reads. Two
+  one-line mutations of the producer left 467 tests passing.
+- `predicted_helper_surface` compared against a build that calls the same two functions — the
+  "a basis that is re-derived rather than observed will agree with itself forever" defect,
+  happening to a test that *cites that sentence as its reason for existing*.
+- A citation dict (`_A_LIVE_GATE`) whose values nothing read, with a comment saying an entry whose
+  gate stops existing "fails there".
+
+**The rule I am writing for myself:** before claiming a control exists, *apply the defect it is
+named after and watch it fail*. A mutation is one line and a revert; reading the test is not
+evidence. This is the repository's own "measure it, don't argue it" extended from defects to
+controls, and the tell is the same one every time — if I can state what the test asserts without
+saying what would break, it asserts a file.
+
+Second-order, and the part I nearly missed: two of the nine were controls I had *written in this
+same session* while explicitly reasoning about this failure mode. Knowing the pattern does not
+catch it. Driving it does.

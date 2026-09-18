@@ -57,14 +57,22 @@ outcome is judgment they wrote being unhelpful to them. `docs/planning/BACKLOG.m
 """
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import PurePosixPath
 from typing import Any
 
+import frontmatter
 from deepagents.backends import StoreBackend
+from pydantic import ValidationError
 
 from chemclaw.agent.audit import bounded_repr
 from chemclaw.agent.refusal_route import routed
+from chemclaw.agent.session_store import _session_connection, _session_dsn
 from chemclaw.agent.skill_backend import SkillsReadOnlyRefusal
+from chemclaw.agent.skill_manifest import SkillManifest
+from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
@@ -80,6 +88,9 @@ logger = logging.getLogger(__name__)
 #: own actor — so the path needs to carry no identity at all.
 LOCAL_SKILLS_ROOT = "/mine/"
 
+#: The advisory lock one chemist's writes serialize on — see `_one_writer_per_chemist`.
+_WRITER_LOCK = "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))"
+
 #: The same label without its slashes, for the skills middleware's source list.
 LOCAL_SKILLS_LABEL = "mine"
 
@@ -94,6 +105,141 @@ _LOCAL_READ_ONLY = routed(
     who_can_act="the chemist who owns it, through the skills route",
     sanctioned_path="draft the skill in your answer and say it can be saved from there",
 )
+
+
+class SkillRefused(ChemclawError):
+    """A document this tier will not keep, and whether the reason is a conflict or a fault.
+
+    One exception rather than two, carrying `conflict`, because every caller has to translate it to
+    its own surface anyway — a 409 or a 422 at a route, prose at a tool — and two classes would be
+    two things to keep in step for one branch.
+    """
+
+    def __init__(self, message: str, *, conflict: bool = False) -> None:
+        """Refuse, saying whether the name is taken (`conflict`) or the document is malformed."""
+        super().__init__(message)
+        self.conflict = conflict
+
+
+def storable_name(name: str) -> bool:
+    r"""Whether this name could ever have been written, which is what a read of it may assume.
+
+    **The writer's rule, asked by the readers, because the readers are reachable with anything.**
+    `GET /skills/mine/{name}` and its `DELETE` take a path parameter: any byte a URL can carry
+    reaches the store. Measured against the shipped Postgres store, `a\x00b` raised
+    `psycopg.DataError: PostgreSQL text fields cannot contain NUL (0x00) bytes` out of both — a
+    **500** on a name that cannot exist, where the honest answer is 404 and is what the in-memory
+    store already gave. A 500 on caller input is an availability question dressed as a bug report.
+
+    It is a predicate rather than a second copy of the check for the reason the whole tier is
+    arranged around: a rule stated at one surface is a rule the other surface does not have, which
+    is exactly the hole `validated_skill`'s docstring measures for the two write doors.
+    """
+    return all(not character.isspace() and character.isprintable() for character in name)
+
+
+def validated_skill(body: str, *, expected_name: str | None = None) -> str:
+    """The name this body declares, or a refusal naming what is wrong with it.
+
+    **Every door into this tier goes through here, and the reason is a hole that was measured.**
+    `POST /skills/mine` had these checks and the *acceptance* of a proposal did not, so a document
+    refused at one door was written at the other. Driven before this function existed, all three
+    refused bodies landed: a skill taking a shipped skill's name, a body that is not a `SKILL.md`
+    at all, and one at 40,000 characters against a 16,000 cap — 409, 422, 422 at the save route and
+    **200, written** at the accept route. The module that opened the second door argued in its own
+    docstring that "a second door into one bound is a hole in it" and then closed one bound of four.
+
+    So the admission rules live with the tier rather than with a surface, and a new way in gets them
+    by calling this. The four callers are the save route, the accept route, `propose_skill`, and the
+    distiller before it files.
+
+    Args:
+        body: The whole `SKILL.md`, frontmatter included.
+        expected_name: What the caller believes the name is, when it has an independent opinion —
+            `propose_skill` takes a `name` argument beside the body. Two sources of one name can
+            disagree and the reader believes whichever the code consults, so they are compared
+            rather than one being preferred.
+
+    Returns:
+        The validated name, which is also the skill's directory and its store key.
+
+    Raises:
+        SkillRefused: With `conflict` set when the name is a shipped skill's — the one refusal that
+            is about the deployment rather than about the document.
+    """
+    if len(body) > settings.agent_local_skill_max_chars:
+        raise SkillRefused(
+            f"a personal skill may be at most {settings.agent_local_skill_max_chars} characters "
+            f"and this one is {len(body)}. A skill is judgment, not a transcript."
+        )
+    try:
+        parsed = frontmatter.loads(body)
+    except Exception as error:
+        raise SkillRefused(
+            f"the skill's frontmatter could not be parsed: {error}. It must open with `---`, a "
+            "`name:` and a `description:`, then `---`."
+        ) from error
+    try:
+        manifest = SkillManifest.model_validate(parsed.metadata)
+    except ValidationError as error:
+        problems = "; ".join(
+            f"{'.'.join(str(part) for part in item['loc']) or '<root>'}: {item['msg']}"
+            for item in error.errors()
+        )
+        raise SkillRefused(f"the skill's frontmatter is not valid: {problems}") from error
+    if expected_name is not None and manifest.name != expected_name.strip():
+        raise SkillRefused(
+            f"the frontmatter declares the name {manifest.name!r} and the name given beside it is "
+            f"{expected_name.strip()!r}. Send the same name in both, since the frontmatter is what "
+            "a later turn reads."
+        )
+    if "/" in manifest.name or manifest.name.startswith("."):
+        raise SkillRefused("a skill name may not contain '/' or start with '.'")
+    if not storable_name(manifest.name):
+        raise SkillRefused(
+            "a skill name may not contain whitespace or control characters — use hyphens."
+        )
+    # Imported here rather than at module scope because `langgraph_agent` imports *this* module —
+    # the cycle is real, and the call is per save rather than per turn. `declared_tools` is cached
+    # on the directory tuple, so the cost is one `Path.is_dir()` fan-out.
+    from chemclaw.agent.langgraph_agent import shipped_skill_names
+
+    if manifest.name in shipped_skill_names():
+        raise SkillRefused(
+            f"{manifest.name!r} is the name of a skill this deployment already ships; give yours a "
+            "different name so it is clear which judgment is acting",
+            conflict=True,
+        )
+    return manifest.name
+
+
+#: The in-process tools whose only outcome is a personal skill, and which are therefore not bound
+#: where `personal_skills_available()` is false. A name rather than a literal in the builder,
+#: because the set belongs to the tier: whoever adds the second such tool adds it here and the
+#: builder needs no edit.
+PERSONAL_TIER_TOOLS = frozenset({"propose_skill"})
+
+
+def personal_skills_available() -> bool:
+    """Whether this deployment can keep a chemist's own skill at all.
+
+    Two gates, both necessary. `agent_memory_enabled` is the deployment's decision that
+    agent-authored files may outlive a session; `session_store` is the same condition the
+    checkpointer reads, because the store shares its pool and a process on the in-memory store has
+    no Postgres to put one in.
+
+    **One function because three surfaces read it, and the third read it by not reading it.**
+    `api/runner.turn_store` mounts `/mine` on these conditions and `api/routes/skills.py` refuses on
+    them, but `propose_skill` was bound on every model call with no condition at all — so under the
+    shipped defaults (`agent_memory_enabled` is False, and no Helm value sets it) the model spent
+    the tool's schema on every request, wrote a row into a store that dies with the process, and
+    told the chemist to go accept something `POST /proposals/...` answers 503 to. A tool whose only
+    outcome is unreachable is not a capability, and this is the predicate that says so.
+
+    Returns:
+        True where a proposal has somewhere durable to land and a route that can accept it.
+    """
+    return settings.agent_memory_enabled and settings.session_store == "postgres"
 
 
 def local_skills_namespace(actor: str) -> tuple[str, ...]:
@@ -274,14 +420,14 @@ def _count_a_load(result: Any, path: str = "") -> None:
     """
     if getattr(result, "error", None) is None and not getattr(result, "no_lines_requested", False):
         record_metric(lambda m: m.increment("chemclaw_local_skill_loads_total"))
-        # The same load on the turn's own channel. The counter is bare because a chemist's skill
-        # name is their words and a Prometheus label is a shared exposition no erasure reaches;
-        # this is a per-actor row in this system's own database, which `agent/leaver.py` erases
-        # with them — so the name is safe here and is the whole point, since the guard asks
-        # whether *this particular* skill was acting.
+        # The same load on the turn's own channel, carrying the name in process only: the ledger
+        # digests it before it reaches `turn_costs` (`agent/skill_fingerprint.py`), because that
+        # row is retained through erasure and a chemist's skill name is their own words. The
+        # counter beside it is bare for the neighbouring reason — a Prometheus label is a shared
+        # exposition no erasure reaches at all.
         name = _name_of(path)
         if name:
-            record_skill_loaded(name, LOCAL_SKILLS_LABEL)
+            record_skill_loaded(name)
 
 
 #: The document inside a skill directory that makes it a skill, mirroring the shared tree's shape so
@@ -313,6 +459,40 @@ def _writer(store: Any, actor: str) -> StoreBackend:
     return StoreBackend(namespace=lambda _runtime: namespace, store=store)
 
 
+@asynccontextmanager
+async def _one_writer_per_chemist(actor: str) -> AsyncIterator[None]:
+    """Serialize this chemist's saves, so the row cap is a bound rather than a suggestion.
+
+    **The cap was check-then-write with nothing between the two.** Measured against a real
+    `AsyncPostgresStore` at a cap of 3: twelve concurrent `POST /skills/mine` calls all read the
+    same pre-write count, all passed, and all twelve were written. The acceptance door had the same
+    shape at a cap of 2 and wrote eight. The bound's stated purpose is prompt-prefix spend — every
+    personal skill is in the prompt of every turn its owner takes — so a cap that concurrency lifts
+    is not bounding the thing it exists to bound.
+
+    A transaction-scoped advisory lock keyed on the actor, which is the shape
+    `agent/behaviour_proposals.py` uses one table over and releases on commit. It is per chemist, so
+    two people never contend, and it is taken on the session-store database rather than through the
+    `store` backend because the count and the write are two calls through somebody else's object and
+    cannot be one transaction — `tests/test_scratchpad.py` is what forbids reaching past the backend
+    to do it the other way.
+
+    **Conditioned on the backend rather than guarded by an `except`.** The tier is only reachable
+    when `turn_store()` answers, which needs `session_store="postgres"`; a test driving the writer
+    directly over an in-memory store has no database to lock on and no concurrency to lose, so the
+    lock is skipped explicitly rather than attempted and swallowed.
+    """
+    if settings.session_store != "postgres":
+        yield
+        return
+    async with _session_connection(_session_dsn()) as conn:
+        await conn.execute(_WRITER_LOCK, (f"local-skills\x1f{actor}",))
+        try:
+            yield
+        finally:
+            await conn.commit()
+
+
 async def save_local_skill(store: Any, actor: str, name: str, body: str) -> None:
     """Write one of a chemist's own skills, replacing any earlier version of that name.
 
@@ -342,7 +522,20 @@ async def save_local_skill(store: Any, actor: str, name: str, body: str) -> None
         name: The skill's name, which is also its directory.
         body: The whole `SKILL.md`, frontmatter included.
     """
-    await _writer(store, actor).awrite(_key(name), body)
+    async with _one_writer_per_chemist(actor):
+        held = await list_local_skills(store, actor)
+        # Refused rather than evicted, and counted inside the lock so the cap binds the tier rather
+        # than trailing it by however many requests arrived together. Replacing a skill already held
+        # is not a new row, so it is allowed at the cap — otherwise a chemist at the limit could not
+        # correct any of them.
+        if name not in held and len(held) >= settings.agent_local_skills_max:
+            raise SkillRefused(
+                f"you already keep {len(held)} personal skills, which is this deployment's limit "
+                f"of {settings.agent_local_skills_max}: every one of them is in the prompt of "
+                "every turn you take, so remove one before adding another",
+                conflict=True,
+            )
+        await _writer(store, actor).awrite(_key(name), body)
     log_event(
         logger,
         "local_skill.saved",
@@ -394,7 +587,13 @@ async def list_local_skills(store: Any, actor: str) -> list[str]:
 
 
 async def read_local_skill(store: Any, actor: str, name: str) -> str | None:
-    """One of a chemist's own skills, verbatim, or `None` if they have no skill by that name."""
+    """One of a chemist's own skills, verbatim, or `None` if they have no skill by that name.
+
+    A name the writer would have refused is answered as absent rather than passed to the store —
+    see `storable_name`, which measured a 500 on the shipped backend for a name that cannot exist.
+    """
+    if not storable_name(name):
+        return None
     item = await store.aget(local_skills_namespace(actor), _key(name))
     if item is None:
         return None
@@ -409,7 +608,9 @@ async def delete_local_skill(store: Any, actor: str, name: str) -> bool:
     behaviour change nobody can withdraw is a worse bargain than one nobody can see, because the
     person has learned there is something acting on them and still cannot stop it.
     """
-    if await store.aget(local_skills_namespace(actor), _key(name)) is None:
+    if not storable_name(name) or (
+        await store.aget(local_skills_namespace(actor), _key(name)) is None
+    ):
         return False
     # Through the same backend the write uses rather than `store.adelete`, so both halves of this
     # tier's lifecycle go through upstream's own code and the stored shape keeps one definition.

@@ -47,6 +47,7 @@ from chemclaw.agent.context_budget import (
 from chemclaw.agent.framing import frame_untrusted
 from chemclaw.agent.job_results import await_job_results
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
+from chemclaw.agent.local_skills import personal_skills_available
 from chemclaw.agent.loop_cap import begin_loop_watch, end_loop_watch, loop_hit_cap
 from chemclaw.agent.plan_gate import (
     PLAN_APPROVAL_PROMPT,
@@ -62,6 +63,7 @@ from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.scratchpad import memory_store
 from chemclaw.agent.session import TurnSession
 from chemclaw.agent.session_events import claim_unconsumed
+from chemclaw.agent.skill_fingerprint import skill_fingerprint
 from chemclaw.agent.spend_cap import (
     begin_spend_watch,
     end_spend_watch,
@@ -854,15 +856,31 @@ class _TurnLedger:
             self.notes_cited = len(cited_ids(event.text))
 
     def note_signal(self, signal: Any) -> None:
-        """Record a durable job launch, so the resume below knows what to wait for.
+        """Record what a graph run announced about itself, for the readers below.
 
-        A method rather than the lambda this was, because the resume passes a *different* callback
-        deliberately (a no-op) and a named pair reads as the decision it is rather than as one
-        lambda that lost its body.
+        A method rather than the lambda this was, because the second and third runs of a turn pass
+        `note_signal_without_job_chaining` and a named pair reads as the decision it is rather than
+        as one lambda that lost its body.
         """
         if isinstance(signal, JobSignal):
             self.started_jobs.append(signal.job_id)
-        elif isinstance(signal, SkillLoadedSignal):
+        else:
+            self.note_signal_without_job_chaining(signal)
+
+    def note_signal_without_job_chaining(self, signal: Any) -> None:
+        """The same, for a run that must not add to what this turn will wait for.
+
+        **Exactly one signal type is suppressed, and the blanket that stood here suppressed the
+        union.** The rule this callback exists for is `JobSignal`'s alone: a resume that fed its own
+        job ids back into `started_jobs` would let one chemist turn chain durable jobs indefinitely
+        inside a single request. Nothing about a revision round or a resumed half makes the *other*
+        signals untrue, and dropping them was measurably unsafe in one direction that matters —
+        `answer_review_max_rounds` ships at 2, so a skill read only during a revision round left
+        `turn_costs.skills_loaded` empty, and `agent/distiller.py::independent_sessions` counted
+        that session as *independent* evidence for proposing the very skill that was acting in it.
+        The self-confirmation guard failed **open**, which is the direction it exists to close.
+        """
+        if isinstance(signal, SkillLoadedSignal):
             # Both tiers into one set. A personal skill shapes a turn exactly as a reviewed one
             # does, and the guard that reads this would otherwise be blind to the tier most likely
             # to be self-confirming — the one the agent can propose into.
@@ -1140,9 +1158,11 @@ async def _resume_on_job_results(
     A second `graph_events` over the *same* graph and the same `thread_id`, because the continuation
     has to see the conversation the first half produced.
 
-    **`on_signal` is a no-op here rather than the ledger's appender, deliberately.** A resume that
-    fed its own job ids back into `started_jobs` would be the recursion this feature is without, so
-    that one chemist turn cannot chain durable jobs indefinitely inside a single request.
+    **`on_signal` drops this run's job launches and keeps everything else.** A resume that fed its
+    own job ids back into `started_jobs` would be the recursion this feature is without, so that one
+    chemist turn cannot chain durable jobs indefinitely inside a single request — and that argument
+    reaches `JobSignal` and nothing beside it, which is why the callback is named rather than a
+    blanket `lambda _signal: None`. See `_TurnLedger.note_signal_without_job_chaining`.
 
     `run_complete` is cleared for the duration and set again after: the resume drives a *second*
     model run, which can half-write exactly like the first — so the exchange is incomplete again
@@ -1173,7 +1193,7 @@ async def _resume_on_job_results(
             _job_results_message(results),
             config=config,
             trace=trace,
-            on_signal=lambda _signal: None,
+            on_signal=ledger.note_signal_without_job_chaining,
             usage=ledger.usage,
             exchanges=ledger.exchanges,
             carry=carry,
@@ -1242,7 +1262,7 @@ async def _revise_answer(
             trace=trace,
             # A no-op for the reason the resume gives: a revision that fed its own job ids back into
             # `started_jobs` would let one chemist turn chain durable work indefinitely.
-            on_signal=lambda _signal: None,
+            on_signal=ledger.note_signal_without_job_chaining,
             usage=ledger.usage,
             exchanges=ledger.exchanges,
             carry=carry,
@@ -2222,7 +2242,15 @@ def _book_turn_spend(
             answer_confidence=ledger.answer_confidence,
             review_required=ledger.review_required,
             notes_cited=ledger.notes_cited,
-            skills_loaded=sorted(ledger.skills_loaded),
+            # **Digested, because this row outlives the person.** The column's only consumer is
+            # the distiller's self-confirmation guard, which asks whether *this* skill was acting —
+            # an equality question a digest answers exactly as well as the name. The name itself is
+            # a chemist's own words, and `turn_costs` is in `leaver._RETAINED` and refused by
+            # `durable/retention.py`: measured, a skill called `project-nightingale-workup` was
+            # still in the table after `erase_actor(apply=True)` reported success. The code claimed
+            # the opposite ("erased with that person by `agent/leaver.py`"), which is the kind of
+            # false statement about a control this repository exists to stop making.
+            skills_loaded=sorted(skill_fingerprint(name) for name in ledger.skills_loaded),
         )
     )
     # **The same record as a log line, because a deployment may have no ledger to read.** The cost
@@ -2322,12 +2350,10 @@ async def _turn_checkpointer() -> Any:
 async def turn_store() -> Any:
     """This turn's durable memory store, or `None` where the deployment keeps none.
 
-    Two gates, both necessary and neither redundant. `agent_memory_enabled` is the deployment's
-    decision that agent-authored files may outlive a session at all; `session_store` is the same
-    condition `_turn_checkpointer` reads, because the store shares the checkpointer's pool and a
-    process on the in-memory store has no Postgres to put one in. Building it here rather than in
-    `build_langgraph_agent` is what keeps that builder synchronous — the same seam the checkpointer
-    already uses.
+    The two gates are `local_skills.personal_skills_available`'s, asked rather than restated:
+    a third surface (`propose_skill`) read them by not reading them at all, which is the argument
+    that function now carries. Building the store here rather than in `build_langgraph_agent` is
+    what keeps that builder synchronous — the same seam the checkpointer already uses.
 
     The *third* gate is not here and that is deliberate: whether the turn has an actor is decided by
     `scratchpad_backend`, because that is where the namespace is computed and an actorless memory is
@@ -2342,7 +2368,7 @@ async def turn_store() -> Any:
     Returns:
         A ready `AsyncPostgresStore`, or `None` for a turn with a scratchpad but no memory.
     """
-    if not settings.agent_memory_enabled or settings.session_store != "postgres":
+    if not personal_skills_available():
         return None
     return await memory_store()
 
