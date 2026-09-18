@@ -499,10 +499,27 @@ _COUNTED_SURFACE = re.compile(
 )
 #: The bundle by name, as every sentence that got this wrong wrote it.
 _CALC_BUNDLE = re.compile(r"`?calc`?\s+bundle", re.IGNORECASE)
-#: Records, not descriptions. A merged ADR is never edited (CLAUDE.md), and an archive or a task
-#: directory is a dated account of an afternoon; each is *supposed* to hold the number that was
-#: true when it was written.
+#: Records, not descriptions — and the axis is written out because it decides an asymmetry a
+#: reviewer asked about. A merged ADR is never edited (CLAUDE.md), `docs/archive/` is
+#: pre-implementation design, and `tasks/` is a dated account of an afternoon; each is *supposed*
+#: to hold the number that was true when it was written. `tasks/lessons.md` is exempt with the
+#: rest of that directory deliberately, not by oversight: CLAUDE.md does call it live, and it is
+#: read at session start, but it is append-only and every entry is dated, which is the merged-ADR
+#: argument rather than the runbook's.
+#:
+#: `docs/planning/BACKLOG.md` and `docs/guides/runbook.md` are deliberately *not* here, and a row
+#: in either that quotes the historical sentence beside "calc bundle" is *meant* to red. A queue
+#: whose closed rows are deleted in the commit that closes them, and a runbook describing what is
+#: true today, are both read as current; either cites the ADR rather than re-transcribing the
+#: number out of it, which is what the ADR is for.
 _HISTORICAL = ("docs/archive/", "docs/decisions/", "tasks/")
+
+#: The one live file that has to write the sentences this refuses, because it quotes them to say
+#: what they are. It passed without this by accident — the docstring below wrote "its own bundle"
+#: where the live-lane scripts wrote "its own `calc` bundle", so the guard was green on its own
+#: wording and nothing warned the next editor; restoring that one word red the suite. Derived from
+#: `__file__` rather than spelled out, so renaming this module carries the exemption with it.
+_NAMES_WHAT_IT_FORBIDS = (Path(__file__).resolve().relative_to(_ROOT).as_posix(),)
 _CALC_SERVER_PACKAGE = "src/chemclaw/connectors/calc/server/"
 
 
@@ -510,7 +527,7 @@ def test_the_calc_tool_surface_is_not_counted_in_prose() -> None:
     """Three live sentences said "fifteen" over a surface of seventeen.
 
     The bundle's own module docstring opened "Fifteen tools", and both live-lane scripts taught
-    that Chemclaw3 keeps its own bundle and "all fifteen tools" — measured at HEAD,
+    that Chemclaw3 keeps its own `calc` bundle and "all fifteen tools" — measured at HEAD,
     `connector.yaml` declares seventeen and the module decorates the same seventeen. Nothing
     failed, because nothing read those sentences: the count is a second answer to a question the
     manifest already answers, which is `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose`
@@ -533,7 +550,7 @@ def test_the_calc_tool_surface_is_not_counted_in_prose() -> None:
     offenders = []
     scanned_in_package = []
     for name in filter(None, tracked):
-        if name.startswith(_HISTORICAL):
+        if name.startswith(_HISTORICAL) or name in _NAMES_WHAT_IT_FORBIDS:
             continue
         try:
             content = (_ROOT / name).read_text(encoding="utf-8")
