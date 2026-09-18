@@ -131,8 +131,13 @@ _RUN_BUDGET_FRACTION = 0.5
 #: "5 left" — overstating a deadline by up to half a day, in the direction that makes a requester
 #: act later than they can afford to. Flooring is the conservative direction for a deadline, and
 #: `GREATEST(..., 0)` already keeps it off the negative side.
+#:
+#: `session_id` is selected for the same reason `kind` always was: it is a column of the row this
+#: query already reads, and the surface at the other end ends every other inbox row in "open the
+#: conversation". It is the requester's *own* session — this whole query is scoped to
+#: `requested_by` — so it reaches nobody it does not already belong to.
 _BLOCKED = """
-    SELECT requested_by, request_id, kind,
+    SELECT requested_by, request_id, kind, session_id,
            left(subject, %(chars)s) AS subject,
            length(subject) AS subject_chars,
            left(coalesce(rationale, ''), %(chars)s) AS rationale,
@@ -180,6 +185,11 @@ class BlockedRequest(BaseModel):
     subject: str
     rationale: str = ""
     asked_of: str = ""
+    #: The conversation the question was asked in, or `""` — a wait opened by a BO plate run or a
+    #: connector job has none, and `AwaitRequest.session_id` defaults to empty for exactly those.
+    #: Defaulted here for `CheckIn.truncated`'s reason: a run opened on the previous release
+    #: replays a recorded result that has no such key.
+    session_id: str = ""
     #: Whole days the question has been open, and whole days until it expires. Rounded here rather
     #: than sent as timestamps because the recipient acts on "nine days, five left", and a surface
     #: that had to do the arithmetic would be a second place it could be done differently.
@@ -323,6 +333,7 @@ async def collect_check_ins(after: str = "") -> CheckInPage:
         requested_by,
         request_id,
         kind,
+        session_id,
         subject,
         subject_chars,
         rationale,
@@ -335,6 +346,7 @@ async def collect_check_ins(after: str = "") -> CheckInPage:
             BlockedRequest(
                 request_id=str(request_id),
                 kind=str(kind),
+                session_id=str(session_id),
                 subject=_abbreviated(str(subject), int(subject_chars)),
                 rationale=_abbreviated(str(rationale), int(rationale_chars)),
                 asked_of=str(asked_of),
@@ -512,11 +524,22 @@ class CheckInWorkflow:
         sees when they open the app, and an outbound channel is a courtesy on top of it. The digest
         learned that ordering the hard way; this starts with it. What overlaps is one requester
         against another, which is where the wall clock was being spent.
+
+        **`truncated` travels on the mailbox row and used to travel only in the email.** The
+        payload was `{"requests": [...]}` and nothing else, so `_message` told a requester with
+        more than `_PAGE_ROWS` open questions that their list was short and the mailbox the app
+        actually opens said nothing — a list that looks complete, which is the one thing
+        `_abbreviated` and `kg/conflicts.py` both refuse to do to a reader. Beside `requests`
+        rather than inside each one, because it is a property of the page: what the route does with
+        it is the route's business.
         """
         sent = await notify_session_best_effort(
             digest_channel(item.owner),
             CHECK_IN_KIND,
-            {"requests": [blocked.model_dump() for blocked in item.requests]},
+            {
+                "requests": [blocked.model_dump() for blocked in item.requests],
+                "truncated": item.truncated,
+            },
         )
         await deliver_best_effort(_message(item))
         return sent

@@ -1043,3 +1043,179 @@ def test_the_supersede_leaves_alone_a_requester_this_run_is_not_writing_to() -> 
     assert theirs == [f"check-in-scope-{_OTHER}"], (
         "a requester outside this page lost their only notice and got nothing in its place"
     )
+
+
+async def _wire(owner: str) -> list[dict[str, Any]]:
+    """`GET /check-ins` as the caller's own surface reads it, claimed as that principal."""
+    from fastapi.testclient import TestClient
+
+    from chemclaw.api.app import create_app
+    from chemclaw.api.auth import Principal, require_principal
+
+    app = create_app(connector_factory=lambda _profile: [])
+    app.dependency_overrides[require_principal] = lambda: Principal(oid=owner, upn=f"{owner}@corp")
+    with TestClient(app) as client:
+        served = client.get("/check-ins").json()
+    return [dict(one) for one in served]
+
+
+def test_a_blocked_question_carries_its_kind_and_the_conversation_that_raised_it() -> None:
+    """Both are columns of the row the query already reads, and one of them was not selected.
+
+    `kind` is what the pending inbox two sections up badges every row by, and `session_id` is the
+    link both other inboxes on that page end in — a check-in ended nowhere. `pending_requests` has
+    carried both since `076`; `_BLOCKED` selected `kind` and not `session_id`, so the second was
+    unavailable at every layer above it rather than dropped at one.
+    """
+
+    async def _run() -> BlockedRequest:
+        await migrated_db_or_skip()
+        await _clear()
+        await _open("check-in-fields")
+        items = await _collected()
+        mine = _for(_OWNER, items)
+        assert mine is not None and mine.requests
+        return mine.requests[0]
+
+    blocked = asyncio.run(_run())
+
+    assert blocked.kind == "measurement", "the class of answer the badge is drawn from"
+    assert blocked.session_id == "s-1", (
+        "the conversation that raised the question did not survive the query it is a column of"
+    )
+
+
+def test_the_wire_carries_what_the_card_badges_links_and_warns_by() -> None:
+    """The three fields, at the model that decides what a client may see.
+
+    `CheckInOut` restates `BlockedRequest` rather than importing it, so a field reaching the worker
+    shape reaches nobody until it is added here too — which is why this is asserted at the route
+    and not only at the collector. `truncated` is the page's rather than the request's, so it is
+    stamped onto every row the short notice carried: a reader asks "is this list complete", and the
+    answer belongs on whatever they are looking at.
+    """
+    from chemclaw.agent.session_events import claim_unconsumed, record_session_event
+
+    async def _run() -> list[dict[str, Any]]:
+        await migrated_db_or_skip()
+        await claim_unconsumed(digest_channel(_OWNER))
+        await record_session_event(
+            digest_channel(_OWNER),
+            CHECK_IN_KIND,
+            {
+                "requests": [
+                    BlockedRequest(
+                        request_id="check-in-wire-fields",
+                        kind="approval",
+                        subject="sign off round 3",
+                        session_id="s-42",
+                    ).model_dump()
+                ],
+                "truncated": True,
+            },
+        )
+        return await _wire(_OWNER)
+
+    served = asyncio.run(_run())
+    mine = [one for one in served if one["request_id"] == "check-in-wire-fields"]
+    assert mine, f"the row did not reach the route: {served}"
+    assert mine[0]["kind"] == "approval"
+    assert mine[0]["session_id"] == "s-42"
+    assert mine[0]["truncated"] is True
+
+
+def test_a_payload_written_before_these_fields_is_still_read() -> None:
+    """The leniency `_check_in` claims, asserted on exactly the fields this commit adds.
+
+    The claim is the consume, so a row this route cannot parse is destroyed rather than deferred —
+    and a sweep's recorded activity result replays across a release. Three additive fields must
+    therefore read as empty rather than as a failure.
+    """
+    from chemclaw.agent.session_events import claim_unconsumed, record_session_event
+
+    async def _run() -> list[dict[str, Any]]:
+        await migrated_db_or_skip()
+        await claim_unconsumed(digest_channel(_OTHER))
+        await record_session_event(
+            digest_channel(_OTHER),
+            CHECK_IN_KIND,
+            # Exactly what the sweep wrote before this commit: no `truncated`, and a request with
+            # neither of the two new keys.
+            {
+                "requests": [
+                    {
+                        "request_id": "check-in-old-payload",
+                        "subject": "an older night",
+                        "rationale": "",
+                        "asked_of": "lab-team",
+                        "open_days": 9,
+                        "days_left": 5,
+                    }
+                ]
+            },
+        )
+        return await _wire(_OTHER)
+
+    served = asyncio.run(_run())
+    mine = [one for one in served if one["request_id"] == "check-in-old-payload"]
+    assert mine, f"a payload an older sweep wrote was not readable at all: {served}"
+    assert mine[0]["kind"] == "" and mine[0]["session_id"] == ""
+    assert mine[0]["truncated"] is False
+    assert mine[0]["open_days"] == 9, "the fields that were always there stopped arriving"
+
+
+def test_a_requester_served_short_is_told_so_by_the_sweep_rather_than_only_by_email() -> None:
+    """`CheckIn.truncated` existed, said so in the outbound copy, and reached the mailbox nowhere.
+
+    The backlog row this closes reads `_check_in` as dropping the flag. It does not: `_tell` wrote
+    `{"requests": [...]}` and nothing else, so there was no flag at the route to drop. Driven
+    through the real workflow for that reason — the gap is in the seam between the two halves, and
+    both halves passed their own tests.
+    """
+    owner = "check-in-short"
+
+    async def _forget() -> None:
+        """Remove this test's rows, **after** it as well as before.
+
+        It is the only test in the suite that inserts more than a page of `pending_requests`, and
+        `pending_store.open_requests` counts every waiting row rather than one requester's — so
+        `tests/test_pending_store.py::test_the_inbox_query_says_how_much_it_did_not_return`, which
+        asserts a 200-row fetch is not truncated, saw this test's 205 rows on top of its own 35 and
+        failed with `total_waiting=284`. It passed locally and reds on CI for the ordinary reason
+        two files share one database and the order between them is not fixed.
+
+        Cleaning before a test only protects that test. What a test owes the ones after it is to
+        leave the table as it found it, and a row count is exactly the shared state a later
+        assertion cannot defend itself against.
+        """
+        async with db.connection(_dsn()) as conn:
+            await conn.execute("DELETE FROM pending_requests WHERE requested_by = %s", (owner,))
+            await conn.execute(
+                "DELETE FROM session_events WHERE session_id = %s", (digest_channel(owner),)
+            )
+
+    async def _run() -> int:
+        await migrated_db_or_skip()
+        await _clear()
+        await _forget()
+        await _open_many({owner: _PAGE_ROWS + 5})
+        async with await start_env_or_skip() as env:
+            client = pydantic_client(env)
+            async with _sweep_worker(client):
+                return await _sweep(client, "short")
+
+    try:
+        delivered = asyncio.run(_run())
+        assert delivered >= 1, "the sweep reported telling nobody"
+
+        served = asyncio.run(_wire(owner))
+        assert len(served) == _PAGE_ROWS, f"the notice carried {len(served)} rows"
+        assert all(one["truncated"] is True for one in served), (
+            "a chemist with more questions than one check-in carries was shown a list that looks "
+            "complete"
+        )
+    finally:
+        # In a `finally` rather than after the assertions: a failing assertion is exactly when the
+        # rows are most likely to be left behind, and the next file's failure would then be about
+        # this one's leftovers instead of about itself.
+        asyncio.run(_forget())
