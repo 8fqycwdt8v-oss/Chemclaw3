@@ -492,7 +492,7 @@ _INSTRUCTION_BLOCKS: tuple[PromptBlock, ...] = (
     ),
     # **Cut here because the block above carries the security floor and this one carries a
     # capability.** Joined, the whole paragraph required `record_knowledge_note` and
-    # `record_confirmed_answer` — which the one helper this deployment builds does not hold, since
+    # `record_confirmed_answer` — which the helpers this deployment builds does not hold, since
     # `agent/subagents.py` subtracts every side-effecting tool — so the envelope rule, half of the
     # two-part injection defense, was measured *absent* from the helper's prompt while
     # `tests/test_framing.py` (which reads the maximal text) stayed green. The standing rule this

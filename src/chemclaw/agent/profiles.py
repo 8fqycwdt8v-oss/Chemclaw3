@@ -131,6 +131,25 @@ class AgentProfile(BaseModel):
     # tree that does not exist until a deployment names one. The failure mode is the benign one —
     # a name nothing backs narrows to nothing and removes no skill anybody has.
     skill_names: frozenset[str] | None = None
+    # What this profile is *for*, in one sentence, written for the model that decides whether to
+    # delegate to it. Unset on a profile nobody rosters, which is every profile a session picks by
+    # name — a session profile is chosen by a person who already knows what they want.
+    #
+    # **It exists because the last roster's descriptions were derived, and derived identically.**
+    # `D-2026-08-12-a-supervisor-that-holds-every-tool-has-no-reason-to-delegate` measured a
+    # five-specialist roster whose menu was built as `instructions.split(". ")[0]` — and all five
+    # profiles open with "You are Chemclaw's `<name>` specialist", so the menu the model read
+    # carried the names and nothing else. Fixing it to carry capability changed 1 of 15 to 1 of 15;
+    # the delegation only moved when the `task` description was rewritten too. A field is the fix
+    # that cannot regress: prose written to be a description is not prose that happens to be the
+    # first sentence of something else.
+    #
+    # It is only half of what the model reads. `subagents.describe_helper` appends the tool names
+    # the compiled helper actually bound, so the capability half is *derived from the graph* and
+    # cannot drift from it — which matters more here than anywhere, because a rostered profile's
+    # helper is narrower than the profile (every tool that acts is subtracted), so a sentence
+    # written about the profile would describe a surface the helper does not have.
+    description: str | None = Field(default=None, max_length=MAX_MANIFEST_TEXT_CHARS)
 
 
 # The one profile that exists today: every field unset, so it resolves to the global agent verbatim.

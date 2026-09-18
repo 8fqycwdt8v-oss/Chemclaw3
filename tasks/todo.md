@@ -27,12 +27,13 @@ stays LangChain/LangGraph-native.
 - [x] ADR
 
 ## Phase 2 — The roster: N named helpers, selected automatically in-context
-- [ ] A roster setting naming which profiles are offered as helpers
-- [ ] `_subagents` builds one governed entry per roster name, each an attenuation
-- [ ] Each helper's `task` description derived from its profile so selection has information
-      (`D-2026-08-12` measured identical descriptions costing every delegation)
-- [ ] The caller stays `default`; selection is the model's ordinary tool-call decision
-- [ ] ADR recording that the reason the backlog said was missing has arrived
+- [x] A roster setting naming which profiles are offered as helpers
+- [x] `_subagents` builds one governed entry per roster name, each an attenuation
+- [x] Each helper's `task` description is a written purpose **plus a list derived from the
+      compiled `ToolNode`** (`D-2026-08-12` measured identical descriptions costing every
+      delegation; a derived list cannot regress that way)
+- [x] The caller stays `default`; selection is the model's ordinary tool-call decision
+- [x] ADR recording that the reason the backlog said was missing has arrived
 
 ## Phase 3 — The per-actor local skills tier
 - [ ] Per-turn, actor-scoped skills directory resolved where ambient identity is reachable
