@@ -28,7 +28,10 @@ Skills hold judgment; connectors hold capability (deterministic tools). Anything
 generates enters the graph **directly**, labelled `created_by: agent`, and is corrected rather than
 pre-approved (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). What the agent cannot touch
 at all is its own behaviour: no path writes a `SKILL.md` (`agent/skill_backend.py`'s
-`SkillsReadOnlyRefusal`), so a skill changes only through a reviewed commit to `skills/` in git.
+`SkillsReadOnlyRefusal`), so the shared tree changes only through a reviewed commit to `skills/` in
+git — and a chemist's own skills, which act on their turns alone, only through `POST /skills/mine`,
+a route a person calls (`D-2026-09-18-a-skill-a-chemist-keeps-is-behaviour-they-approved`). A turn
+may read both and write neither.
 
 ## The code: `src/chemclaw/`
 

@@ -38,6 +38,10 @@ from functools import cache
 from pathlib import Path
 
 import frontmatter
+from deepagents.middleware.skills import (
+    MAX_SKILL_DESCRIPTION_LENGTH,
+    MAX_SKILL_NAME_LENGTH,
+)
 from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core.metrics_bridge import degraded
@@ -46,6 +50,22 @@ logger = logging.getLogger(__name__)
 
 # Where a skill's frontmatter lives inside its directory — the Agent Skills spec's filename.
 SKILL_FILENAME = "SKILL.md"
+
+#: The Agent Skills spec's bounds on the two required fields, taken from the loader that applies
+#: them rather than transcribed.
+#:
+#: **Imported because upstream *truncates* rather than refuses.** A description over the limit is
+#: cut to it with a warning, and a name over it likewise — so a skill can be stored under one name
+#: and listed under another, and a description can be stored whole and read half. Both are silent
+#: from anywhere but a log. Declaring them on `SkillManifest` turns the same limits into a
+#: validation error: a CI failure for the reviewed tree (`make skill-validate`) and a 422 for the
+#: chemist's own tier, in both cases naming the field rather than quietly shortening it.
+#:
+#: `tests/test_upstream_surface.py` is what holds the assumption that upstream truncates, because
+#: if a bump made it *refuse* instead, these bounds would be the only thing standing between a
+#: person and a skill that vanishes from the listing with no error anywhere.
+MAX_SKILL_NAME_CHARS = MAX_SKILL_NAME_LENGTH
+MAX_SKILL_DESCRIPTION_CHARS = MAX_SKILL_DESCRIPTION_LENGTH
 
 
 class SkillManifest(BaseModel):
@@ -60,8 +80,8 @@ class SkillManifest(BaseModel):
     # preserving what the hand-rolled check did before this model (`value.strip()`).
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    name: str = Field(min_length=1)
-    description: str = Field(min_length=1)
+    name: str = Field(min_length=1, max_length=MAX_SKILL_NAME_CHARS)
+    description: str = Field(min_length=1, max_length=MAX_SKILL_DESCRIPTION_CHARS)
     # The capabilities this skill's judgment is written about, by *tool* name — the in-process
     # tools, the generated connector job launchers, and the tools an enabled connector's endpoint
     # serves, all in one list because all three are things the model calls by name. Optional: a
