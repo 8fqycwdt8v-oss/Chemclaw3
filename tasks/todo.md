@@ -35,7 +35,22 @@ stays LangChain/LangGraph-native.
 - [x] The caller stays `default`; selection is the model's ordinary tool-call decision
 - [x] ADR recording that the reason the backlog said was missing has arrived
 
-## Phase 3 — The per-actor local skills tier
+## Phase 3 — The per-actor local skills tier, *with its writer*
+
+**Reordered, and the reason is this repository's own rule.** `D-2026-09-05` §3 specifies this tier
+and records it unbuilt because "nothing writes a per-actor directory until the distiller exists" —
+and the distiller is blocked on deployment history the census measures at zero. Shipping the tier
+with no writer is a mechanism whose only caller is its own test, which is the `reject_widening`
+shape this repository deleted 254 lines for. So the writer ships with it, and the first writer is
+**the chemist**: a route they call, never a tool the agent holds. `SkillsReadOnlyRefusal` is
+untouched — the agent may draft the text into its answer and can never write the file.
+
+**Storage is the store, not a directory**, which is the one place this ADR's own specification has
+to be departed from. A pod's filesystem is ephemeral and the chart runs `serverReplicas` of them,
+so a local skill written to disk would vanish on restart and differ per replica. `StoreBackend` over
+the same `AsyncPostgresStore` that already serves `/memories/` is multi-replica-safe, and its
+namespace is the erasure key `agent/leaver.py` already sweeps by prefix.
+
 - [ ] Per-turn, actor-scoped skills directory resolved where ambient identity is reachable
 - [ ] Never shared, never citable, never auto-promoted
 - [ ] Routes so a chemist can list, read and delete the local skills acting on their turns

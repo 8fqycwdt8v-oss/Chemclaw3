@@ -108,6 +108,7 @@ from chemclaw.agent.chemclaw_agent import (
 )
 from chemclaw.agent.compaction import context_compaction_middleware, disabled_summarizer
 from chemclaw.agent.llm_provider import build_chat_model
+from chemclaw.agent.local_skills import LOCAL_SKILLS_LABEL, LOCAL_SKILLS_ROOT
 from chemclaw.agent.loop_cap import enforce_loop_cap
 from chemclaw.agent.model_calls import model_call_middleware, refuse_unparsed_arguments
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
@@ -1109,9 +1110,18 @@ def _skills_middleware(backend: CompositeBackend, labelled: list[tuple[str, str]
     registers no tools. `FilesystemMiddleware` is the opposite case and does need the splice —
     upstream composes one unconditionally — which is why `_middleware` explains the rule there.
     """
+    # **Derived from the routes the backend really has, not from `labelled` alone.** The shared
+    # trees come from `labelled`; the chemist's own tier is mounted by `scratchpad_backend` on two
+    # conditions this function cannot see (a store, and a turn with an actor), so asking the backend
+    # is the only way the listing and the routes cannot disagree — and a source advertising a path
+    # that resolves to the composite's default `StateBackend` would publish an empty tier to the
+    # model on every turn a deployment has no store.
+    sources = [(f"/{label}", label) for label, _ in labelled]
+    if LOCAL_SKILLS_ROOT in backend.routes:
+        sources.append((f"/{LOCAL_SKILLS_LABEL}", LOCAL_SKILLS_LABEL))
     return ReloadingSkillsMiddleware(
         backend=backend,
-        sources=[(f"/{label}", label) for label, _ in labelled],
+        sources=sources,
         # Upstream's own template, minus one sentence that is false on this deployment. Passed
         # here rather than defaulted because the constructor is the supported seam for it, and
         # because a template that arrives from upstream every bump is the half that cannot go
