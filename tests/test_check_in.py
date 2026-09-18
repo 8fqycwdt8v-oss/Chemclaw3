@@ -1174,26 +1174,48 @@ def test_a_requester_served_short_is_told_so_by_the_sweep_rather_than_only_by_em
     """
     owner = "check-in-short"
 
-    async def _run() -> int:
-        await migrated_db_or_skip()
-        await _clear()
+    async def _forget() -> None:
+        """Remove this test's rows, **after** it as well as before.
+
+        It is the only test in the suite that inserts more than a page of `pending_requests`, and
+        `pending_store.open_requests` counts every waiting row rather than one requester's — so
+        `tests/test_pending_store.py::test_the_inbox_query_says_how_much_it_did_not_return`, which
+        asserts a 200-row fetch is not truncated, saw this test's 205 rows on top of its own 35 and
+        failed with `total_waiting=284`. It passed locally and reds on CI for the ordinary reason
+        two files share one database and the order between them is not fixed.
+
+        Cleaning before a test only protects that test. What a test owes the ones after it is to
+        leave the table as it found it, and a row count is exactly the shared state a later
+        assertion cannot defend itself against.
+        """
         async with db.connection(_dsn()) as conn:
             await conn.execute("DELETE FROM pending_requests WHERE requested_by = %s", (owner,))
             await conn.execute(
                 "DELETE FROM session_events WHERE session_id = %s", (digest_channel(owner),)
             )
+
+    async def _run() -> int:
+        await migrated_db_or_skip()
+        await _clear()
+        await _forget()
         await _open_many({owner: _PAGE_ROWS + 5})
         async with await start_env_or_skip() as env:
             client = pydantic_client(env)
             async with _sweep_worker(client):
                 return await _sweep(client, "short")
 
-    delivered = asyncio.run(_run())
-    assert delivered >= 1, "the sweep reported telling nobody"
+    try:
+        delivered = asyncio.run(_run())
+        assert delivered >= 1, "the sweep reported telling nobody"
 
-    served = asyncio.run(_wire(owner))
-    assert len(served) == _PAGE_ROWS, f"the notice carried {len(served)} rows"
-    assert all(one["truncated"] is True for one in served), (
-        "a chemist with more questions than one check-in carries was shown a list that looks "
-        "complete"
-    )
+        served = asyncio.run(_wire(owner))
+        assert len(served) == _PAGE_ROWS, f"the notice carried {len(served)} rows"
+        assert all(one["truncated"] is True for one in served), (
+            "a chemist with more questions than one check-in carries was shown a list that looks "
+            "complete"
+        )
+    finally:
+        # In a `finally` rather than after the assertions: a failing assertion is exactly when the
+        # rows are most likely to be left behind, and the next file's failure would then be about
+        # this one's leftovers instead of about itself.
+        asyncio.run(_forget())
