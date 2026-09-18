@@ -525,6 +525,7 @@ def test_the_calc_tool_surface_is_not_counted_in_prose() -> None:
     ).stdout.split("\0")
 
     offenders = []
+    scanned_in_package = []
     for name in filter(None, tracked):
         if name.startswith(_HISTORICAL):
             continue
@@ -532,11 +533,20 @@ def test_the_calc_tool_surface_is_not_counted_in_prose() -> None:
             content = (_ROOT / name).read_text(encoding="utf-8")
         except (UnicodeDecodeError, FileNotFoundError, IsADirectoryError):
             continue  # binary, or a symlink into a tree this checkout does not have
+        if name.startswith(_CALC_SERVER_PACKAGE):
+            scanned_in_package.append(name)
         for sentence in re.split(r"(?<=[.:!?])\s", content):
             if not _COUNTED_SURFACE.search(sentence):
                 continue
             if name.startswith(_CALC_SERVER_PACKAGE) or _CALC_BUNDLE.search(sentence):
                 offenders.append(f"{name}: {' '.join(sentence.split())[:120]}")
+
+    assert scanned_in_package, (
+        f"nothing tracked was read under {_CALC_SERVER_PACKAGE}; the package has been renamed or "
+        "moved. The constant is an unanchored string, so half this scan's scope went empty in "
+        "silence and `assert not offenders` below would pass over a docstring counting the whole "
+        "surface — which is the shape of guard this test exists to refuse."
+    )
 
     assert not offenders, (
         f"the calc bundle's tool surface is counted in prose: {offenders}. The manifest declares "
