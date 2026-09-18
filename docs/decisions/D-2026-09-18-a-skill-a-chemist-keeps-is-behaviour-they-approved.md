@@ -82,14 +82,43 @@ the row.
 one answer per name; a tier that accumulated drafts would answer it with a list. The earlier body is
 not recoverable, which is why the route echoes what it stored.
 
-**`MAX_LOCAL_SKILL_CHARS` is 16,000, derived rather than picked.** The largest skill this repository
-ships is `protocol-generation` at 12,896 characters, so a chemist can write judgment as substantial
-as anything reviewed into `skills/` while the shape that is not a skill at all — a transcript, a
-pasted dataset — is refused. It is load-bearing for the reason `AgentProfile.instructions`' bound
-is: a body is read into a model's context on demand, so an unbounded one is unbounded spend, and
-this is the one tier where a *person* rather than this repository decides the text.
-`tests/test_local_skills.py` checks the bound against the shipped tree, so a skill landing in
+**Two bounds, because either alone is unbounded in the other**, and the second one was missing
+from the first version of this record.
+
+`agent_local_skill_max_chars` is 16,000, derived rather than picked: the largest skill this
+repository ships is `protocol-generation` at 12,896 characters, so a chemist can write judgment as
+substantial as anything reviewed into `skills/` while the shape that is not a skill at all — a
+transcript, a pasted dataset — is refused. That bounds a **body**, which is read into context on
+demand, and `tests/test_local_skills.py` checks it against the shipped tree so a skill landing in
 `skills/` that this tier could not hold turns it red.
+
+`agent_local_skills_max` is 20, and it bounds something else: **the prefix of every model call its
+owner makes.** A skill's name and description are listed in the system message unconditionally —
+only the body is on demand — so the row count is a multiplier on the one part of a request nothing
+can compact. This paragraph originally said `agent_memory_max_files` held that, and it does not:
+that cap is enforced by `scratchpad.BoundedStoreBackend`, which mounts `/memories/` and not this
+root, so nothing on either half of this tier ever counted a row. Measured on a compiled graph with
+the connector surface bound, an empty mounted tier costs **6** tokens and a maximal one — 20 rows
+at deepagents' 1,024-character description limit — costs **5,571**;
+`tests/test_context_floor.py::test_a_chemists_own_skills_cost_no_more_prefix_than_their_cap_allows`
+is the ratchet, and it is deliberately *not* folded into `CEILINGS`: that file bounds what this
+repository ships to everybody, and charging every deployment 5,600 tokens of thread allowance for a
+tier almost none of them will fill is the wrong trade. Nothing is lost by keeping it out, because
+`agent/context_budget.prefix_tokens` charges the prefix of the call actually in flight.
+
+The row cap is **refused rather than evicted**, which is the one place this tier departs from the
+memory tier's shape on purpose: a memory a turn wrote may be dropped silently, and judgment a person
+authored may not vanish because they wrote one more. A *replacement* is allowed at the cap, or a
+chemist who filled it could not correct any of them.
+
+**A third bound rides on `SkillManifest`, and it is upstream's own.** deepagents truncates a name or
+a description past the Agent Skills spec's limits and carries on, so an over-long description is
+served half with nothing but a log saying so, and a name over the limit is stored under one spelling
+and listed under another. `agent/skill_manifest.py` imports those two constants and declares them as
+pydantic bounds, which turns both into a CI failure for the reviewed tree and a 422 for this one.
+`tests/test_upstream_surface.py` holds the assumption that upstream truncates, because a bump that
+made it *refuse* would put a person's skill in the store and out of the listing with no error
+anywhere.
 
 **What the tier still cannot do, so nobody reads this as the whole feature**: nothing proposes a
 skill automatically, nothing promotes a local skill into `skills/`, and nothing measures whether one
@@ -136,7 +165,21 @@ argument is about one base class and does not travel with the refusal.**
 - `::test_a_skill_is_replaced_rather_than_versioned`,
   `::test_a_chemist_can_remove_what_is_acting_on_them`
 - `::test_the_size_bound_is_larger_than_anything_this_repository_ships`
+- `::test_the_listing_answers_for_a_tier_larger_than_one_page` — `BaseStore.asearch` defaults to
+  `limit=10`, so the un-paged listing answered ten of twelve while the prompt carried twelve, which
+  falsifies this record's own licence condition: the two beyond the page were undeletable through
+  the only route that deletes.
+- `::test_a_reviewed_skill_wins_a_name_a_personal_one_also_claims` — the collision order, driven
+  through the loader rather than read off the source list.
+- `tests/test_api_local_skills.py` — the four routes: owner scoping driven as a second principal,
+  the 422 family (frontmatter, traversal, NUL, whitespace, an invented key), the 409s (a shipped
+  name, the row cap), the 503 on all four routes, and the listing past one page.
+- `tests/test_context_floor.py::test_a_chemists_own_skills_cost_no_more_prefix_than_their_cap_allows`
+- `tests/test_upstream_surface.py::test_an_oversized_skill_description_is_still_truncated_rather_than_refused`
 - `::test_the_label_carries_no_identity`
+- `::test_the_outer_permission_rules_deny_a_write_under_this_root_too` — the second layer, which
+  covers this root by *absence* and so is the one most likely to be widened by a rule added for
+  another root.
 - `::test_a_write_outside_the_tool_chain_is_not_a_write_without_a_record` — including that the
   body never reaches the log.
 - `tests/test_scratchpad.py::test_no_first_party_module_writes_to_a_store_directly` — passed on

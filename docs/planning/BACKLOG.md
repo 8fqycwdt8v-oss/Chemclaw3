@@ -191,6 +191,23 @@ topic).
       tool this profile lacks, and the worst outcome is judgment they wrote being unhelpful to them.
 
 
+- [ ] **`Chemclaw3_ui` has no surface for the four `/skills/mine` routes** — [M], opened by
+      `D-2026-09-18-a-skill-a-chemist-keeps-is-behaviour-they-approved`. That ADR grants the
+      personal tier its exemption from review *on the condition* that a chemist can see what is
+      acting on their turns and remove it — and the only thing that can currently exercise the
+      condition is `curl`. The routes are there, driven and tested
+      (`tests/test_api_local_skills.py`); what is missing is the half a chemist can reach.
+
+      It is a row in this repository rather than only in the frontend's because the condition is
+      this repository's claim: `SECURITY.md` and `ARCHITECTURE.md` now say a personal skill is
+      inspectable and removable, and until the UI ships that is true of an API rather than of a
+      person. The shape is the smallest one that discharges it — a list of names, the body of one
+      verbatim, a delete, and the save the agent's draft is posted through — and the two refusals
+      worth rendering rather than swallowing are the 409s: a name this deployment already ships,
+      and the row cap, which says in its detail why it exists (every personal skill is in the
+      prompt of every turn its owner takes).
+
+
 - [ ] **Both published tool-utility results were measured against a control arm that also swaps
       the prompt** — [M], `data/evals/profiles/no-tools.yaml` (`instructions:`),
       `D-2026-09-14-tools-were-never-the-variable`. The benchmark half is corrected: the arms differ

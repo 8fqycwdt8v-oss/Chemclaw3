@@ -275,15 +275,42 @@ async def save_local_skill(store: Any, actor: str, name: str, body: str) -> None
     )
 
 
+#: How many rows one page of the listing walk asks for.
+#:
+#: The same shape — and the same reason — as `scratchpad._EVICTION_PAGE`: `BaseStore.asearch`
+#: defaults to `limit=10`, which is not a page size a caller chose, it is a default a caller who
+#: passed nothing inherited. This tier's cap is `agent_local_skills_max`, so one page normally
+#: answers the whole namespace and the loop runs once.
+_LISTING_PAGE = 100
+
+
 async def list_local_skills(store: Any, actor: str) -> list[str]:
-    """The names of one chemist's own skills, sorted.
+    """The names of one chemist's own skills, sorted — **all** of them.
 
     Read off the store rather than off the mounted backend, because this answers a *route's*
     question — "what is acting on my turns" — and the route has no turn and therefore no mount.
+
+    **Paged, because the un-paged spelling answered ten.** `store.asearch(namespace)` with no
+    `limit` is not "everything", it is `BaseStore.asearch`'s default of 10 — so a chemist with
+    twelve saved skills was listed ten while the prompt carried twelve, and the two beyond the page
+    were undeletable through the route that exists to remove them. That falsifies the licence this
+    tier holds its exemption under: the ADR grants it *on the condition* that a person can see what
+    is acting on their turns and withdraw it. A listing that is confidently short is worse than no
+    listing, because it answers the question wrongly rather than not at all.
+
+    The walk terminates on a page that adds nothing, which also ends it against a store that
+    ignores `offset` — the same guard `scratchpad.BoundedStoreBackend` carries for the same reason.
     """
-    items = await store.asearch(local_skills_namespace(actor))
+    namespace = local_skills_namespace(actor)
+    held: dict[str, Any] = {}
+    while True:
+        page = await store.asearch(namespace, limit=_LISTING_PAGE, offset=len(held))
+        fresh = {item.key: item for item in page if item.key not in held}
+        if not fresh:
+            break
+        held.update(fresh)
     suffix = f"/{LOCAL_SKILL_FILENAME}"
-    return sorted(item.key[1 : -len(suffix)] for item in items if item.key.endswith(suffix))
+    return sorted(key[1 : -len(suffix)] for key in held if key.endswith(suffix))
 
 
 async def read_local_skill(store: Any, actor: str, name: str) -> str | None:
@@ -321,16 +348,12 @@ async def delete_local_skill(store: Any, actor: str, name: str) -> bool:
     return True
 
 
-#: The most one of a chemist's own skills may be, in characters.
-#:
-#: **A bound rather than a guess, and the basis is the shared tree.** The largest skill this
-#: repository ships is `protocol-generation` at 12,896 characters, so 16,000 leaves a person room to
-#: write judgment as substantial as anything reviewed into `skills/` and refuses the shape that is
-#: not a skill at all — a transcript, a pasted dataset, a document somebody meant to attach.
-#:
-#: It is load-bearing for the same reason `AgentProfile.instructions`' bound is: a skill body is
-#: read into a model's context on demand, so an unbounded one is unbounded spend on a turn that
-#: loads it, and this tier is the one place a *person* rather than this repository decides the
-#: text. `agent_memory_max_files` bounds how many rows a namespace may hold; this bounds how large
-#: one of them is, which that cap cannot see.
-MAX_LOCAL_SKILL_CHARS = 16_000
+# **The tier's two bounds are `agent_local_skill_max_chars` and `agent_local_skills_max`**, and
+# they live in `core/config/agent.py` with their arithmetic rather than here, because this
+# repository's rule is that a threshold is a setting. The route enforces both, and the second one
+# is the one that was missing: `agent_memory_max_files` is enforced by
+# `scratchpad.BoundedStoreBackend`, which mounts `/memories/` and not this root, so nothing on
+# either half of this tier ever counted a row. The row cap is a bound on **prefix** spend rather
+# than on storage — a local skill's name and description sit in the system message of every model
+# call its owner makes — and it is refused rather than evicted, because judgment a person authored
+# may not vanish because they wrote one more.

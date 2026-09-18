@@ -97,6 +97,7 @@ from chemclaw.agent.langgraph_agent import (
 )
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import get_profile, registered_profile_names
+from chemclaw.agent.skill_manifest import MAX_SKILL_DESCRIPTION_CHARS
 from chemclaw.connectors.registry import enabled, server_tools_module
 from chemclaw.connectors.transport import _allowed
 from chemclaw.core.config import Settings
@@ -1861,4 +1862,101 @@ def test_a_helpers_prefix_is_bounded_by_the_one_this_file_already_ratchets() -> 
         "so the ceilings in this file no longer bound it — and a fan-out pays that prefix once per "
         "helper. Either the helper's prompt has outgrown the harness block it is built without, or "
         "something now binds a tool to a helper that it does not bind to its caller"
+    )
+
+
+#: What a chemist's own skills may add to the prefix of every one of their model calls, in tokens.
+#:
+#: **A bound on a tier this ratchet's ceilings deliberately do not hold, and the distinction is the
+#: reason it is a separate number.** `CEILINGS` bounds what *this repository* ships — the same
+#: prefix for every deployment and every person. The personal-skills tier is neither: it is per
+#: actor, it is empty on a fresh deployment, and the bytes in it were written by a chemist. Folding
+#: its worst case into `PREFIX_BOUND` would take 5,600 tokens of thread allowance from every
+#: deployment on earth for a tier almost all of them will never fill.
+#:
+#: Nothing is lost by keeping it out, because the *runtime* charges the real thing:
+#: `agent/context_budget.prefix_tokens` reads the prefix of the call in flight, so a chemist who
+#: fills their tier is compacted against what they actually send. What this number holds is the
+#: other question — how large can that get — and it is derived rather than picked:
+#: `agent_local_skills_max` rows, each contributing the name and the description that deepagents
+#: truncates at its spec limit of 1,024 characters. Measured 2026-09-18 on a compiled graph with
+#: the connector surface bound: an empty mounted tier costs **6** tokens, and a maximal one
+#: **5,571**.
+#:
+#: Raising it means one of the two bounds moved, which is a decision about how much of a person's
+#: own context their own judgment may take.
+LOCAL_SKILLS_ALLOWANCE = 5_700
+
+
+def test_a_chemists_own_skills_cost_no_more_prefix_than_their_cap_allows() -> None:
+    """The one part of the prefix a *person* writes, bounded and measured rather than assumed.
+
+    **This ratchet was blind to it**, for the reason `_bound_tools` and `_observed_prefix` were
+    blind to their own halves: `_observed_prefix` passes no `store=`, so the graph it measures
+    mounts no personal tier and the figure it charges is a deployment with the feature off. That is
+    the same shape as
+    `D-2026-09-05-a-ratchet-that-binds-no-connectors-measures-a-smaller-system`, one tier over.
+
+    It is asserted here rather than folded into `CEILINGS` because the two bound different things —
+    see `LOCAL_SKILLS_ALLOWANCE`. What would make this fail is a raised row cap, a longer permitted
+    description, or a listing format that grew: each of those is a real change in what a chemist's
+    own judgment costs them on every turn, and each would otherwise be invisible.
+    """
+    import asyncio
+
+    from langgraph.store.memory import InMemoryStore
+
+    from chemclaw.agent.local_skills import save_local_skill
+    from chemclaw.core.config import settings
+    from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+
+    profile = get_profile("default")
+    connectors = _connector_tools(profile)
+
+    def prefix(store: Any) -> int:
+        tokens = set_current_identity("a-chemist", frozenset())
+        try:
+            graph = build_langgraph_agent(
+                model=_CapturingModel(messages=iter([AIMessage(content="")])),
+                profile=profile,
+                audit_sink=NullAuditSink(),
+                connectors=connectors,
+                store=store,
+            )
+            _RECEIVED.clear()
+            graph.invoke({"messages": [HumanMessage("what does this turn cost?")]})
+            system = [message for message in _RECEIVED if isinstance(message, SystemMessage)][0]
+            return _count(
+                system.content if isinstance(system.content, str) else str(system.content)
+            )
+        finally:
+            reset_current_identity(tokens)
+
+    # Maximal by the tier's own two bounds: every row the cap permits, each with the longest
+    # description deepagents will publish rather than truncate.
+    filled = InMemoryStore()
+    description = "x" * MAX_SKILL_DESCRIPTION_CHARS
+    for index in range(settings.agent_local_skills_max):
+        name = f"local-skill-{index:03d}"
+        asyncio.run(
+            save_local_skill(
+                filled,
+                "a-chemist",
+                name,
+                f"---\nname: {name}\ndescription: {description}\n---\n\nbody\n",
+            )
+        )
+
+    empty, full = prefix(InMemoryStore()), prefix(filled)
+    cost = full - empty
+
+    assert cost <= LOCAL_SKILLS_ALLOWANCE, (
+        f"a full personal skills tier adds {cost} tokens to every one of that chemist's model "
+        f"calls, over the {LOCAL_SKILLS_ALLOWANCE} this file allows it. Either "
+        "`agent_local_skills_max` rose, the permitted description grew, or upstream's listing "
+        "format did — each is a real change in what a person's own judgment costs them per turn"
+    )
+    assert cost > 0, (
+        "a full personal tier costs nothing, which means it is not reaching the system message at "
+        "all — the feature is mounted and invisible to the model, so this asserts nothing"
     )

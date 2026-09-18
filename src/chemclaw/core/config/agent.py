@@ -467,6 +467,27 @@ class AgentSettings(BaseSettings):
     # 200 at 5 kB is ~1 MB per person, which a namespace this is meant to hold does not approach:
     # the working surface of one chemist's research turns, not an archive.
     agent_memory_max_files: int = Field(default=200, ge=1)
+    # **What bounds the chemist's own skills tier, which `agent_memory_max_files` does not.** That
+    # cap lives in `scratchpad.BoundedStoreBackend`, which mounts `/memories/`; the local-skills
+    # tier mounts a plain read-only backend and is written from an HTTP route, so nothing on either
+    # half counted a row until these two existed.
+    #
+    # Two numbers because they bound different things, the `preferences_*` pair's reason exactly.
+    # The char cap is one skill's *body*, which is read into context on demand. The row cap is
+    # **prefix** spend: every local skill's name and description sit in the system message of every
+    # model call this chemist makes, unconditionally, so the row count is a multiplier on the one
+    # part of the request nothing can compact. 20 x deepagents' 1,024-character description limit is
+    # ~5,300 tokens of worst case; `agent/local_skills.py` carries the arithmetic.
+    #
+    # Refused at the route rather than evicted, unlike the memory tier: a memory a turn wrote may
+    # be dropped silently, and judgment a person authored may not.
+    #
+    # 16,000 is the shared tree's own largest skill (`protocol-generation`, 12,896 characters)
+    # plus room, so a person may write judgment as substantial as anything reviewed in. 20 is
+    # not the memory tier's 200 because a memory is a note a turn took and there are as many as
+    # the work produced, while a skill is judgment somebody sat down and wrote.
+    agent_local_skill_max_chars: int = Field(default=16_000, ge=1)
+    agent_local_skills_max: int = Field(default=20, ge=1)
     # What `recall_preferences` may hand back, and the second half of the same finding.
     # `user_preferences` is the other agent-writable table with no bound: `remember_preference`
     # takes a **model-chosen** key, so the row count is not one-per-known-name, and the `SELECT …

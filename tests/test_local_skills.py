@@ -15,7 +15,6 @@ from chemclaw.agent.langgraph_agent import skills_backend
 from chemclaw.agent.local_skills import (
     LOCAL_SKILLS_LABEL,
     LOCAL_SKILLS_ROOT,
-    MAX_LOCAL_SKILL_CHARS,
     ReadOnlyStoreBackend,
     delete_local_skill,
     list_local_skills,
@@ -153,8 +152,24 @@ def test_every_method_this_tier_exposes_is_either_a_read_or_a_refusal(store: InM
         "upstream added a method and it needs triaging before this file means anything"
     )
 
-    # Every write verb refuses, async twins included — they dispatch through the sync overrides,
-    # which is the behaviour that makes four overrides cover eight names.
+    # **Every read probe is invoked**, which this test shipped without doing — it built ten lambdas,
+    # spent them as a set of *names* and called none of them. A read half that is only a key list
+    # classifies the surface and proves nothing about it, so a verb that upstream turned into a
+    # write would have sat in `reads` and passed: the `unclassified` assertion is satisfied by the
+    # name being *somewhere*, and only calling it says which half is true.
+    for name, call in reads.items():
+        try:
+            outcome = call()
+            if asyncio.iscoroutine(outcome):
+                outcome = asyncio.run(outcome)
+        except SkillsReadOnlyRefusal:  # pragma: no cover - the failure this loop exists to catch
+            pytest.fail(f"{name} is classified as a read and refuses like a write")
+        assert outcome is not None, f"{name} answered nothing"
+        assert name in surface, f"{name} is not on the surface any more"
+
+    # Every write verb refuses, async twins included. **Eight overrides rather than four**, because
+    # `StoreBackend`'s async verbs are native against the store rather than `to_thread` wrappers —
+    # the shared tree's inheritance argument is about `FilesystemBackend` and does not travel.
     for name, call in writes.items():
         with pytest.raises(SkillsReadOnlyRefusal):
             result = call()
@@ -249,10 +264,38 @@ def test_the_size_bound_is_larger_than_anything_this_repository_ships() -> None:
     """
     from pathlib import Path
 
+    from chemclaw.core.config import settings
+
     shipped = [path.stat().st_size for path in Path("skills").glob("*/SKILL.md")]
 
     assert shipped, "no shipped skills were found, so this asserts nothing"
-    assert MAX_LOCAL_SKILL_CHARS > max(shipped)
+    assert settings.agent_local_skill_max_chars > max(shipped)
+
+
+def test_the_listing_answers_for_a_tier_larger_than_one_page(store: InMemoryStore) -> None:
+    """The licence condition, driven past the page size the un-paged spelling inherited.
+
+    `store.asearch(namespace)` with no `limit` is `BaseStore`'s default of **10**, not "everything".
+    Measured before this was paged: twelve saved skills listed ten, while the mount — which walks
+    the namespace itself — carried twelve. So a chemist was shown a confidently short answer to
+    "what is acting on my turns", and the two beyond the page could not be deleted through the only
+    route that deletes.
+
+    Driven well past a page so the loop runs more than once rather than merely not truncating at
+    ten, and asserted against the *mount* as well as the listing, because agreement between the two
+    is the property the licence actually needs.
+    """
+    names = [f"skill-{index:03d}" for index in range(250)]
+    for name in names:
+        asyncio.run(save_local_skill(store, "alice-oid", name, _BODY.replace("my-workup", name)))
+
+    listed = asyncio.run(list_local_skills(store, "alice-oid"))
+
+    assert listed == sorted(names)
+    mounted = _mounted(store, "alice-oid")
+    for name in (names[0], names[11], names[-1]):
+        assert mounted.read(f"{LOCAL_SKILLS_ROOT}{name}/SKILL.md").error is None
+        assert asyncio.run(delete_local_skill(store, "alice-oid", name)) is True
 
 
 def test_the_label_carries_no_identity() -> None:
@@ -291,3 +334,81 @@ def test_a_write_outside_the_tool_chain_is_not_a_write_without_a_record(
     assert "my-workup" in caplog.text
     # The body never reaches the log — only that a skill by that name changed, and how large it was.
     assert "Quench cold." not in caplog.text
+
+
+def test_a_reviewed_skill_wins_a_name_a_personal_one_also_claims(store: InMemoryStore) -> None:
+    """The collision order is a decision, and this is where it is decided rather than inherited.
+
+    Upstream resolves a name collision **last-source-wins**, so whichever tree is last in `sources`
+    silently displaces the other. `POST /skills/mine` refuses the collision it can see — a personal
+    skill taking a shipped name — but it cannot refuse the one that arrives the other way round, a
+    skill added to `skills/` months after somebody saved theirs. Of the two silences, reviewed
+    judgment winning is the safer, and the person can still see their own document through the route
+    that lists it.
+
+    Asserted on the *order of the sources the middleware is given*, because that is the whole
+    mechanism: an `append` puts `/mine` last and reverses the outcome with no other line changing.
+    """
+    from chemclaw.agent.langgraph_agent import (
+        _labelled,
+        _skill_dirs,
+        _skills_middleware,
+        shipped_skill_names,
+    )
+
+    middleware = _skills_middleware(_mounted(store, "alice-oid"), _labelled(_skill_dirs()))
+    # Upstream normalises a `(path, label)` source to a bare path when the label it would derive
+    # matches, so the shape is read rather than assumed.
+    paths = [source if isinstance(source, str) else source[0] for source in middleware.sources]
+
+    assert paths[0] == f"/{LOCAL_SKILLS_LABEL}", (
+        "the chemist's own tier must come first so a reviewed skill wins a name collision; "
+        f"the sources are {paths}"
+    )
+    assert len(paths) > 1, "only one source, so this asserts nothing about precedence"
+
+    # And the outcome itself, because the order is only the mechanism. A personal skill claiming a
+    # shipped name is saved past the route that would have refused it — which is the case with no
+    # route to refuse at, a name that entered `skills/` after somebody saved theirs.
+    contested = sorted(shipped_skill_names())[0]
+    asyncio.run(
+        save_local_skill(store, "alice-oid", contested, _BODY.replace("my-workup", contested))
+    )
+    loaded = _skills_middleware(
+        _mounted(store, "alice-oid"), _labelled(_skill_dirs())
+    ).before_agent({}, None, None)
+    surviving = {skill["name"]: skill["path"] for skill in loaded["skills_metadata"]}
+
+    assert contested in surviving, f"{contested} vanished from the listing entirely"
+    assert not surviving[contested].startswith(LOCAL_SKILLS_ROOT), (
+        f"a personal skill displaced the reviewed {contested}: the model is served "
+        f"{surviving[contested]}"
+    )
+
+
+def test_the_outer_permission_rules_deny_a_write_under_this_root_too() -> None:
+    """Refused twice, deliberately, the way `/skills/` is.
+
+    `ReadOnlyStoreBackend` refuses the write itself on every call; these rules are the outer half,
+    evaluated before any filesystem operation reaches a backend. Two layers because a security
+    property that arrives as somebody else's default can leave the same way — and this root is
+    covered by *absence*, which is the shape most likely to change without anybody noticing: the
+    allows name `/scratch/**` and `/memories/**` and the blanket deny closes everything else, so a
+    future allow added for one root could widen this one by the order it was inserted in.
+    """
+    from chemclaw.agent.scratchpad import MEMORY_ROOT, SCRATCH_ROOT, filesystem_permissions
+
+    rules = filesystem_permissions()
+    allowed = [path for rule in rules if rule.mode == "allow" for path in rule.paths]
+
+    assert not any(path.startswith(LOCAL_SKILLS_ROOT) for path in allowed), (
+        f"a write is allowed under {LOCAL_SKILLS_ROOT}, so the outer half of this tier's "
+        f"read-only property is gone; the allows are {allowed}"
+    )
+    assert sorted(allowed) == sorted([f"{SCRATCH_ROOT}**", f"{MEMORY_ROOT}**"]), (
+        "the allow-list changed, so re-derive whether this root is still covered by the deny that "
+        "closes the surface behind it"
+    )
+    assert rules[-1].mode == "deny" and rules[-1].paths == ["/**"], (
+        "the blanket deny is no longer last, and these rules are first-match-wins"
+    )

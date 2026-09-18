@@ -1916,3 +1916,50 @@ def test_the_task_tool_still_closes_over_its_roster_as_subagent_graphs() -> None
         "the roster is no longer keyed by subagent name, so `_helper_of` cannot name the one "
         "helper `agent/subagents.py` compiles"
     )
+
+
+def test_an_oversized_skill_description_is_still_truncated_rather_than_refused() -> None:
+    """Why `SkillManifest` declares length bounds upstream already has constants for.
+
+    `agent/skill_manifest.py` imports `MAX_SKILL_NAME_LENGTH` and `MAX_SKILL_DESCRIPTION_LENGTH` and
+    turns them into pydantic bounds, which looks like a duplicate control and is not: upstream's
+    loader **truncates** past either limit and carries on, logging a warning. So without this
+    repository's bounds a chemist posting a 2,000-character description gets a 200, and a model is
+    served half of it with nothing on either surface saying so — and a skill can be stored under one
+    name and listed under another.
+
+    This is an assumption test in the direction that matters. If a bump made upstream *refuse*
+    instead of truncating, the same skill would vanish from the listing with no error anywhere, and
+    this repository's bounds would be the only thing between a person and a silent no-op. Either
+    behaviour is workable; not knowing which one is live is not.
+    """
+    from deepagents.middleware.skills import (
+        MAX_SKILL_DESCRIPTION_LENGTH,
+        MAX_SKILL_NAME_LENGTH,
+        _parse_skill_metadata,
+    )
+
+    from chemclaw.agent.skill_manifest import (
+        MAX_SKILL_DESCRIPTION_CHARS,
+        MAX_SKILL_NAME_CHARS,
+    )
+
+    assert (MAX_SKILL_NAME_CHARS, MAX_SKILL_DESCRIPTION_CHARS) == (
+        MAX_SKILL_NAME_LENGTH,
+        MAX_SKILL_DESCRIPTION_LENGTH,
+    ), "this repository's bounds are imported from upstream's, so they cannot disagree"
+
+    over = "d" * (MAX_SKILL_DESCRIPTION_LENGTH + 500)
+    parsed = _parse_skill_metadata(
+        f"---\nname: over-long\ndescription: {over}\n---\n\nbody\n", "/x/SKILL.md", "over-long"
+    )
+
+    assert parsed is not None, (
+        "upstream now refuses an over-long description rather than truncating it. A skill over the "
+        "limit would vanish from the listing with no error, so `SkillManifest`'s bounds are the "
+        "only refusal a person ever sees — keep them, and say so here"
+    )
+    assert len(parsed["description"]) == MAX_SKILL_DESCRIPTION_LENGTH, (
+        "upstream no longer truncates to the spec limit, so the number `SkillManifest` bounds at "
+        "is no longer the number the model is served"
+    )

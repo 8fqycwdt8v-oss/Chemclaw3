@@ -1116,9 +1116,18 @@ def _skills_middleware(backend: CompositeBackend, labelled: list[tuple[str, str]
     # is the only way the listing and the routes cannot disagree — and a source advertising a path
     # that resolves to the composite's default `StateBackend` would publish an empty tier to the
     # model on every turn a deployment has no store.
-    sources = [(f"/{label}", label) for label, _ in labelled]
+    #
+    # **The chemist's own tier goes first, and the order is a decision rather than an append.**
+    # Upstream resolves a name collision last-source-wins, so whichever tree is last silently
+    # displaces the other. Reviewed judgment wins here: a personal skill taking a shipped skill's
+    # name is the tier escaping the bound `api/routes/skills.py` refuses at, and that route cannot
+    # refuse the collision that arrives the other way round — a skill added to `skills/` months
+    # after somebody saved theirs. Of the two silences this is the safer one, and the person can
+    # still see their own document through the route that lists it.
+    sources: list[tuple[str, str]] = []
     if LOCAL_SKILLS_ROOT in backend.routes:
         sources.append((f"/{LOCAL_SKILLS_LABEL}", LOCAL_SKILLS_LABEL))
+    sources += [(f"/{label}", label) for label, _ in labelled]
     return ReloadingSkillsMiddleware(
         backend=backend,
         sources=sources,
@@ -1244,6 +1253,22 @@ def _skill_dirs() -> list[str]:
     that resolve to nothing.
     """
     return [*settings.skills_dirs, *skills_dirs()]
+
+
+def shipped_skill_names() -> frozenset[str]:
+    """Every skill name this deployment's *reviewed* trees declare.
+
+    Public because `api/routes/skills.py` needs it to refuse a personal skill that would take a
+    shipped skill's name, and it has to be asked of the same walk the graph does — a route that
+    re-derived the tree list would answer about a different set than the one the model is served.
+
+    Cheap to call per request: `declared_tools` is `@cache`d on the directory tuple, so the cost is
+    `_skill_dirs`' `Path.is_dir()` fan-out over the enabled bundles and nothing else.
+
+    Returns:
+        The declared names, including every enabled connector bundle's own `skills/`.
+    """
+    return frozenset(declared_tools([directory for _label, directory in _labelled(_skill_dirs())]))
 
 
 def _labelled(dirs: list[str]) -> list[tuple[str, str]]:
