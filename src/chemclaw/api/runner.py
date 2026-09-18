@@ -358,7 +358,7 @@ async def run_turn(
                 # The two awaits are hoisted rather than moved into the thread, because acquiring a
                 # pooled connection is the loop's to do.
                 checkpointer = await _turn_checkpointer()
-                store = await _turn_store()
+                store = await turn_store()
                 graph = await asyncio.to_thread(
                     graph_factory,
                     profile=profile,
@@ -2232,7 +2232,7 @@ async def _turn_checkpointer() -> Any:
     return await checkpointer()
 
 
-async def _turn_store() -> Any:
+async def turn_store() -> Any:
     """This turn's durable memory store, or `None` where the deployment keeps none.
 
     Two gates, both necessary and neither redundant. `agent_memory_enabled` is the deployment's
@@ -2245,6 +2245,12 @@ async def _turn_store() -> Any:
     The *third* gate is not here and that is deliberate: whether the turn has an actor is decided by
     `scratchpad_backend`, because that is where the namespace is computed and an actorless memory is
     one nobody could erase.
+
+    **Public since `api/routes/skills.py` became the second caller**, and public rather than
+    copied: the chemist's own skills ride this same store
+    (`D-2026-09-18-a-skill-a-chemist-keeps-is-behaviour-they-approved`), so the two surfaces answer
+    "is this available" from one function. A second spelling of these two conditions is how one of
+    them gets a third condition later and the other does not.
 
     Returns:
         A ready `AsyncPostgresStore`, or `None` for a turn with a scratchpad but no memory.

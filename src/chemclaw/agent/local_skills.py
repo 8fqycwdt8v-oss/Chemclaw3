@@ -132,11 +132,23 @@ class ReadOnlyStoreBackend(StoreBackend):
     as an access-control decision rather than a fault, and what lands it in the audit trail as a
     refusal (`agent/skill_backend.py` carries the argument).
 
+    **Eight overrides, not four, and the reason is that the shared tree's argument does not
+    transfer.** `agent/skill_backend.py` states — correctly, for its own base class — that the async
+    twins need no override because `FilesystemBackend` implements them as
+    `asyncio.to_thread(self.write, …)` and so dispatches through the subclass. `StoreBackend` does
+    not: `awrite`, `aedit` and `adelete` are *natively* async against the store, so four sync
+    overrides left the async path open. Measured before this was fixed — `awrite`, `aedit` and
+    `adelete` all succeeded against a read-only tier, and that is the path an async agent actually
+    takes. `aupload_files` happened to refuse, which is worse than if none had: three holes beside
+    one working refusal is what a spot check passes.
+
     **Derived rather than listed, because the write half grows.** deepagents 0.7 added `delete` to
     the protocol and the shared tree inherited a working one until a test caught it. Here the same
-    risk is answered the same way: `tests/test_local_skills.py` enumerates the protocol's write
-    verbs and asserts each is refused, so a bump that adds a seventh turns red rather than quietly
-    handing a turn a way to rewrite its owner's judgment.
+    risk is answered the same way, and it is what caught the three above:
+    `tests/test_local_skills.py` enumerates every public method on the protocol *and* on
+    `StoreBackend`, and requires each to be probed as a read or refused as a write — so a bump that
+    adds a ninth turns red rather than quietly handing a turn a way to rewrite its owner's
+    judgment.
     """
 
     def write(self, *args: Any, **kwargs: Any) -> Any:
@@ -158,6 +170,32 @@ class ReadOnlyStoreBackend(StoreBackend):
 
     def upload_files(self, *args: Any, **kwargs: Any) -> Any:
         """Refuse, for the reason `write` gives."""
+        raise SkillsReadOnlyRefusal(_LOCAL_READ_ONLY)
+
+    async def awrite(self, *args: Any, **kwargs: Any) -> Any:
+        """Refuse. Overridden because `StoreBackend.awrite` is native rather than a thread wrapper.
+
+        This is the one that mattered: an async agent takes the async path, so before this override
+        existed the refusal was true of a path nothing used and false of the path everything does.
+        """
+        raise SkillsReadOnlyRefusal(_LOCAL_READ_ONLY)
+
+    async def aedit(self, *args: Any, **kwargs: Any) -> Any:
+        """Refuse, for the reason `awrite` gives."""
+        raise SkillsReadOnlyRefusal(_LOCAL_READ_ONLY)
+
+    async def adelete(self, *args: Any, **kwargs: Any) -> Any:
+        """Refuse, for the reason `awrite` gives."""
+        raise SkillsReadOnlyRefusal(_LOCAL_READ_ONLY)
+
+    async def aupload_files(self, *args: Any, **kwargs: Any) -> Any:
+        """Refuse.
+
+        Stated rather than inherited even though the base class's own implementation already
+        refused by falling through to `upload_files`: relying on that is relying on one of the four
+        async verbs being a wrapper while the other three are not, which is the accident this class
+        was just caught by.
+        """
         raise SkillsReadOnlyRefusal(_LOCAL_READ_ONLY)
 
 
@@ -239,3 +277,18 @@ async def delete_local_skill(store: Any, actor: str, name: str) -> bool:
         return False
     await store.adelete(namespace, _key(name))
     return True
+
+
+#: The most one of a chemist's own skills may be, in characters.
+#:
+#: **A bound rather than a guess, and the basis is the shared tree.** The largest skill this
+#: repository ships is `protocol-generation` at 12,896 characters, so 16,000 leaves a person room to
+#: write judgment as substantial as anything reviewed into `skills/` and refuses the shape that is
+#: not a skill at all — a transcript, a pasted dataset, a document somebody meant to attach.
+#:
+#: It is load-bearing for the same reason `AgentProfile.instructions`' bound is: a skill body is
+#: read into a model's context on demand, so an unbounded one is unbounded spend on a turn that
+#: loads it, and this tier is the one place a *person* rather than this repository decides the
+#: text. `agent_memory_max_files` bounds how many rows a namespace may hold; this bounds how large
+#: one of them is, which that cap cannot see.
+MAX_LOCAL_SKILL_CHARS = 16_000

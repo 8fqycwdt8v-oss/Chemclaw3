@@ -38,13 +38,14 @@ dry run.
 import asyncio
 import logging
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 
 import psycopg
 
 from chemclaw.agent.checkpointer import CHECKPOINT_TABLES, checkpoint_thread_delete_statements
+from chemclaw.agent.local_skills import local_skills_prefix
 from chemclaw.agent.scratchpad import memory_prefix
 from chemclaw.agent.session_store import (
     SessionTurnClaims,
@@ -155,7 +156,10 @@ _SESSION_SCOPED = "SELECT session_id FROM session_owners WHERE owner = ANY(%(act
 _CHECKPOINT_ERASE: tuple[tuple[str, str], ...] = checkpoint_thread_delete_statements(
     f"thread_id IN ({_SESSION_SCOPED})"
 )
-# The agent's durable memories, which are **not** session-scoped and so cannot ride the pass above.
+
+
+# The agent's durable memories **and the chemist's own skills**, neither session-scoped and so
+# neither able to ride the pass above.
 # A memory outlives the session it was written in — that is the whole point of it — so the only key
 # that finds a departing person's is the one `agent/scratchpad.py` deliberately put in the store's
 # namespace. `store.prefix` holds the dotted namespace, and `memory_prefix` builds the same string
@@ -174,6 +178,34 @@ _CHECKPOINT_ERASE: tuple[tuple[str, str], ...] = checkpoint_thread_delete_statem
 # Skipped when absent, for the reason `_CHECKPOINT_ERASE` is: `AsyncPostgresStore.setup()` creates
 # these, not a migration, so a deployment that never enabled memories does not have them and
 # erasure must not be the one operation it cannot perform.
+def store_prefixes(actors: Sequence[str]) -> list[str]:
+    """Every `store.prefix` a departing person's rows live under, across both tiers.
+
+    **Both tiers, because they are erased by the same predicate and written by different modules.**
+    The agent's durable memories and the chemist's own skills share the `store` table under
+    different first namespace components, so a sweep that built only the memory prefixes would
+    leave behind the one kind of row this system lets a person author about *themselves* — judgment
+    that was still shaping their turns.
+
+    Built from the two functions the writers write under rather than by re-deriving the dotted join
+    here, which is the defect class where two modules agree about a key until one of them is
+    edited. One digest per *spelling* of the id, for the reason `actors` is a list of them: a row
+    written on the `unverified:` path is under a different namespace from one written on the
+    authenticated path, and both are the same chemist's.
+
+    A function rather than an expression inline because it is the thing a test can hold —
+    `tests/test_local_skills.py` asserts both tiers appear, which an inline list comprehension
+    could only be checked by re-reading the source.
+
+    Args:
+        actors: Every spelling of the departing person's id.
+
+    Returns:
+        The prefixes `_MEMORY_ERASE`'s statements delete by.
+    """
+    return [memory_prefix(form) for form in actors] + [local_skills_prefix(form) for form in actors]
+
+
 _MEMORY_ERASE: tuple[tuple[str, str], ...] = (
     ("store_vectors", "DELETE FROM store_vectors WHERE prefix = ANY(%(memory_prefixes)s)"),
     ("store", "DELETE FROM store WHERE prefix = ANY(%(memory_prefixes)s)"),
@@ -854,7 +886,7 @@ async def _erase_within_claims(actors: list[str], report: ErasureReport, *, appl
         # One digest per spelling of the id, for the reason `actors` is a list of spellings: a
         # memory written on the `unverified:` path is under a different namespace from one written
         # on the authenticated path, and both are the same chemist's.
-        memory_prefixes = [memory_prefix(form) for form in actors]
+        memory_prefixes = store_prefixes(actors)
         # The mailbox ids, one per spelling, minted by the function the writer and the reader both
         # use rather than re-spelled here — a second spelling of this string is a mailbox somebody
         # writes to and nobody erases, which is the defect this line closes.
