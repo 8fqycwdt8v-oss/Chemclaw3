@@ -798,7 +798,11 @@ def ungrounded_parameter_shapes(answer: str, tool_outputs: Sequence[str]) -> lis
     table passes untouched, and so does a fabricated flow rate in a turn where some tool returned
     any flow rate at all. It is a filter that raises the cost of the specific failure the live run
     measured — a branded chromatographic method assembled with no analytical capability behind it —
-    and it is why the caller keeps it behind a config knob and off by default.
+    and it is why the caller keeps it behind a config knob. That knob ships **on**, which it did
+    not when this paragraph was written: what changed is not the heuristic's accuracy but what a
+    mark now leads to, since `answer_review_max_rounds` ships non-zero and an over-fire is a
+    revision round rather than a label a chemist has to learn to discount
+    (`core/config/llm.py` carries both halves of that trade).
 
     Returns:
         One `"<shape class>: <the matched text>"` per class that fired, in table order, so the

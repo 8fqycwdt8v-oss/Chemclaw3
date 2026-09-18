@@ -115,6 +115,7 @@ from chemclaw.core.tracing import start_span
 from chemclaw.core.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.core.turn_signals import JobSignal
 from chemclaw.core.turn_text import reset_current_user_texts, set_current_user_texts
+from chemclaw.durable.awaiting import AwaitRequest, open_wait
 from chemclaw.kg.note import cited_ids
 
 logger = logging.getLogger(__name__)
@@ -569,6 +570,16 @@ async def run_turn(
                     )
                 if rounds:
                     _record_review_rounds(session, answer, rounds)
+                    # **The one place a person is asked, and it is inside `if rounds:`.** That
+                    # guard is what keeps `answer_review_max_rounds = 0` a complete no-op — not a
+                    # second reading of the setting, which could disagree with the loop's own —
+                    # and it is the only call site, so one turn cannot escalate twice however the
+                    # loop left the building (exhausted, broken out of by an empty round, or by a
+                    # round that raised). All three spent their allowance and all three end on an
+                    # answer the flag is still on; `_escalate_exhausted_review` asks whether it is.
+                    await _escalate_exhausted_review(
+                        session, answer, actor, review.unsupported, ledger.correlation_id
+                    )
             # **Asked again, because a cap can fire inside a revision.** Both guards were evaluated
             # once, above the loop, so a turn whose second model call tripped the loop or spend cap
             # emitted no `ErrorEvent` at all and booked `outcome='answered', completed=True`. The
@@ -1356,6 +1367,137 @@ def _record_review_rounds(session: TurnSession, answer: AnswerEvent, rounds: int
             "the answer for session %s was grounded after %d revision(s)",
             session.session_id,
             rounds,
+        )
+
+
+async def _escalate_exhausted_review(
+    session: TurnSession,
+    answer: AnswerEvent,
+    actor: str | None,
+    claims: Sequence[str],
+    correlation_id: str,
+) -> None:
+    """Ask a person to look at an answer the revision loop could not ground.
+
+    **The half of the bound that was missing.** `_record_review_rounds` counts an exhausted loop
+    and the answer ships still marked, which is where Paperclip's own `maxReviewRounds` does the
+    thing this did not: it escalates the stage to a person, and only that person can advance it.
+    Bounded rounds that end in a counter increment are a verdict nobody acted on twice over —
+    the turn ends, the chemist holds a flagged answer, and nothing in the system is waiting on
+    anybody to read it. This opens that wait, on the machinery that already exists for exactly
+    this shape of question (`durable/awaiting.py`: a question, a deadline, an escalation, and an
+    answer that may never come).
+
+    **It runs as the turn's own authenticated principal, or it does not run.** `actor` is the
+    front door's `oid`, the same value `require_actor` would read off the ambient identity this
+    turn stamped. Where there is none — the CLI, a test, an unauthenticated dev posture — the
+    escalation is skipped and says so: synthesizing a requester would be this system granting
+    itself a chemist's identity to file work that chemist did not ask for, which is the shape
+    `D-2026-09-15-the-requester-hears-nothing-until-it-is-too-late` declined a whole scheduled
+    agent over, and which `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`
+    is the consequence of. A `requested_by` nobody can produce is worse than an absent wait,
+    because the inbox would name a person who never asked.
+
+    **The dedup subject is the conversation, deliberately.** `request_id_for` keys on
+    `(kind, subject, asked_of)`, so what goes in `subject` decides what joins what: the answer's
+    own text would open a fresh wait on every exhausted turn — a notification storm, and with the
+    shape gate on a busy chemist could file a dozen in an afternoon — while a constant subject
+    would collapse the whole deployment into one wait whose rationale belongs to whichever turn
+    exhausted first. Naming the session makes the unit of review a *conversation*, which is what a
+    person actually opens and reads: two turns of one thread that exhaust on related answers join
+    one wait, and the reviewer sees one open question per conversation rather than one per turn.
+    The consequence to know is that the joined wait keeps the **first** turn's rationale — so the
+    claims named below are the ones that first went unsupported, and the reviewer is pointed at
+    the thread rather than at a single answer. That is the right trade for a review (the thread is
+    the evidence) and would be the wrong one for an approval, where each act needs its own
+    decision — which is why `durable/connector_job.py` keys its approval on the job id instead.
+
+    **Unrouted (`asked_of=""`), which means "whoever is entitled".** `connector_job.py` fails
+    closed on an unrouted *approval* because the requester could then approve their own
+    irreversible change; a review is not an authorization, and the chemist who received the
+    flagged answer is among the people best placed to read it. Nothing is released by answering.
+
+    **Best-effort, on the `deliver_best_effort`/`notify_session_best_effort` precedent.** The
+    answer has already been built and is about to be yielded; a chemist must not lose it because
+    the broker is down, so every failure is counted through `degraded` and swallowed. The turn is
+    no worse off than it was before this function existed, which is exactly the property
+    `_record_review_rounds` claims for the exhausted answer itself.
+
+    Args:
+        session: The turn's session — its id is both the dedup key and where the wait's own
+            push-back notice lands, so the chemist learns a review was raised without this
+            function emitting an event of its own.
+        answer: The answer as it will ship. Only `review_required` is read: a loop that broke out
+            after *fixing* the answer has nothing to escalate.
+        actor: The turn's authenticated principal, or `None` off the authenticated path.
+        claims: What the last verdict found unsupported, named in the rationale so the reviewer
+            starts where the checks stopped.
+        correlation_id: The turn's id, in the rationale because it is the join key to
+            `turn_costs`, `audit_events` and every log line the turn wrote.
+    """
+    if not answer.review_required or not settings.answer_review_escalation_enabled:
+        return
+    if not actor:
+        logger.info(
+            "the answer for session %s stays marked for review and no person was asked: the turn "
+            "has no authenticated actor to raise the request as",
+            session.session_id,
+        )
+        return
+    # Built here rather than through `request_external_input`, whose two extra acts are both wrong
+    # for this caller: `authorize_trigger` decides against the *model's* standing for a tool the
+    # model did not call, and the premise pre-check refuses to open a wait whose citations have
+    # since moved — which for a review is the strongest reason to open one. What the model-facing
+    # path does that this copies is the whole construction below, including `requested_by` coming
+    # from the authenticated identity and nothing else.
+    request = AwaitRequest(
+        kind="review",
+        subject=(
+            "Review a ChemClaw answer that could not be grounded "
+            f"(conversation {session.session_id})"
+        ),
+        rationale=(
+            "The automated checks flagged this answer and the revision rounds did not clear the "
+            f"flag, so a person is being asked to read it. Turn {correlation_id}. What the checks "
+            "could not ground: " + "; ".join(claims)
+        ),
+        requested_by=actor,
+        session_id=session.session_id,
+        correlation_id=correlation_id,
+    )
+    try:
+        # **Bounded, because the answer is already built and waiting behind this call.** `connect()`
+        # caches a client for the process, so a broker that has since died is discovered *here*, on
+        # the path between the last token and the `AnswerEvent` — an unbounded open would hold a
+        # finished answer for as long as the broker takes to not answer. The same budget the turn
+        # already pays once for its durable-reachability probe, for the same reason it exists
+        # there: a check that delays every turn is worse than the outage it reports. A timeout
+        # lands in the degrade below, which is where it belongs.
+        request_id, opened = await asyncio.wait_for(
+            open_wait(request), settings.connector_health_timeout_seconds
+        )
+    except Exception:
+        degraded(
+            logger,
+            "answer_review_escalation",
+            "the answer for session %s stays marked for review and the request to have a person "
+            "read it could not be opened; the answer still ships",
+            session.session_id,
+        )
+        return
+    if opened:
+        logger.warning(
+            "a person has been asked to review the answer for session %s, which stayed flagged "
+            "after every revision round (%s)",
+            session.session_id,
+            request_id,
+        )
+    else:
+        logger.info(
+            "the answer for session %s stays marked for review; the review request already open "
+            "for this conversation covers it (%s)",
+            session.session_id,
+            request_id,
         )
 
 

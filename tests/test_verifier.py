@@ -435,8 +435,10 @@ def test_the_scan_over_fires_on_a_chemists_own_figures_which_is_why_it_defaults_
 
     Every answer below is legitimate: the chemist supplied the number and the turn called no tool,
     so the scan has nothing to match against and marks it for review. This is the documented cost
-    of a shape heuristic, and it is the whole argument for `answer_shape_gate_enabled` defaulting
-    to off. A test that only showed the true positives would let that cost drift unnoticed.
+    of a shape heuristic. It was the whole argument for `answer_shape_gate_enabled` defaulting to
+    off; the default is now on, so this file is where that cost is *paid* rather than avoided —
+    which makes the rate more worth pinning, not less. A test that only showed the true positives
+    would let it drift unnoticed.
     """
     over_fires = {
         "Your 7.26 ppm singlet is residual CHCl3, not product.": ["ppm limit: 7.26 ppm"],
