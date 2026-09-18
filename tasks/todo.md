@@ -329,3 +329,37 @@ the `hybrid` retrieval row it bears on. E3 is queued in `Chemclaw3-mcp`'s own `d
 hole is written down and deliberately not closed: no pytest rule catches a forgotten `await` inside
 an async test — the obvious `filterwarnings` line does not work, because the warning is raised by
 the garbage collector after the test has returned.
+
+---
+
+# 2026-09-18 — Context and workspace management
+
+**Asked:** investigate context and workspace management. **Found and shipped:** two defects, one of
+them the top `BACKLOG.md` row, plus five prose claims the measurement falsified.
+
+- [x] Attribute the 91% of a helper spawn's checkpoint cost that `D-2026-09-12` could not reach.
+      Grouped the rows by `(checkpoint_ns, channel)` — the step neither the ADR nor the row took.
+      ~15.7 MB of 18.9 MB sits under a `tools:<uuid>` namespace **on the caller's own `thread_id`**:
+      a helper compiled with `checkpointer=None` *inherits* its caller's saver.
+- [x] Fix it — `checkpointer=False`, upstream's documented opt-out. A spawn: 18,944 kB → **424 kB**.
+      The caller still gets its capped 200,000-char file and its 57-character thread.
+- [x] Replace the AST test that asserted the opposite of what ran with one that drives a real spawn
+      against a real saver. Mutation-tested: restoring the omitted keyword reproduces the namespace.
+- [x] Fix `_bounded_file`, found beside it: the floor was on the budget and integer division put it
+      back to 0, which is how the setting is switched *off*. Two 500,000-char files against an
+      exhausted budget stored 1,000,000 uncut, unlogged, uncounted. Floor now applies after dividing.
+- [x] ADR `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer`, ledger row, topic row.
+- [x] Correct five falsified claims: the spend cap "ships at 0" in `core/metrics.py` and
+      `api/budget.py` (it ships at 300,000, inverting an operator's reading of a flat series); the
+      10.4x amplification justifying `agent_subagent_files_max_chars`; "nothing a helper writes
+      outlives the turn"; the prune comment's present-tense helper namespace.
+- [x] Delete the closed row; open two that state what is actually left.
+
+**Review.** The failure mode worth carrying is in `lessons.md`: a green test that reads the *source*
+asserted the opposite of what the framework does with an argument nobody passed, and two other
+modules in this tree had already measured the truth and written it down. The tree held both the
+claim and its refutation for weeks.
+
+**Still open, now queued rather than implied:** a chemist's own `/scratch/` writes are unbounded and
+— with `retention_enabled=False` — permanent; and a parallel `task` fan-out still multiplies the
+helper file budget by its width, because `_files_already_held` reads a pre-batch snapshot.
