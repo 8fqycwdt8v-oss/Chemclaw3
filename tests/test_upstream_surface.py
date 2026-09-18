@@ -976,6 +976,47 @@ def test_a_message_still_flattens_its_content_blocks_through_a_text_property() -
     )
 
 
+def test_the_sse_decoder_is_still_private_and_still_flushes_on_an_empty_line() -> None:
+    """`evals/live.decoded_events` drives `httpx_sse`'s parser itself, and this is why it may.
+
+    Three shapes are pinned here, all of them things `httpx_sse` does not publish. **That the
+    parser is private at all** is the first: if `SSEDecoder` ever reaches `httpx_sse.__all__`, the
+    row in `tests/test_third_party_layering.py` has to go and the import moves to the public name.
+    **The two class names** are the second — `chemclaw/evals/live.py` imports both at module scope,
+    so a rename is an ImportError at process start of the probe runner, the storm and the
+    benchmark. **`decode("")` returning the pending event** is the third and is the whole reason
+    the first two are worth paying for: `EventSource.aiter_sse` never hands the decoder that empty
+    line at end-of-stream, so it drops the final event of every stream that was cut off — which is
+    every turn `cli/live_storm` exists to produce. `decoded_events` supplies it. If upstream ever
+    flushes for itself, this assertion still passes and the one in
+    `tests/test_live_probes.py::test_the_final_event_of_a_stream_that_ends_without_a_blank_line_still_arrives`
+    is what says the workaround may be dropped.
+    """
+    import httpx_sse
+    from httpx_sse._decoders import SSEDecoder, SSELineDecoder
+
+    assert "SSEDecoder" not in httpx_sse.__all__, (
+        "httpx_sse now publishes SSEDecoder; chemclaw/evals/live.py should import it from the "
+        "package top level and lose its row in tests/test_third_party_layering.py"
+    )
+
+    lines = SSELineDecoder()
+    assert lines.decode('data: {"a": 1}\n') == ['data: {"a": 1}']
+    assert lines.decode('data: {"b": ') == []
+    assert lines.flush() == ['data: {"b": ']
+
+    events = SSEDecoder()
+    assert events.decode('data: {"a": 1}') is None, (
+        "SSEDecoder no longer buffers a `data:` line; evals/live.decoded_events drives it line "
+        "by line and reads the event off the blank line that follows"
+    )
+    flushed = events.decode("")
+    assert flushed is not None and flushed.data == '{"a": 1}', (
+        "SSEDecoder no longer emits the pending event on an empty line; that is the flush "
+        "evals/live.decoded_events supplies at end-of-stream so a truncated turn keeps its answer"
+    )
+
+
 def test_the_pinned_versions_are_the_ones_these_assertions_were_measured_against() -> None:
     """A floor, not a ceiling — so a bump is loud once and then accepted deliberately.
 
@@ -995,6 +1036,10 @@ def test_the_pinned_versions_are_the_ones_these_assertions_were_measured_against
         # usage keys above, `langchain-core` for `BaseMessage.text` being a property.
         "langchain-openai": (1, 6, 0),
         "langchain-core": (1, 6, 0),
+        # Not a layer-1 dependency at all — the live harnesses' SSE parser, whose *private*
+        # decoder `evals/live.py` drives by hand. It is here because that is the coupling most
+        # likely to be moved by a patch release, and the row above is the one that says so.
+        "httpx-sse": (0, 4, 3),
     }
     for package, floor in measured.items():
         found = tuple(int(part) for part in version(package).split(".")[:3])
@@ -1604,7 +1649,7 @@ def test_a_file_a_helper_hands_back_is_a_mapping_carrying_its_text_under_content
     )
 
 
-def test_a_pipeline_block_on_an_autocommit_connection_is_still_one_transaction() -> None:
+async def test_a_pipeline_block_on_an_autocommit_connection_is_still_one_transaction() -> None:
     """Psycopg's pipeline is a transaction boundary, and two first-party modules reason from it.
 
     `AsyncPostgresSaver._cursor(pipeline=True)` opens `conn.pipeline()`, and inside that block an
@@ -1620,41 +1665,36 @@ def test_a_pipeline_block_on_an_autocommit_connection_is_still_one_transaction()
     becomes real again with no line of either module rewritten, so the assumption is pinned here
     rather than believed there.
     """
-    import asyncio
-
     import psycopg
 
     from chemclaw.core.config import settings
     from tests.pg import migrated_db_or_skip
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn, autocommit=True)
-        try:
-            async with conn.pipeline():
-                async with conn.cursor() as cur:
-                    await cur.execute("SELECT txid_current()")
-                    first = await cur.fetchone()
-                    await cur.execute("SELECT txid_current()")
-                    second = await cur.fetchone()
+    await migrated_db_or_skip()
+    conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn, autocommit=True)
+    try:
+        async with conn.pipeline():
             async with conn.cursor() as cur:
                 await cur.execute("SELECT txid_current()")
-                outside_first = await cur.fetchone()
+                first = await cur.fetchone()
                 await cur.execute("SELECT txid_current()")
-                outside_second = await cur.fetchone()
-        finally:
-            await conn.close()
+                second = await cur.fetchone()
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT txid_current()")
+            outside_first = await cur.fetchone()
+            await cur.execute("SELECT txid_current()")
+            outside_second = await cur.fetchone()
+    finally:
+        await conn.close()
 
-        assert first == second, (
-            "a pipeline block on an autocommit connection is no longer one transaction; "
-            "agent/checkpointer.py and durable/retention.py both reason from it being one"
-        )
-        assert outside_first != outside_second, (
-            "the control arm failed: autocommit outside a pipeline should commit per statement, "
-            "so this test would pass for the wrong reason"
-        )
-
-    asyncio.run(_run())
+    assert first == second, (
+        "a pipeline block on an autocommit connection is no longer one transaction; "
+        "agent/checkpointer.py and durable/retention.py both reason from it being one"
+    )
+    assert outside_first != outside_second, (
+        "the control arm failed: autocommit outside a pipeline should commit per statement, "
+        "so this test would pass for the wrong reason"
+    )
 
 
 def test_aput_still_writes_its_blobs_and_its_checkpoint_row_in_one_transaction() -> None:
@@ -1915,4 +1955,106 @@ def test_the_task_tool_still_closes_over_its_roster_as_subagent_graphs() -> None
     assert "general-purpose" in nonlocals["subagent_graphs"], (
         "the roster is no longer keyed by subagent name, so `_helper_of` cannot name the one "
         "helper `agent/subagents.py` compiles"
+    )
+
+
+def test_pyjwt_still_fetches_its_key_set_through_fetch_data() -> None:
+    """`api/auth.py` overrides `PyJWKClient.fetch_data`, which upstream never published as a seam.
+
+    PyJWT's own client reaches the tenant with `urllib.request.urlopen` — no `trust_env`, so it
+    follows an ambient `HTTPS_PROXY`, and the key set every bearer token is validated against would
+    come from whatever answered. `api/auth._HttpxJwkClient` closes that by overriding one method,
+    which is the narrowest available seam and also an undocumented one: `fetch_data` is a method of
+    a concrete class, not an interface, and nothing obliges upstream to keep routing the fetch
+    through it.
+
+    **The failure if it moves is silent and total**, which is why this is asserted rather than
+    trusted. A `get_jwk_set` that fetched inline, or a second helper the override does not cover,
+    would leave every assertion in `tests/test_auth.py` and `tests/test_entra_end_to_end.py` green —
+    they drive the client, and the client would still work — while the traffic went back through
+    `urlopen` and the proxy posture stopped holding. So this drives it: a subclass that overrides
+    only `fetch_data` must be able to serve a whole key-set lookup with no network at all.
+    """
+    from jwt import PyJWKClient
+
+    assert "fetch_data" in vars(PyJWKClient), (
+        "`PyJWKClient.fetch_data` is no longer defined on the class; "
+        "api/auth.py::_HttpxJwkClient overrides exactly that name to keep the JWKS fetch off the "
+        "ambient proxy"
+    )
+
+    calls = 0
+
+    class _Offline(PyJWKClient):
+        def fetch_data(self) -> Any:
+            nonlocal calls
+            calls += 1
+            # Typed `Any` rather than as the dict it is, because upstream's `JWKSetCache.put` is
+            # annotated `PyJWKSet` while upstream's own `fetch_data` hands it the parsed dict —
+            # so the runtime contract and the annotation disagree, and it is the runtime one
+            # `api/auth.py` copies.
+            data: Any = {
+                "keys": [
+                    {
+                        "kty": "oct",
+                        "kid": "kid-a",
+                        "use": "sig",
+                        "k": "c2VjcmV0LWtleS1tYXRlcmlhbA",
+                    }
+                ]
+            }
+            if self.jwk_set_cache is not None:
+                self.jwk_set_cache.put(data)
+            return data
+
+    client = _Offline("https://tenant.invalid/discovery/v2.0/keys")
+    assert [key.key_id for key in client.get_signing_keys()] == ["kid-a"], (
+        "a `PyJWKClient` no longer serves its signing keys from `fetch_data`'s return value; "
+        "api/auth.py::_HttpxJwkClient's override is the only thing keeping the tenant fetch on "
+        "httpx with `trust_env=False`"
+    )
+    assert calls == 1, (
+        f"resolving one key set called `fetch_data` {calls} times; api/auth.py replaces that "
+        "method, so a fetch upstream makes by another route is a fetch through `urlopen` and the "
+        "ambient proxy"
+    )
+
+
+def test_a_pyjwt_client_still_fills_its_key_set_cache_from_fetch_data() -> None:
+    """The half of upstream's `fetch_data` that `api/auth.py` has to *reproduce*, not replace.
+
+    Upstream's implementation does two things: the HTTP call, and `self.jwk_set_cache.put(...)` of
+    what came back. The override replaces the first and copies the second, because `get_jwk_set`
+    reads that cache *before* it calls `fetch_data` — so an override that returned the key set
+    without filling it would turn PyJWT's five-minute cache off and make every single token
+    validation an outbound request to the tenant. That is a performance and amplification failure
+    with no functional symptom, so no other test in this tree would catch it.
+
+    Driven rather than read off the attribute: the second lookup must cost no fetch.
+    """
+    from jwt import PyJWKClient
+
+    calls = 0
+
+    class _Counting(PyJWKClient):
+        def fetch_data(self) -> Any:
+            nonlocal calls
+            calls += 1
+            data: Any = {"keys": [{"kty": "oct", "kid": "kid-a", "use": "sig", "k": "c2VjcmV0"}]}
+            # Exactly what `api/auth._HttpxJwkClient.fetch_data` does with its response.
+            if self.jwk_set_cache is not None:
+                self.jwk_set_cache.put(data)
+            return data
+
+    client = _Counting("https://tenant.invalid/discovery/v2.0/keys")
+    assert client.jwk_set_cache is not None, (
+        "a `PyJWKClient` no longer caches its key set by default; api/auth.py's override writes "
+        "`jwk_set_cache` by hand and would be filling something nothing reads"
+    )
+    client.get_signing_keys()
+    client.get_signing_keys()
+    assert calls == 1, (
+        f"two key-set lookups cost {calls} fetches; `jwk_set_cache.put` in "
+        "api/auth.py::_HttpxJwkClient.fetch_data is no longer what makes the second one free, so "
+        "every token validation is an outbound request to the tenant"
     )

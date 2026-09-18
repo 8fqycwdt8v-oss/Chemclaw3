@@ -66,6 +66,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.db import _redact
 from chemclaw.core.db import connection as db_connection
 from chemclaw.core.logging import configure_logging
+from chemclaw.core.markdown import render_table
 from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
 from chemclaw.ingest.eln.ord import OrdReaction
 from chemclaw.ingest.eln.ord_adapter import OrdJsonAdapter
@@ -871,20 +872,32 @@ def report(run: DataRun) -> str:
         # read as "every check returned nothing", which is a different and much worse claim.
         lines.append("No checks run (`--backfill-only`). `make live-data` reads what arrived.")
         return "\n".join(lines)
+    lines.append(
+        render_table(
+            ["dataset", "published", "seeded", "mapped", "refused"],
+            [
+                [
+                    reach.dataset,
+                    str(reach.published),
+                    str(reach.seeded),
+                    str(reach.mapped),
+                    str(reach.refused),
+                ]
+                for reach in run.reach
+            ],
+            align="lrrrr",
+        )
+    )
     lines += [
-        "| dataset | published | seeded | mapped | refused |",
-        "| --- | ---: | ---: | ---: | ---: |",
+        "",
+        render_table(
+            ["check", "result", "observed"],
+            [
+                [check.name, "PASS" if check.passed else "**FAIL**", check.observed]
+                for check in run.checks
+            ],
+        ),
     ]
-    for reach in run.reach:
-        lines.append(
-            f"| {reach.dataset} | {reach.published} | {reach.seeded} "
-            f"| {reach.mapped} | {reach.refused} |"
-        )
-    lines += ["", "| check | result | observed |", "| --- | --- | --- |"]
-    for check in run.checks:
-        lines.append(
-            f"| {check.name} | {'PASS' if check.passed else '**FAIL**'} | {check.observed} |"
-        )
     passed = sum(1 for check in run.checks if check.passed)
     lines.append(f"\n**{passed}/{len(run.checks)} checks passed.**")
     return "\n".join(lines)

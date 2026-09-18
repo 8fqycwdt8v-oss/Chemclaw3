@@ -345,7 +345,7 @@ def test_the_workflow_module_does_not_reach_the_connector_registry() -> None:
     )
 
 
-def test_a_template_naming_an_unknown_job_fails_instead_of_hanging() -> None:
+async def test_a_template_naming_an_unknown_job_fails_instead_of_hanging() -> None:
     """The end the offline tests can only argue about: against a real server, the run *terminates*.
 
     This is the defect itself. Every check above is about the mechanism — where the lookup happens,
@@ -375,30 +375,27 @@ def test_a_template_naming_an_unknown_job_fails_instead_of_hanging() -> None:
         }
     )
 
-    async def _run() -> None:
-        async with await start_env_or_skip() as env:
-            client = pydantic_client(env)
-            async with Worker(
-                client,
-                task_queue=settings.background_task_queue,
-                workflows=[TemplateWorkflow],
-                activities=[authorize_job_step, _swallow_record, _nothing_to_resume],
-            ):
-                with pytest.raises(WorkflowFailureError):
-                    await asyncio.wait_for(
-                        client.execute_workflow(
-                            TemplateWorkflow.run,
-                            TemplateRunInput(template=template, requested_by="tester"),
-                            id="template-bad-job",
-                            task_queue=settings.background_task_queue,
-                            execution_timeout=timedelta(seconds=30),
-                        ),
-                        # Well inside the execution timeout: if the SDK is suspending the workflow
-                        # rather than failing it, nothing returns and this is what says so.
-                        timeout=30,
-                    )
-
-    asyncio.run(_run())
+    async with await start_env_or_skip() as env:
+        client = pydantic_client(env)
+        async with Worker(
+            client,
+            task_queue=settings.background_task_queue,
+            workflows=[TemplateWorkflow],
+            activities=[authorize_job_step, _swallow_record, _nothing_to_resume],
+        ):
+            with pytest.raises(WorkflowFailureError):
+                await asyncio.wait_for(
+                    client.execute_workflow(
+                        TemplateWorkflow.run,
+                        TemplateRunInput(template=template, requested_by="tester"),
+                        id="template-bad-job",
+                        task_queue=settings.background_task_queue,
+                        execution_timeout=timedelta(seconds=30),
+                    ),
+                    # Well inside the execution timeout: if the SDK is suspending the workflow
+                    # rather than failing it, nothing returns and this is what says so.
+                    timeout=30,
+                )
 
 
 # --- DARK-2: the step is authorized and audited as its requester (D-168) -----------------------
@@ -758,7 +755,7 @@ def test_the_configs_restatement_of_the_wrapper_ceiling_cannot_drift() -> None:
     Settings(template_run_timeout_seconds=wrapper + 1)
 
 
-def test_a_failed_template_step_wakes_the_session_and_names_which_step(
+async def test_a_failed_template_step_wakes_the_session_and_names_which_step(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A template that dies at step 2 of 3 must reach the chemist, and say where it died.
@@ -822,35 +819,32 @@ def test_a_failed_template_step_wakes_the_session_and_names_which_step(
         }
     )
 
-    async def _run() -> None:
-        async with await start_env_or_skip() as env:
-            client = pydantic_client(env)
-            async with Worker(
-                client,
-                task_queue=_QUEUE,
-                workflows=[TemplateWorkflow],
-                activities=[
-                    authorize_job_step,
-                    record_session_event_activity,
-                    _swallow_record,
-                    _nothing_to_resume,
-                ],
-            ):
-                with pytest.raises(WorkflowFailureError):
-                    await asyncio.wait_for(
-                        client.execute_workflow(
-                            TemplateWorkflow.run,
-                            TemplateRunInput(
-                                template=template, requested_by="tester", session_id="s-tmpl"
-                            ),
-                            id="template-failure-notify",
-                            task_queue=_QUEUE,
-                            execution_timeout=timedelta(seconds=30),
+    async with await start_env_or_skip() as env:
+        client = pydantic_client(env)
+        async with Worker(
+            client,
+            task_queue=_QUEUE,
+            workflows=[TemplateWorkflow],
+            activities=[
+                authorize_job_step,
+                record_session_event_activity,
+                _swallow_record,
+                _nothing_to_resume,
+            ],
+        ):
+            with pytest.raises(WorkflowFailureError):
+                await asyncio.wait_for(
+                    client.execute_workflow(
+                        TemplateWorkflow.run,
+                        TemplateRunInput(
+                            template=template, requested_by="tester", session_id="s-tmpl"
                         ),
-                        timeout=30,
-                    )
-
-    asyncio.run(_run())
+                        id="template-failure-notify",
+                        task_queue=_QUEUE,
+                        execution_timeout=timedelta(seconds=30),
+                    ),
+                    timeout=30,
+                )
 
     assert len(notified) == 1, "a failed template emitted no session event at all — the defect"
     session_id, kind, payload = notified[0]
@@ -861,7 +855,7 @@ def test_a_failed_template_step_wakes_the_session_and_names_which_step(
     assert payload["template"] == "fails-midway"
 
 
-def test_a_declared_optional_input_the_caller_omitted_resolves_to_none() -> None:
+async def test_a_declared_optional_input_the_caller_omitted_resolves_to_none() -> None:
     """Omitting an optional argument killed every template on its first step, at run time.
 
     `registry.py` dumps the launch params with `exclude_none=True`, so an optional input the caller
@@ -921,32 +915,29 @@ def test_a_declared_optional_input_the_caller_omitted_resolves_to_none() -> None
         seen.append(step.prompt)
         return "ok"
 
-    async def _run() -> None:
-        async with await start_env_or_skip() as env:
-            client = pydantic_client(env)
-            async with Worker(
-                client,
-                task_queue=settings.background_task_queue,
-                workflows=[TemplateWorkflow],
-                activities=[_agent, _swallow_record, _nothing_to_resume],
-            ):
-                await asyncio.wait_for(
-                    client.execute_workflow(
-                        TemplateWorkflow.run,
-                        # `solvent` deliberately absent, exactly as `exclude_none` leaves it.
-                        TemplateRunInput(
-                            template=template,
-                            inputs={"smiles": "CCO"},
-                            requested_by="tester",
-                        ),
-                        id="template-optional-input",
-                        task_queue=settings.background_task_queue,
-                        execution_timeout=timedelta(seconds=30),
+    async with await start_env_or_skip() as env:
+        client = pydantic_client(env)
+        async with Worker(
+            client,
+            task_queue=settings.background_task_queue,
+            workflows=[TemplateWorkflow],
+            activities=[_agent, _swallow_record, _nothing_to_resume],
+        ):
+            await asyncio.wait_for(
+                client.execute_workflow(
+                    TemplateWorkflow.run,
+                    # `solvent` deliberately absent, exactly as `exclude_none` leaves it.
+                    TemplateRunInput(
+                        template=template,
+                        inputs={"smiles": "CCO"},
+                        requested_by="tester",
                     ),
-                    timeout=30,
-                )
-
-    asyncio.run(_run())
+                    id="template-optional-input",
+                    task_queue=settings.background_task_queue,
+                    execution_timeout=timedelta(seconds=30),
+                ),
+                timeout=30,
+            )
 
     # Reaching the step at all is the assertion: before this, the run died here.
     assert seen == ["solvent=null smiles=CCO"], (

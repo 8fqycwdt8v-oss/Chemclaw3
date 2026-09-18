@@ -132,19 +132,15 @@ def test_input_dict_ordering_does_not_change_key() -> None:
     assert k1.as_str() == k2.as_str()
 
 
-def test_store_get_returns_none_on_miss() -> None:
+async def test_store_get_returns_none_on_miss() -> None:
     """An unknown key returns None rather than raising."""
-
-    async def _run() -> None:
-        store = InMemoryStore()
-        key = CalculationKey.build("xtb", "gfn2", inputs={"smiles": "CCO"})
-        assert await store.get(key) is None
-        await store.put(StoredResult(key=key, result={"energy": 1}))
-        got = await store.get(key)
-        assert got is not None
-        assert got.result == {"energy": 1}
-
-    asyncio.run(_run())
+    store = InMemoryStore()
+    key = CalculationKey.build("xtb", "gfn2", inputs={"smiles": "CCO"})
+    assert await store.get(key) is None
+    await store.put(StoredResult(key=key, result={"energy": 1}))
+    got = await store.get(key)
+    assert got is not None
+    assert got.result == {"energy": 1}
 
 
 def test_cache_logs_hit_and_miss(caplog: pytest.LogCaptureFixture) -> None:

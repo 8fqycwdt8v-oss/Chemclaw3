@@ -24,6 +24,17 @@ rule has been written twice the two copies have disagreed silently. `db` holds t
 the same story: `apply_vector_recall_settings` is the pgvector recall parameters *both* dense
 searches run under.
 
+`markdown` is the same argument at a third scale, and the one where writing it twice was already
+wrong. Twenty sites across `agent`, `cli`, `evals`, `memory` and `protocols` rendered a Markdown
+table by hand, and **seventeen of them escaped nothing** — so a cell carrying a literal `|` added a
+column, which a connector's own tool result reaches: driven through `cli.live_jobs.report`, an
+`observed` of `result[0]='a | b'` rendered four cells under a header declaring three. The value here
+is not the grid, which is trivial; it is the three rules a generic table library would push back out
+to twenty callers — a `|` cannot add a cell, absence has exactly one spelling, and whether a
+zero-row table renders at all belongs to the caller, because only the caller knows whether "nothing
+came back" or "nothing was asked" is the true statement. `core` is the only package all five
+importers already depend on, and the module imports nothing but `collections.abc`.
+
 `connect` is the one way to attach a database this system does **not** own, and it is here for the
 `fulltext` reason rather than the `db` one: three seams reach somebody else's database — the
 warehouse ELN inbound (`ingest`), the result store outbound (`publish`), and the dense half of

@@ -225,29 +225,25 @@ def test_a_role_this_build_does_not_know_becomes_unknown_rather_than_a_failure()
 # --- the drain -----------------------------------------------------------------------------
 
 
-def test_a_drain_pass_labels_and_stamps_and_reports_more() -> None:
+async def test_a_drain_pass_labels_and_stamps_and_reports_more() -> None:
     """One bounded pass: label what is stale, stamp it, and say whether the backlog is drained."""
+    index = InMemoryLabelIndex()
+    for n in range(3):
+        await index.record(_row(f"r{n}"))
+    policies = {"pistachio": LabelPolicy(provides=frozenset({LabelGroup.NAMED_REACTION}))}
 
-    async def _run() -> None:
-        index = InMemoryLabelIndex()
-        for n in range(3):
-            await index.record(_row(f"r{n}"))
-        policies = {"pistachio": LabelPolicy(provides=frozenset({LabelGroup.NAMED_REACTION}))}
+    first = await label_stale(index, _FakeLabeller(), policies, _VERSION, limit=2)
+    assert (first.labelled, first.has_more) == (2, True)
+    second = await label_stale(index, _FakeLabeller(), policies, _VERSION, limit=2)
+    assert (second.labelled, second.has_more) == (1, False)
 
-        first = await label_stale(index, _FakeLabeller(), policies, _VERSION, limit=2)
-        assert (first.labelled, first.has_more) == (2, True)
-        second = await label_stale(index, _FakeLabeller(), policies, _VERSION, limit=2)
-        assert (second.labelled, second.has_more) == (1, False)
-
-        assert await index.stale(_VERSION, limit=10) == []
-        coverage = await index.coverage(_VERSION)
-        assert (coverage.labelled, coverage.total) == (3, 3)
-        assert coverage.verdict.startswith("COMPLETE")
-
-    asyncio.run(_run())
+    assert await index.stale(_VERSION, limit=10) == []
+    coverage = await index.coverage(_VERSION)
+    assert (coverage.labelled, coverage.total) == (3, 3)
+    assert coverage.verdict.startswith("COMPLETE")
 
 
-def test_one_unlabellable_reaction_does_not_stall_the_corpus_behind_it() -> None:
+async def test_one_unlabellable_reaction_does_not_stall_the_corpus_behind_it() -> None:
     """`stale()` is deterministic, so a refusal that failed the batch would repeat forever.
 
     This is the failure `reembed_stale` was changed to prevent one index over, where a single
@@ -255,37 +251,29 @@ def test_one_unlabellable_reaction_does_not_stall_the_corpus_behind_it() -> None
     still *stamped* — it leaves the stale set carrying nothing derived, which the coverage report
     counts honestly — because the alternative is a row the drain re-reads on every pass forever.
     """
+    index = InMemoryLabelIndex()
+    for n in range(3):
+        await index.record(_row(f"r{n}"))
+    labeller = _FakeLabeller(refuse={"r1"}, refuse_batches=True)
 
-    async def _run() -> None:
-        index = InMemoryLabelIndex()
-        for n in range(3):
-            await index.record(_row(f"r{n}"))
-        labeller = _FakeLabeller(refuse={"r1"}, refuse_batches=True)
+    report = await label_stale(index, labeller, {}, _VERSION, limit=10)
+    assert report.labelled == 3
+    assert report.unlabelled == 1
+    assert await index.stale(_VERSION, limit=10) == []
 
-        report = await label_stale(index, labeller, {}, _VERSION, limit=10)
-        assert report.labelled == 3
-        assert report.unlabelled == 1
-        assert await index.stale(_VERSION, limit=10) == []
-
-        rows = {r.reaction_id: r for r in await index.stale("next-version", limit=10)}
-        assert rows["r0"].named_reaction == "Buchwald-Hartwig amination"
-        assert rows["r1"].named_reaction is None
-
-    asyncio.run(_run())
+    rows = {r.reaction_id: r for r in await index.stale("next-version", limit=10)}
+    assert rows["r0"].named_reaction == "Buchwald-Hartwig amination"
+    assert rows["r1"].named_reaction is None
 
 
-def test_an_outage_propagates_instead_of_becoming_200_doomed_single_calls() -> None:
+async def test_an_outage_propagates_instead_of_becoming_200_doomed_single_calls() -> None:
     """A server that is not there is Temporal's problem, not something to retry per reaction."""
-
-    async def _run() -> None:
-        index = InMemoryLabelIndex()
-        await index.record(_row())
-        with pytest.raises(LabelServerError):
-            await label_stale(index, _FakeLabeller(outage=True), {}, _VERSION, limit=10)
-        # Nothing was stamped, so the next pass sees the same work.
-        assert len(await index.stale(_VERSION, limit=10)) == 1
-
-    asyncio.run(_run())
+    index = InMemoryLabelIndex()
+    await index.record(_row())
+    with pytest.raises(LabelServerError):
+        await label_stale(index, _FakeLabeller(outage=True), {}, _VERSION, limit=10)
+    # Nothing was stamped, so the next pass sees the same work.
+    assert len(await index.stale(_VERSION, limit=10)) == 1
 
 
 def test_a_short_species_list_costs_the_roles_and_not_the_atom_map(
@@ -367,24 +355,20 @@ def test_the_outage_error_is_not_bad_data() -> None:
     assert isinstance(LabelToolError("x"), ChemclawError)
 
 
-def test_the_drain_sends_one_batch_not_one_call_per_reaction() -> None:
+async def test_the_drain_sends_one_batch_not_one_call_per_reaction() -> None:
     """13M reactions at a round trip each is 13M round trips; at `label_batch_size` it is 65,000."""
-
-    async def _run() -> None:
-        index = InMemoryLabelIndex()
-        for n in range(5):
-            await index.record(_row(f"r{n}"))
-        labeller = _FakeLabeller()
-        await label_stale(index, labeller, {}, _VERSION, limit=5)
-        assert labeller.calls == [5]
-
-    asyncio.run(_run())
+    index = InMemoryLabelIndex()
+    for n in range(5):
+        await index.record(_row(f"r{n}"))
+    labeller = _FakeLabeller()
+    await label_stale(index, labeller, {}, _VERSION, limit=5)
+    assert labeller.calls == [5]
 
 
 # --- what the drain reads, and how it matches an answer back to a row -------------------------
 
 
-def test_a_source_that_declares_no_labels_block_is_still_drained() -> None:
+async def test_a_source_that_declares_no_labels_block_is_still_drained() -> None:
     """The requirement, as a test: every reaction corpus gets labelled, not only declaring ones.
 
     The drain used to narrow `stale()` to the sources that declared a `labels:` block. Exactly one
@@ -394,27 +378,23 @@ def test_a_source_that_declares_no_labels_block_is_still_drained() -> None:
 
     A block says what a source *carries*. It is read per row, as a policy, and never as permission.
     """
+    index = InMemoryLabelIndex()
+    await index.record(_row("e1", source="eln-json"))
+    await index.record(_row("p1", source="pistachio"))
+    # What `label_policies()` returns today: only Pistachio declares a block.
+    policies = {"pistachio": LabelPolicy()}
 
-    async def _run() -> None:
-        index = InMemoryLabelIndex()
-        await index.record(_row("e1", source="eln-json"))
-        await index.record(_row("p1", source="pistachio"))
-        # What `label_policies()` returns today: only Pistachio declares a block.
-        policies = {"pistachio": LabelPolicy()}
+    report = await label_stale(index, _FakeLabeller(), policies, _VERSION, limit=10)
 
-        report = await label_stale(index, _FakeLabeller(), policies, _VERSION, limit=10)
-
-        assert report.labelled == 2
-        assert {row.source for row in await index.stale("next-version", limit=10)} == {
-            "eln-json",
-            "pistachio",
-        }
-        assert await index.stale(_VERSION, limit=10) == []
-
-    asyncio.run(_run())
+    assert report.labelled == 2
+    assert {row.source for row in await index.stale("next-version", limit=10)} == {
+        "eln-json",
+        "pistachio",
+    }
+    assert await index.stale(_VERSION, limit=10) == []
 
 
-def test_two_sources_sharing_a_reaction_id_each_keep_their_own_labels() -> None:
+async def test_two_sources_sharing_a_reaction_id_each_keep_their_own_labels() -> None:
     """One batch, one id, two rows — and neither may be given the other's chemistry.
 
     `reaction_labels` keys on `(source, reaction_id)` precisely because two ELNs may use one entry
@@ -427,34 +407,31 @@ def test_two_sources_sharing_a_reaction_id_each_keep_their_own_labels() -> None:
     """
     ester = "CCO.CC(=O)O>>CCOC(C)=O"
 
-    async def _run() -> None:
-        index = InMemoryLabelIndex()
-        await index.record(_row("RXN-1", source="eln-a", record_smiles=ester))
-        await index.record(_row("RXN-1", source="eln-b"))
+    index = InMemoryLabelIndex()
+    await index.record(_row("RXN-1", source="eln-a", record_smiles=ester))
+    await index.record(_row("RXN-1", source="eln-b"))
 
-        labeller = _FakeLabeller()
-        report = await label_stale(index, labeller, {}, _VERSION, limit=10)
+    labeller = _FakeLabeller()
+    report = await label_stale(index, labeller, {}, _VERSION, limit=10)
 
-        assert report.labelled == 2 and report.unlabelled == 0
-        # Distinct ids went on the wire, which is what makes two answers possible at all.
-        assert len(set(labeller.sent[0])) == 2
-        rows = {r.source: r for r in await index.stale("next-version", limit=10)}
-        assert rows["eln-a"].record_smiles == ester
-        assert rows["eln-b"].record_smiles == _RECORD
-        # Each row carries the answer minted for its own id, not its neighbour's.
-        for row in rows.values():
-            assert row.mapped_smiles is not None
-            assert row.named_reaction == "Buchwald-Hartwig amination"
-            assert [s.derived_role for s in row.species][2] is SpeciesRole.LIGAND
-
-    asyncio.run(_run())
+    assert report.labelled == 2 and report.unlabelled == 0
+    # Distinct ids went on the wire, which is what makes two answers possible at all.
+    assert len(set(labeller.sent[0])) == 2
+    rows = {r.source: r for r in await index.stale("next-version", limit=10)}
+    assert rows["eln-a"].record_smiles == ester
+    assert rows["eln-b"].record_smiles == _RECORD
+    # Each row carries the answer minted for its own id, not its neighbour's.
+    for row in rows.values():
+        assert row.mapped_smiles is not None
+        assert row.named_reaction == "Buchwald-Hartwig amination"
+        assert [s.derived_role for s in row.species][2] is SpeciesRole.LIGAND
 
 
 # --- a stamp is not a derivation --------------------------------------------------------
 # D-2026-09-09-a-rebuild-nothing-counts-reports-as-finished---------------
 
 
-def test_a_pass_that_derived_nothing_does_not_report_the_corpus_complete() -> None:
+async def test_a_pass_that_derived_nothing_does_not_report_the_corpus_complete() -> None:
     """The re-label case the `std6`→`std7` bump made real, and what it used to answer.
 
     `D-2026-09-09-a-map-number-is-not-a-molecule` moved `STANDARDIZATION_VERSION`, which is folded
@@ -475,29 +452,26 @@ def test_a_pass_that_derived_nothing_does_not_report_the_corpus_complete() -> No
     """
     old_version = "rxnlabel@1:std6:roles1"
 
-    async def _run() -> None:
-        index = InMemoryLabelIndex()
-        await index.record(_row("r0"))
-        # Labelled under the superseded standardization, by a server that was working then.
-        await label_stale(index, _FakeLabeller(), {}, old_version, limit=10)
-        assert (await index.coverage(old_version)).labelled == 1
+    index = InMemoryLabelIndex()
+    await index.record(_row("r0"))
+    # Labelled under the superseded standardization, by a server that was working then.
+    await label_stale(index, _FakeLabeller(), {}, old_version, limit=10)
+    assert (await index.coverage(old_version)).labelled == 1
 
-        # The bump: every row is stale, and the server answers for nothing.
-        report = await label_stale(index, _FakeLabeller(refuse={"r0"}), {}, _VERSION, limit=10)
-        assert (report.labelled, report.unlabelled) == (1, 1)
+    # The bump: every row is stale, and the server answers for nothing.
+    report = await label_stale(index, _FakeLabeller(refuse={"r0"}), {}, _VERSION, limit=10)
+    assert (report.labelled, report.unlabelled) == (1, 1)
 
-        coverage = await index.coverage(_VERSION)
-        assert (coverage.labelled, coverage.total) == (0, 1)
-        assert coverage.verdict.startswith("NOT ANSWERABLE YET")
-        assert "COMPLETE" not in coverage.verdict
-        # And the content really is the superseded labeller's, which is what makes the count right.
-        [row] = list(index._rows.values())
-        assert row.named_reaction == "Buchwald-Hartwig amination"
-
-    asyncio.run(_run())
+    coverage = await index.coverage(_VERSION)
+    assert (coverage.labelled, coverage.total) == (0, 1)
+    assert coverage.verdict.startswith("NOT ANSWERABLE YET")
+    assert "COMPLETE" not in coverage.verdict
+    # And the content really is the superseded labeller's, which is what makes the count right.
+    [row] = list(index._rows.values())
+    assert row.named_reaction == "Buchwald-Hartwig amination"
 
 
-def test_an_underived_row_leaves_the_stale_set_and_returns_at_the_next_version() -> None:
+async def test_an_underived_row_leaves_the_stale_set_and_returns_at_the_next_version() -> None:
     """Both halves of the stamp, because a fix to one of them breaks the other.
 
     Stamping is what lets the drain advance past a reaction the server cannot answer for — remove
@@ -506,19 +480,15 @@ def test_an_underived_row_leaves_the_stale_set_and_returns_at_the_next_version()
     put the row back into the stale set at the *same* version, and must not keep it out at the
     next one.
     """
+    index = InMemoryLabelIndex()
+    await index.record(_row("r0"))
+    await label_stale(index, _FakeLabeller(refuse={"r0"}), {}, _VERSION, limit=10)
 
-    async def _run() -> None:
-        index = InMemoryLabelIndex()
-        await index.record(_row("r0"))
-        await label_stale(index, _FakeLabeller(refuse={"r0"}), {}, _VERSION, limit=10)
-
-        assert await index.stale(_VERSION, limit=10) == []
-        assert [r.reaction_id for r in await index.stale("rxnlabel@2:std7:roles1", 10)] == ["r0"]
-
-    asyncio.run(_run())
+    assert await index.stale(_VERSION, limit=10) == []
+    assert [r.reaction_id for r in await index.stale("rxnlabel@2:std7:roles1", 10)] == ["r0"]
 
 
-def test_a_degraded_pass_does_not_advance_the_version_every_tool_reads() -> None:
+async def test_a_degraded_pass_does_not_advance_the_version_every_tool_reads() -> None:
     """`current_version()` must never hand back a stamp no row's *content* was derived under.
 
     Every rxnfp tool calls it first and passes the answer to `coverage`/`select`, so a marked
@@ -526,39 +496,31 @@ def test_a_degraded_pass_does_not_advance_the_version_every_tool_reads() -> None
     original defect inverted. A corpus whose whole re-label found the server down therefore has
     *no* current version, which is the honest answer: the tools report the corpus as unlabelled.
     """
+    index = InMemoryLabelIndex()
+    await index.record(_row("r0"))
+    await label_stale(index, _FakeLabeller(), {}, "rxnlabel@1:std6:roles1", limit=10)
+    assert await index.current_version() == "rxnlabel@1:std6:roles1"
 
-    async def _run() -> None:
-        index = InMemoryLabelIndex()
-        await index.record(_row("r0"))
-        await label_stale(index, _FakeLabeller(), {}, "rxnlabel@1:std6:roles1", limit=10)
-        assert await index.current_version() == "rxnlabel@1:std6:roles1"
-
-        await label_stale(index, _FakeLabeller(refuse={"r0"}), {}, _VERSION, limit=10)
-        assert await index.current_version() is None
-
-    asyncio.run(_run())
+    await label_stale(index, _FakeLabeller(refuse={"r0"}), {}, _VERSION, limit=10)
+    assert await index.current_version() is None
 
 
-def test_a_partly_degraded_pass_reports_the_share_it_actually_derived() -> None:
+async def test_a_partly_degraded_pass_reports_the_share_it_actually_derived() -> None:
     """The case a Pistachio re-label really produces: some rows derived, some not.
 
     The whole point of the fix is that this reads as PARTIAL rather than COMPLETE — a chemist told
     "counts over this facet are totals" over a corpus two thirds of which carries superseded
     content is the failure, and it is invisible in the answer itself.
     """
+    index = InMemoryLabelIndex()
+    for n in range(3):
+        await index.record(_row(f"r{n}"))
+    await label_stale(index, _FakeLabeller(refuse={"r1"}), {}, _VERSION, limit=10)
 
-    async def _run() -> None:
-        index = InMemoryLabelIndex()
-        for n in range(3):
-            await index.record(_row(f"r{n}"))
-        await label_stale(index, _FakeLabeller(refuse={"r1"}), {}, _VERSION, limit=10)
-
-        coverage = await index.coverage(_VERSION)
-        assert (coverage.labelled, coverage.total) == (2, 3)
-        assert coverage.verdict.startswith("PARTIAL")
-        assert await index.current_version() == _VERSION
-
-    asyncio.run(_run())
+    coverage = await index.coverage(_VERSION)
+    assert (coverage.labelled, coverage.total) == (2, 3)
+    assert coverage.verdict.startswith("PARTIAL")
+    assert await index.current_version() == _VERSION
 
 
 # --- the labelling leg's identity on the wire ----------------------------------------------------

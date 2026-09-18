@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from chemclaw.core.config import PG_LOOPBACK_HOSTS, settings
+from chemclaw.core.http import default_ssl_context
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import register_secret_env
 from chemclaw.deliver.message import Attachment, Message
@@ -363,20 +364,40 @@ class WebhookDeliveryDriver:
         headers["Idempotency-Key"] = identity
         async with httpx.AsyncClient(
             timeout=self.timeout_seconds,
+            # **One process-wide trust store, for the reason `core.http.default_ssl_context`
+            # measures: httpx builds a fresh `ssl.SSLContext` and parses the whole certifi bundle
+            # per client, at ~22 ms each.** This driver is rebuilt per delivery on purpose —
+            # `registry.build` is uncached so a driver cannot outlive a credential rotation — so it
+            # constructs a client per *message*, and it was the one httpx client in this tree
+            # reaching a real dependency that paid full price for it. The cost is blocking CPU on
+            # the loop that serves every stream on the pod, not await time, which is what made it
+            # invisible.
+            #
+            # A shared *connection pool* is the other half and is deliberately not taken here: it
+            # would have to be cached per event loop, which is the shape `core/db.py` already
+            # carries a measured bug and a `_forget_pools_of_ended_loops` sweep for. Deliveries are
+            # low-frequency and the handshake is per destination; the context was the measured part.
+            verify=default_ssl_context(),
             # Never inherit an ambient proxy — the same flag, and the same reason, every other
-            # *httpx* client in this tree that reaches a real dependency carries. Not every client:
-            # `api/auth.py`'s `PyJWKClient` fetches the tenant key set through
-            # `urllib.request.urlopen`, which has no such flag and follows `HTTP_PROXY` (measured);
-            # it is a `BACKLOG.md` row rather than a silent exception to this sentence. The httpx
-            # set is (`connectors/registry.py`,
-            # `core/mcp_session.py`, `core/embeddings.py`, `connectors/health.py`,
-            # `agent/llm_provider.py`, `publish/drivers/http.py`). That list was *aspirational*
-            # about its last two until 2026-09-05: both LLM seams carried the flag only on a
-            # private-CA branch no shipped configuration takes, so this comment described a fleet
-            # posture two of its six members did not have
+            # *httpx* client in this tree that reaches a real dependency carries. The set is
+            # (`connectors/registry.py`, `core/mcp_session.py`, `core/embeddings.py`,
+            # `connectors/health.py`, `agent/llm_provider.py`, `publish/drivers/http.py`,
+            # `api/auth.py`). That list was *aspirational* about two of them until 2026-09-05: both
+            # LLM seams carried the flag only on a private-CA branch no shipped configuration
+            # takes, so this comment described a fleet posture two of its six members did not have
             # (`D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address` made it true).
-            # This one was the exception and
-            # is the worst place for it: the payload is human-readable message content and the
+            #
+            # **`api/auth.py` is the seventh and used to be named here as the exception.** It
+            # fetched the tenant key set through `urllib.request.urlopen`, which takes no such flag
+            # and was measured following `HTTP_PROXY` — on the anchor every bearer token is
+            # validated against. `_HttpxJwkClient` overrides PyJWT's `fetch_data` onto httpx, so
+            # the exception is closed rather than tracked. The sentence that stood here also cited
+            # a `BACKLOG.md` row for it, and no such row has ever existed: `grep -i jwks
+            # docs/planning/*.md` returns nothing, which is a claim about a control that was not
+            # merely stale but never true.
+            #
+            # This client is the worst place to inherit a proxy: the payload is human-readable
+            # message content and the
             # request carries `Authorization: Bearer`. Measured with a recording listener installed
             # as `HTTP_PROXY`, the proxy received the whole POST — body and bearer — and the
             # configured destination received nothing. The destination is stated in the manifest

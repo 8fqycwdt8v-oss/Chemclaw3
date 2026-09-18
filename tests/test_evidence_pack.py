@@ -11,6 +11,8 @@ happened", and refusals are part of the record rather than a list of faults.
 
 import asyncio
 
+import pytest
+
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from chemclaw.operations.evidence_pack import LIMITS, assemble
@@ -141,21 +143,17 @@ def test_a_refusal_is_part_of_the_record_rather_than_a_fault() -> None:
     asyncio.run(_clear())
 
 
-def test_an_empty_pack_says_so_rather_than_reading_as_nothing_happened() -> None:
+async def test_an_empty_pack_says_so_rather_than_reading_as_nothing_happened() -> None:
     """The one thing a caller must check before presenting a pack.
 
     An empty pack is a statement about the *record* — a window outside retention reads identically
     to a session in which nothing was done — which is the same distinction `Coverage` exists to
     make one module over.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        pack = await assemble("pack-test-session-that-never-existed")
-        assert pack.is_empty
-        assert pack.tool_calls == [] and pack.effects == []
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    pack = await assemble("pack-test-session-that-never-existed")
+    assert pack.is_empty
+    assert pack.tool_calls == [] and pack.effects == []
 
 
 def test_the_far_sides_own_text_reaches_the_model_with_no_live_delimiter() -> None:
@@ -370,7 +368,7 @@ def test_a_session_whose_only_record_is_an_abandoned_turn_is_not_reported_as_emp
     asyncio.run(_clear())
 
 
-def test_the_packs_own_headline_reaches_the_model_and_not_only_its_tests() -> None:
+async def test_the_packs_own_headline_reaches_the_model_and_not_only_its_tests() -> None:
     """`degraded_turns` had no reader in `src/` at all — one grep hit, its own `def`.
 
     Its docstring calls it *"the pack's own headline"* and says *"a reader who checks nothing else
@@ -386,26 +384,90 @@ def test_the_packs_own_headline_reaches_the_model_and_not_only_its_tests() -> No
     degraded answer that reads as complete", and the pack is where that is supposed to stop being
     true. This test is the reader the docstring claimed to have.
     """
+    await migrated_db_or_skip()
+    await _clear()
+    async with await connect(settings.postgres_dsn) as conn:
+        await conn.execute(
+            "INSERT INTO audit_events (correlation_id, session_id, actor, tool, arguments,"
+            " outcome, detail, latency_ms) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            ("c-head", SESSION, "u-1", "gather_evidence", "{}", "ok", "", 12.0),
+        )
+        await conn.commit()
+    await _seed_turn(SESSION, "c-head", "loop_capped", context_unreducible=True)
+
+    from chemclaw.agent.evidence_tools import assemble_evidence_pack
+
+    payload = await assemble_evidence_pack(SESSION)
+
+    assert payload["degraded_turns"] == ["c-head"], (
+        "the pack's own headline is absent from the payload the model receives, so a reader "
+        f"who checks nothing else checks nothing: {sorted(payload)}"
+    )
+
+
+def test_a_section_is_built_from_its_columns_by_name_and_not_by_their_order() -> None:
+    """Reversing a SELECT list must change nothing about the section it builds.
+
+    **This is the failure the pack could least afford and had.** `PackJob` was assembled by
+    unpacking a ten-element tuple whose first nine columns are all `TEXT` — `job_id`, `connector`,
+    `job`, `rationale`, `requested_by`, `summary`, `state`, `failure_reason`, `note_id` — so
+    editing the SELECT list swapped fields silently, passed `mypy --strict`, and produced a
+    plausible-looking evidence pack: a run attributed to the wrong person, with somebody else's
+    reason, in the one document a reader is told to treat as the record.
+
+    Both directions are driven, because only the pair is a control: the hostile order returns the
+    same section, and a column the model has no field for raises naming it rather than being
+    dropped.
+    """
+    import pydantic
+
+    from chemclaw.operations.evidence_pack import PackJob, _section
+
+    columns = (
+        "job_id, connector, job, rationale, requested_by, summary, state, failure_reason, "
+        "note_id, completed_at"
+    )
+    reversed_list = ", ".join(reversed([name.strip() for name in columns.split(",")]))
+    where = " FROM job_records WHERE session_id = %s ORDER BY completed_at LIMIT %s"
 
     async def _run() -> None:
         await migrated_db_or_skip()
-        await _clear()
+        await _seed()
+        straight = await _section(PackJob, f"SELECT {columns}{where}", (SESSION, 10))
+        scrambled = await _section(PackJob, f"SELECT {reversed_list}{where}", (SESSION, 10))
+        assert straight and scrambled == straight, (
+            "the column order must not be able to decide which field a value lands in"
+        )
+        with pytest.raises(pydantic.ValidationError, match="surplus"):
+            await _section(PackJob, f"SELECT {columns}, connector AS surplus{where}", (SESSION, 10))
+
+    asyncio.run(_run())
+    asyncio.run(_clear())
+
+
+def test_a_hallucinated_tool_name_is_bounded_on_the_field_rather_than_by_its_reader() -> None:
+    """`audit_events.tool` is the model's own string, so the bound belongs on `ToolCall.tool`.
+
+    It used to be applied in the comprehension that built the section, and the comment beside it
+    recorded the reason that is not enough: "the sanitisation went into one reader of this column
+    and not its sibling in the same package". A row factory removes the comprehension altogether —
+    `class_row` builds the model straight out of the row and calls nothing of this module's on the
+    way — so a bound that lived in the reader would simply have been deleted by the conversion.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _seed()
         async with await connect(settings.postgres_dsn) as conn:
             await conn.execute(
                 "INSERT INTO audit_events (correlation_id, session_id, actor, tool, arguments,"
                 " outcome, detail, latency_ms) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                ("c-head", SESSION, "u-1", "gather_evidence", "{}", "ok", "", 12.0),
+                ("c-9", SESSION, "u-1", "drop table; --", "{}", "error", "", 1.0),
             )
             await conn.commit()
-        await _seed_turn(SESSION, "c-head", "loop_capped", context_unreducible=True)
-
-        from chemclaw.agent.evidence_tools import assemble_evidence_pack
-
-        payload = await assemble_evidence_pack(SESSION)
-
-        assert payload["degraded_turns"] == ["c-head"], (
-            "the pack's own headline is absent from the payload the model receives, so a reader "
-            f"who checks nothing else checks nothing: {sorted(payload)}"
-        )
+        pack = await assemble(SESSION)
+        assert "drop table; --" not in [call.tool for call in pack.tool_calls]
+        assert "(unrecognised)" in [call.tool for call in pack.tool_calls]
 
     asyncio.run(_run())
+    asyncio.run(_clear())

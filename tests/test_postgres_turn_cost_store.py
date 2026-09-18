@@ -25,8 +25,6 @@ deliberately a pair: one asserts a retried write of a record does not double, th
 records do not merge.
 """
 
-import asyncio
-
 from chemclaw.agent.turn_cost import TurnCost
 from chemclaw.agent.turn_cost_store import PostgresTurnCostSink
 from chemclaw.core import db
@@ -63,28 +61,24 @@ async def _spend(actor: str) -> tuple[int, int]:
     return int(row[0]), int(row[1])
 
 
-def test_recording_a_cost_is_findable_with_its_own_totals() -> None:
+async def test_recording_a_cost_is_findable_with_its_own_totals() -> None:
     """The write side, proven by reading the row back: nothing else exposes a single row."""
-
-    async def _run() -> None:
-        sink = await _sink_or_skip()
-        await sink.record(
-            TurnCost(
-                correlation_id="pgcost-basic-1",
-                actor="pgcost-actor-basic",
-                input_tokens=100,
-                output_tokens=20,
-                cache_read_tokens=5,
-                cache_write_tokens=0,
-            )
+    sink = await _sink_or_skip()
+    await sink.record(
+        TurnCost(
+            correlation_id="pgcost-basic-1",
+            actor="pgcost-actor-basic",
+            input_tokens=100,
+            output_tokens=20,
+            cache_read_tokens=5,
+            cache_write_tokens=0,
         )
+    )
 
-        assert await _spend("pgcost-actor-basic") == (1, 125)  # 100 + 20 + 5 + 0
-
-    asyncio.run(_run())
+    assert await _spend("pgcost-actor-basic") == (1, 125)  # 100 + 20 + 5 + 0
 
 
-def test_a_retried_write_of_one_record_replaces_never_adds() -> None:
+async def test_a_retried_write_of_one_record_replaces_never_adds() -> None:
     """The one arithmetic error this ledger must not make (module docstring): no double-count.
 
     A retry — the *same record*, written twice — must overwrite the row rather than accumulate a
@@ -96,20 +90,16 @@ def test_a_retried_write_of_one_record_replaces_never_adds() -> None:
     identity was the correlation id, which is the id the front door *adopts* off the request
     (`D-2026-09-06-an-id-a-caller-chooses-is-not-a-key`). The test below is the other half.
     """
+    sink = await _sink_or_skip()
+    actor = "pgcost-actor-upsert"
+    cost = TurnCost(correlation_id="pgcost-upsert-1", actor=actor, input_tokens=999)
+    await sink.record(cost)
+    await sink.record(cost)
 
-    async def _run() -> None:
-        sink = await _sink_or_skip()
-        actor = "pgcost-actor-upsert"
-        cost = TurnCost(correlation_id="pgcost-upsert-1", actor=actor, input_tokens=999)
-        await sink.record(cost)
-        await sink.record(cost)
-
-        assert await _spend(actor) == (1, 999), "a retried write was counted as a second turn"
-
-    asyncio.run(_run())
+    assert await _spend(actor) == (1, 999), "a retried write was counted as a second turn"
 
 
-def test_two_turns_under_one_correlation_id_are_two_rows_and_neither_is_erased() -> None:
+async def test_two_turns_under_one_correlation_id_are_two_rows_and_neither_is_erased() -> None:
     """The ledger is not erasable by the party it bills.
 
     `api/middleware._request_correlation_id` adopts an inbound `X-Chemclaw-Correlation-Id` whenever
@@ -124,46 +114,34 @@ def test_two_turns_under_one_correlation_id_are_two_rows_and_neither_is_erased()
     is that the filter accepts a caller's string, and a fix that quietly stopped adopting one would
     make this pass while removing a feature the tracing depends on.
     """
+    sink = await _sink_or_skip()
+    from chemclaw.api.middleware import _CORRELATION_ID
 
-    async def _run() -> None:
-        sink = await _sink_or_skip()
-        from chemclaw.api.middleware import _CORRELATION_ID
-
-        forged = "client-chosen-id-0001"
-        assert _CORRELATION_ID.match(forged), "the premise: this id is adopted off the request"
-        actor = "pgcost-actor-forged"
-        for tokens in (900_000, 1_000):
-            await sink.record(
-                TurnCost(correlation_id=forged, actor=actor, input_tokens=tokens, session_id="s")
-            )
-
-        assert await _spend(actor) == (2, 901_000), (
-            "two turns sent under one correlation id collapsed into one row — the cost ledger is "
-            "erasable by the party being billed"
+    forged = "client-chosen-id-0001"
+    assert _CORRELATION_ID.match(forged), "the premise: this id is adopted off the request"
+    actor = "pgcost-actor-forged"
+    for tokens in (900_000, 1_000):
+        await sink.record(
+            TurnCost(correlation_id=forged, actor=actor, input_tokens=tokens, session_id="s")
         )
 
-    asyncio.run(_run())
+    assert await _spend(actor) == (2, 901_000), (
+        "two turns sent under one correlation id collapsed into one row — the cost ledger is "
+        "erasable by the party being billed"
+    )
 
 
-def test_distinct_correlation_ids_both_count() -> None:
+async def test_distinct_correlation_ids_both_count() -> None:
     """Two genuinely different turns for one actor both contribute, unlike a retry of one."""
+    sink = await _sink_or_skip()
+    actor = "pgcost-actor-distinct"
+    await sink.record(TurnCost(correlation_id="pgcost-distinct-1", actor=actor, input_tokens=100))
+    await sink.record(TurnCost(correlation_id="pgcost-distinct-2", actor=actor, input_tokens=50))
 
-    async def _run() -> None:
-        sink = await _sink_or_skip()
-        actor = "pgcost-actor-distinct"
-        await sink.record(
-            TurnCost(correlation_id="pgcost-distinct-1", actor=actor, input_tokens=100)
-        )
-        await sink.record(
-            TurnCost(correlation_id="pgcost-distinct-2", actor=actor, input_tokens=50)
-        )
-
-        assert await _spend(actor) == (2, 150)
-
-    asyncio.run(_run())
+    assert await _spend(actor) == (2, 150)
 
 
-def test_a_row_written_before_the_knowledge_columns_existed_reads_as_unknown() -> None:
+async def test_a_row_written_before_the_knowledge_columns_existed_reads_as_unknown() -> None:
     """The ambiguous zero, in a column — and why these five are nullable and undefaulted.
 
     `retrieval_calls = 0` is the most interesting value this table can hold: a turn that answered
@@ -173,56 +151,52 @@ def test_a_row_written_before_the_knowledge_columns_existed_reads_as_unknown() -
     schema: a row inserted without the columns reads NULL, and a row the sink writes carries the
     numbers it was handed.
     """
-
-    async def _run() -> None:
-        sink = await _sink_or_skip()
-        async with db.connection(_dsn()) as conn:
-            await conn.execute(
-                # `turn_id` is spelled out because it is the primary key since migration 088 and
-                # a legacy row is one migration 088 backfilled from its own correlation id — which
-                # is exactly what this INSERT reproduces.
-                "INSERT INTO turn_costs (turn_id, correlation_id, actor) VALUES (%s, %s, %s) "
-                "ON CONFLICT (turn_id) DO NOTHING",
-                (
-                    "pgcost-knowledge-legacy",
-                    "pgcost-knowledge-legacy",
-                    "pgcost-actor-knowledge",
-                ),
-            )
-            cursor = await conn.execute(
-                "SELECT retrieval_calls, capture_calls, answer_confidence, review_required, "
-                "notes_cited FROM turn_costs WHERE correlation_id = %s",
-                ("pgcost-knowledge-legacy",),
-            )
-            legacy = await cursor.fetchone()
-        assert legacy == (None, None, None, None, None), (
-            "a row written before the measurement existed reports a measurement"
+    sink = await _sink_or_skip()
+    async with db.connection(_dsn()) as conn:
+        await conn.execute(
+            # `turn_id` is spelled out because it is the primary key since migration 088 and
+            # a legacy row is one migration 088 backfilled from its own correlation id — which
+            # is exactly what this INSERT reproduces.
+            "INSERT INTO turn_costs (turn_id, correlation_id, actor) VALUES (%s, %s, %s) "
+            "ON CONFLICT (turn_id) DO NOTHING",
+            (
+                "pgcost-knowledge-legacy",
+                "pgcost-knowledge-legacy",
+                "pgcost-actor-knowledge",
+            ),
         )
-
-        await sink.record(
-            TurnCost(
-                correlation_id="pgcost-knowledge-measured",
-                actor="pgcost-actor-knowledge",
-                retrieval_calls=3,
-                capture_calls=1,
-                answer_confidence=0.75,
-                review_required=True,
-                notes_cited=2,
-            )
+        cursor = await conn.execute(
+            "SELECT retrieval_calls, capture_calls, answer_confidence, review_required, "
+            "notes_cited FROM turn_costs WHERE correlation_id = %s",
+            ("pgcost-knowledge-legacy",),
         )
-        async with db.connection(_dsn()) as conn:
-            cursor = await conn.execute(
-                "SELECT retrieval_calls, capture_calls, answer_confidence, review_required, "
-                "notes_cited FROM turn_costs WHERE correlation_id = %s",
-                ("pgcost-knowledge-measured",),
-            )
-            measured = await cursor.fetchone()
-        assert measured == (3, 1, 0.75, True, 2)
+        legacy = await cursor.fetchone()
+    assert legacy == (None, None, None, None, None), (
+        "a row written before the measurement existed reports a measurement"
+    )
 
-    asyncio.run(_run())
+    await sink.record(
+        TurnCost(
+            correlation_id="pgcost-knowledge-measured",
+            actor="pgcost-actor-knowledge",
+            retrieval_calls=3,
+            capture_calls=1,
+            answer_confidence=0.75,
+            review_required=True,
+            notes_cited=2,
+        )
+    )
+    async with db.connection(_dsn()) as conn:
+        cursor = await conn.execute(
+            "SELECT retrieval_calls, capture_calls, answer_confidence, review_required, "
+            "notes_cited FROM turn_costs WHERE correlation_id = %s",
+            ("pgcost-knowledge-measured",),
+        )
+        measured = await cursor.fetchone()
+    assert measured == (3, 1, 0.75, True, 2)
 
 
-def test_an_estimate_reaches_the_ledger_and_stays_out_of_the_measured_sum() -> None:
+async def test_an_estimate_reaches_the_ledger_and_stays_out_of_the_measured_sum() -> None:
     """A turn the provider never reported writes a real number, in its own column.
 
     `stream_options.include_usage` puts a request's usage on the terminal chunk, so a turn the
@@ -236,31 +210,27 @@ def test_an_estimate_reaches_the_ledger_and_stays_out_of_the_measured_sum() -> N
     it** catches the tempting fix of adding it to `input_tokens`, which would let an inferred
     number pass for a provider's in every existing dashboard and eval that reads this table.
     """
-
-    async def _run() -> None:
-        sink = await _sink_or_skip()
-        actor = "pgcost-actor-estimated"
-        await sink.record(
-            TurnCost(
-                correlation_id="pgcost-estimated-1",
-                actor=actor,
-                input_tokens=0,
-                output_tokens=0,
-                estimated_tokens=43438,
-                outcome="abandoned",
-                completed=False,
-            )
+    sink = await _sink_or_skip()
+    actor = "pgcost-actor-estimated"
+    await sink.record(
+        TurnCost(
+            correlation_id="pgcost-estimated-1",
+            actor=actor,
+            input_tokens=0,
+            output_tokens=0,
+            estimated_tokens=43438,
+            outcome="abandoned",
+            completed=False,
         )
+    )
 
-        async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
-            cursor = await conn.execute(
-                "SELECT estimated_tokens FROM turn_costs WHERE correlation_id = %s",
-                ("pgcost-estimated-1",),
-            )
-            row = await cursor.fetchone()
-        assert row is not None, "the row the sink just wrote is not there"
-        assert int(row[0]) == 43438, "the estimate did not reach the ledger"
+    async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
+        cursor = await conn.execute(
+            "SELECT estimated_tokens FROM turn_costs WHERE correlation_id = %s",
+            ("pgcost-estimated-1",),
+        )
+        row = await cursor.fetchone()
+    assert row is not None, "the row the sink just wrote is not there"
+    assert int(row[0]) == 43438, "the estimate did not reach the ledger"
 
-        assert await _spend(actor) == (1, 0), "an estimate was summed into the measured tokens"
-
-    asyncio.run(_run())
+    assert await _spend(actor) == (1, 0), "an estimate was summed into the measured tokens"

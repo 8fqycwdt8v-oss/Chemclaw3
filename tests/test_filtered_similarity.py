@@ -11,8 +11,6 @@ to search deeper first. That property is invisible in a small fixture unless a t
 corpus where the wanted hits sit below the page boundary, which is what this one does.
 """
 
-import asyncio
-
 import pytest
 
 from chemclaw.core.config import settings
@@ -53,67 +51,51 @@ async def _indexed(reactions: dict[str, str]) -> InMemoryFingerprintStore:
     return store
 
 
-def test_an_unfiltered_search_is_unchanged_including_the_unstored_record() -> None:
+async def test_an_unfiltered_search_is_unchanged_including_the_unstored_record() -> None:
     """No filter means no corpus read and no drop — the D-018 pending-note citation survives.
 
     That citation is deliberate: the fingerprint index is written at ingestion while the note is
     merged separately, so a hit whose note is still in review yields a reference `kg-validate`
     flags on the report PR. Narrowing must not quietly delete a behaviour nobody asked to change.
     """
-
-    async def _run() -> None:
-        store = await _indexed({"r1": _QUERY})
-        retriever = FingerprintReactionRetriever(store, InMemoryReactionRecordStore())
-        chunks = await retriever.retrieve(_QUERY, {})
-        assert [c.source_note_id for c in chunks] == ["reaction-r1"]  # no record stored
-
-    asyncio.run(_run())
+    store = await _indexed({"r1": _QUERY})
+    retriever = FingerprintReactionRetriever(store, InMemoryReactionRecordStore())
+    chunks = await retriever.retrieve(_QUERY, {})
+    assert [c.source_note_id for c in chunks] == ["reaction-r1"]  # no record stored
 
 
-def test_a_tag_filter_narrows_to_the_records_that_carry_it() -> None:
+async def test_a_tag_filter_narrows_to_the_records_that_carry_it() -> None:
     """The whole point: "similar, and on this campaign" was previously unanswerable."""
+    store = await _indexed({"r1": _QUERY, "r2": "CCO.CC(=O)Cl>>CCOC(C)=O.Cl"})
+    retriever = FingerprintReactionRetriever(store, await _records(r1="step-3", r2="step-9"))
 
-    async def _run() -> None:
-        store = await _indexed({"r1": _QUERY, "r2": "CCO.CC(=O)Cl>>CCOC(C)=O.Cl"})
-        retriever = FingerprintReactionRetriever(store, await _records(r1="step-3", r2="step-9"))
-
-        assert len(await retriever.retrieve(_QUERY, {})) == 2
-        narrowed = await retriever.retrieve(_QUERY, {"tag": "step-3"})
-        assert [c.source_note_id for c in narrowed] == ["reaction-r1"]
-
-    asyncio.run(_run())
+    assert len(await retriever.retrieve(_QUERY, {})) == 2
+    narrowed = await retriever.retrieve(_QUERY, {"tag": "step-3"})
+    assert [c.source_note_id for c in narrowed] == ["reaction-r1"]
 
 
-def test_a_type_filter_drops_a_hit_whose_record_is_not_that_type() -> None:
+async def test_a_type_filter_drops_a_hit_whose_record_is_not_that_type() -> None:
     """`type` is the other half of the gate every note retriever already applies."""
+    store = await _indexed({"r1": _QUERY})
+    retriever = FingerprintReactionRetriever(store, await _records(r1=None))
 
-    async def _run() -> None:
-        store = await _indexed({"r1": _QUERY})
-        retriever = FingerprintReactionRetriever(store, await _records(r1=None))
-
-        assert len(await retriever.retrieve(_QUERY, {"type": "reaction"})) == 1
-        assert await retriever.retrieve(_QUERY, {"type": "playbook"}) == []
-
-    asyncio.run(_run())
+    assert len(await retriever.retrieve(_QUERY, {"type": "reaction"})) == 1
+    assert await retriever.retrieve(_QUERY, {"type": "playbook"}) == []
 
 
-def test_a_filtered_hit_whose_record_is_missing_is_dropped() -> None:
+async def test_a_filtered_hit_whose_record_is_missing_is_dropped() -> None:
     """The one place the pending-note citation does not apply, and deliberately.
 
     A filter says "only notes that are X". A note nobody can read cannot be *shown* to be X, so
     serving it would answer a narrowed question with an unnarrowed hit — the same rule an undated
     note fails a date window under.
     """
-
-    async def _run() -> None:
-        store = await _indexed({"r1": _QUERY})
-        retriever = FingerprintReactionRetriever(store, InMemoryReactionRecordStore())
-        assert await retriever.retrieve(_QUERY, {"tag": "step-3"}) == []
-
-    asyncio.run(_run())
+    store = await _indexed({"r1": _QUERY})
+    retriever = FingerprintReactionRetriever(store, InMemoryReactionRecordStore())
+    assert await retriever.retrieve(_QUERY, {"tag": "step-3"}) == []
 
 
-def test_the_filter_is_applied_before_truncation_not_after(
+async def test_the_filter_is_applied_before_truncation_not_after(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The property the whole design turns on, and the one a small fixture would never reveal.
@@ -123,25 +105,21 @@ def test_the_filter_is_applied_before_truncation_not_after(
     first and then narrowing finds it. As the index gets better at surfacing near-duplicates, the
     naive order returns *fewer* results, which is exactly backwards.
     """
+    # Near-identical esterifications, so all twelve crowd the top of the ranking together.
+    reactions = {f"r{i}": f"CCO.CC(=O)O>>CCOC(C)=O.O.{'[Na+].[Cl-].' * i}O" for i in range(12)}
+    store = await _indexed(reactions)
+    projects = dict.fromkeys(reactions, "untagged") | {"r11": "wanted"}
 
-    async def _run() -> None:
-        # Near-identical esterifications, so all twelve crowd the top of the ranking together.
-        reactions = {f"r{i}": f"CCO.CC(=O)O>>CCOC(C)=O.O.{'[Na+].[Cl-].' * i}O" for i in range(12)}
-        store = await _indexed(reactions)
-        projects = dict.fromkeys(reactions, "untagged") | {"r11": "wanted"}
+    monkeypatch.setattr(settings, "fingerprint_top_k", 2)
+    monkeypatch.setattr(settings, "fingerprint_similarity_threshold", 0.0)
+    retriever = FingerprintReactionRetriever(store, await _records(**projects))
 
-        monkeypatch.setattr(settings, "fingerprint_top_k", 2)
-        monkeypatch.setattr(settings, "fingerprint_similarity_threshold", 0.0)
-        retriever = FingerprintReactionRetriever(store, await _records(**projects))
+    page = await retriever.retrieve(_QUERY, {})
+    assert len(page) == 2
+    assert "reaction-r11" not in [c.source_note_id for c in page]  # outside the page
 
-        page = await retriever.retrieve(_QUERY, {})
-        assert len(page) == 2
-        assert "reaction-r11" not in [c.source_note_id for c in page]  # outside the page
-
-        narrowed = await retriever.retrieve(_QUERY, {"tag": "wanted"})
-        assert [c.source_note_id for c in narrowed] == ["reaction-r11"]
-
-    asyncio.run(_run())
+    narrowed = await retriever.retrieve(_QUERY, {"tag": "wanted"})
+    assert [c.source_note_id for c in narrowed] == ["reaction-r11"]
 
 
 def test_the_deeper_search_is_still_bounded_by_the_index_cap(
@@ -153,20 +131,16 @@ def test_the_deeper_search_is_still_bounded_by_the_index_cap(
     assert FingerprintReactionRetriever._depth(10) == 12
 
 
-def test_a_page_is_never_exceeded_by_the_deeper_search(
+async def test_a_page_is_never_exceeded_by_the_deeper_search(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Searching deeper must widen what is *considered*, never what is returned."""
+    reactions = {f"r{i}": f"CCO.CC(=O)O>>CCOC(C)=O.O.{'[Na+].[Cl-].' * i}O" for i in range(8)}
+    store = await _indexed(reactions)
 
-    async def _run() -> None:
-        reactions = {f"r{i}": f"CCO.CC(=O)O>>CCOC(C)=O.O.{'[Na+].[Cl-].' * i}O" for i in range(8)}
-        store = await _indexed(reactions)
-
-        monkeypatch.setattr(settings, "fingerprint_top_k", 3)
-        monkeypatch.setattr(settings, "fingerprint_similarity_threshold", 0.0)
-        retriever = FingerprintReactionRetriever(
-            store, await _records(**dict.fromkeys(reactions, "wanted"))
-        )
-        assert len(await retriever.retrieve(_QUERY, {"tag": "wanted"})) == 3
-
-    asyncio.run(_run())
+    monkeypatch.setattr(settings, "fingerprint_top_k", 3)
+    monkeypatch.setattr(settings, "fingerprint_similarity_threshold", 0.0)
+    retriever = FingerprintReactionRetriever(
+        store, await _records(**dict.fromkeys(reactions, "wanted"))
+    )
+    assert len(await retriever.retrieve(_QUERY, {"tag": "wanted"})) == 3

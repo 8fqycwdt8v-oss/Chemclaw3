@@ -389,7 +389,7 @@ def test_a_geometry_keyed_calculation_is_findable_by_its_geometry(
         _run(tools.find_calculations(smiles="CCO", calc_type="xtb.opt"))
 
 
-def test_the_geometry_store_round_trips_through_postgres() -> None:
+async def test_the_geometry_store_round_trips_through_postgres() -> None:
     """The backend the deployment actually uses, not just the in-memory twin.
 
     The cross-process reach is the whole reason a durable backend exists: the conformer search runs
@@ -399,19 +399,16 @@ def test_the_geometry_store_round_trips_through_postgres() -> None:
     from chemclaw.science.calc.postgres_structures import PostgresStructureStore
     from tests.pg import migrated_db_or_skip
 
-    async def _drive() -> None:
-        await migrated_db_or_skip()
-        store = PostgresStructureStore()
-        first, second = _structure("CCO"), _structure("CCC")
-        await store.put([first, second])
-        # Idempotent by content address: a second write is a no-op, not a conflict.
-        await store.put([first])
+    await migrated_db_or_skip()
+    store = PostgresStructureStore()
+    first, second = _structure("CCO"), _structure("CCC")
+    await store.put([first, second])
+    # Idempotent by content address: a second write is a no-op, not a conflict.
+    await store.put([first])
 
-        assert (await store.get(first.structure_id)) == first
-        assert (await store.get(second.structure_id)) == second
-        assert await store.get("st_never_written") is None
-
-    asyncio.run(_drive())
+    assert (await store.get(first.structure_id)) == first
+    assert (await store.get(second.structure_id)) == second
+    assert await store.get("st_never_written") is None
 
 
 def test_writing_no_geometries_touches_nothing() -> None:

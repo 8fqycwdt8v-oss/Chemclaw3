@@ -308,7 +308,7 @@ def test_the_stale_scan_is_bounded_and_deterministic() -> None:
     _both_backends(_body)
 
 
-def test_current_version_reads_the_index_and_not_the_whole_corpus() -> None:
+async def test_current_version_reads_the_index_and_not_the_whole_corpus() -> None:
     """`current_version()` must reach `reaction_labels_current_version_idx` (086).
 
     Two halves, because they fail for different reasons. The **shape** half runs with no database:
@@ -338,21 +338,18 @@ def test_current_version_reads_the_index_and_not_the_whole_corpus() -> None:
         "ORDER BY labelled_at DESC, source, reaction_id LIMIT 1"
     ), "the statement no longer matches reaction_labels_current_version_idx (086)'s order"
 
-    async def _run() -> None:
-        index = await _postgres_or_skip()
-        await index.record(_label("pg-current-version"))
-        await index.store_labels(_derived(_label("pg-current-version")), _VERSION)
-        assert await index.current_version() is not None
-        async with await connect(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute("SET LOCAL enable_seqscan = off")
-                await cur.execute(f"EXPLAIN (COSTS OFF) {PostgresLabelIndex._CURRENT_VERSION}")
-                plan = "\n".join(str(row[0]) for row in await cur.fetchall())
-        assert "reaction_labels_current_version_idx" in plan, (
-            "current_version() does not reach its index; the plan was:\n" + plan
-        )
-
-    asyncio.run(_run())
+    index = await _postgres_or_skip()
+    await index.record(_label("pg-current-version"))
+    await index.store_labels(_derived(_label("pg-current-version")), _VERSION)
+    assert await index.current_version() is not None
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SET LOCAL enable_seqscan = off")
+            await cur.execute(f"EXPLAIN (COSTS OFF) {PostgresLabelIndex._CURRENT_VERSION}")
+            plan = "\n".join(str(row[0]) for row in await cur.fetchall())
+    assert "reaction_labels_current_version_idx" in plan, (
+        "current_version() does not reach its index; the plan was:\n" + plan
+    )
 
 
 def test_a_labellers_confidence_survives_the_round_trip_in_both_backends() -> None:

@@ -23,6 +23,33 @@ one place, because `RecordContextCompaction` computes the estimate and then awai
 reports the bill. `note_model_call` is that comparison, and `estimator_ratio` is what the triggers
 are divided by.
 
+**The prefix is now counted rather than estimated, and the thread deliberately is not.** A BPE
+encoding is available offline (`llm_token_encoding`, `o200k_base` by default), so the question is
+where it pays, and it is not where it was expected to. Measured 2026-09-16 on a compiled `default`
+graph with the connector surface bound, 98 tools, `o200k_base` against chars/4:
+
+- The **tool schemas** — the largest single term, 61,093 estimated — bill **61,123**. The estimator
+  is within **0.05%** of the encoding on JSON schemas, so counting them exactly corrects 30 tokens
+  in 61,093 and is kept only because it is free: `_SCHEMA_TOKENS` memoises the sweep per bound
+  surface for the life of the process, and it costs 92.7 ms against 50.5 ms, once.
+- The **system message** bills **6,574** against **7,755** estimated — the estimator is **18%
+  high** on this repository's own prompt, and that is where the whole correction is. 1.62 ms per
+  model call, on a thread `awrap_model_call` already keeps off the loop.
+
+End to end through the middleware the prefix falls **68,828 → 67,667, -1,161 tokens (-1.69%)**, and
+those are thread the policy was cutting for nothing: the clamp below means an over-estimate of the
+whole request is never refunded, only an under-estimate is corrected.
+
+The **thread** is the term where chars/4 is most wrong — measured at **2.08x** on a thread of dense
+`enumerate_bond_cleavages`-shaped results — and it is still the term left to the estimator, because
+counting it exactly costs **24.2 ms against 0.03 ms** per count at the shipped thread allowance
+(49.6 against 0.07 at 113,250), a count happens at least three times per model call, and two of the
+three are `RecordContextCompaction`'s, *on the event loop that serves every SSE stream on the pod*.
+~72 ms of loop time per model call, to sharpen a term the whole-request conversion below already
+converts away in aggregate, is the wrong trade. **So the calibration stays**, and not as a fallback
+for the prefix alone: a gateway fronting a non-OpenAI vendor tokenizes differently from any encoding
+named here, and the provider's own framing is in no local count either.
+
 **It only ever tightens.** `estimator_ratio` is clamped at 1.0 from below, so a mismeasurement can
 make the policy compact earlier than it needed to; it can never make it believe a request is
 smaller than it is. That asymmetry is deliberate: the failure being closed is a hard context-length
@@ -74,10 +101,13 @@ all — the join between the policy and the bill it exists to reduce, which no s
 
 import asyncio
 import logging
+import os
+import tempfile
 import threading
 from collections.abc import Awaitable, Callable, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest
@@ -418,6 +448,235 @@ def effective_trigger(configured: int) -> int:
     return trigger
 
 
+#: The process's BPE encoding: empty before the one attempt, `[None]` when exact counting is not
+#: available here, `[encoding]` when it is. A list rather than a flag-plus-value pair because
+#: "not resolved yet" and "resolved to nothing" are different states and conflating them is how a
+#: failed resolution gets retried on every model call.
+_ENCODING: list[Any] = []
+_ENCODING_LOCK = threading.Lock()
+
+
+def _baked_cache_dir() -> Path | None:
+    """The merge-table cache `tiktoken` would read, when a deployment has actually baked one.
+
+    **This is a precondition rather than an optimisation, and the reason is the egress posture.**
+    `tiktoken.get_encoding` fetches its merge table over HTTPS on a miss — measured here with an
+    empty cache and no network, `requests.exceptions.ProxyError` (an `OSError`) after 0.03 s
+    where the proxy refuses at once and 0.2 s where it is dialled, and
+    on a network that drops rather than refuses the packet that becomes a connect timeout on the
+    thread measuring the prefix. Production is air-gapped, so the right behaviour is not to reach
+    the network and recover; it is not to reach it. Asking whether a cache has been baked at all
+    means the common misconfiguration — an image built without one — never makes the call.
+
+    **The resolution below is `tiktoken.load.read_file_cached`'s own, and it is transcribed rather
+    than paraphrased because a paraphrase of it was wrong in the direction that dials.** That
+    function decides on *presence* (`"TIKTOKEN_CACHE_DIR" in os.environ`) and treats an empty value
+    as *caching disabled — fetch every time*. This function asked `os.environ.get(...) or ...`,
+    which is truthiness: an empty `TIKTOKEN_CACHE_DIR` fell through to `DATA_GYM_CACHE_DIR` and
+    then to the temp-directory default, and where that default happened to be populated — which it
+    is on any host that has ever loaded an encoding — this function answered "a table is baked
+    here, it is safe to load". Measured with `TIKTOKEN_CACHE_DIR=""` and a populated
+    `/tmp/data-gym-cache`: this returned that directory, `tiktoken.get_encoding("o200k_base")`
+    then ignored it exactly as upstream says it will, and the resolve dialled. A guard that says
+    "no network will be reached" and is then the reason one is reached is worse than no guard, so
+    the two spellings are now the same spelling. Nothing else here may be loosened the same way:
+    upstream compares `cache_dir == ""` exactly, so a value of `" "` is a directory named `" "`
+    and is not stripped here either.
+
+    What it does not close, said rather than implied: a *populated* cache that does not hold the
+    configured encoding still attempts one fetch per process, which is the deployment that changed
+    `llm_token_encoding` without re-baking. `_resolve_encoding` says what bounds that and what
+    does not.
+
+    Returns:
+        The directory, or `None` when there is nothing baked there to read — including the
+        deliberate "no cache" that an empty value is.
+    """
+    if "TIKTOKEN_CACHE_DIR" in os.environ:
+        named = os.environ["TIKTOKEN_CACHE_DIR"]
+    elif "DATA_GYM_CACHE_DIR" in os.environ:
+        named = os.environ["DATA_GYM_CACHE_DIR"]
+    else:
+        named = str(Path(tempfile.gettempdir()) / "data-gym-cache")
+    if named == "":
+        return None
+    try:
+        directory = Path(named)
+        return directory if any(directory.iterdir()) else None
+    except OSError:
+        return None
+
+
+def _resolve_encoding() -> Any | None:
+    """Load the configured encoding once, or say why the budget is counting with chars/4 instead.
+
+    **Never raises and never fails a turn.** Every caller has a working answer without it — the
+    estimator this module has always used — so a missing table, an unknown encoding name or a
+    `tiktoken` that is not installed costs accuracy and nothing else.
+
+    **The name is configured because the model is not knowable.** Every model call goes to one
+    OpenAI-compatible gateway (`D-2026-09-04-a-gateway-is-the-only-provider`), which does not say
+    what it fronts, so `encoding_for_model` has nothing to be given. `llm_token_encoding` is
+    therefore a statement by the deployment about its own endpoint, and where that endpoint fronts
+    a non-OpenAI vendor the count is a *closer approximation* rather than the bill: the residual is
+    what `_Calibration` above measures and divides out, which is why it stays.
+
+    **The swallow below bounds an exception and the residual is a hang, so what bounds the hang is
+    stated here rather than assumed.** `tiktoken.load.read_file` calls `requests.get(blobpath)`
+    with no timeout at all, so on a network that *drops* rather than refuses there is no exception
+    to catch and this function does not return. Three things are true about that, measured rather
+    than reasoned:
+
+    - **`_baked_cache_dir` closes the common path**, and after the transcription above it closes it
+      for the empty-value spelling too: with nothing baked — or with caching deliberately disabled
+      — `tiktoken` is never imported and never called, so no fetch exists to hang. Measured on the
+      arm that used to dial (`TIKTOKEN_CACHE_DIR=""`, a populated `/tmp/data-gym-cache`): hosts
+      dialled went from `['127.0.0.1']` to none.
+    - **The residual is bounded one layer down, at the resolver rather than at a timeout.**
+      `core/netguard.py` arms at `chemclaw.core.config` import, which this module's own import
+      chain makes, and `requests` is pure Python so the patched `socket.getaddrinfo` sees it.
+      Measured with the guard armed and no proxy variable set: a fetch of `o200k_base` is refused
+      in **0.003 s** as `requests.ConnectionError`, which the `except Exception` here then turns
+      into the degradation this function already reports. What is *not* bounded is named rather
+      than glossed: a deployment running `CHEMCLAW_EGRESS_GUARD_ENABLED=false`, and an ambient
+      proxy variable whose proxy is loopback or allowlisted — the guard must exempt loopback, so it
+      sees a legitimate dial. That second case is how the defect above was measured dialling
+      `127.0.0.1` with the guard armed and reporting no refusal.
+    - **Moving the lock is not one of the three, and that is a measurement rather than a
+      preference** — see `_encoding`.
+    """
+    name = settings.llm_token_encoding
+    if not name:
+        return None
+    cache = _baked_cache_dir()
+    if cache is None:
+        log_event(
+            logger,
+            "context.token_encoding_unavailable",
+            "no tiktoken merge-table cache is baked here, so the context budget counts with its "
+            "chars/4 estimator and the measured calibration ratio; bake one and set "
+            "TIKTOKEN_CACHE_DIR to count the request prefix exactly",
+            level=logging.INFO,
+            encoding=name,
+        )
+        return None
+    try:
+        import tiktoken
+
+        encoding = tiktoken.get_encoding(name)
+    except Exception:
+        degraded(
+            logger,
+            "context_budget",
+            "could not load the '%s' token encoding from the cache at %s; the context budget "
+            "counts with its chars/4 estimator instead",
+            name,
+            cache,
+            level=logging.WARNING,
+        )
+        return None
+    log_event(
+        logger,
+        "context.token_encoding_loaded",
+        "counting this request's prefix with the %s encoding",
+        name,
+        level=logging.INFO,
+        encoding=name,
+    )
+    return encoding
+
+
+def _encoding() -> Any | None:
+    """The process's encoding, resolved at most once. `None` means "count with the estimator".
+
+    Under the lock for the whole resolution rather than around a memo read: loading `o200k_base`
+    from a warm cache measures **357 ms** and builds a 3.6 MB table, and two turns racing a cold
+    process should wait for one load rather than each do their own.
+
+    **It stays there, and the reason is that releasing it bounds nothing.** The worry it answers is
+    real — `_resolve_encoding`'s fetch has no timeout, so a dropping network makes the resolution
+    never return — but the lock is not what turns one stall into many. Driven with a 3.0 s stall
+    standing in for that fetch and four concurrent prefix measurements: **lock held, 1 fetch, wall
+    3.00 s, every thread 3.0 s; lock released, 4 fetches, wall 3.02 s, every thread 3.0 s.** Nobody
+    waits any less without it, because the thing they are waiting for is the fetch and the memo is
+    still empty until it returns — so a fifth turn arriving at second 2 blocks either way. All
+    releasing it buys is one hung socket per concurrent turn instead of one per process, which is
+    the wrong direction on an air-gapped estate.
+
+    So the bound is `_baked_cache_dir` declining to call at all, and the egress guard refusing the
+    residual at the resolver in 0.003 s; both are in `_resolve_encoding`'s docstring with their
+    measurements, including the two postures neither covers. A `concurrent.futures` future with a
+    join timeout was the obvious third option and is declined: it stops the *waiting* without
+    stopping the socket or the thread, which is a control that reads as one and is not — the same
+    trade `Chemclaw3-mcp` records for a per-tool-call wall clock over `asyncio.to_thread`.
+    """
+    with _ENCODING_LOCK:
+        if not _ENCODING:
+            _ENCODING.append(_resolve_encoding())
+        return _ENCODING[0]
+
+
+def reset_encoding() -> None:
+    """Forget the resolved encoding. Tests only — a process resolves this once and keeps it."""
+    with _ENCODING_LOCK:
+        _ENCODING.clear()
+
+
+def _text_tokens(content: Any, encoding: Any) -> int | None:
+    """Exact tokens of a message's content, or `None` when this content cannot be counted that way.
+
+    **A block list rather than only a string, because the system message this repository sends is
+    one.** The first version of this function tested `isinstance(content, str)` and fell back
+    otherwise — which measured as a no-op on the exact term it was written for: the prompt a turn
+    is handed arrives as `[{"type": "text", "text": ...}]`, so the whole 15% over-estimate stayed.
+    A fallback that is never taken and a fallback that is always taken look identical from the
+    number that comes out, which is why `tests/test_context_budget.py` asserts the count *changed*.
+
+    `None` for anything else, deliberately: an image block is priced by
+    `count_tokens_approximately` at a flat 85 tokens and by an encoding not at all, so a message
+    carrying one is counted by the estimator whole rather than half each way.
+
+    **`encode_ordinary`, not `encode`.** `encode` raises `ValueError` on a text containing a
+    special-token spelling such as `<|endoftext|>`, and a tool result is text a server wrote — a
+    counter that can raise on its own input would fail the turn it exists to make cheaper.
+    """
+    if isinstance(content, str):
+        return len(encoding.encode_ordinary(content))
+    if not isinstance(content, list):
+        return None
+    total = 0
+    for block in content:
+        if isinstance(block, str):
+            total += len(encoding.encode_ordinary(block))
+            continue
+        if not isinstance(block, dict) or block.get("type") != "text":
+            return None
+        text = block.get("text")
+        if not isinstance(text, str):
+            return None
+        total += len(encoding.encode_ordinary(text))
+    return total
+
+
+def _message_tokens(message: BaseMessage) -> int:
+    """One message's size: exactly where the encoding can be had, by chars/4 where it cannot.
+
+    **The envelope is still the estimator's, and deliberately.** `count_tokens_approximately`
+    charges a per-message constant (upstream's `extra_tokens_per_message`, plus the role, the name,
+    an `AIMessage`'s tool calls and a `ToolMessage`'s call id) that stands in for the provider's
+    own framing, and no local tokenizer knows what that framing is. So this counts the *content*
+    with the encoding and asks the estimator what the rest of the message costs — which keeps the
+    two units addable, the property `_clear_older_tool_results` relies on when it reclaims the
+    difference of two single-message counts.
+    """
+    encoding = _encoding()
+    content = None if encoding is None else _text_tokens(message.content, encoding)
+    if content is None:
+        return int(count_tokens_approximately([message]))
+    envelope = int(count_tokens_approximately([message.model_copy(update={"content": ""})]))
+    return envelope + content
+
+
 def _tool_name(tool: Any) -> str:
     """The name a provider sees for one bound tool, whether it is an object or a dict schema."""
     name = getattr(tool, "name", None)
@@ -433,12 +692,22 @@ def _tool_name(tool: Any) -> str:
 
 
 def estimate_tool_schemas(tools: Sequence[Any]) -> int:
-    """Estimated tokens of the tool schemas as a provider is sent them.
+    """Tokens of the tool schemas as a provider is sent them, counted with the best unit available.
 
     Through `convert_to_openai_tool`, which is the function LangChain itself calls when binding
     tools to a model — the same choice `tests/test_context_floor.py` made and for the same reason:
     reading `.name`/`.description` off a plain decorated callable finds a repr, an empty string and
     `None`, and measures the whole surface at ~11 tokens per tool.
+
+    **Exact where the encoding can be had, and this is the cheapest place in the system for it**:
+    `_schema_tokens` memoises the result per bound surface for the life of the process, so the
+    whole sweep is one encode per surface rather than one per model call. **And it is the term the
+    correction turned out not to be about.** Measured 2026-09-16 over the `default` profile's 98
+    bound tools, `o200k_base` against chars/4: **61,123 against 61,093** — the estimator is within
+    **0.05%** on JSON schemas, which is 30 tokens in 61,093. The sweep costs 92.7 ms against
+    50.5 ms, once per process per surface, so this is kept for costing nothing rather than for
+    buying anything; the term beside it is where the error is
+    (`MeasureRequestPrefix._measure`).
 
     Never raises. A tool whose schema cannot be derived contributes nothing rather than costing the
     turn, because this number exists to *bound* a budget and a missing summand only makes the bound
@@ -449,7 +718,7 @@ def estimate_tool_schemas(tools: Sequence[Any]) -> int:
     total = 0
     for tool in tools:
         try:
-            total += count_tokens_approximately([_as_message(convert_to_openai_tool(tool))])
+            total += _message_tokens(_as_message(convert_to_openai_tool(tool)))
         except Exception:
             continue
     return int(total)
@@ -526,9 +795,26 @@ class MeasureRequestPrefix(AgentMiddleware[Any, Any, Any]):
     """
 
     def _measure(self, request: ModelRequest[Any]) -> int:
-        """This request's prefix in estimated tokens, the schema half memoised per bound surface."""
+        """This request's prefix, the schema half memoised per bound surface.
+
+        **The instructions are the half chars/4 is actually wrong about, and it over-charges.**
+        Measured 2026-09-16 on the `default` profile's observed system message — instructions, the
+        skills listing and the middleware sections — `o200k_base` bills **6,574** against the
+        estimator's **7,755**: the estimator is **18% high**, where on the schema half beside it it
+        is 0.05% low. Through this method the whole prefix measures **67,667 against 68,828**, and
+        the 1,161 tokens between them are thread the policy was cutting for nothing.
+
+        **The calibration cannot give them back, which is why this is worth an encode.**
+        `estimator_ratio` is clamped at 1.0 from below, so a request whose billed size is *under*
+        what this system estimated converts at 1.0 and the over-estimate is kept, not refunded. The
+        clamp is right — it is what makes a mismeasurement cost a compaction rather than a turn —
+        and counting the prefix where it is cheap is the way to stop paying for it.
+
+        It costs **1.62 ms** per model call at that size, on the worker thread `awrap_model_call`
+        already measures in.
+        """
         system = request.system_message
-        instructions = int(count_tokens_approximately([system])) if system is not None else 0
+        instructions = _message_tokens(system) if system is not None else 0
         return _schema_tokens(request.tools) + instructions
 
     def _measured(self, request: ModelRequest[Any]) -> int | None:

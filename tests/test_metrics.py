@@ -273,3 +273,87 @@ def test_a_gauge_family_renders_one_labelled_series_per_reading() -> None:
     rendered = metrics.render()
     assert 'chemclaw_table_bytes{table="session_messages"} 581632' in rendered
     assert 'chemclaw_table_bytes{table="audit_events"} 4096' in rendered
+
+
+def test_a_non_finite_gauge_reading_renders_as_prometheus_spells_it() -> None:
+    """`inf` and `nan` are not tokens the exposition format has, and one poisons the whole scrape.
+
+    A bound gauge computing a ratio reaches a zero denominator sooner or later. Before `_sample`,
+    `render()` formatted every gauge with `:g`, which spells those `inf` and `nan` — and a sample
+    Prometheus cannot parse does not fail alone, it fails the scrape, so one unreadable ratio loses
+    every metric this pod has at the moment somebody is looking for them.
+    """
+    for reading, expected in (
+        (float("inf"), "+Inf"),
+        (float("-inf"), "-Inf"),
+        (float("nan"), "NaN"),
+    ):
+        metrics = Metrics()
+        metrics.bind_gauge("chemclaw_turns_in_flight", lambda reading=reading: reading)  # type: ignore[misc]
+        assert f"chemclaw_turns_in_flight {expected}" in metrics.render()
+
+
+def test_a_bool_reading_renders_as_a_number_rather_than_as_the_word_true() -> None:
+    """The scrape-killer `_sample` shipped with, defended by a comment that had it backwards.
+
+    `bool` is a subclass of `int`, so the original `if isinstance(value, int): return str(value)`
+    arm rendered `True` — not `1` — for any gauge whose source returned a flag. Its comment said
+    "includes bool, which is an int and renders 0/1 — correct here", which is the whole defect
+    stated as the reason it is safe. `True` is not a sample Prometheus can parse, and an
+    unparseable sample loses the *entire* exposition, so this is the same total outage as the
+    `inf` case above reached by a much more ordinary mistake: binding a gauge to a predicate.
+
+    It was dead code as well as wrong — every shipped emission site hands `_sample` a float — so
+    the fix is the coercion rather than a narrower `isinstance`. Pinned here because the next
+    person to bind a gauge to `lambda: some_flag` has no reason to expect this to matter.
+    """
+    for reading, expected in ((True, "1.0"), (False, "0.0")):
+        metrics = Metrics()
+        metrics.bind_gauge("chemclaw_egress_guard_armed", lambda reading=reading: reading)  # type: ignore[misc]
+        assert f"chemclaw_egress_guard_armed {expected}\n" in metrics.render()
+
+
+def test_a_counter_past_a_million_is_rendered_exactly() -> None:
+    """`:g` carries six significant digits, so this was the point every counter stopped being true.
+
+    The non-finite half above is loud — Prometheus rejects the scrape. This half was silent:
+    1,234,567 rendered as `1.23457e+06`, which is well-formed, accepted, graphed, and wrong by
+    three. `chemclaw_tool_calls_total` on the shipped fleet crosses a million in days, so this was
+    not a hypothetical range.
+    """
+    metrics = Metrics()
+    metrics.increment("chemclaw_turns_started_total", amount=1_234_567)
+    rendered = metrics.render()
+    assert "chemclaw_turns_started_total 1234567" in rendered
+    assert "e+06" not in rendered
+
+
+def test_a_histogram_sum_keeps_the_precision_its_observations_had() -> None:
+    """`_sum` had the same six-digit ceiling as a counter, and a duration sum is where it lands.
+
+    A pod observing seconds accumulates past 10^6 in about eleven days of busy tool calls, after
+    which every `rate()` over `_sum` reads a rounded numerator against an exact denominator.
+    """
+    metrics = Metrics()
+    metrics.observe("chemclaw_turn_duration_seconds", 1_234_567.25)
+    line = next(
+        row
+        for row in metrics.render().splitlines()
+        if row.startswith("chemclaw_turn_duration_seconds_sum")
+    )
+    assert line.endswith(" 1234567.25"), line
+
+
+def test_the_bucket_boundary_label_is_left_alone_because_it_is_a_series_identity() -> None:
+    """`le` is a label, not a sample: re-spelling it would mint a new series beside the old one.
+
+    This asserts the asymmetry deliberately, so that a later sweep "finishing the job" by routing
+    `le` through `_sample` as well has to argue with a test rather than with a comment. `3600` and
+    `3600.0` are the same number and two different series to every dashboard already reading this
+    histogram.
+    """
+    metrics = Metrics()
+    metrics.observe("chemclaw_turn_duration_seconds", 0.5)
+    rendered = metrics.render()
+    assert 'le="1"' in rendered
+    assert 'le="1.0"' not in rendered

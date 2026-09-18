@@ -523,7 +523,7 @@ def test_the_bootstrap_file_is_never_the_newest_shipped_migration(tmp_path: Path
         settings.sql_migrations_dir = original
 
 
-def test_a_ledger_row_this_image_ships_no_file_for_is_reported(
+async def test_a_ledger_row_this_image_ships_no_file_for_is_reported(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A database ahead of the image is a WARNING — and still a run that starts.
@@ -538,39 +538,35 @@ def test_a_ledger_row_this_image_ships_no_file_for_is_reported(
     the constraint on it — a rollback has to be able to start, and this schema only ever goes
     forward, so there is nothing here for the migrator to undo.
     """
+    await migrated_db_or_skip()
+    dsn = migration_dsn()
+    planted = "999_a_migration_from_a_newer_image.sql"
+    conn = await psycopg.AsyncConnection.connect(dsn)
+    try:
+        await conn.execute(
+            "INSERT INTO schema_migrations (filename, checksum) VALUES (%s, %s)",
+            (planted, "0" * 64),
+        )
+        await conn.commit()
+        with caplog.at_level(logging.WARNING, logger="chemclaw.core.migrate"):
+            assert await migrate(dsn) == [], "a ledger row ahead of the image refused the run"
+    finally:
+        await conn.execute("DELETE FROM schema_migrations WHERE filename = %s", (planted,))
+        await conn.commit()
+        await conn.close()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        dsn = migration_dsn()
-        planted = "999_a_migration_from_a_newer_image.sql"
-        conn = await psycopg.AsyncConnection.connect(dsn)
-        try:
-            await conn.execute(
-                "INSERT INTO schema_migrations (filename, checksum) VALUES (%s, %s)",
-                (planted, "0" * 64),
-            )
-            await conn.commit()
-            with caplog.at_level(logging.WARNING, logger="chemclaw.core.migrate"):
-                assert await migrate(dsn) == [], "a ledger row ahead of the image refused the run"
-        finally:
-            await conn.execute("DELETE FROM schema_migrations WHERE filename = %s", (planted,))
-            await conn.commit()
-            await conn.close()
-
-        ahead = [
-            record
-            for record in caplog.records
-            if getattr(record, "event", "") == "migrate.database_ahead"
-        ]
-        assert ahead, "nothing at WARNING said the database is ahead of this image"
-        assert ahead[0].levelno == logging.WARNING
-        assert getattr(ahead[0], "unknown", None) == 1
-        assert getattr(ahead[0], "newest_unknown", None) == planted
-
-    asyncio.run(_run())
+    ahead = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", "") == "migrate.database_ahead"
+    ]
+    assert ahead, "nothing at WARNING said the database is ahead of this image"
+    assert ahead[0].levelno == logging.WARNING
+    assert getattr(ahead[0], "unknown", None) == 1
+    assert getattr(ahead[0], "newest_unknown", None) == planted
 
 
-def test_a_peer_holding_the_lock_is_named_rather_than_raised_as_a_traceback() -> None:
+async def test_a_peer_holding_the_lock_is_named_rather_than_raised_as_a_traceback() -> None:
     """The *normal* concurrency case must not read as a crash.
 
     Two overlapping deploys, or `make db-migrate` run during one, is the event this lock exists
@@ -581,22 +577,18 @@ def test_a_peer_holding_the_lock_is_named_rather_than_raised_as_a_traceback() ->
 
     The budget is named in the message because it is the one thing an operator can change.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        dsn = migration_dsn()
-        peer = await psycopg.AsyncConnection.connect(dsn)
+    await migrated_db_or_skip()
+    dsn = migration_dsn()
+    peer = await psycopg.AsyncConnection.connect(dsn)
+    try:
+        await peer.execute("SELECT pg_advisory_xact_lock(%s)", (_MIGRATION_LOCK_KEY,))
+        original = settings.pg_migration_lock_wait_seconds
+        settings.pg_migration_lock_wait_seconds = 1.0
         try:
-            await peer.execute("SELECT pg_advisory_xact_lock(%s)", (_MIGRATION_LOCK_KEY,))
-            original = settings.pg_migration_lock_wait_seconds
-            settings.pg_migration_lock_wait_seconds = 1.0
-            try:
-                with pytest.raises(MigrationError, match="another migrator held"):
-                    await migrate(dsn)
-            finally:
-                settings.pg_migration_lock_wait_seconds = original
+            with pytest.raises(MigrationError, match="another migrator held"):
+                await migrate(dsn)
         finally:
-            await peer.rollback()
-            await peer.close()
-
-    asyncio.run(_run())
+            settings.pg_migration_lock_wait_seconds = original
+    finally:
+        await peer.rollback()
+        await peer.close()

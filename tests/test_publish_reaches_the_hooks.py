@@ -1240,7 +1240,7 @@ def test_a_hessian_cache_miss_publishes_what_its_row_actually_holds(
     )
 
 
-def test_a_published_gradient_is_converted_into_the_unit_the_registry_keeps(
+async def test_a_published_gradient_is_converted_into_the_unit_the_registry_keeps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The predicate column is canonical or it is a lie, and it was a lie for `max_gradient`.
@@ -1264,13 +1264,10 @@ def test_a_published_gradient_is_converted_into_the_unit_the_registry_keeps(
     install(monkeypatch, FakeCalcServer())
     queued = _publishing(monkeypatch)
 
-    async def _relax_and_differentiate() -> None:
-        store = InMemoryStore()
-        structure = await compose.embed("CCO")
-        relaxed, _ = await compose.relax(store, structure, None)
-        await compose.hessian(store, relaxed.structure, None, artifacts=InMemoryArtifactStore())
-
-    asyncio.run(_relax_and_differentiate())
+    store = InMemoryStore()
+    structure = await compose.embed("CCO")
+    relaxed, _ = await compose.relax(store, structure, None)
+    await compose.hessian(store, relaxed.structure, None, artifacts=InMemoryArtifactStore())
 
     gradients = [
         fact for record in queued for fact in record.properties if fact.property == "max_gradient"
@@ -1360,7 +1357,9 @@ def test_every_declared_tool_composite_is_published_by_a_real_tool_call(
     assert published[0].properties, "a record with no facts says nothing was found"
 
 
-def test_asking_the_same_composite_twice_is_one_record(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_asking_the_same_composite_twice_is_one_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A tool composite has no cache key, so its identity is the result it produced.
 
     The route plus a hash of the payload: two identical questions collapse to one row on the
@@ -1370,15 +1369,10 @@ def test_asking_the_same_composite_twice_is_one_record(monkeypatch: pytest.Monke
     calc_tools = _calc_stack(monkeypatch)
     queued = _publishing(monkeypatch)
 
-    async def _three_calls() -> None:
-        manager = calc_tools.server._tool_manager
-        await manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
-        await manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
-        await manager.call_tool(
-            "compute_thermochemistry", {"smiles": "CCO", "temperature_k": 310.0}
-        )
-
-    asyncio.run(_three_calls())
+    manager = calc_tools.server._tool_manager
+    await manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
+    await manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
+    await manager.call_tool("compute_thermochemistry", {"smiles": "CCO", "temperature_k": 310.0})
 
     refs = [record.calc_ref for record in queued if record.payload_kind == "ThermochemistryResult"]
     assert len(refs) == 3
@@ -1386,7 +1380,7 @@ def test_asking_the_same_composite_twice_is_one_record(monkeypatch: pytest.Monke
     assert refs[2] != refs[0], "a second temperature is a second measurement, not a duplicate"
 
 
-def test_an_unstated_default_and_the_value_it_resolves_to_are_one_record(
+async def test_an_unstated_default_and_the_value_it_resolves_to_are_one_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Both tool composites take a **sentinel** default, and a request hash cannot see through one.
@@ -1406,19 +1400,16 @@ def test_an_unstated_default_and_the_value_it_resolves_to_are_one_record(
     calc_tools = _calc_stack(monkeypatch)
     queued = _publishing(monkeypatch)
 
-    async def _four_calls() -> None:
-        manager = calc_tools.server._tool_manager
-        await manager.call_tool("predict_logd", {"smiles": "CC(=O)Nc1ccc(O)cc1"})
-        await manager.call_tool(
-            "predict_logd", {"smiles": "CC(=O)Nc1ccc(O)cc1", "ph": settings.logd_default_ph}
-        )
-        await manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
-        await manager.call_tool(
-            "compute_thermochemistry",
-            {"smiles": "CCO", "temperature_k": settings.xtb_thermo_temperature_k},
-        )
-
-    asyncio.run(_four_calls())
+    manager = calc_tools.server._tool_manager
+    await manager.call_tool("predict_logd", {"smiles": "CC(=O)Nc1ccc(O)cc1"})
+    await manager.call_tool(
+        "predict_logd", {"smiles": "CC(=O)Nc1ccc(O)cc1", "ph": settings.logd_default_ph}
+    )
+    await manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
+    await manager.call_tool(
+        "compute_thermochemistry",
+        {"smiles": "CCO", "temperature_k": settings.xtb_thermo_temperature_k},
+    )
 
     for kind in ("LogdResult", "ThermochemistryResult"):
         refs = [record.calc_ref for record in queued if record.payload_kind == kind]
@@ -1428,7 +1419,7 @@ def test_an_unstated_default_and_the_value_it_resolves_to_are_one_record(
         )
 
 
-def test_a_presentational_argument_does_not_fork_a_composite_s_identity(
+async def test_a_presentational_argument_does_not_fork_a_composite_s_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Moving the identity onto the result put a *presentational* argument inside it.
@@ -1448,12 +1439,9 @@ def test_a_presentational_argument_does_not_fork_a_composite_s_identity(
     calc_tools = _calc_stack(monkeypatch)
     queued = _publishing(monkeypatch)
 
-    async def _two_calls() -> None:
-        manager = calc_tools.server._tool_manager
-        await manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
-        await manager.call_tool("compute_thermochemistry", {"smiles": "CCO", "top_bands": 200})
-
-    asyncio.run(_two_calls())
+    manager = calc_tools.server._tool_manager
+    await manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
+    await manager.call_tool("compute_thermochemistry", {"smiles": "CCO", "top_bands": 200})
 
     records = [record for record in queued if record.payload_kind == "ThermochemistryResult"]
     assert len(records) == 2, "both calls must reach the hook"

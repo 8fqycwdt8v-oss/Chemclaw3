@@ -18,12 +18,15 @@ import pytest
 
 from chemclaw.agent.graph_tools import find_notes
 from chemclaw.agent.subscriptions import Subscription
+from chemclaw.core.config import settings
 from chemclaw.durable.digest import _matches
 from chemclaw.kg.graph import invalidate_cache, load_notes
 from chemclaw.kg.note import Note
 from chemclaw.kg.render import render_note
 from chemclaw.kg.search import query_terms, search_text, term_coverage
 from chemclaw.retrieval.retrievers import GraphRetriever
+from chemclaw.retrieval.vector_index import NoteRecord, PostgresNoteIndex
+from tests.pg import migrated_db_or_skip
 
 _KNOWLEDGE = Path(__file__).resolve().parents[1] / "knowledge"
 
@@ -165,3 +168,64 @@ def test_a_stopword_list_only_grows_by_words_a_note_cannot_be_about() -> None:
 
     for open_class in ("give", "given", "use", "used", "using", "get", "got", "need", "yield"):
         assert open_class not in _STOPWORDS, open_class
+
+
+def test_the_two_lexical_rules_over_one_corpus_are_not_one_rule() -> None:
+    """Neither lexical leg subsumes the other, which is why the duplication is not removable.
+
+    Two rankers read the notes: `GraphRetriever` scores `kg.search.term_coverage`'s **substring**
+    match in this process, `LexicalRetriever` asks Postgres for `ts_rank` over the same rows. That
+    reads as one rule written twice — the shape `core/fulltext.py` exists to end, and the shape
+    D-2026-08-05 is about — and it is not: the server stems and stop-words by a text-search
+    configuration, and a substring is not a lexeme. Measured on 2026-09-16 against live
+    PostgreSQL 16 over the two notes below, each direction has words the other cannot reach.
+
+    This is the assertion behind the decision *not* to delete either leg. Deleting one because the
+    other "already does that" is the removal this pins as lossy, and the gold-set half of the same
+    measurement is in `retrieval/retrievers.py` — where the Postgres leg is the better ranker (42
+    of 46 gold notes to the graph leg's 40 at a matched slot budget) and the graph leg is the only
+    one that answers at all where the derived index is never built.
+    """
+    asyncio.run(migrated_db_or_skip())
+    corpus = {
+        "n-coupling": "The Suzuki coupling was run in toluene.",
+        "n-polyester": "The polyester film was dried overnight.",
+    }
+    durable = PostgresNoteIndex()
+    asyncio.run(
+        durable.upsert(
+            [
+                NoteRecord(note_id=note_id, text=text, embedding=[0.0] * settings.embedding_dim)
+                for note_id, text in corpus.items()
+            ],
+            "probe",
+        )
+    )
+    scope = set(corpus)
+
+    def stemmed(query: str) -> set[str]:
+        hits = asyncio.run(durable.search_lexical(query, 50, within=scope))
+        return {hit.note_id for hit in hits}
+
+    def substrings(query: str) -> set[str]:
+        terms = query_terms(query)
+        return {
+            note_id
+            for note_id, text in corpus.items()
+            if term_coverage(Note(id=note_id, type="reaction", body=text), terms) == len(terms)
+        }
+
+    # Inflections the server stems and a substring test cannot see at all.
+    for inflected, note_id in (
+        ("couplings", "n-coupling"),
+        ("coupled", "n-coupling"),
+        ("dry", "n-polyester"),
+        ("films", "n-polyester"),
+    ):
+        assert stemmed(inflected) == {note_id}, inflected
+        assert substrings(inflected) == set(), inflected
+
+    # And the coarseness that goes the other way: `ester` inside `polyester` is a hit for the
+    # substring rule and no lexeme at all for the server.
+    assert substrings("ester") == {"n-polyester"}
+    assert stemmed("ester") == set()

@@ -314,71 +314,63 @@ def test_an_unlabelled_reaction_is_never_presented_as_a_precedent() -> None:
     _both_backends(_body)
 
 
-def test_q2_conditions_that_worked_for_similar_products() -> None:
+async def test_q2_conditions_that_worked_for_similar_products() -> None:
     """Question 2: neighbours in fingerprint space first, then their reactions.
 
     Run against the in-memory fingerprint store only — the two-pass shape is what is under test,
     and pgvector's ranking is already covered by `tests/test_molfp_postgres.py`.
     """
+    index = InMemoryLabelIndex()
+    await _seed(index, "sim")
+    molecules = InMemoryFingerprintStore(molecule_definition())
+    from chemclaw.science.fingerprints.molfp.search import record_for
 
-    async def _run() -> None:
-        index = InMemoryLabelIndex()
-        await _seed(index, "sim")
-        molecules = InMemoryFingerprintStore(molecule_definition())
-        from chemclaw.science.fingerprints.molfp.search import record_for
+    for smiles in (_ANILINE, _BIPHENYL):
+        await molecules.add(record_for(smiles, smiles))
 
-        for smiles in (_ANILINE, _BIPHENYL):
-            await molecules.add(record_for(smiles, smiles))
+    found = await conditions_for_similar_products(
+        index, molecules, _VERSION, _ANILINE, threshold=0.99, limit=20
+    )
+    assert {h.reaction_id for h in found.hits} == {"sim-b1", "sim-b2", "sim-b3"}
+    assert all(h.named_reaction == "Buchwald-Hartwig amination" for h in found.hits)
 
-        found = await conditions_for_similar_products(
-            index, molecules, _VERSION, _ANILINE, threshold=0.99, limit=20
-        )
-        assert {h.reaction_id for h in found.hits} == {"sim-b1", "sim-b2", "sim-b3"}
-        assert all(h.named_reaction == "Buchwald-Hartwig amination" for h in found.hits)
-
-        # A product nothing resembles is a genuine "no neighbours", not an open facet that would
-        # have selected the whole corpus.
-        none = await conditions_for_similar_products(
-            index, molecules, _VERSION, "CCCCCCCCCCCCCCCC", threshold=0.99, limit=20
-        )
-        assert none.hits == []
-
-    asyncio.run(_run())
+    # A product nothing resembles is a genuine "no neighbours", not an open facet that would
+    # have selected the whole corpus.
+    none = await conditions_for_similar_products(
+        index, molecules, _VERSION, "CCCCCCCCCCCCCCCC", threshold=0.99, limit=20
+    )
+    assert none.hits == []
 
 
-def test_q4_reactions_whose_product_matches_a_smarts() -> None:
+async def test_q4_reactions_whose_product_matches_a_smarts() -> None:
     """Question 4, over the pattern screen: find the structures, then find their reactions.
 
     Postgres-only, because the screen is a GIN containment index and there is no in-memory twin —
     a Python reimplementation would be a second definition of soundness, which is the one property
     this search rests on.
     """
+    await migrated_db_or_skip()
+    index = PostgresLabelIndex()
+    await _seed(index, "smarts")
+    molecules = CorpusMolecules()
+    await molecules.add_many([_ANILINE, _BIPHENYL])
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        index = PostgresLabelIndex()
-        await _seed(index, "smarts")
-        molecules = CorpusMolecules()
-        await molecules.add_many([_ANILINE, _BIPHENYL])
+    found = await reactions_with_product_substructure(
+        index, molecules, _VERSION, "c1ccccc1[NX3;H1]", limit=20
+    )
+    mine = {h.reaction_id for h in found.hits if h.source == "smarts-corpus"}
+    assert mine == {"smarts-b1", "smarts-b2", "smarts-b3"}
 
-        found = await reactions_with_product_substructure(
-            index, molecules, _VERSION, "c1ccccc1[NX3;H1]", limit=20
-        )
-        mine = {h.reaction_id for h in found.hits if h.source == "smarts-corpus"}
-        assert mine == {"smarts-b1", "smarts-b2", "smarts-b3"}
-
-        # The same query narrowed by name is still one facet, not a second search.
-        suzukis = await reactions_with_product_substructure(
-            index, molecules, _VERSION, "c1ccccc1-c1ccccc1", limit=20
-        )
-        assert {h.named_reaction for h in suzukis.hits if h.source == "smarts-corpus"} == {
-            "Bromo Suzuki coupling"
-        }
-
-    asyncio.run(_run())
+    # The same query narrowed by name is still one facet, not a second search.
+    suzukis = await reactions_with_product_substructure(
+        index, molecules, _VERSION, "c1ccccc1-c1ccccc1", limit=20
+    )
+    assert {h.named_reaction for h in suzukis.hits if h.source == "smarts-corpus"} == {
+        "Bromo Suzuki coupling"
+    }
 
 
-def test_a_corpus_sitting_exactly_on_the_cap_is_not_reported_as_truncated() -> None:
+async def test_a_corpus_sitting_exactly_on_the_cap_is_not_reported_as_truncated() -> None:
     """Truncation is observed by reading one row past the cap, never inferred from `len == cap`.
 
     `len(candidates) == limit` cannot tell "there were more" from "that was all of them", so a
@@ -392,38 +384,30 @@ def test_a_corpus_sitting_exactly_on_the_cap_is_not_reported_as_truncated() -> N
     else the shared database holds, and a query only these rows can match is the only way to assert
     a *count* rather than a membership.
     """
+    await migrated_db_or_skip()
+    molecules = CorpusMolecules()
+    corpus = ["C[Se]C", "CC[Se]C"]
+    await molecules.add_many(corpus)
+    try:
+        exactly, truncated = await molecules.containing("[#34]", 2)
+        assert sorted(exactly) == sorted(corpus)
+        assert truncated is False, "a complete answer was reported as a sample"
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        molecules = CorpusMolecules()
-        corpus = ["C[Se]C", "CC[Se]C"]
-        await molecules.add_many(corpus)
-        try:
-            exactly, truncated = await molecules.containing("[#34]", 2)
-            assert sorted(exactly) == sorted(corpus)
-            assert truncated is False, "a complete answer was reported as a sample"
-
-            capped, truncated = await molecules.containing("[#34]", 1)
-            assert len(capped) == 1
-            assert truncated is True, "a screen that really did cut a row said it had not"
-        finally:
-            await _drop_corpus_molecules(corpus)
-
-    asyncio.run(_run())
+        capped, truncated = await molecules.containing("[#34]", 1)
+        assert len(capped) == 1
+        assert truncated is True, "a screen that really did cut a row said it had not"
+    finally:
+        await _drop_corpus_molecules(corpus)
 
 
-def test_the_corpus_molecule_table_is_the_fingerprint_store_pointed_elsewhere() -> None:
+async def test_the_corpus_molecule_table_is_the_fingerprint_store_pointed_elsewhere() -> None:
     """No new similarity code: `PostgresFingerprintStore` is already table-parameterised."""
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await CorpusMolecules().add_many([_ANILINE])
-        store = PostgresFingerprintStore(
-            CORPUS_MOLECULES_TABLE, settings.ecfp_bits, molecule_definition()
-        )
-        assert not await store.is_empty()
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    await CorpusMolecules().add_many([_ANILINE])
+    store = PostgresFingerprintStore(
+        CORPUS_MOLECULES_TABLE, settings.ecfp_bits, molecule_definition()
+    )
+    assert not await store.is_empty()
 
 
 # A corpus that is cheap to index and expensive to verify: long acyclic chains have no tautomers
@@ -479,7 +463,7 @@ async def _worst_tick_gap(
     return elapsed, max(gaps)
 
 
-def test_the_substructure_verify_does_not_freeze_the_event_loop() -> None:
+async def test_the_substructure_verify_does_not_freeze_the_event_loop() -> None:
     """The screen's survivors are verified off the loop, so no other session's stream stalls.
 
     This is the property `molfp.find_substructure_matches` states for its own scan and this path
@@ -490,24 +474,20 @@ def test_the_substructure_verify_does_not_freeze_the_event_loop() -> None:
     Asserted as a number rather than as "it was called in a thread", because a thread that the
     loop then awaits synchronously would pass the second and fail a chemist.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        molecules = CorpusMolecules()
-        await molecules.add_many(_CHAIN_CORPUS)
-        try:
-            elapsed, worst = await _worst_tick_gap(molecules.containing(_UNMATCHABLE, 5000))
-        finally:
-            await _drop_corpus_molecules(_CHAIN_CORPUS)
-        # The verify really did run inside the measured window: without this the gap assertion
-        # would also pass on a screen that returned nothing.
-        assert elapsed > 0.25, f"the verify finished in {elapsed:.3f}s — it was not the work"
-        assert worst < 0.1, f"the loop was blocked for {worst * 1000:.0f} ms during the verify"
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    molecules = CorpusMolecules()
+    await molecules.add_many(_CHAIN_CORPUS)
+    try:
+        elapsed, worst = await _worst_tick_gap(molecules.containing(_UNMATCHABLE, 5000))
+    finally:
+        await _drop_corpus_molecules(_CHAIN_CORPUS)
+    # The verify really did run inside the measured window: without this the gap assertion
+    # would also pass on a screen that returned nothing.
+    assert elapsed > 0.25, f"the verify finished in {elapsed:.3f}s — it was not the work"
+    assert worst < 0.1, f"the loop was blocked for {worst * 1000:.0f} ms during the verify"
 
 
-def test_a_substructure_verify_that_runs_too_long_is_cut_off_rather_than_awaited(
+async def test_a_substructure_verify_that_runs_too_long_is_cut_off_rather_than_awaited(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The verify carries the wall-clock bound the sibling scan does; without it there was none.
@@ -517,18 +497,15 @@ def test_a_substructure_verify_that_runs_too_long_is_cut_off_rather_than_awaited
     """
     monkeypatch.setattr(settings, "substructure_match_timeout_seconds", 0.001)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        molecules = CorpusMolecules()
-        corpus = _CHAIN_CORPUS[:30]
-        await molecules.add_many(corpus)
-        try:
-            with pytest.raises(FingerprintError, match="CHEMCLAW_SUBSTRUCTURE_MATCH_TIMEOUT"):
-                await molecules.containing(_UNMATCHABLE, 5000)
-        finally:
-            await _drop_corpus_molecules(corpus)
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    molecules = CorpusMolecules()
+    corpus = _CHAIN_CORPUS[:30]
+    await molecules.add_many(corpus)
+    try:
+        with pytest.raises(FingerprintError, match="CHEMCLAW_SUBSTRUCTURE_MATCH_TIMEOUT"):
+            await molecules.containing(_UNMATCHABLE, 5000)
+    finally:
+        await _drop_corpus_molecules(corpus)
 
 
 def test_a_verify_past_its_deadline_stops_instead_of_matching_the_rest_of_the_candidates() -> None:

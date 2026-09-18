@@ -1,10 +1,24 @@
 """Concrete source retrievers — thin adapters over existing layers (plan step 5b.3).
 
-Two real sources behind the one `SourceRetriever` contract, proving the harness core is
-source-agnostic (a third — analytics, or external literature — is another adapter here, not a
-core change): `GraphRetriever` reads the knowledge graph (Phase 2), `FingerprintReactionRetriever`
-runs reaction-fingerprint search (Phase 3). Neither introduces a new store. Every chunk they
-emit carries the id of the note it came from, so the harness can cite it (5b.2).
+Four retrievers behind the one `SourceRetriever` contract, proving the harness core is
+source-agnostic (a fifth — analytics, or external literature — is another adapter here, not a core
+change): `GraphRetriever` reads the knowledge graph (Phase 2), `FingerprintReactionRetriever` runs
+reaction-fingerprint search (Phase 3), and `VectorRetriever`/`LexicalRetriever` read the derived
+note index (F10-A). None introduces a new store. Every chunk they emit carries the id of the note it
+came from, so the harness can cite it (5b.2). This paragraph said "two real sources" and named the
+first two for as long as the file held four.
+
+**Three of them are legs over one corpus, and two of those three are lexical** — `GraphRetriever`
+scores a substring match in this process, `LexicalRetriever` asks Postgres for `ts_rank` over the
+same notes — which reads as a duplicate and was measured rather than argued on 2026-09-16, with
+`make retrieval-arms` over 20 probes and 46 labelled (query, note) pairs. At a matched slot budget
+(one leg at `retrieval_top_k=24` against the shipped three at 8) the Postgres leg alone finds 42 of
+46 gold notes to this leg's 40, with 24 of them in the top 3 against 19, and **this leg contributes
+no gold note the Postgres one misses**. It is kept anyway, for two reasons neither of which is
+ranking quality: it is the only note leg that needs no derived index, and the index the others read
+is rebuilt only where `lexical` or `vector` is in `CHEMCLAW_DATA_SOURCES`
+(`settings.note_reindex_effective`) while the shipped default is `graph,eln-json`; and the two are
+not one rule — see `_relevance` for what removing its half of the duplication measured.
 """
 
 import asyncio
@@ -441,6 +455,17 @@ def _relevance(
     a note's whole metadata-plus-body haystack and its length tracks how much a note *records*
     rather than how padded it is; penalising a thorough campaign note for being thorough is the
     wrong correction here. The saturation term is what bounds repetition instead.
+
+    **It is the second BM25 over this corpus — `LexicalRetriever` asks Postgres for `ts_rank` over
+    the same notes — and deleting it was measured rather than reasoned about** (2026-09-16,
+    `make retrieval-arms`, 20 probes and 46 labelled pairs). Reverting this leg to its pre-relevance
+    `(-coverage, -confidence, id)` order costs rank in every configuration it was measured in: the
+    graph leg alone at `retrieval_top_k=24` moves mean gold rank 4.72 → 5.67 with 18 pairs down
+    against 8 up, `graph`+`lexical` 4.61 → 4.98, and the shipped three legs at 8 **lose a gold
+    note** (39 → 38 found) because a per-leg cut spends its slots in this order. So the duplication
+    stays until the graph leg itself does: the removal that would end it is dropping this leg, and
+    that is blocked on `settings.note_reindex_effective` — the index the other legs read is not
+    maintained in the shipped `graph,eln-json` configuration at all.
     """
     return sum(
         math.log(1 + population / (1 + document_frequency[term]))
@@ -722,10 +747,22 @@ class VectorRetriever:
 class LexicalRetriever:
     """Retrieve notes by full-text term match (Postgres FTS). A `SourceRetriever` (F10-A).
 
-    The lexical/BM25-style entry point: a ranked term match that beats the graph retriever's plain
-    substring test (which cannot rank, and matches incidental substrings). Also an entry point into
-    the graph, not a replacement (D-004). The index backend is injected for testability, and
-    defaults to the production one for the same reason as `VectorRetriever`.
+    The lexical/BM25-style entry point: `ts_rank` over the GIN-indexed `tsvector` of the same notes
+    `GraphRetriever` scans. Also an entry point into the graph, not a replacement (D-004). The index
+    backend is injected for testability, and defaults to the production one for the same reason as
+    `VectorRetriever`.
+
+    **What it beats the graph leg at, and where the two genuinely differ.** This docstring said the
+    graph retriever "cannot rank", which stopped being true when `_relevance` shipped, so the
+    difference is now stated as what it measures. On the 46-pair gold set at a matched slot budget
+    (2026-09-16, `make retrieval-arms`): this leg alone finds 42 gold notes to the graph leg's 40
+    and puts 24 in the top 3 to its 19, and the two gold notes only one leg finds are both this
+    one's.
+    The rules are different rather than better and worse, though, which is why both legs still ship:
+    Postgres stems and stop-words by a text-search configuration, `kg.search.term_coverage` matches
+    substrings, and measured against live PostgreSQL 16 `couplings`/`coupled`/`dry`/`films` are hits
+    here and not there while `ester` matches `polyester` there and not here
+    (`tests/test_note_search.py`).
     """
 
     def __init__(

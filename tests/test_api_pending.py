@@ -150,38 +150,32 @@ def test_answering_a_request_routed_to_somebody_else_is_refused() -> None:
     asyncio.run(_check())
 
 
-def test_answering_an_unknown_request_is_a_404_and_not_a_403() -> None:
+async def test_answering_an_unknown_request_is_a_404_and_not_a_403() -> None:
     """A request that does not exist is a different fact from one that is not yours.
 
     Kept apart on purpose: this route lists nothing a caller could enumerate — `GET /pending` only
     ever returns what is routed to them — so there is no id to probe for, and telling a caller
     plainly that nothing is there is better than making them guess at a permission problem.
     """
+    await migrated_db_or_skip()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-
-    asyncio.run(_run())
     with _client(_app(), _ALICE) as client:
         response = client.post("/pending/api-pending-nope/answer", json={"payload": {}})
     assert response.status_code == 404
 
 
-def test_answering_a_decided_request_is_a_409() -> None:
+async def test_answering_a_decided_request_is_a_409() -> None:
     """A second answer is told, rather than silently ignored.
 
     The workflow ignores a duplicate signal because a signal has no reply channel. This route reads
     the store first precisely so the caller who is too late finds out.
     """
+    await migrated_db_or_skip()
+    await _open("api-pending-409")
+    await pending_store.settle_request(
+        "api-pending-409", state="answered", answered_by="u-first", answer={}
+    )
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _open("api-pending-409")
-        await pending_store.settle_request(
-            "api-pending-409", state="answered", answered_by="u-first", answer={}
-        )
-
-    asyncio.run(_run())
     with _client(_app(), _ALICE) as client:
         response = client.post("/pending/api-pending-409/answer", json={"payload": {}})
     assert response.status_code == 409
@@ -214,15 +208,12 @@ def test_an_undeliverable_answer_is_a_503_and_settles_nothing() -> None:
     asyncio.run(_check())
 
 
-def test_the_inbox_returns_what_is_waiting_on_the_caller() -> None:
+async def test_the_inbox_returns_what_is_waiting_on_the_caller() -> None:
     """`GET /pending` is scoped to the authenticated caller, not to a query parameter."""
+    await migrated_db_or_skip()
+    await _open("api-pending-mine", asked_of="u-alice")
+    await _open("api-pending-theirs", asked_of="u-bob")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _open("api-pending-mine", asked_of="u-alice")
-        await _open("api-pending-theirs", asked_of="u-bob")
-
-    asyncio.run(_run())
     with _client(_app(), _ALICE) as client:
         body = client.get("/pending").json()
     ids = {row["request_id"] for row in body["requests"]}
@@ -231,7 +222,7 @@ def test_the_inbox_returns_what_is_waiting_on_the_caller() -> None:
     assert body["count"] == len(body["requests"])
 
 
-def test_the_inbox_does_not_list_what_the_answer_route_would_refuse() -> None:
+async def test_the_inbox_does_not_list_what_the_answer_route_would_refuse() -> None:
     """A row a caller cannot act on is worse than no row: the two read one predicate.
 
     `_routing_identities` widens the store query to the caller's whole routing surface, and the
@@ -240,13 +231,10 @@ def test_the_inbox_does_not_list_what_the_answer_route_would_refuse() -> None:
     Driven through both routes rather than through `_may_answer` alone, because the defect was that
     the two disagreed and only the pair can show they now agree.
     """
+    await migrated_db_or_skip()
+    await _open("api-pending-self", asked_of="qc-team", kind="approval", requested_by="u-carol")
+    await _open("api-pending-other", asked_of="qc-team", kind="approval")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _open("api-pending-self", asked_of="qc-team", kind="approval", requested_by="u-carol")
-        await _open("api-pending-other", asked_of="qc-team", kind="approval")
-
-    asyncio.run(_run())
     with _client(_app(), _QC_LEAD) as client:
         body = client.get("/pending").json()
         refused = client.post("/pending/api-pending-self/answer", json={"payload": {}})
@@ -277,7 +265,7 @@ def test_both_routes_are_behind_the_authentication_gate(path: str) -> None:
     assert "require_principal" in dependencies
 
 
-def test_the_inbox_says_it_is_a_page_rather_than_the_whole_inbox() -> None:
+async def test_the_inbox_says_it_is_a_page_rather_than_the_whole_inbox() -> None:
     """`GET /pending` bounded its answer and the response could not express that.
 
     `PendingRequestsOut`'s own docstring reasoned that `count` is a page length and not a total —
@@ -285,18 +273,13 @@ def test_the_inbox_says_it_is_a_page_rather_than_the_whole_inbox() -> None:
     the first 20 as the whole inbox. That is how a raised question ages out unanswered: it never
     appeared in anybody's list.
     """
+    await migrated_db_or_skip()
+    async with await connect(settings.postgres_dsn) as conn:
+        await conn.execute("DELETE FROM pending_requests WHERE asked_of = %s", ("u-alice-page",))
+        await conn.commit()
+    for index in range(35):
+        await _open(f"api-pending-page-{index:02d}", asked_of="u-alice-page")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with await connect(settings.postgres_dsn) as conn:
-            await conn.execute(
-                "DELETE FROM pending_requests WHERE asked_of = %s", ("u-alice-page",)
-            )
-            await conn.commit()
-        for index in range(35):
-            await _open(f"api-pending-page-{index:02d}", asked_of="u-alice-page")
-
-    asyncio.run(_run())
     alice = Principal(oid="u-alice-page", upn="alice-page@example.com", roles=frozenset())
     with _client(_app(), alice) as client:
         page = client.get("/pending", params={"limit": 20}).json()

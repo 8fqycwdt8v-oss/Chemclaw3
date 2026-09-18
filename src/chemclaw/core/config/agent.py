@@ -728,6 +728,39 @@ class AgentSettings(BaseSettings):
     # tuned it reads the same number.
     agent_max_promoted_invalid_calls: int = Field(default=20, ge=0)
 
+    # How many audit events `PostgresAuditSink` may hold before it starts shedding the oldest.
+    #
+    # **The buffer had no write-side bound at all, and its docstring is why that looked safe.** It
+    # argues — correctly — that a *failed* batch must be dropped rather than re-queued, "because
+    # re-queueing it would make a broken database grow the buffer without bound". That covers a
+    # database which is **down**. It says nothing about one which is merely **slow**: `record()`
+    # appends and returns while `_flush_all` drains at whatever rate the connection allows, so a
+    # database answering in seconds instead of milliseconds grows the list on the producer side,
+    # inside a pod the chart limits to 1 GiB, at roughly ninety rows a turn.
+    #
+    # Shedding the **oldest** is deliberate. Both ends lose a row, and the end worth keeping is the
+    # recent one: an operator reaching for this trail is asking what just happened. Nothing is lost
+    # silently either way — every event has already gone to the stdlib log by the time it is
+    # buffered, and `chemclaw_audit_events_shed_total` is a separate series from
+    # `chemclaw_audit_sink_failures_total` on purpose, because "the database is unreachable" and
+    # "the database cannot keep up" have different remedies and would be indistinguishable pooled.
+    #
+    # 50,000 is about 555 turns of backlog at the measured ~90 rows a turn — large enough that an
+    # ordinary slow patch never reaches it, small enough that it cannot be the thing that ends the
+    # process. 0 removes the bound and restores the old unbounded behaviour for a deployment that
+    # would rather have the OOM than the gap.
+    #
+    # **The memory figure is measured, because the sentence here first said "a few tens of MB" and
+    # that was wrong by 4x in the reassuring direction.** At the realistic row — `arguments` cut to
+    # `agent_audit_max_arg_chars`, i.e. 200 — 50,000 events is **1,672 B each, 80 MB**, which is 8%
+    # of the 1 GiB the chart gives a pod that is also holding the model context. That is the number
+    # this default is chosen against, and it is only 80 rather than 160 because `_shed_to_bound`
+    # charges the in-flight batch too: before that fix `_flush_all` swapped the list out and
+    # `record` refilled a fresh one the bound could not see, so the real ceiling was twice whatever
+    # this field said. Raising this field past ~150,000 puts the buffer alone over a quarter of the
+    # pod, which is the point at which it stops being a backstop and becomes the risk.
+    agent_audit_buffer_max_events: int = Field(default=50_000, ge=0)
+
     # How many times one turn may call a tool with the *identical* arguments before the call is
     # refused (`agent.repeat_guard`). The loop cap above bounds the harness's iterations and says
     # nothing about this: a live run called `find_past_jobs` 7-8 times in a single turn, with

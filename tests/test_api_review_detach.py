@@ -193,13 +193,9 @@ def test_stop_re_raises_a_cancellation_addressed_to_its_own_caller() -> None:
     )
 
 
-def test_stop_still_swallows_the_turn_s_own_cancellation() -> None:
+async def test_stop_still_swallows_the_turn_s_own_cancellation() -> None:
     """The other direction: an ordinary Stop must still return, not raise at its caller."""
-
-    async def _run() -> None:
-        turn = DetachableTurn(_forever(), session_id="s-ordinary")
-        await asyncio.sleep(0.02)
-        await turn.stop()
-        assert turn._task.cancelled()
-
-    asyncio.run(_run())
+    turn = DetachableTurn(_forever(), session_id="s-ordinary")
+    await asyncio.sleep(0.02)
+    await turn.stop()
+    assert turn._task.cancelled()

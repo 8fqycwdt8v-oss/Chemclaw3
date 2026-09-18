@@ -122,30 +122,26 @@ def _for(owner: str, items: list[CheckIn]) -> CheckIn | None:
     return next((item for item in items if item.owner == owner), None)
 
 
-def test_a_quiet_question_reaches_the_person_who_asked_it() -> None:
+async def test_a_quiet_question_reaches_the_person_who_asked_it() -> None:
     """The gap this closes: the requester, not the person it was asked of.
 
     `awaiting.py` re-notifies `asked_of` on `reminder_hours` and writes to `requested_by` only at
     expiry, so before this sweep a requester's only signal was the failure.
     """
+    await migrated_db_or_skip()
+    await _clear()
+    await _open("check-in-quiet")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clear()
-        await _open("check-in-quiet")
+    mine = _for(_OWNER, await _collected())
 
-        mine = _for(_OWNER, await _collected())
-
-        assert mine is not None, "the requester was told nothing about their own blocked work"
-        (blocked,) = mine.requests
-        assert blocked.request_id == "check-in-quiet"
-        assert blocked.open_days >= 9, "the age is what makes 'still' mean something"
-        assert 0 < blocked.days_left <= 5
-
-    asyncio.run(_run())
+    assert mine is not None, "the requester was told nothing about their own blocked work"
+    (blocked,) = mine.requests
+    assert blocked.request_id == "check-in-quiet"
+    assert blocked.open_days >= 9, "the age is what makes 'still' mean something"
+    assert 0 < blocked.days_left <= 5
 
 
-def test_a_question_asked_this_morning_is_not_news(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_question_asked_this_morning_is_not_news(monkeypatch: pytest.MonkeyPatch) -> None:
     """Below the quiet threshold nothing is said, or the second check-in teaches its reader to skip.
 
     The threshold is the whole reason this is a *check-in* rather than a second copy of the
@@ -153,111 +149,87 @@ def test_a_question_asked_this_morning_is_not_news(monkeypatch: pytest.MonkeyPat
     """
     monkeypatch.setattr(settings, "check_in_quiet_days", 3.0)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clear()
-        await _open("check-in-fresh", opened_days_ago=0.5)
+    await migrated_db_or_skip()
+    await _clear()
+    await _open("check-in-fresh", opened_days_ago=0.5)
 
-        assert _for(_OWNER, await _collected()) is None
-
-    asyncio.run(_run())
+    assert _for(_OWNER, await _collected()) is None
 
 
-def test_an_expired_question_is_not_reported_twice() -> None:
+async def test_an_expired_question_is_not_reported_twice() -> None:
     """Expiry already reaches the requester through the wait's own notice.
 
     Repeating it here would make this sweep a second, worse copy of a message that was already
     delivered — and a worse one, because it would arrive every night thereafter.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clear()
-        await _open("check-in-expired", opened_days_ago=100.0, due_in_days=5.0)
-        async with db.connection(_dsn()) as conn:
-            await conn.execute(
-                "UPDATE pending_requests SET due_at = now() - INTERVAL '1 day'"
-                " WHERE request_id = %s",
-                ("check-in-expired",),
-            )
-
-        assert _for(_OWNER, await _collected()) is None
-
-    asyncio.run(_run())
-
-
-def test_an_answered_question_stops_being_reported() -> None:
-    """The obvious one, and the one whose absence would make this sweep nag forever."""
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clear()
-        await _open("check-in-answered")
-        await pending_store.settle_request(
-            "check-in-answered", state="answered", answered_by="u-lab", answer={"yield": 0.7}
+    await migrated_db_or_skip()
+    await _clear()
+    await _open("check-in-expired", opened_days_ago=100.0, due_in_days=5.0)
+    async with db.connection(_dsn()) as conn:
+        await conn.execute(
+            "UPDATE pending_requests SET due_at = now() - INTERVAL '1 day' WHERE request_id = %s",
+            ("check-in-expired",),
         )
 
-        assert _for(_OWNER, await _collected()) is None
-
-    asyncio.run(_run())
+    assert _for(_OWNER, await _collected()) is None
 
 
-def test_each_requester_hears_only_their_own() -> None:
+async def test_an_answered_question_stops_being_reported() -> None:
+    """The obvious one, and the one whose absence would make this sweep nag forever."""
+    await migrated_db_or_skip()
+    await _clear()
+    await _open("check-in-answered")
+    await pending_store.settle_request(
+        "check-in-answered", state="answered", answered_by="u-lab", answer={"yield": 0.7}
+    )
+
+    assert _for(_OWNER, await _collected()) is None
+
+
+async def test_each_requester_hears_only_their_own() -> None:
     """Grouping is by requester, and a leak here would show one chemist another's work."""
+    await migrated_db_or_skip()
+    await _clear()
+    await _open("check-in-mine", requested_by=_OWNER)
+    await _open("check-in-theirs", requested_by=_OTHER)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clear()
-        await _open("check-in-mine", requested_by=_OWNER)
-        await _open("check-in-theirs", requested_by=_OTHER)
+    items = await _collected()
+    mine, theirs = _for(_OWNER, items), _for(_OTHER, items)
 
-        items = await _collected()
-        mine, theirs = _for(_OWNER, items), _for(_OTHER, items)
-
-        assert mine is not None and theirs is not None
-        assert [r.request_id for r in mine.requests] == ["check-in-mine"]
-        assert [r.request_id for r in theirs.requests] == ["check-in-theirs"]
-
-    asyncio.run(_run())
+    assert mine is not None and theirs is not None
+    assert [r.request_id for r in mine.requests] == ["check-in-mine"]
+    assert [r.request_id for r in theirs.requests] == ["check-in-theirs"]
 
 
-def test_a_request_with_no_requester_is_addressed_to_nobody_and_skipped() -> None:
+async def test_a_request_with_no_requester_is_addressed_to_nobody_and_skipped() -> None:
     """A row with no actor cannot be reported *to* anyone, so it must not open an empty mailbox."""
+    await migrated_db_or_skip()
+    await _clear()
+    await _open("check-in-actorless", requested_by="")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clear()
-        await _open("check-in-actorless", requested_by="")
-
-        items = await _collected()
-        assert not any(item.owner == "" for item in items)
-
-    asyncio.run(_run())
+    items = await _collected()
+    assert not any(item.owner == "" for item in items)
 
 
-def test_the_message_carries_what_a_person_needs_to_act() -> None:
+async def test_the_message_carries_what_a_person_needs_to_act() -> None:
     """A channel reaches somebody with none of the context a surface has.
 
     So the outbound copy states the subject, who it is waiting on, how long, and the reason the
     requester themselves wrote — the same discipline `awaiting._awaiting_message` records.
     """
+    await migrated_db_or_skip()
+    await _clear()
+    await _open("check-in-body")
+    mine = _for(_OWNER, await _collected())
+    assert mine is not None
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clear()
-        await _open("check-in-body")
-        mine = _for(_OWNER, await _collected())
-        assert mine is not None
+    message = _message(mine)
 
-        message = _message(mine)
-
-        assert message.recipient == _OWNER
-        assert "run the four conditions from round 3" in message.body
-        assert "lab-team" in message.body, "say who it is waiting on"
-        assert "the Suzuki screen is suspended on it" in message.body, "carry their own reason"
-        assert "check-in-body" in message.body, "the id is the handle"
-
-    asyncio.run(_run())
+    assert message.recipient == _OWNER
+    assert "run the four conditions from round 3" in message.body
+    assert "lab-team" in message.body, "say who it is waiting on"
+    assert "the Suzuki screen is suspended on it" in message.body, "carry their own reason"
+    assert "check-in-body" in message.body, "the id is the handle"
 
 
 def test_the_sweep_runs_no_model() -> None:
@@ -315,7 +287,7 @@ def test_the_schedule_is_planned_only_when_a_deployment_asks(
     assert "agent-check-in" in OWNED_SCHEDULE_IDS, "an unowned id can never be pruned"
 
 
-def test_the_mailbox_the_sweep_writes_is_one_a_reader_can_open() -> None:
+async def test_the_mailbox_the_sweep_writes_is_one_a_reader_can_open() -> None:
     """The round trip, and the defect it was written to catch was mine.
 
     `CHECK_IN_KIND` shipped with no reader: `GET /digests` claims `DIGEST_KIND` only, so a check-in
@@ -331,32 +303,29 @@ def test_the_mailbox_the_sweep_writes_is_one_a_reader_can_open() -> None:
     from chemclaw.api.auth import Principal, require_principal
     from chemclaw.durable.digest import digest_channel
 
-    async def _write() -> None:
-        await migrated_db_or_skip()
-        await claim_unconsumed(digest_channel(_OWNER))  # start clean
-        # **Built by the writer's own model, not typed out.** The literal dict this replaced agreed
-        # with `BlockedRequest` on the day it was written and with nothing afterwards: renaming
-        # `open_days` would have left this test green while every entry `GET /check-ins` served read
-        # 0, which is the one number the notice exists to carry.
-        await record_session_event(
-            digest_channel(_OWNER),
-            CHECK_IN_KIND,
-            {
-                "requests": [
-                    BlockedRequest(
-                        request_id="check-in-wire",
-                        kind="measurement",
-                        subject="run the four conditions from round 3",
-                        rationale="the Suzuki screen is suspended on it",
-                        asked_of="lab-team",
-                        open_days=9,
-                        days_left=5,
-                    ).model_dump()
-                ]
-            },
-        )
-
-    asyncio.run(_write())
+    await migrated_db_or_skip()
+    await claim_unconsumed(digest_channel(_OWNER))  # start clean
+    # **Built by the writer's own model, not typed out.** The literal dict this replaced agreed
+    # with `BlockedRequest` on the day it was written and with nothing afterwards: renaming
+    # `open_days` would have left this test green while every entry `GET /check-ins` served read
+    # 0, which is the one number the notice exists to carry.
+    await record_session_event(
+        digest_channel(_OWNER),
+        CHECK_IN_KIND,
+        {
+            "requests": [
+                BlockedRequest(
+                    request_id="check-in-wire",
+                    kind="measurement",
+                    subject="run the four conditions from round 3",
+                    rationale="the Suzuki screen is suspended on it",
+                    asked_of="lab-team",
+                    open_days=9,
+                    days_left=5,
+                ).model_dump()
+            ]
+        },
+    )
 
     app = create_app(connector_factory=lambda _profile: [])
     app.dependency_overrides[require_principal] = lambda: Principal(
@@ -423,30 +392,26 @@ def test_a_check_in_does_not_reach_another_chemists_mailbox() -> None:
     asyncio.run(_untouched())
 
 
-def test_a_deadline_is_floored_rather_than_rounded() -> None:
+async def test_a_deadline_is_floored_rather_than_rounded() -> None:
     """`::int` rounds, so 4.6 days left arrived as "5 left" — half a day of borrowed deadline.
 
     The direction is what makes it worth a test rather than a shrug: over-stating how long is left
     makes a requester act later than they can afford to, and the whole point of the notice is that
     it reaches them *before* the deadline. `FLOOR` is the conservative side of the same arithmetic.
     """
+    await migrated_db_or_skip()
+    await _clear()
+    await _open("check-in-floor", opened_days_ago=9.6, due_in_days=4.6)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _clear()
-        await _open("check-in-floor", opened_days_ago=9.6, due_in_days=4.6)
+    mine = _for(_OWNER, await _collected())
+    assert mine is not None
+    (blocked,) = mine.requests
 
-        mine = _for(_OWNER, await _collected())
-        assert mine is not None
-        (blocked,) = mine.requests
-
-        assert blocked.days_left == 4, (
-            f"4.6 days left was reported as {blocked.days_left}; rounding a deadline up hands the "
-            "requester time the request does not have"
-        )
-        assert blocked.open_days == 9, f"9.6 days open was reported as {blocked.open_days}"
-
-    asyncio.run(_run())
+    assert blocked.days_left == 4, (
+        f"4.6 days left was reported as {blocked.days_left}; rounding a deadline up hands the "
+        "requester time the request does not have"
+    )
+    assert blocked.open_days == 9, f"9.6 days open was reported as {blocked.open_days}"
 
 
 def test_the_outbound_copy_is_not_delivered_as_a_digest() -> None:

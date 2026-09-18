@@ -64,29 +64,21 @@ async def _populated() -> InMemoryStore:
     return store
 
 
-def test_an_empty_query_returns_everything_newest_first() -> None:
+async def test_an_empty_query_returns_everything_newest_first() -> None:
     """No filter is "what is in the store", not an error — and order is the useful part."""
-
-    async def _run() -> None:
-        store = await _populated()
-        found = await store.find(CalculationQuery())
-        assert [s.key.calc_type for s in found] == ["dft", "pka", "dft"]
-        dates = [s.created_at for s in found if s.created_at is not None]
-        assert dates == sorted(dates, reverse=True)
-
-    asyncio.run(_run())
+    store = await _populated()
+    found = await store.find(CalculationQuery())
+    assert [s.key.calc_type for s in found] == ["dft", "pka", "dft"]
+    dates = [s.created_at for s in found if s.created_at is not None]
+    assert dates == sorted(dates, reverse=True)
 
 
-def test_a_molecule_is_found_by_hashing_the_query_not_by_scanning() -> None:
+async def test_a_molecule_is_found_by_hashing_the_query_not_by_scanning() -> None:
     """`input_hash` is a hash of the input mapping and non-reversible; matching is equality."""
-
-    async def _run() -> None:
-        store = await _populated()
-        found = await store.find(CalculationQuery(smiles="CCO"))
-        assert len(found) == 2
-        assert {s.key.input_hash for s in found} == {molecule_hash("CCO")}
-
-    asyncio.run(_run())
+    store = await _populated()
+    found = await store.find(CalculationQuery(smiles="CCO"))
+    assert len(found) == 2
+    assert {s.key.input_hash for s in found} == {molecule_hash("CCO")}
 
 
 def test_a_molecule_filter_is_refused_on_a_structure_keyed_family() -> None:
@@ -101,59 +93,41 @@ def test_a_molecule_filter_is_refused_on_a_structure_keyed_family() -> None:
     assert CalculationQuery(calc_type="xtb.energy").calc_type == "xtb.energy"
 
 
-def test_an_equivalent_smiles_finds_the_same_rows() -> None:
+async def test_an_equivalent_smiles_finds_the_same_rows() -> None:
     """The whole point of canonicalising in the query: "OCC" is ethanol too."""
-
-    async def _run() -> None:
-        store = await _populated()
-        assert len(await store.find(CalculationQuery(smiles="OCC"))) == 2
-
-    asyncio.run(_run())
+    store = await _populated()
+    assert len(await store.find(CalculationQuery(smiles="OCC"))) == 2
 
 
-def test_type_and_version_narrow_independently() -> None:
+async def test_type_and_version_narrow_independently() -> None:
     """A version filter is what answers "is the old number still what we have on file"."""
-
-    async def _run() -> None:
-        store = await _populated()
-        assert len(await store.find(CalculationQuery(calc_type="dft"))) == 2
-        assert len(await store.find(CalculationQuery(calc_version="v3"))) == 1
-        assert await store.find(CalculationQuery(calc_type="dft", calc_version="v3")) == []
-
-    asyncio.run(_run())
+    store = await _populated()
+    assert len(await store.find(CalculationQuery(calc_type="dft"))) == 2
+    assert len(await store.find(CalculationQuery(calc_version="v3"))) == 1
+    assert await store.find(CalculationQuery(calc_type="dft", calc_version="v3")) == []
 
 
-def test_the_date_window_is_inclusive_at_both_ends() -> None:
+async def test_the_date_window_is_inclusive_at_both_ends() -> None:
     """A result computed exactly at the boundary is inside the window it names."""
-
-    async def _run() -> None:
-        store = await _populated()
-        assert len(await store.find(CalculationQuery(since=_NOW))) == 1
-        assert len(await store.find(CalculationQuery(until=_NOW - timedelta(days=2)))) == 1
-        assert (
-            len(await store.find(CalculationQuery(since=_NOW - timedelta(days=1), until=_NOW))) == 2
-        )
-
-    asyncio.run(_run())
+    store = await _populated()
+    assert len(await store.find(CalculationQuery(since=_NOW))) == 1
+    assert len(await store.find(CalculationQuery(until=_NOW - timedelta(days=2)))) == 1
+    assert len(await store.find(CalculationQuery(since=_NOW - timedelta(days=1), until=_NOW))) == 2
 
 
-def test_an_undated_result_falls_outside_every_window() -> None:
+async def test_an_undated_result_falls_outside_every_window() -> None:
     """A result of unknown date fails a windowed query rather than passing it.
 
     It cannot be shown to fall inside the window, and a question about a period should not be
     answered with a result whose date nobody knows.
     """
-
-    async def _run() -> None:
-        store = InMemoryStore()
-        await store.put(_stored("CCO"))  # no created_at
-        assert await store.find(CalculationQuery(since=_NOW - timedelta(days=365))) == []
-        assert len(await store.find(CalculationQuery())) == 1
-
-    asyncio.run(_run())
+    store = InMemoryStore()
+    await store.put(_stored("CCO"))  # no created_at
+    assert await store.find(CalculationQuery(since=_NOW - timedelta(days=365))) == []
+    assert len(await store.find(CalculationQuery())) == 1
 
 
-def test_an_undated_result_sorts_ahead_of_every_dated_one() -> None:
+async def test_an_undated_result_sorts_ahead_of_every_dated_one() -> None:
     """Where an undated row lands in the ordering — and that mixing the two kinds does not crash.
 
     The in-memory store keeps no clock, so `find`'s docstring says insertion order stands in for
@@ -169,45 +143,33 @@ def test_an_undated_result_sorts_ahead_of_every_dated_one() -> None:
     `created_at` itself and has no undated row to place — so the in-memory choice is pinned here or
     nowhere. Reversing the partition (`dated + undated`) still fails this.
     """
-
-    async def _run() -> None:
-        store = await _populated()  # three dated results, newest at `_NOW`
-        await store.put(_stored("CCC"))  # no created_at
-        found = await store.find(CalculationQuery())
-        assert found[0].created_at is None
-        dated = [s.created_at for s in found[1:] if s.created_at is not None]
-        assert len(dated) == len(found) - 1, "an undated row sorted in among the dated ones"
-        assert dated == sorted(dated, reverse=True)
-
-    asyncio.run(_run())
+    store = await _populated()  # three dated results, newest at `_NOW`
+    await store.put(_stored("CCC"))  # no created_at
+    found = await store.find(CalculationQuery())
+    assert found[0].created_at is None
+    dated = [s.created_at for s in found[1:] if s.created_at is not None]
+    assert len(dated) == len(found) - 1, "an undated row sorted in among the dated ones"
+    assert dated == sorted(dated, reverse=True)
 
 
-def test_limit_caps_the_page() -> None:
+async def test_limit_caps_the_page() -> None:
     """The store is never evicted (D-011), so an uncapped browse is a full scan of it."""
-
-    async def _run() -> None:
-        store = await _populated()
-        assert len(await store.find(CalculationQuery(limit=1))) == 1
-
-    asyncio.run(_run())
+    store = await _populated()
+    assert len(await store.find(CalculationQuery(limit=1))) == 1
 
 
-def test_the_tool_returns_records_carrying_a_citable_reference(
+async def test_the_tool_returns_records_carrying_a_citable_reference(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`calc_ref` is the flat key a note's `calc_refs` cites, so a found value stays traceable."""
-
-    async def _run() -> None:
-        store = await _populated()
-        monkeypatch.setattr(tools, "default_store", lambda: store)
-        found = await tools.find_calculations(smiles="CCO", calc_type="dft")
-        assert len(found.hits) == 1
-        record = found.hits[0]
-        assert record.calc_ref.startswith("dft@b3lyp:")
-        assert record.result == {"energy": -1.0}
-        assert record.calc_type == "dft"
-
-    asyncio.run(_run())
+    store = await _populated()
+    monkeypatch.setattr(tools, "default_store", lambda: store)
+    found = await tools.find_calculations(smiles="CCO", calc_type="dft")
+    assert len(found.hits) == 1
+    record = found.hits[0]
+    assert record.calc_ref.startswith("dft@b3lyp:")
+    assert record.result == {"energy": -1.0}
+    assert record.calc_type == "dft"
 
 
 def test_the_tool_clamps_a_limit_past_the_configured_ceiling(
@@ -233,15 +195,11 @@ def test_the_tool_clamps_a_limit_past_the_configured_ceiling(
     asyncio.run(_run())
 
 
-def test_the_tool_refuses_a_date_it_cannot_parse(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_the_tool_refuses_a_date_it_cannot_parse(monkeypatch: pytest.MonkeyPatch) -> None:
     """Dropping it would answer a question about a window with results from outside it."""
-
-    async def _run() -> None:
-        monkeypatch.setattr(tools, "default_store", InMemoryStore)
-        with pytest.raises(ValueError):
-            await tools.find_calculations(since="last Tuesday")
-
-    asyncio.run(_run())
+    monkeypatch.setattr(tools, "default_store", InMemoryStore)
+    with pytest.raises(ValueError):
+        await tools.find_calculations(since="last Tuesday")
 
 
 def test_the_browse_marks_a_row_whose_epoch_was_never_recorded(
