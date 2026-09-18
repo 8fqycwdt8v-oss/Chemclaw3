@@ -1430,7 +1430,14 @@ async def _escalate_exhausted_review(
             function emitting an event of its own.
         answer: The answer as it will ship. Only `review_required` is read: a loop that broke out
             after *fixing* the answer has nothing to escalate.
-        actor: The turn's authenticated principal, or `None` off the authenticated path.
+        actor: The turn's authenticated principal. **Checked against `entra_required` as well as
+            for emptiness**, because off the authenticated path it is not empty: `api/auth.py`
+            manufactures a stand-in principal whose `oid` is the literal `dev-user`, and
+            `Principal.oid` is `min_length=1`, so `not actor` is false in exactly the posture this
+            guard was written for. Raising a durable request as `dev-user` — and addressing its
+            notices to `dev-user` — is the attribution-nothing-can-write shape
+            `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` deletes on sight,
+            arriving through the branch meant to prevent it.
         claims: What the last verdict found unsupported, named in the rationale so the reviewer
             starts where the checks stopped.
         correlation_id: The turn's id, in the rationale because it is the join key to
@@ -1438,7 +1445,22 @@ async def _escalate_exhausted_review(
     """
     if not answer.review_required or not settings.answer_review_escalation_enabled:
         return
-    if not actor:
+    if not claims:
+        # **The loop refuses to revise on a contentless verdict and this must refuse to escalate on
+        # one, for the same reason.** The re-grade at the loop's bottom is a *fresh* verdict, so a
+        # turn can exit with rounds spent and `unsupported` empty — a judge outage
+        # (`verifier.py` sets `review_notes` and leaves the claims empty) or a low-confidence
+        # verdict whose every claim is supported. Both produced a rationale ending "What the checks
+        # could not ground: " with nothing after it. A judge outage is fleet-wide, so without this
+        # it files one contentless review request per active conversation — a verdict nobody can
+        # act on, which is the failure this whole escalation exists to end.
+        logger.info(
+            "the answer for session %s stays marked for review and no person was asked: the "
+            "verdict named no unsupported claim for a reviewer to start from",
+            session.session_id,
+        )
+        return
+    if not actor or not settings.entra_required:
         logger.info(
             "the answer for session %s stays marked for review and no person was asked: the turn "
             "has no authenticated actor to raise the request as",
@@ -1462,6 +1484,22 @@ async def _escalate_exhausted_review(
             f"flag, so a person is being asked to read it. Turn {correlation_id}. What the checks "
             "could not ground: " + "; ".join(claims)
         ),
+        # **Routed to the requester, and that is a visibility decision rather than a routing one.**
+        # An empty `asked_of` does not mean "whoever is entitled" to a reader — `_may_answer`
+        # returns `True` for any authenticated caller and `pending_store`'s list predicate carries
+        # `OR asked_of = ''`, so an unrouted request is listed to the whole tenant. This one's
+        # `rationale` is model-authored claim text lifted out of the answer, and its `subject`
+        # names the conversation — while that conversation is owner-scoped and 404s a non-owner
+        # with no existence leak. Unrouted, it published a fragment of a private thread fleet-wide
+        # to people who cannot open the thread to check it.
+        #
+        # So it goes to the one principal who can actually read what it points at. That makes the
+        # ask an honest self-review rather than a leaky appeal to nobody: a real reviewer
+        # population is a configured entitlement this deployment does not have, and inventing one
+        # here would be a control nobody asked for. `connectors/bo/workflows.py` leaves `asked_of`
+        # empty for a wait a *person* launched about work they chose to share; this one fires
+        # automatically, per conversation, carrying conversation content.
+        asked_of=actor,
         requested_by=actor,
         session_id=session.session_id,
         correlation_id=correlation_id,
