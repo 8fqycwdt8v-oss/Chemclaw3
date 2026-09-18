@@ -564,7 +564,33 @@ _HISTORICAL = ("docs/archive/", "docs/decisions/", "tasks/")
 #: where the live-lane scripts wrote "its own `calc` bundle", so the guard was green on its own
 #: wording and nothing warned the next editor; restoring that one word red the suite. Derived from
 #: `__file__` rather than spelled out, so renaming this module carries the exemption with it.
+#:
+#: **What is exempt is the quotation, not the file, and it was the file.** The `#:` above argued a
+#: narrow thing and the implementation skipped a thousand lines: driven, a *fresh* count of
+#: "all seventeen tools" beside the bundle's name, in a different test's docstring in this
+#: module, was `1 passed`. That is not hypothetical, it is history: `a0573397` existed
+#: solely to hand-delete two such counts from this file, and nothing here would have caught them.
+#: So the skip is per *match*: inside this file a counted surface is exempt only where the phrase
+#: is enclosed in quotation marks, which is what quoting a sentence to say what it is looks like
+#: and what writing a fresh one does not.
 _NAMES_WHAT_IT_FORBIDS = (Path(__file__).resolve().relative_to(_ROOT).as_posix(),)
+
+#: The quotation marks that make a count a quotation. ASCII and typographic, because this file is
+#: read and edited by people who use both.
+_OPENS, _CLOSES = '"\u201c', '"\u201d'
+
+
+def _first_live_count(paragraph: str, quotations_are_exempt: bool) -> re.Match[str] | None:
+    """The first counted surface in `paragraph`, skipping quoted ones where that is allowed."""
+    for match in _COUNTED_SURFACE.finditer(paragraph):
+        if not quotations_are_exempt:
+            return match
+        before = paragraph[match.start() - 1 : match.start()]
+        after = paragraph[match.end() : match.end() + 1]
+        if not (before in _OPENS and after in _CLOSES):
+            return match
+    return None
+
 
 #: The module that *defines* the calc tool surface — the thing the package half of the scope is
 #: about. Named as an import path and resolved to a file, rather than spelled as a path, because a
@@ -651,6 +677,12 @@ def test_the_calc_tool_surface_is_not_counted_in_prose() -> None:
     the file that carried the original defect. Widening to the paragraph costs zero new offenders,
     measured; the quoted sentence in the failure message is still a sentence, because the paragraph
     is the pairing window rather than what a reader wants quoted back at them.
+
+    **This module is exempt only where it quotes.** It has to write the sentences it refuses, to
+    say what they are; the implementation of that was a whole-file skip, and a fresh count in
+    another test's docstring here passed. `a0573397` existed solely to hand-delete two such counts
+    from this file, which is the same defect already happening once. So the skip is per match and
+    the condition is quotation marks around the phrase.
     """
     surface_file = _calc_surface_file()
     package = surface_file.rsplit("/", 1)[0] + "/"
@@ -663,18 +695,19 @@ def test_the_calc_tool_surface_is_not_counted_in_prose() -> None:
     scanned_in_package = []
     scanned_naming_the_bundle = []
     for name in filter(None, tracked):
-        if name.startswith(_HISTORICAL) or name in _NAMES_WHAT_IT_FORBIDS:
+        if name.startswith(_HISTORICAL):
             continue
+        quoting = name in _NAMES_WHAT_IT_FORBIDS
         try:
             content = (_ROOT / name).read_text(encoding="utf-8")
         except (UnicodeDecodeError, FileNotFoundError, IsADirectoryError):
             continue  # binary, or a symlink into a tree this checkout does not have
         if name.startswith(package):
             scanned_in_package.append(name)
-        elif names_the_bundle.search(content):
+        elif names_the_bundle.search(content) and not quoting:
             scanned_naming_the_bundle.append(name)
         for paragraph in _PARAGRAPH.split(content):
-            counted = _COUNTED_SURFACE.search(paragraph)
+            counted = _first_live_count(paragraph, quoting)
             if not counted:
                 continue
             if name.startswith(package) or names_the_bundle.search(paragraph):
