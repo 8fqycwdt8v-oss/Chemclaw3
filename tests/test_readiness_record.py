@@ -314,19 +314,24 @@ def test_a_claim_about_a_shipped_default_agrees_with_the_setting() -> None:
     wrong = []
     for match in claims:
         name, stated, on = match.group(1), match.group(2), match.group(3)
-        if on is not None:
-            value = getattr(settings, on)
-            if not value:
-                wrong.append(f"`{on}` is claimed to ship on and ships {value!r}")
-            continue
-        assert name is not None
-        matched = _fields_named(name)
+        token = name if name is not None else on
+        assert token is not None
+        matched = _fields_named(token)
         assert matched, (
-            f"the record names `{name}`, which is no setting on this config. This used to read "
+            f"the record names `{token}`, which is no setting on this config. This used to read "
             "`matched = [name]` for a non-glob name, so it could not fire for the shape the record "
             "actually writes and an unknown name raised a bare AttributeError from `getattr` "
-            "below instead."
+            "below instead — and then it was hoisted here because the arm that resolution reached "
+            "was the one with no live instance while the `ships on` arm, which is the shape the "
+            "record actually writes, still went straight to `getattr`."
         )
+        if on is not None:
+            for field in matched:
+                value = getattr(settings, field)
+                if not value:
+                    wrong.append(f"`{field}` is claimed to ship on and ships {value!r}")
+            continue
+        assert stated is not None
         expected = int(stated.replace("_", "").replace(",", ""))
         for field in matched:
             value = getattr(settings, field)
