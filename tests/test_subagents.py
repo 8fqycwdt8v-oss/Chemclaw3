@@ -1095,6 +1095,37 @@ def test_several_files_share_one_budget() -> None:
     )
 
 
+def test_an_exhausted_budget_still_cuts_when_more_than_one_file_crosses() -> None:
+    """The most-exhausted case was the *unbounded* case, which is the one shape a cap may not have.
+
+    `_bounded_file` floored the budget at 1 and then divided it by the number of files sharing the
+    command, so `1 // 2` was 0 — and 0 is how `agent_subagent_files_max_chars` is switched off
+    entirely (`bounded_content` returns uncut at `limit <= 0`). A caller whose `files` channel was
+    already at the budget, receiving two files from one helper, therefore stored both of them
+    whole, with nothing logged and `chemclaw_subagent_file_truncations_total` unmoved.
+
+    Measured before the fix: two 500,000-character files against an exhausted budget stored
+    1,000,000 characters. The sibling `bounded_for_batch` floors *after* dividing and its comment
+    says why — "0 is the deployment's own 'no cap' and a share that rounded to it would restore the
+    unbounded behaviour exactly where the batch is widest".
+
+    Driven on `_bounded_file` rather than through a spawn, because the property is arithmetic: the
+    crossing itself is already driven by the tests above, and a fixture that arranged an exhausted
+    channel would add a second way to spell `held`, not evidence.
+    """
+    from chemclaw.agent.tool_result_size import _bounded_file
+
+    budget = settings.agent_subagent_files_max_chars
+    content = "z" * (budget * 4)
+    stored = sum(len(_bounded_file(content, sharing=2, held=budget)) for _ in range(2))
+
+    assert stored < len(content), (
+        f"two files crossing into a channel already holding {budget} characters stored {stored} "
+        f"characters against a {budget} budget, so the cap switched itself off at the point the "
+        "channel was fullest"
+    )
+
+
 def test_a_second_delegation_shares_the_budget_the_first_one_spent() -> None:
     """`files` accumulates, so the bound has to be on the channel and it was on one `Command`.
 
@@ -1102,9 +1133,12 @@ def test_a_second_delegation_shares_the_budget_the_first_one_spent() -> None:
     `DeltaChannel` — it merges rather than replaces. So a caller that delegates N times stored up
     to N x `agent_subagent_files_max_chars`, which is the same shape `_bounded_file`'s own
     docstring rejects one level down ("a per-file cap times an unbounded number of files is not a
-    bound"), one level up. It is a *storage* bound, so the cost is checkpoint rows: measured at
-    10.4x amplification, ten delegations at the shipped setting is ~20 MB of checkpoint rows per
-    superstep instead of ~2.
+    bound"), one level up. It is a *storage* bound, so the cost is checkpoint rows, amplified by
+    LangGraph rewriting the whole channel per superstep and again per version. The 10.4x this
+    docstring used to quote is not that amplification: it was a whole helper spawn, ~98% of which
+    was the helper checkpointing its own thread onto the caller's saver
+    (`D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer`), a cost this bound never
+    touched and which is now closed.
 
     Driven through `bound_tool_results` — the shipped middleware — rather than on `_bounded_file`,
     because what changed is that the bound now reads the caller's state, and a test that called
@@ -1210,39 +1244,71 @@ def test_a_helper_has_no_durable_memory_route_and_no_store_is_passed_to_one() ->
     )
 
 
-def test_the_helper_graph_is_compiled_without_a_checkpointer() -> None:
-    """Upstream's contract is one prompt in, one report out — a thread to resume is not that.
+def test_a_helper_writes_no_checkpoint_of_its_own() -> None:
+    """Observed against a real saver, because the source says nothing about this.
 
-    Asserted because the fact is load-bearing outside this file and was already misread once: a
-    `BACKLOG.md` row costing a helper spawn at 20,712 kB attributed it to "the helper's own subgraph
-    checkpoints" and offered "compiling a helper with no checkpointer at all" as one of two levers
-    to choose between. There is no such checkpointer to remove — this is already the shipped
-    configuration, so that lever was spent before the row was written, and whoever picked it up
-    would have gone looking for an object that does not exist.
+    **This test used to read the AST and assert the wrong thing.** It checked that the helper's
+    `build_langgraph_agent(...)` call passes no `checkpointer=` keyword and concluded from that
+    absence that a helper holds no checkpointer — reasoning a `BACKLOG.md` row then used to
+    declare one of its two remaining levers already spent. The absence is what *causes* the
+    behaviour it was read as excluding: `None` is how a LangGraph subgraph asks to inherit its
+    parent's saver (`CONFIG_KEY_CHECKPOINTER: checkpointer or configurable.get(...)`), so every
+    helper was checkpointing its own thread under a `tools:<uuid>` namespace on the caller's
+    `thread_id`. Measured before the fix: 18,944 kB of checkpoint rows for one 2 MB helper write,
+    15.7 MB of it in that namespace; after, 424 kB.
 
-    Read off the source rather than the compiled object, because a `CompiledStateGraph` exposes no
-    "was I given a saver" that is public API, and pinning a private attribute would be a second
-    upstream coupling for a fact the call site states outright.
+    That is the defect `tests/test_context_floor.py`'s own docstring names — "a basis that is
+    re-derived rather than observed will agree with itself forever" — so this reads the rows the
+    turn actually wrote. `checkpointer=False` is the fix and it is *also* not assertable from the
+    source: what matters is that no subgraph namespace lands on the thread, whatever spelling
+    produces it.
     """
-    import ast
-    from pathlib import Path
+    import chemclaw.agent.checkpointer as ckpt
+    from chemclaw.agent.audit import NullAuditSink
+    from chemclaw.core import db
+    from chemclaw.core.config import settings as live
+    from tests.pg import create_checkpoint_tables, migrated_db_or_skip
 
-    import chemclaw.agent.langgraph_agent as la
+    thread = "helper-checkpoint-probe"
 
-    tree = ast.parse(Path(la.__file__).read_text(encoding="utf-8"))
-    builds = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "build_langgraph_agent"
-    ]
+    async def _run() -> tuple[dict[str, int], int]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        await ckpt.close_checkpointer()
+        saver = await ckpt.checkpointer()
+        try:
+            model = _HelperScript(messages=iter([]), read=True, written="a scratch note")
+            graph = build_langgraph_agent(
+                model=model,
+                audit_sink=NullAuditSink(),
+                profile=AgentProfile(name="default"),
+                checkpointer=saver,
+            )
+            await graph.ainvoke(turn_input("sweep the sources"), turn_config(thread))
+            async with db.connection(live.postgres_dsn) as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT checkpoint_ns, count(*) FROM checkpoints "
+                    "WHERE thread_id = %s GROUP BY 1",
+                    (thread,),
+                )
+                rows = {str(ns): int(count) for ns, count in await cur.fetchall()}
+            return rows, model.helper_calls
+        finally:
+            await ckpt.close_checkpointer()
 
-    assert len(builds) == 1, "this module builds the helper graph once; this test reads that one"
-    passed = {keyword.arg for keyword in builds[0].keywords}
-    assert "helper" in passed, "the one build here should be the helper's; this test is stale"
-    assert "checkpointer" not in passed, (
-        "the helper graph was given a checkpointer: it would then hold a thread nobody addresses, "
-        "and its state would be persisted twice — once under its own thread and again through the "
-        "keys upstream copies into the caller's"
+    namespaces, helper_calls = asyncio.run(_run())
+
+    assert helper_calls > 0, (
+        "no helper ran, so this turn had no subgraph to checkpoint and the assertion below would "
+        "pass on an empty thread"
+    )
+    assert namespaces.get("", 0) > 0, (
+        f"the caller wrote no checkpoints either, so nothing here measures a saver: {namespaces}"
+    )
+    assert not [name for name in namespaces if name], (
+        f"a helper checkpointed its own thread onto the caller's saver: {namespaces}. A helper is "
+        "one prompt in and one report out — a thread to resume is a second conversation nobody "
+        "addresses, and it cost the caller's session 45x the checkpoint rows a turn writes"
     )
 
 

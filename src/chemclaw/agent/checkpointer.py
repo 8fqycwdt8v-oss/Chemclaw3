@@ -255,18 +255,25 @@ CHECKPOINT_TABLES: tuple[str, ...] = ("checkpoints", "checkpoint_blobs", "checkp
 # One statement, so on this autocommit pool it is one transaction: a concurrent reader sees the
 # thread before it or after it, never mid-prune.
 #
-# **Partitioned by `checkpoint_ns`, which is the caveat that would have been found in production.**
-# A turn that spawns the `task` helper writes a subgraph namespace beside the root one on the *same*
+# **Partitioned by `checkpoint_ns`, and the case that motivated it no longer ships.**
+# A turn that spawned the `task` helper wrote a subgraph namespace beside the root one on the *same*
 # `thread_id` — measured, one `tools:<uuid>` namespace per `task` call, 7 `checkpoints` and 3
-# `checkpoint_blobs` each, and a *new* namespace every call. The review that asked for the partition
+# `checkpoint_blobs` each, and a *new* namespace every call. That is exactly what
+# `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer` closed: the helper inherited its
+# caller's saver because the call site passed `None`, and it now passes `False`, so no shipped path
+# writes a second namespace. **The partition stays** — it is generic over namespaces, LangGraph
+# writes one for any subgraph that inherits a saver, and the leak it prevents is silent. What the
+# measurement below is about is therefore history, kept because it is the argument for keeping the
+# clause. The review that asked for the partition
 # expected over-pruning: a thread-wide floor taking a live helper's namespace whole. Measured, that
 # is not this statement's failure — `oldest_kept` groups by `checkpoint_ns`, so a namespace with no
 # row in the global top-K gets no floor and is simply never touched. With the `PARTITION BY` removed
 # and nothing else changed, the root namespace went 52 -> 3 either way while every helper namespace
 # went 7 -> 3 partitioned and stayed at **7** unpartitioned: a leak that grows with helper use
-# rather than a loss. Over-pruning stays possible only in the window where a helper's own
+# rather than a loss. Over-pruning stays possible only in the window where a non-root namespace's
 # checkpoints are the newest on the thread, and one `PARTITION BY` closes both.
-# `tests/test_checkpointer_prune.py` drives a real `task` call rather than asserting either.
+# `tests/test_checkpointer_prune.py` writes a second namespace through the saver to drive it — it
+# used to get one from a real `task` call, which is the thing that changed.
 #
 # **The `EXISTS` is conservative in the safe direction.** A blob whose channel appears in no kept
 # checkpoint's `channel_versions` is *not* deleted: the floor for it does not exist, so the clause

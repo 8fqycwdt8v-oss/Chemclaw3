@@ -372,7 +372,16 @@ def build_langgraph_agent(
         "state_schema": ChemclawState,
         "middleware": _middleware(prof, backend, audit, chat_model, labelled),
         "name": "chemclaw",
-        "checkpointer": checkpointer,
+        # **`False` rather than `None` for a helper, and the difference is 98% of what a spawn
+        # costs.** `None` does not mean "no checkpointer" to LangGraph: a subgraph compiled with
+        # `None` *inherits* its parent's through the run config — LangGraph's own pregel algorithm
+        # module resolves it as
+        # `CONFIG_KEY_CHECKPOINTER: checkpointer or configurable.get(CONFIG_KEY_CHECKPOINTER)`,
+        # so every helper was checkpointing its own thread onto the
+        # caller's saver under a `tools:<uuid>` namespace on the caller's `thread_id`. `False` is
+        # upstream's documented opt-out — `find_subgraph_pregel` skips "subgraphs that disabled
+        # checkpointing". See `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer`.
+        "checkpointer": False if helper else checkpointer,
         "response_format": response_format,
     }
     if helper:
@@ -571,8 +580,16 @@ def _subagents(
       here — the caller's sessions are already open when this runs, so the helper is handed
       `connectors` and costs no second socket. The narrowing is applied in `build_langgraph_agent`
       beside the in-process one, so it travels with `helper=True` rather than with this call site.
-    - **No checkpointer.** Upstream's contract is that a helper sees the prompt it was given and
-      returns one report; a thread to resume would be a second conversation nobody addresses.
+    - **No checkpointer — `checkpointer=False`, which is not the same as passing nothing.**
+      Upstream's contract is that a helper sees the prompt it was given and returns one report; a
+      thread to resume would be a second conversation nobody addresses. This bullet said exactly
+      that while the call site passed `None`, and `None` is how a subgraph asks to inherit its
+      parent's saver: measured, one 2 MB helper write cost 18,944 kB of checkpoint rows, of which
+      15.7 MB sat under a `tools:<uuid>` namespace on the caller's own `thread_id`. With `False` the
+      same turn costs 424 kB. What is given up is resuming a turn *inside* a helper, which nothing
+      here can reach: `interrupt()` has no caller in `src/`, and the two tools that could ask a
+      question are subtracted from every helper's surface. No byte count belongs in this comment
+      either — see the ADR, which cannot be edited.
     - **No durable memory and no store.** `store=` is not forwarded, so the helper's backend has no
       `/memories/` route: nothing a helper writes reaches the knowledge graph or the memory tiers.
 
