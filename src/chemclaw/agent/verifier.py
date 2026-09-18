@@ -847,12 +847,6 @@ def promised_uncalled_tools(answer: str, tools_called: Sequence[str]) -> list[st
     """
     # Imported here, not at module scope: `chemclaw_agent` imports this module's verifier for the
     # turn path, so a top-level import would close the cycle.
-    from chemclaw.agent.chemclaw_agent import (
-        connector_tool_names,
-        registered_tool_names,
-        template_tool_names,
-    )
-
     # **The capability name spaces only, not `available_tool_names()`.** That union exists for the
     # validators, which must resolve *any* name the agent can call, and it includes three spaces
     # that are the agent's own scaffolding rather than anything a chemist is promised: the subagent
@@ -864,12 +858,12 @@ def promised_uncalled_tools(answer: str, tools_called: Sequence[str]) -> list[st
     # `answer_review_max_rounds` is 2, so each false positive costs two full graph runs and then
     # files a durable review request against a correct answer.
     #
-    # A chemist is promised a *capability* — a calculation, a lookup, a search. Those are exactly
-    # the three spaces below, and none of the 111 names in them is shorter than seven characters or
-    # an English word, which is what makes a bare-token match safe here and unsafe over the union.
-    capability_tools = (
-        set(registered_tool_names()) | set(connector_tool_names()) | set(template_tool_names())
-    )
+    # A chemist is promised a *capability* — a calculation, a lookup, a search. The split is
+    # `chemclaw_agent`'s, written so `available_tool_names` is expressed in terms of it and a
+    # seventh name space cannot join this scan by being added there.
+    from chemclaw.agent.chemclaw_agent import capability_tool_names
+
+    capability_tools = capability_tool_names()
 
     called = set(tools_called)
     # Sorted by where the answer first names each tool, which requires the match *position* and not

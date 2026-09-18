@@ -3018,3 +3018,38 @@ me until every reviewer has handed back. And when a reviewer is stopped mid-flig
 files it was scoped to before doing anything else — a mutation left behind is indistinguishable from
 my own work in a `git status` listing, and it is the one kind of leftover that is *designed* to make
 the tests pass while the code is wrong.
+
+## A number is derived from a measurement, and the measurement's unit can move underneath it
+
+**2026-09-18.** I recommended `agent_max_turn_billed_tokens = 300_000` as a per-turn runaway
+backstop, argued as "above the one runaway this tree has measured" — a turn that billed 250,000
+tokens against a 1,000-token session cap. The argument is sound and the number was wrong by an
+order of magnitude: at this tree's current `PREFIX_BOUND` of 81,600 tokens per model call, 300,000
+funds **three** calls, while `harness_max_loop_iterations` permits 25 and
+`agent_context_token_budget` permits 118,700 on each of them. The backstop sat *below* the two
+guards it was supposed to sit above, so it would have ended ordinary heavy turns and made the
+iteration cap unreachable. One guard killing another, shipped on by default, in the commit whose
+whole subject was turning guards on.
+
+**Why the reasoning felt complete.** I checked the new number against the measured runaway and it
+was larger, which is the comparison the argument names. What I did not check is whether the
+measurement still meant what it meant when it was taken: 250,000 tokens was ~25 calls when a call
+carried ~10,000, and is ~3 calls now that the prefix has grown sevenfold. The figure survived the
+change that invalidated its unit, and comparing against it reproduced the staleness rather than
+catching it. This is
+`D-2026-09-05-a-ratchet-that-re-derives-half-its-basis-bounds-half-a-request` in a new place: a
+basis nobody re-derives agrees with itself forever.
+
+**Rule: a cap that must sit above another guard is *derived from that guard*, never chosen against
+a past measurement.** Here it is `harness_max_loop_iterations × agent_context_token_budget` — what
+a turn can lawfully spend with both existing guards holding. Write the relation, not the number.
+
+**Rule: pin the relation, in both directions, and mutate it.** `tests/test_spend_cap.py` now
+asserts the cap is at or above the lawful ceiling *and* funds at least
+`harness_max_loop_iterations` calls at `PREFIX_BOUND`. Both fail against 300,000, which is how I
+know the tests are about the defect rather than about the fix. A single-direction assertion would
+have passed against a cap set absurdly high, which is the other way to get this wrong.
+
+**Rule: when a setting's justification cites a measurement, name the measurement's unit in the same
+sentence.** "250,000 tokens" is not a fact about runaways; "25 model calls, at the ~10,000-token
+calls of the day" is. Only the second one visibly rots.

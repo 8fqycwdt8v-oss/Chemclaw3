@@ -883,13 +883,32 @@ def available_tool_names() -> set[str]:
     the agent had just called. `task` is the same shape a third time and was added with the
     middleware that registers it, rather than after a validator rejected a correct reference to it.
     """
+    return capability_tool_names() | {
+        *skill_tool_names(),
+        *harness_tool_names(),
+        *subagent_tool_names(),
+    }
+
+
+def capability_tool_names() -> set[str]:
+    """The three name spaces that are a *capability* — a calculation, a lookup, a search.
+
+    The other three in `available_tool_names` are the agent's own scaffolding: the harness's todo
+    writer, the backend's filesystem verbs (`ls`, `grep`, `glob`, `read_file`) and the subagent
+    spawner (`task`). Nothing promises a chemist one of those, and four of their names are ordinary
+    English words.
+
+    That distinction is here rather than at its caller because the union above is written in terms
+    of it, so the two cannot drift: a seventh name space lands in `available_tool_names` without
+    silently joining the set the verifier scans for a bare token.
+    `agent/verifier.promised_uncalled_tools` is the caller, and
+    `tests/test_verifier.py::test_no_capability_tool_is_short_enough_to_collide_with_english`
+    asserts the property that makes a bare-token match safe over this set and unsafe over that one.
+    """
     return {
         *registered_tool_names(),
         *connector_tool_names(),
         *template_tool_names(),
-        *skill_tool_names(),
-        *harness_tool_names(),
-        *subagent_tool_names(),
     }
 
 

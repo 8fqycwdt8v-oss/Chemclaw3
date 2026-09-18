@@ -1450,14 +1450,12 @@ def test_no_capability_tool_is_short_enough_to_collide_with_english() -> None:
     could break it. This is the assertion that fails on the day one does, rather than the day a
     chemist's answer is sent to a reviewer for saying "task".
     """
-    from chemclaw.agent.chemclaw_agent import (
-        connector_tool_names,
-        registered_tool_names,
-        template_tool_names,
-    )
+    from chemclaw.agent.chemclaw_agent import available_tool_names, capability_tool_names
 
-    capability = (
-        set(registered_tool_names()) | set(connector_tool_names()) | set(template_tool_names())
+    capability = capability_tool_names()
+    assert capability < available_tool_names(), (
+        "the capability spaces must stay a strict subset of the union the validators resolve; if "
+        "they are equal, the narrowing this test protects has been undone"
     )
     assert capability, "the premise: there are capability tools to scan for"
     short = sorted(name for name in capability if len(name) < 7 or "_" not in name)
