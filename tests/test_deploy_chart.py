@@ -5621,17 +5621,27 @@ def test_the_background_worker_has_an_alert_the_shared_endpoint_cannot_give_it()
 
 
 def test_the_component_label_the_worker_alert_reads_is_one_the_podmonitor_stamps() -> None:
-    """An alert label the scrape config does not produce is a rule that is green forever.
+    """An alert label the scrape config does not produce is a rule that is wrong.
 
-    This is the same failure the fleet group's own comment records for `kube_pod_status_ready`, one
-    label instead of one metric: `podTargetLabels` is what turns a pod label into a sample label,
-    so an alert selecting on `app_kubernetes_io_component` is only meaningful while the PodMonitor
-    copies it. Held in both directions so neither side can be edited alone.
+    And for an `absent()` it is wrong in the *loud* direction.
+
+    `podTargetLabels` is what turns a pod label into a sample label, so an alert selecting on
+    `app_kubernetes_io_component` is only meaningful while the PodMonitor copies it. Held in both
+    directions so neither side can be edited alone.
+
+    **Which way it fails is worth stating, because this docstring said the opposite.** For a
+    positive expression — the fleet group's `kube_pod_status_ready` — a label no sample carries
+    means the vector is empty and the rule is green forever, which is the failure that reads as
+    "the condition never occurred". `ChemclawNoBackgroundWorkerIsScraped` is an `absent()`, and
+    `absent()` of a vector that matches nothing is **1**: drop the label and a `severity: critical`
+    alert pages permanently, for every release, until somebody deletes the rule. The condition this
+    test catches is the same; the symptom it sends a reader looking for is not.
     """
     monitor = (CHART / "templates" / "podmonitor.yaml").read_text()
     assert "app.kubernetes.io/component" in monitor.split("podTargetLabels:")[1][:200], (
-        "the PodMonitor stopped copying the component label, so the background-worker alert now "
-        "selects on a label no sample carries and can never fire"
+        "the PodMonitor stopped copying the component label, so the background-worker alert's "
+        "`absent()` now matches no series and is 1 on every evaluation — a critical page that "
+        "never clears, rather than a rule that never fires"
     )
     workers = (CHART / "templates" / "deployment-workers.yaml").read_text()
     assert "app.kubernetes.io/component: background-worker" in workers, (
@@ -5651,11 +5661,24 @@ def test_no_alert_reads_a_series_this_prometheus_cannot_see() -> None:
     So the constraint is asserted rather than left in a comment for the next person to miss. If a
     deployment ever federates those series, this test is the one place that has to change, and it
     says why.
+
+    **Every alert, including one with no `for:`.** The haystack was `if "for:" in block`, which
+    dropped an alert without a hold-down entirely — `ChemclawBudgetNearingItsCap` has none, so a
+    `kube_*` series added there would have passed. The cut is now at whichever of `for:`, `labels:`
+    or `annotations:` comes first, because what has to be excluded is the *annotation prose* (a
+    description may legitimately name `kube_pod_status_ready` while arguing why it is not used),
+    and every alert has at least one of the three.
     """
     rules = (CHART / "templates" / "prometheusrule.yaml").read_text()
+    alerts = rules.split("- alert: ")[1:]
     expressions = "\n".join(
-        block.split("for:")[0] for block in rules.split("- alert: ")[1:] if "for:" in block
+        min(
+            (block.split(marker)[0] for marker in ("for:", "labels:", "annotations:")),
+            key=len,
+        )
+        for block in alerts
     )
+    assert len(alerts) == rules.count("- alert: "), "the split lost an alert"
     for series in ("kube_deployment_", "kube_pod_", "kube_statefulset_", "kube_daemonset_"):
         assert series not in expressions, (
             f"an alert expression reads `{series}*`, which kube-state-metrics publishes to the "

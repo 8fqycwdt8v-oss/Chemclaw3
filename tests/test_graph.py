@@ -1,8 +1,11 @@
 """Behavioral tests for the NetworkX indexer and validation (plan steps 2.3, 2.4)."""
 
+import ast
 import hashlib
+import inspect
 import logging
 import os
+import textwrap
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -12,6 +15,7 @@ import networkx as nx
 import pytest
 
 import chemclaw.kg.graph as graph
+import chemclaw.retrieval.vector_index as vector_index
 from chemclaw.core.config import settings
 from chemclaw.kg.graph import build_graph, neighborhood
 from chemclaw.kg.validate import validate
@@ -603,6 +607,87 @@ def test_one_note_changed_re_reads_one_file_and_not_the_corpus(
     assert sorted(notes["b"].outgoing_links()) == ["a", "c"], (
         "the changed note was served from the cache rather than re-read, which is the failure in "
         "the other direction and worse"
+    )
+
+
+def test_the_parse_cache_and_the_content_fingerprint_disagree_and_reparse_is_what_settles_it(
+    tmp_path: Path,
+) -> None:
+    """The two answers to "what changed" stopped agreeing when one became a hash.
+
+    `invalidate_cache` keeps `_PARSED_FILES` on an argument it states: the fingerprint "is keyed on
+    the same two stat fields and can therefore be wrong in exactly the same cases and no others".
+    That was true while `note_file_fingerprints` returned `mtime_ns:size`. It now hashes the file's
+    **bytes**, so a same-size edit with the mtime restored moves the fingerprint and leaves the
+    parse — and the disagreement runs the harmful way for the one caller that pairs them:
+    `reindex_notes` would embed the *old* body and store it under the *new* digest, after which the
+    digest matches on every later run and the row never heals.
+
+    Both directions are asserted here, because the plain bust keeping the parse is the behaviour
+    `D-2026-09-06-one-note-changed-is-not-the-corpus-changed` bought and must not be lost to this
+    fix: a note write still pays nothing, and only a caller that asks for `reparse` pays the read.
+
+    A same-size, same-mtime edit is not contrived — it is what a `git checkout` between two branches
+    that differ by a few characters looks like on a filesystem whose times are restored.
+    """
+    directory = tmp_path
+    (directory / "compound").mkdir()
+    note = directory / "compound" / "a.md"
+    note.write_text(_note("a", ["b"]), encoding="utf-8")
+    before = note.stat()
+
+    graph.invalidate_cache(reparse=True)
+    first_fingerprint = graph.note_file_fingerprints(directory)["a"]
+    assert sorted(graph.load_notes(directory)[0].outgoing_links()) == ["b"]
+
+    note.write_text(_note("a", ["c"]), encoding="utf-8")
+    os.utime(note, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert note.stat().st_size == before.st_size, "the edit has to be the same size to be the case"
+    assert note.stat().st_mtime_ns == before.st_mtime_ns
+
+    assert graph.note_file_fingerprints(directory)["a"] != first_fingerprint, (
+        "the fingerprint no longer sees a same-size edit, so it is a stat pair again and the whole "
+        "disagreement this test is about has gone away — re-read note_file_fingerprints"
+    )
+
+    graph.invalidate_cache(directory)
+    assert sorted(graph.load_notes(directory)[0].outgoing_links()) == ["b"], (
+        "a plain bust now re-reads every file, which is the cost D-2026-09-06 removed; if this is "
+        "deliberate, that decision needs superseding rather than this assertion loosening"
+    )
+
+    graph.invalidate_cache(directory, reparse=True)
+    assert sorted(graph.load_notes(directory)[0].outgoing_links()) == ["c"], (
+        "reparse=True left the stale parse in place, so reindex_notes still embeds the old body "
+        "under the new digest and the row never heals"
+    )
+
+
+def test_the_reindex_job_asks_for_the_reparse_its_own_comparison_needs() -> None:
+    """The caller, not just the capability — a parameter nobody passes is not a fix.
+
+    Read off the source rather than driven, because driving it needs Postgres and the property is
+    about which argument this one call site passes. `reindex_notes` is the only function in the tree
+    that diffs `load_notes` against `note_file_fingerprints`, which is what makes it the only one
+    that needs this.
+
+    **Read off the AST, not the text.** The first version of this grepped the source for
+    `reparse=True` and passed with the call reverted, because the docstring above that call says
+    `reparse=True` too — a control satisfied by the prose describing it, which is the shape this
+    repository keeps finding. A keyword in a `Call` node cannot be written by a comment.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(vector_index.reindex_notes)))
+    passed = {
+        keyword.arg
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        for keyword in node.keywords
+        if isinstance(keyword.value, ast.Constant) and keyword.value.value is True
+    }
+    assert "reparse" in passed, (
+        "reindex_notes busts the caches without reparse=True, so its note list comes from the stat "
+        "cache while its fingerprints come from the file's bytes — see "
+        "test_the_parse_cache_and_the_content_fingerprint_disagree_and_reparse_is_what_settles_it"
     )
 
 
