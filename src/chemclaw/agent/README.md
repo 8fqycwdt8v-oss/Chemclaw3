@@ -12,7 +12,7 @@ place and withholds the shell and the delete verb. Turn state is a declared sche
 `TodoListMiddleware`'s todo list; every tool call crosses the chain
 `langgraph_agent.tool_call_middleware` builds, whose order is load-bearing and documented
 there. The `task` tool is not optional — upstream refuses to let a profile strip the
-middleware that registers it — so `subagents.py` supplies the one helper it reaches, compiled
+middleware that registers it — so `subagents.py` supplies the helpers it reaches, compiled
 through this same builder rather than inherited ungoverned. The Microsoft Agent Framework this layer
 was first built on is gone
 (`docs/decisions/D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md`) — replaced

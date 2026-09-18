@@ -71,6 +71,7 @@ advertising a mechanism after the mechanism is gone.
 import logging
 import uuid
 from collections.abc import Callable, Collection, Mapping, Sequence
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Any, NotRequired, cast
 
@@ -84,6 +85,7 @@ from deepagents.middleware.skills import (
     SkillsState,
 )
 from langchain.agents.middleware.types import PrivateStateAttr
+from langchain_core.runnables import RunnableLambda
 from langgraph.channels.untracked_value import UntrackedValue
 
 # `_capability_tools` keeps its underscore deliberately. It is named in six merged ADRs (D-040,
@@ -111,7 +113,8 @@ from chemclaw.agent.model_calls import model_call_middleware, refuse_unparsed_ar
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
 from chemclaw.agent.plan_link import stamp_plan_link
 from chemclaw.agent.plan_scope import ScopedTodoListMiddleware
-from chemclaw.agent.profiles import AgentProfile, get_profile
+from chemclaw.agent.profile_discovery import ProfileError, load_profiles
+from chemclaw.agent.profiles import AgentProfile, get_profile, registered_profile_names
 from chemclaw.agent.repeat_guard import refuse_repeated_calls
 from chemclaw.agent.scratchpad import (
     filesystem_permissions,
@@ -125,10 +128,12 @@ from chemclaw.agent.spend_cap import MeterTurnSpend, enforce_spend_cap
 from chemclaw.agent.state import ChemclawState
 from chemclaw.agent.subagents import (
     HELPER_BRIEF,
+    describe_helper,
     general_purpose_helper,
     governed_roster,
     helper_connectors,
     helper_profile,
+    specialist_override,
 )
 from chemclaw.agent.tool_authz import (
     announce_tool_failures,
@@ -160,6 +165,7 @@ def build_langgraph_agent(
     response_format: Any | None = None,
     store: Any | None = None,
     helper: bool = False,
+    specialist: AgentProfile | None = None,
 ) -> Any:
     """Compile the LangGraph conversation agent for one profile.
 
@@ -203,11 +209,18 @@ def build_langgraph_agent(
             thing it changes is that a helper gets no helpers of its own, which is the recursion
             guard: `_subagents` builds its spec by calling this function, so a graph that handed its
             helper a helper would not terminate. It is a parameter rather than a depth counter
-            because one level is the whole design — `agent/subagents.py` says why the roster is one
-            name — so a counter would be a knob for a depth nobody has asked for. It also
+            because one level is the whole design — `agent/subagents.py` says why — so a counter
+            would be a knob for a depth nobody has asked for. It also
             narrows: a helper gets `helper_profile`'s in-process subtraction and
             `helper_connectors`' matching one over the caller's open connector tools, so "a helper
             reads, it does not act" travels with this switch rather than with a call site.
+        specialist: The rostered profile this helper is named for, or `None` for the unnamed one.
+            Ignored unless `helper`, since a specialist is a narrowing *of* a helper. It only ever
+            intersects — the surface stays what the caller holds ∩ what the specialist names, minus
+            everything that acts — so a roster entry cannot reach past the agent that spawned it and
+            `D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor` needs no revisiting. What it
+            *does* replace is the instructions and the model route, which are the two dimensions
+            that carry no authority.
 
     Returns:
         A compiled graph. No network call happens here; construction only, exactly as
@@ -257,9 +270,9 @@ def build_langgraph_agent(
     # bundle whose manifest declares a `state_changing` tool is out of a helper's reach on the day
     # it is enabled.
     if helper:
-        prof = helper_profile(prof, frozenset(fn.__name__ for fn in tools))
+        prof = helper_profile(prof, frozenset(fn.__name__ for fn in tools), specialist)
         tools = _capability_tools(prof)
-        connectors = helper_connectors(connectors)
+        connectors = helper_connectors(connectors, specialist)
     # **Resolved once, here, because two things now depend on which sink this graph got.** The
     # middleware writes the rows and the prompt tells the chemist what the trail is
     # (`instructions_for(durable_trail=…)`), and the two disagreeing is precisely the defect that
@@ -345,7 +358,16 @@ def build_langgraph_agent(
             {tool.name for tool in bound},
             durable_trail=not isinstance(sink, NullAuditSink),
         )
-        + (HELPER_BRIEF if helper else ""),
+        + (HELPER_BRIEF if helper else "")
+        + (
+            specialist_override(
+                specialist,
+                frozenset(fn.__name__ for fn in tools)
+                | frozenset(tool.name for tool in (connectors or [])),
+            )
+            if helper and specialist is not None
+            else ""
+        ),
         "state_schema": ChemclawState,
         "middleware": _middleware(prof, backend, audit, chat_model, labelled),
         "name": "chemclaw",
@@ -527,7 +549,7 @@ def _subagents(
     actor: str,
     connectors: list[Any] | None,
 ) -> list[Any]:
-    """The helpers this agent may spawn — one, compiled here so it carries this chain.
+    """The helpers this agent may spawn, each compiled here so it carries this chain.
 
     **Not optional, and that is the reason this function exists.** `SubAgentMiddleware` is in
     upstream's `_REQUIRED_MIDDLEWARE` and `_apply_excluded_middleware` raises rather than let a
@@ -596,24 +618,223 @@ def _subagents(
         connectors: This turn's already-open connector tools, shared with the helper rather than
             reopened. Narrowed to the read-only half by the helper's own build.
 
+    **One unnamed helper plus whatever `CHEMCLAW_AGENT_HELPER_ROSTER` names**, and the roster
+    half is new
+    (`D-2026-09-16-a-roster-varies-the-two-dimensions-that-carry-no-authority`). Every entry is
+    built by this same function with a `specialist=`, so each is an *intersection* of the caller's
+    surface rather than a profile of its own: a name can make a helper narrower and never wider.
+    The unnamed one stays, and must — it claims upstream's `general-purpose`, which is the string
+    comparison that displaces the ungoverned helper `create_deep_agent` would otherwise insert.
+
+    A rostered entry that binds no capability tool is **dropped with a WARNING rather than offered
+    empty**, because what a profile names and what a deployment binds are different sets: `safety`'s
+    three screens are served by a connector bundle, so with that bundle off its helper is a menu
+    entry whose only possible outcome is a wasted delegation. An unknown name is skipped the same
+    way and refused loudly at startup instead (`api/app.py`), which is the split this repository
+    already draws — a turn must not die for a misconfiguration, and a misconfiguration must not be
+    discoverable only by noticing something missing.
+
     Returns:
-        The single-entry list to hand `create_deep_agent(subagents=…)`.
+        The list to hand `create_deep_agent(subagents=…)`.
     """
-    return governed_roster(
-        [
-            general_purpose_helper(
-                build_langgraph_agent(
-                    model=model,
-                    profile=profile,
-                    actor=actor,
-                    correlation_id=correlation_id,
-                    audit_sink=audit_sink,
-                    connectors=connectors,
-                    helper=True,
-                )
+
+    def compile_helper(specialist: AgentProfile | None) -> Any:
+        """One helper graph, built from the caller's own profile and this turn's open connectors."""
+        return build_langgraph_agent(
+            model=model,
+            profile=profile,
+            actor=actor,
+            correlation_id=correlation_id,
+            audit_sink=audit_sink,
+            connectors=connectors,
+            helper=True,
+            specialist=specialist,
+        )
+
+    specs: list[dict[str, Any]] = [general_purpose_helper(compile_helper(None))]
+    if not settings.helper_roster:
+        return governed_roster(specs)
+
+    # Registering the file profiles is part of building the roster, not something each caller does
+    # first — `TemplateSurface.resolve` carries the same line and the record of what happened when
+    # it did not: `registered_profile_names()` holds `default` alone until this has run, so every
+    # shipped profile read as unknown from any process that had not started the front door.
+    #
+    # **Behind the roster check, behind a registry check, and inside a `try`, because none of the
+    # three was free.** `load_profiles` is idempotent in *registration* only: it re-globs, re-reads
+    # and re-validates every profile file on each call — measured at 8.06 ms, with no warm-up — so
+    # the comment that used to sit here, "the load is idempotent, so a turn pays for it once per
+    # process", was false and the cost landed on every turn, including one whose roster is empty
+    # and which is documented as "what this repository shipped before". Asking the registry first
+    # makes the sentence true: after any turn has loaded them, every rostered name resolves and the
+    # file read is skipped. And `ProfileError` is a `ValueError` raised *here* rather than by
+    # `get_profile`, so uncaught it killed the turn three lines above a comment arguing that a turn
+    # must not die for a roster misconfiguration.
+    try:
+        if not set(settings.helper_roster) <= set(registered_profile_names()):
+            load_profiles()
+    except ProfileError:
+        logger.warning(
+            "helper roster: the profile files could not be loaded, so no named helper is offered",
+            exc_info=True,
+        )
+        return governed_roster(specs)
+
+    held = frozenset(fn.__name__ for fn in _capability_tools(profile))
+    offered: set[str] = {specs[0]["name"]}
+    for name in settings.helper_roster:
+        if name in offered:
+            # Upstream keys its graphs by name and takes the last, so a repeat would compile twice
+            # and list twice while only one could be reached. `general-purpose` is in `offered`
+            # from the start deliberately: claiming that name is the one suppression that displaces
+            # upstream's own ungoverned helper, and a roster entry must not be able to take it.
+            logger.warning(
+                "helper roster: %r is already offered, so the repeat is ignored; upstream keys "
+                "subagents by name and would keep only the last",
+                name,
             )
-        ]
-    )
+            continue
+        try:
+            rostered = get_profile(name)
+        except ValueError:
+            # Fail-soft *here* and loud at startup (`api/app.py`), which is the split this
+            # repository already draws for a misconfiguration: a turn must not die because a
+            # deployment misspelled a roster entry, and a misspelling must not be discoverable only
+            # by noticing a missing menu item. Skipping is safe in the direction that matters — an
+            # absent helper costs delegation, never authority.
+            logger.warning(
+                "helper roster: no profile named %r, so it is not offered; known: %s",
+                name,
+                sorted(registered_profile_names()),
+            )
+            continue
+        surface = predicted_helper_surface(profile, held, rostered, connectors)
+        if not surface:
+            # A named helper that would bind nothing is a menu entry that can only waste a
+            # delegation. **INFO, not WARNING, and it names both causes**: this is the *normal*
+            # state of a rostered profile whose bundle is off, so at WARNING it was a line on every
+            # build of every turn forever — which is how operators learn to ignore WARNINGs. And a
+            # narrow caller empties a helper by intersection, where telling somebody to enable a
+            # connector is advice that cannot help.
+            logger.info(
+                "helper roster: %r is not offered on this turn — nothing survives the intersection "
+                "of the caller's surface (%s) with what that profile names. Either its connector "
+                "bundle is disabled, or this caller is too narrow for it",
+                name,
+                profile.name,
+            )
+            continue
+        offered.add(name)
+        specs.append(
+            {
+                "name": name,
+                "description": describe_helper(rostered, surface),
+                # **Compiled on first use, not here.** Measured, compiling the roster eagerly took
+                # a turn's graph build from 43 ms to 118 ms — 2.75x — against a 250 ms ceiling
+                # `tests/test_langgraph_connectors.py` holds and whose own docstring states the
+                # headroom as 1.9x-3x. Most of that is paid for helpers no turn spawns. The surface
+                # above is predicted from the same two functions the build applies, so nothing here
+                # needs the graph to exist; `tests/test_subagents.py` asserts the prediction equals
+                # what a compiled helper really binds, which is what keeps it honest.
+                "runnable": _compiled_on_first_use(partial(compile_helper, rostered)),
+            }
+        )
+    return governed_roster(specs)
+
+
+def predicted_helper_surface(
+    caller: AgentProfile,
+    held: frozenset[str],
+    specialist: AgentProfile,
+    connectors: list[Any] | None,
+) -> frozenset[str]:
+    """What a rostered helper *would* bind, without compiling its graph.
+
+    The roster needs this answer twice before any delegation happens — to drop an entry that would
+    bind nothing, and to write the tool list into its description — and compiling three graphs per
+    turn to learn it is most of the cost this roster adds. So it is derived from the same two
+    functions the build itself applies, `helper_profile` and `helper_connectors`, rather than from
+    a third rule that could disagree with them.
+
+    **A prediction is a claim about what a build will do, which is the shape this repository
+    distrusts** — `tests/test_context_floor.py`'s own docstring is about a basis that re-derives
+    rather than observes. It is safe *here* only because
+    `tests/test_subagents.py::test_the_predicted_surface_is_what_a_compiled_helper_binds` compiles
+    the helper and compares, so a change to the build that this function does not follow turns red
+    rather than silently advertising a surface nobody has.
+
+    The scratch verbs are absent by construction rather than subtracted: they come from
+    `FilesystemMiddleware`, which neither of these two functions knows about.
+
+    Args:
+        caller: The profile of the agent that would spawn this helper.
+        held: The caller's own resolved in-process tool names.
+        specialist: The rostered profile the helper is named for.
+        connectors: This turn's already-open connector tools.
+
+    Returns:
+        The capability tool names the compiled helper would hold, in-process and connector alike.
+    """
+    narrowed = helper_profile(caller, held, specialist)
+    # `narrowed.tool_names` rather than resolving it through `_capability_tools` again. The two are
+    # the same set here and only here, because `helper_profile` builds it by *removing* from
+    # `held` — which is itself the caller's already-resolved names — so every survivor is a name
+    # the registry answered for a moment ago. Resolving three more times cost ~6 ms each on a
+    # per-turn path, and the equality is asserted rather than assumed by the prediction test below.
+    in_process = narrowed.tool_names or frozenset()
+    reachable = helper_connectors(connectors, specialist) or []
+    return in_process | frozenset(tool.name for tool in reachable)
+
+
+def _compiled_on_first_use(build: Callable[[], Any]) -> Any:
+    """A runnable that builds its graph the first time it is invoked, then reuses it.
+
+    Deferring is what keeps a roster from taxing every turn with the cost of helpers no turn
+    spawns; memoising is what keeps a turn that delegates twice from paying twice. The cache is per
+    spec and a spec is built per turn, so nothing outlives the connectors it closed over — which is
+    the lifetime rule that makes the whole graph per-turn in the first place.
+
+    `RunnableLambda` over an async callable, because `_build_task_tool` calls `.with_config(...)`
+    on whatever sits in the `runnable` slot and then `await`s `.ainvoke(state, config)`; a sync
+    lambda returning a coroutine satisfies the first and leaves the second unawaited.
+    """
+    compiled: list[Any] = []
+
+    async def invoke(state: Any, config: Any = None) -> Any:
+        if not compiled:
+            compiled.append(build())
+        return await compiled[0].ainvoke(state, config)
+
+    return RunnableLambda(invoke)
+
+
+def _bound_helper_names(runnable: Any) -> frozenset[str]:
+    """A compiled helper's **capability** tools, read off its own `ToolNode`.
+
+    The same read `tests/test_context_floor.py` makes, and for the same reason: a surface derived
+    from a profile is a claim about what a build *should* have produced, and this is what it did.
+    It is what makes a roster description underivable from anything stale — and it is also the only
+    honest test of "is this entry worth offering", since a profile that names ten connector tools
+    binds none of them in a deployment that has those bundles turned off.
+
+    **The scratch verbs are subtracted, and driving this is what showed why.**
+    `FilesystemMiddleware` is in `create_deep_agent`'s required set, so every helper binds `ls`,
+    `glob`, `grep`, `read_file`, `write_file` and `edit_file` whatever its profile says. Left in,
+    they appeared in
+    all four roster descriptions — making entries look alike in exactly the dimension the model
+    chooses on, which is the defect `D-2026-08-12` measured — and, worse, they made the
+    "bound nothing" test unreachable: a helper whose every capability tool was missing still bound
+    six verbs and was offered as though it could do its job. They are the helper's own notepad over
+    a backend with no store behind it, so they are not capability and do not belong in either
+    answer.
+
+    Empty rather than raising when the graph has no tool node: a helper compiled with no capability
+    is exactly the case the caller is asking about.
+    """
+    node = runnable.nodes.get("tools") if hasattr(runnable, "nodes") else None
+    bound = getattr(getattr(node, "bound", None), "tools_by_name", None)
+    scratch = set(scratchpad_tools())
+    return frozenset(bound) - scratch if bound else frozenset()
 
 
 class ReloadingSkillsState(SkillsState):

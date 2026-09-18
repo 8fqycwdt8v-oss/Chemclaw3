@@ -1170,7 +1170,17 @@ CLEAR_TRIGGER_THREAD_ALLOWANCE = 30_000
 #: to keep this number whole, and it is refused for the reason the paragraph above gives: the window
 #: is the input and this is the dependent number, so a budget that rose with the prefix would be
 #: spending head-room under a 128k model that the provider, not this repository, decides.
-BUDGET_THREAD_ALLOWANCE = 37_900
+#:
+#: **37,100 since `D-2026-09-16-a-roster-varies-the-two-dimensions-that-carry-no-authority`**, down
+#: a further 800 because the `task` roster took `CEILINGS["__default__"]` to 70,600. The same rule
+#: a third time, and this is the branch where following it was a live temptation rather than a
+#: formality: the roster's own measured cost is 305 tokens and the ceiling rose 1,188, because this
+#: ratchet under-charges a roster whose descriptions name what each helper *binds* and so grow with
+#: the bundles a deployment enables. Raising the budget to keep this number whole was tried in the
+#: commit before this one and reverted on the argument directly above — the window is the input, so
+#: a budget that rises with the prefix spends head-room a provider decides, and what buys the
+#: thread back is a narrower prefix rather than a raise here.
+BUDGET_THREAD_ALLOWANCE = 37_100
 
 #: The smallest context window this stack is designed against, in billed tokens.
 #:

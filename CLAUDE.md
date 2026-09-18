@@ -83,7 +83,7 @@ outlives all of this: deepagents builds a bare `SubAgent` dict with *only* `spec
 anything not compiled by `build_langgraph_agent` runs with no audit trail, no authz and no plan
 gate — silently.
 
-**There is, however, exactly one subagent, on every turn, and this file used to omit it**
+**There is, however, at least one subagent on every turn, and this file used to omit it**
 (`D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller`). `SubAgentMiddleware` is in
 `create_deep_agent`'s `_REQUIRED_MIDDLEWARE` and `_apply_excluded_middleware` *raises* rather than
 let a profile strip it, so `task` ships whether or not this deployment wants helpers and the only
@@ -93,8 +93,8 @@ model swap — so the roster is a graph `build_langgraph_agent` compiled, carryi
 Reading the deletion paragraph above as "no delegation" is therefore wrong in the direction that
 matters, and it stayed wrong long enough for the helper's surface to drift from its description:
 the `task` tool said isolation and parallel reading while the helper held its caller's **54**
-in-process tools, nine `run_*` launchers and `record_knowledge_note` among them. It now holds
-**18** of them — its caller's set minus `authz.side_effecting_tools()` (derived from the partition
+in-process tools, nine `run_*` launchers and `record_knowledge_note` among them. The unnamed helper
+now holds **18** of them — its caller's set minus `authz.side_effecting_tools()` (derived from the partition
 that already exists, so a bundle added next year is out of reach the day it is enabled) and minus
 `ask_clarifying_question`, which changes nothing and still writes a question onto the *chemist's*
 stream from a context the chemist cannot see. **The compiled helper graph binds 24**, because
@@ -127,9 +127,23 @@ prompt is an inequality, which `tests/test_context_floor.py` asserts rather than
 **A third claim went with them** — *nothing counts how often `task` is called*, given here and in
 two merged records as why the roster question could not be settled. It was false when it was
 written: `task` is an ordinary tool in the caller's `ToolNode`, so
-`chemclaw_tool_calls_total{tool="task"}` has always moved. No specialist roster ships; re-measured,
-every profile would now hold something, and it stays unbuilt for the reason `agent/subagents.py`
-gives — but the excuse is gone.
+`chemclaw_tool_calls_total{tool="task"}` has always moved.
+
+**A specialist roster now ships**
+(`D-2026-09-16-a-roster-varies-the-two-dimensions-that-carry-no-authority`), and the sentence that
+stood here — "no specialist roster ships … it stays unbuilt for the reason `agent/subagents.py`
+gives" — recorded that the missing thing was a *reason* rather than a design.
+`CHEMCLAW_AGENT_HELPER_ROSTER` names agent profiles, and a rostered helper's surface is *what its
+caller holds ∩ what the profile names − everything that acts*, on both halves, so the attenuation
+invariant holds by arithmetic and `D-2026-08-12`'s widening lever is **not** taken. What a name
+varies is the two dimensions that carry no authority: its instructions and its model route.
+Selection is the model's ordinary tool call, so a chemist picks no profile to get it. Which three
+names ship is a measurement — after the acting tools are subtracted, `reporting` keeps 3 of 8 and
+`property-lookup` 1 of 5, because their job *is* writing — and an entry that would bind nothing in a
+given deployment is not offered at all. Each entry's description carries a written purpose plus the
+tool list its *compiled* helper binds, which is what makes `D-2026-08-12`'s identical-menu defect
+unrepeatable. **It settles nothing about whether delegation pays**: what arrived is a product
+requirement, not evidence, and `evals/delegation.py` has still never run against a model.
 
 **The isolation it rests on is real, and measuring it found what a helper's report is**
 (`D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread`). Driven on a compiled graph,
