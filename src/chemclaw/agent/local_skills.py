@@ -56,13 +56,18 @@ one-sided — a chemist may be offered their own skill about a tool this profile
 outcome is judgment they wrote being unhelpful to them. `docs/planning/BACKLOG.md` carries the row.
 """
 
+import logging
 from typing import Any
 
 from deepagents.backends import StoreBackend
 
+from chemclaw.agent.audit import bounded_repr
 from chemclaw.agent.refusal_route import routed
 from chemclaw.agent.skill_backend import SkillsReadOnlyRefusal
 from chemclaw.core.ids import stable_hash
+from chemclaw.core.logging import log_event
+
+logger = logging.getLogger(__name__)
 
 #: The root a chemist's own skills are mounted at, and the label the model sees in their paths.
 #:
@@ -236,6 +241,21 @@ async def save_local_skill(store: Any, actor: str, name: str, body: str) -> None
     an answer. The route validates `body` as a `SkillManifest` before calling this, so a malformed
     skill is a 422 rather than a file the listing then skips.
 
+    **This write is outside the tool-call chain, and what stands in its place is stated rather than
+    assumed.** `tests/test_scratchpad.py::test_no_first_party_module_writes_to_a_store_directly`
+    holds that every store write arrives as a `write_file` tool call, because that is what crosses
+    the audit row, the authorization gate, the dry-run refusal and the repeat guard — and the reason
+    it gives is that a direct write "would do so silently: nothing fails, the memory is simply
+    written with no record that it was."
+
+    There is no tool call here to cross anything: the write comes from an HTTP route a *person*
+    calls, which is the whole design (`D-2026-09-18-…`), and three of those four controls have no
+    subject without a turn. The fourth — authorization — is the route's `CurrentUser` plus the fact
+    that the namespace is derived from the caller rather than taken from them, so there is no
+    decision here to get wrong. What would otherwise be lost is the *record*, so it is written: an
+    INFO naming who changed which skill, which is the same thing `skill_backend.read` does for the
+    other direction and the only reason this write is not silent.
+
     Args:
         store: The process's store.
         actor: Whose tier to write, in the turn's own actor spelling.
@@ -243,6 +263,16 @@ async def save_local_skill(store: Any, actor: str, name: str, body: str) -> None
         body: The whole `SKILL.md`, frontmatter included.
     """
     await _writer(store, actor).awrite(_key(name), body)
+    log_event(
+        logger,
+        "local_skill.saved",
+        "%s saved their own skill %s",
+        bounded_repr(actor),
+        bounded_repr(name),
+        actor=bounded_repr(actor),
+        skill=bounded_repr(name),
+        chars=len(body),
+    )
 
 
 async def list_local_skills(store: Any, actor: str) -> list[str]:
@@ -272,10 +302,22 @@ async def delete_local_skill(store: Any, actor: str, name: str) -> bool:
     behaviour change nobody can withdraw is a worse bargain than one nobody can see, because the
     person has learned there is something acting on them and still cannot stop it.
     """
-    namespace = local_skills_namespace(actor)
-    if await store.aget(namespace, _key(name)) is None:
+    if await store.aget(local_skills_namespace(actor), _key(name)) is None:
         return False
-    await store.adelete(namespace, _key(name))
+    # Through the same backend the write uses rather than `store.adelete`, so both halves of this
+    # tier's lifecycle go through upstream's own code and the stored shape keeps one definition.
+    # It is also what `tests/test_scratchpad.py` asks for structurally — no first-party module
+    # reaches past the backend to the store's write verbs.
+    await _writer(store, actor).adelete(_key(name))
+    log_event(
+        logger,
+        "local_skill.removed",
+        "%s removed their own skill %s",
+        bounded_repr(actor),
+        bounded_repr(name),
+        actor=bounded_repr(actor),
+        skill=bounded_repr(name),
+    )
     return True
 
 

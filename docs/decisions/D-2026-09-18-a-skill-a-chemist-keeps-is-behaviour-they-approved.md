@@ -100,6 +100,18 @@ already covers this tier because the label is the first path segment and the mou
 which means a local skill's *name* reaches the exposition. That is a per-person label on a shared
 metric and it is the thing to watch if this tier is ever busy.
 
+**A write outside the tool-call chain is not a write without a record.**
+`tests/test_scratchpad.py::test_no_first_party_module_writes_to_a_store_directly` holds that every
+store write arrives as a `write_file` tool call, because that is what crosses the audit row, the
+authorization gate, the dry-run refusal and the repeat guard. Three of those four have no subject
+here — there is no turn — and the fourth is answered by the route being `CurrentUser`-gated with a
+namespace *derived from* the caller rather than taken from them. But that guard's stated reason
+does apply in its own words, that a direct write "would do so silently: nothing fails, the memory
+is simply written with no record that it was", so both halves of this tier's lifecycle log one.
+The delete also goes through the same backend the write uses rather than reaching past it to
+`store.adelete`, which keeps the stored shape's single definition and satisfies that guard on the
+merits rather than by exemption.
+
 **And one defect found by building it, recorded because the reasoning is transferable.**
 `agent/skill_backend.py` states that the async write verbs need no override, because
 `FilesystemBackend` implements them as `asyncio.to_thread(self.write, …)`. That is true of that base
@@ -125,4 +137,8 @@ argument is about one base class and does not travel with the refusal.**
   `::test_a_chemist_can_remove_what_is_acting_on_them`
 - `::test_the_size_bound_is_larger_than_anything_this_repository_ships`
 - `::test_the_label_carries_no_identity`
+- `::test_a_write_outside_the_tool_chain_is_not_a_write_without_a_record` — including that the
+  body never reaches the log.
+- `tests/test_scratchpad.py::test_no_first_party_module_writes_to_a_store_directly` — passed on
+  the merits, with no exemption added for this tier.
 - `tests/test_route_auth_coverage.py` — that the four routes are gated like every other.

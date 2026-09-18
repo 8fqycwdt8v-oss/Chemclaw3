@@ -264,3 +264,30 @@ def test_the_label_carries_no_identity() -> None:
     """
     assert LOCAL_SKILLS_ROOT == f"/{LOCAL_SKILLS_LABEL}/"
     assert local_skills_namespace("alice-oid")[1] not in LOCAL_SKILLS_ROOT
+
+
+def test_a_write_outside_the_tool_chain_is_not_a_write_without_a_record(
+    store: InMemoryStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The concern `test_no_first_party_module_writes_to_a_store_directly` is actually about.
+
+    That guard's stated mechanism — the audit row, the authz gate, the dry-run refusal and the
+    repeat guard a `write_file` tool call crosses — has no subject here: this write comes from an
+    HTTP route a person calls, and three of the four controls need a turn to mean anything. But its
+    stated *reason* does apply, and in its own words: a direct write "would do so silently: nothing
+    fails, the memory is simply written with no record that it was."
+
+    So both halves of this tier's lifecycle leave one, and this is what makes "not silent" a
+    property rather than a sentence.
+    """
+    import logging as _logging
+
+    with caplog.at_level(_logging.INFO):
+        asyncio.run(save_local_skill(store, "alice-oid", "my-workup", _BODY))
+        asyncio.run(delete_local_skill(store, "alice-oid", "my-workup"))
+
+    assert "local_skill.saved" in caplog.text
+    assert "local_skill.removed" in caplog.text
+    assert "my-workup" in caplog.text
+    # The body never reaches the log — only that a skill by that name changed, and how large it was.
+    assert "Quench cold." not in caplog.text
