@@ -603,3 +603,52 @@ def test_each_cap_marks_its_watch_through_its_own_public_recorder() -> None:
             f"the {cap} cap's enforcer does not go through {recorder}(), so that recorder has no "
             "producer and the runner's reader is fed by something else"
         )
+
+
+def test_the_turn_cap_stays_above_what_the_other_two_guards_authorise() -> None:
+    """The cap is a backstop, so it must sit above every turn this system said it would run.
+
+    **This shipped wrong once and nothing caught it.** `agent_max_turn_billed_tokens` was set to
+    300,000 from a measured 250,000-token runaway — a figure taken when a model call carried about
+    10,000 tokens. The static prefix has since grown sevenfold, and because `graph_usage_tokens`
+    reads the provider's `total_tokens` (prompt *and* completion, cached tokens included), the whole
+    prefix is billed on every call. Measured against `tests/test_context_floor.PREFIX_BOUND`, that
+    300,000 funded **three** model calls while `harness_max_loop_iterations` permitted 25: an
+    ordinary plan/tool/answer turn with one correction was refused mid-flight, and
+    `chemclaw_turn_loop_caps_total` could never move again because the spend cap always bit first.
+
+    So the relation, not the number, is what this asserts — the same shape
+    `tests/test_compaction.py` uses to hold both compaction defaults against their own basis. A
+    lawful turn is bounded by the two guards that already exist: at most
+    `harness_max_loop_iterations` model calls, each at most `agent_context_token_budget`. A cap at
+    or above that product can only be reached by a bug, which is what "runaway backstop" means. A
+    cap below it silently supersedes the loop cap and starts refusing work the system authorised.
+
+    A deployment may still set a smaller number deliberately — that is a cost *budget* and buys
+    refusals knowingly. This holds the shipped default only.
+    """
+    lawful_ceiling = settings.harness_max_loop_iterations * settings.agent_context_token_budget
+    assert settings.agent_max_turn_billed_tokens >= lawful_ceiling, (
+        f"the turn cap ({settings.agent_max_turn_billed_tokens:,}) is below the "
+        f"{lawful_ceiling:,} tokens that {settings.harness_max_loop_iterations} model calls at "
+        f"agent_context_token_budget already authorise, so it refuses lawful turns and makes the "
+        "loop cap unreachable"
+    )
+
+
+def test_the_turn_cap_funds_more_calls_than_the_loop_cap_permits() -> None:
+    """The same guarantee stated in calls rather than tokens, because that is how it failed.
+
+    `PREFIX_BOUND` is what one model call costs before a single token of conversation: this repo's
+    ratcheted ceiling plus what the sibling fleet serves. Dividing the cap by it gives the number of
+    model calls a turn can actually make — the figure that read 3 against a loop cap of 25 and was
+    invisible in the token comparison above.
+    """
+    from tests.test_context_floor import PREFIX_BOUND
+
+    funded = settings.agent_max_turn_billed_tokens // PREFIX_BOUND
+    assert funded >= settings.harness_max_loop_iterations, (
+        f"the turn cap funds {funded} model calls at PREFIX_BOUND ({PREFIX_BOUND:,} each) while "
+        f"the loop cap permits {settings.harness_max_loop_iterations}; the tighter guard is the "
+        "one nobody configured"
+    )

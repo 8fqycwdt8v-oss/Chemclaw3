@@ -7,13 +7,20 @@ returned as the tool's result (`agent/tool_authz._refusal_message`), so the mode
 alone between three moves — route to something that is allowed, report the wall and carry on, or
 call the identical tool again. Prose that names only the wall supports the last two.
 
-Counted over the eleven sites rather than asserted: five said nothing at all about what would work
-instead — every entitlement denial — six named an action of some kind, and exactly **one**,
+Counted over the sites that existed when this was written — eleven, and a twelfth has since
+arrived, which is the reason no line below states a live count. Five said nothing at all about what
+would work instead — every entitlement denial — six named an action of some kind, and exactly
+**one**,
 `plan_gate.out_of_scope_refusal`, named a *tool the model could call right now*. The five others
 carried their action as an English clause inside a paragraph of explanation, which is the form a
 model paraphrases away when it relays the refusal. The counts are not prose here: the partition
-they describe is the fixture `tests/test_refusal_route.py` asserts membership of, so a site added
-or removed fails that file rather than falsifying this paragraph.
+they describe is what `tests/test_refusal_route.py` asserts membership of, so a site added or
+removed fails that file rather than falsifying this paragraph. **That claim was itself prose until
+`test_the_partition_is_read_off_the_tree_rather_than_copied_into_this_file` existed** — the
+membership was checked against a hand-written fixture driving gates it named one by one, so a
+twelfth gate calling `routed` in a module the fixture did not touch was covered by nothing: not
+the one-shape assertion, not the honesty partition, not the role-leak scan. The set is now read
+off `src/chemclaw` by an AST walk over every `routed(code=…)` call.
 
 So every refusal the model reads carries a second line in one fixed grammar:
 
@@ -36,19 +43,20 @@ So every refusal the model reads carries a second line in one fixed grammar:
 
 **`sanctioned path` is honest or it is absent, and that is the whole discipline.** A fabricated
 path is worse than none: it sends the model round the loop again against a wall that has not moved,
-which is exactly the behaviour this is written to stop. Five of the eleven refusals genuinely have
-no path — an agent cannot grant itself a role or authenticate a request — and they say `none from
-here`. The field's value is that "there is nothing you can do about this" is *information*, and
+which is exactly the behaviour this is written to stop. The entitlement refusals genuinely have no
+path — an agent cannot grant itself a role or authenticate a request — and they say `none from
+here`; which codes those are is `_HAS_NO_PATH` in the test, not a count here. The field's value is
+that "there is nothing you can do about this" is *information*, and
 the model had to infer it before. `tests/test_refusal_route.py` holds both halves of that
 partition, so inventing a path for an entitlement denial fails rather than ships.
 
-**What it costs, measured rather than waved at.** Across the eleven, the footer adds a mean of
-249 characters — about 62 tokens at this tree's chars/4 estimator — against sentences averaging
-136. It is paid per *refusal* rather than per model call, so it does not touch the static prefix
-`tests/test_context_floor.py` ratchets, and the longest composed refusal stays far inside
-`tool_authz._refusal_message`'s bound. A refusal the model relays badly costs a whole extra turn,
-which is the comparison that makes 62 tokens cheap; the figure is here because a doubling would
-not be, and because a number nobody wrote down is a number nobody re-checks.
+**What it costs, measured rather than waved at.** Measured across the eleven sites of the day, the
+footer adds a mean of 249 characters — about 62 tokens at this tree's chars/4 estimator — against
+sentences averaging 136. It is paid per *refusal* rather than per model call, so it does not touch
+the static prefix `tests/test_context_floor.py` ratchets, and the longest composed refusal stays far
+inside `tool_authz._refusal_message`'s bound. A refusal the model relays badly costs a whole extra
+turn, which is the comparison that makes 62 tokens cheap; the figure is here because a doubling
+would not be, and because a number nobody wrote down is a number nobody re-checks.
 
 **This changes no decision.** Nothing here is consulted by a gate; every one of them composes its
 sentence after it has already decided to refuse. Two tests hold that rather than leaving it to
@@ -61,15 +69,22 @@ the printed name, the gate falls **open** and that second test is the only one t
 **The grammar is unforgeable from the values this writes, and the names are reduced at the two
 places an unvalidated one enters.** A footer is a grammar, and a grammar is worth forging: a second
 `sanctioned path:` field spelled inside an interpolated string would be read by the model as this
-system's own routing. Two of the eleven interpolate a string nothing validates — `authorize_tool`
+system's own routing. Two of them interpolate a string nothing validates — `authorize_tool`
 takes whatever name the model put in its tool call, and `out_of_scope_refusal` interpolates the
 `tools` a `write_todos` step declared, which is an arbitrary model-authored list
 (`plan_scope.step_declaration` keeps every string). Both now pass those names through
-`framing.safe_id`, whose charset cannot spell a field, a separator or a delimiter; real tool names
-are `[a-z_]+` and come back unchanged. `routed` additionally strips its own separator out of every
-value it is handed, so a caller added later cannot open a field by accident. What this does *not*
-rest on is the envelope defence: `_refusal_message` defangs the composed text, which neutralises a
-smuggled `</retrieved-note-…>` or `[system …]` and says nothing about a smuggled `sanctioned path`.
+`framing.safe_id` — and it is worth naming the character that does the work, because the
+reassuring version of this sentence was here and is wrong. `safe_id`'s charset is
+`[A-Za-z0-9._:-]`, which *can* spell `code:`. What it cannot spell is a **space** or a **pipe**,
+and this grammar needs both at every field: two of the four names contain a space, the separator
+is ` | `, and a field is only a field after a `": "`. So a forged `code:x` survives reduction as a
+substring and opens nothing, while `watch_for | sanctioned path: …` loses its separator and its
+space in the same pass — which is why the forgery test asserts on `"code: "` with the space rather
+than on the colon. Real tool names are `[a-z_]+` and come back unchanged. `routed` additionally
+strips its own separator out of every value it is handed, so a caller added later cannot open a
+field by accident. What this does *not* rest on is the envelope defence: `_refusal_message`
+defangs the composed text, which neutralises a smuggled `</retrieved-note-…>` or `[system …]` and
+says nothing about a smuggled `sanctioned path`.
 """
 
 #: The one character that separates the footer's fields. A pipe rather than a comma or a semicolon

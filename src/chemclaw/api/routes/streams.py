@@ -623,7 +623,8 @@ async def read_check_ins(principal: CurrentUser) -> list[CheckInOut]:
     **This is the reader `CHECK_IN_KIND` did not have when the sweep was written**, and shipping
     without it would have been `D-2026-08-27-a-digest-nobody-can-read-is-not-delivered` a second
     time — a job writing nightly into a mailbox nothing opens, reporting success. The sweep ships
-    off, and `check_in_enabled` names what a deployment needs before turning it on.
+    **on** now that this route exists to read it and the sweep supersedes rather than stacks;
+    `check_in_enabled` is what a deployment turns off.
     """
     claimed = await claim_unconsumed(digest_channel(principal.oid), kinds=(CHECK_IN_KIND,))
     return [item for event in claimed for item in _check_in(event.payload)]

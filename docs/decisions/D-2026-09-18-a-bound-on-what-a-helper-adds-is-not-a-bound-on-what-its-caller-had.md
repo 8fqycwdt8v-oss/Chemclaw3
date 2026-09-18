@@ -101,9 +101,17 @@ here would become a no-op that reads as deliberate.
   different fixture.
 
 The merged ADR is not edited, per the standing rule; this one is the record. Four surviving copies
-of a *fourth* stale claim — the per-turn spend cap "ships at 0" when it ships at 300,000 — are
-corrected here too, including `docs/guides/runbook.md`, which is the operator-facing copy an
-on-call engineer reads, and a `docs/decisions/README.md` cell that asserted both values at once.
+of a *fourth* stale claim — the per-turn spend cap "ships at 0", which it has not for some time —
+were corrected here too, including `docs/guides/runbook.md`, the operator-facing copy an on-call
+engineer reads, and a `docs/decisions/README.md` cell that asserted two values at once.
+
+**And the correction was itself overtaken before it merged, which is the same lesson once more.**
+`D-2026-09-18-a-cap-below-an-ordinary-turn-is-a-guard-that-kills-another` landed on `main` while
+this branch was in review and made the cap **derived** — `harness_max_loop_iterations x
+agent_context_token_budget` — so "it ships at 300,000" was true when written here and false by the
+time it would have merged. The merge takes `main`'s wording in every one of those places, because
+it names the *relation* rather than a figure and so cannot go stale the same way. No number for
+this setting is written in this ADR for that reason.
 
 ## Consequences
 

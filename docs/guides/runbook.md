@@ -1385,10 +1385,10 @@ diagnoses below have no way to name an actor without it:
 
 Three things it can mean, in the order worth checking. **A real runaway** — read
 `chemclaw_tokens_total` and the `turn_costs` rows for that actor; the per-turn ceiling
-(`agent_max_turn_billed_tokens`) ships at 300,000 as a runaway backstop, so one turn is bounded but
-loosely, and a turn inside that ceiling is enough to
-do this. **A cap set below real traffic** — if several unrelated principals cross in the same
-window, the cap is the outlier, not them. **A window that is too short for the work** —
+(`agent_max_turn_billed_tokens`) ships as a *runaway backstop*, above what the loop cap and the
+context budget already authorise, so it does not bound a turn doing ordinary heavy work — one such
+turn is enough to do this. **A cap set below real traffic** — if several unrelated principals
+cross in the same window, the cap is the outlier, not them. **A window that is too short for the work** —
 `budget_window_hours` is rolling and anchored at each principal's first turn, so a user who does a
 day's work in an hour waits out the remainder.
 

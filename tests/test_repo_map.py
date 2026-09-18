@@ -483,29 +483,52 @@ def test_the_calc_bundle_teaches_its_shape_without_counting_its_jobs() -> None:
     )
 
 
-#: A complete tool surface, counted: "all fifteen tools", "Fifteen tools", "all fifteen of its
-#: tools". The quantifier is what makes it a claim about the *whole* surface rather than about a
-#: subset somebody measured — "two tools on the server are like this" counts a subset and is not
-#: what went stale here.
+#: A tool surface, counted: "all fifteen tools", "Fifteen tools", "all fifteen of its tools".
+#:
+#: The quantifier is optional and does **not** discriminate a whole-surface claim from a subset
+#: one — this comment used to say it did, and measured, making `all\s+` mandatory matches the two
+#: live-lane scripts and misses `Fifteen tools, and not one of them computes anything.`, which is
+#: the module docstring that actually went stale and the reason the scope has a package half at
+#: all. So the pattern is deliberately broad: in scope, any cardinal immediately before "tools" is
+#: refused, subset or whole. A subset count is the same second answer over a smaller set — "the
+#: two tools pinned to the `xtb` binary" goes stale the day a third is — and the remedy is the
+#: same one this rule asks for everywhere, which is to name them instead of counting them.
 _COUNTED_SURFACE = re.compile(
     rf"\b(?:all\s+)?(?:{_CARDINAL})\b(?:\s+of\s+(?:its|the|them|these))?\s+tools?\b",
     re.IGNORECASE,
 )
 #: The bundle by name, as every sentence that got this wrong wrote it.
 _CALC_BUNDLE = re.compile(r"`?calc`?\s+bundle", re.IGNORECASE)
-#: Records, not descriptions. A merged ADR is never edited (CLAUDE.md), and an archive or a task
-#: directory is a dated account of an afternoon; each is *supposed* to hold the number that was
-#: true when it was written.
+#: Records, not descriptions — and the axis is written out because it decides an asymmetry a
+#: reviewer asked about. A merged ADR is never edited (CLAUDE.md), `docs/archive/` is
+#: pre-implementation design, and `tasks/` is a dated account of an afternoon; each is *supposed*
+#: to hold the number that was true when it was written. `tasks/lessons.md` is exempt with the
+#: rest of that directory deliberately, not by oversight: CLAUDE.md does call it live, and it is
+#: read at session start, but it is append-only and every entry is dated, which is the merged-ADR
+#: argument rather than the runbook's.
+#:
+#: `docs/planning/BACKLOG.md` and `docs/guides/runbook.md` are deliberately *not* here, and a row
+#: in either that quotes the historical sentence beside "calc bundle" is *meant* to red. A queue
+#: whose closed rows are deleted in the commit that closes them, and a runbook describing what is
+#: true today, are both read as current; either cites the ADR rather than re-transcribing the
+#: number out of it, which is what the ADR is for.
 _HISTORICAL = ("docs/archive/", "docs/decisions/", "tasks/")
+
+#: The one live file that has to write the sentences this refuses, because it quotes them to say
+#: what they are. It passed without this by accident — the docstring below wrote "its own bundle"
+#: where the live-lane scripts wrote "its own `calc` bundle", so the guard was green on its own
+#: wording and nothing warned the next editor; restoring that one word red the suite. Derived from
+#: `__file__` rather than spelled out, so renaming this module carries the exemption with it.
+_NAMES_WHAT_IT_FORBIDS = (Path(__file__).resolve().relative_to(_ROOT).as_posix(),)
 _CALC_SERVER_PACKAGE = "src/chemclaw/connectors/calc/server/"
 
 
 def test_the_calc_tool_surface_is_not_counted_in_prose() -> None:
-    """Three live sentences said "fifteen" over a surface of seventeen.
+    """Three live sentences counted a tool surface the manifest already declares.
 
     The bundle's own module docstring opened "Fifteen tools", and both live-lane scripts taught
-    that Chemclaw3 keeps its own bundle and "all fifteen tools" — measured at HEAD,
-    `connector.yaml` declares seventeen and the module decorates the same seventeen. Nothing
+    that Chemclaw3 keeps its own `calc` bundle and "all fifteen tools" — measured at HEAD,
+    `connector.yaml` and the module agreed with each other and with neither sentence. Nothing
     failed, because nothing read those sentences: the count is a second answer to a question the
     manifest already answers, which is `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose`
     over a tool surface instead of a `make` target.
@@ -525,24 +548,33 @@ def test_the_calc_tool_surface_is_not_counted_in_prose() -> None:
     ).stdout.split("\0")
 
     offenders = []
+    scanned_in_package = []
     for name in filter(None, tracked):
-        if name.startswith(_HISTORICAL):
+        if name.startswith(_HISTORICAL) or name in _NAMES_WHAT_IT_FORBIDS:
             continue
         try:
             content = (_ROOT / name).read_text(encoding="utf-8")
         except (UnicodeDecodeError, FileNotFoundError, IsADirectoryError):
             continue  # binary, or a symlink into a tree this checkout does not have
+        if name.startswith(_CALC_SERVER_PACKAGE):
+            scanned_in_package.append(name)
         for sentence in re.split(r"(?<=[.:!?])\s", content):
             if not _COUNTED_SURFACE.search(sentence):
                 continue
             if name.startswith(_CALC_SERVER_PACKAGE) or _CALC_BUNDLE.search(sentence):
                 offenders.append(f"{name}: {' '.join(sentence.split())[:120]}")
 
+    assert scanned_in_package, (
+        f"nothing tracked was read under {_CALC_SERVER_PACKAGE}; the package has been renamed or "
+        "moved. The constant is an unanchored string, so half this scan's scope went empty in "
+        "silence and `assert not offenders` below would pass over a docstring counting the whole "
+        "surface — which is the shape of guard this test exists to refuse."
+    )
+
     assert not offenders, (
         f"the calc bundle's tool surface is counted in prose: {offenders}. The manifest declares "
         "it and validate_connectors holds the declaration against what the module serves; a "
-        "number here is a second answer that goes stale on its own, as 'fifteen' did over "
-        "seventeen."
+        "number here is a second answer that goes stale on its own, as 'fifteen' did."
     )
 
 

@@ -216,6 +216,22 @@ def out_of_scope_refusal(tool_name: str, scope: frozenset[str]) -> PlanNotApprov
     by it.
     """
     declared = ", ".join(safe_id(name) for name in sorted(scope)) or "no tools at all"
+    # **The first clause is dropped when the scope is empty, because it would name nothing.**
+    # An approval whose steps declare no tools is not a corner case:
+    # `D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool` calls it a real and
+    # common shape. With it, the sentence reads "its steps declared no tools at all" while the
+    # path read "call one of the tools the approval already covers — they are named above", which
+    # points at an empty list. That is precisely the fabricated path `refusal_route`'s docstring
+    # forbids — worse than none, because it sends the model round the loop again against a wall
+    # that has not moved — and it is the one arm where the clause is dead rather than merely terse.
+    rewrite = (
+        f"rewrite the plan so a step declares {tool_name} and ask for that plan to be approved"
+    )
+    path = (
+        f"call one of the tools the approval already covers — they are named above — or {rewrite}"
+        if scope
+        else rewrite
+    )
     return PlanNotApprovedError(
         routed(
             f"{tool_name} changes stored data or starts work, and the approved plan does not "
@@ -224,11 +240,7 @@ def out_of_scope_refusal(tool_name: str, scope: frozenset[str]) -> PlanNotApprov
             code="plan_scope_excludes_tool",
             boundary="the tools the approved plan's steps declared",
             who_can_act="a human, by approving a plan whose steps declare this tool",
-            sanctioned_path=(
-                "call one of the tools the approval already covers — they are named above — or "
-                f"rewrite the plan so a step declares {tool_name} and ask for that plan to be "
-                "approved"
-            ),
+            sanctioned_path=path,
         )
     )
 

@@ -755,7 +755,9 @@ them the top `BACKLOG.md` row, plus five prose claims the measurement falsified.
       exhausted budget stored 1,000,000 uncut, unlogged, uncounted. Floor now applies after dividing.
 - [x] ADR `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer`, ledger row, topic row.
 - [x] Correct five falsified claims: the spend cap "ships at 0" in `core/metrics.py` and
-      `api/budget.py` (it ships at 300,000, inverting an operator's reading of a flat series); the
+      `api/budget.py` (it had not shipped at 0 for some time, inverting an operator's reading of a
+      flat series — and the replacement figure was itself superseded by a derived cap on `main`
+      before this branch merged); the
       10.4x amplification justifying `agent_subagent_files_max_chars`; "nothing a helper writes
       outlives the turn"; the prune comment's present-tense helper namespace.
 - [x] Delete the closed row; open two that state what is actually left.

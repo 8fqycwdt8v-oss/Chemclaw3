@@ -430,7 +430,7 @@ def test_a_fabricated_residual_solvent_limit_is_scanned_like_an_elemental_one() 
     assert ungrounded_parameter_shapes("The PDE for THF is 7.2 mg/day.", ["Q3C: 7.2 mg/day"]) == []
 
 
-def test_the_scan_over_fires_on_a_chemists_own_figures_which_is_why_it_defaults_off() -> None:
+def test_the_scan_over_fires_on_a_chemists_own_figures_which_is_the_cost_the_default_pays() -> None:
     """Pin the false positives rather than claim they are rare — the docstring reasons about a rate.
 
     Every answer below is legitimate: the chemist supplied the number and the turn called no tool,
@@ -1406,3 +1406,58 @@ def test_every_gate_that_ran_names_itself(monkeypatch: pytest.MonkeyPatch) -> No
     review = asyncio.run(score_answer("An answer.", [], []))
     assert review.checks_run == ["verifier", "answer-shape"]
     assert review.review_required is True
+
+
+def test_the_scan_does_not_read_ordinary_english_as_a_promised_tool() -> None:
+    """The shape gate scans for a bare token, so its name space must hold no English words.
+
+    `available_tool_names()` is the validators' union and includes three spaces that are the agent's
+    own scaffolding rather than a capability: the subagent spawner (`task`), the harness todo writer
+    and the backend filesystem verbs (`ls`, `grep`, `glob`). Scanning over that union, *"the first
+    task is to degas the solvent"* and *"use grep to find it"* both came back as an answer promising
+    a tool it never called.
+
+    That is not a stray log line at the shipped defaults. `answer_shape_gate_enabled` is on and
+    `answer_review_max_rounds` is 2, so a false positive here costs two full graph runs and then
+    files a durable review request asking a person to read a correct answer.
+
+    Both arms are asserted: the scaffolding words must not fire, and a real capability promise must
+    still fire — a narrowing that silenced the gate entirely would pass the first arm alone.
+    """
+    for prose in (
+        "The first task is to degas the solvent thoroughly.",
+        "Use grep to find it in the notebook.",
+        "That is a big task for one afternoon.",
+        "I will ls the directory of prior runs.",
+    ):
+        assert promised_uncalled_tools(prose, []) == [], (
+            f"ordinary English read as a promised tool: {prose!r}"
+        )
+
+    promised = promised_uncalled_tools("I could run predict_pka for that number.", [])
+    assert promised == ["promised but not called: predict_pka"], (
+        "the narrowing must not silence the gate on a real capability the answer promised"
+    )
+
+
+def test_no_capability_tool_is_short_enough_to_collide_with_english() -> None:
+    """What makes the bare-token match safe, asserted rather than assumed.
+
+    The scan is safe over the capability name spaces because none of those names is an English
+    word — which is a property of the *surface*, not of the scan, and a bundle enabled next year
+    could break it. This is the assertion that fails on the day one does, rather than the day a
+    chemist's answer is sent to a reviewer for saying "task".
+    """
+    from chemclaw.agent.chemclaw_agent import available_tool_names, capability_tool_names
+
+    capability = capability_tool_names()
+    assert capability < available_tool_names(), (
+        "the capability spaces must stay a strict subset of the union the validators resolve; if "
+        "they are equal, the narrowing this test protects has been undone"
+    )
+    assert capability, "the premise: there are capability tools to scan for"
+    short = sorted(name for name in capability if len(name) < 7 or "_" not in name)
+    assert not short, (
+        f"capability tool name(s) a bare-token scan could read out of ordinary prose: {short}. "
+        "Either rename, or narrow `promised_uncalled_tools` further."
+    )

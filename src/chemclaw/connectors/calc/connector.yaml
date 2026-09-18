@@ -9,7 +9,7 @@
 # and return shapes below are unchanged by that, deliberately — profiles, eval probes and skills name
 # them by string.
 #
-# That server's own manifest must **not** go on `CHEMCLAW_CONNECTORS_DIR`: its seventeen primitives
+# That server's own manifest must **not** go on `CHEMCLAW_CONNECTORS_DIR`: its primitives
 # are orchestrator-facing, and a partial port would win the `calc` name collision and take the read
 # tools declared below and every durable job off the agent's surface with no error.
 #

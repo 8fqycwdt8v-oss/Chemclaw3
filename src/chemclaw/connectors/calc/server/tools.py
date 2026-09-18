@@ -4,8 +4,9 @@ After `D-2026-08-16-the-physics-leaves-the-cache-stays` not one of these tools c
 anything. How many there are is the manifest's answer, not this paragraph's — `connector.yaml`
 declares the surface and `validate_connectors` holds the declaration against what this module
 serves, in both directions, so a count written here would be a second answer that goes stale on
-its own. It said "Fifteen" over seventeen. The physics is in `Chemclaw3-mcp`'s `servers/calc`,
-exposed as individually-keyed primitives; what happens here is the three things that stayed:
+its own. It said "Fifteen", which was wrong then and is the wrong kind of sentence at any number.
+The physics is in `Chemclaw3-mcp`'s `servers/calc`, exposed as individually-keyed primitives; what
+happens here is the three things that stayed:
 
 - **The D-011 cache.** Every compute tool goes through `connectors/calc/remote.py::cached_remote` —
   ask the server for the key, look it up, cross the wire only on a miss. A persisted result is still
