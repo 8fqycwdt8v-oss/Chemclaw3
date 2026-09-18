@@ -473,6 +473,11 @@
           "expr": "topk(10, sum by (skill) (increase(chemclaw_skill_loads_total[30d])))",
           "legendFormat": "skill loaded (30d): {{skill}}",
           "refId": "K"
+        },
+        {
+          "expr": "sum(increase(chemclaw_local_skill_loads_total[30d]))",
+          "legendFormat": "personal skills loaded (30d)",
+          "refId": "L"
         }
       ]
     },

@@ -145,6 +145,42 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
+- [ ] **A chemist's own skill is not scoped by the tools the turn can reach** — [S], opened by
+      `D-2026-09-18-a-skill-a-chemist-keeps-is-behaviour-they-approved`. `ToolScopedSkills` hides a
+      shared skill whose every declared tool is absent, because judgment about capability an agent
+      does not have is misleading rather than merely useless — and the per-actor tier applies it to
+      nothing. The other three narrowings are deliberately absent (they answer governance questions
+      about a *shared* corpus, and `EnabledSkills` would delete the tier outright); this one would
+      have carried.
+
+      It is absent for a structural reason rather than an oversight: the shared tree gets its
+      declared tools from `declared_tools` reading frontmatter off a **directory**, and this tier is
+      stored, so applying it means parsing every local skill's frontmatter out of the store —
+      synchronously, inside a backend whose reason for existing is that it is not a filesystem.
+      The cheap shape is to parse on *write*, in `api/routes/skills.py`, and keep the declared tool
+      names beside the body in the stored value: the route already validates the frontmatter, so it
+      has the manifest in hand and the turn-side read stays one `aget`.
+      The cost of leaving it is bounded and one-sided — a chemist is offered their own skill about a
+      tool this profile lacks, and the worst outcome is judgment they wrote being unhelpful to them.
+
+
+- [ ] **`Chemclaw3_ui` has no surface for the four `/skills/mine` routes** — [M], opened by
+      `D-2026-09-18-a-skill-a-chemist-keeps-is-behaviour-they-approved`. That ADR grants the
+      personal tier its exemption from review *on the condition* that a chemist can see what is
+      acting on their turns and remove it — and the only thing that can currently exercise the
+      condition is `curl`. The routes are there, driven and tested
+      (`tests/test_api_local_skills.py`); what is missing is the half a chemist can reach.
+
+      It is a row in this repository rather than only in the frontend's because the condition is
+      this repository's claim: `SECURITY.md` and `ARCHITECTURE.md` now say a personal skill is
+      inspectable and removable, and until the UI ships that is true of an API rather than of a
+      person. The shape is the smallest one that discharges it — a list of names, the body of one
+      verbatim, a delete, and the save the agent's draft is posted through — and the two refusals
+      worth rendering rather than swallowing are the 409s: a name this deployment already ships,
+      and the row cap, which says in its detail why it exists (every personal skill is in the
+      prompt of every turn its owner takes).
+
+
 - [ ] **Both published tool-utility results were measured against a control arm that also swaps
       the prompt** — [M], `data/evals/profiles/no-tools.yaml` (`instructions:`),
       `D-2026-09-14-tools-were-never-the-variable`. The benchmark half is corrected: the arms differ

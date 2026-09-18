@@ -108,6 +108,7 @@ from chemclaw.agent.chemclaw_agent import (
 )
 from chemclaw.agent.compaction import context_compaction_middleware, disabled_summarizer
 from chemclaw.agent.llm_provider import build_chat_model
+from chemclaw.agent.local_skills import LOCAL_SKILLS_LABEL, LOCAL_SKILLS_ROOT
 from chemclaw.agent.loop_cap import enforce_loop_cap
 from chemclaw.agent.model_calls import model_call_middleware, refuse_unparsed_arguments
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
@@ -1126,9 +1127,27 @@ def _skills_middleware(backend: CompositeBackend, labelled: list[tuple[str, str]
     registers no tools. `FilesystemMiddleware` is the opposite case and does need the splice —
     upstream composes one unconditionally — which is why `_middleware` explains the rule there.
     """
+    # **Derived from the routes the backend really has, not from `labelled` alone.** The shared
+    # trees come from `labelled`; the chemist's own tier is mounted by `scratchpad_backend` on two
+    # conditions this function cannot see (a store, and a turn with an actor), so asking the backend
+    # is the only way the listing and the routes cannot disagree — and a source advertising a path
+    # that resolves to the composite's default `StateBackend` would publish an empty tier to the
+    # model on every turn a deployment has no store.
+    #
+    # **The chemist's own tier goes first, and the order is a decision rather than an append.**
+    # Upstream resolves a name collision last-source-wins, so whichever tree is last silently
+    # displaces the other. Reviewed judgment wins here: a personal skill taking a shipped skill's
+    # name is the tier escaping the bound `api/routes/skills.py` refuses at, and that route cannot
+    # refuse the collision that arrives the other way round — a skill added to `skills/` months
+    # after somebody saved theirs. Of the two silences this is the safer one, and the person can
+    # still see their own document through the route that lists it.
+    sources: list[tuple[str, str]] = []
+    if LOCAL_SKILLS_ROOT in backend.routes:
+        sources.append((f"/{LOCAL_SKILLS_LABEL}", LOCAL_SKILLS_LABEL))
+    sources += [(f"/{label}", label) for label, _ in labelled]
     return ReloadingSkillsMiddleware(
         backend=backend,
-        sources=[(f"/{label}", label) for label, _ in labelled],
+        sources=sources,
         # Upstream's own template, minus one sentence that is false on this deployment. Passed
         # here rather than defaulted because the constructor is the supported seam for it, and
         # because a template that arrives from upstream every bump is the half that cannot go
@@ -1251,6 +1270,22 @@ def _skill_dirs() -> list[str]:
     that resolve to nothing.
     """
     return [*settings.skills_dirs, *skills_dirs()]
+
+
+def shipped_skill_names() -> frozenset[str]:
+    """Every skill name this deployment's *reviewed* trees declare.
+
+    Public because `api/routes/skills.py` needs it to refuse a personal skill that would take a
+    shipped skill's name, and it has to be asked of the same walk the graph does — a route that
+    re-derived the tree list would answer about a different set than the one the model is served.
+
+    Cheap to call per request: `declared_tools` is `@cache`d on the directory tuple, so the cost is
+    `_skill_dirs`' `Path.is_dir()` fan-out over the enabled bundles and nothing else.
+
+    Returns:
+        The declared names, including every enabled connector bundle's own `skills/`.
+    """
+    return frozenset(declared_tools([directory for _label, directory in _labelled(_skill_dirs())]))
 
 
 def _labelled(dirs: list[str]) -> list[tuple[str, str]]:
