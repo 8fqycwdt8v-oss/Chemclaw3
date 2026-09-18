@@ -478,6 +478,11 @@
           "expr": "sum(increase(chemclaw_local_skill_loads_total[30d]))",
           "legendFormat": "personal skills loaded (30d)",
           "refId": "L"
+        },
+        {
+          "expr": "sum by (outcome) (increase(chemclaw_behaviour_proposals_total[30d]))",
+          "legendFormat": "behaviour proposals (30d): {{outcome}}",
+          "refId": "M"
         }
       ]
     },

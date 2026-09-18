@@ -130,7 +130,36 @@ class ToolFailureSignal(BaseModel):
     reason: RefusalReason | None = None
 
 
-Signal = JobSignal | NoteRecordedSignal | QuestionSignal | ToolFailureSignal
+class SkillLoadedSignal(BaseModel):
+    """A skill whose body this turn actually read — the join key a counter cannot be.
+
+    **It exists for the self-confirmation guard and for nothing else yet, and that is stated
+    rather than hidden.** Nothing distilled may count evidence it itself produced: a trajectory
+    that happened *because* a skill was already shaping that turn is not independent evidence for
+    proposing that skill. The predicate is one line; what it had nothing to read was a per-turn
+    record of which skills were loaded, and `chemclaw_skill_loads_total{skill}` cannot be it —
+    a Prometheus counter says a skill was read, never in which turn, and is not a join key.
+
+    **Not rendered to the chemist**, unlike every other member of this union. The others exist
+    because something happened that the person should see; this one is bookkeeping the turn's own
+    cost row absorbs. It rides the same channel anyway because the channel is what carries a fact
+    from a backend three layers down to the runner without the model being able to author it —
+    which is this module's whole subject — and a second mechanism for one field would be the
+    `job_events` duplication D-091 folded back in.
+
+    Both tiers, deliberately: a personal skill shapes a turn exactly as a reviewed one does, and a
+    guard blind to the personal tier would be blind to the tier most likely to be
+    self-confirming, since that is the one the agent can propose into.
+    """
+
+    skill: str
+    # `shared` or `mine`, which is the mount's own label rather than a new vocabulary. A guard only
+    # needs the name; the tier is here because "which of my turns loaded judgment I wrote myself"
+    # is the question a person is most likely to ask of this row.
+    tier: str
+
+
+Signal = JobSignal | NoteRecordedSignal | QuestionSignal | SkillLoadedSignal | ToolFailureSignal
 
 
 # The key a signal rides under in the graph's custom stream. Namespaced because the channel is
@@ -206,6 +235,18 @@ def record_job_started(job_id: str, kind: str) -> None:
 def record_note_written(note_id: str, reference: str) -> None:
     """Note that a note reached the graph. A no-op where nothing is streaming."""
     _emit(NoteRecordedSignal(note_id=note_id, reference=reference))
+
+
+def record_skill_loaded(skill: str, tier: str) -> None:
+    """Note that this turn read one skill's body. A no-op where nothing is streaming.
+
+    Called from the two backends that deliver a skill body, rather than from the tool that asks for
+    one: `read_file` is a general verb and the decision that a given path *is* a skill body lives in
+    the backend, beside the counter that already books it. One producer per tier, both of them the
+    same call the counter is taken on, so the array and the counter cannot disagree about what a
+    load is.
+    """
+    _emit(SkillLoadedSignal(skill=skill, tier=tier))
 
 
 def record_question(question: str, options: list[str]) -> None:

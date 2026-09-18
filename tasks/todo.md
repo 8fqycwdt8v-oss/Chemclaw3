@@ -76,23 +76,25 @@ different table, and the only thing that turns a proposal into judgment is a per
 route. That is "auto proposal based on user interactions" in the most direct form available today,
 and it exercises every part of the queue on day one.
 
-- [ ] A content-hashed, append-only proposal table modelled on `plan_approvals`, schema-informed by
-      retired `note_proposals` — `(kind, name, content_hash)` unique, so a decision is evidence and
-      a re-proposal of *changed* content is a new row rather than an overwrite
-- [ ] `propose_skill`, the agent's half: writes a proposal, never a skill
-- [ ] Decision is an HTTP route, never a tool — `plan.py`/`workflows.py`/`skills.py`'s shape
-- [ ] Accepting a skill proposal writes the proposer's **local** tier (phase 3), which is the only
-      destination that exists: the shared tree is git-merged by a human and a route cannot commit
-- [ ] A rejection leaves a trace and an unchanged re-proposal cannot reopen it
-- [ ] A proposer can learn what became of its proposal
-- [ ] ADR
+- [x] A content-hashed, append-only proposal table — `(actor, kind, name, content_hash)` unique,
+      per actor so one chemist's rejection does not decide for another
+- [x] `propose_skill`, the agent's half: writes a proposal, never a skill
+- [x] Decision is an HTTP route, never a tool — `plan.py`/`workflows.py`/`skills.py`'s shape
+- [x] Accepting a skill proposal writes the proposer's **local** tier, inside the decision and
+      through the same `agent_local_skills_max` refusal the save route gives
+- [x] A rejection leaves a trace and an unchanged re-proposal cannot reopen it
+- [x] A proposer can learn what became of its proposal — three answers, not one
+- [x] ADR (`D-2026-09-18-a-proposal-is-not-a-skill-and-a-route-is-not-a-tool`)
 
 ## Phase 5 — The proposers that need history
-- [ ] Profile proposer over session tool co-occurrence
-- [ ] Skill distiller over recurring trajectories and human protocol corrections
-- [ ] **The self-confirmation guard, with its caller**: nothing distilled may count evidence it
-      itself produced
-- [ ] ADR
+- [x] Skill distiller over recurring trajectories (`make distill`), consuming the census
+      `D-2026-08-27` built to greenlight it
+- [x] Profile proposer over tool co-occurrence (`make propose-profile`) — **a record, not an
+      effect**, because profiles are git-resident and no route can commit
+- [x] **The self-confirmation guard, with its caller** — and with the *producer* neither the plan
+      nor the ADR knew it needed: `turn_costs.skills_loaded`, because
+      `chemclaw_skill_loads_total{skill}` says a skill was read and never in which turn
+- [x] ADR (`D-2026-09-18-a-guard-with-nothing-to-read-is-not-a-guard`)
 
 ## Review
 
@@ -735,3 +737,33 @@ rule that finding left behind is written about inheritance rather than about wri
 `chemclaw_local_skill_loads_total` is the tier's signal now, on `read` and `aread` both, and bare
 rather than labelled: a local skill's name is a person's own words and a label would mint a series
 per private project name in a shared exposition.
+
+### Phases 4 and 5 — landed
+
+**Phase 4 shipped with a proposer**, for the rule that reordered phase 3: a queue whose only caller
+is its own test is the shape this repository deleted 254 lines for. `propose_skill` writes a row and
+never a skill, so `SkillsReadOnlyRefusal` is untouched; `POST /proposals/{kind}/{name}` is the only
+thing that turns one into behaviour. The key is the content, so an unchanged re-proposal meets its
+own rejection — driven against both backends, because a control with two implementations that
+disagree is one nobody can reason about.
+
+**Phase 5's guard turned out to need a third thing that shipped with it.** The plan said the
+self-confirmation guard ships with its caller. Building it found that it also had to ship with a
+*producer*: nothing recorded which skills a turn loaded, and
+`chemclaw_skill_loads_total{skill}` cannot be it, because a counter says a skill was read and never
+in which turn. Built as specified the guard would have been a function reading a column nobody
+writes — `map_to_hpc_identity` and the empty `audit_events.agent` exactly. `turn_costs.skills_loaded`
+is the record, and the guard's two tests differ in nothing but whether the candidate skill was
+already loaded, because a guard asserted only where it is a no-op is the same defect.
+
+**Neither miner has anything to say about this corpus.** `make trajectory-census` measures the
+history at zero, so `make distill` reports zero and `make propose-profile` finds no cluster. Both
+distinguish "this database is empty" from "nothing recurs", because a miner that printed nothing
+would be indistinguishable from one that was broken.
+
+**One thing `mypy --strict` caught that no pytest rule would have**: the Postgres arm of
+`tests/test_behaviour_proposals.py` called `migrated_db_or_skip()` without awaiting it, so the
+coroutine was created and dropped and the arm never skipped — it passed only because this machine
+has a migrated database. That is the same hole main's own 2026-09-16 review wrote down about a
+forgotten `await` inside an *async* test, where the warning arrives from the garbage collector after
+the test has returned.

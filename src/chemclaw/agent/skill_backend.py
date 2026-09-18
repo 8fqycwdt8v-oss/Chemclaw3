@@ -71,6 +71,7 @@ from chemclaw.agent.authz import AuthorizationError
 from chemclaw.agent.refusal_route import routed
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.turn_signals import record_skill_loaded
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +222,11 @@ class NarrowedSkillsBackend(FilesystemBackend):
             record_metric(
                 lambda m: m.increment("chemclaw_skill_loads_total", labels={"skill": skill})
             )
+            # The same load, on the channel that can carry it into *this turn's* cost row — which a
+            # counter cannot, because it says a skill was read and never in which turn. The guard
+            # `agent/distiller.py` needs is one predicate over exactly that, so the array and the
+            # counter are taken on one condition rather than two that could drift apart.
+            record_skill_loaded(skill, SHARED_TIER)
         return result
 
     def glob(self, pattern: str, path: str | None = None) -> GlobResult:
@@ -318,6 +324,13 @@ def _skill_of(path: str) -> str:
     """
     parts = PurePosixPath(path.strip("/")).parts
     return parts[0] if parts else ""
+
+
+#: What `SkillLoadedSignal.tier` says about a skill from the reviewed tree.
+#:
+#: The mount's own vocabulary rather than a new one: `agent/local_skills.LOCAL_SKILLS_LABEL` is the
+#: other value, and both are what a path already carries.
+SHARED_TIER = "shared"
 
 
 def _is_a_skill_body(path: str) -> bool:

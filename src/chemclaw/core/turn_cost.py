@@ -167,4 +167,15 @@ class TurnCost(BaseModel):
     answer_confidence: float | None = None
     review_required: bool = False
     notes_cited: int = 0
+    # **Which skills shaped this turn** — the dimension the self-confirmation guard reads, and the
+    # one a counter cannot supply: `chemclaw_skill_loads_total{skill}` says a skill was read, never
+    # in which turn, and a Prometheus counter is not a join key. Both tiers land here, since a
+    # personal skill shapes a turn exactly as a reviewed one does and a guard blind to the personal
+    # tier would be blind to the one the agent can propose into.
+    #
+    # Sorted on the way in, so two turns that loaded the same skills produce the same row. A
+    # `list` rather than a `tuple` because psycopg adapts a list to a Postgres array and a tuple to
+    # a composite — the column is `TEXT[]`, and the difference is a runtime error rather than a
+    # style choice.
+    skills_loaded: list[str] = Field(default_factory=list)
     recorded_at: datetime | None = None
