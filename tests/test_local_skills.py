@@ -412,3 +412,47 @@ def test_the_outer_permission_rules_deny_a_write_under_this_root_too() -> None:
     assert rules[-1].mode == "deny" and rules[-1].paths == ["/**"], (
         "the blanket deny is no longer last, and these rules are first-match-wins"
     )
+
+
+def test_a_local_skill_load_is_counted_and_carries_no_persons_words(store: InMemoryStore) -> None:
+    """The tier's usage signal, and the reason it is not the labelled counter beside it.
+
+    **`chemclaw_skill_loads_total` does not cover this tier**, and the ADR shipped saying it did —
+    in both directions at once, since it also warned that a local skill's *name* therefore reaches
+    the exposition. Measured: a shipped skill and a personal one read through the same mount in one
+    process left the labelled series at 1 for the shipped one and no series at all for the other,
+    because that counter lives on `NarrowedSkillsBackend` and this tier is a `StoreBackend`. So the
+    coverage claim was false and the privacy warning was a warning about nothing.
+
+    Both halves are answered by one bare counter. It is bare rather than labelled because a local
+    skill's name is a person's own words, clamped by nothing, and a label would mint a series per
+    private project name in a shared exposition — and an operator's question here is whether the
+    tier is used at all, not by whom.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    asyncio.run(save_local_skill(store, "alice-oid", "a-private-project", _BODY))
+    backend = _mounted(store, "alice-oid")
+    path = f"{LOCAL_SKILLS_ROOT}a-private-project/SKILL.md"
+
+    before = METRICS.render()
+    assert backend.read(path).error is None
+    assert asyncio.run(backend.aread(path)).error is None
+    # A failed read delivered no body, so it is not a load.
+    assert backend.read(f"{LOCAL_SKILLS_ROOT}not-a-skill/SKILL.md").error is not None
+    after = METRICS.render()
+
+    def counted(rendered: str) -> int:
+        for line in rendered.splitlines():
+            if line.startswith("chemclaw_local_skill_loads_total "):
+                return int(float(line.rsplit(maxsplit=1)[1]))
+        return 0
+
+    assert counted(after) - counted(before) == 2, (
+        "two delivered bodies — one sync, one async — must each count, and the failed read must "
+        "not; the async path is the one an agent takes and is native rather than a thread wrapper"
+    )
+    assert "a-private-project" not in after, (
+        "a chemist's own skill name reached the exposition: that is a per-person identifier on a "
+        "shared metric, minting a series per private project name"
+    )

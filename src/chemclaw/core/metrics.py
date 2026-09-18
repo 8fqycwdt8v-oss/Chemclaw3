@@ -755,6 +755,19 @@ _COUNTERS: dict[str, str] = {
         "visibility predicate only ever narrows, so an unconfigured deployment permits every "
         "string a model can invent, and `skills/README.md` resolves."
     ),
+    "chemclaw_local_skill_loads_total": (
+        "Skill bodies a chemist's *own* tier delivered — the same question as the counter above, "
+        "asked of the tier that counter cannot see. `chemclaw_skill_loads_total` lives on "
+        "`NarrowedSkillsBackend`, and the personal tier is a `StoreBackend`, so a local skill load "
+        "moved nothing at all: measured, a shipped skill and a personal one read through the same "
+        "mount in one process left one series at 1 and the other absent. **Bare, and that is the "
+        "whole reason it is a second series rather than a label.** A local skill's name is written "
+        "by a person, clamped by nothing, and would be a per-chemist identifier minting a series "
+        "per private project name in a shared exposition — the rule `Chemclaw3-mcp` states for its "
+        "own fleet, which this repository had no occasion to state until a caller-named skill "
+        "existed. What an operator needs from this is whether the tier is used at all, and a bare "
+        "count answers it; who used which is a question for that person's own listing route."
+    ),
     # --- the turn ------------------------------------------------------------------------------
     "chemclaw_turns_finished_total": (
         "Turns that ended, by outcome — the one series that separates `answered` from "

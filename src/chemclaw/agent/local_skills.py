@@ -66,6 +66,7 @@ from chemclaw.agent.refusal_route import routed
 from chemclaw.agent.skill_backend import SkillsReadOnlyRefusal
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import log_event
+from chemclaw.core.metrics_bridge import record_metric
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +203,49 @@ class ReadOnlyStoreBackend(StoreBackend):
         was just caught by.
         """
         raise SkillsReadOnlyRefusal(_LOCAL_READ_ONLY)
+
+    def read(self, *args: Any, **kwargs: Any) -> Any:
+        """Read one of the owner's skills, and count it — the tier's only usage signal.
+
+        **`chemclaw_skill_loads_total` does not cover this tier, and this record's ADR said it
+        did.** That counter is `NarrowedSkillsBackend`'s, which is a `FilesystemBackend`; this is a
+        `StoreBackend`, so a local skill's body reached the model with nothing moving anywhere.
+        Measured: a shipped skill and a personal one read through the same mount in one process
+        left `chemclaw_skill_loads_total{skill="protocol-generation"}` at 1 and no series for the
+        other. The same base-class mistake as the async write verbs, one method over — which is why
+        the rule that paragraph left behind is written about *inheritance* rather than about
+        writes.
+
+        **A separate bare counter rather than the labelled one**, for the reason the metric's own
+        HELP gives: a local skill's name is a person's words, and a label would mint a series per
+        private project name in a shared exposition.
+        """
+        result = super().read(*args, **kwargs)
+        _count_a_load(result)
+        return result
+
+    async def aread(self, *args: Any, **kwargs: Any) -> Any:
+        """The async twin, overridden rather than inherited — see `awrite` for why that matters.
+
+        `StoreBackend.aread` is native against the store rather than a `to_thread` wrapper, so a
+        counter placed on `read` alone would count the path nothing takes and miss the one an async
+        agent does: the exact shape this class was caught by on its write half.
+        """
+        result = await super().aread(*args, **kwargs)
+        _count_a_load(result)
+        return result
+
+
+def _count_a_load(result: Any) -> None:
+    """Book one delivered local-skill body, or nothing.
+
+    Derived from the *result* rather than from the path, so the two conditions
+    `agent/skill_backend.py` had to learn the hard way are answered by the object that knows them:
+    a read that failed delivered nothing, and a read that asked for no lines delivered nothing
+    either while still resolving. A path-shaped predicate would book both.
+    """
+    if getattr(result, "error", None) is None and not getattr(result, "no_lines_requested", False):
+        record_metric(lambda m: m.increment("chemclaw_local_skill_loads_total"))
 
 
 #: The document inside a skill directory that makes it a skill, mirroring the shared tree's shape so

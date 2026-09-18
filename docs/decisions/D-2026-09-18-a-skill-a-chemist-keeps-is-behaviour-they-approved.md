@@ -123,11 +123,28 @@ anywhere.
 **What the tier still cannot do, so nobody reads this as the whole feature**: nothing proposes a
 skill automatically, nothing promotes a local skill into `skills/`, and nothing measures whether one
 helped. The first is the distiller, still blocked on deployment history. The second needs the
-promotion thresholds `D-2026-09-05` sketches. The third is `chemclaw_skill_loads_total{skill}`
-(`D-2026-09-16-a-skill-nothing-counts-is-a-skill-nobody-can-retire`) plus a corpus, and the counter
-already covers this tier because the label is the first path segment and the mount is `/mine/` —
-which means a local skill's *name* reaches the exposition. That is a per-person label on a shared
-metric and it is the thing to watch if this tier is ever busy.
+promotion thresholds `D-2026-09-05` sketches.
+
+**The third is a counter, and this paragraph shipped wrong about it in both directions at once.**
+It said `chemclaw_skill_loads_total{skill}`
+(`D-2026-09-16-a-skill-nothing-counts-is-a-skill-nobody-can-retire`) "already covers this tier
+because the label is the first path segment", and warned that a local skill's *name* therefore
+reaches the exposition. Measured: a shipped skill and a personal one read through the same mount in
+one process left the labelled series at 1 for the shipped one and **no series at all** for the
+other. That counter lives on `NarrowedSkillsBackend`, a `FilesystemBackend`; this tier is a
+`StoreBackend`. So the coverage claim was false and the privacy warning was a warning about
+nothing — which is the same base-class mistake as the async write verbs below, one method over, and
+the reason the rule that finding leaves behind is written about *inheritance* rather than about
+writes.
+
+`chemclaw_local_skill_loads_total` is the tier's own signal, on `read` and `aread` both, counted
+off the result rather than the path so a failed read and a zero-line read book nothing. **Bare
+rather than labelled**, and that is why it is a second series rather than a label on the first: a
+local skill's name is a person's own words, clamped by nothing, and a label would mint a series per
+private project name in a shared exposition. `Chemclaw3-mcp` states that rule for its own fleet;
+this repository had no occasion to state it until a caller-named skill existed. What an operator
+needs here is whether the tier is used at all; who used which is a question for that person's own
+listing route.
 
 **A write outside the tool-call chain is not a write without a record.**
 `tests/test_scratchpad.py::test_no_first_party_module_writes_to_a_store_directly` holds that every
@@ -177,6 +194,8 @@ argument is about one base class and does not travel with the refusal.**
 - `tests/test_context_floor.py::test_a_chemists_own_skills_cost_no_more_prefix_than_their_cap_allows`
 - `tests/test_upstream_surface.py::test_an_oversized_skill_description_is_still_truncated_rather_than_refused`
 - `::test_the_label_carries_no_identity`
+- `::test_a_local_skill_load_is_counted_and_carries_no_persons_words` — both arms, since the
+  coverage claim and the privacy claim were each false.
 - `::test_the_outer_permission_rules_deny_a_write_under_this_root_too` — the second layer, which
   covers this root by *absence* and so is the one most likely to be widened by a rule added for
   another root.
