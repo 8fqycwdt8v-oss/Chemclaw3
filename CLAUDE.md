@@ -567,10 +567,16 @@ citations a chemist checks at the point of use, and contradiction — `memory/fa
 `contradicts` edge, `kg/conflicts.py`, `memory/supersede.py` and bi-temporal `valid_to`. **A skill
 is the opposite case**, because it is injected into the prompt and reshapes every later answer with
 no citation trail — and what the code does about that is refuse outright: no agent path writes a
-`SKILL.md` (`agent/skill_backend.SkillsReadOnlyRefusal`), so a skill changes only through a
+`SKILL.md` (`agent/skill_backend.SkillsReadOnlyRefusal`), so the shared tree changes only through a
 reviewed commit to `skills/`. Said that way deliberately: "an admin reviews it" describes the
 repository's workflow, not a control this system implements, and the two are easy to confuse in
-exactly the direction that overstates what is enforced. See
+exactly the direction that overstates what is enforced. **There is a second skills tier now, and
+this paragraph said "a skill" where it meant the shared one**
+(`D-2026-09-18-a-skill-a-chemist-keeps-is-behaviour-they-approved`): a chemist keeps their own
+skills through `POST /skills/mine`, and what makes that safe is not review but blast radius —
+the namespace closes over one actor, so the judgment acts on that person's turns and reaches no
+other, and the same route lists, reads and removes it. The refusal is unchanged on both: a turn
+reads either tier and writes neither, which is the sentence that was always doing the work. See
 `docs/reference/architektur.md` §4, §9, §12 for the layers, and that ADR for what replaced the gate.
 
 `kg/record.py` is the one write path, and the order it writes in is load-bearing now that a reader

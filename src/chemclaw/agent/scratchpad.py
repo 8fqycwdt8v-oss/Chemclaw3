@@ -78,6 +78,11 @@ from deepagents.backends.protocol import EditResult, WriteResult
 from langgraph.store.base import SearchItem
 from langgraph.store.postgres.aio import AsyncPostgresStore
 
+from chemclaw.agent.local_skills import (
+    LOCAL_SKILLS_ROOT,
+    ReadOnlyStoreBackend,
+    local_skills_namespace,
+)
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor
 from chemclaw.core.ids import stable_hash
@@ -456,8 +461,8 @@ def scratchpad_backend(skills: CompositeBackend, store: Any | None = None) -> Co
             no durable memory — which is every turn under the default configuration.
 
     Returns:
-        A backend routing `/skills/…` as given, `/memories/…` to the store when both conditions
-        hold, and everything else — `/scratch/…` included — to graph state.
+        A backend routing `/skills/…` as given, `/memories/…` and `/mine/…` to the store when both
+        conditions hold, and everything else — `/scratch/…` included — to graph state.
     """
     routes = dict(skills.routes)
     actor = get_current_actor()
@@ -466,6 +471,14 @@ def scratchpad_backend(skills: CompositeBackend, store: Any | None = None) -> Co
         # A closure over the value, not a read through the runtime: see the module docstring. The
         # lambda takes the runtime upstream passes and ignores it, which is the whole point.
         routes[MEMORY_ROOT] = BoundedStoreBackend(namespace=lambda _runtime: namespace, store=store)
+        # The chemist's own skills, on the same two conditions and for the same reason: a store to
+        # hold them and an actor to own them. A *different* first namespace component, so the two
+        # tiers are separately erasable and a bug in one cannot serve the other's rows — see
+        # `agent/local_skills.py`, which also says why this is stored rather than filed.
+        own = local_skills_namespace(actor)
+        routes[LOCAL_SKILLS_ROOT] = ReadOnlyStoreBackend(
+            namespace=lambda _runtime: own, store=store
+        )
     return CompositeBackend(default=StateBackend(), routes=routes)
 
 
