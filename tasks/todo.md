@@ -51,11 +51,11 @@ so a local skill written to disk would vanish on restart and differ per replica.
 the same `AsyncPostgresStore` that already serves `/memories/` is multi-replica-safe, and its
 namespace is the erasure key `agent/leaver.py` already sweeps by prefix.
 
-- [ ] Per-turn, actor-scoped skills directory resolved where ambient identity is reachable
-- [ ] Never shared, never citable, never auto-promoted
-- [ ] Routes so a chemist can list, read and delete the local skills acting on their turns
-- [ ] `SkillsReadOnlyRefusal` unchanged — no agent tool writes a skill
-- [ ] ADR
+- [x] Per-turn, actor-scoped skills directory resolved where ambient identity is reachable
+- [x] Never shared, never citable, never auto-promoted
+- [x] Routes so a chemist can list, read and delete the local skills acting on their turns
+- [x] `SkillsReadOnlyRefusal` unchanged — no agent tool writes a skill
+- [x] ADR
 
 ## Phase 4 — The proposal queue and its human gate
 - [ ] A content-hashed, append-only proposal table modelled on `plan_approvals`, schema-informed by
@@ -104,6 +104,30 @@ tests leaked the shipped profiles into a module-global registry, and the control
 still carries" paragraph named the listing and missed the larger residual — the deployment's prose
 still orders the model to load skills the arm cannot reach, which makes a delta measured there a
 lower bound rather than an unbiased estimate.
+
+### Phase 3 — landed
+
+The per-actor tier plus its writer, in one PR, because `D-2026-09-05` §3 records the tier as
+blocked on *"nothing writes a per-actor directory until the distiller exists"* and the distiller is
+blocked on deployment history the census measures at zero. Shipping the tier alone would have been
+a mechanism whose only caller is its own test.
+
+**Two things departed from the design on purpose, both stated in the ADR rather than absorbed.**
+Storage is the store rather than a directory — a pod's filesystem is ephemeral and the chart runs
+`serverReplicas`, so a filed skill vanishes on restart and differs per replica, while the store
+puts the rows under the namespace `agent/leaver.py` already erases by. And `ToolScopedSkills` is
+not applied; the backlog carries the row and the cheap shape for closing it.
+
+**The derived enumeration earned its keep immediately.** Four sync overrides left `awrite`, `aedit`
+and `adelete` open on a read-only tier — the async path is the one an async agent takes — because
+`skill_backend.py`'s argument that async twins need no override is true of `FilesystemBackend` and
+false of `StoreBackend`. Three of four succeeded; the fourth refused, which is what a spot check
+passes. The rule worth keeping: an inherited-refusal argument is about one base class and does not
+travel with the refusal.
+
+Two of my own tests were replaced rather than left: one asserted a hardcoded set was a subset of a
+list built from the same hardcoded set, the other only checked a symbol was imported. The second is
+why `leaver.store_prefixes` is a function now.
 
 ### Phase 2 — what the measurement decided before any code
 
