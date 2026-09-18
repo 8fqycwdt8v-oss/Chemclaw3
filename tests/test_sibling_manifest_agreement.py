@@ -35,6 +35,16 @@ the seam carrying `predict_pka`, `predict_solubility` and `compute_xtb_energy`. 
 on the wire is one the fleet records, so nothing was broken; the tripwire simply did not exist
 there. `_callers()` derives the list from who imports a dispatcher, and 13 sites became 26.
 
+**And it read the seam in one direction only.** "Every name this repository sends is one the fleet
+serves" catches a rename; it is silent about the fleet *growing*, and on 2026-09-18 two of the
+tools `servers/calc/tool-surface.json` records were named by no site here. Both turned out to be
+declined on purpose and for measured, structural reasons — `optimize_geometry` derives the same
+cache key as `relax_structure` while returning a different payload, and `predict_logd` is the one
+tool the server answers `calculation_key` with no key for — so nothing was broken and nothing was
+written down either. `_DECLINED` is where that goes, reconciled against the derived difference in
+both directions, so a ninth tool arriving in the fleet is a decision somebody takes rather than a
+silence.
+
 **Opt-in, and it can only skip or fail.** Reading a few YAML files and one JSON file needs a
 checkout and no build, which is the property that makes these plausible to run in CI where the
 schema measurement in `tests/test_context_floor.py` is not. Without a checkout each skips with the
@@ -310,20 +320,102 @@ def test_the_calc_seam_calls_only_tools_the_fleet_records_serving() -> None:
             )
 
 
-def test_the_two_composites_this_repository_assembles_differ_in_why_they_are_assembled() -> None:
-    """`compute_thermochemistry` is not served; `predict_logd` is, and is composed here anyway.
+#: The fleet `calc` tools no hardcoded site here names, and the measured reason each is declined.
+#:
+#: **A table, because this one can be reconciled and `_CALLERS` could not.** The tuple that
+#: `_callers()` replaced was a list of caller modules with nothing on the other side of it: a ninth
+#: caller was simply absent, and absence is what no assertion can see. The set of *declined tools*
+#: is the opposite shape — the fleet publishes what it serves and `_hardcoded_calls()` derives what
+#: is called, so this table is subtracted from a derived difference in both directions on every
+#: run. It cannot silently gain a stale row (a tool that starts being called fails), lose a needed
+#: one (a tool the fleet adds and nothing calls fails), or outlive its subject (a tool the fleet
+#: withdraws fails). The reason string is the part a machine cannot check, which is exactly the
+#: part worth writing down.
+#:
+#: Both reasons are structural rather than preferential, and both were measured on this commit
+#: against the fleet checkout rather than read off a comment:
+#:
+#: * `optimize_geometry` derives the **same** `calc_key` as `relax_structure` —
+#:   `identity.COMPUTE_TOOLS` routes both through `_from_spec` with an `OptSpec`, and the key does
+#:   not carry the tool name. Driven for `CCO`, `optimize_geometry({"smiles": "CCO"})` and
+#:   `relax_structure` on the structure `optimization_inputs` embeds from it produce one identical
+#:   string. The two return different payloads — a summary without coordinates, and the full result
+#:   with them — so caching either under that key poisons the other, and
+#:   `connectors/calc/server/tools.py::optimize_geometry` composes `embed_structure` plus
+#:   `relax_structure` instead.
+#: * `predict_logd` answers `calculation_key` with **no key at all** (`calc_key=None`, plus a
+#:   caveat naming the pKa to key instead), so `cached_remote` refuses it outright as a miswiring
+#:   rather than recomputing it forever. `connectors/calc/server/tools.py::predict_logd` calls the
+#:   cached `predict_pka` and finishes locally.
+_DECLINED: dict[str, str] = {
+    "optimize_geometry": (
+        "shares `relax_structure`'s cache key while returning a different payload, so this "
+        "repository composes `embed_structure` + `relax_structure` and stores the one payload "
+        "shape that key may hold"
+    ),
+    "predict_logd": (
+        "the server derives no cache key for it, so `cached_remote` refuses it; the composite is "
+        "assembled here from a cached `predict_pka` plus a local Crippen sum"
+    ),
+}
 
-    Both are built in `connectors/calc/compose.py` out of separately keyed primitives, and
-    `connectors/calc/server/tools.py` said both were "not shipped by the server at all, because
-    their keys would name an output" — while `connectors/calc/remote.py::remote_key` said in the
-    present tense that `predict_logd` is *"the server's own"*. The fleet's file settles it, and the
-    two reasons are different: one composite has no server tool to collide with, the other has one
-    and this repository declines to call it because its expensive half is a cached pKa.
 
-    Worth a check rather than a corrected sentence, because the first half is a real invariant. The
-    fleet's own rule forbids duplicating a Chemclaw3 capability, and a `compute_thermochemistry`
-    appearing there would give this family two answers to one question — the failure that rule
-    exists to prevent — with nothing in either tree noticing.
+def _tools_named() -> set[str]:
+    """Every `calc` tool name the hardcoded sites put on the wire.
+
+    A site whose tool expression cannot be resolved to literals contributes nothing here and is
+    *not* reported here either: `test_the_calc_seam_calls_only_tools_the_fleet_records_serving`
+    fails on exactly that, and a second assertion about it would be one cause reported twice.
+    """
+    named: set[str] = set()
+    for _relative, expression, _keys, bound in _hardcoded_calls():
+        named |= _literal_strings(expression, bound) or frozenset()
+    return named
+
+
+def test_every_calc_tool_the_fleet_serves_is_called_here_or_declined_with_a_reason() -> None:
+    """The seam is accounted for in *both* directions, not only in the one that breaks loudly.
+
+    `test_the_calc_seam_calls_only_tools_the_fleet_records_serving` reads the seam from this side:
+    every name this repository puts on the wire must be one the fleet serves. That direction
+    catches a rename. It cannot catch the other thing a tool surface does — grow. A tool the fleet
+    adds that nothing here calls is either a capability this repository is missing or a duplicate
+    of something it already composes, and both of those are decisions somebody should take
+    deliberately; today they arrive as silence.
+
+    So the difference is derived and reconciled against `_DECLINED`. Nothing here states how many
+    tools are served, how many are called, or how many are declined — `tool-surface.json` and
+    `_hardcoded_calls()` answer the first two, and the third is whatever is left over.
+    """
+    root = _sibling_or_skip()
+    surface: dict[str, dict[str, Any]] = json.loads(
+        (root / "servers" / "calc" / "tool-surface.json").read_text(encoding="utf-8")
+    )
+    unreached = set(surface) - _tools_named()
+    assert unreached == set(_DECLINED), (
+        f"{sorted(unreached - set(_DECLINED))} are served by Chemclaw3-mcp's calc server and "
+        "named by no hardcoded call site here, with no reason recorded — call them, or add a row "
+        f"to `_DECLINED` saying why not. And {sorted(set(_DECLINED) - unreached)} are recorded as "
+        "declined while that is no longer the state: either this repository now calls one (delete "
+        "its row) or the fleet has withdrawn one (the reason written beside it is about a tool "
+        "that no longer exists, and whatever else that reason justified needs re-reading)."
+    )
+
+
+def test_the_composite_this_repository_assembles_is_not_also_served_by_the_fleet() -> None:
+    """`compute_thermochemistry` is composed here out of primitives and must not be served there.
+
+    A real invariant rather than a corrected sentence. The fleet's own rule forbids duplicating a
+    Chemclaw3 capability, and a `compute_thermochemistry` appearing there would give this family
+    two answers to one question — the failure that rule exists to prevent — with nothing in either
+    tree noticing.
+
+    This test used to carry a second half, asserting that `predict_logd` *is* served and composed
+    here anyway. That half is now `_DECLINED`'s, where it is derived rather than named: a tool this
+    repository declines to call is exactly a tool the fleet serves and nothing here reaches, so the
+    fleet withdrawing it fails
+    `test_every_calc_tool_the_fleet_serves_is_called_here_or_declined_with_a_reason` with the
+    reason string it invalidated. Two assertions about one fact is one cause reported twice.
     """
     root = _sibling_or_skip()
     surface: dict[str, dict[str, Any]] = json.loads(
@@ -334,11 +426,6 @@ def test_the_two_composites_this_repository_assembles_differ_in_why_they_are_ass
         "Chemclaw3-mcp now serves `compute_thermochemistry`, which this repository composes from "
         "separately keyed primitives. Two live definitions of one calculation is the duplication "
         "both repositories' rules forbid — decide which one answers before either ships."
-    )
-    assert "predict_logd" in surface, (
-        "the fleet no longer serves `predict_logd`. `remote_key`'s docstring describes it as the "
-        "one tool that answers `calculation_key` with `None`, and `cached_remote` refuses such a "
-        "tool as a miswiring — so that paragraph is now about nothing."
     )
 
 

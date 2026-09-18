@@ -2183,3 +2183,79 @@ def test_every_compiled_graph_in_this_tree_names_its_checkpointer() -> None:
         "whatever it carries under its own namespace. Pass `checkpointer=False` for a graph "
         "nothing resumes, or name the saver."
     )
+
+
+def test_only_the_subagent_middleware_returns_a_command_carrying_the_files_channel() -> None:
+    """`batch_siblings`'s divisor is sound only while `task` is the single such producer.
+
+    `agent/tool_result_size.py` divides the helper file budget by the batch's calls **naming this
+    tool**, and the argument for not dividing by the whole batch is that nothing else in the
+    installed `deepagents` hands a caller a `Command` whose `update` carries `files`. Two
+    different tools doing it would each divide by their own count and together exceed the budget.
+
+    That claim lived in an ADR and in a walk somebody did once, which is the shape this file
+    exists to end: a dependency bump adding a second producer would red nothing.
+    `deepagents.middleware.subagents._return_command_with_state_update` copies every key not in
+    `_EXCLUDED_STATE_KEYS`, so it is the producer; the assertion is that it stays the only one.
+
+    **Three sites, and only one of them originates anything** — which is why the assertion names
+    all three rather than filtering two away, since a filter is where a fourth would hide.
+    `filesystem`'s pair rebuild a wrapped tool's result as `{**update, "messages": …}`, so the
+    `files` they can carry is the wrapped tool's, already counted wherever it came from; they relay
+    a producer and cannot invent one. A **new** entry in this list is the thing to look at.
+
+    **Scoped to `Command`s on purpose.** `FilesystemMiddleware`'s write verbs reach the same
+    channel through `StateBackend`'s `send(...)` and return a plain `ToolMessage`, so they never
+    pass `rewritten_command_files` and this bound never sees them. That is a separate gap with its
+    own `BACKLOG.md` row; what this pins is the population the divisor reasons about.
+    """
+    import ast
+    import importlib
+    import inspect
+    import pkgutil
+
+    import deepagents
+
+    producers: list[str] = []
+    for found in pkgutil.walk_packages(deepagents.__path__, deepagents.__name__ + "."):
+        try:
+            module = importlib.import_module(found.name)
+            source = inspect.getsource(module)
+        except Exception:
+            # A module that will not import, or has no readable source, cannot be a producer.
+            continue
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name != "Command":
+                continue
+            for keyword in node.keywords:
+                if keyword.arg != "update" or not isinstance(keyword.value, ast.Dict):
+                    continue
+                # A literal `"files"` key, or a `**spread` of state this module did not filter —
+                # the second is how the real producer does it and the first is how a new one would.
+                spreads = any(key is None for key in keyword.value.keys)
+                literal = any(
+                    isinstance(key, ast.Constant) and key.value == "files"
+                    for key in keyword.value.keys
+                )
+                if spreads or literal:
+                    producers.append(f"{found.name}:{node.lineno}")
+
+    assert producers == [
+        # The two relays: a wrapped tool's own update, rebuilt with new messages.
+        "deepagents.middleware.filesystem:3422",
+        "deepagents.middleware.filesystem:3463",
+        # The producer: `**state_update`, every key the subagent held that is not excluded.
+        "deepagents.middleware.subagents:507",
+    ], (
+        f"the sites handing a caller a `Command` that can carry `files` are {producers}, and "
+        "`agent/tool_result_size.py::batch_siblings` divides the helper file budget by the "
+        "batch's calls naming ONE tool on the grounds that exactly one of them originates such a "
+        "command. A second originator divides by its own count and the two together exceed the "
+        "budget. So: read the new or moved site. If it relays a wrapped tool's update, add it "
+        "here with that noted; if it builds one of its own, the divisor's argument no longer "
+        "holds and `batch_siblings` has to count the union of the producing tools."
+    )

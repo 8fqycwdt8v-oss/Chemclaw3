@@ -1943,3 +1943,148 @@ def test_a_named_helpers_two_texts_name_the_same_surface() -> None:
     for tool in surface:
         assert tool in described, f"the description omits {tool}"
         assert tool in override, f"the helper's own override omits {tool}"
+
+
+def test_a_parallel_fan_out_shares_the_budget_rather_than_multiplying_it() -> None:
+    """N concurrent `task` calls each read the same pre-batch `files`, so each took it all.
+
+    **The gap, and it is the concurrent half of the test above.**
+    `test_a_second_delegation_shares_the_budget_the_first_one_spent` closed the *sequential* case:
+    a second `task` call sees the first one's files in `held` and is charged for them. It cannot
+    close the concurrent one, because `_files_already_held` reads `request.state["files"]` and
+    `_batch_calls`'s own docstring says why that is the wrong number here — `ToolNode` builds every
+    call in a superstep from **one pre-batch snapshot**, so N concurrent `task` calls see an
+    identical `held` and each take the whole of what is left. The channel then receives up to
+    N x `agent_subagent_files_max_chars`, and `general_purpose_helper`'s own description invites
+    exactly that shape ("Spawn one — or several at once") against an
+    `agent_max_parallel_tool_calls` that ships at 8.
+
+    The divisor is same-name calls rather than `batch_width`, and that is the one decision here.
+    `batch_width` is the whole batch, and dividing by it would charge a helper for seven `props`
+    calls that write no file — measured on the installed distributions, the only site that copies
+    a non-excluded state key (and so `files`) into a caller's `Command` is
+    `deepagents.middleware.subagents`'s `**state_update`, which is `task`. Concurrent producers of
+    this channel are therefore the batch's calls that name *this* tool, and nothing else.
+
+    Driven through `bound_tool_results` with a real originating `AIMessage`, because the whole
+    defect is what the middleware reads off the batch: a fixture that passed the width in would
+    assert the arithmetic and not the wiring.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from deepagents.backends.utils import create_file_data
+    from langgraph.types import Command
+
+    from chemclaw.agent.tool_result_size import bound_tool_results
+
+    budget = settings.agent_subagent_files_max_chars
+    width = 4
+    asked = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "task", "args": {}, "id": f"fan-{i}", "type": "tool_call"}
+            for i in range(width)
+        ],
+    )
+
+    async def _handler(request: Any) -> Any:
+        which = request.tool_call["id"]
+        return Command(
+            update={"files": {f"/scratch/{which}.md": create_file_data("z" * budget * 2)}}
+        )
+
+    landed = 0
+    for i in range(width):
+        request = SimpleNamespace(
+            # The snapshot every call in the superstep is built from: empty, for all of them.
+            tool_call={"id": f"fan-{i}", "name": "task"},
+            state={"messages": [asked], "files": {}},
+        )
+        bounded = cast("Any", asyncio.run(bound_tool_results.awrap_tool_call(request, _handler)))  # type: ignore[arg-type]
+        landed += sum(len(str(d.get("content", ""))) for d in bounded.update["files"].values())
+
+    assert landed <= budget, (
+        f"{width} concurrent `task` calls put {landed} characters into one `files` channel "
+        f"against a {budget}-character budget, so the bound is per call rather than per channel"
+    )
+
+
+def test_the_fan_out_divisor_counts_the_tools_that_write_files_not_the_whole_batch() -> None:
+    """One `task` beside seven tools that write no file still gets the whole remaining budget.
+
+    The other direction of the test above, and the reason its divisor is same-name calls. A bound
+    that divided by `batch_width` would fail closed — safe, and wrong in a way nobody would see as
+    a defect: a helper's research note cut to an eighth because the model happened to ask `props`
+    seven questions in the same breath. Only `task` reaches this code path at all, so a batch with
+    one of them has one producer of this channel.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from deepagents.backends.utils import create_file_data
+    from langgraph.types import Command
+
+    from chemclaw.agent.tool_result_size import bound_tool_results
+
+    budget = settings.agent_subagent_files_max_chars
+    asked = AIMessage(
+        content="",
+        tool_calls=[{"name": "task", "args": {}, "id": "solo", "type": "tool_call"}]
+        + [
+            {"name": "lookup_property", "args": {}, "id": f"p-{i}", "type": "tool_call"}
+            for i in range(7)
+        ],
+    )
+    note = "z" * (budget - 1)
+
+    async def _handler(_request: Any) -> Any:
+        return Command(update={"files": {"/scratch/note.md": create_file_data(note)}})
+
+    request = SimpleNamespace(
+        tool_call={"id": "solo", "name": "task"},
+        state={"messages": [asked], "files": {}},
+    )
+    bounded = cast("Any", asyncio.run(bound_tool_results.awrap_tool_call(request, _handler)))  # type: ignore[arg-type]
+    landed = sum(len(str(d.get("content", ""))) for d in bounded.update["files"].values())
+    assert landed == len(note), (
+        f"a lone `task` beside seven tools that write no file stored {landed} of "
+        f"{len(note)} characters, so the divisor is counting the batch rather than the producers"
+    )
+
+
+def test_the_file_share_bounds_the_superstep_at_every_width_this_deployment_allows() -> None:
+    """The per-file floor is a notice, so past a crossover the total grows linearly again.
+
+    **The counterpart `bounded_for_batch` already has and this budget did not.**
+    `tests/test_tool_result_size.py::test_the_batch_share_bounds_the_batch_at_every_width` exists
+    because a share driven below `bounded_content`'s brief form stops shrinking — the notice is
+    ~44 characters and nothing returns less — so N files each at the floor is 44N, which passes
+    the budget again at a large enough N. Every floor test beside this one pins `sharing=2` or
+    `sharing=4`, comfortably inside the crossover, which is the exact blind spot that test's own
+    docstring records about its first version.
+
+    It matters more since `concurrent` joined the denominator: multiplying it by up to
+    `agent_max_parallel_tool_calls` moves the crossover down by the same factor, measured from
+    ~4,444 files per command at width 1 to ~555 at width 8.
+
+    So this sweeps the widths a deployment can actually reach, and asserts the thing worth
+    asserting — that the notice is what remains, rather than content. A floor that stores only
+    system text is a bound doing its job at the edge; a floor that stores a helper's bytes is not.
+    """
+    from chemclaw.agent.tool_result_size import _bounded_file
+
+    budget = settings.agent_subagent_files_max_chars
+    content = "z" * 10_000
+    for concurrent in (1, 2, 4, settings.agent_max_parallel_tool_calls):
+        for sharing in (1, 8, 600, 5_000):
+            stored = _bounded_file(content, sharing, budget, concurrent)
+            assert len(stored) < len(content), (
+                f"at {sharing} file(s) across {concurrent} call(s) on an exhausted budget, "
+                f"{len(stored)} of {len(content)} characters were stored uncut"
+            )
+            assert "z" * 100 not in stored, (
+                f"at {sharing} file(s) across {concurrent} call(s) the floor kept a run of the "
+                "helper's own bytes; past the crossover what remains must be the notice, or the "
+                f"superstep total grows linearly again ({len(stored)} characters each)"
+            )

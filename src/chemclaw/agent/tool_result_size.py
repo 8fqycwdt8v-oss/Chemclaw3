@@ -434,18 +434,41 @@ def bounded_for_batch(request: Any, content: Any, *, mark: str = SYSTEM_SPEECH_M
     return bounded
 
 
+def _batch_calls(request: Any) -> list[Any]:
+    """The tool calls the assistant message that asked for *this* one made, this one included.
+
+    The shared walk under both counters below. It is read off the message rather than counted from
+    the state's tool results, for the reason `plan_gate.rewrite_todos_in_batch` gives for the same
+    walk: `ToolNode` hands each call a runtime built from one pre-batch snapshot, so the
+    originating `AIMessage` is the only place the *other* calls running right now are visible —
+    the results do not exist yet.
+
+    Empty when the message cannot be found, which both readers turn into 1 rather than 0 or a
+    guess: off the request path (a middleware driven directly, `agent/tool_invocation.py`'s
+    no-graph fold) there is no batch, and one call getting the whole budget is exactly today's
+    behaviour.
+
+    Args:
+        request: The tool-call request the middleware chain is running.
+
+    Returns:
+        The batch's calls, or an empty list when the originating message is not in state.
+    """
+    messages = (getattr(request, "state", None) or {}).get("messages") or []
+    this_call = request.tool_call.get("id")
+    for message in reversed(messages):
+        calls = getattr(message, "tool_calls", None) or []
+        if any(call.get("id") == this_call for call in calls):
+            return list(calls)
+    return []
+
+
 def batch_width(request: Any) -> int:
     """How many tool calls the assistant message that asked for *this* one made.
 
-    The denominator of the share below, and the number nothing was dividing by. It is read off the
-    message rather than counted from the state's tool results, for the reason
-    `plan_gate.rewrite_todos_in_batch` gives for the same walk: `ToolNode` hands each call a
-    runtime built from one pre-batch snapshot, so the originating `AIMessage` is the only place the
-    *other* calls running right now are visible — the results do not exist yet.
-
-    1 when the message cannot be found rather than 0 or a guess: off the request path (a middleware
-    driven directly, `agent/tool_invocation.py`'s no-graph fold) there is no batch, and one call
-    getting the whole ceiling is exactly today's behaviour.
+    The denominator of `bounded_for_batch`'s share, and the number nothing was dividing by. Every
+    call in a batch sends its result to the same model in the same request, so the whole batch is
+    the right divisor there — unlike `batch_siblings` below, whose resource has fewer producers.
 
     Args:
         request: The tool-call request the middleware chain is running.
@@ -453,13 +476,45 @@ def batch_width(request: Any) -> int:
     Returns:
         The number of calls in this call's batch, never below 1.
     """
-    messages = (getattr(request, "state", None) or {}).get("messages") or []
-    this_call = request.tool_call.get("id")
-    for message in reversed(messages):
-        calls = getattr(message, "tool_calls", None) or []
-        if any(call.get("id") == this_call for call in calls):
-            return max(len(calls), 1)
-    return 1
+    return max(len(_batch_calls(request)), 1)
+
+
+def batch_siblings(request: Any) -> int:
+    """How many calls in this batch invoke the same tool as this one.
+
+    **The divisor for a resource whose producers are one tool rather than the whole batch**, which
+    is the caller's `files` channel. `_files_already_held` reads a pre-batch snapshot, so N
+    concurrent `task` calls each see an identical `held` and each take the whole of what is left —
+    the concurrent half of the defect `_bounded_file`'s `held` closed for the sequential case.
+
+    Same-name rather than `batch_width`, and that is the decision: measured against the installed
+    distributions, the only site that copies a non-excluded state key — and so `files` — into a
+    caller's `Command` is `deepagents.middleware.subagents`'s `**state_update`, which is `task`.
+    A `props` call in the same batch writes no file, so charging a helper for it would cut a
+    research note to a fraction on a batch that shares none of its budget.
+
+    **It counts siblings by name, not writers, and that gap is a real cost rather than a rounding
+    one.** Most `task` calls read and write nothing, so a batch of eight helpers of which one files
+    a note charges that note an eighth — which is the same outcome the paragraph above rejects
+    `batch_width` for, arrived at by a narrower route. Driven at the shipped budget, one writer
+    beside silent siblings: 199,999 characters land whole at width 1, 100,000 at width 2, 50,000 at
+    4 and 25,000 at 8. The bound still holds — an unused sibling's share is wasted allowance, never
+    spent — so this fails closed, and what it costs is a note cut for company it did not keep.
+    Counting writers instead needs their results, which do not exist when this runs;
+    `docs/planning/BACKLOG.md` carries the exact-accounting design and why it is not a free win.
+
+    Args:
+        request: The tool-call request the middleware chain is running.
+
+    Returns:
+        The number of calls in this batch naming this call's tool, never below 1.
+    """
+    # Subscript rather than `.get`, because `bounded_for_batch` one function up already requires
+    # the key and the two reads of one dict must not disagree about whether it is optional — a
+    # missing name here would match no sibling, floor to 1 and hand out the whole budget, which is
+    # a fail-open reached by a shape the other reader would have raised on.
+    name = request.tool_call["name"]
+    return max(sum(1 for call in _batch_calls(request) if call.get("name") == name), 1)
 
 
 @wrap_tool_call
@@ -494,7 +549,9 @@ async def bound_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any
         return message.model_copy(update={"content": content})
 
     def _bounded_for_this_command(content: str, sharing: int) -> str:
-        return _bounded_file(content, sharing, _files_already_held(request))
+        return _bounded_file(
+            content, sharing, _files_already_held(request), batch_siblings(request)
+        )
 
     return rewritten_command_files(
         rewritten_tool_messages(result, _bounded),
@@ -529,7 +586,7 @@ def _files_already_held(request: Any) -> int:
     )
 
 
-def _bounded_file(content: str, sharing: int, held: int = 0) -> str:
+def _bounded_file(content: str, sharing: int, held: int = 0, concurrent: int = 1) -> str:
     """One file's share of `agent_subagent_files_max_chars`, cut with a notice that says so.
 
     **The resource is the caller's `files` channel, so the budget is the channel's and the share is
@@ -550,6 +607,15 @@ def _bounded_file(content: str, sharing: int, held: int = 0) -> str:
     the reason the comment below it gives: applied before, one integer division put it back to 0
     and the cap failed open on the fullest channel.
 
+    **`concurrent` is what `held` cannot be**, and it is the other half of the same bound. `held`
+    is a *pre-batch* snapshot — `batch_siblings`'s docstring says why it has to be — so the
+    siblings running right now in this superstep are invisible to it and every one of them read
+    the same number. Dividing what is left by how many of them there are is the only arithmetic
+    available before their results exist; it assumes each of them writes, and each an equal slice,
+    so a lone writer beside silent siblings is over-charged by the batch's width. That is the
+    conservative direction for a storage bound — an unclaimed share is wasted, not spent — and it
+    is the cost `batch_siblings` states with its measurement.
+
     The tool name passed to the notice is `task`, because that is the call the caller sees in its
     own thread and the one an operator would go looking at.
 
@@ -557,6 +623,8 @@ def _bounded_file(content: str, sharing: int, held: int = 0) -> str:
         content: The file's text as the helper left it.
         sharing: How many files cross in this command.
         held: Characters of `files` the caller's state already carries.
+        concurrent: How many calls in this batch name this call's tool, which is an upper
+            bound on how many of them write into the same channel — see `batch_siblings`.
 
     Returns:
         The text to store, or `content` itself when nothing was cut.
@@ -570,7 +638,7 @@ def _bounded_file(content: str, sharing: int, held: int = 0) -> str:
         # character files against an exhausted budget stored 1,000,000 characters uncut, with no
         # truncation logged and the counter unmoved, so the cap failed open exactly where the
         # channel was fullest. `bounded_for_batch` already floors after dividing and says why.
-        share = max((budget - held) // max(sharing, 1), 1)
+        share = max((budget - held) // max(sharing * concurrent, 1), 1)
     else:
         share = 0
     bounded, removed = bounded_content(content, "task", share)
@@ -579,10 +647,11 @@ def _bounded_file(content: str, sharing: int, held: int = 0) -> str:
     record_metric(lambda m: m.increment("chemclaw_subagent_file_truncations_total"))
     logger.warning(
         "cut %d character(s) from a file a helper wrote into its caller's state; the share of "
-        "`agent_subagent_files_max_chars` across %d file(s) is %d, with %d character(s) of the "
-        "budget already held",
+        "`agent_subagent_files_max_chars` across %d file(s) in %d concurrent call(s) to this tool "
+        "— however few of them wrote — is %d, with %d character(s) of the budget already held",
         removed,
         sharing,
+        concurrent,
         share,
         held,
     )
