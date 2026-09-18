@@ -168,6 +168,16 @@ STATE_CHANGING_TOOLS: frozenset[str] = (
             # is one name whatever a chemist has composed.
             "compose_workflow",  # writes composed_workflows
             "run_composed_workflow",  # starts a TemplateWorkflow run
+            # Writes a row in `behaviour_proposals`, which is the small reason. The real one is
+            # that a turn proposing a change to what the agent *does* is something the plan gate
+            # should see — the same standing `compose_workflow` has, where what is gated is the
+            # procedure rather than the row. Nothing here changes behaviour: only a person's
+            # `POST /proposals/...` does, and `SkillsReadOnlyRefusal` still refuses every skill
+            # write a turn could attempt. Being here also subtracts it from every helper's surface
+            # by arithmetic, which is `ask_clarifying_question`'s argument exactly: a helper
+            # proposing behaviour changes from a context the chemist cannot see is worse than one
+            # that cannot propose at all.
+            "propose_skill",  # writes behaviour_proposals
         }
     )
     | DEFAULT_WRITE_TOOL_GATES

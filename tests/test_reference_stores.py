@@ -41,6 +41,10 @@ SELECTABLE = {
     "InMemoryCampaignStore": "session_store",
     "InMemoryHistoryProvider": "session_store",
     "InMemoryPlanApprovalStore": "session_store",
+    # Same switch and the same argument, one layer up: a proposal authorizes a change to what the
+    # agent does for one person, and under `session_store="memory"` that person's whole context is
+    # a process — so a durable queue would outlive the thing it changes.
+    "InMemoryProposalStore": "session_store",
     # Same switch, same argument: whether this deployment keeps conversation state durably
     # is one decision, and a composed workflow that vanishes with a CLI process is the
     # honest behaviour there rather than a failure to configure something.

@@ -61,6 +61,7 @@ from chemclaw.core.turn_signals import (
     JobSignal,
     QuestionSignal,
     Signal,
+    SkillLoadedSignal,
     ToolFailureSignal,
 )
 
@@ -464,7 +465,7 @@ def _plan_steps(update: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def _signal_event(signal: Signal) -> Event:
+def _signal_event(signal: Signal) -> Event | None:
     """Map one out-of-band turn signal to its stream event (one place, so the two cannot drift).
 
     It used to live in `chemclaw.api.runner` and be imported here at call time, because the runner
@@ -485,4 +486,16 @@ def _signal_event(signal: Signal) -> Event:
         # field is now the same verdict the audit row records, rather than a second opinion.
         #
         return ToolFailedEvent(tool=signal.tool, message=signal.message, reason=signal.reason)
+    if isinstance(signal, SkillLoadedSignal):
+        # **The one member of the union with no event, and the only one that must not have one.**
+        # Every other signal exists because something happened that the chemist should see; this one
+        # is bookkeeping the turn's own cost row absorbs (`turn_costs.skills_loaded`, for the
+        # self-confirmation guard). Rendering "loaded a skill" into the transcript would put the
+        # progressive-disclosure mechanism on the screen on every turn that used it.
+        #
+        # Returning `None` rather than falling through, because the fall-through below is
+        # `NoteRecordedEvent` — a chain of `isinstance` ending in an unguarded default is exactly
+        # how a new member of a union gets silently rendered as the last one, which is what
+        # `mypy --strict` caught here the moment this signal was added.
+        return None
     return NoteRecordedEvent(note_id=signal.note_id, reference=signal.reference)

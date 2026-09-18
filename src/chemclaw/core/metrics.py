@@ -826,6 +826,19 @@ _COUNTERS: dict[str, str] = {
         "visibility predicate only ever narrows, so an unconfigured deployment permits every "
         "string a model can invent, and `skills/README.md` resolves."
     ),
+    "chemclaw_behaviour_proposals_total": (
+        "Proposed changes to what the agent does, by kind and by what became of them. The only "
+        "answer to the question this queue exists to make answerable — is the agent proposing "
+        "anything, and is anybody deciding? A deployment where `proposed` climbs and `accepted` "
+        "and `rejected` stay flat has a queue nobody reads, which is worse than no queue: the "
+        "agent is told its proposal is waiting and it is not. `superseded` is the system's own "
+        "outcome rather than a person's, and the same text proposed again must not read as a fresh "
+        "proposal either — `already_open` is the model repeating itself and `already_decided` "
+        "is the "
+        "idempotent path. The outcomes are `proposed`, `already_open`, `already_decided`, "
+        "`superseded`, `accepted` and `rejected` — not counted here, because a count in prose "
+        "is a claim about its author's afternoon and this one was already wrong once."
+    ),
     "chemclaw_local_skill_loads_total": (
         "Skill bodies a chemist's *own* tier delivered — the same question as the counter above, "
         "asked of the tier that counter cannot see. `chemclaw_skill_loads_total` lives on "
@@ -1224,6 +1237,7 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_tool_calls_total": ("tool", "outcome"),
     # A directory name under a configured skills tree, clamped by the read having succeeded rather
     # than by the visibility predicate, which is inert in a deployment that configures no gate.
+    "chemclaw_behaviour_proposals_total": ("kind", "outcome"),
     "chemclaw_skill_loads_total": ("skill",),
     "chemclaw_tool_refusals_total": ("reason",),
     "chemclaw_invalid_tool_calls_total": ("tool",),

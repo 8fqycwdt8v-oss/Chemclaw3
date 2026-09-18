@@ -57,6 +57,7 @@ outcome is judgment they wrote being unhelpful to them. `docs/planning/BACKLOG.m
 """
 
 import logging
+from pathlib import PurePosixPath
 from typing import Any
 
 from deepagents.backends import StoreBackend
@@ -67,6 +68,7 @@ from chemclaw.agent.skill_backend import SkillsReadOnlyRefusal
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.turn_signals import record_skill_loaded
 
 logger = logging.getLogger(__name__)
 
@@ -221,7 +223,7 @@ class ReadOnlyStoreBackend(StoreBackend):
         private project name in a shared exposition.
         """
         result = super().read(*args, **kwargs)
-        _count_a_load(result)
+        _count_a_load(result, _first_argument(args, kwargs))
         return result
 
     async def aread(self, *args: Any, **kwargs: Any) -> Any:
@@ -232,11 +234,37 @@ class ReadOnlyStoreBackend(StoreBackend):
         agent does: the exact shape this class was caught by on its write half.
         """
         result = await super().aread(*args, **kwargs)
-        _count_a_load(result)
+        _count_a_load(result, _first_argument(args, kwargs))
         return result
 
 
-def _count_a_load(result: Any) -> None:
+def _first_argument(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
+    """The path a `read`/`aread` was given, whichever way upstream's caller spelled the call.
+
+    Read off the arguments rather than re-declared as a signature, because this class forwards with
+    `*args, **kwargs` on purpose: `tests/test_local_skills.py` derives its coverage from
+    `BackendProtocol` *and* `StoreBackend`, so a signature written here would be a second copy of
+    upstream's that a bump could silently invalidate. `file_path` is upstream's own keyword
+    (`tests/test_upstream_surface.py` pins it for the write verbs).
+    """
+    if args:
+        return str(args[0])
+    return str(kwargs.get("file_path", ""))
+
+
+def _name_of(path: str) -> str:
+    """The skill a mounted path belongs to, or empty for anything that is not a skill body.
+
+    The same predicate the shared tree applies with `_is_a_skill_body` plus `_skill_of`, stated
+    once here because this backend sees paths *relative to its mount* — `/my-workup/SKILL.md`
+    rather than `/mine/my-workup/SKILL.md` — so the shared tree's pair would read the first segment
+    of a different string.
+    """
+    parts = PurePosixPath(path.strip("/")).parts
+    return parts[0] if len(parts) > 1 else ""
+
+
+def _count_a_load(result: Any, path: str = "") -> None:
     """Book one delivered local-skill body, or nothing.
 
     Derived from the *result* rather than from the path, so the two conditions
@@ -246,6 +274,14 @@ def _count_a_load(result: Any) -> None:
     """
     if getattr(result, "error", None) is None and not getattr(result, "no_lines_requested", False):
         record_metric(lambda m: m.increment("chemclaw_local_skill_loads_total"))
+        # The same load on the turn's own channel. The counter is bare because a chemist's skill
+        # name is their words and a Prometheus label is a shared exposition no erasure reaches;
+        # this is a per-actor row in this system's own database, which `agent/leaver.py` erases
+        # with them — so the name is safe here and is the whole point, since the guard asks
+        # whether *this particular* skill was acting.
+        name = _name_of(path)
+        if name:
+            record_skill_loaded(name, LOCAL_SKILLS_LABEL)
 
 
 #: The document inside a skill directory that makes it a skill, mirroring the shared tree's shape so

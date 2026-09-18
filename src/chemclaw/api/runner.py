@@ -114,7 +114,7 @@ from chemclaw.core.session_context import (
 from chemclaw.core.temporal_client import connect
 from chemclaw.core.tracing import start_span
 from chemclaw.core.turn_flags import reset_dry_run, set_dry_run
-from chemclaw.core.turn_signals import JobSignal
+from chemclaw.core.turn_signals import JobSignal, SkillLoadedSignal
 from chemclaw.core.turn_text import reset_current_user_texts, set_current_user_texts
 from chemclaw.durable.awaiting import AwaitRequest, open_wait
 from chemclaw.kg.note import cited_ids
@@ -768,6 +768,12 @@ class _TurnLedger:
     answer_confidence: float | None = None
     review_required: bool = False
     notes_cited: int = 0
+    # **Which skills actually shaped this turn**, for the guard `agent/distiller.py` reads. A set
+    # rather than a list: a turn that re-read one skill's body loaded it once as far as any
+    # consumer is concerned, and a duplicate would make "how many turns loaded this" wrong in the
+    # direction that admits self-confirming evidence. Ordered on the way out so two turns that
+    # loaded the same skills produce the same row.
+    skills_loaded: set[str] = field(default_factory=set)
 
     @property
     def answer_text(self) -> str:
@@ -856,6 +862,11 @@ class _TurnLedger:
         """
         if isinstance(signal, JobSignal):
             self.started_jobs.append(signal.job_id)
+        elif isinstance(signal, SkillLoadedSignal):
+            # Both tiers into one set. A personal skill shapes a turn exactly as a reviewed one
+            # does, and the guard that reads this would otherwise be blind to the tier most likely
+            # to be self-confirming — the one the agent can propose into.
+            self.skills_loaded.add(signal.skill)
 
 
 async def _earlier_user_texts(history: Any | None, session: TurnSession) -> list[str]:
@@ -2211,6 +2222,7 @@ def _book_turn_spend(
             answer_confidence=ledger.answer_confidence,
             review_required=ledger.review_required,
             notes_cited=ledger.notes_cited,
+            skills_loaded=sorted(ledger.skills_loaded),
         )
     )
     # **The same record as a log line, because a deployment may have no ledger to read.** The cost

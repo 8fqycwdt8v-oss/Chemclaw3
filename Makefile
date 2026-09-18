@@ -103,7 +103,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-turn-cost live-benchmark live-template-args live-verifier-margin trajectory-census live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats upstream-check share-estimate share-sync live-ab live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status
+.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-turn-cost live-benchmark live-template-args live-verifier-margin trajectory-census distill propose-profile live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats upstream-check share-estimate share-sync live-ab live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -548,6 +548,20 @@ live-verifier-margin:  ## Re-roll the raw judge and measure its margin at the th
 
 trajectory-census:  ## Count recurring tool-call trajectories over the stored sessions (the distiller's trigger).
 	uv run python -m chemclaw.cli.trajectory_census $(ARGS)
+
+# The consumer that census never had. Mines the same corpus, applies the self-confirmation guard
+# — a trajectory that recurs only where a skill of that name was already acting is not evidence
+# for proposing it — and files what survives into the proposal queue for its owner to decide.
+#
+# **On demand and never on a timer**, the rule `CLAUDE.md` states and the campaign and playbook
+# miners already follow. Dry by default: `ARGS="--propose"` is what writes.
+distill:  ## Distil recurring trajectories into skill proposals (dry; ARGS="--propose" to file).
+	uv run python -m chemclaw.cli.distill $(ARGS)
+
+# The other proposer, and the honest one to read the help for: an accepted profile proposal is a
+# *record* that somebody wants one, because a profile is git-resident and no route can commit.
+propose-profile:  ## Propose an agent profile from observed tool co-occurrence (dry; ARGS="--propose").
+	uv run python -m chemclaw.cli.propose_profile $(ARGS)
 
 # The corpus half of the same question `live-probes` asks of the model: not "did a tool answer"
 # but "is the number in the answer the number in the paper". Checks every published measurement

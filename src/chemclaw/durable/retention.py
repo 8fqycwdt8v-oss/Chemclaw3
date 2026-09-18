@@ -531,6 +531,15 @@ _NOT_PRUNED: dict[str, str] = {
     "take what an erasure may not",
     "plan_approvals": "refused: who authorized a plan to spend anything, kept through erasure "
     "(`leaver._RETAINED`); consumed rows are marked, never removed",
+    "behaviour_proposals": "refused: who decided what this system was allowed to become — the "
+    "`plan_approvals` reason, one layer up, since a proposal is about the agent's behaviour rather "
+    "than one plan's spend. Kept through erasure (`leaver._RETAINED`), and a decision is never "
+    "overwritten, so a rejection survives the same text arriving again. **It retains more than the "
+    "row above it and that is stated rather than inherited**: a plan approval keeps a hash and a "
+    "verdict, while this keeps `content` — a whole document, about one person's chemistry, after "
+    "they leave. The justification is real (a rejection is only evidence if the text it rejected "
+    "is still there, which is `note_proposals`' own argument for keeping the body verbatim) and it "
+    "is a larger claim, so it is written here rather than left to the neighbour's sentence",
     "turn_costs": "refused: what a person's turns cost, the record an operator bills against — "
     "kept through erasure (`leaver._RETAINED`), so not disposable on a clock",
 }

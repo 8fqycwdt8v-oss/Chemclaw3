@@ -337,6 +337,18 @@ _RETAINED: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ),
     ("plan_approvals", ("actor",), "who approved a plan before it was allowed to spend anything"),
     (
+        "behaviour_proposals",
+        ("actor", "decided_by"),
+        "who proposed a change to what the agent does, and who decided it — the row above's "
+        "reason one layer up, since this is about the agent's behaviour rather than one plan's "
+        "spend. **It retains more than that row and the report says so rather than letting it "
+        "ride**: a plan approval is a hash and a verdict, while a proposal keeps `content` — a "
+        "whole document a model wrote about this person's chemistry, held after they leave. That "
+        "is justified (a rejection is only evidence if the text it rejected is still there) and "
+        "it is a larger claim, which is exactly why it is printed with a count rather than "
+        "assumed",
+    ),
+    (
         "note_proposals",
         ("actor", "decided_by"),
         "who proposed a knowledge note, and who signed it off, while there was a PR-gate to sign "

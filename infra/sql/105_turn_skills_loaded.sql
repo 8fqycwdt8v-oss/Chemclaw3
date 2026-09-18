@@ -1,0 +1,38 @@
+-- Which skills a turn actually loaded — the dimension the self-confirmation guard reads.
+--
+-- `082_turn_knowledge.sql` added the three dimensions this row had every other dimension of: did
+-- the turn consult the record, did the answer cite it, was anything written back. This is a fourth
+-- of the same kind, and it exists because a distiller cannot be written without it.
+--
+-- **The guard the distiller needs is one predicate and it had nothing to read.** Nothing distilled
+-- may count evidence it itself produced: a trajectory that happened *because* a skill was already
+-- shaping that turn is not independent evidence for proposing that skill. Without a per-turn record
+-- of which skills were loaded, that predicate is a function reading something nobody writes — which
+-- is `map_to_hpc_identity` and the empty `audit_events.agent` column exactly, a claim that a
+-- control exists.
+--
+-- **Why the existing counter is not this.** `chemclaw_skill_loads_total{skill}` says a skill was
+-- read; it cannot say in which turn, and a Prometheus counter is not a join key. The same is true
+-- of `chemclaw_local_skill_loads_total`, which is deliberately bare.
+--
+-- **Names, not a count.** A count would answer "did this turn load anything", which is not the
+-- question — the guard asks whether *this particular* skill was acting, and a superset would
+-- discard evidence that is genuinely independent while a subset would admit evidence that is not.
+-- Both tiers land in the same array: a personal skill shapes a turn exactly as a shared one does,
+-- and a guard that saw only the reviewed tree would be blind to the tier most likely to be
+-- self-confirming, since that is the one the agent can propose into.
+--
+-- **A chemist's own skill name is a person's words**, which is why `chemclaw_local_skill_loads_total`
+-- is bare rather than labelled. It is safe here and not there for a reason worth stating: this is a
+-- per-actor row in this system's own database, erased with that person by `agent/leaver.py`, rather
+-- than a label on a shared Prometheus exposition that no erasure reaches.
+--
+-- Additive and defaulted, per `infra/sql/README.md`: every existing row keeps its meaning and the
+-- previous image can still write.
+ALTER TABLE turn_costs ADD COLUMN IF NOT EXISTS skills_loaded TEXT[] NOT NULL DEFAULT '{}';
+
+-- The distiller's read is "every turn of this actor that loaded this skill", which is a containment
+-- test over a per-actor slice. GIN on the array, because the alternative — scanning the actor's
+-- turns and filtering in Python — is what the guard would cost on a corpus large enough for the
+-- distiller to have anything to say.
+CREATE INDEX IF NOT EXISTS turn_costs_skills_loaded_idx ON turn_costs USING GIN (skills_loaded);

@@ -50,6 +50,10 @@ _EXPECTED_INPROCESS_TOOLS = {
     "structure_experiment_request",
     "compose_workflow",
     "run_composed_workflow",
+    # In-process for the same reason `compose_workflow` is: the store is core's, and proposing is
+    # the turn's own composition rather than durable work. It writes a proposal and never a skill —
+    # a person's route is what turns one into behaviour.
+    "propose_skill",
     "draft_experiment_protocol",
     "read_experiment_protocol",
     "find_experiment_protocols",
