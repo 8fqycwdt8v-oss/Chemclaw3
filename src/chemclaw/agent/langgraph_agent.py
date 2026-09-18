@@ -373,9 +373,10 @@ def build_langgraph_agent(
         "name": "chemclaw",
         # **`False` rather than `None` for a helper, and the difference is 98% of what a spawn
         # costs.** `None` does not mean "no checkpointer" to LangGraph: a subgraph compiled with
-        # `None` *inherits* its parent's through the run config
-        # (`CONFIG_KEY_CHECKPOINTER: checkpointer or configurable.get(CONFIG_KEY_CHECKPOINTER)`,
-        # `langgraph/pregel/_algo.py`), so every helper was checkpointing its own thread onto the
+        # `None` *inherits* its parent's through the run config — LangGraph's own pregel algorithm
+        # module resolves it as
+        # `CONFIG_KEY_CHECKPOINTER: checkpointer or configurable.get(CONFIG_KEY_CHECKPOINTER)`,
+        # so every helper was checkpointing its own thread onto the
         # caller's saver under a `tools:<uuid>` namespace on the caller's `thread_id`. `False` is
         # upstream's documented opt-out — `find_subgraph_pregel` skips "subgraphs that disabled
         # checkpointing". See `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer`.
