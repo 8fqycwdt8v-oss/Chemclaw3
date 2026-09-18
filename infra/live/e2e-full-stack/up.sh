@@ -130,7 +130,7 @@ assert_credential_accepted() {
 #
 # `calc` is started by `processes.sh`, not here, and it is NOT a connector and its manifest must stay
 # off `CHEMCLAW_CONNECTORS_DIR` — it says so in a box. Chemclaw3 keeps its own `calc` bundle and
-# all fifteen tools; what moved to the fleet is the *physics* behind them
+# its whole tool surface; what moved to the fleet is the *physics* behind them
 # (D-2026-08-16-the-physics-leaves-the-cache-stays), which `connectors/calc/remote.py::calc_session`
 # dials on a cache miss at `calc_server_url` (8860). "Not a connector" is not "not needed": with
 # this server down, `/readyz` is entirely green — it probes connectors, and this is not one — and

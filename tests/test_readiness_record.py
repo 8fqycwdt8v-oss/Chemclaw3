@@ -190,3 +190,69 @@ def test_the_live_run_row_counts_what_its_transcripts_hold() -> None:
         f"the live-run row's tool count disagrees with its own transcripts, which name "
         f"{len(tools)}: {sorted(tools)}"
     )
+
+
+#: A claim in the record about what a *setting* ships as. Three shapes appear, because three rows
+#: make that claim: `` `name` ships at **0** ``, `` `name` **ships on** ``, and
+#: `` `retention_*_days` defaults to 0 `` — a glob standing for a family whose members must agree.
+_SHIPPED_DEFAULT = re.compile(
+    r"`([a-z][a-z0-9_]*(?:\*[a-z0-9_]*)?)`\s*"
+    r"(?:\*\*)?(?:ships at|defaults to)(?:\*\*)?\s*"
+    r"(?:\*\*)?(\d[\d_,]*)(?:\*\*)?"
+    r"|`([a-z][a-z0-9_]*)`\s*\*\*ships on\*\*"
+)
+
+
+def test_a_claim_about_a_shipped_default_agrees_with_the_setting() -> None:
+    """Two accepted risks went stale in two days and nothing here noticed.
+
+    `agent_max_turn_billed_tokens` shipped at 0, and §4 said so. Another session turned it on
+    (`D-2026-09-16-a-setting-that-ships-off-is-a-feature-nobody-has`, default 300,000) and this
+    record went on telling a deployment team that a turn's spend was unbounded — the *reassuring*
+    direction of staleness inverted: a record understating what it has is read as honest right up
+    until somebody re-derives it. Nothing failed, because every test this file already runs asks
+    whether a named control *exists*, and this control existed the whole time. What changed was its
+    default, which no assertion here could see.
+
+    So a row that states what a setting ships as is checked against the setting. Three shapes,
+    because three rows make the claim: "ships at N", "ships on" (non-zero, deliberately not a
+    number — the record's own preamble refuses figures that go stale on a commit), and a `*` glob
+    standing for a family every member of which must agree, which is how the retention row states
+    a posture over five settings at once.
+
+    It cannot check the sentence around the claim. A row may say "which is off" beside a setting
+    that is on and this will not see it; what it sees is the number, which is the half that moved
+    both times.
+    """
+    from chemclaw.core.config import settings
+
+    fields = type(settings).model_fields
+    claims = list(_SHIPPED_DEFAULT.finditer(_record_text()))
+    assert claims, "the record states no shipped default at all; the three rows that did have gone"
+
+    wrong = []
+    for match in claims:
+        name, stated, on = match.group(1), match.group(2), match.group(3)
+        if on is not None:
+            value = getattr(settings, on)
+            if not value:
+                wrong.append(f"`{on}` is claimed to ship on and ships {value!r}")
+            continue
+        assert name is not None
+        matched = (
+            [field for field in fields if re.fullmatch(name.replace("*", ".*"), field)]
+            if "*" in name
+            else [name]
+        )
+        assert matched, f"the record names `{name}`, which is no setting on this config"
+        expected = int(stated.replace("_", "").replace(",", ""))
+        for field in matched:
+            value = getattr(settings, field)
+            if value != expected:
+                wrong.append(f"`{field}` is claimed to ship at {expected} and ships {value!r}")
+
+    assert not wrong, (
+        f"the readiness record states a shipped default the config disagrees with: {wrong}. A row "
+        "that is stale in the reassuring direction — a gap the record still accepts and the code "
+        "has closed — reads as honest until somebody re-derives it."
+    )

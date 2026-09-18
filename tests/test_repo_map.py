@@ -483,6 +483,69 @@ def test_the_calc_bundle_teaches_its_shape_without_counting_its_jobs() -> None:
     )
 
 
+#: A complete tool surface, counted: "all fifteen tools", "Fifteen tools", "all fifteen of its
+#: tools". The quantifier is what makes it a claim about the *whole* surface rather than about a
+#: subset somebody measured — "two tools on the server are like this" counts a subset and is not
+#: what went stale here.
+_COUNTED_SURFACE = re.compile(
+    rf"\b(?:all\s+)?(?:{_CARDINAL})\b(?:\s+of\s+(?:its|the|them|these))?\s+tools?\b",
+    re.IGNORECASE,
+)
+#: The bundle by name, as every sentence that got this wrong wrote it.
+_CALC_BUNDLE = re.compile(r"`?calc`?\s+bundle", re.IGNORECASE)
+#: Records, not descriptions. A merged ADR is never edited (CLAUDE.md), and an archive or a task
+#: directory is a dated account of an afternoon; each is *supposed* to hold the number that was
+#: true when it was written.
+_HISTORICAL = ("docs/archive/", "docs/decisions/", "tasks/")
+_CALC_SERVER_PACKAGE = "src/chemclaw/connectors/calc/server/"
+
+
+def test_the_calc_tool_surface_is_not_counted_in_prose() -> None:
+    """Three live sentences said "fifteen" over a surface of seventeen.
+
+    The bundle's own module docstring opened "Fifteen tools", and both live-lane scripts taught
+    that Chemclaw3 keeps its own bundle and "all fifteen tools" — measured at HEAD,
+    `connector.yaml` declares seventeen and the module decorates the same seventeen. Nothing
+    failed, because nothing read those sentences: the count is a second answer to a question the
+    manifest already answers, which is `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose`
+    over a tool surface instead of a `make` target.
+
+    So the count is refused rather than corrected, and no number is reasserted here — the
+    declared-equals-served half is already held, in both directions, by
+    `tests/test_validate_connectors.py::test_the_shipped_bundles_pass_their_own_gate` over
+    `validate_connectors`'s rule 5, and duplicating it here would be the same defect one layer up.
+
+    Scope is derived rather than listed: the bundle's server package, where the surface is defined,
+    plus any live file naming the bundle in the same sentence as the count — which is how the
+    identical sentence reached two scripts. Historical records are exempt because their job is to
+    hold what was true when they were written.
+    """
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=_ROOT, capture_output=True, text=True, check=True
+    ).stdout.split("\0")
+
+    offenders = []
+    for name in filter(None, tracked):
+        if name.startswith(_HISTORICAL):
+            continue
+        try:
+            content = (_ROOT / name).read_text(encoding="utf-8")
+        except (UnicodeDecodeError, FileNotFoundError, IsADirectoryError):
+            continue  # binary, or a symlink into a tree this checkout does not have
+        for sentence in re.split(r"(?<=[.:!?])\s", content):
+            if not _COUNTED_SURFACE.search(sentence):
+                continue
+            if name.startswith(_CALC_SERVER_PACKAGE) or _CALC_BUNDLE.search(sentence):
+                offenders.append(f"{name}: {' '.join(sentence.split())[:120]}")
+
+    assert not offenders, (
+        f"the calc bundle's tool surface is counted in prose: {offenders}. The manifest declares "
+        "it and validate_connectors holds the declaration against what the module serves; a "
+        "number here is a second answer that goes stale on its own, as 'fifteen' did over "
+        "seventeen."
+    )
+
+
 def _ci_validators() -> set[str]:
     """Every `*-validate` target `make ci` runs, read off the recipe itself."""
     makefile = (_ROOT / "Makefile").read_text(encoding="utf-8")
