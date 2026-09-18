@@ -3111,3 +3111,15 @@ saying what would break, it asserts a file.
 Second-order, and the part I nearly missed: two of the nine were controls I had *written in this
 same session* while explicitly reasoning about this failure mode. Knowing the pattern does not
 catch it. Driving it does.
+
+**And it happened again, in the fix.** The registry walk above passed alone and failed the first
+full run: it walked a registry `_register_generated_tools()` had never filled, so the control
+written to cover *every* tool-defining module covered the ones a bare import reached. Two more in
+the same commit — a new `ChemclawError` subclass that a derived register walks, and two tests of
+mine asserting an "empty corpus" against a database 243 other tests write to.
+
+**So the rule has a second half: a control's fixture is part of its subject.** Running it in
+isolation is not evidence that it covers what it names, and "it passes" and "it passes on the
+shipped surface" are different claims. Before believing a new control, ask what its fixture builds
+and whether that is the thing the sentence in its docstring is about — then run the whole suite,
+because a green targeted run is exactly the evidence that misses this.

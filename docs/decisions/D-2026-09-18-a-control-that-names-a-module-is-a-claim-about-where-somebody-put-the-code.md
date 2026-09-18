@@ -166,6 +166,32 @@ fixture. A merged ADR is never edited, the allowance it is charged against is 5,
 still holds, and the difference is four tokens — recorded here because the alternative is a reader
 re-measuring it and wondering which of us was wrong.
 
+### 12. The control in §1 shipped measuring a smaller surface than it names
+
+Written into this record after the fact, because it is this ADR's own thesis happening to this
+ADR's own fix. The registry walk in §1 passed in isolation and failed the first full run:
+`chemclaw.connectors.jobs` — which defines the generated `run_*` launchers — only enters the
+registry once `_register_generated_tools()` has run, and importing `tool_modules` does not run it.
+So the control that exists to cover *every* module defining a tool covered every module the import
+happened to reach, which on its own is not the shipped set. It calls `_capability_tools()` itself
+now. That module's `importlib` is argued rather than forbidden: resolving a `module:attribute`
+reference a bundle's `connector.yaml` declares is what it is for, it is guarded by
+`check_driver_module`, and the symbol half still covers it.
+
+Two smaller ones landed with it, and both are the same shape. `SkillRefused` is a new
+`ChemclawError` subclass and `durable/publish`'s `_BAD_DATA_TYPES` is a derived register that walks
+the hierarchy — a new exception type is a registration, not just a class. And the two miner-CLI
+tests from §4 asserted the *empty-corpus* message, which is a claim about the database rather than
+about the miner: the Postgres arm is shared, 243 sessions written by other tests were in
+`turn_costs` by the time they ran, and both failed. They assert what the miner is responsible for
+now, driven against a seeded corpus.
+
+**The general form, which is worth more than the three instances**: a control's *fixture* is part of
+its subject. `D-2026-09-05-a-ratchet-that-binds-no-connectors-measures-a-smaller-system` said this
+about a ratchet calling `build_langgraph_agent` without `connectors=`; it is equally true of a
+registry walk over a registry nothing filled, and of a corpus assertion over a database somebody
+else writes. Running a control in isolation is not evidence that it covers what it names.
+
 ## Consequences
 
 - Nine controls that passed their own defect now fail it, each driven rather than argued.
