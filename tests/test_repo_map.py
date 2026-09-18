@@ -524,7 +524,7 @@ _CALC_SERVER_PACKAGE = "src/chemclaw/connectors/calc/server/"
 
 
 def test_the_calc_tool_surface_is_not_counted_in_prose() -> None:
-    """Three live sentences said "fifteen" over a surface of seventeen.
+    """Three live sentences counted a tool surface the manifest already declares.
 
     The bundle's own module docstring opened "Fifteen tools", and both live-lane scripts taught
     that Chemclaw3 keeps its own `calc` bundle and "all fifteen tools" — measured at HEAD,
@@ -574,8 +574,7 @@ def test_the_calc_tool_surface_is_not_counted_in_prose() -> None:
     assert not offenders, (
         f"the calc bundle's tool surface is counted in prose: {offenders}. The manifest declares "
         "it and validate_connectors holds the declaration against what the module serves; a "
-        "number here is a second answer that goes stale on its own, as 'fifteen' did over "
-        "seventeen."
+        "number here is a second answer that goes stale on its own, as 'fifteen' did."
     )
 
 
