@@ -804,3 +804,52 @@ claim and its refutation for weeks.
 beside it is closed by
 `D-2026-09-18-a-pre-batch-snapshot-cannot-see-its-own-superstep`; what is left of it is the
 narrower row that ADR opens, that the divisor counts siblings by name rather than writers.
+
+### Review round — four fresh-context reviews of all five merged commits
+
+Two reviewers read affected-but-unchanged code; two drove **mutations** against the merged tree.
+The engineering held. Nine of its *controls* did not, and the pattern is one sentence:
+**a control that names a module is a claim about where somebody put the code.** The full record is
+`D-2026-09-18-a-control-that-names-a-module-is-a-claim-about-where-somebody-put-the-code`.
+
+- [x] §1 The two absence tests the feature rests on held nothing — a registered `settle_proposal`
+      writing the tier and deciding its own proposal left them at 16 passed. Subject is the whole
+      registry now, by AST, with `importlib` refused; driven from two different modules.
+- [x] §2 `on_signal=lambda _signal: None` was written for `JobSignal` and suppressed the union, so
+      a skill read in a revision round (`answer_review_max_rounds` ships at **2**) left the guard's
+      input empty and the guard counted that session as *independent* evidence — failing **open**.
+- [x] §3 Two one-line mutations of the column's producer left **467 passing**; the suite stopped at
+      the in-process ledger. Driven through the real sink and the distiller's own query now.
+- [x] §4 `distiller.propose` and both miner CLIs (341 lines) had no test. Plus the two fields
+      nothing asserted: `Candidate.self_confirming` and `bounded`'s primary sort key.
+- [x] §5 `predicted_helper_surface` re-derives through the functions the build calls, so dropping
+      the roster's connector intersection stayed green. Asserted against literals now. The
+      description's containment was one-directional and is both now.
+- [x] §6 `propose_skill` bound for **462 tokens** a call in every shipped configuration, where
+      `turn_store()` is `None` and the accept route 503s. `personal_skills_available()` is the one
+      predicate three surfaces ask; `make distill --propose` refuses up front.
+- [x] §7 `skills-removed.yaml` listed a **personal** skill while listing none of the 28 shared
+      ones, so every A/B against the clean control carried personal judgment.
+- [x] §8 `task`'s menu grew with a fleet this repository's ratchet cannot bind (897/900 measured,
+      ~1,009 with `safety` served). Bounded at `agent_helper_menu_tools` rather than by the ratchet.
+- [x] §9 A frontmatter defect *widened* what a skill was scoped to — over-long description →
+      unscoped, visible to every caller. `_declared_pair` reads the two keys scoping needs.
+- [x] §10 `105`'s GIN index served a containment query nobody wrote; `106` drops it.
+- [x] §11 `CLAUDE.md`'s 18/24 measured 21/27; two `tests/test_molfp.py` claims corrected against a
+      re-driven mutation table (the 8-of-16 leak lands at 0.511–0.566, inside an interval the
+      docstring declared empty — the control still catches it, three of three, with less room than
+      claimed).
+- [x] Also: a NUL in a `/skills/mine/{name}` path parameter was a **500** on the shipped store
+      (`storable_name`), `SkillLoadedSignal.tier` was written by two producers and read by nobody
+      while its comment justified it by a row it never reached, and `_A_LIVE_GATE`'s citations were
+      never resolved by anything — the comment saying an entry "fails there" was itself the claim.
+
+**The lesson, for `lessons.md`.** Every one of these passed review at the time, and each was a test
+whose *subject* was a file rather than a behaviour: one module's source, one tool's name, an
+in-process object one layer short of the row, a prediction re-derived through the thing predicted.
+A mutation is cheap and settles it; reading the test does not. The repository already says "measure
+it, don't argue it" about defects — this extends it to controls: **apply the defect the control is
+named after and watch it fail, or you have not got a control.**
+
+**Not fixed, deliberately:** whether delegation pays is still open and `evals/delegation.py` has
+still never run against a model. Nothing in this round is evidence about that.

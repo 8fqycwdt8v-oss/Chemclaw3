@@ -3083,3 +3083,43 @@ have passed against a cap set absurdly high, which is the other way to get this 
 **Rule: when a setting's justification cites a measurement, name the measurement's unit in the same
 sentence.** "250,000 tokens" is not a fact about runaways; "25 model calls, at the ~10,000-token
 calls of the day" is. Only the second one visibly rots.
+
+## A control's subject must be a behaviour, not a file (2026-09-18)
+
+Four fresh-context reviews of five merged commits found the engineering sound and **nine of its
+controls hollow**. Each had passed review. Each had the same shape: the test's subject was a file
+rather than a behaviour.
+
+- `assert "save_local_skill" not in inspect.getsource(proposal_tools)` — a claim about where
+  somebody chose to put the code. A registered tool doing exactly the forbidden thing, appended to
+  *that same module*, left it green.
+- `{name for name in registered_tool_names() if "accept" in name}` — a claim about vocabulary.
+- An assertion on the in-process ledger, one layer short of the row the guard actually reads. Two
+  one-line mutations of the producer left 467 tests passing.
+- `predicted_helper_surface` compared against a build that calls the same two functions — the
+  "a basis that is re-derived rather than observed will agree with itself forever" defect,
+  happening to a test that *cites that sentence as its reason for existing*.
+- A citation dict (`_A_LIVE_GATE`) whose values nothing read, with a comment saying an entry whose
+  gate stops existing "fails there".
+
+**The rule I am writing for myself:** before claiming a control exists, *apply the defect it is
+named after and watch it fail*. A mutation is one line and a revert; reading the test is not
+evidence. This is the repository's own "measure it, don't argue it" extended from defects to
+controls, and the tell is the same one every time — if I can state what the test asserts without
+saying what would break, it asserts a file.
+
+Second-order, and the part I nearly missed: two of the nine were controls I had *written in this
+same session* while explicitly reasoning about this failure mode. Knowing the pattern does not
+catch it. Driving it does.
+
+**And it happened again, in the fix.** The registry walk above passed alone and failed the first
+full run: it walked a registry `_register_generated_tools()` had never filled, so the control
+written to cover *every* tool-defining module covered the ones a bare import reached. Two more in
+the same commit — a new `ChemclawError` subclass that a derived register walks, and two tests of
+mine asserting an "empty corpus" against a database 243 other tests write to.
+
+**So the rule has a second half: a control's fixture is part of its subject.** Running it in
+isolation is not evidence that it covers what it names, and "it passes" and "it passes on the
+shipped surface" are different claims. Before believing a new control, ask what its fixture builds
+and whether that is the thing the sentence in its docstring is about — then run the whole suite,
+because a green targeted run is exactly the evidence that misses this.

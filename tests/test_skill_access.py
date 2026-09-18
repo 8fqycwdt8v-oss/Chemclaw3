@@ -12,6 +12,8 @@ Two seams, proven separately and then together:
   prose and only one of them leaves the shipped profiles usable.
 """
 
+from typing import Any, cast
+
 from chemclaw.agent.skill_access import (
     EnabledSkills,
     RoleScopedSkills,
@@ -192,3 +194,34 @@ def test_the_narrowings_compose_and_only_ever_remove() -> None:
     # Enabled two; capability dropped `deep-research`; the role let the other through.
     assert names == {"knowledge-graph-query"}
     assert names < every
+
+
+def test_the_control_arm_that_removes_skills_removes_both_tiers() -> None:
+    """`skill_names: []` means "no skills", and a chemist's own tier used to escape it.
+
+    `data/evals/profiles/skills-removed.yaml` exists to be the clean control its own header demands
+    — the arm that varies skills and nothing else. The personal tier is mounted by the backend
+    rather than selected by `skill_names`, on a governance argument (`agent/local_skills.py`) that
+    is right about a *named subset* and wrong about the empty set, which is a profile author writing
+    down that this agent reaches no skill at all. Measured before this: the arm listed a personal
+    skill while listing none of the 28 shared ones, so every A/B it reported carried personal
+    judgment for any actor with a populated `/mine`.
+    """
+    from chemclaw.agent.langgraph_agent import _skills_middleware
+    from chemclaw.agent.local_skills import LOCAL_SKILLS_ROOT
+    from chemclaw.agent.profiles import AgentProfile
+
+    class _Backend:
+        routes = {LOCAL_SKILLS_ROOT: object()}
+
+    def _sources(profile: AgentProfile) -> list[str]:
+        backend = cast("Any", _Backend())
+        return [str(source) for source in _skills_middleware(backend, [], profile).sources]
+
+    assert LOCAL_SKILLS_ROOT.rstrip("/") in _sources(AgentProfile(name="default"))
+    assert LOCAL_SKILLS_ROOT.rstrip("/") in _sources(
+        AgentProfile(name="some", skill_names=frozenset({"a"}))
+    )
+    assert LOCAL_SKILLS_ROOT.rstrip("/") not in _sources(
+        AgentProfile(name="arm", skill_names=frozenset())
+    )

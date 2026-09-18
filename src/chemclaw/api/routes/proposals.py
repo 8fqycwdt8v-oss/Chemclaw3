@@ -35,10 +35,13 @@ from chemclaw.agent.behaviour_proposals import (
     ProposalKind,
     default_proposal_store,
 )
-from chemclaw.agent.local_skills import list_local_skills, save_local_skill
+from chemclaw.agent.local_skills import (
+    SkillRefused,
+    save_local_skill,
+    validated_skill,
+)
 from chemclaw.api.deps import CurrentUser
 from chemclaw.api.runner import turn_store
-from chemclaw.core.config import settings
 
 
 class ProposalOut(BaseModel):
@@ -179,6 +182,20 @@ async def _write_what_was_accepted(proposal: Proposal, actor: str) -> None:
     """
     if proposal.kind != "skill":
         return
+    # **Every admission rule, not just the cap.** This door used to check the row cap alone, and
+    # measured, all three bodies `POST /skills/mine` refuses were written here whole: a name taken
+    # by a shipped skill (409 there, 200 here), a body that is not a `SKILL.md` at all, and one at
+    # 40,000 characters against a 16,000 cap. The module docstring above argued "a second door into
+    # one bound is a hole in it" and then closed one bound of four, which is the defect it names.
+    #
+    # Re-validated at the decision rather than trusted from the proposal, because a proposal can be
+    # older than the rules: a deployment that lowers `agent_local_skill_max_chars`, or ships a skill
+    # whose name a pending proposal already claims, must not have that decided for it by a row
+    # written last month.
+    try:
+        validated_skill(proposal.content, expected_name=proposal.name)
+    except SkillRefused as refusal:
+        raise HTTPException(409 if refusal.conflict else 422, str(refusal)) from refusal
     store = await turn_store()
     if store is None:
         raise HTTPException(
@@ -186,15 +203,12 @@ async def _write_what_was_accepted(proposal: Proposal, actor: str) -> None:
             "this deployment keeps no personal skills, so accepting one would record a decision "
             "that changes nothing (CHEMCLAW_AGENT_MEMORY_ENABLED with a Postgres session store)",
         )
-    held = await list_local_skills(store, actor)
-    if proposal.name not in held and len(held) >= settings.agent_local_skills_max:
-        raise HTTPException(
-            409,
-            f"you already keep {len(held)} personal skills, which is this deployment's limit of "
-            f"{settings.agent_local_skills_max}: every one of them is in the prompt of every turn "
-            "you take. Remove one and accept this again — it stays here until you do",
-        )
-    await save_local_skill(store, actor, proposal.name, proposal.content)
+    # The row cap rides on the writer too, so this door and the save route spend one bound under
+    # one lock rather than each counting for itself.
+    try:
+        await save_local_skill(store, actor, proposal.name, proposal.content)
+    except SkillRefused as refusal:
+        raise HTTPException(409 if refusal.conflict else 422, str(refusal)) from refusal
 
 
 def register(app: FastAPI) -> None:

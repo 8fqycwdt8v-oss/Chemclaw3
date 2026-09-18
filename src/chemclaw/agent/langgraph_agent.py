@@ -108,7 +108,12 @@ from chemclaw.agent.chemclaw_agent import (
 )
 from chemclaw.agent.compaction import context_compaction_middleware, disabled_summarizer
 from chemclaw.agent.llm_provider import build_chat_model
-from chemclaw.agent.local_skills import LOCAL_SKILLS_LABEL, LOCAL_SKILLS_ROOT
+from chemclaw.agent.local_skills import (
+    LOCAL_SKILLS_LABEL,
+    LOCAL_SKILLS_ROOT,
+    PERSONAL_TIER_TOOLS,
+    personal_skills_available,
+)
 from chemclaw.agent.loop_cap import enforce_loop_cap
 from chemclaw.agent.model_calls import model_call_middleware, refuse_unparsed_arguments
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
@@ -246,6 +251,15 @@ def build_langgraph_agent(
     # extra cost and by the mechanism that already existed — which is D-2026-08-10's fourth
     # invariant ("skills do not inherit") arriving as a consequence rather than as a second gate.
     tools = _capability_tools(prof)
+    # **A tool whose only outcome is unreachable is not a capability, so it is not bound.**
+    # `propose_skill` writes a `behaviour_proposals` row for a person to accept through
+    # `POST /proposals/...`, and both the durable row and that route need the personal tier — which
+    # ships off (`agent_memory_enabled` defaults False and no Helm value sets it). Bound anyway, the
+    # model spent the schema on every request and told the chemist to go accept something the route
+    # answers 503 to. Filtered here rather than gated inside the tool because a refusal the model
+    # can only discover by calling is still paid for in the prefix, every call, forever.
+    if not personal_skills_available():
+        tools = [fn for fn in tools if fn.__name__ not in PERSONAL_TIER_TOOLS]
     # **The helper's narrowing is applied here rather than in `_subagents`, and both the position
     # and the second call are the point.** `helper=True` is the one switch that says "this graph is
     # behind the `task` tool", so everything a helper is — no side-effecting tool, no tool that
@@ -540,7 +554,7 @@ def _middleware(
         # deployment has declined one since D-025 on indirect-prompt-injection grounds that the
         # deepagents variant answers only half of. `agent/compaction.py` carries the whole argument.
         disabled_summarizer(model, backend),
-        _skills_middleware(backend, labelled),
+        _skills_middleware(backend, labelled, profile),
         *tool_call_middleware(audit, profile),
         # Unconditional, unlike the harness middleware above it: an unbounded thread is a property
         # of a session, not of the plan/execute mode, and the single-turn agent accumulates one just
@@ -1111,7 +1125,9 @@ def _harness_middleware(profile: AgentProfile) -> list[Any]:
     return [ScopedTodoListMiddleware(), *caps]
 
 
-def _skills_middleware(backend: CompositeBackend, labelled: list[tuple[str, str]]) -> Any:
+def _skills_middleware(
+    backend: CompositeBackend, labelled: list[tuple[str, str]], profile: AgentProfile
+) -> Any:
     """Wrap a narrowed backend in deepagents' provider — the plumbing around the decision.
 
     Private, and split from `skills_backend` for the reason `chemclaw_agent.skills_source` is split
@@ -1148,8 +1164,17 @@ def _skills_middleware(backend: CompositeBackend, labelled: list[tuple[str, str]
     # refuse the collision that arrives the other way round — a skill added to `skills/` months
     # after somebody saved theirs. Of the two silences this is the safer one, and the person can
     # still see their own document through the route that lists it.
+    #
+    # **A profile that narrows to the empty set reaches neither tier, and `/mine` used to escape
+    # it.** `profile.skill_names` is a governance narrowing over the *shared* corpus and
+    # `local_skills.py` argues at length that it must not select among a person's own — which is
+    # right for a named subset and wrong for `[]`, which is a profile author writing down that this
+    # agent reaches no skill at all. The one thing that writes it is `data/evals/profiles/
+    # skills-removed.yaml`, the arm whose whole value is being the clean control its own header
+    # demands; measured before this, that arm listed a chemist's personal skill while listing none
+    # of the 28 shared ones, so every A/B it reported still carried personal judgment.
     sources: list[tuple[str, str]] = []
-    if LOCAL_SKILLS_ROOT in backend.routes:
+    if LOCAL_SKILLS_ROOT in backend.routes and profile.skill_names != frozenset():
         sources.append((f"/{LOCAL_SKILLS_LABEL}", LOCAL_SKILLS_LABEL))
     sources += [(f"/{label}", label) for label, _ in labelled]
     return ReloadingSkillsMiddleware(

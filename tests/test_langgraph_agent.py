@@ -41,6 +41,7 @@ from chemclaw.agent.chemclaw_agent import (
 )
 from chemclaw.agent.framing import ENVELOPE_TAG, SYSTEM_SPEECH_MARK
 from chemclaw.agent.langgraph_agent import _labelled, build_langgraph_agent, skills_backend
+from chemclaw.agent.local_skills import PERSONAL_TIER_TOOLS, personal_skills_available
 from chemclaw.agent.loop_cap import loop_capped
 from chemclaw.agent.plan_gate import PLAN_GATE_REASON, harness_enabled_for, plan_approval_refusal
 from chemclaw.agent.profile_discovery import load_profiles
@@ -165,8 +166,17 @@ def test_every_in_process_tool_reaches_the_graph_unchanged() -> None:
     ambient = set(scratchpad_tools()) | subagent_tool_names()
     if harness_enabled_for(get_profile("default")):
         ambient |= harness_tool_names()
-    assert advertised == {tool.__name__ for tool in _capability_tools()} | ambient
-    assert advertised == set(registered_tool_names()) | ambient
+    # **And the registry minus what this deployment cannot deliver**, subtracted through the same
+    # predicate the graph builds on for the same reason the harness union is unioned that way
+    # rather than named. `propose_skill`'s only outcome is a personal skill a person accepts
+    # through `POST /proposals/...`, and both the durable row and that route need the tier that
+    # `personal_skills_available()` gates — off in the shipped configuration, where the tool cost
+    # 462 tokens of prefix on every model call to tell the chemist to accept something the route
+    # answers 503 to. So "the two engines offer the same surface" is still the property; what
+    # varies is the deployment, and this assertion follows it instead of going stale.
+    withheld = set() if personal_skills_available() else set(PERSONAL_TIER_TOOLS)
+    assert advertised == ({tool.__name__ for tool in _capability_tools()} - withheld) | ambient
+    assert advertised == (set(registered_tool_names()) - withheld) | ambient
 
 
 def test_a_profile_narrows_the_graph_surface() -> None:

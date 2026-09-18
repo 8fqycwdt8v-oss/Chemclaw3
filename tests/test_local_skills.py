@@ -26,6 +26,7 @@ from chemclaw.agent.local_skills import (
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.agent.scratchpad import memory_namespace, scratchpad_backend
 from chemclaw.agent.skill_backend import SkillsReadOnlyRefusal
+from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 
 _BODY = "---\nname: my-workup\ndescription: how I work up a Suzuki\n---\n\nQuench cold.\n"
@@ -272,7 +273,9 @@ def test_the_size_bound_is_larger_than_anything_this_repository_ships() -> None:
     assert settings.agent_local_skill_max_chars > max(shipped)
 
 
-def test_the_listing_answers_for_a_tier_larger_than_one_page(store: InMemoryStore) -> None:
+def test_the_listing_answers_for_a_tier_larger_than_one_page(
+    store: InMemoryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The licence condition, driven past the page size the un-paged spelling inherited.
 
     `store.asearch(namespace)` with no `limit` is `BaseStore`'s default of **10**, not "everything".
@@ -285,6 +288,10 @@ def test_the_listing_answers_for_a_tier_larger_than_one_page(store: InMemoryStor
     ten, and asserted against the *mount* as well as the listing, because agreement between the two
     is the property the licence actually needs.
     """
+    # The row cap lives in the writer now, and this test is about the *listing* rather than about
+    # the cap — so it is lifted deliberately here instead of the corpus being shrunk to fit, which
+    # would take the test below one page and stop exercising the walk at all.
+    monkeypatch.setattr(settings, "agent_local_skills_max", 1_000)
     names = [f"skill-{index:03d}" for index in range(250)]
     for name in names:
         asyncio.run(save_local_skill(store, "alice-oid", name, _BODY.replace("my-workup", name)))
@@ -356,7 +363,9 @@ def test_a_reviewed_skill_wins_a_name_a_personal_one_also_claims(store: InMemory
         shipped_skill_names,
     )
 
-    middleware = _skills_middleware(_mounted(store, "alice-oid"), _labelled(_skill_dirs()))
+    middleware = _skills_middleware(
+        _mounted(store, "alice-oid"), _labelled(_skill_dirs()), AgentProfile(name="default")
+    )
     # Upstream normalises a `(path, label)` source to a bare path when the label it would derive
     # matches, so the shape is read rather than assumed.
     paths = [source if isinstance(source, str) else source[0] for source in middleware.sources]
@@ -375,7 +384,7 @@ def test_a_reviewed_skill_wins_a_name_a_personal_one_also_claims(store: InMemory
         save_local_skill(store, "alice-oid", contested, _BODY.replace("my-workup", contested))
     )
     loaded = _skills_middleware(
-        _mounted(store, "alice-oid"), _labelled(_skill_dirs())
+        _mounted(store, "alice-oid"), _labelled(_skill_dirs()), AgentProfile(name="default")
     ).before_agent({}, None, None)
     surviving = {skill["name"]: skill["path"] for skill in loaded["skills_metadata"]}
 
@@ -456,3 +465,23 @@ def test_a_local_skill_load_is_counted_and_carries_no_persons_words(store: InMem
         "a chemist's own skill name reached the exposition: that is a per-person identifier on a "
         "shared metric, minting a series per private project name"
     )
+
+
+async def test_a_name_that_could_never_have_been_written_reads_as_absent() -> None:
+    r"""A path parameter carries any byte, and the shipped backend raised on one of them.
+
+    `GET /skills/mine/{name}` and its `DELETE` take the name straight off the URL. Measured against
+    the real `AsyncPostgresStore`, `a\\x00b` raised `psycopg.DataError: PostgreSQL text fields
+    cannot contain NUL (0x00) bytes` out of both readers — a **500** for a name the writer refuses
+    and that therefore cannot exist, where 404 is the answer and is what the in-memory store already
+    gave. Both stores are driven, because the defect was exactly that the two disagreed.
+    """
+    from chemclaw.agent.local_skills import storable_name
+
+    assert not storable_name("a\x00b")
+    assert not storable_name("two words")
+    assert storable_name("cold-quench")
+
+    store = InMemoryStore()
+    assert await read_local_skill(store, "alice", "a\x00b") is None
+    assert await delete_local_skill(store, "alice", "a\x00b") is False

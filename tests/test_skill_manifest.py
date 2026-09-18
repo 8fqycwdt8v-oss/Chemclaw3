@@ -206,3 +206,50 @@ def test_every_template_tool_a_skill_names_is_a_real_template_tool() -> None:
         f"The real names are {sorted(real)} — `run_` plus the file stem with dashes replaced by "
         "underscores, never the stem as written."
     )
+
+
+def test_a_frontmatter_defect_cannot_widen_what_a_skill_is_scoped_to(tmp_path: Path) -> None:
+    """A read error must cost a skill its visibility, never buy it back.
+
+    `declared_tools` fed `ToolScopedSkills`, which reads a missing entry as "declares nothing" and
+    therefore leaves the skill **visible to every caller**. So while this walked the whole
+    `SkillManifest`, any frontmatter defect — a description one character over
+    `MAX_SKILL_DESCRIPTION_CHARS`, a misspelled `tags:` key — silently unscoped the skill. Neither
+    is evidence about which tools the skill teaches, and the filter's whole contract is one-way.
+    """
+    from chemclaw.agent.skill_manifest import MAX_SKILL_DESCRIPTION_CHARS, _declared_tools
+
+    for name, extra in (
+        ("over-long", f"description: {'x' * (MAX_SKILL_DESCRIPTION_CHARS + 1)}"),
+        ("typo-key", "description: fine\ndescriptions: a misspelled key extra=forbid refuses"),
+    ):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "SKILL.md").write_text(
+            f"---\nname: {name}\n{extra}\ntools: [predict_pka]\n---\n\nbody\n"
+        )
+
+    _declared_tools.cache_clear()
+    declared = declared_tools([str(tmp_path)])
+
+    assert declared == {
+        "over-long": frozenset({"predict_pka"}),
+        "typo-key": frozenset({"predict_pka"}),
+    }, "a frontmatter defect erased the tools declaration, leaving the skill unscoped"
+
+    _declared_tools.cache_clear()
+
+
+def test_a_skill_with_no_readable_name_is_still_undeclared(tmp_path: Path) -> None:
+    """The other direction of the same rule: recovering two keys is not recovering anything.
+
+    A file with no `name` cannot be keyed at all, so it stays out of the map — which is the
+    conservative answer and is what `make skill-validate` exists to catch loudly.
+    """
+    from chemclaw.agent.skill_manifest import _declared_tools
+
+    (tmp_path / "nameless").mkdir()
+    (tmp_path / "nameless" / "SKILL.md").write_text("---\ndescription: no name\n---\n\nbody\n")
+
+    _declared_tools.cache_clear()
+    assert declared_tools([str(tmp_path)]) == {}
+    _declared_tools.cache_clear()

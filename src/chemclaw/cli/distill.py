@@ -25,6 +25,7 @@ import json
 from collections import defaultdict
 
 from chemclaw.agent.distiller import bounded, candidates, propose, scaffold
+from chemclaw.agent.local_skills import personal_skills_available
 from chemclaw.cli.trajectory_census import _stored, census
 
 
@@ -89,6 +90,19 @@ async def _run(write: bool, as_json: bool) -> int:
             occurrences[turn.tools].append(turn.session_id)
     by_class = {tools: sorted(set(sessions)) for tools, sessions in occurrences.items()}
     found = bounded(candidates(report, by_class, await _skills_by_session()))
+
+    if write and not personal_skills_available():
+        # **Refused up front rather than filed and discovered later.** A proposal's only outcome is
+        # `POST /proposals/skill/{name} {accepted: true}`, which needs the personal tier — so with
+        # the tier off this would write durable rows that the one route able to act on them answers
+        # 503 to, and the chemist would find that out after deciding. The dry run still works and is
+        # the useful half here: it says what the corpus would propose.
+        print(
+            "refusing to file: this deployment keeps no personal skills, so nothing could accept "
+            "what this would propose (needs CHEMCLAW_AGENT_MEMORY_ENABLED with a Postgres session "
+            "store). Re-run without --propose to see what the corpus would say."
+        )
+        return 1
 
     filed: list[dict[str, object]] = []
     for candidate in found:
