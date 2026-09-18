@@ -494,8 +494,19 @@ def test_the_calc_bundle_teaches_its_shape_without_counting_its_jobs() -> None:
 #: refused, subset or whole. A subset count is the same second answer over a smaller set — "the
 #: two tools pinned to the `xtb` binary" goes stale the day a third is — and the remedy is the
 #: same one this rule asks for everywhere, which is to name them instead of counting them.
+#:
+#: **Up to two words may sit between the cardinal and "tools", and for a while none could.** This
+#: comment stated the rule as "any cardinal immediately before 'tools' is refused" and a reader
+#: took that to cover the phrasing a prose author actually writes; driven, "all seventeen **read**
+#: tools" in `infra/live/processes.sh` — one of the two files that carried the original defect —
+#: was `1 passed`. One adjective was the whole exemption. `_COUNTED_JOBS` six lines up had already
+#: admitted one such word since it was written, so the two patterns in this file disagreed about
+#: the same question and the narrower one was the one whose comment overstated. Measured over the
+#: tree, allowing up to two costs **zero** new offenders, which is the same measurement and the
+#: same `{0,2}?` run `_calc_bundle_pattern` carries for the same reason.
 _COUNTED_SURFACE = re.compile(
-    rf"\b(?:all\s+)?(?:{_CARDINAL})\b(?:\s+of\s+(?:its|the|them|these))?\s+tools?\b",
+    rf"\b(?:all\s+)?(?:{_CARDINAL})\b(?:\s+of\s+(?:its|the|them|these))?"
+    rf"(?:\s+[a-z][a-z-]*){{0,2}}?\s+tools?\b",
     re.IGNORECASE,
 )
 
