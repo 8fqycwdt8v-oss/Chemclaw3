@@ -288,8 +288,10 @@ topic).
 
   **This is what is left of the row `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer`
   closed**, and it is worth stating separately because that row's framing is now wrong in the
-  reader's favour: the 20,712 kB it costed was ~98% the helper's inherited checkpointer, not this
-  channel, so the amplification argument for urgency is gone while the unbounded surface is not.
+  reader's favour: the bulk of the 20,712 kB it costed was the helper's inherited checkpointer
+  rather than this channel — most of it, not "~98%", because that arm's own cap reclaimed 8.8% of
+  the 20,712 — so the amplification argument for urgency is gone while the unbounded surface is
+  not.
   It stays a decision rather than an edit for the reason it always did — a cap here truncates a
   chemist's own document, which is a different act from truncating a helper's. Anchors:
   `agent/scratchpad.py`, `deepagents.backends.state.StateBackend`, `agent/tool_result_size.py::_bounded_file`.

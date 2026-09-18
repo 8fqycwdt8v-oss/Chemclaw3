@@ -439,9 +439,13 @@ class AgentSettings(BaseSettings):
     # **The 10.4x this comment used to quote was mostly not this channel**, which is worth keeping
     # because it is why the figure is gone rather than updated. One 2 MB helper write measured
     # 20,712 kB of checkpoint rows above baseline, and
-    # `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer` attributed it: ~98% was the
-    # helper checkpointing its *own* thread onto the caller's saver, which this setting never
-    # touched and which is now closed. What this bound is actually charged against is the caller's
+    # `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer` attributed the bulk of it to
+    # the helper checkpointing its *own* thread onto the caller's saver — a cost this setting never
+    # touched, and which is now closed. **Not "~98% of 20,712", which this comment said**: that
+    # arm's own cap reclaimed 8.8% of the 20,712, so at most 91.2% can be the helper's thread.
+    # 97.8% is the reduction measured on the *other* arm (18,944 -> 424), and carrying a
+    # percentage across two bases is the defect this paragraph exists to describe.
+    # What this bound is actually charged against is the caller's
     # `files` channel alone. No replacement number is written here, for the reason the paragraph
     # below already gives about the discarded one. It is a *total*:
     # several files share it, the way a batch of tool calls shares `agent_max_tool_result_chars`,

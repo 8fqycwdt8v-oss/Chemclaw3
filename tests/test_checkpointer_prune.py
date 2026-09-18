@@ -7,10 +7,17 @@ grew four full copies of the whole message list per turn, so blob bytes went as 
 turn count: measured on this suite's own shape, 2.57 / 10.29 / 41.17 MB at 20 / 40 / 80 turns, ratio
 4.00 twice.
 
-**Every test here drives the real compiled agent against the real Postgres saver**, because all
-three things that could go wrong are things a mock cannot have: a `checkpoint_ns` a `task` helper
-writes on the same `thread_id`, a live turn committing on a connection the prune is not inside, and
-a resume that reads back a conversation LangGraph reassembles from `checkpoint_blobs`.
+**Every test here drives the real compiled agent against the real Postgres saver**, because the
+things that could go wrong are things a mock cannot have: a live turn committing on a connection
+the prune is not inside, and a resume that reads back a conversation LangGraph reassembles from
+`checkpoint_blobs`.
+
+**A second `checkpoint_ns` used to arrive for free and no longer does.** It came from a `task`
+helper inheriting its caller's saver, which
+`D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer` closed, so the namespace the
+partition is about is now written deliberately through the saver's own API — see
+`_write_namespace`. That is the one thing in this file not driven by a compiled agent, and it is
+written rather than mocked for the same reason as the rest.
 
 `tests/test_checkpointer_schema.py` owns the stamp and the refusal; this file owns the bytes.
 """
@@ -33,13 +40,6 @@ from tests.pg import create_checkpoint_tables, migrated_db_or_skip
 # no connector and no server — what matters is that the turn takes two model calls and therefore
 # writes the thirteen checkpoints a real tool-calling turn writes.
 _TOOL_TURN: tuple[Any, ...] = ({"name": "ls", "args": {}}, "answered")
-# The same shape through the one helper this repository compiles, which is what puts a second
-# `checkpoint_ns` on the thread. The helper's own model call is scripted after the `task` call.
-_TASK_TURN: tuple[Any, ...] = (
-    {"name": "task", "args": {"description": "read", "subagent_type": "general-purpose"}},
-    "helper report",
-    "answered",
-)
 
 
 def _script(turn: tuple[Any, ...], turns: int) -> ScriptedChatModel:
@@ -86,6 +86,21 @@ async def _thread_rows(thread: str) -> dict[str, int]:
     }
 
 
+async def _namespace_rows(thread: str, table: str) -> dict[str, int]:
+    """Rows of `table` per `checkpoint_ns` on one thread.
+
+    `_namespaces` counts `checkpoints` only, so the `checkpoint_ns` predicates in `pruned_writes`
+    and `pruned_blobs` had nothing asserting them — measured, either could be dropped and this
+    whole file stayed green, in both this version and the one before it.
+    """
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute(
+            f"SELECT checkpoint_ns, count(*) FROM {table} WHERE thread_id = %s GROUP BY 1",
+            (thread,),
+        )
+        return {str(name): int(count) for name, count in await cur.fetchall()}
+
+
 async def _namespaces(thread: str) -> dict[str, int]:
     """Checkpoints per `checkpoint_ns` on one thread — the partition the prune must respect."""
     async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
@@ -103,8 +118,14 @@ async def _write_namespace(saver: Any, thread: str, namespace: str, count: int) 
     caller's saver and checkpointed under `tools:<uuid>`.
     `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer` closed that — it was 98% of
     what a spawn cost — so the partition below has to be driven rather than observed as a side
-    effect. Written through `aput` rather than as raw `INSERT`s so the rows carry the real
-    `channel_versions` the prune's floor is computed from.
+    effect. Written through `aput`/`aput_writes` rather than as raw `INSERT`s so the rows carry the
+    real `channel_versions` the prune's floor is computed from.
+
+    **It writes channel *values* and pending writes, not bare checkpoints, and that is the point.**
+    A namespace of bare checkpoints exercises only the `pruned_checkpoints` CTE, leaving the
+    `checkpoint_ns` joins in `pruned_blobs` and `pruned_writes` with nothing under them — measured,
+    dropping either join survived this whole file. Writing a value per version puts rows in all
+    three tables, so the statement is pruned the way a real namespace would be.
     """
     from langgraph.checkpoint.base import empty_checkpoint
 
@@ -115,9 +136,13 @@ async def _write_namespace(saver: Any, thread: str, namespace: str, count: int) 
         checkpoint = {
             **checkpoint,
             "id": f"{index:032d}-0000-0000-0000",
+            "channel_values": {"messages": [HumanMessage(content=f"ns-value-{index}")]},
             "channel_versions": versions,
         }
         config = await saver.aput(config, checkpoint, {"source": "loop"}, versions)
+        await saver.aput_writes(
+            config, [("messages", [HumanMessage(content=f"ns-write-{index}")])], f"task-{index}"
+        )
 
 
 async def _ready(monkeypatch: pytest.MonkeyPatch, keep: int) -> Any:
@@ -197,7 +222,7 @@ def test_every_namespace_of_a_thread_is_bounded_and_not_only_the_root(
     namespaces rather than a loss, and this test fails if the `PARTITION BY` is dropped.
     """
 
-    async def _run() -> tuple[dict[str, int], dict[str, int], list[str]]:
+    async def _run() -> tuple[dict[str, int], dict[str, int], dict[str, int], list[str]]:
         saver = await _ready(monkeypatch, 3)
         try:
             conversation = await _drive(saver, "prune-ns", 4, _TOOL_TURN)
@@ -206,6 +231,7 @@ def test_every_namespace_of_a_thread_is_bounded_and_not_only_the_root(
                 await cur.execute(ckpt._PRUNE_SUPERSEDED, {"thread": "prune-ns", "keep": 3})
                 await conn.commit()
             partitioned = await _namespaces("prune-ns")
+            kept_writes = await _namespace_rows("prune-ns", "checkpoint_writes")
             # A second thread driven identically, pruned by hand with the partition removed. Two
             # threads rather than one, because the first has already been pruned correctly and
             # could not show what the broken form would have left.
@@ -215,11 +241,11 @@ def test_every_namespace_of_a_thread_is_bounded_and_not_only_the_root(
             async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
                 await cur.execute(flat, {"thread": "prune-ns-flat", "keep": 3})
                 await conn.commit()
-            return partitioned, await _namespaces("prune-ns-flat"), conversation
+            return partitioned, kept_writes, await _namespaces("prune-ns-flat"), conversation
         finally:
             await ckpt.close_checkpointer()
 
-    partitioned, unpartitioned, conversation = asyncio.run(_run())
+    partitioned, kept_writes, unpartitioned, conversation = asyncio.run(_run())
 
     extra = [name for name in partitioned if name]
     assert extra, (
@@ -230,6 +256,14 @@ def test_every_namespace_of_a_thread_is_bounded_and_not_only_the_root(
         f"a non-root namespace is not bounded at the retained count: {partitioned}"
     )
     assert partitioned[""] > 0, "the root namespace was emptied"
+    # `pruned_writes` and `pruned_blobs` carry their own `checkpoint_ns` predicates, and nothing
+    # asserted either: the root's floor is computed from real UUID6 ids that sort above every
+    # synthetic one, so dropping a predicate lets one namespace's floor delete another's rows.
+    assert all(kept_writes.get(name, 0) > 0 for name in extra), (
+        f"a retained non-root checkpoint kept no `checkpoint_writes` rows: {kept_writes}. A "
+        "`checkpoint_ns` predicate in `_PRUNE_SUPERSEDED` is missing, so one namespace's floor is "
+        "deleting another's rows"
+    )
     assert any(count > 3 for name, count in unpartitioned.items() if name), (
         "the unpartitioned form bounded the second namespace too, so this test cannot tell the "
         f"two statements apart and proves nothing about the partition: {unpartitioned}"

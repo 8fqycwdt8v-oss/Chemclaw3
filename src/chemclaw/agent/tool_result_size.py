@@ -497,7 +497,9 @@ async def bound_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any
         return _bounded_file(content, sharing, _files_already_held(request))
 
     return rewritten_command_files(
-        rewritten_tool_messages(result, _bounded), _bounded_for_this_command
+        rewritten_tool_messages(result, _bounded),
+        _bounded_for_this_command,
+        (getattr(request, "state", None) or {}).get("files"),
     )
 
 
