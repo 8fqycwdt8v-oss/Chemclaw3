@@ -483,10 +483,16 @@ def test_the_calc_bundle_teaches_its_shape_without_counting_its_jobs() -> None:
     )
 
 
-#: A complete tool surface, counted: "all fifteen tools", "Fifteen tools", "all fifteen of its
-#: tools". The quantifier is what makes it a claim about the *whole* surface rather than about a
-#: subset somebody measured — "two tools on the server are like this" counts a subset and is not
-#: what went stale here.
+#: A tool surface, counted: "all fifteen tools", "Fifteen tools", "all fifteen of its tools".
+#:
+#: The quantifier is optional and does **not** discriminate a whole-surface claim from a subset
+#: one — this comment used to say it did, and measured, making `all\s+` mandatory matches the two
+#: live-lane scripts and misses `Fifteen tools, and not one of them computes anything.`, which is
+#: the module docstring that actually went stale and the reason the scope has a package half at
+#: all. So the pattern is deliberately broad: in scope, any cardinal immediately before "tools" is
+#: refused, subset or whole. A subset count is the same second answer over a smaller set — "the
+#: two tools pinned to the `xtb` binary" goes stale the day a third is — and the remedy is the
+#: same one this rule asks for everywhere, which is to name them instead of counting them.
 _COUNTED_SURFACE = re.compile(
     rf"\b(?:all\s+)?(?:{_CARDINAL})\b(?:\s+of\s+(?:its|the|them|these))?\s+tools?\b",
     re.IGNORECASE,
