@@ -88,8 +88,16 @@ a different box does not move.
 - A platform-imposed `RLIMIT_DATA` degrades the budget instead of disabling the parser.
 - Two tests drive red-then-green: without `_at_ceiling` the refusal reads
   `unknown error (<string>, line 0)`; without the clamp `_bound_allocations` raises `ValueError`.
-- Left open, and stated rather than fixed: `.pptx` goes through the same lxml layer and its
-  behaviour under this ceiling is **unverified**. `docs/planning/BACKLOG.md` carries the row.
+- Left open, and stated rather than fixed, with a `docs/planning/BACKLOG.md` row each:
+  **`.pptx`** goes through the same lxml layer and its behaviour under this ceiling is unverified;
+  and the budget is what a parse may allocate **on top of the document**, because
+  `_bound_allocations` reads its baseline after `raw` is unpickled into the child — driven,
+  `VmData` 230.4 MiB before a 50 MiB document and 280.5 MiB after. The chart's coefficient
+  multiplies only the budget, and `binding.max_file_bytes` has no upper bound, so a site binding at
+  200 MiB moves the real per-parse charge and moves no inequality. That is this ADR's parent
+  argument — a coefficient of the quantity it is declared against — failing on its second quantity.
+  Not fixed here because `tests/test_deploy_chart.py` is being rewritten on another branch, and the
+  row states the three candidate fixes with what each costs.
 
 ## What keeps it true
 
