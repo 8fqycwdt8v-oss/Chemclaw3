@@ -764,6 +764,27 @@ class AgentSettings(BaseSettings):
     # and wants it back.
     agent_helper_roster: str = "evidence" + os.pathsep + "computation" + os.pathsep + "safety"
 
+    # How many of a rostered helper's tool names its `task` menu entry enumerates before it says
+    # "and N more".
+    #
+    # **A bound rather than a ratchet, because the thing that grows is not one this repository can
+    # measure.** `describe_helper` lists the surface the helper's graph *bound*, which is the right
+    # derivation — a profile edited next year cannot leave the menu stale — and it made `task`'s own
+    # schema a function of how many tools the sibling fleet serves. Measured: `task` is 897 tokens
+    # against `tests/test_context_floor.py`'s 900-token per-tool bound with the `safety` entry
+    # dropped (its whole surface is served out of `Chemclaw3-mcp`, so this repository's ratchet
+    # binds
+    # none of it); reconstructed with that entry's real surface it is ~1,009, over the bound, with
+    # the ratchet reading 897 and passing. That is
+    # `D-2026-09-05-a-ratchet-that-binds-no-connectors-measures-a-smaller-system` one level down, in
+    # the per-tool bound instead of the total — and the remedy that test names ("narrow the
+    # arguments or paginate") is unavailable for a description, so the bound has to be here.
+    #
+    # Twelve because the menu's job is to tell entries apart, and `D-2026-08-12`'s defect was a
+    # roster whose five entries were *identical*: a dozen names does that for any roster this
+    # repository ships, and the count that follows is honest about what it did not list.
+    agent_helper_menu_tools: int = 12
+
     # How many of one reply's unparseable tool calls are promoted onto `tool_calls` and refused
     # individually (`agent/model_calls.PromoteInvalidToolCalls`); the rest are counted and named
     # for the operator without becoming calls. 0 removes the bound.

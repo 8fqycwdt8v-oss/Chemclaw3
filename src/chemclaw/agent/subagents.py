@@ -384,8 +384,17 @@ def describe_helper(profile: AgentProfile, bound: Iterable[str]) -> str:
         The `description` for this entry's `CompiledSubAgent` spec.
     """
     purpose = (profile.description or "").strip()
-    names = ", ".join(sorted(bound))
-    return f"{purpose} Reads only, and holds exactly: {names}."
+    # **Bounded, because what this enumerates is not a surface this repository can measure.** The
+    # list comes off the compiled graph, so it grows with whatever the sibling fleet serves — and
+    # `tests/test_context_floor.py`'s per-tool bound binds no fleet connector, so `task` measured
+    # 897 against a 900-token ceiling while a deployment that serves `safety` would send ~1,009.
+    # A ratchet that cannot see its input is not the place for this bound; see
+    # `agent_helper_menu_tools`.
+    ordered = sorted(bound)
+    shown = ", ".join(ordered[: settings.agent_helper_menu_tools])
+    rest = len(ordered) - settings.agent_helper_menu_tools
+    held = f"{shown}, and {rest} more" if rest > 0 else shown
+    return f"{purpose} Reads only, and holds exactly: {held}."
 
 
 def helper_profile(

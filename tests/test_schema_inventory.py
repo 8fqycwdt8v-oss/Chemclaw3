@@ -102,7 +102,15 @@ _TOUCHES = (
     re.compile(rf"^UPDATE\s+({_NAME})\s", re.I),
 )
 # Statements that legitimately name no table.
-_TABLE_FREE = (re.compile(r"^CREATE EXTENSION", re.I),)
+#
+# `DROP INDEX` is here rather than in `_TOUCHES` because its syntax names an *index*, never the
+# table under it — so there is no table to credit, and crediting the index's own name to the
+# Migration column would put a non-table in it. It is a real construct in this directory since
+# `106`, which drops an index `105` created for a containment query nobody ever wrote.
+_TABLE_FREE = (
+    re.compile(r"^CREATE EXTENSION", re.I),
+    re.compile(r"^DROP INDEX", re.I),
+)
 
 
 def _split_on_statement_ends(body: str) -> list[str]:

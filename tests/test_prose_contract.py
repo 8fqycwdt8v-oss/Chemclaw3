@@ -145,6 +145,31 @@ _A_LIVE_GATE = {
 }
 
 
+def test_every_exempted_description_cites_a_test_that_exists() -> None:
+    """The comment above says an entry whose gate stops existing "fails there"; it did not.
+
+    `_A_LIVE_GATE`'s **values were read by nothing** — the exemption is `name not in _A_LIVE_GATE`,
+    so the citation beside each name was decoration, and the one it carried pointed at a test a
+    mutation review then showed holds nothing (see
+    `D-2026-09-18-a-control-that-names-a-module-is-a-claim-about-where-somebody-put-the-code`). A
+    citation nobody resolves is the same shape as the gate these tests exist to find: a claim that a
+    control exists. `docs/decisions/` has the ledger test that resolves ADR citations the same way,
+    for the same reason.
+    """
+    import subprocess
+
+    for tool, citation in _A_LIVE_GATE.items():
+        path, _, test = citation.partition("::")
+        assert Path(path).exists(), f"{tool} cites {path}, which is not a file"
+        found = subprocess.run(
+            ["uv", "run", "pytest", citation, "--collect-only", "-q"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert found.returncode == 0, f"{tool} cites {citation}, which pytest cannot collect"
+
+
 def test_no_tool_description_tells_the_model_to_expect_a_review_gate() -> None:
     """The same failure as the tier above, on the control that was removed instead of the hardware.
 

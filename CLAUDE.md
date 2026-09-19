@@ -94,15 +94,20 @@ Reading the deletion paragraph above as "no delegation" is therefore wrong in th
 matters, and it stayed wrong long enough for the helper's surface to drift from its description:
 the `task` tool said isolation and parallel reading while the helper held its caller's **54**
 in-process tools, nine `run_*` launchers and `record_knowledge_note` among them. The unnamed helper
-now holds **18** of them — its caller's set minus `authz.side_effecting_tools()` (derived from the partition
+now holds **21** of them — its caller's set minus `authz.side_effecting_tools()` (derived from the partition
 that already exists, so a bundle added next year is out of reach the day it is enabled) and minus
 `ask_clarifying_question`, which changes nothing and still writes a question onto the *chemist's*
-stream from a context the chemist cannot see. **The compiled helper graph binds 24**, because
+stream from a context the chemist cannot see. **The compiled helper graph binds 27**, because
 `FilesystemMiddleware` supplies six file verbs that `tool_names` does not reach — they write to the
 helper's own scratch space and it is handed no store, so they reach nothing that outlives it. Both
 numbers are here because this paragraph shipped saying 54 and 24 in one subtraction that does not
 work: the first is in-process, the second is bound, and a narrowing argued across two bases is the
-defect `_bound_tools` was written to end one section below. `AgentProfile.model_route` names a key in
+defect `_bound_tools` was written to end one section below. **Both digits then went stale the way
+every digit in this file does** — a mutation review measured 21 and 27 where the paragraph said 18
+and 24, and the 18 had been written *in* the commit that shipped the roster and was already wrong at
+the next merge. They are corrected rather than deleted because the paragraph's subject is the two
+*bases*, not their values; what makes the relation checkable is
+`tests/test_subagents.py`, which asserts the strict-subset inequality rather than either number. `AgentProfile.model_route` names a key in
 `model_routes` — a key, never a model id, which would be a site's model name in git — so
 `CHEMCLAW_MODEL_ROUTES='{"helper": "…"}'` makes delegated reading cheaper with no code change.
 **The delegation question is still open**: the corpus that was supposed to settle it measured

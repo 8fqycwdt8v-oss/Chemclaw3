@@ -152,11 +152,14 @@ class SkillLoadedSignal(BaseModel):
     self-confirming, since that is the one the agent can propose into.
     """
 
+    # The name alone, because the name alone is what any consumer of this asks about.
+    #
+    # **A `tier` field stood here, carried by nothing.** Its comment said it was for the question
+    # "which of my turns loaded judgment I wrote myself" — which is a question about
+    # `turn_costs.skills_loaded`, and that column never held it: `_TurnLedger` folds both tiers into
+    # one set on purpose, so the field was written by two producers and read by no line in `src/`.
+    # A field justified by a row it does not reach is the shape this repository deletes on sight.
     skill: str
-    # `shared` or `mine`, which is the mount's own label rather than a new vocabulary. A guard only
-    # needs the name; the tier is here because "which of my turns loaded judgment I wrote myself"
-    # is the question a person is most likely to ask of this row.
-    tier: str
 
 
 Signal = JobSignal | NoteRecordedSignal | QuestionSignal | SkillLoadedSignal | ToolFailureSignal
@@ -237,7 +240,7 @@ def record_note_written(note_id: str, reference: str) -> None:
     _emit(NoteRecordedSignal(note_id=note_id, reference=reference))
 
 
-def record_skill_loaded(skill: str, tier: str) -> None:
+def record_skill_loaded(skill: str) -> None:
     """Note that this turn read one skill's body. A no-op where nothing is streaming.
 
     Called from the two backends that deliver a skill body, rather than from the tool that asks for
@@ -246,7 +249,7 @@ def record_skill_loaded(skill: str, tier: str) -> None:
     same call the counter is taken on, so the array and the counter cannot disagree about what a
     load is.
     """
-    _emit(SkillLoadedSignal(skill=skill, tier=tier))
+    _emit(SkillLoadedSignal(skill=skill))
 
 
 def record_question(question: str, options: list[str]) -> None:

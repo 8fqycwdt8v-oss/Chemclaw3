@@ -503,9 +503,19 @@ def test_a_scan_past_its_deadline_stops_instead_of_matching_the_rest_of_the_corp
         leaked to ~14 of 16         ratio 0.931   fails
 
     So a half passes every machine measured and still fails a deadline that leaked to *half* the
-    corpus. That is the same headroom a quarter gave over the one machine it was written on, and it
-    is why loosening the bar here is not weakening the control: nothing between 0.27 and 0.55
-    corresponds to a behaviour this scan can have.
+    corpus.
+
+    **The sentence that stood here overstated that, in the reassuring direction, and it is the kind
+    of claim this repository is supposed to measure.** It read "that is the same headroom a quarter
+    gave over the one machine it was written on … nothing between 0.27 and 0.55 corresponds to a
+    behaviour this scan can have". Both halves are false. Re-running the mutation table above on a
+    second machine, three runs each, the 8-of-16 leak measures **0.511 / 0.566 / 0.562** — so the
+    interval declared empty contains a behaviour this scan really has, and the *margin* between the
+    bar and the nearest failure mode is 2-13% here rather than the 55% a quarter had. Three of three
+    still fail, so the control caught the leak every time; what is gone is the claim that it does so
+    with room to spare, on an instrument whose own documented machine-to-machine spread is ~46%
+    (0.186 to 0.271). Read a failure at 0.50-0.57 as "this may be the 8-of-16 leak" and re-run
+    the table rather than the test.
 
     **A ratio is a proxy and the honest assertion would count records** — "went on matching every
     remaining record" is a claim about records. That was tried and is not a test-only change: on
@@ -529,9 +539,9 @@ def test_a_scan_past_its_deadline_stops_instead_of_matching_the_rest_of_the_corp
     assert outcome.hits == []  # unmatchable, so the unbounded run really did examine all 16
     assert bounded < unbounded / 2, (
         f"the scan ran {bounded:.3f}s of an unbounded {unbounded:.3f}s past its deadline "
-        f"(ratio {bounded / unbounded:.3f}); a leaked deadline reads ~1.0 and stopping halfway "
-        "reads ~0.75, so this is the bound failing to reach the worker thread rather than a slow "
-        "machine — see the docstring for the measured spread"
+        f"(ratio {bounded / unbounded:.3f}); a leaked deadline reads ~0.93 and a deadline that "
+        "leaked to half the corpus reads ~0.51-0.57, so this is the bound failing to reach the "
+        "worker thread rather than a slow machine — see the docstring for the measured spread"
     )
 
 

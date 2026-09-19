@@ -429,7 +429,7 @@ def _empty_listing(tmp_path: Path) -> str:
     profile = get_profile("default")
     labelled = [("cold", str(tmp_path))]
     middleware = _skills_middleware(
-        skills_backend(profile, _capability_tools(profile), labelled=labelled), labelled
+        skills_backend(profile, _capability_tools(profile), labelled=labelled), labelled, profile
     )
     loaded = middleware.before_agent({}, None, None) or {}
     metadata = loaded.get("skills_metadata", [])

@@ -424,18 +424,19 @@ topic).
       table that is in `retention._NOT_PRUNED` on purpose. `durable/awaiting.py`,
       `durable/pending_store.py`.
 
-- [ ] **A warm parse forkserver is ~109 MB the front door's pod was not sized for** — [S],
-      measured 2026-09-13. `ingest/documents/isolate.py` starts its server by fork **and exec**, so
-      its pages are not copy-on-write with the front door's: driven on this tree, RSS was
-      111,140 kB in the front door and 111,188 kB in the forkserver — a second, full resident copy of pypdf,
-      python-docx, openpyxl and python-pptx. `deploy/helm/chemclaw/values.yaml`'s `resources.service` is
-      unchanged at `requests: 512Mi / limits: 1Gi`, so that is 21% of the request arriving the
-      first time anybody uploads a document, and it is *per replica*. Nothing is wrong today; what
-      is missing is that the chart was sized before this process existed. The decision is whether
-      to raise the request, keep the forkserver cold (it is lazy, so a replica that never parses
-      never pays), or both — and it wants a measurement of the Temporal worker too, which now
-      starts one as well (`ingest/documents/sync.py`). Anchor: `isolate.parse_context`,
-      `deploy/helm/chemclaw/values.yaml`.
+- [ ] **Nothing bounds what a turn costs the front door's memory** — [M], opened 2026-09-18 by
+      `D-2026-09-18-a-second-process-in-the-pod-is-memory-the-chart-never-declared`, which sized
+      `resources.service` against a resident set with **no turn in flight**: 431.9 MiB measured on
+      the real uvicorn front door with its lifespan run and `/healthz` served, no agent graph
+      compiled, no connector session open, no checkpointer write. The memory request is now derived
+      against that floor plus the parse path, and `CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS` is 12 —
+      so the one part of the pod that scales with load is the part no number covers. The CPU half
+      *is* measured (0.581 s of CPU over 8.32 s of wall clock per turn, which is why
+      `requests.cpu` is 1); the memory half has never been. What it wants is the same shape as the
+      parse measurement: drive a turn against the mock LLM, sample the pod's `Pss` across it, and
+      express the peak as MiB per admitted permit so `test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares`
+      can take a third term. Anchors: `deploy/helm/chemclaw/values.yaml` `resources.service`,
+      `tests/test_deploy_chart.py::test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares`.
 
 - [ ] **Neither net sees one Postgres server that two DSNs spell differently** — [M], found
       2026-09-05 by a fresh-context review of `D-2026-09-05-a-pool-count-is-not-a-connection-count`,

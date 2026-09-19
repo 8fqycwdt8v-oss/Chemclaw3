@@ -1076,7 +1076,7 @@ def _skills_listing(profile: Any, tools: list[Any], available: Collection[str]) 
     """
     labelled = _labelled(_skill_dirs())
     backend = skills_backend(profile, tools, labelled=labelled, available=available)
-    middleware = _skills_middleware(backend, labelled)
+    middleware = _skills_middleware(backend, labelled, profile)
     loaded = middleware.before_agent({}, None, None) or {}
     return str(middleware._format_skills_list(loaded.get("skills_metadata", [])))
 

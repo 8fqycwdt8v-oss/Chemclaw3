@@ -201,6 +201,14 @@ ADR carrying the reading behind it.
   key, so every fingerprint and corpus-reaction write fails with `InvalidColumnReference`. Roll
   forward, or re-add the old key by hand
   (D-2026-09-09-a-definition-change-shelves-a-row-it-does-not-delete).
+- `106_drop_the_index_nobodys_query_uses.sql` — flagged for the `DROP INDEX` text and reviewed as
+  **not** a break, which is the over-flag the pattern's own comment predicts: it cannot tell a
+  unique index (whose drop breaks `ON CONFLICT`'s arbiter inference) from a plain one (whose drop
+  costs a plan). This is a plain GIN index on `turn_costs.skills_loaded`, named by no `ON CONFLICT`
+  and read through by nothing — the containment query `105` created it for was never written, and
+  the column's one reader scans the corpus in a single pass. The previous image writes exactly as
+  before; re-running `105` restores the index
+  (D-2026-09-18-a-control-that-names-a-module-is-a-claim-about-where-somebody-put-the-code).
 ### Migrations that are not re-runnable, and the recipe for each
 
 Re-running the whole set is how a restored database whose `schema_migrations` ledger is older than

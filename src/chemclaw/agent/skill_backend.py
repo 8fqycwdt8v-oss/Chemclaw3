@@ -226,7 +226,7 @@ class NarrowedSkillsBackend(FilesystemBackend):
             # counter cannot, because it says a skill was read and never in which turn. The guard
             # `agent/distiller.py` needs is one predicate over exactly that, so the array and the
             # counter are taken on one condition rather than two that could drift apart.
-            record_skill_loaded(skill, SHARED_TIER)
+            record_skill_loaded(skill)
         return result
 
     def glob(self, pattern: str, path: str | None = None) -> GlobResult:
@@ -324,13 +324,6 @@ def _skill_of(path: str) -> str:
     """
     parts = PurePosixPath(path.strip("/")).parts
     return parts[0] if parts else ""
-
-
-#: What `SkillLoadedSignal.tier` says about a skill from the reviewed tree.
-#:
-#: The mount's own vocabulary rather than a new one: `agent/local_skills.LOCAL_SKILLS_LABEL` is the
-#: other value, and both are what a path already carries.
-SHARED_TIER = "shared"
 
 
 def _is_a_skill_body(path: str) -> bool:
