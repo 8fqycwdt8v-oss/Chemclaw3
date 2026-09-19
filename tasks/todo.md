@@ -37,7 +37,7 @@ registers the one that is a decision.
 - [x] `service_max_concurrent_turns_per_actor` (default 0); chart sets 4 against 12.
 - [x] `chemclaw_turns_refused_actor_cap_total` (unlabelled) + `chemclaw_turn_actor_capacity` gauge.
 - [x] `D-2026-09-19-a-pod-wide-cap-is-not-a-fair-one` + ledger row + topic-table row.
-- [x] Tests: `tests/test_turn_fairness.py` (6), `test_detach.py` (1), `test_stream_contract.py` (3),
+- [x] Tests: `tests/test_turn_fairness.py` (10), `test_detach.py` (1), `test_stream_contract.py` (3),
       `test_deploy_chart.py` (1).
 
 ## Part 2 — the register repairs
@@ -78,3 +78,36 @@ better than 6 × 12 = 72 and is not a per-actor guarantee. The fleet-wide form b
 **A guard I did not know about caught me**: `tests/test_decision_log.py` requires a new ADR to be
 cited by a row of the README's "By topic" table, not merely listed in the ledger. Filed under
 *Front door / SSE contract*, beside D-166.
+
+## What four fresh-context reviews found after the first push
+
+Worth recording because the pattern is not "sloppiness": every finding was a place where the prose
+was more confident than the code, which is the failure this repository is organised around.
+
+- **The central correctness argument was half true.** "Deriving the count from `TurnLease` inherits
+  the lease's expiry" holds in the *streaming* phase and not in the *reservation* phase, where
+  `deadline=math.inf` and three untimed store round trips run. Driven with the owner store parked:
+  the actor was still refused after 7.5× the widest lease that configuration can stamp — a
+  permanent lockout across every session, the exact brick the design claimed to prevent.
+  `claimed_at` + `_still_holding` close it; the session's own 409 is untouched.
+- **The pointer-repair commit added a dangling pointer of the class it was closing.** The ADR cited
+  `D-2026-09-05-a-lease-is-demand-and-a-permit-is-occupancy`, which has never existed. It was
+  copied from `tests/test_detach.py:344`, where it was already dangling. Both fixed. Nothing
+  catches this automatically: `test_docstring_paths` exempts `docs/decisions/`, and
+  `test_decision_log` checks *test* citations rather than ADR-to-ADR ones.
+- **"Two orders of magnitude" was one**, and the two quantities (requests/minute, simultaneous
+  turns) are not commensurable anyway — five sites, all replaced with the honest form.
+- **`live_storm`'s family A sweeps the *admission* cap**, not this one, which did not exist when it
+  was written — six sites.
+- **The invariant was enforced against `values.yaml`, not against the running config**, so a
+  `--set` or env override shipped a guard that refuses nothing while publishing a gauge that reads
+  as protection. Now a cross-field validator.
+- **The cap inverted under the shared dev principal**: with `entra_required=false` every caller is
+  one oid, so "per actor" meant "per pod" and one client refused everyone. It skips itself there.
+- **A sibling bug found and fixed rather than noted**: `routes/streams.py`'s 429 carried no
+  `Retry-After` either, so the same UI misclassification (`budget_exhausted`, composer locked)
+  applied to `/events`. Hardening one route and leaving the other would have been knowing about it.
+- **The log reported the configured cap where it claimed to report a measurement**, which would
+  have hidden a count *above* the cap — the one observable symptom of a lease outliving its turn.
+- **Nothing asserted the counter increments**, so the dashboard panel could have read zero for ever
+  while every test stayed green.

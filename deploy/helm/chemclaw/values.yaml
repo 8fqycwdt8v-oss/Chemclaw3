@@ -1090,17 +1090,21 @@ config:
   # How much of that a single chemist may hold. The cap above is actor-blind, so without this one
   # principal opening twelve sessions takes every permit on the replica and everyone else is shed
   # `at_capacity` — measured as one hang-up per permit (`chemclaw.api.detach`). The per-actor rate
-  # limit below never reaches it: 120/min is two orders of magnitude above twelve concurrent turns.
+  # limit below never reaches it: the chart sets that to 120 requests/minute, which meters a rate
+  # while this counts simultaneous turns — a principal holds the whole replica on twelve requests.
   #
   # 4 of 12: one actor takes at most a third of a replica, so three distinct chemists are needed
   # to fill a pod, and a full pod always has at least three people on it. It is already more
   # parallelism than the shipped UI generates by hand — the browser holds one turn per open
-  # session view and `CHEMCLAW_SERVICE_MAX_EVENT_STREAMS_PER_USER` is 5.
+  # session view, and the per-user event-stream cap is 5 (a code default; this chart does not set
+  # that key).
   #
   # **Must stay strictly below `CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS`**; at or above it the guard
-  # enforces nothing while reading as protection, and `tests/test_helm_chart.py` is what holds the
-  # two apart. Off in code (0) because `chemclaw.cli.live_storm` drives 48 concurrent turns from
-  # one credential to measure this very cap's shedding curve; the posture lives here.
+  # enforces nothing while reading as protection — `tests/test_deploy_chart.py` holds the two
+  # apart here, and a cross-field validator in `core/config/__init__.py` refuses it at startup for
+  # the configuration a pod actually runs, which a values file cannot see. Off in code (0) because
+  # `chemclaw.cli.live_storm`'s family A sweeps the *admission* cap end to end, driving 48
+  # concurrent turns from one credential at each value; the posture lives here.
   #
   # Per process, so `service.autoscaling.maxReplicas` multiplies it — an actor spread over the
   # fleet holds that multiple, and a fleet-wide per-actor limit belongs at the ingress (SCALE-1).

@@ -256,8 +256,17 @@ async def session_events(
     at_pod_cap = sum(streams.values()) >= settings.service_max_event_streams_total
     if at_user_cap or at_pod_cap:
         METRICS.increment("chemclaw_event_streams_rejected_total")
+        # `Retry-After` for the reason the turn route's per-actor refusal documents at length:
+        # `Chemclaw3_ui`'s `errorFromStatus` splits 429 on the header's *presence*, and without one
+        # renders `budget_exhausted` — "the usage budget for this service is exhausted" — which
+        # locks the composer and which nothing in that UI clears. This cap clears the moment the
+        # client closes a stream, so both halves of that sentence are false here. Found while
+        # hardening the turn route against the identical mistake; fixing one and leaving the other
+        # would have been knowing about it.
         raise HTTPException(
-            status_code=429, detail="too many concurrent event streams; close one and retry"
+            status_code=429,
+            detail="too many concurrent event streams; close one and retry",
+            headers={"Retry-After": "1"},
         )
     streams[principal.oid] = streams.get(principal.oid, 0) + 1
 

@@ -341,7 +341,10 @@ def test_the_in_flight_gauge_counts_demand_and_can_exceed_the_permit_count(
     every permit but one free.
 
     Keeping demand rather than switching to a permits gauge is
-    `D-2026-09-05-a-lease-is-demand-and-a-permit-is-occupancy`: the queued term is the leading half
+    `src/chemclaw/api/detach.py`'s module docstring (an ADR of that name has never existed — this
+    pointer was dangling before the per-actor cap cited it, and
+    `D-2026-09-19-a-pod-wide-cap-is-not-a-fair-one` is where the argument is now recorded): the
+    queued term is the leading half
     of the signal an autoscaler wants, and a detached turn is a turn still spending this pod's CPU,
     its model tokens and its database connection — the permit came back as fairness to a *waiting
     client*, not because the work stopped.
@@ -497,7 +500,18 @@ def test_a_detached_turn_still_holds_its_actors_slot(
     monkeypatch.setattr(settings, "service_max_concurrent_turns_per_actor", 1)
     agent = _SlowerThanAdmission()
 
-    with _Served(_app(agent)) as served, httpx.Client(base_url=served.base, timeout=30) as client:
+    # A *named* principal, because the cap deliberately skips the shared dev one: with
+    # `entra_required` false every caller is one oid, so "per actor" would mean "per pod" and one
+    # client would refuse everybody. This app is served by a real uvicorn, so the override has to
+    # be installed on the app object before it starts.
+    from chemclaw.api.auth import Principal, require_principal
+
+    app = _app(agent)
+    app.dependency_overrides[require_principal] = lambda: Principal(
+        oid="detach-alice", upn="a@corp", roles=frozenset()
+    )
+
+    with _Served(app) as served, httpx.Client(base_url=served.base, timeout=30) as client:
         abandoned = client.post("/sessions").json()["session_id"]
         _hang_up_mid_turn(client, abandoned)
 

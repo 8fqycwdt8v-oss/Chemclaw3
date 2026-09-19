@@ -655,7 +655,9 @@ def test_an_expired_lease_does_not_hold_an_actors_slot() -> None:
     assert _actor_turns_in_flight(active, "alice", besides="other") == 1
 
     # Lapse it the way `_start_turn_lease` would, with a deadline already in the past.
-    active["s1"] = type(active["s1"])(token=token, deadline=0.0, actor="alice")
+    active["s1"] = type(active["s1"])(
+        token=token, deadline=0.0, actor="alice", claimed_at=active["s1"].claimed_at
+    )
     assert _actor_turns_in_flight(active, "alice", besides="other") == 0
 
 

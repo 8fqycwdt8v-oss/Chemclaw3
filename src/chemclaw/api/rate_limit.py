@@ -25,8 +25,9 @@ into looking like a down target.
 **Per process, like the admission cap, and the same caveat applies.** `maxReplicas: 6` multiplies
 the real ceiling by six. That is a property of both guards and of the deployment, not something this
 module can fix by pretending otherwise; a fleet-wide limit belongs at the ingress. The backlog row
-this paragraph used to send a reader to is gone: `D-2026-08-01-a-per-process-cap-multiplied-by-a-
-number-nobody-wrote-down` closed it for *turns* — declaring the product, deriving the replica count
+this paragraph used to send a reader to is gone:
+`D-2026-08-01-a-per-process-cap-multiplied-by-a-number-nobody-wrote-down` closed it for *turns* —
+declaring the product, deriving the replica count
 and alerting on `chemclaw_fleet_turn_ceiling` — and it was deleted on merge, as that register
 requires. **It closed the arithmetic and not the enforcement, and only for turns**: nothing declares
 a fleet-wide ceiling for *requests*, so the multiplication above is stated here and nowhere checked.

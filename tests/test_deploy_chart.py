@@ -6032,9 +6032,9 @@ def test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_agains
 def test_the_chart_caps_turns_per_actor_strictly_below_the_process_cap() -> None:
     """A fairness cap at or above the pod's own cap enforces nothing while reading as protection.
 
-    The code default is 0 (off) because `chemclaw.cli.live_storm` drives tens of concurrent turns
-    from one credential to measure this very cap's shedding curve, so the production posture lives
-    here — and a posture nothing checks is one that drifts. `>=` is the whole failure mode: at 12
+    The code default is 0 (off) because `chemclaw.cli.live_storm`'s family A sweeps the *admission*
+    cap end to end from one credential, so the production posture lives here — and a posture
+    nothing checks is one that drifts. `>=` is the whole failure mode: at 12
     against a 12-permit pod the guard is consulted on every request, refuses nothing ever, and a
     reviewer reading `values.yaml` sees a per-actor limit that does not exist.
     """

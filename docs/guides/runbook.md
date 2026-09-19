@@ -1931,8 +1931,10 @@ the newer generation wrote in a shape the older one cannot read.
 
 ## (xii) A caller is being refused (429 / 413), or should be and is not
 
-Three bounds sit in front of the app, at three levels, because none of them can be enforced from
-inside it (D-2026-08-01-a-cheap-request-is-still-a-request).
+Several bounds sit in front of the app, at different levels, because most of them cannot be enforced
+from inside it (D-2026-08-01-a-cheap-request-is-still-a-request). A count is not written here: the
+one that was said three while four refusals were documented below it, and the per-actor turn cap
+made it five. Read the headings.
 
 **429, `Retry-After: N`.** The per-principal request budget. It is a token bucket:
 `CHEMCLAW_SERVICE_RATE_LIMIT_PER_MINUTE` is the sustained refill and `..._BURST` is what one caller
@@ -1948,6 +1950,34 @@ Two properties worth knowing before you tune it:
 - **The probes are exempt by construction.** `/healthz`, `/readyz` and `/metrics` do not depend on
   `require_principal`, which is the only place the budget is spent. If a probe ever starts getting
   429s, the gate has been moved somewhere it should not be.
+
+**429, `Retry-After: N`, on `POST /sessions/{id}/messages` only — and this is a *different* refusal
+with the same shape.** The per-actor concurrent-turn cap
+(`D-2026-09-19-a-pod-wide-cap-is-not-a-fair-one`). It answers when one principal already holds
+`CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS_PER_ACTOR` turns *in flight* on this process, so it is a
+count of simultaneous turns rather than a rate, and the request budget above can be wide open while
+this fires. **The counter is `chemclaw_turns_refused_actor_cap_total`**, not
+`chemclaw_requests_rate_limited_total` — reading the wrong one is the likeliest way to spend an
+afternoon here, because the header and the status are identical.
+
+- **Read it beside `chemclaw_turns_shed_total`.** Rising alone means the guard is doing its job:
+  one chemist wanted more than their share and everyone else was unaffected. Rising *together* means
+  the pod is genuinely full as well, and the per-actor cap is not why anyone is waiting.
+- **`chemclaw_turn_actor_capacity` reading 0 means the guard is off**, which is the code default.
+  A deployment that meant to enable it and did not looks exactly like one where nobody has hit the
+  cap, and that gauge is the only thing that tells the two apart from a scrape.
+- **It is inert under the shared dev principal.** With `CHEMCLAW_ENTRA_REQUIRED=false` every caller
+  is one oid, so "per actor" would mean "per pod" and one client would refuse everyone; the guard
+  skips itself rather than invert. A deployment fronting the API with a single service credential
+  for many humans has the same problem and no such escape — the cap has nothing to divide there.
+- **It is not in the access log's 429 population alone.** The refusal logs at INFO naming the
+  principal, above the durable claim and the admission permit, so a refused retry costs no permit,
+  no turn slot and no Postgres claim. `Retry-After` is a jittered *cadence* (built from
+  `CHEMCLAW_SERVICE_TURN_ADMISSION_TIMEOUT_SECONDS`), not an estimate of when the caller's own turn
+  will end — that is bounded by `CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS` and can be minutes.
+- **A chemist reporting "it says my budget is exhausted" is a client-side misclassification**, not
+  this cap: `Chemclaw3_ui` renders a 429 *without* `Retry-After` as a terminal `budget_exhausted`.
+  If you see that, something between the pod and the browser is stripping the header.
 
 **413.** The request body exceeded `CHEMCLAW_SERVICE_MAX_REQUEST_BYTES`, refused before anything
 read it. If a chemist reports that an attachment *at* the documented size is rejected, check that

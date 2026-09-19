@@ -201,10 +201,13 @@ def test_a_double_submit_to_one_session_is_still_409_not_429(monkeypatch: Any) -
 def test_the_actor_cap_is_off_in_code() -> None:
     """0 is the code default, and `chemclaw.cli.live_storm` is the concrete reason.
 
-    That instrument drives 48 concurrent turns from one credential to measure this cap's own
-    shedding curve; an on-by-default per-actor cap converts those sheds into 429s and breaks the
+    That instrument's family A sweeps the *admission* cap end to end, driving 48 concurrent turns
+    from one credential at each value; an on-by-default per-actor cap converts those sheds into
+    429s and breaks the
     one tool that validates admission control. The chart carries the production posture instead
-    (D-142/REV-16), which `tests/test_helm_chart.py` holds.
+    (D-142/REV-16), which `tests/test_deploy_chart.py` holds, and which
+    `core/config/__init__.py` refuses outright at startup when it is not strictly below the pod
+    cap.
     """
     from chemclaw.core.config.service import ServiceSettings
 
@@ -281,11 +284,135 @@ def test_the_refusal_carries_retry_after_because_the_client_splits_429_on_it(
             refused = await client.post(f"/sessions/{second}/messages", json={"message": "hi"})
 
             assert refused.status_code == 429
-            assert refused.headers["retry-after"] == "5", (
-                "the hint must be the configured admission timeout, not a number invented here"
+            hint = int(refused.headers["retry-after"])
+            # Jittered over one interval, so refused clients do not re-converge on one cadence and
+            # arrive together at the pod that just refused them. Never 0, which would mean "retry
+            # immediately" and turn the hint into a spin.
+            assert 1 <= hint <= 10, f"hint {hint} is outside base..2x base for a 5s admission wait"
+
+            # Derived from the setting rather than written here: move the setting, move the hint.
+            monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 30.0)
+            third = (await client.post("/sessions")).json()["session_id"]
+            again = await client.post(f"/sessions/{third}/messages", json={"message": "hi"})
+            assert again.status_code == 429
+            assert int(again.headers["retry-after"]) > 10, (
+                "the hint is a literal, not the configured admission wait"
             )
 
             agent.release.set()
+            await _drain(held)
+
+    asyncio.run(_run())
+
+
+def test_the_refusal_actually_increments_its_counter(monkeypatch: Any) -> None:
+    """Delete the increment and this goes red; nothing else in the suite did.
+
+    The shipped dashboard panel reads `chemclaw_turns_refused_actor_cap_total` against
+    `chemclaw_turns_shed_total`, and its own description says a flat zero has to be
+    distinguishable from "the cap is off". Asserting only that the counter is *declared* — which is
+    what this file did first — leaves the panel reading zero for ever if the call site is dropped,
+    which is the one failure a metric cannot report about itself.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    monkeypatch.setattr(settings, "service_max_concurrent_turns_per_actor", 1)
+    agent = _ParkedTurn()
+
+    async def _run() -> None:
+        app = _app(agent, owner_store=_FakeOwnerStore())
+        async with asgi_client(app) as client:
+            before = METRICS.value("chemclaw_turns_refused_actor_cap_total")
+            held = await _hold_turns(app, client, ALICE, 1)
+
+            _as(app, ALICE)
+            second = (await client.post("/sessions")).json()["session_id"]
+            assert (
+                await client.post(f"/sessions/{second}/messages", json={"message": "hi"})
+            ).status_code == 429
+
+            after = METRICS.value("chemclaw_turns_refused_actor_cap_total")
+            assert after == before + 1, "the refusal did not reach its counter"
+
+            agent.release.set()
+            await _drain(held)
+
+    asyncio.run(_run())
+
+
+def test_a_reservation_that_never_starts_its_lease_ages_out_of_the_actor_count() -> None:
+    """The half of the expiry argument that was false until it was driven.
+
+    `TurnLease.actor`'s docstring justifies deriving the count from the lease map because a lease
+    expires and a counter does not. That is true of a *started* lease and was not true of a
+    reservation: `_claim_turn_slot` stamps `deadline=math.inf` and only `post_message`'s `finally`
+    ends it, so a handler parked on one of the reservation phase's three store round trips — none
+    of which carries a statement timeout — held the slot with no expiry at all. Inherited by the
+    per-actor count, one wedged store call refused that chemist on *every* session until the pod
+    restarted, which is exactly the brick the design claims to avoid.
+
+    So an un-started reservation ages from `claimed_at`, at the width `_start_turn_lease` would
+    have stamped. The session's own 409 keeps reading `deadline` and is deliberately unchanged.
+    """
+    from chemclaw.api.state import _actor_turns_in_flight, _claim_turn_slot
+
+    active: dict[str, Any] = {}
+    assert _claim_turn_slot(active, "s1", actor="alice") is not None
+    assert active["s1"].deadline == float("inf"), "the reservation is still the 409's to own"
+    assert _actor_turns_in_flight(active, "alice", besides="other") == 1
+
+    # Age the reservation past the widest a live turn could hold it, leaving `deadline` inf.
+    stale = active["s1"]
+    width = settings.service_turn_timeout_seconds + settings.service_turn_admission_timeout_seconds
+    active["s1"] = type(stale)(
+        token=stale.token,
+        deadline=float("inf"),
+        actor="alice",
+        claimed_at=stale.claimed_at - width - 1.0,
+    )
+    assert _actor_turns_in_flight(active, "alice", besides="other") == 0, (
+        "a parked reservation still holds this actor's slot; one wedged store call bricks them"
+    )
+    assert "s1" in active, "the session's own 409 must be unaffected by the actor count's view"
+
+
+def test_the_cap_is_inert_under_the_shared_dev_principal(monkeypatch: Any) -> None:
+    """With one oid for everybody, "per actor" would mean "per pod" — so the guard stands down.
+
+    `entra_required=False` hands every caller the same `Principal`, which is exactly the shape this
+    cap must not act on: it would stop dividing the replica between chemists and start capping the
+    replica itself at this number, so the first client to reach it would refuse every other client.
+    That is the starvation the guard exists to prevent, inverted, and the configuration is
+    reachable — `service_allow_insecure` permits it, and a deployment fronting the API with one
+    service credential for many humans has the same shape with no such switch.
+
+    Driven rather than reasoned: this was found by `tests/test_detach.py`, which serves a real
+    uvicorn under the dev principal and went red the moment the guard learned to stand down.
+    """
+    from chemclaw.api.auth import _DEV_PRINCIPAL_OID
+
+    monkeypatch.setattr(settings, "service_max_concurrent_turns_per_actor", 1)
+    shared = Principal(oid=_DEV_PRINCIPAL_OID, upn="dev@localhost", roles=frozenset())
+    agent = _ParkedTurn()
+
+    async def _run() -> None:
+        app = _app(agent, owner_store=_FakeOwnerStore())
+        async with asgi_client(app) as client:
+            held = await _hold_turns(app, client, shared, 1)
+
+            _as(app, shared)
+            second = (await client.post("/sessions")).json()["session_id"]
+            second_turn = asyncio.create_task(
+                client.post(f"/sessions/{second}/messages", json={"message": "hi"})
+            )
+            async with asyncio.timeout(10):
+                while len(app.state.active_turns) < 2:
+                    await asyncio.sleep(0.01)
+
+            agent.release.set()
+            assert (await second_turn).status_code == 200, (
+                "the cap acted on the shared principal and refused the whole pod"
+            )
             await _drain(held)
 
     asyncio.run(_run())

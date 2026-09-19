@@ -32,10 +32,10 @@ reading holds its permits for the whole run, and needs no malice to do it: a che
 tabs open is the same arithmetic.
 
 **The guard that looks like it should cover this does not reach it.** `api/rate_limit.py` is per
-principal, and the chart sets 120 requests/minute with a burst of 30 — two orders of magnitude above
-twelve concurrent turns. A principal can hold the whole replica while spending twelve requests, so
-the rate limiter never fires. Rate and concurrency are different quantities and only one of them
-was bounded per actor.
+principal, and the chart sets 120 requests/minute with a burst of 30. Rate and concurrency are not
+the same quantity and are not even commensurable: a principal can hold the whole replica while
+spending **twelve requests**, so the limiter never fires on this condition. Only one of the two was
+bounded per actor.
 
 **The tree already ships this guard's twin, one route over.** `api/routes/streams.py` bounds
 concurrent event streams **twice** — per user (`service_max_event_streams_per_user`) and pod-wide
@@ -69,6 +69,22 @@ pod restarted — a permanent 429 for one human, reachable by a flaky mobile net
 guard meant to protect them. Reading the lease inherits the expiry, the identity-checked release and
 the existing sweep, and adds no second synchronisation primitive to a module whose last two defects
 were both races.
+
+**That inheritance was half true as first written, and an adversarial review of this change proved
+the other half.** A lease expires in the *streaming* phase and does not expire in the *reservation*
+phase: `_claim_turn_slot` stamps `deadline=math.inf` and only `post_message`'s `finally` ends it,
+which covers an exception and a cancellation but not a handler **parked** on an await. Three store
+round trips run inside that window — the title write, the budget check, the durable claim — and
+none carries a statement timeout, so one wedged connection held the slot with no expiry at all.
+Driven, with the owner store parked on the title write, the actor was still refused after 7.5× the
+widest lease that configuration can stamp. The session's own 409 accepts that case deliberately (a
+wedged store is an outage either way, and that guard's correctness rests on the `finally` being the
+only ending); the per-actor cap inherited it silently and turned it into a lockout of one chemist
+across *every* session — the exact brick the paragraph above claims the design avoids. So
+`TurnLease` carries `claimed_at`, and `_still_holding` ages an un-started reservation at the width
+`_start_turn_lease` would have stamped. It can only ever expire a reservation later than the lease
+it is about to become, so the count stays conservative in the direction that protects other
+chemists rather than the one that bricks this one. The session guard is untouched.
 
 `_start_turn_lease` carries `actor` across its restamp. That call runs at the hand-off, so dropping
 the field would leave every lease anonymous from the moment a turn actually streams: the cap would
@@ -123,8 +139,9 @@ guards answering one event in opposite directions is the design.
 The permit rations concurrent demand on the shared model endpoint, and that queue should not be held
 for a reader who left. The per-actor slot rations **one principal's share of this replica**, and a
 detached turn is still spending it — CPU, model tokens and a store connection — until the loop cap
-or `service_turn_timeout_seconds` stops it. `D-2026-09-05-a-lease-is-demand-and-a-permit-is-occupancy`
-already says so for the neighbouring gauge.
+or `service_turn_timeout_seconds` stops it. `src/chemclaw/api/detach.py`'s module docstring
+already says so for the neighbouring gauge — a detached turn keeps its lease and returns its
+permit, which is why `chemclaw_turns_in_flight` counts leases and can exceed the permit count.
 
 More sharply: releasing here would hand the cap straight back to the attack it exists to stop. Each
 POST-and-hang-up would free both the permit and the actor's slot while leaving a pump running for
@@ -136,9 +153,9 @@ change "tidies up" the inconsistency.
 
 ### Off in code, on in the chart
 
-0 disables. The code default is not doctrine here but a measurement: `chemclaw.cli.live_storm`
-drives tens of concurrent turns **from one credential**, and its family A exists to measure this
-very cap's shedding curve. An on-by-default per-actor cap converts those sheds into 429s and breaks
+0 disables. The code default is not doctrine here but a measurement: `chemclaw.cli.live_storm`'s
+family A sweeps the **admission** cap end to end, driving 48 concurrent turns **from one
+credential** at each value. An on-by-default per-actor cap converts those sheds into 429s and breaks
 the one instrument that validates admission control. Same split `budget_enabled` and
 `service_rate_limit_per_minute` already take (D-142/REV-16).
 
@@ -203,6 +220,10 @@ the per-process half is binding and the fleet-wide half is missing.
   — the header, and that its value is the configured admission timeout rather than a literal.
 - `tests/test_detach.py::test_a_detached_turn_still_holds_its_actors_slot` — §3, in both directions:
   the permit came back and the slot did not.
+- `tests/test_turn_fairness.py::test_a_reservation_that_never_starts_its_lease_ages_out_of_the_actor_count`
+  — the reservation-phase expiry the first draft of this ADR got wrong.
+- `tests/test_turn_fairness.py::test_the_refusal_actually_increments_its_counter` — the call site,
+  which nothing else asserted while the dashboard read the series.
 - `tests/test_stream_contract.py::test_an_expired_lease_does_not_hold_an_actors_slot`,
   `::test_a_turns_own_session_is_not_counted_against_its_actor`,
   `::test_a_maintenance_hold_is_not_a_turn` — §1's expiry, `besides=`, and `actor=None`.
