@@ -2,449 +2,158 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project status
+## What this system is, today
 
-Phases 0–5b of the plan are **implemented and CHECKMATE-reviewed**: toolchain + config,
-the agent+Temporal spine, fast calculators (xTB/pKa/solubility) with the Postgres
-calculation cache (the calculators themselves have since moved to `Chemclaw3-mcp`; the cache and
-the ledger stayed), BoFire BO campaigns, the knowledge graph, the eval/metric
-layer, ECFP4/DRFP fingerprint search, ELN ingestion, the memory layers, and the report
-harness.
+**This section states what is true. It does not say how it got that way** — that is
+`docs/decisions/`, 680 ADRs with an index, and it used to be 444 lines here, 56% of this file. That
+changelog was 44% of the words and carried most of the falsifiable surface: audited, its load-bearing
+figures were *mostly wrong*, including a spend cap it called "ships at 0" after two raises, a tool
+count whose base had moved under the subtraction it was making, and a bolded headline saying no
+specialist team ships 68 lines above a bolded headline saying one does
+(`D-2026-09-19-a-refusal-that-cannot-expire-is-not-a-decision`). **No figure appears in this section.** Where a
+number matters, the symbol that holds it is named instead, and `tests/test_claude_md_figures.py`
+is what keeps a new one from creeping back.
 
-The **foundation build F0–F7** (the real target stack: OpenShift + an internal
-OpenAI-compatible LLM, Entra identity system-wide) is **implemented for everything verifiable
-offline**, each phase ADR'd (D-039…D-050) and green under `make lint type test`:
+**Layers.** Four, never merged (`ARCHITECTURE.md` maps every directory):
 
-- **F0** LLM provider seam (generic credential, not Entra) · **F1** the plan/execute harness ·
-  **F2** FastAPI+SSE front door · **F3** durable Postgres sessions + job→session push-back.
-- **F4** Entra identity/RBAC: front-door OIDC, one authorization gate, `require_actor` reject-if-absent
-  core rule, Temporal-mTLS. (Workload-identity federation, OBO and the HPC identity bridge were
-  built and never wired to anything; D-2026-08-15 deleted all three — 254 LOC whose only callers
-  were their own tests. Re-adding one is a new decision, and the ADRs that designed them stand.)
-- **F5** was the real Nextflow (Seqera/Tower) launcher behind the QM activities. **It is gone**
-  along with the whole HPC/DFT tier — see the section below.
-- **F6** OpenShift delivery: one rootless image, Helm chart, CI, the plain-secret set `values.yaml`
-  declares and `tests/test_helm_chart.py` pins, Temporal self-hosted.
-- **F7** the generic `DataSource` seam (`chemclaw.ingest.sources`) — ELN re-hosted unchanged; a new source is one
-  `ingest/sources/<name>/datasource.yaml` folder plus its name in `CHEMCLAW_DATA_SOURCES`, with **zero**
-  core edits (D-120). The first live connector — a warehouse ELN — went one step further
-  (D-2026-08-04-the-schema-is-a-file): `chemclaw.ingest.eln.warehouse` is a generic engine naming no
-  table and no column, and the site's schema is a *binding* in the manifest, because a schema nobody
-  can see yet cannot be written into Python. Both halves ship, proven against a fake driver; only the
-  tenant is missing. **The database it attaches to is as free as the schema**
-  (D-2026-08-26-the-driver-s-signature-is-the-schema): a `connection:` block is the driver's *own*
-  keyword arguments, checked against its signature offline, so a lakehouse, a Postgres, a DuckDB
-  export and a vector database need no shared model to be their union — the Snowflake driver that
-  model was shaped around never had a tenant and is deleted, the first integration is **Pistachio on
-  Databricks**, and `vector_store_provider` takes a `module:callable` on the same terms.
-  The same argument then carried a **mounted SMB/CIFS file share**
-  (`chemclaw.ingest.documents`, D-2026-08-06): the share's folder tree is a binding, the share is
-  *mounted* rather than called (no client, no credential, no egress), its documents are indexed as
-  cited evidence rather than PR-gated notes, and its AD group becomes an entitlement in the one role
-  set every gate already reads.
+1. **LangGraph** — conversation orchestration, one compiled graph per turn over `create_agent`
+   (`agent/langgraph_agent.py`), with a Postgres checkpointer (`agent/checkpointer.py`) on its own
+   autocommit pool. Per turn, because LangGraph binds tools at construction and a connector session
+   belongs to one turn.
+2. **Temporal** — durable execution of long or expensive work: the semiempirical calculations and
+   BoFire BO. Queues: `background-jobs` plus one derived `connector-<name>` per bundle that owns
+   durable work. A persisted result is never recomputed (D-011); `cached_compute` single-flights
+   concurrent misses on one key *in one process*, and the cross-process half is a `DEFERRED.md` row.
+3. **Agent Skills** (`SKILL.md`) — judgment, loaded on demand.
+4. **Markdown knowledge graph in Git** — what we know. `kg/record.py` is the one write path, and its
+   order is load-bearing: dependencies, then the subject, then the retirements, so a note never
+   appears in the graph before what it cites.
 
-**Layer 1 was then rebuilt on LangGraph** (D-2026-08-10, phases M0–M13), replacing the Microsoft
-Agent Framework everything above was first built on. The case was never capability — it was that
-four pieces of this tree existed only to work around framework defects, and two of those defects
-were *silent*: one agent leased per concurrent turn, because the Anthropic client kept streaming
-tool-call identity on the client instance (8/8 concurrent turns failed on a shared client, 0/8 on
-per-turn ones), and a history-persistence flag whose consequence was that **harness mode never
-worked** while every unit test passed. What stands in their place: `agent/langgraph_agent.py`
-builds a compiled graph over `create_agent` — per turn, because LangGraph binds tools at
-construction and a connector session belongs to exactly one turn; turn state lives in a Postgres
-checkpointer (`agent/checkpointer.py`) on its own autocommit pool instead of being hand-built;
-the tool chain is `@wrap_tool_call` middlewares in the old nesting order over the *same*
-extracted decision functions, so an authorization refusal or an audit row cannot depend on which
-engine ran — how many there are is `len(tool_call_middleware(...))`, not a word here, because this
-sentence said "seven" over a chain of ten and `langgraph_agent.py` had already deleted its own count
-for that reason; skills come from `deepagents.SkillsMiddleware` over a backend narrowed by the same
-three predicates (`agent/skill_backend.py` — the gate had to move to the backend because deepagents
-publishes skill *paths* into the prompt); the plan is `TodoListMiddleware`'s todo list, which the
-gate (`agent/plan_gate.py`) reads as it stands at that instant; the runaway cap is a first-party
-`before_model` counter over `ChemclawState.model_calls` (`agent/loop_cap.py`), so the number that
-enforces the limit and the number that records it are the same number — upstream's
-`ModelCallLimitMiddleware` was tried in that slot and reverted, for the reason the M14 paragraph
-below gives.
+Durability lives **only** in Temporal, never in layer 1's own stores — stricter since the
+checkpointer arrived, because the checkpointer holds turn state and every long job is still
+Temporal's.
 
-**There is no specialist team and no challenge panel** (D-2026-08-15). Both shipped off, stayed off
-in every configuration, and were deleted with the routing measurement built to decide whether the
-first should ever be turned on — 1,442 lines of agent code, ~400 of eval machinery, 1,506 lines of
-tests, seven settings and three metric series, none of it reachable. The delegation question was
-never settled and this corpus could not settle it: D-2026-08-12 measured **2 of 15**, D-2026-08-13's
-reframing measured **14/15 against 14/15** with the old arm already at ceiling, and two of the
-fifteen probes span two specialists so the accuracy figure had an unpassable floor before any model
-was involved. Neither number was a deployment's rate.
+**The tool chain** is `@wrap_tool_call` middlewares over extracted decision functions, so an
+authorization refusal or an audit row cannot depend on which engine ran. How many there are is
+`len(tool_call_middleware(...))`. Skills come from `deepagents.SkillsMiddleware` over a backend
+narrowed by three predicates (`agent/skill_backend.py`) — the gate is in the backend because
+deepagents publishes skill *paths* into the prompt. The plan is `TodoListMiddleware`'s todo list,
+read by `agent/plan_gate.py` as it stands at that instant. The runaway cap is a first-party
+`before_model` counter over `ChemclawState.model_calls` (`agent/loop_cap.py`).
 
-`reject_widening` went with it, deliberately: a guard with no caller, kept alive by a test that
-calls it directly, is the `map_to_hpc_identity` shape — a claim that a control exists. The invariant
-is not lost, because an invariant is not a function. `D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor`
-is merged and states the rule, and it binds whoever re-adds subagents. So does the constraint that
-outlives all of this: deepagents builds a bare `SubAgent` dict with *only* `spec["middleware"]`, so
-anything not compiled by `build_langgraph_agent` runs with no audit trail, no authz and no plan
-gate — silently.
+**`ModelCallLimitMiddleware` is unsafe to compose with any middleware that jumps from
+`after_model`**, which is the general rule left by trying it and reverting: upstream counts in
+`after_model`, so a jumping middleware short-circuits the count, and its `exit_behavior="end"`
+fabricates an assistant message the CLI, the report and the persisted thread all read.
 
-**There is, however, at least one subagent on every turn, and this file used to omit it**
-(`D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller`). `SubAgentMiddleware` is in
-`create_deep_agent`'s `_REQUIRED_MIDDLEWARE` and `_apply_excluded_middleware` *raises* rather than
-let a profile strip it, so `task` ships whether or not this deployment wants helpers and the only
-decidable thing is what it reaches: `agent/subagents.py` claims upstream's `general-purpose` name —
-the one suppression that is a string comparison rather than a registry lookup that fails open on a
-model swap — so the roster is a graph `build_langgraph_agent` compiled, carrying the whole chain.
-Reading the deletion paragraph above as "no delegation" is therefore wrong in the direction that
-matters, and it stayed wrong long enough for the helper's surface to drift from its description:
-the `task` tool said isolation and parallel reading while the helper held its caller's **54**
-in-process tools, nine `run_*` launchers and `record_knowledge_note` among them. The unnamed helper
-now holds **21** of them — its caller's set minus `authz.side_effecting_tools()` (derived from the partition
-that already exists, so a bundle added next year is out of reach the day it is enabled) and minus
-`ask_clarifying_question`, which changes nothing and still writes a question onto the *chemist's*
-stream from a context the chemist cannot see. **The compiled helper graph binds 27**, because
-`FilesystemMiddleware` supplies six file verbs that `tool_names` does not reach — they write to the
-helper's own scratch space and it is handed no store, so they reach nothing that outlives it. Both
-numbers are here because this paragraph shipped saying 54 and 24 in one subtraction that does not
-work: the first is in-process, the second is bound, and a narrowing argued across two bases is the
-defect `_bound_tools` was written to end one section below. **Both digits then went stale the way
-every digit in this file does** — a mutation review measured 21 and 27 where the paragraph said 18
-and 24, and the 18 had been written *in* the commit that shipped the roster and was already wrong at
-the next merge. They are corrected rather than deleted because the paragraph's subject is the two
-*bases*, not their values; what makes the relation checkable is
-`tests/test_subagents.py`, which asserts the strict-subset inequality rather than either number. `AgentProfile.model_route` names a key in
-`model_routes` — a key, never a model id, which would be a site's model name in git — so
-`CHEMCLAW_MODEL_ROUTES='{"helper": "…"}'` makes delegated reading cheaper with no code change.
-**The delegation question is still open**: the corpus that was supposed to settle it measured
-delegation *rate* over one-tool probes, which is a mediator rather than an outcome and gave
-isolation no mechanism to appear.
+**Delegation.** `task` ships on every turn whether or not a deployment wants it —
+`SubAgentMiddleware` is in `create_deep_agent`'s `_REQUIRED_MIDDLEWARE` and `_apply_excluded_middleware`
+*raises* rather than let a profile strip it. So the only decidable thing is what a helper reaches.
+**A helper is an attenuation, not a new actor** (`D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor`):
+its surface is *what its caller holds ∩ what the profile names − `authz.side_effecting_tools()`*, on
+both the in-process and the connector half, plus `ask_clarifying_question`, which would write onto a
+chemist's stream from a context the chemist cannot see. `tests/test_subagents.py` asserts the strict
+subset rather than either count. A named roster ships and is **on by default**
+(`agent_helper_roster`, profiles in `data/profiles/`); what a name varies is only its instructions
+and its model route, both of which carry no authority, and selection is the model's ordinary tool
+call. Adding a profile is a file, not a decision. A helper shares the connector sessions its caller
+already opened and opens none of its own. Its report is **defanged, not framed** — it is this
+system's own paraphrase, and `agent/tool_result_shape.py` is the one function both result-rewriting
+middlewares go through, because `task` returns a `Command` rather than a `ToolMessage`.
 
-**And a helper reaches the connectors, since
-`D-2026-09-15-a-helper-shares-the-session-its-caller-already-opened` drove a bound that had been
-restated twice and run never.** It was two claims. The first — *two concurrent readers of one MCP
-tool object deadlock* — is **false** for this shape: over one `HeldConnectorSession`, four
-concurrent 1.88 s `pyexec` calls finish in **1.99 s** fully overlapped, 32 fast `props` calls in
-348 ms, zero errors, and a call that fails mid-flight beside another damages neither it nor the
-session. The second — misattribution in the connector's log — does not reach a helper, because
-`core/call_identity.py` binds the headers from the ambient context when the *session* opens and a
-helper is the same actor, session and correlation id. The lifecycle argument that replaced them in
-D-2026-08-29 survives and never applied: it forbids a helper opening sessions of its **own**, and
-the caller's are already open when the roster is compiled, so sharing them costs **zero** extra
-sockets. What a helper holds is now its caller's set minus `side_effecting_tools()` on *both*
-halves — `helper_profile` for the in-process one, `helper_connectors` for the connector one, one
-switch applying both. Its prefix grew and needs no second ceiling: a strict subset plus a smaller
-prompt is an inequality, which `tests/test_context_floor.py` asserts rather than a number restates.
-**A third claim went with them** — *nothing counts how often `task` is called*, given here and in
-two merged records as why the roster question could not be settled. It was false when it was
-written: `task` is an ordinary tool in the caller's `ToolNode`, so
-`chemclaw_tool_calls_total{tool="task"}` has always moved.
+**The constraint that binds whoever adds delegation**: deepagents builds a bare `SubAgent` dict with
+*only* `spec["middleware"]`, so anything not compiled by `build_langgraph_agent` runs with **no audit
+trail, no authorization and no plan gate — silently.** What is still open is whether delegation pays:
+`evals/delegation.py` has never run against a model, and the corpus that was meant to settle it
+measured delegation *rate* over one-tool probes, which is a mediator rather than an outcome.
 
-**A specialist roster now ships**
-(`D-2026-09-16-a-roster-varies-the-two-dimensions-that-carry-no-authority`), and the sentence that
-stood here — "no specialist roster ships … it stays unbuilt for the reason `agent/subagents.py`
-gives" — recorded that the missing thing was a *reason* rather than a design.
-`CHEMCLAW_AGENT_HELPER_ROSTER` names agent profiles, and a rostered helper's surface is *what its
-caller holds ∩ what the profile names − everything that acts*, on both halves, so the attenuation
-invariant holds by arithmetic and `D-2026-08-12`'s widening lever is **not** taken. What a name
-varies is the two dimensions that carry no authority: its instructions and its model route.
-Selection is the model's ordinary tool call, so a chemist picks no profile to get it. Which three
-names ship is a measurement — after the acting tools are subtracted, `reporting` keeps 3 of 8 and
-`property-lookup` 1 of 5, because their job *is* writing — and an entry that would bind nothing in a
-given deployment is not offered at all. Each entry's description carries a written purpose plus the
-tool list its *compiled* helper binds, which is what makes `D-2026-08-12`'s identical-menu defect
-unrepeatable. **It settles nothing about whether delegation pays**: what arrived is a product
-requirement, not evidence, and `evals/delegation.py` has still never run against a model.
+**Context and cost.** Compaction is `agent/compaction.py` — upstream's `ClearToolUsesEdit` for tool
+results and a first-party conversation window, both non-destructive inside `wrap_model_call`, with
+`chemclaw_context_compactions_total` making it checkable. The budgets are **billed**-token budgets,
+converted by a ratio `agent/context_budget.py` measures from the provider's own `input_tokens` and
+clamps so it can only tighten, and they charge the request's own prefix unconditionally — so
+`agent_context_token_budget` bounds **request** spend, not thread spend. Read the arithmetic in
+`core/config/agent.py` — both defaults are *derived* from `tests/test_context_floor.PREFIX_BOUND` plus the thread allowances `tests/test_compaction.py` holds, and the derivation is the thing to
+read, never the result. The prefix floor is `tests/test_context_floor.py`: `CEILINGS["__default__"]` is the live ceiling, `PREFIX_BOUND` adds
+`SERVED_ELSEWHERE_ALLOWANCE` for the bundles this repository does not serve and cannot watch, and the fixture must bind
+connectors or it measures a smaller system than a turn runs. A turn's spend is bounded by `agent/spend_cap.py`,
+counted in a `TurnTotal` channel so a fan-out shares one budget; `api/budget.py` meters around a
+turn and cannot see inside one. Deferring connector tool schemas is designed and deliberately
+unbuilt.
 
-**The isolation it rests on is real, and measuring it found what a helper's report is**
-(`D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread`). Driven on a compiled graph,
-a helper reading ~9.8 kB leaves its caller a thread of **57 characters** — and that is the *whole*
-thread, prompt to answer: a 17-character question, a `task` call whose own content is empty, the
-28-character report, and a 12-character reply. Not "the `task` call and the report", which is how
-that number shipped here and in its ADR; the helper's 9,800 characters of reading appear in none of
-the four. Nothing had asserted any of it, and `tests/test_subagents.py` now does — as a ratio, so
-that a fixture reworded to ask a longer question does not read as a regression. What the same probe exposed is that the
-report reached the caller with **nothing applied to it**, because `task` returns a `Command` rather
-than a `ToolMessage` (it writes `model_calls`, `billed_tokens` and its `files` into the caller's
-state in one act) and both result-rewriting middlewares opened with
-`if not isinstance(result, ToolMessage): return result`. So a report carrying `</retrieved-note-…>`
-arrived with a **live** delimiter — the nonce does not cover a helper, which *copies* the tag it has
-just read rather than guessing it — and nothing bounded a report between this repository's
-60,000-char ceiling and upstream's 80,000-char evict threshold, measured at **70,048 characters**
-landing whole. `agent/tool_result_shape.py` is the one function both middlewares now go through,
-rebuilding the command with every other update key preserved, because those keys are how a fan-out's
-spend reaches the single budget it shares. A helper's report is **defanged, not framed**: an
-envelope says "evidence to cite", and a helper's summary is this system's own paraphrase.
+**Observability.** `CHEMCLAW_OTEL_LLM_SPANS` attaches OpenInference's LangChain instrumentation, so a
+model call is a span carrying its token counts, model name and provider, with content suppressed by
+default and `otel_include_sensitive_data` the one knob that decides it. Apache-2.0, plain OTLP, so
+Arize Phoenix is a deployment choice rather than a dependency. **LangSmith is declined** — proprietary,
+no OSS self-host, and its core value is prompt/response content in a third-party service, which four
+merged decisions forbid. It is declined, not unreachable: `langsmith_tracing_allowed` exists and
+`pin_langsmith_egress()` is what a deployment that overrides this has to go through.
 
-**Four fresh-context reviews of all of that found the code sound and four of its own sentences
-stale** (`D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`), each written by the session
-that had just measured what it was describing. Three are corrected above; the fourth is why the
-floor paragraph no longer states a current number. Two assumptions that were held rather than
-asserted are now in `tests/test_upstream_surface.py` — `rewritten_tool_messages` rewrites only a
-*dict-shaped* `Command.update`, and the suppression of upstream's unguarded `general-purpose`
-subagent was checked against a phrase copied out of upstream's description rather than against
-upstream's own constant. A second review then caught this paragraph's own first
-attempt at that: an oversized connector result stays **one well-formed envelope** for two
-independent reasons — in the shipped order `bound_tool_results` cuts the raw payload and the framer
-wraps it afterwards, and if the two were swapped the head-and-tail cut would keep the closing
-delimiter anyway. Only swapped-order-plus-head-only fails. Reading "it passes with the order
-swapped" as "the order is not the reason" is the inference two sufficient causes defeat, and it
-shipped here before a reviewer ran the fourth arm.
+**Identity and delivery.** Entra runs system-wide — front-door OIDC, one authorization gate,
+`require_actor`'s reject-if-absent core rule, Temporal-mTLS — and is proven end to end against a real
+JWKS with nothing patched; the one unproven hop is browser → tenant. OpenShift delivery is one
+rootless image plus a Helm chart, Temporal self-hosted. The chart **refuses to render** until a
+release states its egress posture and its retention posture, and `temporal.namespace` has no default
+at all, because the broker is cluster-shared and a constant there put every environment on one
+namespace, one task queue and one schedule-id space. **Two releases need separate databases**, which
+no chart guard can check.
 
-**That sweep missed one, and 2026-08-26 finished it**
-(`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`): `audit_events.agent` was
-empty on **every row that trail has ever written**, because `set_current_specialist` had no caller
-in `src/` and `record_handoff` had none anywhere — while three docstrings said in the present tense
-that the trail names the agent beside the human. The contextvar trio, `record_handoff` and
-`HandoffSignal` are gone; the column, `HandoffEvent` and the D-2026-08-10 rule stay, and an
-*absence* test now fails whoever re-adds the claim without a producer.
+**Seams.** A connector is a directory with a `connector.yaml` (D-118); a data source is
+`ingest/sources/<name>/datasource.yaml` plus its name in `CHEMCLAW_DATA_SOURCES`, with zero core
+edits (D-120); a result sink is the third (`publish/`, schema in `schema/result-store/`, off until
+`CHEMCLAW_RESULT_SINKS` names one) — a connector *produces*, a source *supplies*, a sink *consumes
+what the system produced*. A warehouse ELN's schema and its database are both bindings in the
+manifest: a `connection:` block is the driver's own keyword arguments, checked against its signature
+offline. A mounted SMB/CIFS share is a source too — mounted rather than called, so no client, no
+credential, no egress, and its AD group is an entitlement in the one role set every gate reads.
 
-An audit against LangChain's own **deep-agents** pillars (D-2026-08-11-a-policy-nobody-can-see…)
-then found five of six sound and each narrowing already argued for — and the sixth, *context
-management*, gone. D-025's compaction lived in the removed framework, and what survived it was the
-appearance of the policy: three settings with no reader, a config comment in the present tense, and
-a sentence in the system prompt telling the model its context was compacted while the whole thread
-was replayed every turn. `agent/compaction.py` is that policy again (upstream's `ClearToolUsesEdit`
-for tool results, a first-party conversation window, both non-destructive inside `wrap_model_call`),
-and `chemclaw_context_compactions_total` is what makes it checkable rather than believed. The same
-sweep put the LangGraph checkpoint tables into `durable/retention.py` — pruned by *thread*, because
-`parent_checkpoint_id` chains them — and gave the CLI the checkpointer two of its docstrings already
-described. **LangSmith is declined** (D-2026-08-11-the-observability-gap…): it is proprietary with no
-OSS self-host, and its core value is prompt/response content in a third-party service, which four
-merged decisions forbid. The trace half of what it was wanted for is now first-party
-(D-2026-08-11-a-model-call-is-a-span…): `CHEMCLAW_OTEL_LLM_SPANS` attaches OpenInference's LangChain
-instrumentation, so a **model call is a span** carrying its token counts, model name and provider —
-closing the two regressions the framework removal left — with content suppressed by default and
-`otel_include_sensitive_data` restored as the one knob that decides it. The instrumentation is
-Apache-2.0 and speaks plain OTLP, so **Arize Phoenix is a deployment choice rather than a
-dependency**; what stays open is AG-13's eval surface, which wants that backend actually run.
+**There is no HPC tier and no DFT.** Every calculation is semiempirical — GFN2-xTB through tblite,
+and CREST — and runs in its own pod (`Chemclaw3-mcp`'s `servers/calc`, `CHEMCLAW_CALC_SERVER_URL`),
+never on a cluster. **When a decision turns on a difference inside GFN2-xTB's error bar, say so and
+propose an experiment — there is no tier to escalate to.**
 
-**That compaction policy was sound and its arithmetic was not**
-(`D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget`, eight measured defects). The estimator
-is chars/4, which measures **1.04x** on the static prefix and **0.45x** on a connector JSON result
-— so a thread believed to be at its 100,000 budget billed 223,750. Upstream's `keep` counts tool
-*results* rather than steps, so with 8 parallel calls allowed and 2 results kept, a five-way fan-out
-past the trigger lost **three of its five** to a placeholder reading "Earlier tool result" before
-the model had read them. Nothing capped a single result, so two calls inside their own ceilings
-made a ~245,000-token request with both edits reclaiming nothing — and that turn moved **neither**
-compaction counter, while `core/metrics.py` documented a flat zero as "never over budget". Now: the
-configured budgets are **billed**-token budgets, converted by a ratio `agent/context_budget.py`
-measures from the provider's own `input_tokens` and clamps so it can only tighten; the newest
-tool-call batch is never cleared and clearing stops at the trigger; `agent/tool_result_size.py`
-bounds one result head-and-tail with a notice that names itself as system text; `turn_costs`
-records whether the policy acted; and `chemclaw_connector_tool_schema_tokens` measures the half of
-the prefix `tests/test_context_floor.py` cannot ratchet, because an endpoint tool's schema comes
-from a server this repository does not build.
+**Knowledge is written directly and corrected, not pre-approved**
+(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). The PR-gate is gone and so is every module
+behind it; there is no path in this tree that opens a pull request, and a rule phrased as "a human
+opens the proposal" is describing a mechanism that no longer exists. The axis is whether a thing
+changes what the agent *does*: knowledge does not, so it lands in `knowledge/` carrying
+`created_by: agent`, readable beside its own citations. What makes that safe is provenance on every
+retrieved chunk, the citations a chemist checks at the point of use, and contradiction
+(`memory/failure.py`'s `contradicts`, `kg/conflicts.py`, `memory/supersede.py`, bi-temporal
+`valid_to`). **A skill is the opposite case** and is refused outright in both tiers: no agent path
+writes a `SKILL.md` (`agent/skill_backend.SkillsReadOnlyRefusal`). The shared tree changes only
+through a reviewed commit to `skills/`; a chemist keeps their own through `POST /skills/mine`, where
+what makes it safe is blast radius rather than review — the namespace closes over one actor. A turn
+reads either tier and writes neither. **No Temporal Schedule mines knowledge on a timer**: the
+campaign, playbook and optimization miners run on demand.
 
-**One line of that arithmetic was wrong for a whole class of deployment, and
-`D-2026-09-04-a-budget-that-excludes-the-prefix-is-not-a-budget` changed what a budget *means* to
-fix it**, revisiting `D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget` on purpose.
-`effective_trigger` subtracted the request's own prefix — instructions, the skills listing and every
-bound tool schema — only `if window:`, and `llm_context_window_tokens` defaulted to 0 with no
-value anywhere in `deploy/`, `infra/` or `.env.example`. So in every shipped configuration ~43,175 estimated tokens
-left on every model call charged against nothing: measured end to end, a thread the policy cut to
-its 90,030-token budget went out as a **137,301-token request at a 128k model** with
-`chemclaw_context_unreducible_total` flat. The prefix is now charged unconditionally, which makes
-`agent_context_token_budget` a bound on **request** spend rather than on *thread* spend — the same
-thread cuts to 45,015 and the request to 92,286 — and makes that counter meaningful without a
-declared window: probed at the shipped budget, a thread the policy cannot reduce far enough ticks it
-**1** where the old arithmetic read **0**. `llm_context_window_tokens` is now a second bound rather
-than the only real one. **What it costs is stated because it is a real behavioural change**: every
-deployment's thread allowance falls by the prefix, 43% of the shipped budget, and
-`agent_tool_result_clear_trigger` shipped at 30,000, *below* the prefix, which floors the trigger at
-1 — clear every reclaimable tool result on every model call. That floor is reported at WARNING
-rather than returned silently. **The same commit then took the decision this paragraph shipped
-calling open**: the default was set to 73,500, above the prefix, so the shipped configuration is not
-floored and `tests/test_compaction.py` asserts *that*. Three present-tense sentences — the two in
-`agent/context_budget.py` and this one — went on saying 30,000 and "an open decision", falsified by
-their own diff, which is `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` happening inside
-the commit that wrote it down.
+**An ELN transcription is data, not a claim**, so it is readable the moment it is ingested:
+`record_from_ord_reaction` infers nothing and hands a reviewer nothing to decide.
 
-**Both of those numbers were charged against a ratchet that could not see a third of what it was
-bounding** (`D-2026-09-05-a-ratchet-that-re-derives-half-its-basis-bounds-half-a-request`). The
-budget paragraph above rests on `tests/test_context_floor.py`'s ceiling, and that file observes its
-tool half off the compiled graph's `ToolNode` while *re-deriving* its prose half as
-`instructions_for(profile)` plus `_skills_listing(...)` — which is not the system message the model
-is sent. So the ratchet measured 43,063 where the request carried 43,521, and the real prefix was
-**already 21 tokens over the 43,500 ceiling** with every assertion green. The whole gap is one thing
-the re-derivation cannot reach: the wrapper deepagents puts *around* the listing. `_observed_prefix`
-now invokes the graph against a capturing model and takes the `SystemMessage` off the wire, so the
-total is observed and the three prompt lines merely *split* it; lengthening upstream's own skills
-prompt moves the floor and can fail the ratchet, which it could not before. The ceiling went to **44,500**
-and `agent_tool_result_clear_trigger` to **74,500**, still ceiling-plus-30,000 — both superseded
-within the day by the paragraph below, which found the ceiling was measuring a graph with no
-connector bound. That test's own
-docstring already said it — *"a basis that is re-derived rather than observed will agree with itself
-forever"* — and it was true of one half and the defect in the other, which is the same sentence
-being right about somebody else and blind about itself.
+**Code execution.** There is no local shell and no `Bash` tool — `agent/scratchpad.py` withholds
+deepagents' `execute` and `delete` verbs. That is not a rule against code execution: `pyexec` is a
+sandboxed MCP server in the sibling fleet, reachable by naming it in a deployment's connector set,
+and a turn runs Python through it. Propose a *local* exec path and it is refused; propose a second
+sandboxed one and it is an ordinary connector question. There is no `WebSearch`/`WebFetch`, and that
+one is the no-egress posture, which holds.
 
-**An audit against the Claude Agent SDK then added three guards and designed a fourth**
-(`D-2026-08-29-an-iteration-cap-is-not-a-cost-cap`). Most of that SDK's surface is already here and
-narrower — its file memory against `memory/`'s knowledge-graph tiers, its allow/deny/ask modes
-against the authorization chain, its skills against the role-narrowed backend — and two features
-stay declined for reasons already on record (a `Bash` tool, `scratchpad.py` withholds `execute`;
-`WebSearch`/`WebFetch`, the no-egress posture). What was genuinely missing: **nothing bounded a
-turn's *spend*.** The audit's own first finding was half wrong in the reassuring direction —
-`api/budget.py` does meter tokens, but `check()` runs before a turn and `record()` after it, so a
-single turn's runaway is exactly what neither half can see, and that module's docstring carries the
-belief that leaves the hole ("one turn cannot loop forever" — it cannot *loop*; it can *spend*).
-`agent/spend_cap.py` is the ceiling: enforced in `before_model` (D-2026-08-15's skippability),
-counted in a `TurnTotal` channel so a fan-out shares one budget instead of getting one each, metered
-in `wrap_model_call` because only the response carries the bill — and the first probe of that write
-went straight into `tests/test_state_channels.py`'s failure, a channel `ChemclawState` did not
-declare, dropped in silence. It ships at 0. Beside it: `agent/session_fork.py` branches a thread as
-a whole-thread SQL copy (every checkpoint PK leads with `thread_id`; the tip alone loses shared
-`checkpoint_blobs` versions, and a fork without `session_messages` rows is invisible to
-`GET /sessions`), and `AgentProfile.effort` reaches both providers through one `reasoning_effort`
-kwarg — the per-provider translation everyone expects turned out not to exist to write.
-**The fourth is designed and deliberately unbuilt**
-(`D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`): deferring connector tool schemas.
-Measuring for it found the prefix is **33,310 tokens over 56 bound tools**, re-sent every model
-call and uncached on the shipped `openai_compatible` stack — and that
-`tests/test_context_floor.py`, the ratchet that exists to bound this, counted **7,799 fewer** than
-the model was sent, because `@tool` is identity so it measured raw callables rather than the bound
-objects, and never saw the seven `FilesystemMiddleware`/`SubAgentMiddleware` tools at all.
-**That second half is closed.** `_bound_tools` now reads the surface off the compiled graph's
-`ToolNode` — so any future tool source lands in the count the moment it is bound — and every
-ceiling was re-baselined in one commit: on 2026-08-29 `default` measured **42,505** where the old
-basis reported 34,379, six tools turned out to have been over `MAX_SINGLE_TOOL_TOKENS` all along,
-and **nothing was added**. The number grew because the measurement got honest, not because the
-surface did.
+**Shapes upstream never promised.** Six places read one; `tests/test_upstream_surface.py` asserts
+every one in a single file, each naming the module that would break, two of them asserting an
+*absence* so upstream fixing something turns the workaround red. `session_store.message_from_row` is
+the one function allowed to turn a `session_messages` row back into a message, and the shape stamp
+has exactly one definition (`agent/message_migration.py`).
 
-**Those are figures about a commit, and this file no longer claims a current one.** The floor moves
-whenever any bound tool's schema changes, which is a thing other branches do: measured four days
-later it was 42,549 — drifted by a merge that touched a tool-schema module, with no line of this
-paragraph's subject rewritten. Twice now a session has re-transcribed these numbers to correct them
-and been stale again within a merge, which is the same argument this file already makes about
-counting `make` targets and skipped tests: **the live number is whatever `tests/test_context_floor.py`
-measures, and the ceiling it ratchets against is the only figure worth reading here — which is
-`CEILINGS["__default__"]` in that same file, and not a digit transcribed here.** This sentence
-shipped naming one, 65,000, and a later commit raised the ceiling without touching this line — the
-paragraph that opens "this file no longer claims a current one" claiming a stale one, which is the
-argument it is making happening to itself. The deferral itself stands.
+**Not in this system, and each absence is a decision rather than a gap**: a specialist *router* and a
+challenge panel, `reject_widening`, workload-identity federation, OBO, the HPC identity bridge, the
+audit hash chain, the Nextflow/Seqera launcher, `compute_dft_energy`. Re-adding any is a new
+decision, and the ADRs that designed them stand.
 
-**That ceiling then moved again, by 20,500 in one commit, and nothing was added**
-(`D-2026-09-05-a-ratchet-that-binds-no-connectors-measures-a-smaller-system`). The ratchet called
-`build_langgraph_agent` without the `connectors=` argument that function accepts, so it measured 61
-tools where a shipped turn binds 113 — its docstring's claim that reading the `ToolNode` is why it
-cannot drift was true of the *method* and false of the *fixture*, which is the paragraph above
-happening a third time. Measured both ways in one commit: 43,179 with the argument omitted, 64,099
-with it passed. **The real shipped prefix is the ratchet's ceiling plus what the sibling
-fleet serves**, and neither half is a number this file may hold: the second comes from bundles
-served out of `Chemclaw3-mcp`, which this repository does not build and cannot watch, so it goes
-stale on somebody else's merge schedule. It went stale that way inside a day — the figure written
-here moved by 326 tokens on a `Raises:` paragraph merged next door between the measurement and the
-commit recording it. `SERVED_ELSEWHERE` names the bundles, `SERVED_ELSEWHERE_ALLOWANCE` is the bound
-this repository holds them to, and
-`test_the_allowance_for_the_bundles_this_ratchet_cannot_serve_is_still_a_bound` runs the sibling's
-own servers against it — skipping, with the reason in the message, where there is no sibling
-checkout, because a check that quietly shrinks is worse than one that says what it did not look at.
-**That sentence described a control that had never run anywhere**
-(`D-2026-09-07-a-claim-about-another-repository-is-checked-by-reading-it`): the ratchet searched one
-path in one casing under one variable while `infra/live/siblings.sh` — merged the same day, its own
-header describing this bug being fixed — searched four under two, so on the container this
-repository provisions the live lanes resolved the fleet and the test skipped. One resolution now,
-the shell's, asked by `tests/siblings.py` rather than copied into it; a skip is counted by
-`tests/conftest.py::_report_sibling_skips`, which two sentences in that ratchet already claimed
-existed and did not; and what the fleet declares is compared against what this tree declares by
-`tests/test_sibling_manifest_agreement.py`, down to the `calc` seam's hardcoded tool names, which
-no manifest covers in either direction.
+**Live edges** — the things that need a real broker or cluster — are in `docs/planning/BACKLOG.md`.
 
-Its first consequence is that the compaction defaults
-were derived against the smaller prefix, so `agent_tool_result_clear_trigger` was floored at 1 while
-two places asserted it was not; the trigger is re-derived as `PREFIX_BOUND` plus the thread
-allowance it has always intended, and the assertion now measures the prefix with connectors bound.
-The budget went the *other* way in the same review: the same upwards derivation from
-`PREFIX_BOUND` permitted a maximal request no 128k model accepts, so `agent_context_token_budget` is
-derived *downwards* from the window and only checked against the bound. `core/config/agent.py`
-carries both arithmetics and `tests/test_compaction.py` holds them as
-`CLEAR_TRIGGER_THREAD_ALLOWANCE`/`BUDGET_THREAD_ALLOWANCE` — read those, not a figure here.
-
-M13 removed the dependency itself: `agent-framework-*` is out of `pyproject.toml` and the suite is
-green with it uninstalled, which is how that was verified. Taking it out is also what exposed
-readers that only knew the *old* stored message shape — `chemclaw.cli.explain` was rendering every
-current session's audit reconstruction blank — so `session_store.message_from_row` is now the one
-function allowed to turn a `session_messages` row back into a message
-(D-2026-08-11-what-the-removal-found). The retention sweep's deletion guard
-(`agent/message_pairing.py`) reads the same rows to decide what may be deleted, and it now *imports*
-the shape stamp instead of restating it: the stamp has exactly one definition, in
-`agent/message_migration.py`, and `tests/test_message_pairing.py` scans the package for a second.
-
-A later pass (D-2026-08-14-the-coupling-is-the-cost-not-the-line-count) asked what the LangGraph
-stack now does out of the box, and answered it against the installed distributions rather than the
-documentation. The finding worth carrying: **what breaks on a dependency bump is not the volume of
-first-party code but the number of places reading a shape upstream never promised.** Six existed;
-`tests/test_upstream_surface.py` now asserts every one in a single file, each naming the module that
-would break, two of them asserting an *absence* so that upstream fixing something turns the
-workaround red instead of letting it outlive its reason. The same pass moved the runaway cap onto
-`ModelCallLimitMiddleware` and **that half was reverted a day later**
-(`D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`): upstream counts in
-`after_model`, which any middleware jumping from `after_model` runs *before* and short-circuits —
-measured, the challenge gate's revision jump let a cap of 2 run 4 model calls — and its
-`exit_behavior="end"` fabricates an assistant message the CLI, the specialist report and the
-persisted thread all read. The general rule left behind: **`ModelCallLimitMiddleware` is unsafe to
-compose with any middleware that jumps from `after_model`.** What survived is the reduction of
-`ReloadingSkillsMiddleware` to a single `UntrackedValue` channel, deleting a dependency on the
-*arity* LangChain invokes a hook with — with upstream's `PrivateStateAttr` kept, because dropping it
-put the role-narrowed skills listing into the graph's *input* schema where a caller could replace it.
-`tests/test_state_channels.py` now drives a compiled graph for every channel `ChemclawState`
-declares, because all three of that week's defects were a hook writing a channel the graph did not
-have — which LangGraph drops in silence. It also declined three adoptions
-that looked obvious and are not: `ToolErrorMiddleware` and `ToolRetryMiddleware` both trigger on
-raised exceptions and MCP tools never raise, and `plan_state`'s `channel_values` read turned out to
-be public `Checkpoint` API rather than an internal. The same pass **built and reverted** the front door's
-move to `stream_events(version="v3")`: it retires the largest coupling of all — `astream`'s tuple
-arity — and the event contract survived unmodified, but v3 reports token usage only at
-`message-finish`, so a turn abandoned mid-message books **0** tokens where the current driver books
-~30, which makes "drop the connection just before the answer" a free bypass of the token budget.
-A maintenance coupling is the smaller harm; the finding and the restart condition are in the ADR.
-**GxP is no longer a constraint on layer 1** — a conclusion
-`D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks` reached
-independently and carried out, removing the audit hash chain while keeping the trail, the gates and
-the INSERT-only grant. What that leaves open in `docs/planning/BACKLOG.md` is the scope of a
-standing plan approval and `HumanInTheLoopMiddleware` for per-call approval of an irreversible
-action — it stays declined for the plan gate itself. `RubricMiddleware` is **declined** (`D-2026-08-16-a-second-judge-is-a-second-answer-about-the-same-answer`) — it cannot reuse `score_answer`, and a failed grading returns the ungraded answer.
-
-**There is no HPC tier, and there is no DFT** (`D-2026-08-26-semiempirical-is-the-whole-tier`).
-Every calculation this system runs is semiempirical — GFN2-xTB through tblite, and CREST — and it
-runs in its own pod (`Chemclaw3-mcp`'s `servers/calc`, addressed by `CHEMCLAW_CALC_SERVER_URL`) on
-OpenShift or Databricks, never on a cluster. The `qm` connector bundle, the `hpc` config section and
-its fourteen `hpc_*` settings, the Seqera/Tower launcher, the mock launcher in `Chemclaw3_mock`, the chart's
-`connectors.qm` entry and `hpcApiToken` secret, and `compute_dft_energy` itself are all deleted —
-not deferred. Three things were deliberately kept and each says why in the ADR: the `dft` *backfill*
-projector (`calculation_results` is never pruned, so a deployment still holds rows the removed
-bundle stamped), the parent-ceiling invariant rewritten against `xtb_job_timeout_seconds` (the CREST
-search is the longest activity now), and `job-result` back in core's `KNOWN_NOTE_TYPES` because no
-bundle mints it any more. **When a decision turns on a difference inside GFN2-xTB's error bar, say
-so and propose an experiment — there is no tier to escalate to.**
-
-**Live edges remain open** (need a real Temporal broker / OpenShift cluster): live cluster durability
-+ `helm`/`kubeconform` render. See `docs/planning/BACKLOG.md` for the exact list. Note that the
-render edge has several things to catch: `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`
-makes the chart **refuse to render** until a release states its egress posture, and the retention
-posture is refused the same way. A count is not written here — the live set is whatever
-`tests/test_deploy_chart.py` renders with and `Makefile`'s `helm-validate` passes, and the one that
-was written here said "two" the day a third arrived. That third is **not** a posture with a
-permissive escape hatch: `temporal.namespace` has no default at all, because
-`CHEMCLAW_TEMPORAL_ADDRESS` names a *cluster-shared* broker and the constant it replaced put every
-environment on one namespace, one task queue and one schedule-id space — measured, a peer's `helm
-upgrade` rewrote this release's Schedules and deleted the ones it did not itself plan. Two releases
-need separate **databases** for the same reason, which no chart guard can check. The same ADR derives
-`CHEMCLAW_CONNECTORS_ENABLED` from the `connectors` block (`enabled: false` used to take a bundle's
-pods and leave its tools advertised) and splits `replicas` into `serverReplicas`/`workerReplicas`.
-
-**Identity is no longer one of them** (D-2026-08-20-a-tenant-is-a-jwks-document-and-an-issuer-string).
-A tenant, to a resource server, is a JWKS document and an issuer string, so `Chemclaw3_mock`'s
-`app/entra/` is one: `tests/test_entra_end_to_end.py` runs the production app with
-`entra_required=True` against a real HTTP JWKS with nothing patched, and `make live-up` runs the
-enforced posture end to end. The one hop still unproven is browser → tenant, because MSAL talks to
-`login.microsoftonline.com` and mocking that is mocking a login UI rather than a key set.
-
-**On the design documents below: they are historical, not current.** `docs/reference/architektur.md` is
-pre-implementation design: the connector seam that now carries every tool, job and skill (D-118) is
-retrofitted into it in notes rather than designed into it, so it describes a system that no longer
-exists in its details while remaining right about the four layers. Read it for intent; read
+**The design documents are historical, not current.** `docs/reference/architektur.md` is
+pre-implementation: it is right about the four layers and wrong in its details, and its HPC/SLURM/
+Nextflow and DFT-escalation prose describes a design retracted in full. Read it for intent; read
 `docs/decisions/`, the package READMEs and `docs/guides/runbook.md` for what is true today.
-
-- `docs/reference/architektur.md` — the four-layer architecture (§6 = the real OpenShift/internal-LLM
-  deployment; §7/§8 = Entra durchgängig). Its HPC/SLURM/Nextflow and DFT-escalation prose describes a
-  design that was retracted in full; §6 carries the note saying so.
-- `docs/archive/plans/implementation-plan.md` — the original build order; `docs/archive/plans/implementation-tickets.md` — the
-  F0–F9 ticket backlog with per-phase status.
 
 ## Related repositories
 
@@ -517,7 +226,8 @@ middle one feel safe when nothing checks it:
 - **`src/` is all the code.** Everything beside it is data, configuration or documents.
   (`tests/test_repo_map.py`, `test_no_import_package_sits_beside_data`.)
 - **Capability code lives in a connector bundle or in `science/`, nowhere else.** The rule stands;
-  what it covers shrank. `science/bo` and `science/fingerprints` are still engines — pure
+  what it covers shrank. `science/bo`, `science/fingerprints` and `science/labels` are still
+  engines — pure
   computation, with the bundle as their durable-job and MCP wrapper, a pair rather than a
   duplication. `science/calc` no longer holds an engine at all: after
   `D-2026-08-16-the-physics-leaves-the-cache-stays` it is the cache, the calibration ledger, the
@@ -561,41 +271,11 @@ holds turn state and every long or expensive job is still Temporal's (D-2026-08-
 judgment; **connectors** hold capability (deterministic tools) — MCP is the protocol a connector
 speaks, not the thing that holds the capability (D-110/D-118).
 
-**Knowledge is written directly and corrected, not pre-approved**
-(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). The PR-gate D-005 built — the agent
-proposes, a human decides, over job results, reports and distilled playbooks — is **gone**, and so
-is every module behind it. The axis that replaced it is whether a thing *changes what the agent
-does*: knowledge does not, so it lands in `knowledge/` the moment it is learned, carrying
-`created_by: agent` (D-160) and readable beside its own citations. Three things that already existed
-are what make that safe, and they are the control now: provenance on every retrieved chunk, the
-citations a chemist checks at the point of use, and contradiction — `memory/failure.py`'s
-`contradicts` edge, `kg/conflicts.py`, `memory/supersede.py` and bi-temporal `valid_to`. **A skill
-is the opposite case**, because it is injected into the prompt and reshapes every later answer with
-no citation trail — and what the code does about that is refuse outright: no agent path writes a
-`SKILL.md` (`agent/skill_backend.SkillsReadOnlyRefusal`), so the shared tree changes only through a
-reviewed commit to `skills/`. Said that way deliberately: "an admin reviews it" describes the
-repository's workflow, not a control this system implements, and the two are easy to confuse in
-exactly the direction that overstates what is enforced. **There is a second skills tier now, and
-this paragraph said "a skill" where it meant the shared one**
-(`D-2026-09-18-a-skill-a-chemist-keeps-is-behaviour-they-approved`): a chemist keeps their own
-skills through `POST /skills/mine`, and what makes that safe is not review but blast radius —
-the namespace closes over one actor, so the judgment acts on that person's turns and reaches no
-other, and the same route lists, reads and removes it. The refusal is unchanged on both: a turn
-reads either tier and writes neither, which is the sentence that was always doing the work. See
-`docs/reference/architektur.md` §4, §9, §12 for the layers, and that ADR for what replaced the gate.
-
-`kg/record.py` is the one write path, and the order it writes in is load-bearing now that a reader
-can see a half-written unit: dependencies, then the subject, then the retirements, so a note never
-appears in the graph before what it cites.
-
-**A deterministic transcription is not an assertion, and is not gated**
-(D-2026-08-25-an-eln-transcription-is-data-not-a-claim). An ELN entry becomes a row in
-`reaction_records` — readable the moment it is ingested, queryable by structure, expandable into its
-recipe — because `record_from_ord_reaction` infers nothing and so hands a reviewer nothing to
-decide. Measured, the gate cost 202 ms of serialized git per entry and a corpus scan that wedged the
-sync at ~700k entries, for 4 person-years of clicking per million. The same rule now runs the other
-way too: **no Temporal Schedule opens a pull request.** The campaign/playbook/optimization miners are
-unchanged and still run, on demand rather than hourly, so knowledge never arrives on a timer.
+**Knowledge writes, the two skills tiers and the ELN transcription rule are stated once, above.**
+What belongs here is only where they sit in the layering: knowledge is layer 4 and lands through
+`kg/record.py`; a skill is layer 3 and no turn writes one. See `docs/reference/architektur.md`
+§4, §9, §12 for the layers as originally designed, and
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` for what replaced the gate.
 
 ## Commands
 
@@ -711,6 +391,24 @@ Keep these current; they are the memory across sessions. For recurring patterns,
 **Name the file `D-YYYY-MM-DD-<slug>.md`, today's date plus a slug naming the decision, and add its
 row to `docs/decisions/README.md`.** That is the whole procedure. Nothing to enumerate, nothing to
 reserve, nothing to coordinate with other sessions.
+
+**Two rules about what an ADR is for, because the record became something else**
+(`D-2026-09-19-a-refusal-that-cannot-expire-is-not-a-decision`):
+
+- **A defect fix is a commit and a test, not an ADR.** Measured over the corpus, 60% of these files
+  read as defect reports and 14% weigh an alternative, which is the defining content of a decision.
+  Every one of them lands as a permanent, never-edited document stamped `accepted` whose *title* is
+  a rule, and that is where the volume comes from and where a stale constraint hides. Write the
+  finding in the commit message and the guard in a test. Write an ADR when a **choice between
+  options** is being taken, or when something is being **declined**.
+- **An ADR that declines a class of future work carries `Revisit when:`** — the condition that
+  would make it worth reopening, in the shape `DEFERRED.md`'s "Trigger to revisit" column has
+  always required. Without it a refusal never expires while a deferral does, and a refusal is the
+  stronger word. `tests/test_declines_carry_a_trigger.py` holds it from its cursor forward. That is
+  a bound on the trigger being *written*, not on anyone checking it: `D-092` stated a precise one
+  ("revisit only if a deployment vendors the weight files into the container image at build time"),
+  `D-135` and `ingest/sources/vendored_dataset.py` met it, and the decision stayed closed because
+  nothing watches a condition. Make the trigger executable where you can.
 
 The id is the *whole stem*, not the date — two ADRs on one day is normal here, and an id naming two
 decisions is the failure the ledger exists to prevent.

@@ -90,8 +90,9 @@ class MemorySettings(BaseSettings):
     observation_retire_after_days: int = Field(default=30, ge=0)
     observation_max_results: int = Field(default=10, ge=1)
     # Cadence for the observation lifecycle job (mine, then retire). Daily, because it re-scans
-    # the whole corpus. Promotion is not on this timer — it opens pull requests, so it is started
-    # on demand (D-2026-08-25).
+    # the whole corpus. Promotion is not on this timer — it writes playbook notes nobody asked
+    # for, so it is started on demand (D-2026-08-25; it said "opens pull requests" until
+    # D-2026-09-05 deleted the gate).
     observation_schedule_minutes: float = Field(default=1440.0, gt=0)
     # Fraction of a Schedule's interval used as a deterministic per-job phase offset (gap
     # SCH-3). Two schedules sharing a cadence would otherwise fire together against one background
