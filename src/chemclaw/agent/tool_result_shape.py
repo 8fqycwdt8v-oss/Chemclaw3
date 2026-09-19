@@ -94,28 +94,61 @@ def rewritten_tool_messages(result: Any, rewrite: Callable[[ToolMessage], ToolMe
 _DROPPED_PATH = "/scratch/_files_the_budget_could_not_hold.md"
 
 
-def _dropped_notice(paths: list[str]) -> str:
+def _dropped_head(count: int) -> str:
+    """The part of the dropped-set notice that is a fact rather than a sample.
+
+    Separated from the sample because it is what the caller has to *reserve* room for before it
+    spends anything: the notice is itself an entry in the channel it is explaining, and a bound
+    that forgets its own notice is the defect `bounded_content` fixed one level down by charging
+    its notice against the limit rather than adding it on top.
+
+    The only variable is the count, so its length grows monotonically with it — which is what lets
+    a caller reserve against the number of files that *could* be dropped and be sure the notice for
+    the number actually dropped fits.
+    """
+    return (
+        f"[system] {count} file(s) a helper wrote were **not stored**: this caller's `files` "
+        f"budget (`agent_subagent_files_max_chars`) cannot hold them even as truncation notices. "
+        f"Reading one back will fail."
+    )
+
+
+def _dropped_notice(paths: list[str], budget: int) -> str:
     """The one entry that stands for every file the channel could not represent.
 
-    Names the count and a bounded sample of the paths rather than all of them, or the notice is the
-    unbounded thing. `agent_subagent_files_max_chars` is named so a reader knows which knob moved
-    it, and the text says the files were **not stored** rather than truncated — reading one back
-    fails, which is the outcome this is honest about.
+    **The sample is cut to fit `budget`, and it used to be cut to ten paths.** That bounded the
+    count of the sample and not its length, and a path is not text this system wrote: it is the
+    string a *model* passed to `write_file`. Measured through the shipped middleware at a
+    200,000-character budget, ten dropped paths of 1,000 characters each put the stored total at
+    201,517 — the notice being the unbounded thing this docstring's own previous version said it
+    must not be.
+
+    What it never drops is the count and the fact that reading one back will fail, because those
+    are the two things a caller cannot act correctly without. The sample is the part that is nice
+    to have, so the sample is the part that shrinks.
     """
-    sample = ", ".join(paths[:10])
-    more = f" and {len(paths) - 10} more" if len(paths) > 10 else ""
-    return (
-        f"[system] {len(paths)} file(s) a helper wrote were **not stored**: this caller's `files` "
-        f"budget (`agent_subagent_files_max_chars`) cannot hold them even as truncation notices. "
-        f"Reading one back will fail. Dropped: {sample}{more}."
-    )
+    head = _dropped_head(len(paths))
+    # Reserved at the *widest* form of the "and N more" clause — `len(paths)` bounds that N — for
+    # the same reason `bounded_content` measures its notice at the widest form of its own numbers.
+    used = len(head) + len(" Dropped: ") + len(f" and {len(paths)} more") + len(".")
+    sample: list[str] = []
+    for path in paths:
+        step = len(path) + (2 if sample else 0)
+        if used + step > budget:
+            break
+        sample.append(path)
+        used += step
+    if not sample:
+        return head
+    more = f" and {len(paths) - len(sample)} more" if len(sample) < len(paths) else ""
+    return f"{head} Dropped: {', '.join(sample)}{more}."
 
 
 def rewritten_command_files(
     result: Any,
     rewrite: Callable[[str, int], str],
     existing: Any = None,
-    capacity: int | None = None,
+    budget: int | None = None,
 ) -> Any:
     """Apply `rewrite` to every file a `Command` **changes** in its caller's state.
 
@@ -146,34 +179,48 @@ def rewritten_command_files(
     **A cap on each file's size is not a cap on the command, because the cut has a floor.**
     `bounded_content` never returns less than the notice that says it cut — a bound paid for by
     saying nothing is not what this module is for — so N files each cut to that notice is 44N, and
-    past a crossover the total grows linearly in N again. Driven before `capacity` existed: eight
-    concurrent `task` calls of 600 changed files each landed 206,400 characters against a
-    200,000-character budget, and one call of 5,000 files landed 215,000. The per-file share had
-    already floored, so dividing it further could not help.
+    past a crossover the total grows linearly in N again. Driven before this loop spent a
+    remainder: eight concurrent `task` calls of 600 changed files each landed 206,400 characters
+    against a 200,000-character budget, and one call of 5,000 files landed 215,000. The per-file
+    share had already floored, so dividing it further could not help.
 
-    So the count is capped too. Files past `capacity` are **omitted** rather than stored empty, and
-    one entry at `_DROPPED_PATH` names how many went and why. Omitting is the louder failure of the
-    two: reading a dropped path back fails with "no such file", where an empty one hands a chemist a
-    document that simply stops — the silent cut this module exists to prevent. One notice covers the
-    whole dropped set, which is what keeps the total bounded rather than moving the problem.
+    So the count is bounded too — by the budget running out rather than by a count derived from it.
+    A file the remainder cannot pay for is **omitted** rather than stored empty, and one entry at
+    `_DROPPED_PATH` names how many went and why. Omitting is the louder failure of the two: reading
+    a dropped path back fails with "no such file", where an empty one hands a chemist a document
+    that simply stops — the silent cut this module exists to prevent. One notice covers the whole
+    dropped set, which is what keeps the total bounded rather than moving the problem.
+
+    **A path is charged too, and for a while nothing charged it.** The budget's subject is the
+    caller's `files` channel, and a channel is its keys as much as its values — LangGraph writes
+    the mapping. `agent/tool_result_size._files_already_held` summed `content` and never read a
+    key, this loop divided a budget that had never seen one, and the sweep that was supposed to
+    hold the bound measured the same half. Driven through the shipped middleware at a
+    200,000-character budget, one call of 5,000 changed files landed 191,517 characters of text
+    under 83,370 characters of ordinary `/scratch/w0-4443.md` keys — **274,887 in the channel, 37%
+    over, with no adversary at all** — and since a key is a string the *model* passed to
+    `write_file`, 1,000-character paths took the same command to 4,728,887. So a file's share is
+    reduced by its own key, and a key the remainder cannot pay for is what drops the file.
 
     Skipping them is not merely kinder, it is what the channel does anyway. Upstream's reducer is
     `result[key] = value`, so re-delivering a file whose text is unchanged is a no-op on the
     channel — the bound could only ever have cost bytes, never saved any. What is left to bound is
-    exactly the set of paths whose text differs from what the caller already holds, and `sharing`
-    counts that set, so a helper that changed one file gets the whole remaining budget instead of a
-    share diluted by every document its caller happened to be carrying.
+    exactly the set of paths whose text differs from what the caller already holds, and the loop
+    divides the remainder over that set, so a helper that changed one file gets the whole budget
+    instead of a share diluted by every document its caller happened to be carrying.
 
     Args:
         result: Whatever the tool handler returned.
-        rewrite: Takes one file's text and how many files share the budget, and returns the text to
-            store. Returning the same string is how a rewrite declines to change anything.
+        rewrite: Takes one file's text and how many characters this file may occupy, and returns
+            the text to store. Returning the same string is how a rewrite declines to change
+            anything — which the loop relies on, since identity is how it tells a cut from a pass.
         existing: The caller's `files` before this command lands. Files whose text it already holds
             unchanged are passed through untouched. `None` bounds every file, which is the old
             behaviour and is kept only for a caller that has no state to compare against.
-        capacity: How many changed files the remaining budget can represent *at all*. `None` keeps
-            every one, which is right for a caller with no budget to spend. See the paragraph
-            below for why a cap on the count is needed beside the cap on each file's size.
+        budget: How many characters this command may add to the caller's `files` channel, keys
+            and text together. `None` bounds nothing and passes 0 as every share, which is how
+            `agent_subagent_files_max_chars = 0` switches the cap off — `bounded_content` treats a
+            non-positive limit as no cap, so the off switch has one spelling rather than two.
 
     Returns:
         The same shape, with its changed files rewritten.
@@ -195,35 +242,45 @@ def rewritten_command_files(
         before = held.get(path)
         return isinstance(before, dict) and before.get("content") == content
 
-    sharing = sum(
-        1
+    changed_paths = [
+        path
         for path, data in files.items()
         if isinstance(data, dict)
         and isinstance(data.get("content"), str)
         and not _is_unchanged(path, str(data["content"]))
-    )
+    ]
+    # Room for the one entry that names a dropped set, taken off the top before anything is spent.
+    # `_dropped_head`'s only variable is the count and its length grows with it, so reserving
+    # against every changed file is enough for the notice about however many actually went.
+    reserve = 0 if budget is None else len(_DROPPED_PATH) + len(_dropped_head(len(changed_paths)))
+    remaining = None if budget is None else max(budget - reserve, 0)
+    left = len(changed_paths)
     rewritten: dict[str, Any] = {}
     changed = False
-    kept = 0
     dropped: list[str] = []
-    # The share is computed over what will actually be stored, not over what arrived: dividing the
-    # budget by files this command is about to drop would shrink every kept file for nothing.
-    storable = sharing if capacity is None else min(sharing, capacity)
     for path, data in files.items():
         content = data.get("content") if isinstance(data, dict) else None
         if not isinstance(content, str) or _is_unchanged(path, content):
             rewritten[path] = data
             continue
-        if capacity is not None and kept >= capacity:
+        # The share is what is left divided by the files still to come, less this file's own key.
+        # Dividing the *remainder* rather than the budget is what makes the bound exact: a file
+        # that came in under its share hands what it did not spend to the ones after it, and a
+        # file that floored has already been charged in full.
+        share = 0 if remaining is None else max(remaining // max(left, 1) - len(path), 1)
+        left -= 1
+        bounded = rewrite(content, share)
+        if remaining is not None and len(path) + len(bounded) > remaining:
             dropped.append(path)
             changed = True
             continue
-        kept += 1
-        bounded = rewrite(content, storable)
+        if remaining is not None:
+            remaining -= len(path) + len(bounded)
         rewritten[path] = data if bounded is content else {**data, "content": bounded}
         changed = changed or bounded is not content
     if dropped:
-        rewritten[_DROPPED_PATH] = create_file_data(_dropped_notice(dropped))
+        room = reserve - len(_DROPPED_PATH) + (remaining or 0)
+        rewritten[_DROPPED_PATH] = create_file_data(_dropped_notice(dropped, room))
         logger.warning(
             "dropped %d file(s) a helper wrote: the caller's `files` budget cannot represent them "
             "even as truncation notices, so %s names the set rather than storing each one empty",
