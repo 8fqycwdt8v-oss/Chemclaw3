@@ -287,8 +287,13 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	@# shipped covering three of six; `secrets.create` and `mcpFace.route.enabled` were rendered by
 	@# nothing in `tests/`, this file or `.github/`. The two `--set`s after `alertmanager.enabled`
 	@# are its prerequisites, not extra coverage: that template refuses to render with no receivers.
+	@# `mcpFace.ingressNamespaces` is the same kind of prerequisite for `mcpFace.route.enabled`, and
+	@# it was added *by* this render failing: publishing the face with an empty peer list renders a
+	@# Route to an address the chart's own `mcp-face-ingress` policy drops, which the template now
+	@# refuses. That refusal landing here first is the union arm working — it is the only thing in
+	@# the tree that had ever set that switch.
 	@set -e; \
-	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set documentShare.enabled=true --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall"; do \
+	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set-json mcpFace.ingressNamespaces=[{\"network.openshift.io/policy-group\":\"ingress\"}] --set documentShare.enabled=true --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall"; do \
 	    helm template chemclaw deploy/helm/chemclaw \
 	      --set networkPolicy.allowAnyDestination=true \
 	      --set retention.unboundedGrowthAccepted=true \

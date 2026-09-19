@@ -919,7 +919,7 @@ def test_a_minted_handoff_tool_name_carries_only_what_a_tool_name_may_carry(stem
     on a turn nobody touched.
 
     The pattern is written out here rather than imported from `agent/handoff.py`, for
-    `tests/test_identity_contract.py`'s reason one repository over: a test that imports the constant
+    `Chemclaw3-mcp/tests/test_identity_contract.py`'s reason: a test that imports the constant
     it is checking agrees with it however wrong it is.
     """
     import re

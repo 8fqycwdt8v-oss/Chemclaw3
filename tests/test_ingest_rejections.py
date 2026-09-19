@@ -996,15 +996,20 @@ async def test_the_reader_says_how_many_refusals_it_did_not_show() -> None:
     source = "test-many-matches"
     await _clear(source)
     await _clear(LEDGER_SOURCE)
-    # A nonce in the reason, so this assertion counts *these* rows: matching deliberately
-    # spans sources, and a shared schema carries other tests' refusals.
+    # A nonce in the reason *and in the query*, so this assertion counts only these rows. The
+    # nonce alone was not enough: matching deliberately spans sources and the whole suite shares
+    # one schema, so the ordinary words of a natural-language question ("record", "run") matched a
+    # thirteenth row another module had refused, and this assertion read `13 == 12` on CI while
+    # passing on every subset run locally. The query is the nonce for that reason — what this test
+    # is about is that `total_matching` reports the true count rather than the truncated list's
+    # length, and nothing about that needs the question to be a sentence.
     nonce = "plateaux77713"
     await record_refusals(
         source,
         {f"plate-{index:02d}-well": f"{nonce}: yield_percent exceeds 100" for index in range(12)},
     )
 
-    found = await refusals_matching(f"why is there no record of the {nonce} run")
+    found = await refusals_matching(nonce)
     assert len(found.rejections) == rejections._MAX_MATCHES
     assert found.total_matching == 12
     assert found.truncated
