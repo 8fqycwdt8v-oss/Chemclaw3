@@ -557,7 +557,39 @@ async def bound_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any
         rewritten_tool_messages(result, _bounded),
         _bounded_for_this_command,
         (getattr(request, "state", None) or {}).get("files"),
+        _representable_files(request),
     )
+
+
+def _representable_files(request: Any) -> int | None:
+    """How many changed files this command's share of the budget can hold *at all*.
+
+    **The cap on the count that the cap on each file's size is not.** `bounded_content` floors at
+    the notice saying it cut, so N files each at that floor is 44N and the superstep total grows
+    linearly in N again past a crossover — measured, eight concurrent calls of 600 changed files
+    landed 206,400 characters against a 200,000-character budget. Dividing the share further cannot
+    help, because it had already floored; what is left is to store fewer files and say so once.
+
+    Derived rather than declared: the floor is whatever `bounded_content`'s brief notice measures,
+    so a reworded notice moves this and no constant here goes stale. Divided by `batch_siblings`
+    for the same reason the share is — the siblings in this superstep spend the same channel and
+    each reads the same pre-batch snapshot.
+
+    `None` when the budget is off (`agent_subagent_files_max_chars == 0`), which is the documented
+    way to switch this whole cap off and must not become a cap of zero files.
+
+    Args:
+        request: The tool-call request, whose state carries the caller's channels.
+
+    Returns:
+        The number of changed files that may be stored, at least 1, or `None` when uncapped.
+    """
+    budget = settings.agent_subagent_files_max_chars
+    if budget <= 0:
+        return None
+    remaining = max(budget - _files_already_held(request), 0)
+    floor = max(len(_brief_notice(remaining or 1)), 1)
+    return max(remaining // (floor * batch_siblings(request)), 1)
 
 
 def _files_already_held(request: Any) -> int:

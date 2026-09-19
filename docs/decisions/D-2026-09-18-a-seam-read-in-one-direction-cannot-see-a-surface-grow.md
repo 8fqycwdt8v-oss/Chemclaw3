@@ -114,5 +114,8 @@ private data structure inside a generic walker, so it is a backlog row rather th
   the derived test cannot express.
 - `tests/test_sibling_manifest_agreement.py::test_the_calc_seam_calls_only_tools_the_fleet_records_serving`
   — the other direction, unchanged, and still the only place an unresolvable tool expression fails.
-- `tests/conftest.py::_report_sibling_skips` — all four are opt-in on a fleet checkout, so "green"
-  and "ran" stay different statements.
+- `tests/conftest.py::_report_sibling_skips` — every sibling-reading check is opt-in on a fleet
+  checkout, so "green" and "ran" stay different statements. (Amended 2026-09-19: this read "all
+  four", which resolved to no set — the section lists three tests plus this reporter, which is not
+  itself opt-in, while the file holds five `_sibling_or_skip()`-gated tests. A count, not the
+  decision, so it is corrected here rather than superseded.)
