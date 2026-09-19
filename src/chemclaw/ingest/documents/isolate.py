@@ -80,16 +80,24 @@ test must drive `parse_document` directly, which is where that behaviour belongs
 import logging
 import multiprocessing as mp
 import os
+import resource
 import signal
 import threading
 import time
 from multiprocessing.connection import Connection
 from multiprocessing.context import ForkServerContext
 from multiprocessing.process import BaseProcess
+from pathlib import Path
 from typing import cast
 
+from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
-from chemclaw.ingest.documents.parse import DocumentParseError, ParsedDocument, parse_document
+from chemclaw.ingest.documents.parse import (
+    DocumentParseError,
+    ParsedDocument,
+    parse_document,
+    too_large_to_read,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +150,61 @@ class ParseWorkerLost(DocumentParseError):
     """
 
 
+def _anonymous_bytes() -> int | None:
+    """This process's private anonymous memory, which is what `RLIMIT_DATA` counts.
+
+    Returns:
+        `VmData` in bytes, or None where there is no `/proc` to read it from.
+    """
+    try:
+        status = Path("/proc/self/status").read_text()
+    except OSError:
+        return None
+    for line in status.splitlines():
+        if line.startswith("VmData:"):
+            return int(line.split()[1]) * 1024
+    return None
+
+
+def _bound_allocations(budget: int) -> None:
+    """Cap what this parse may allocate, so an unbounded document is a refusal not an OOMKill.
+
+    **This is the only bound in the unit that kills the pod.** Every ceiling upstream of here is a
+    number read out of the archive — the bytes on the wire, a binding's `max_file_bytes`, the
+    declared expansion `_refuse_a_bomb` sums. Measured over a real memory cgroup, three independent
+    reasons none of them predicts the cost: one wide code point anywhere widens a whole
+    document-wide join by 2× or 4×, a shared string is stored once and read N times, and
+    `python-docx` builds an lxml DOM out of the markup rather than out of the text. A kernel ceiling
+    on the process that does the allocating needs a model of none of that, and it covers a parser
+    added after this was written —
+    `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse` has the tables.
+
+    `RLIMIT_DATA` rather than `RLIMIT_AS`: since Linux 4.7 it covers the heap *and* private
+    anonymous mappings, which is what a parse spends, and it leaves the file-backed mappings this
+    child inherited — libpython, libxml2, the parsers — out of the sum. The baseline is read rather
+    than assumed, because a `forkserver` child starts with the whole preload list already resident
+    and a budget charged against zero would refuse the first document it saw.
+
+    What an exhausted budget looks like from outside is a refusal, by one of two routes: CPython
+    raises `MemoryError`, which `parse_document` names; or a C parser reports its own allocation
+    failure, which arrives as the same broad `DocumentParseError` an unreadable file does. Either
+    way the caller is told the document could not be read, which is more than an OOM-killed pod
+    tells anybody, and every other turn on the replica is still being served.
+
+    Args:
+        budget: Bytes this process may allocate beyond what it already holds.
+    """
+    base = _anonymous_bytes()
+    if base is None:
+        # Not Linux, so there is no `/proc/self/status` to read a baseline from and no shipped
+        # deployment either. Said out loud rather than passed over: the parse runs unbounded here.
+        logger.warning(
+            "no /proc/self/status to size a parse budget against; this parse is not memory-bounded"
+        )
+        return
+    resource.setrlimit(resource.RLIMIT_DATA, (base + budget, base + budget))
+
+
 def _parse_into(
     connection: "Connection[object]", name: str, raw: bytes, declared: str | None
 ) -> None:
@@ -178,9 +241,19 @@ def _parse_into(
             os.setsid()
         except OSError:  # pragma: no cover - only reachable if the child already leads a group
             logger.debug("parse child could not lead its own process group; kills stay per-pid")
+        # Before a byte is read, and in this process rather than in the parent: a limit set on the
+        # front door would bound the front door, which is the thing being protected.
+        _bound_allocations(settings.document_parse_memory_bytes)
         connection.send(("parsed", parse_document(name, raw, declared)))
     except DocumentParseError as exc:
         connection.send(("refused", exc))
+    # Outside `parse_document`'s own arm on purpose: this one is the *pickling* of a document that
+    # parsed, which is a second full copy of the text and is deliberately inside the same budget.
+    # Driven, a 7.2 M-character `.docx` extracted fine and then exhausted the ceiling on the pipe,
+    # and before this arm existed the caller was told only that the reader "stopped without
+    # answering" — the one refusal in this module whose cause is knowable, arriving nameless.
+    except MemoryError:
+        connection.send(("refused", too_large_to_read(name)))
     # Broad on purpose: this is the child's last act, and an exception that escapes here dies with
     # it, leaving the parent an EOF it can only report as "stopped without answering".
     except BaseException as exc:
