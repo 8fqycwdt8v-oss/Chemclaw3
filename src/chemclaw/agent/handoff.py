@@ -93,7 +93,7 @@ logger = logging.getLogger(__name__)
 
 #: The prefix every handoff tool's name carries. One definition, because three places compare
 #: against it — the factory that mints the names, the turn graph that must not offer a peer a tool
-#: pointing at itself, and `tests/test_handoff.py`, which asserts a helper holds none of them.
+#: pointing at itself, and `tests/test_turn_graph.py`, which asserts a helper holds none of them.
 HANDOFF_PREFIX = "transfer_to_"
 
 #: What the receiving agent is told, appended to its own instructions by `agent/turn_graph.py`.
