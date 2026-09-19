@@ -13,7 +13,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, computed_field
 
-from chemclaw.agent.framing import defang
+from chemclaw.agent.tool_framing import defanged_payload
 from chemclaw.core.tool_registry import tool
 from chemclaw.ingest.commitments.store import mirror_freshness, outstanding
 
@@ -128,14 +128,22 @@ async def review_commitments(
         total_outstanding=page.total_outstanding,
         limit_applied=page.limit_applied,
         commitments=[
-            {
-                **row.model_dump(mode="json", exclude={"title", "owner"}),
-                # `title` and `owner` are free text from a system this one does not control, and
-                # they reach the model exactly as a retrieved chunk does. The identifiers beside
-                # them are keys and bounded vocabularies, so only these two need it.
-                "title": defang(row.title),
-                "owner": defang(row.owner),
-            }
+            # **The whole row, not two fields of it, and the carve-out's justification was false.**
+            # This defanged `title` and `owner` on the stated ground that "the identifiers beside
+            # them are keys and bounded vocabularies". Measured against `ingest/commitments/models.
+            # Commitment`: only `kind` and `state` are `Literal`s. `source`, `external_id`,
+            # `parent_id`, `note_ids`, `job_ids` and `compounds` are unvalidated `str`/`list[str]`
+            # filled by a site-supplied `CommitmentAdapter` from a portfolio export this system does
+            # not control — the same trust position as `title`, which *was* defanged. Driven, a live
+            # closing delimiter in any of the five reached the model unescaped.
+            #
+            # `defanged_payload` rather than five more `defang(...)` entries, for the reason
+            # `protocol_design_tools._readable` uses it: a field added to that model next year is
+            # covered without this line being remembered, and a `Literal` or a datetime has no
+            # delimiter to spell so escaping it costs nothing. It was the one field-level omission
+            # left after this wave closed the identical gap in `graph_tools`, `pending_tools`,
+            # `memory_tools`, `research_tools` and `durable_tools`.
+            defanged_payload(row.model_dump(mode="json"))
             for row in page.commitments
         ],
     )

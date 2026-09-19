@@ -284,22 +284,41 @@ _CARRIED_CHANNELS = ("model_calls", "billed_tokens", "handoffs")
 
 
 def _carry_forward(carry: dict[str, Any], payload: Any) -> None:
-    """Record this update's per-turn counters, so a resume continues them instead of restarting.
+    """Record this superstep's per-turn counters, so a resume continues them instead of restarting.
 
-    **The highest value wins rather than the latest**, because these arrive from every node of a
-    fan-out and `TurnTotal` folds concurrent writes additively — a later update from a helper that
-    started earlier would otherwise walk the count backwards and hand the resume a larger
-    allowance than the turn has left. A cap may bind one call early; it must never bind late.
+    **This folds the superstep the way `TurnTotal` does, and taking the highest value did not.**
+    One `updates` payload is a whole superstep — node name onto that node's own update — and every
+    channel here is a `TurnTotal`, whose `update` sums `max(value - base, 0)` over the writers with
+    `base` the *pre-superstep* value. A `max` over the same writers therefore keeps one branch's
+    advance and discards the rest.
+
+    On an ordinary turn the two agree, because there is one writer per superstep; on a fan-out they
+    do not. Driven at a cap of 4 over 8 helpers: the turn spent 25 calls and 25,000 tokens, and the
+    carry a resume would have been seeded with was `{"model_calls": 4, "billed_tokens": 4000}` — 21
+    calls and 21,000 tokens of fresh allowance, on a turn that had already exhausted its budget.
+    That is precisely what the previous docstring said this must never do ("a cap may bind one call
+    early; it must never bind late"); the `max` is the right guard against a *late-arriving smaller*
+    update and the wrong aggregation against an additive reducer, and both properties are kept here
+    by summing the advances rather than the values.
+
+    `base` is the carry as it stood before this superstep, which is the same number `TurnTotal`
+    sees,
+    so a writer that reports less than the turn has already counted contributes 0 rather than
+    walking the count backwards.
     """
     if not isinstance(payload, dict):
         return
-    for update in payload.values():
-        if not isinstance(update, dict):
-            continue
-        for channel in _CARRIED_CHANNELS:
+    for channel in _CARRIED_CHANNELS:
+        base = int(carry.get(channel, 0))
+        advanced = 0
+        for update in payload.values():
+            if not isinstance(update, dict):
+                continue
             value = update.get(channel)
             if isinstance(value, int) and not isinstance(value, bool):
-                carry[channel] = max(carry.get(channel, 0), value)
+                advanced += max(value - base, 0)
+        if advanced:
+            carry[channel] = base + advanced
 
 
 def _custom_event(payload: Any, on_signal: Any) -> Event | None:

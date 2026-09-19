@@ -37,8 +37,7 @@ from chemclaw.agent.behaviour_proposals import (
     content_hash,
     default_proposal_store,
 )
-from chemclaw.agent.skill_manifest import SkillManifest
-from chemclaw.core.config import settings
+from chemclaw.agent.local_skills import SkillRefused, validated_skill
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.session_context import get_current_session_id
@@ -108,21 +107,28 @@ def _validated(name: str, body: str) -> str:
     which is the worst place to discover it, since the person has already decided and the failure
     looks like the system losing their decision.
 
-    The same three checks the route makes, plus one the route cannot: that the frontmatter's name
-    and the tool's `name` argument agree. Two sources of one name can disagree, and the one a reader
-    believes is whichever the code happens to consult — the reason `agent/profile_discovery.py`
-    refuses a `name:` key beside a filename. Here the model writes both, so a mismatch is a model
-    error worth surfacing rather than a precedence rule worth inventing.
+    **So it calls `validated_skill`, and hand-copying three of its four checks left exactly that
+    hole open.** This used to re-implement the length bound, the frontmatter parse and the name
+    charset, and omit the fourth arm — that the name is not one the deployment already ships.
+    `validated_skill`'s own docstring names `propose_skill` as one of its four callers, and it was
+    not one. Measured: `propose_skill(name="protocol-generation", …)` recorded an `open` proposal
+    and told the chemist it was waiting for them, while `POST /proposals/skill/protocol-generation`
+    answered **409** and `store.decide` was never reached. The proposal could not be accepted and
+    the only exit was declining one they wanted. Fail-closed, so nothing was written — a DRY defect
+    whose cost is a decision the system cannot carry out.
+
+    What this adds that `validated_skill` cannot is the one check the *route* cannot make either:
+    that the frontmatter's name and the tool's `name` argument agree. Two sources of one name can
+    disagree, and the one a reader believes is whichever the code happens to consult — the reason
+    `agent/profile_discovery.py` refuses a `name:` key beside a filename. Here the model writes
+    both, so a mismatch is a model error worth surfacing rather than a precedence rule worth
+    inventing.
 
     Raises:
         ChemclawError: Worded for the model, naming what is wrong and what to send instead.
     """
-    if len(body) > settings.agent_local_skill_max_chars:
-        raise ChemclawError(
-            f"a skill may be at most {settings.agent_local_skill_max_chars} characters and this "
-            f"one is {len(body)}. A skill is judgment, not a transcript — write the rule, not the "
-            "worked example that produced it."
-        )
+    # Checked before the body, because a name the model got wrong is the cheaper thing to say and
+    # `validated_skill` can only report the name the *frontmatter* declares.
     try:
         parsed = frontmatter.loads(body)
     except Exception as bad:
@@ -130,26 +136,20 @@ def _validated(name: str, body: str) -> str:
             f"the body is not a `SKILL.md`: its YAML frontmatter could not be parsed ({bad}). It "
             "must open with `---`, a `name:` and a `description:`, then `---`."
         ) from bad
-    try:
-        manifest = SkillManifest.model_validate(parsed.metadata)
-    except Exception as bad:
+    declared = parsed.metadata.get("name") if isinstance(parsed.metadata, dict) else None
+    if isinstance(declared, str) and declared != name.strip():
         raise ChemclawError(
-            f"the frontmatter is not a valid skill manifest: {bad}. It takes `name`, "
-            "`description`, and optionally `tools` and `tags` — nothing else."
-        ) from bad
-    if manifest.name != name.strip():
-        raise ChemclawError(
-            f"the frontmatter declares the name {manifest.name!r} and the `name` argument is "
+            f"the frontmatter declares the name {declared!r} and the `name` argument is "
             f"{name.strip()!r}. Send the same name in both, since the frontmatter is what a later "
             "turn reads."
         )
-    if "/" in manifest.name or manifest.name.startswith("."):
-        raise ChemclawError("a skill name may not contain '/' or start with '.'")
-    if any(character.isspace() or not character.isprintable() for character in manifest.name):
-        raise ChemclawError(
-            "a skill name may not contain whitespace or control characters — use hyphens."
-        )
-    return manifest.name
+    try:
+        return validated_skill(body, expected_name=name.strip())
+    except SkillRefused as refused:
+        # `SkillRefused` is a `ChemclawError`, so this re-raise changes nothing a caller sees; it is
+        # here so the tool's contract stays "one exception type, worded for the model" rather than
+        # depending on a subclass relationship a reader has to go and check.
+        raise ChemclawError(str(refused)) from refused
 
 
 def _what_became_of_it(name: str, outcome: Proposal, *, proposed_now: bool) -> str:

@@ -21,12 +21,13 @@ from typing import Annotated, Any, Generic, NotRequired, TypedDict, TypeVar, get
 
 import pytest
 from langchain.agents.middleware.todo import PlanningState
+from langgraph.channels.last_value import LastValue
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from chemclaw.agent import checkpointer as ckpt
-from chemclaw.agent.state import ChemclawState
+from chemclaw.agent.state import ChemclawState, TurnFlag, TurnTotal
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from tests.pg import migrated_db_or_skip
@@ -258,10 +259,22 @@ def test_the_stamp_covers_this_repository_s_channels_and_not_the_upstream_base_s
         f"the stamp covers upstream channels {sorted(declared & upstream)}, so a langchain bump "
         "that touches one of them would refuse every live thread"
     )
-    assert declared >= {"loop_capped"}, (
-        "the stamp covers none of the channels this repository declares, so it refuses nothing"
+    assert declared >= {"active_agent"}, (
+        "the stamp covers none of the restorable channels this repository declares, so it refuses "
+        "nothing"
     )
     assert declared < set(get_type_hints(ChemclawState, include_extras=True))
+    # **The named channel is a restorable one, and it has to be.** This asserted `loop_capped`
+    # while the stamp covered every first-party name, including five `UntrackedValue` channels no
+    # checkpoint can hold — so the guard refused the next ordinary turn of every live session each
+    # time a per-turn counter was added, and pre-empted nothing, because a channel absent from
+    # every build's checkpoint cannot be missing from one build's relative to another's.
+    # `_first_party_channels` now excludes them; the exclusion itself is asserted here.
+    assert declared.isdisjoint(ckpt.UNTRACKED_CHANNELS), (
+        f"the stamp covers untracked channels {sorted(declared & set(ckpt.UNTRACKED_CHANNELS))}, "
+        "which no checkpoint holds — so adding one would refuse every live thread and prevent "
+        "nothing"
+    )
 
 
 def test_the_declared_channels_partition_the_state() -> None:
@@ -280,14 +293,27 @@ def test_the_declared_channels_partition_the_state() -> None:
     """
     upstream = set(get_type_hints(PlanningState, include_extras=True))
     declared = set(ckpt.FIRST_PARTY_CHANNELS)
+    untracked = set(ckpt.UNTRACKED_CHANNELS)
     whole = set(get_type_hints(ChemclawState, include_extras=True))
+    # **Three parts rather than two, because one first-party part is deliberately unstamped.**
+    # `UntrackedValue` channels are never written to a checkpoint, so stamping them refused every
+    # live session whenever a per-turn counter was added and could pre-empt nothing. They are still
+    # asserted to be *somewhere*: a channel the derivation drops by accident lands in none of the
+    # three and fails here exactly as it did when there were two.
+    first_party = declared | untracked
 
-    assert declared | upstream == whole, (
-        "the two halves do not add up to the state: "
-        f"in neither {sorted(whole - (declared | upstream))}, "
-        f"in neither's state {sorted((declared | upstream) - whole)}"
+    assert first_party | upstream == whole, (
+        "the parts do not add up to the state: "
+        f"in none {sorted(whole - (first_party | upstream))}, "
+        f"in none's state {sorted((first_party | upstream) - whole)}"
     )
-    assert not (declared & upstream), f"{sorted(declared & upstream)} is claimed by both halves"
+    assert not (first_party & upstream), (
+        f"{sorted(first_party & upstream)} is claimed by both halves"
+    )
+    assert not (declared & untracked), (
+        f"{sorted(declared & untracked)} is both stamped and untracked, so the partition of the "
+        "first-party half is not one"
+    )
 
 
 def test_a_channel_added_to_the_upstream_base_does_not_move_the_stamp() -> None:
@@ -313,6 +339,64 @@ def test_a_channel_added_to_the_upstream_base_does_not_move_the_stamp() -> None:
 
     assert ckpt._first_party_channels(_OursNow) == ("model_calls",)
     assert ckpt._first_party_channels(_OursNext) == ("model_calls",)
+
+
+def test_adding_a_per_turn_counter_does_not_move_the_stamp() -> None:
+    """A channel no checkpoint can hold is not a channel a resume can be missing.
+
+    **This is the defect, staged as the change that caused it.** The stamp is the set of names the
+    *writing* build declared, and the load refuses when any name the *current* build declares is
+    absent from it. While the derivation covered every first-party name, five of the six it returned
+    were `UntrackedValue` subclasses — `TurnTotal`, `TurnFlag` — whose declarations in
+    `agent/state.py` each say in so many words that the channel is never written to a checkpoint. So
+    adding a per-turn counter, which this repository does routinely and which cannot affect a
+    restore, refused the **next ordinary turn** of every live Postgres-backed session; and it
+    pre-empted nothing, because a channel absent from every build's checkpoints cannot be missing
+    from one build's relative to another's. At the build before `active_agent` existed, *all four*
+    stamped names were of that kind, so the stamp could not have pre-empted anything at all.
+
+    Three mutations, not one, because a guard whose only failing mutation is the one it was written
+    for is a regression test for a fixed bug (`tasks/lessons.md`, 2026-09-18). The first is the
+    defect; the second is a *reword* of it — a different untracked shape, so a guard keyed on the
+    class name rather than on the base would pass it; the third is the case that must still move the
+    stamp, which is what stops the fix from being "never refuse anything".
+    """
+    response = TypeVar("response")
+
+    class _Upstream(TypedDict, Generic[response]):
+        messages: list[str]
+
+    class _Base(_Upstream[int]):
+        active_agent: NotRequired[Annotated[str, LastValue(str)]]
+
+    class _PlusTurnTotal(_Upstream[int]):
+        active_agent: NotRequired[Annotated[str, LastValue(str)]]
+        handoffs: NotRequired[Annotated[int, TurnTotal(int)]]
+
+    class _PlusTurnFlag(_Upstream[int]):
+        active_agent: NotRequired[Annotated[str, LastValue(str)]]
+        spend_capped: NotRequired[Annotated[bool, TurnFlag(bool)]]
+
+    class _PlusRestorable(_Upstream[int]):
+        active_agent: NotRequired[Annotated[str, LastValue(str)]]
+        retrieved_notes: NotRequired[Annotated[list[str], LastValue(list)]]
+
+    assert ckpt._first_party_channels(_Base) == ("active_agent",)
+    assert ckpt._first_party_channels(_PlusTurnTotal) == ("active_agent",), (
+        "adding a TurnTotal moved the stamp, so every live session's next turn is refused for a "
+        "channel no checkpoint holds"
+    )
+    assert ckpt._first_party_channels(_PlusTurnFlag) == ("active_agent",), (
+        "adding a TurnFlag moved the stamp — the same defect in the other untracked shape, which a "
+        "guard keyed on one class name would miss"
+    )
+    assert ckpt._first_party_channels(_PlusRestorable) == ("active_agent", "retrieved_notes"), (
+        "adding a restorable channel did not move the stamp, so the guard now refuses nothing and "
+        "the KeyError it exists to pre-empt is live again"
+    )
+    # Both halves are derived from one walk, so the complement has to agree.
+    assert ckpt._untracked_channels(_PlusTurnTotal) == ("handoffs",)
+    assert ckpt._untracked_channels(_PlusRestorable) == ()
 
 
 def test_the_stamp_moves_when_this_repository_s_own_channels_do() -> None:
@@ -379,7 +463,7 @@ def test_a_thread_that_never_held_a_channel_this_build_declares_is_refused_by_na
     message = str(asyncio.run(_run()))
     assert "sess-channel-added" in message, "the refusal does not say which session is affected"
     assert "retrieved_notes" in message, "the refusal does not name the channel that is missing"
-    assert "loop_capped" in message, "the refusal does not say what the thread does hold"
+    assert "active_agent" in message, "the refusal does not say what the thread does hold"
     assert "Start a new session" in message, "the refusal names no remedy, so it is not actionable"
 
 

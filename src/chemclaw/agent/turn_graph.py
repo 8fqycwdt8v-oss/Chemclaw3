@@ -187,6 +187,128 @@ def _peer_surface(root: frozenset[str], peer: AgentProfile) -> frozenset[str]:
     return root & named
 
 
+#: The `AgentProfile` fields a peer is allowed to bring with it, because none of them carries
+#: authority. Everything else comes from the root.
+#:
+#: **Derived-by-exclusion deliberately, so a new field fails safe.** `_peer_profile` builds from the
+#: *root* and overrides only these, which means an authority-bearing field added to `AgentProfile`
+#: next year is root-derived without anybody remembering this line. The previous shape was the
+#: opposite — `peer_profile.model_copy(update={"tool_names": surface})`, whose own comment argued
+#: that copying the peer meant "a field added to `AgentProfile` next year travels here without this
+#: line being remembered". It did travel, and that was the defect: `harness_enabled`,
+# : `harness_autonomy`, `mcp_server_names` and `skill_names` all reached a peer unbounded by the
+# root.
+#: `tests/test_turn_graph.py` holds this set against the model's fields in both directions.
+PEER_OWNED_FIELDS: frozenset[str] = frozenset({"name", "instructions", "effort", "model_route"})
+
+
+def _narrowed(root: frozenset[str] | None, peer: frozenset[str] | None) -> frozenset[str] | None:
+    """One allow-list narrowed by another, where `None` means "does not narrow".
+
+    Used for the dimensions where a peer may legitimately hold *less* than the root and must never
+    hold more. `frozenset()` — "nothing" — survives, because an intersection with it is itself.
+
+    Args:
+        root: The root profile's allow-list for this dimension.
+        peer: The rostered profile's.
+
+    Returns:
+        `None` only when neither narrows; otherwise the tightest of the two.
+    """
+    if root is None:
+        return peer
+    if peer is None:
+        return root
+    return root & peer
+
+
+def _peer_connectors(connectors: list[Any] | None, surface: frozenset[str]) -> list[Any] | None:
+    """The turn's open connector tools, narrowed to the ones this peer's surface names.
+
+    **The connector half of the invariant, which `_peer_surface` alone could not deliver.** A
+    connector tool arrives as an already-open `BaseTool` on `connectors` and goes straight into
+    `_bound_surface`, so `tool_names` never sees it — `build_langgraph_agent` narrows that half only
+    for a *helper* (`helper_connectors`), and a peer took the list untouched. `root_surface`'s own
+    docstring argues the connector names have to be unioned into `root` "or the intersection below
+    would silently drop every connector tool from every peer", and then nothing applied that
+    intersection to the list a peer was compiled with.
+
+    Driven with the shipped `safety` profile as the peer: `_peer_surface` answered two names and the
+    compiled peer bound eleven, `similar_reactions` among them — a tool that profile names nowhere,
+    executing. A *state-changing* leak was still refused by
+    `refuse_undeclared_writes(held=surface)`,
+    which is why this was a widening of the stated invariant rather than an escalation past the
+    root;
+    a read-only one ran. It also propagated, because a helper spawned by a peer takes
+    `helper_connectors` over whatever list the peer holds.
+
+    This is `surface` and not a second computation, so the two halves cannot drift: the same set
+    bounds the in-process tools, the connector tools and `refuse_undeclared_writes`.
+
+    Args:
+        connectors: The open connector tools for this turn, as the root opened them.
+        surface: `_peer_surface(...)` — the root-bounded surface this peer may reach.
+
+    Returns:
+        `None` when the caller passed none, else only the tools `surface` names.
+    """
+    if connectors is None:
+        return None
+    return [tool for tool in connectors if getattr(tool, "name", "") in surface]
+
+
+def _peer_profile(root: AgentProfile, peer: AgentProfile, surface: frozenset[str]) -> AgentProfile:
+    """The profile a peer is compiled with: the root's authority, the peer's brief.
+
+    **A handoff redistributes the turn's authority and cannot extend it**
+    (`D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it`), and until this
+    function existed that held for `tool_names` alone. Three other dimensions travelled from the
+    rostered profile unbounded, and each was reachable with shipped files:
+
+    - **`harness_enabled`/`harness_autonomy` decide whether the plan gate is attached at all**
+      (`langgraph_agent` attaches `enforce_plan_approval` only `if gate_applies(profile)`). A peer
+      profile turning the harness off kept the root's acting tools with no plan gate — driven, the
+      same session and the same actor refused `remember_preference` before a handoff and ran it
+      after. The reverse direction is the same defect mirrored: `api/runner.py` computes
+      `plan_gated` from the **root** profile and consumes the turn's approval only when that is
+      true, so a gated peer under an ungated root made a human approve a plan that was then never
+      spent — and stood for every later turn on the session. Reachable with `data/profiles/
+      computation.yaml`, which pins `harness_enabled: true`, under
+      `CHEMCLAW_HARNESS_ENABLED=false`.
+    - **`mcp_server_names` is the connector half of the surface**, and `_peer_surface` bounded only
+      the in-process half. `root_surface`'s own docstring argues the connector names must be unioned
+      into `root` "or the intersection below would silently drop every connector tool from every
+      peer" — and nothing then applied that intersection to the list a peer was compiled with.
+      Driven with the shipped `safety` profile: the peer bound `similar_reactions`, which its
+      profile names nowhere, and a read-only leak executed. (A state-changing one was still refused
+      by `refuse_undeclared_writes`, which is why this was a widening of the stated invariant rather
+      than an escalation past the root.)
+    - **`skill_names`** is a fourth skills narrowing, so a peer that leaves it unset saw every skill
+      the root's own narrowing had removed — 20 of them, measured.
+
+    `harness_enabled` and `harness_autonomy` are taken from the root outright rather than narrowed,
+    because they are not allow-lists: there is no "less" to intersect, and the runner reads the
+    root's answer for the whole turn.
+
+    Args:
+        root: The profile the turn's root agent runs under.
+        peer: The rostered profile, for its brief and its model route.
+        surface: `_peer_surface(...)` — the root-bounded in-process tool surface.
+
+    Returns:
+        A profile carrying the peer's identity and the root's authority.
+    """
+    brief = {field: getattr(peer, field) for field in PEER_OWNED_FIELDS}
+    return root.model_copy(
+        update={
+            **brief,
+            "tool_names": surface,
+            "mcp_server_names": _narrowed(root.mcp_server_names, peer.mcp_server_names),
+            "skill_names": _narrowed(root.skill_names, peer.skill_names),
+        }
+    )
+
+
 def build_turn_graph(
     model: Any | None = None,
     *,
@@ -309,14 +431,18 @@ def build_turn_graph(
             peer_profile.name,
             build_langgraph_agent(
                 model=model,
-                # The peer's own instructions and model route, over the root-bounded surface. A
-                # `model_copy` rather than a constructor, so a field added to `AgentProfile` next
-                # year travels here without this line being remembered.
-                profile=peer_profile.model_copy(update={"tool_names": surface}),
+                # The peer's own brief over the root's authority — see `_peer_profile`, which is
+                # where the argument for that direction lives. Built from the *root* so a field
+                # added to `AgentProfile` next year is root-derived rather than travelling from the
+                # rostered profile unbounded, which is the defect this replaced.
+                profile=_peer_profile(root_profile, peer_profile, surface),
                 actor=actor,
                 correlation_id=correlation_id,
                 audit_sink=audit_sink,
-                connectors=connectors,
+                # Narrowed to what this peer's surface names — see `_peer_connectors`. The root's
+                # own entry in this loop carries `surface == root`, so it keeps every tool it
+                # opened.
+                connectors=_peer_connectors(connectors, surface),
                 store=store,
                 # Measured identical to `None` and cheaper — see the module docstring. The turn
                 # graph's own checkpointer below is what holds the thread.

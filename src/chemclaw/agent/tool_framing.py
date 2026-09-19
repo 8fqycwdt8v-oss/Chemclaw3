@@ -120,7 +120,7 @@ from chemclaw.agent.framing import (
     neutralise_marks,
 )
 from chemclaw.agent.tool_result_shape import rewritten_tool_messages
-from chemclaw.agent.tool_result_size import bounded_for_batch
+from chemclaw.agent.tool_result_size import bounded_for_batch, original_chars
 from chemclaw.connectors.transport import SERVED_BY
 
 #: What `defanged_payload` preserves: a payload comes back as the type it went in as.
@@ -467,8 +467,22 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
         # against a bound the deployment believed it had. The inner cut is not wrong and is not
         # moved — a ceiling is enforced on what the model is actually sent, so the layer that does
         # the expanding is the layer that has to re-check.
+        # `charged_total`/`count`: the nested `bound_tool_results` has already cut the raw payload
+        # and recorded what the tool returned, so this pass writes a notice about *that* number and
+        # does not count the cut a second time. Without it the delivered sentence described the
+        # intermediate — measured, a 200,000-character result reaching the model as "451 of 60,102
+        # characters removed" — and the truncation counter fired twice for one cut.
         escaped = _rewritten(message.content, defang)
-        return message.model_copy(update={"content": bounded_for_batch(request, escaped)})
+        return message.model_copy(
+            update={
+                "content": bounded_for_batch(
+                    request,
+                    escaped,
+                    charged_total=original_chars(message),
+                    count=original_chars(message) is None,
+                )
+            }
+        )
 
     origin = served_by(request)
     if origin:
@@ -518,7 +532,15 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
             # anything appended afterwards breaks it — the mark has to be the escaped one *while*
             # the notice is being sized.
             framed = _framed_content(message.content, origin)
-            bounded = bounded_for_batch(request, framed, mark=neutralise_marks(SYSTEM_SPEECH_MARK))
+            # See `_defanged` above for `charged_total`/`count`: this branch re-bounds the *framed*
+            # string, so the same double-pass arithmetic applies to it.
+            bounded = bounded_for_batch(
+                request,
+                framed,
+                mark=neutralise_marks(SYSTEM_SPEECH_MARK),
+                charged_total=original_chars(message),
+                count=original_chars(message) is None,
+            )
             return message.model_copy(update={"content": bounded})
 
         return rewritten_tool_messages(result, _framed)

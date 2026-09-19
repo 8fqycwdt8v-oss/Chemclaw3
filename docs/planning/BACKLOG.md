@@ -65,6 +65,31 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
+- [ ] **The personal skills tier is narrowed in the prompt and not at the backend, so
+  `skill_names: []` still hands over the bodies** — [S]. `langgraph_agent.py`'s
+  `if LOCAL_SKILLS_ROOT in backend.routes and profile.skill_names != frozenset()` drops `/mine` from
+  `SkillsMiddleware`'s `sources`, while `scratchpad.py` mounts the `/mine/` route unconditionally and
+  `local_skills.ReadOnlyStoreBackend` carries no `permits` predicate at all. That is exactly the
+  half `agent/skill_backend.py`'s own header calls insufficient — "listing is therefore only half
+  the gate… so the narrowing moves to the backend" — and the shared tier *is* closed at the backend
+  by `NarrowedSkillsBackend`. Driven: with `skill_names: []`, one `ls("/mine/")` returns the skill
+  names and `read_file` returns the body, while the same profile's read of a shared skill is
+  refused. Not a cross-actor leak (the namespace still closes over one actor), but
+  `data/evals/profiles/skills-removed.yaml` is the A/B control arm whose whole value is being clean,
+  and every A/B it reports still carries personal judgment whenever the model opens `/mine`. Give
+  `ReadOnlyStoreBackend` the same `permits` predicate the shared tier has.
+
+- [ ] **A re-proposal of a *superseded* body is answered as "already waiting to be decided" and can
+  never be proposed again** — [S]. `behaviour_proposals.propose`'s
+  `ON CONFLICT (actor, kind, name, content_hash) DO NOTHING` then re-reads the row *in whatever
+  state it is in*, and `_arrival` branches only on `stored.decided` — `superseded` is deliberately
+  not a decision, so it books `outcome="already_open"`. Driven on both shipped backends: propose V1,
+  propose V2 (V1 superseded), re-propose V1 → the row stays `superseded`, `GET /proposals?state=open`
+  never shows it, `POST /proposals/skill/<name>` with V1's hash 409s, and the model tells the chemist
+  it is waiting for their decision. The module's own rule is that "an unchanged re-proposal cannot
+  reopen a **rejection**"; the idempotence is being applied one state too widely. Either revive a
+  superseded row to `open`, or give `_what_became_of_it` a fourth branch that says so.
+
 - [ ] **`max_concurrent_workflow_tasks` is set nowhere, so nothing this repository chose bounds
   workflow-task concurrency** — [M]. `durable/background_worker.py` sets `max_concurrent_activities`
   and stops there, so the workflow-task ceiling is whatever the SDK defaults to. A **child workflow
@@ -499,6 +524,29 @@ topic).
       `api/routes/ops.py::_probe_database`, `core/db.py::connection`.
 
 ## 4 — Operating it
+
+- [ ] **The turn-wide model-call floor only binds where a loop watch is open, and two paths open
+  none** — [S]. `agent/loop_cap._LoopWatch.calls` is what makes a `task` fan-out share one iteration
+  allowance (it was `1 + W*(cap - 1)` calls before, measured at 25 against a cap of 4 over 8
+  helpers, and 193 against the shipped cap of 25 at width 8). `api/runner.py` opens the watch per
+  turn, so the front door is bound. `durable/template_activities.py` opens only
+  `begin_context_watch()`, and the CLI opens nothing — so on those two paths the cap still falls
+  back to the per-branch channel snapshot and a fan-out still multiplies it. The same gap exists for
+  the spend cap's ambient (`set_turn_usage`/`begin_spend_watch`), which those two paths also skip.
+  Either open both watches wherever a turn is driven, or move the pair into one `turn_ambient`
+  context manager every driver has to enter.
+
+- [ ] **A peer that is genuinely restorable still drains every live session on the deploy that adds
+  it** — [M]. `agent/checkpointer._first_party_channels` no longer stamps `UntrackedValue` channels,
+  which was the systemic half: a routine per-turn counter refused the next ordinary turn of every
+  Postgres-backed session while pre-empting nothing, because no build's checkpoint holds such a
+  channel. What is left is the *restorable* case, and `active_agent` is the live instance — a
+  session from before it existed is refused on its next turn even though every reader of that
+  channel uses `state.get(...)` with a default and the feature ships off. The guard's stated failure
+  is "a node indexes that channel and raises a bare `KeyError`", which is a property of how the
+  channel is *read*, not of whether the name is new. Deciding whether to narrow the stamp to
+  channels that are read without a default — and deriving that rather than asserting it — is an ADR,
+  because `D-2026-08-13` chose the name comparison deliberately.
 
 - [ ] **A caller cannot tell that a helper's report is derived from untrusted reading**
       — [M], opened by `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread`, which

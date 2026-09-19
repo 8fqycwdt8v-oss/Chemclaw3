@@ -320,6 +320,7 @@ def bounded_content(
     *,
     mark: str = SYSTEM_SPEECH_MARK,
     remedy: str = TOOL_REMEDY,
+    charged_total: int | None = None,
 ) -> tuple[Any, int]:
     """`content` cut to `limit` characters of text, and how many characters that removed.
 
@@ -342,14 +343,35 @@ def bounded_content(
     a cut is never silent, and a bound never grows what it bounds. Below that length cutting cannot
     reclaim anything, so there is no cut and no notice is owed.
 
+    **`charged_total` is what the notice's arithmetic is about, and it exists because this function
+    runs twice on one result.** `frame_connector_results` nests `bound_tool_results` inside itself
+    and re-bounds afterwards, because escaping is what makes the text longer — so the second pass
+    receives text the first already cut, and computing `total` from it describes the intermediate
+    rather than the tool. Both passes also place the notice at `_HEAD_SHARE`, so the second cut
+    deletes the first's notice and writes its own in the same position. Measured on a connector
+    success at the shipped ceiling: a tool returning 500,000 characters delivered
+    "451 of 60,102 characters removed" — understating the loss by a factor of ~975, in the direction
+    that hides it, in a sentence whose whole stated purpose is "so the model can say how much it did
+    not see". That is `FingerprintSearch.verdict`'s defect, which this module's docstring cites as
+    its reason to exist.
+
+    So the layer that knows the tool's real output size passes it, and the notice is written about
+    that number while the *cut* is still made against the text actually in hand. `None` means "this
+    content is the whole of it", which is true of every single-pass caller.
+
     Returns:
-        The bounded content and the number of characters removed (0 when nothing was).
+        The bounded content and the number of characters removed from `content` (0 when nothing
+        was) — the real removal from what was passed, which is what a caller counting its own work
+        needs; the sentence the model reads is about `charged_total` when one is given.
     """
     spans = _spans(content)
     total = sum(len(span) for span in spans)
     if limit <= 0 or total <= limit:
         return content, 0
-    widest = len(_notice(tool, total, total, mark, remedy))
+    # The notice speaks about the tool's output; the cut is made against the text in hand. They are
+    # the same number for every caller that bounds a result once.
+    charged = total if charged_total is None else max(charged_total, total)
+    widest = len(_notice(tool, charged, charged, mark, remedy))
     carrier = _carrier(content, spans)
     if limit < widest:
         # The share is smaller than the sentence explaining the cut, so the sentence is the thing
@@ -367,7 +389,7 @@ def bounded_content(
         # The figure is not written here: it used to say 19 characters and 3,158 calls, and the
         # mark `_notice` gained made both stale in the same commit
         # (`tests/test_tool_result_size.py` measures the crossover instead).
-        brief = _brief_notice(total, mark)
+        brief = _brief_notice(charged, mark)
         if total <= len(brief):
             return content, 0
         return _rebuilt(content, _kept(spans, 0, brief, carrier)), total
@@ -379,13 +401,38 @@ def bounded_content(
     # `total`.
     kept = max(limit - widest, 0)
     removed = total - kept
-    return (
-        _rebuilt(content, _kept(spans, kept, _notice(tool, removed, total, mark, remedy), carrier)),
-        removed,
-    )
+    notice = _notice(tool, charged - kept, charged, mark, remedy)
+    return _rebuilt(content, _kept(spans, kept, notice, carrier)), removed
 
 
-def bounded_for_batch(request: Any, content: Any, *, mark: str = SYSTEM_SPEECH_MARK) -> Any:
+#: Where the inner bound records the tool's real output size, for the outer bound to charge.
+#:
+# : On `ToolMessage.response_metadata`, because that is the one field on a result that travels with
+# it
+#: through `model_copy` and is not part of what the model reads. A key rather than a second
+#: middleware-to-middleware channel: the two passes are in one chain on one message, and a
+#: contextvar would be wrong the moment two tool calls in a batch are bounded concurrently.
+ORIGINAL_CHARS_KEY = "chemclaw_original_chars"
+
+
+def original_chars(message: Any) -> int | None:
+    """The tool's real output size, if an earlier bound in this chain recorded one.
+
+    Returns:
+        The character count the first pass saw, or `None` when nothing has bounded this result yet.
+    """
+    stamped = (getattr(message, "response_metadata", None) or {}).get(ORIGINAL_CHARS_KEY)
+    return stamped if isinstance(stamped, int) else None
+
+
+def bounded_for_batch(
+    request: Any,
+    content: Any,
+    *,
+    mark: str = SYSTEM_SPEECH_MARK,
+    charged_total: int | None = None,
+    count: bool = True,
+) -> Any:
     """`content` cut to this call's share of the ceiling, counted, logged, and said so in the text.
 
     The share arithmetic and both of its side effects in one function, because there are now two
@@ -399,15 +446,24 @@ def bounded_for_batch(request: Any, content: Any, *, mark: str = SYSTEM_SPEECH_M
 
     Returns `content` itself when nothing was removed, so a caller can tell "unchanged" by
     identity rather than by re-measuring — the same contract `rewritten_tool_messages` relies on.
+
+    **`charged_total` and `count` both exist because this runs twice on one result**, and both were
+    missing. `frame_connector_results` re-bounds after escaping (escaping is what makes the text
+    longer), so a framed connector success or a defanged helper report passes through here a second
+    time. `charged_total` keeps the notice's arithmetic about the tool rather than about the
+    intermediate — see `bounded_content`. `count` keeps the *metric* about the result rather than
+    about the pass: the counter and the `tool_result.truncated` row fired twice for one cut, the
+    second time with the understated figure, so an operator counting cuts saw 2N for N results.
+    The first pass's numbers are the true ones, so the second pass is the one that stays quiet.
     """
     tool = str(request.tool_call["name"])
     ceiling = settings.agent_max_tool_result_chars
     # The batch's share, never below 1: 0 is the deployment's own "no cap" and a share that rounded
     # to it would restore the unbounded behaviour exactly where the batch is widest.
     limit = max(ceiling // batch_width(request), 1) if ceiling else 0
-    bounded, removed = bounded_content(content, tool, limit, mark=mark)
-    if not removed:
-        return content
+    bounded, removed = bounded_content(content, tool, limit, mark=mark, charged_total=charged_total)
+    if not removed or not count:
+        return bounded if removed else content
     # **The metric label is the served name, never the model's string**, and `core/metrics.py`
     # already claimed it was ("a tool name here is one the registry served, never a string a caller
     # invented"). It was not: `ToolNode` dispatches an unregistered name through this chain, its
@@ -543,10 +599,22 @@ async def bound_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any
     result = await handler(request)
 
     def _bounded(message: ToolMessage) -> ToolMessage:
+        # Measured before the cut, because after it the number is gone: `frame_connector_results`
+        # wraps this middleware and re-bounds what comes out, and without this stamp its notice
+        # describes the 60,000-character intermediate instead of what the tool returned.
+        was = sum(len(span) for span in _spans(message.content))
         content = bounded_for_batch(request, message.content)
         if content is message.content:
             return message
-        return message.model_copy(update={"content": content})
+        return message.model_copy(
+            update={
+                "content": content,
+                "response_metadata": {
+                    **(message.response_metadata or {}),
+                    ORIGINAL_CHARS_KEY: was,
+                },
+            }
+        )
 
     return rewritten_command_files(
         rewritten_tool_messages(result, _bounded),

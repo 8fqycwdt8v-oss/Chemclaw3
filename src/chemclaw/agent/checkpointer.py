@@ -131,10 +131,11 @@ import logging
 import time
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
-from typing import Any, cast, get_origin, get_type_hints
+from typing import Annotated, Any, cast, get_args, get_origin, get_type_hints
 
 import psycopg
 from langchain_core.runnables import RunnableConfig
+from langgraph.channels.untracked_value import UntrackedValue
 from langgraph.checkpoint.base import (
     ChannelVersions,
     Checkpoint,
@@ -432,12 +433,74 @@ def _first_party_channels(state: Any) -> tuple[str, ...]:
     `tests/test_checkpointer_schema.py` asserts the result stays disjoint from the upstream base's
     channels, which turns that into a red build rather than a fleet-wide refusal.
 
+    **An untracked channel is excluded, and leaving it in made this guard fire on changes it
+    provably could not protect against.** The refusal below exists for one failure: a checkpoint
+    written before a channel existed is restored, and a node then indexes that channel and raises a
+    bare `KeyError`. That failure needs the channel to be *restorable* — and five of the six names
+    this returned were `UntrackedValue` subclasses (`TurnTotal`, `TurnFlag`), whose whole purpose is
+    that they are **never written to a checkpoint**, as each of their declarations in
+    `agent/state.py` says in so many words ("the channel is never written to a checkpoint, so a new
+    run of the graph on the same `thread_id` starts it empty"). No checkpoint from any build holds
+    one, so no restore can be missing one relative to another build, so the refusal pre-empts
+    nothing for them.
+
+    What it cost instead was the whole fleet. The stamp records the names the *writing* build
+    declared, and the load refuses if any name the *current* build declares is absent from it — so
+    adding a per-turn counter, which this repository does routinely and which cannot affect a
+    resume, refused the **next ordinary turn** of every live Postgres-backed session. Driven: two
+    counters (`handoffs`, plus the checkpointed `active_agent`) took a session whose transcript then
+    resumed perfectly once the comparison was neutralised, and told the chemist to start a new one.
+    Five of the six names the pre-fix stamp carried were of that kind, and at the previous build
+    **all four** were, so the stamp could not have pre-empted anything at all.
+
+    So the derivation now asks what a checkpoint can hold, not what the class declares.
+    `active_agent` stays — `LastPeer` is a `LastValue`, it really is checkpointed, and a session
+    from before it existed really is the case this guard is for.
+
     Args:
         state: The graph state class to read — `ChemclawState` in this process, and stand-in
             classes in the tests that prove what the derivation includes and excludes.
 
     Returns:
-        The names this class adds to its base, sorted, so declaration order cannot move the stamp.
+        The restorable names this class adds to its base, sorted, so declaration order cannot move
+        the stamp.
+    """
+    own = _own_channels(state)
+    return tuple(sorted(name for name, ann in own.items() if not _is_untracked(ann)))
+
+
+def _untracked_channels(state: Any) -> tuple[str, ...]:
+    """The first-party channels the stamp deliberately leaves out, derived the same way.
+
+    The complement of `_first_party_channels` within what this class adds to its base, so the two
+    together are exactly that set. Named rather than left implicit because an exclusion nothing can
+    see is indistinguishable from a channel the derivation lost by accident — and "a channel in
+    neither half" is precisely what `tests/test_checkpointer_schema.py`'s partition exists to catch.
+    With both halves derived from one walk, that test still fails on an accidental drop and passes
+    on the argued one.
+
+    Args:
+        state: The graph state class to read.
+
+    Returns:
+        The names this class adds to its base that no checkpoint can hold, sorted.
+    """
+    own = _own_channels(state)
+    return tuple(sorted(name for name, ann in own.items() if _is_untracked(ann)))
+
+
+def _own_channels(state: Any) -> dict[str, Any]:
+    """The channels `state` adds to its base, name onto annotation.
+
+    One walk, two readers — `_first_party_channels` and `_untracked_channels` partition this by
+    whether a checkpoint can hold the channel, and a second copy of the subtraction is a second
+    thing to get wrong about `__orig_bases__`.
+
+    Args:
+        state: The graph state class to read.
+
+    Returns:
+        Each name this class declares beyond its base, mapped to its type hint with extras kept.
     """
     inherited: set[str] = set()
     for base in getattr(state, "__orig_bases__", ()):
@@ -448,10 +511,40 @@ def _first_party_channels(state: Any) -> tuple[str, ...]:
         # both of which also appear in these lists and neither of which declares channels.
         if isinstance(origin, type) and hasattr(origin, "__required_keys__"):
             inherited |= set(get_type_hints(origin, include_extras=True))
-    return tuple(sorted(set(get_type_hints(state, include_extras=True)) - inherited))
+    declared = get_type_hints(state, include_extras=True)
+    return {name: ann for name, ann in declared.items() if name not in inherited}
+
+
+def _is_untracked(annotation: Any) -> bool:
+    """Whether this channel's annotation binds an `UntrackedValue`, so no checkpoint holds it.
+
+    Read off the annotation rather than off a list of class names, so a sixth untracked channel
+    shape is covered the day it is written — the failure this whole module is about is a control
+    that needed somebody to remember to update it.
+
+    The unwrapping is what makes it work on the declarations `agent/state.py` actually writes:
+    a channel arrives as `NotRequired[Annotated[int, TurnTotal(int)]]`, so the `__metadata__`
+    carrying the channel instance is one `NotRequired` in. Measured on `ChemclawState`: reading
+    `__metadata__` off the outer annotation finds nothing for any of the six, which would have made
+    this predicate answer `False` for every one of them and changed nothing.
+
+    Args:
+        annotation: The channel's type hint, as `get_type_hints(..., include_extras=True)` gives it.
+
+    Returns:
+        `True` when the channel cannot appear in a checkpoint's `channel_values`.
+    """
+    inner = annotation
+    while (origin := get_origin(inner)) is not None and origin is not Annotated:
+        args = get_args(inner)
+        if not args:
+            break
+        inner = args[0]
+    return any(isinstance(bound, UntrackedValue) for bound in getattr(inner, "__metadata__", ()))
 
 
 FIRST_PARTY_CHANNELS = _first_party_channels(ChemclawState)
+UNTRACKED_CHANNELS = _untracked_channels(ChemclawState)
 
 
 class CheckpointValuesMissing(RuntimeError):

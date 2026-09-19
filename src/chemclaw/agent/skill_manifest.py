@@ -160,6 +160,14 @@ def _declared_tools(skills_dirs: tuple[str, ...]) -> dict[str, frozenset[str]]:
     return declared
 
 
+#: The `tools:` declaration given to a skill whose frontmatter could not be read.
+#:
+#: A name no tool can have, so `ToolScopedSkills._permits`' `required & available` is always empty
+#: and the skill is scoped to nothing. A sentinel rather than an empty set, because an empty set is
+#: exactly what "declares nothing" means to that predicate and would be the fail-*open* answer.
+UNREADABLE_DECLARATION: frozenset[str] = frozenset({"\x00unreadable-skill-manifest"})
+
+
 def _declared_pair(path: Path) -> tuple[str, frozenset[str]] | None:
     """One skill's `(name, declared tools)`, or None (logged) if the file cannot be read at all.
 
@@ -203,10 +211,24 @@ def _declared_pair(path: Path) -> tuple[str, frozenset[str]] | None:
         degraded(
             logger,
             "skill_manifest",
-            "skill %s has unreadable frontmatter, treating it as undeclared: %s",
+            "skill %s has unreadable frontmatter, scoping it to nothing: %s",
             path,
             exc,
             level=logging.WARNING,
             exc_info=False,
         )
-        return None
+        # **Fail closed, and returning `None` here failed open.** `ToolScopedSkills._permits` reads
+        # a
+        # *missing* entry as "declares nothing", which it leaves visible to every caller — so an
+        # unreadable `tools:` key was a **widening**, in a filter whose whole contract is that a
+        # declaration can only ever cost a skill its visibility. That is the defect this function's
+        # docstring above describes and fixes for one case (an over-long `description`); measured, a
+        # scalar `tools:`, a mapping `tools:` and a YAML fault all still reached a profile with zero
+        # callable tools.
+        #
+        # The key is the *directory* name rather than the frontmatter's, because the frontmatter is
+        # the thing that could not be read. `make skill-validate` requires the two to match
+        # (`cli/validate_skills.py`), so in any tree CI has walked this is the same string the
+        # readable path would have produced — and in a tree it has not walked, a skill scoped to
+        # nothing is the safe answer rather than a guess.
+        return path.parent.name, UNREADABLE_DECLARATION

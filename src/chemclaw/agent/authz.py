@@ -426,6 +426,24 @@ def writes_durable_memory(name: str, arguments: Mapping[str, Any]) -> bool:
     those name a path too; treating an unreadable argument as the ungated case is how a gate
     becomes bypassable by malformed input.
 
+    **The argument has to be read the way the router reads it, and reading it raw failed open.**
+    This tested `path.startswith(MEMORY_ROOT)` against the model's own spelling, while
+    `FilesystemMiddleware` passes every path through upstream's `validate_path` *before* the
+    permission check and before `CompositeBackend` routes it — and that function normalises
+    (`os.path.normpath`, then a leading slash if there is none). So the gate and the backend read
+    two different strings, and three spellings of one path sat in the gap: measured,
+    `memories/a.md`, `/./memories/a.md` and `memories/sub/b.md` all answered `False` here and all
+    routed to `BoundedStoreBackend` over Postgres. Under an unapproved plan the plan gate
+    short-circuits on `not side_effecting_call(...)`, and on a dry run `dry_run_refusal` does the
+    same, so a durable per-actor write landed with neither gate having looked at it.
+
+    Normalising first closes that by construction rather than by enumerating the spellings, and it
+    also closes the exact-root case the blanket `/**` deny was masking: `_route_for_path` documents
+    "path is exactly the route root without trailing slash" as routing to that backend, so
+    `/memories` is a durable write that no `startswith("/memories/")` can see. A path
+    `validate_path` *refuses* (traversal, a Windows absolute) counts as durable for the same reason
+    a non-string does — an argument this gate cannot resolve is never the ungated case.
+
     Args:
         name: The tool being called.
         arguments: That call's arguments, as the model supplied them.
@@ -433,6 +451,8 @@ def writes_durable_memory(name: str, arguments: Mapping[str, Any]) -> bool:
     Returns:
         `True` when this call would write under the memory root.
     """
+    from deepagents.backends.utils import validate_path
+
     from chemclaw.agent.scratchpad import MEMORY_ROOT
 
     if name not in _MEMORY_WRITE_VERBS:
@@ -440,7 +460,11 @@ def writes_durable_memory(name: str, arguments: Mapping[str, Any]) -> bool:
     path = arguments.get("file_path")
     if not isinstance(path, str):
         return True
-    return path.startswith(MEMORY_ROOT)
+    try:
+        routed = validate_path(path)
+    except ValueError:
+        return True
+    return routed == MEMORY_ROOT.rstrip("/") or routed.startswith(MEMORY_ROOT)
 
 
 def side_effecting_call(name: str, arguments: Mapping[str, Any]) -> bool:

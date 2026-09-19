@@ -239,17 +239,51 @@ def test_a_frontmatter_defect_cannot_widen_what_a_skill_is_scoped_to(tmp_path: P
     _declared_tools.cache_clear()
 
 
-def test_a_skill_with_no_readable_name_is_still_undeclared(tmp_path: Path) -> None:
-    """The other direction of the same rule: recovering two keys is not recovering anything.
+def test_a_skill_with_no_readable_name_is_scoped_to_nothing(tmp_path: Path) -> None:
+    """The residue of the rule above, and it used to be asserted the other way round.
 
-    A file with no `name` cannot be keyed at all, so it stays out of the map — which is the
-    conservative answer and is what `make skill-validate` exists to catch loudly.
+    **This test asserted `declared_tools(...) == {}` and called staying out of the map "the
+    conservative answer". It is the fail-open answer**, and the test directly above says why: the
+    consumer is `ToolScopedSkills._permits`, which reads a *missing* entry as "declares nothing" and
+    therefore leaves the skill **visible to every caller**. So the pair contradicted each other on
+    one rule — "a read error must cost a skill its visibility, never buy it back" — with this half
+    buying it back for every defect the sibling's two cases do not cover. Measured against a profile
+    holding **zero** callable tools: a scalar `tools:`, a mapping `tools:` and an unparseable
+    frontmatter were all visible, where the over-long `description` the sibling covers was not.
+
+    So the unreadable case is keyed too, with a declaration nothing can satisfy. The key is the
+    *directory* name, because the frontmatter is the thing that could not be read — and
+    `make skill-validate` requires the directory and the frontmatter `name` to agree
+    (`cli/validate_skills.py`), so in any tree CI has walked this is the same string the readable
+    path would have produced. In a tree it has not walked, a skill scoped to nothing is the safe
+    answer rather than a guess, which is the direction the sibling's contract asks for.
     """
-    from chemclaw.agent.skill_manifest import _declared_tools
+    from chemclaw.agent.skill_access import ToolScopedSkills
+    from chemclaw.agent.skill_manifest import UNREADABLE_DECLARATION, _declared_tools
 
-    (tmp_path / "nameless").mkdir()
-    (tmp_path / "nameless" / "SKILL.md").write_text("---\ndescription: no name\n---\n\nbody\n")
+    for name, body in (
+        ("nameless", "---\ndescription: no name\n---\n\nbody\n"),
+        ("tools-scalar", "---\nname: tools-scalar\ndescription: d\ntools: predict_pka\n---\n"),
+        ("bad-yaml", "---\nname: bad-yaml\ndescription: [unclosed\n---\n\nbody\n"),
+    ):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "SKILL.md").write_text(body)
 
     _declared_tools.cache_clear()
-    assert declared_tools([str(tmp_path)]) == {}
+    declared = declared_tools([str(tmp_path)])
+
+    assert declared == {
+        "nameless": UNREADABLE_DECLARATION,
+        "tools-scalar": UNREADABLE_DECLARATION,
+        "bad-yaml": UNREADABLE_DECLARATION,
+    }, "an unreadable manifest stayed out of the map, which leaves the skill visible to everyone"
+
+    # **The half that makes the assertion above mean something.** A key in the map is only
+    # conservative if the value cannot be satisfied, so this asks the consumer rather than trusting
+    # the sentinel's name: against a profile holding no tools at all, none of the three is visible.
+    narrowing = ToolScopedSkills(declared=declared, available=frozenset())
+    assert [name for name in declared if narrowing._permits(name)] == [], (
+        "a skill with an unreadable manifest is still visible to a profile holding no tools"
+    )
+
     _declared_tools.cache_clear()
