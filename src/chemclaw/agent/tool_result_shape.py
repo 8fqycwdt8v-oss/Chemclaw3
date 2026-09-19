@@ -27,6 +27,7 @@ where a second copy of the `isinstance` guard would inherit the same hole.
 """
 
 import dataclasses
+import itertools
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -92,6 +93,30 @@ def rewritten_tool_messages(result: Any, rewrite: Callable[[ToolMessage], ToolMe
 #: the whole point is that the count is what had to be bounded: one notice for the set keeps the
 #: total bounded, where a marker each is the 44N the cap exists to stop.
 _DROPPED_PATH = "/scratch/_files_the_budget_could_not_hold.md"
+
+
+def _notice_path(taken: Any) -> str:
+    """`_DROPPED_PATH`, or the first free variant of it if something already holds that name.
+
+    **A fixed literal here overwrites whatever is at it, silently.** Driven: a caller holding a
+    real file at `/scratch/_files_the_budget_could_not_hold.md` got its content replaced by the
+    `[system]` text. Contrived — nothing this system writes picks that name — but a module whose
+    whole subject is that a cut must never be silent may not destroy a document to say so.
+
+    The suffix keeps the name predictable in the case that matters (nothing holds it, so the path
+    is the literal) and merely unusual in the case that does not.
+    """
+    if not isinstance(taken, dict) or _DROPPED_PATH not in taken:
+        return _DROPPED_PATH
+    stem, _, suffix = _DROPPED_PATH.rpartition(".")
+    names = (f"{stem}.{index}.{suffix}" for index in itertools.count(2))
+    candidate = next(name for name in names if name not in taken)
+    logger.warning(
+        "%s is already held, so the notice naming what could not be stored went to %s",
+        _DROPPED_PATH,
+        candidate,
+    )
+    return candidate
 
 
 def _dropped_head(count: int) -> str:
@@ -339,15 +364,16 @@ def rewritten_command_files(
         rewritten[path] = data if kept is text else {**data, "content": kept}
         changed = changed or kept is not text
     if dropped or reverted:
-        room = reserve - len(_DROPPED_PATH) + (remaining or 0)
-        rewritten[_DROPPED_PATH] = create_file_data(_dropped_notice(dropped, reverted, room))
+        where = _notice_path(rewritten)
+        room = reserve - len(where) + (remaining or 0)
+        rewritten[where] = create_file_data(_dropped_notice(dropped, reverted, room))
         logger.warning(
             "could not store %d file(s) a helper wrote and %d it edited: this call's share of the "
             "`files` budget cannot represent them even as truncation notices, so %s names the set "
             "rather than storing each one empty",
             len(dropped),
             len(reverted),
-            _DROPPED_PATH,
+            where,
         )
     if not changed:
         return result

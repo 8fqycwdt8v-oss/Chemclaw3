@@ -2410,3 +2410,52 @@ def test_a_file_the_helper_edited_is_served_before_a_file_it_invented() -> None:
         "the notice still claims a read will fail, which is false for exactly the path where "
         "being wrong is worst — the read succeeds and returns the pre-edit text"
     )
+
+
+def test_the_dropped_set_notice_does_not_overwrite_a_file_that_is_already_there() -> None:
+    """A module about never cutting silently may not destroy a document to say it cut.
+
+    `_DROPPED_PATH` was a fixed literal written straight into the rewritten mapping, so a caller
+    holding a real file at `/scratch/_files_the_budget_could_not_hold.md` had its content replaced
+    by the `[system]` text, silently. Contrived — nothing here picks that name — and unguarded,
+    which is the half that matters.
+
+    Both arms: the path stays the predictable literal when nothing holds it, because a notice
+    nobody can find is its own defect, and it steps aside when something does.
+    """
+    from deepagents.backends.utils import create_file_data
+    from langgraph.types import Command
+
+    from chemclaw.agent.tool_result_shape import _DROPPED_PATH, rewritten_command_files
+    from chemclaw.agent.tool_result_size import _bounded_file
+
+    budget = settings.agent_subagent_files_max_chars
+    mine = "a chemist's own notes, at the one path this module reserves"
+    files = {f"/scratch/e{i}.md": create_file_data("z" * 2_000) for i in range(5_000)}
+
+    without = rewritten_command_files(
+        Command(update={"files": dict(files)}), _bounded_file, None, budget
+    )
+    assert _DROPPED_PATH in without.update["files"], (
+        "the notice did not land at its documented path, so nothing a caller reads tells it what "
+        "happened to the files that are missing"
+    )
+
+    # The faithful shape: deepagents hands the caller's whole channel back, so a document the
+    # caller already holds arrives in the command *unchanged* and passes through the loop. That is
+    # the file the notice used to land on top of.
+    held = {_DROPPED_PATH: create_file_data(mine)}
+    files[_DROPPED_PATH] = held[_DROPPED_PATH]
+    with_collision = rewritten_command_files(
+        Command(update={"files": files}), _bounded_file, held, budget
+    )
+    landed = with_collision.update["files"]
+    assert str(landed[_DROPPED_PATH]["content"]) == mine, (
+        "a file already at the notice's path was overwritten by the notice, which is this module "
+        "destroying a document in order to report that it truncated one"
+    )
+    elsewhere = [path for path in landed if path.startswith("/scratch/_files_the_budget")]
+    assert len(elsewhere) == 2, (
+        f"the notice had nowhere to go and was dropped instead, so the files it stands for are "
+        f"gone with nothing naming them: {elsewhere}"
+    )
