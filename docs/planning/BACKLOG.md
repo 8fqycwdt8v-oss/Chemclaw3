@@ -544,8 +544,11 @@ topic).
       `no-helper` arm is **behavioural**, because `task` cannot be removed — `SubAgentMiddleware`
       is required and an empty roster makes upstream re-insert its own — so compliance is observed
       per run and a baseline that delegated anyway is reported as contaminated rather than averaged
-      in. Until the runner exists the comparator's guards (`MINIMUM_COMPARED_SHARE`,
-      `partially_delegated`) are tested and unexercised.
+      in. Until the runner exists the comparator's guards (`MINIMUM_REPEATS`,
+      `partially_delegated`, `NoComparableTask`) are tested and unexercised. **`MINIMUM_COMPARED_SHARE`
+      stood here until 2026-09-19 and no longer exists in the module** — the surviving-share bound
+      was removed, leaving the per-task floor and the compliance buckets; a row citing a deleted
+      symbol reads as a guard somebody could go and look at.
 
       **What the instrument must not be.** The deleted corpus
       (`data/evals/probes/m12/routing.yaml`, removed with the specialist team) measured
