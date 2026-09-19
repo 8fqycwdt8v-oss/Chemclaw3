@@ -2152,7 +2152,11 @@ def test_the_file_share_bounds_the_superstep_at_every_width_this_deployment_allo
     budget = settings.agent_subagent_files_max_chars
     for width in (1, 2, settings.agent_max_parallel_tool_calls, 20):
         for per_call in (1, 8, 600, 5_000):
-            for padding in (0, 1_000):
+            # The padded arm only has to make keys dominate, which 600 files does as plainly as
+            # 5,000 — and 20 x 5,000 keys of 1,000 characters is 100 M characters of fixture for
+            # one assertion. Tripling a gate test's wall clock to re-say something is how a suite
+            # stops being run.
+            for padding in (0, 1_000) if per_call <= 600 else (0,):
                 asked = AIMessage(
                     content="",
                     tool_calls=[
