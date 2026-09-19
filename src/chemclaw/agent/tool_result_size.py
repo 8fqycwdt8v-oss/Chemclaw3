@@ -548,48 +548,45 @@ async def bound_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any
             return message
         return message.model_copy(update={"content": content})
 
-    def _bounded_for_this_command(content: str, sharing: int) -> str:
-        return _bounded_file(
-            content, sharing, _files_already_held(request), batch_siblings(request)
-        )
-
     return rewritten_command_files(
         rewritten_tool_messages(result, _bounded),
-        _bounded_for_this_command,
+        _bounded_file,
         (getattr(request, "state", None) or {}).get("files"),
-        _representable_files(request),
+        _files_budget(request),
     )
 
 
-def _representable_files(request: Any) -> int | None:
-    """How many changed files this command's share of the budget can hold *at all*.
+def _files_budget(request: Any) -> int | None:
+    """How many characters this command may add to the caller's `files` channel.
 
-    **The cap on the count that the cap on each file's size is not.** `bounded_content` floors at
-    the notice saying it cut, so N files each at that floor is 44N and the superstep total grows
-    linearly in N again past a crossover — measured, eight concurrent calls of 600 changed files
-    landed 206,400 characters against a 200,000-character budget. Dividing the share further cannot
-    help, because it had already floored; what is left is to store fewer files and say so once.
+    **One number, computed once, spent by the loop that has the keys.** The share arithmetic used
+    to live in `_bounded_file` and divide by a count of files, which is the right divisor for text
+    and no divisor at all for a path — so `agent/tool_result_shape.rewritten_command_files` now
+    receives what may be spent and allocates it, because it is the only place that can see what a
+    file costs. That also retires the count cap this replaced: a cap on how many files may be
+    stored was a *model* of when the budget runs out, and the budget running out is available
+    directly.
 
-    Derived rather than declared: the floor is whatever `bounded_content`'s brief notice measures,
-    so a reworded notice moves this and no constant here goes stale. Divided by `batch_siblings`
-    for the same reason the share is — the siblings in this superstep spend the same channel and
-    each reads the same pre-batch snapshot.
+    Three terms, and each is a defect this module already measured:
 
-    `None` when the budget is off (`agent_subagent_files_max_chars == 0`), which is the documented
-    way to switch this whole cap off and must not become a cap of zero files.
+    - the setting is the channel's, so what the channel already holds is subtracted
+      (`_files_already_held`) — otherwise N delegations each store the whole budget;
+    - the batch's siblings divide it, because `files` is a `DeltaChannel` and every `task` call in
+      this superstep read the same pre-batch snapshot (`batch_siblings` says why that is the only
+      arithmetic available before their results exist);
+    - `None` when the setting is 0, which is its documented off switch and must not become a
+      budget of zero characters.
 
     Args:
         request: The tool-call request, whose state carries the caller's channels.
 
     Returns:
-        The number of changed files that may be stored, at least 1, or `None` when uncapped.
+        The characters this command may add, or `None` when the cap is switched off.
     """
     budget = settings.agent_subagent_files_max_chars
     if budget <= 0:
         return None
-    remaining = max(budget - _files_already_held(request), 0)
-    floor = max(len(_brief_notice(remaining or 1)), 1)
-    return max(remaining // (floor * batch_siblings(request)), 1)
+    return max(budget - _files_already_held(request), 0) // batch_siblings(request)
 
 
 def _files_already_held(request: Any) -> int:
@@ -602,6 +599,13 @@ def _files_already_held(request: Any) -> int:
     is already there against the same budget is what makes the setting a bound on the channel,
     which is the resource its comment in `core/config/agent.py` names.
 
+    **A key is charged beside its text, and this function summed only text.** The channel is a
+    mapping and LangGraph checkpoints the mapping, so a path costs what it is long — and a path is
+    a string the *model* wrote in its `write_file` call rather than anything this system composed.
+    Measured through the shipped middleware at the 200,000-character budget, 5,000 ordinary
+    `/scratch/…` keys were 83,370 uncounted characters, and 5,000 thousand-character keys were
+    4,527,370. See `agent/tool_result_shape.rewritten_command_files` for the half that spends it.
+
     Args:
         request: The tool-call request, whose `state` carries the caller's channels.
 
@@ -612,79 +616,51 @@ def _files_already_held(request: Any) -> int:
     if not isinstance(files, dict):
         return 0
     return sum(
-        len(data["content"])
-        for data in files.values()
+        len(path) + len(data["content"])
+        for path, data in files.items()
         if isinstance(data, dict) and isinstance(data.get("content"), str)
     )
 
 
-def _bounded_file(content: str, sharing: int, held: int = 0, concurrent: int = 1) -> str:
+def _bounded_file(content: str, share: int) -> str:
     """One file's share of `agent_subagent_files_max_chars`, cut with a notice that says so.
 
-    **The resource is the caller's `files` channel, so the budget is the channel's and the share is
-    per file** — the same division `bounded_for_batch` applies across a batch of tool calls, and
-    for the same reason: a per-file cap times an unbounded number of files is not a bound. A helper
-    that writes one note gets the whole budget; one that writes ten gets a tenth each.
+    **The cut, the log and the counter — and no longer the arithmetic.** The share used to be
+    divided here, out of the setting, by a count of files and a count of concurrent calls; it is
+    now handed in by `agent/tool_result_shape.rewritten_command_files`, which spends a remainder
+    and is the only place that can see what a file costs, because the key is half the cost and
+    never reached this function. `_files_budget` above holds the two terms that are about the
+    *request* rather than about one file.
 
     `bounded_content` is reused rather than reimplemented, so a truncated file keeps both ends and
     carries the same system-marked notice a truncated tool result does — which matters, because the
     caller *can* read one back (`read_file` reaches the file this crossed with) and a silent cut
     would hand a chemist a document that simply stops.
 
-    **`held` is what makes it a bound on the channel rather than on one `task` call.** `files` is a
-    `DeltaChannel` and accumulates, so without it a caller that delegates ten times stores ten
-    times the setting. What is left of the budget is divided, and an exhausted budget cuts to
-    `bounded_content`'s brief form rather than to nothing — a floor of 1 rather than 0, because 0
-    is how this setting is switched off entirely. **The floor is applied after the division**, for
-    the reason the comment below it gives: applied before, one integer division put it back to 0
-    and the cap failed open on the fullest channel.
-
-    **`concurrent` is what `held` cannot be**, and it is the other half of the same bound. `held`
-    is a *pre-batch* snapshot — `batch_siblings`'s docstring says why it has to be — so the
-    siblings running right now in this superstep are invisible to it and every one of them read
-    the same number. Dividing what is left by how many of them there are is the only arithmetic
-    available before their results exist; it assumes each of them writes, and each an equal slice,
-    so a lone writer beside silent siblings is over-charged by the batch's width. That is the
-    conservative direction for a storage bound — an unclaimed share is wasted, not spent — and it
-    is the cost `batch_siblings` states with its measurement.
-
-    The tool name passed to the notice is `task`, because that is the call the caller sees in its
-    own thread and the one an operator would go looking at.
+    **A share of 0 is no cap rather than no content**, which is how `agent_subagent_files_max_chars
+    = 0` switches the whole bound off: `bounded_content` returns a non-positive limit uncut, so the
+    off switch has one spelling in this module instead of a branch per caller. Every share the loop
+    computes for a live budget is floored at 1 for the reason the sibling `bounded_for_batch` gives
+    — a share that rounded to 0 would restore the unbounded behaviour exactly where the channel is
+    fullest, and that was measured: two 500,000-character files against an exhausted channel stored
+    1,000,000 characters uncut, with nothing logged and the counter unmoved.
 
     Args:
         content: The file's text as the helper left it.
-        sharing: How many files cross in this command.
-        held: Characters of `files` the caller's state already carries.
-        concurrent: How many calls in this batch name this call's tool, which is an upper
-            bound on how many of them write into the same channel — see `batch_siblings`.
+        share: How many characters this file may occupy, or 0 for no cap.
 
     Returns:
         The text to store, or `content` itself when nothing was cut.
     """
-    budget = settings.agent_subagent_files_max_chars
-    if budget > 0:
-        # **The floor belongs on the share, not on the budget.** It was on the budget, and integer
-        # division then divided it away: with the channel already at the budget and two files
-        # crossing, `share` was `1 // 2 == 0` — and 0 is how this setting is switched *off*
-        # (`bounded_content` returns uncut at `limit <= 0`). Measured before the fix: two 500,000-
-        # character files against an exhausted budget stored 1,000,000 characters uncut, with no
-        # truncation logged and the counter unmoved, so the cap failed open exactly where the
-        # channel was fullest. `bounded_for_batch` already floors after dividing and says why.
-        share = max((budget - held) // max(sharing * concurrent, 1), 1)
-    else:
-        share = 0
     bounded, removed = bounded_content(content, "task", share)
     if not removed:
         return content
     record_metric(lambda m: m.increment("chemclaw_subagent_file_truncations_total"))
     logger.warning(
-        "cut %d character(s) from a file a helper wrote into its caller's state; the share of "
-        "`agent_subagent_files_max_chars` across %d file(s) in %d concurrent call(s) to this tool "
-        "— however few of them wrote — is %d, with %d character(s) of the budget already held",
+        "cut %d character(s) from a file a helper wrote into its caller's state; its share of "
+        "`agent_subagent_files_max_chars` — what is left of the channel's budget, divided over the "
+        "files still to cross, less this file's own path — is %d character(s)",
         removed,
-        sharing,
-        concurrent,
         share,
-        held,
     )
     return str(bounded)
