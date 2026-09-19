@@ -12,6 +12,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 
 import pytest
@@ -1010,6 +1011,48 @@ _QUADRATIC_UNITS = {
     ),
     "url-userinfo": "postgresql://a:b@",
 }
+
+
+@pytest.mark.parametrize("groups", [4, 6, 8])
+def test_the_pem_separator_is_not_exponential_in_its_header_count(groups: int) -> None:
+    r"""The axis the quadratic guard above cannot grow, and the one that was exponential.
+
+    **That test grows the line LENGTH, and this rule's blow-up is in the number of alternations
+    after a single `-----BEGIN`.** Its `pem` unit pins the header lines at two per repetition, so
+    `unit * N` multiplies the *start positions* — linear, and it passed throughout. The exponential
+    axis is one
+    header followed by whitespace the separator's sibling `[\s\\]` branch can *also* consume: with
+    *k* spaces there are *k+1* ways to split them between the header's tail and the enclosing
+    `{0,64}` repetition, and a lookahead that must fail enumerates the product.
+
+    Measured before the tails were made possessive, growing groups rather than length:
+
+    | payload | time |
+    | --- | --- |
+    | 128 B | 2.1 ms |
+    | 178 B | 56 ms |
+    | 228 B | 1.05 s |
+    | 278 B | **14.4 s** |
+
+    ~26x per group, so 328 bytes is minutes and 378 is hours — from **model-authored text**, on a
+    filter that holds the stdlib logging lock and, on the front door, the single event loop.
+
+    The bound is generous and the shape is what it asserts: 8 groups is 328 bytes, which took ~6
+    minutes before and is microseconds now, so any threshold in this range separates the two by
+    orders of magnitude rather than by a margin somebody tuned. Parametrized over three sizes so the
+    *scaling* is visible — an exponential rule fails the largest first and cannot pass all three.
+    """
+    payload = "-----BEGIN PRIVATE KEY-----" + ("Proc-Type:" + " " * 40) * groups + "!"
+
+    start = time.perf_counter()
+    redact_secrets(payload)
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 0.5, (
+        f"{len(payload)} bytes of model-authored text took {elapsed:.3f} s to redact at {groups} "
+        "header groups. The separator's branches are ambiguous over whitespace again, and this "
+        "filter runs holding the logging lock"
+    )
 
 
 def test_every_structural_rule_has_a_pathological_unit() -> None:
