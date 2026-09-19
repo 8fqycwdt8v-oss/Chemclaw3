@@ -764,6 +764,42 @@ class AgentSettings(BaseSettings):
     # and wants it back.
     agent_helper_roster: str = "evidence" + os.pathsep + "computation" + os.pathsep + "safety"
 
+    # The agent profiles this deployment runs as **peers** — agents that hand the conversation to
+    # one another with `transfer_to_…` and each answer the chemist directly
+    # (`agent/turn_graph.py`). Empty is the shipped default and means no turn graph is built at
+    # all: `build_turn_graph` returns `None` and a turn runs the single agent it always did.
+    #
+    # **Empty rather than the three names `agent_helper_roster` ships with, and that asymmetry is
+    # the decision rather than an oversight.** A helper reads and reports, so a roster of them
+    # changes what a turn costs and not what it may do; a peer keeps the acting tools the root
+    # held and speaks to the chemist in its own voice, so a mesh that mis-routes is a worse
+    # product than the single agent it replaced. `D-2026-08-10-a-subagent-is-an-attenuation-not-a-
+    # new-actor` requires exactly this — measured hand-off accuracy before a team is turned on —
+    # and that measurement does not exist: `evals/delegation.py` has never run against a model.
+    # Turning this on is also a prefix cost a deployment should choose knowingly, because each
+    # peer binds one handoff tool per other peer and a first-party schema is charged against
+    # `tests/test_context_floor.py`'s ceiling with no allowance to absorb it.
+    #
+    # The root profile is a peer automatically and need not be named; naming it is ignored with a
+    # warning, since it would be a node the graph already has.
+    agent_peer_roster: str = ""
+
+    # How many times one **turn** may hand between peers before `transfer_to_…` refuses. 0 removes
+    # the bound.
+    #
+    # Per turn rather than per thread, and the distinction is the whole point: a conversation that
+    # moves between agents over twenty turns is working, while a turn that bounces four times is a
+    # model talking to itself through a routing table. `ChemclawState.handoffs` is untracked for
+    # that reason, so a thread cannot arrive at its fourth turn already capped —
+    # `agent/loop_cap.py`'s bricked-session defect, which is what happens when a per-turn quantity
+    # is stored per thread.
+    #
+    # Three because a legitimate chain is short: generalist → specialist → back, or generalist →
+    # one specialist → another. A fourth hop in one turn has not been observed to carry
+    # information, and the refusal leaves the agent holding control with everything else it had,
+    # so hitting the cap costs a chemist nothing but a handover they did not need.
+    agent_max_handoffs: int = 3
+
     # How many of a rostered helper's tool names its `task` menu entry enumerates before it says
     # "and N more".
     #
@@ -942,6 +978,16 @@ class AgentSettings(BaseSettings):
         # spaced the way a person writes a list — would not start the front door. Elsewhere a stray
         # space makes an entry inert; here it makes the deployment dead.
         return [name.strip() for name in self.agent_helper_roster.split(os.pathsep) if name.strip()]
+
+    @property
+    def peer_roster(self) -> list[str]:
+        """The profile names run as peers; empty means no turn graph is built (the default).
+
+        Stripped for `helper_roster`'s reason and not a weaker one: `refuse_an_unknown_peer_roster`
+        also raises at startup, so a list written the way a person writes one —
+        `"evidence: safety"` — would stop the front door rather than make one entry inert.
+        """
+        return [name.strip() for name in self.agent_peer_roster.split(os.pathsep) if name.strip()]
 
     @property
     def skills_enabled_list(self) -> list[str]:
