@@ -686,6 +686,7 @@ def test_a_score_over_enough_runs_drops_the_small_sample_caveat_but_keeps_the_re
         mae=1.2,
         folds=5,
         n_observations=settings.bo_fit_quality_trustworthy_observations,
+        response_range=50.0,
     )
     assert "sanity check, not as accuracy" not in over_the_threshold.summary
     # The repeatability caveat is not about sample size, so it survives at any n.
@@ -793,5 +794,65 @@ def test_an_objective_with_no_spread_at_all_refuses_an_r2_instead_of_reporting_a
     ]
     quality = _fit_quality(problem, flat, folds=5, seed=11)[0]
     assert quality.r2 is None, "a constant target cannot be predicted well or badly"
-    assert "no variance" in quality.summary
+    # "no **usable** variance", because the guard this asserts is no longer exact equality: see
+    # `test_a_systematic_sub_noise_drift_is_not_a_response_either` for the input that made the word
+    # necessary — those runs do differ, by an amount no assay resolves.
+    assert "no usable variance" in quality.summary
     assert "R²" not in quality.summary
+    assert quality.response_range == 0.0
+
+
+def test_a_systematic_sub_noise_drift_is_not_a_response_either() -> None:
+    """`spread == 0.0` catches a stuck assay and is defeated by a trend in the last decimal.
+
+    Driven over a real BoFire fit before this: eight runs of 42.0 with a systematic 1.7e-10 step
+    scored **R² 0.9991** and published "predicts held-out runs with R² 1.00", while the same eight
+    runs at exactly 42.0 correctly reported no fit quality at all. Neither caveat fires on it,
+    because both are about run *count* — and there was no field in `FitQuality` a reader could have
+    used to see that the whole range was a nanounit. A random flatline scores honestly (pure 1e-9
+    jitter over the same values measured R² 0.175), which is why the *systematic* case is the one
+    worth a test: it is the one that reads as a model.
+
+    The threshold is relative to the response's own magnitude, and stated once in
+    `bo_flat_response_relative_spread` rather than here.
+    """
+    problem = _problem()
+    drifting = [
+        Observation(
+            params={"temperature": 20.0 + 10.0 * i, "solvent": "THF"}, value=42.0 + i * 1.7e-10
+        )
+        for i in range(8)
+    ]
+    quality = _fit_quality(problem, drifting, folds=5, seed=11)[0]
+    assert quality.r2 is None, "a nanounit of drift on 42.0 is not a response a model explains"
+    assert 0.0 < quality.response_range < 1e-8
+
+
+def test_a_score_states_the_range_it_is_a_fraction_of() -> None:
+    """R² is scale-free, and without the range a reader cannot tell 50 points of yield from 1e-9.
+
+    A pure function of the fields, so constructed rather than fitted — the same argument the
+    high-`n` test above makes. What it pins is that the number reaches the sentence a chemist reads:
+    the field existing is not the same as the summary stating it, and only one of the two is what a
+    tool result carries.
+    """
+    quality = FitQuality(
+        objective="yield", r2=0.91, mae=1.2, folds=5, n_observations=8, response_range=48.5
+    )
+    assert "response range of 48.5" in quality.summary
+
+
+def test_the_defaulted_fold_count_never_asks_for_more_folds_than_there_are_runs() -> None:
+    """The asymmetry between `_resolve_folds`' two branches, held to the floor that makes it safe.
+
+    A caller-supplied count is checked against `n_observations`; a defaulted one is
+    `max(2, min(bo_cv_folds, n))`, which bends down only to 2 — so it would ask for two folds over
+    one observation. That is unreachable today *because* `MIN_SEED_OBSERVATIONS == 2` and
+    `interrogate_surrogate` refuses below it, which is a coupling across two modules rather than a
+    property of the function. Asserted from the constant, so lowering that floor reds here instead
+    of producing a fold that holds out nothing.
+    """
+    from chemclaw.science.bo.engine import _resolve_folds
+    from chemclaw.science.bo.problem import MIN_SEED_OBSERVATIONS
+
+    assert _resolve_folds(None, MIN_SEED_OBSERVATIONS) <= MIN_SEED_OBSERVATIONS

@@ -117,14 +117,24 @@ def declared_tools(skills_dirs: Iterable[str]) -> dict[str, frozenset[str]]:
     now enforced rather than asserted.
 
     **Tolerant where `chemclaw.cli.validate_skills` is strict, and deliberately so.** An unreadable
-    or invalid `SKILL.md` is reported there, loudly, before deploy; here it is simply absent from
-    the map, which the source reads as "declares nothing" and therefore leaves visible. The failure
-    directions are not symmetric: a validator that shrugs ships a broken skill, while a *filter*
-    that raises takes down every live conversation over a frontmatter typo. Both halves see the same
-    files, so the strict one is what actually holds the line.
+    or invalid `SKILL.md` is reported there, loudly, before deploy; here it does not raise. The
+    failure directions are not symmetric: a validator that shrugs ships a broken skill, while a
+    *filter* that raises takes down every live conversation over a frontmatter typo. Both halves see
+    the same files, so the strict one is what actually holds the line.
 
-    A skill missing from the returned map and a skill mapped to an empty set mean the same thing to
-    every caller, so the two are not distinguished.
+    **What "tolerant" does *not* mean is "absent from the map", and this paragraph said it did.** It
+    read "here it is simply absent from the map, which the source reads as 'declares nothing' and
+    therefore leaves visible" — which is the exact behaviour `_declared_pair` a hundred lines below
+    was changed to stop, because leaving a skill visible is a *widening* in a filter whose whole
+    contract is that a declaration can only cost visibility. An unreadable manifest is now mapped to
+    `UNREADABLE_DECLARATION`, keyed by its directory, and scoped to nothing.
+
+    **So a skill missing from the returned map and a skill mapped to an empty set mean opposite
+    things**, and this paragraph claimed they were the same and therefore not distinguished. An
+    empty set is "declares nothing", which `ToolScopedSkills._permits` leaves visible to every
+    profile; absence means the same. `UNREADABLE_DECLARATION`'s own comment says an empty set
+    "would be the fail-*open* answer", which is why nothing here ever returns one for a file it
+    could not read.
 
     Args:
         skills_dirs: The directories to walk — the configured tree plus each enabled connector
@@ -154,9 +164,8 @@ def _declared_tools(skills_dirs: tuple[str, ...]) -> dict[str, frozenset[str]]:
     declared: dict[str, frozenset[str]] = {}
     for directory in skills_dirs:
         for path in sorted(Path(directory).glob(f"*/{SKILL_FILENAME}")):
-            pair = _declared_pair(path)
-            if pair is not None:
-                declared.setdefault(pair[0], pair[1])
+            name, tools = _declared_pair(path)
+            declared.setdefault(name, tools)
     return declared
 
 
@@ -168,8 +177,16 @@ def _declared_tools(skills_dirs: tuple[str, ...]) -> dict[str, frozenset[str]]:
 UNREADABLE_DECLARATION: frozenset[str] = frozenset({"\x00unreadable-skill-manifest"})
 
 
-def _declared_pair(path: Path) -> tuple[str, frozenset[str]] | None:
-    """One skill's `(name, declared tools)`, or None (logged) if the file cannot be read at all.
+def _declared_pair(path: Path) -> tuple[str, frozenset[str]]:
+    """One skill's `(name, declared tools)` — always a pair, scoped to nothing when unreadable.
+
+    **Total, and it used to be able to return `None`.** The summary line here said "or None (logged)
+    if the file cannot be read at all" and the caller guarded on it, long after the `except` arm was
+    changed to return `(directory name, UNREADABLE_DECLARATION)` — so the `| None`, the guard and
+    that clause were all dead, and `mypy --strict` cannot see it. Driven over a missing file, an
+    empty `name`, a whitespace `name`, undecodable bytes and a scalar `tools:`: all five come back
+    as a pair. The annotation is narrowed rather than the behaviour widened, because a `None` here
+    is exactly the fail-open answer the arm below exists to refuse.
 
     Separate from `declared_tools` so the "why swallow it" reasoning sits next to the `except`:
     both failure modes are reported properly by `make skill-validate`, and neither is worth raising
@@ -198,8 +215,16 @@ def _declared_pair(path: Path) -> tuple[str, frozenset[str]] | None:
                 f"name must be a string and tools a list, got {type(name)}/{type(tools)}"
             )
         # Stripped and required non-empty, which is what `SkillManifest`'s `str_strip_whitespace`
-        # plus `min_length=1` did before this read the keys directly. An empty name cannot be the
-        # key of anything, so it stays out of the map rather than claiming `""`.
+        # plus `min_length=1` did before this read the keys directly.
+        #
+        # **It does not "stay out of the map", and this comment said it did** ("an empty name cannot
+        # be the key of anything, so it stays out of the map rather than claiming `\"\"`"). The
+        # raise goes to the arm below, which keys the entry by the *directory* — driven, `name: '
+        # '` returns `('empty-name', UNREADABLE_DECLARATION)`. That is the right answer for the
+        # reason that arm gives: a manifest whose own name cannot be read is one whose `tools:`
+        # declaration cannot be trusted either, and the directory is the string `make
+        # skill-validate` requires it to match. What must not happen is the entry going missing,
+        # which reads as "declares nothing" and leaves the skill visible.
         if not name.strip():
             raise ValueError("a skill's `name` is empty")
         return name.strip(), frozenset(str(tool) for tool in tools)

@@ -334,6 +334,16 @@ the question is "was this recomputed?", assert the **call count**, not the clock
 immune to load and is what D-011 actually claims. I did eventually measure it that way (`0 computed`
 on the repeat) and that is the number that belongs in the report.
 
+**It is not only the clock, and one reading of a stable-looking quantity is not a measurement
+either (2026-09-19).** Re-deriving `FORKSERVER_RSS_CEILING_MIB`, a single reading of the `jinja2`
+arm at load average ~10 came back 121.9 MiB and I wrote a paragraph explaining a "+5.8 MiB, ~10%
+allocator scaling" from it. Four repeats at load 1.1 read 117.7–117.9 — **+1.6 MiB, exactly the
+increment the record already held** — and the shipped arm read 116.2 at both loads, so the
+inference was built on the one arm that happened to be noisy. `VmRSS` is stable to 0.1 MiB when it
+is repeated and was not stable when it was not. **Repeat every arm you are going to compare, not
+just the one you expect to move**, and when a difference has to be explained, first check whether
+it survives a repeat.
+
 ## 2026-08-16 — when a key is derived on the other side of a wire, ask what it names
 
 **Pattern.** Three defects in one migration, all the same shape: the cache key is derived by the
@@ -3018,6 +3028,36 @@ me until every reviewer has handed back. And when a reviewer is stopped mid-flig
 files it was scoped to before doing anything else — a mutation left behind is indistinguishable from
 my own work in a `git status` listing, and it is the one kind of leftover that is *designed* to make
 the tests pass while the code is wrong.
+
+**And a mutation loop must never run in the background, because the restore is the half that gets
+killed.** Learned twice in one session, from both ends. A reviewer's backgrounded batch was cut off
+mid-iteration and left `"model_route"` -> `"model_routes"` in `turn_graph.py`; its re-run then backed
+up the *already-mutated* file and dutifully restored the mutation, so the backup itself carried the
+defect forward. Separately, a reviewer I told to mutate in the shared tree left a revert of a merged
+authorization fix behind. The shape is the same in both: a mutation harness is a
+patch-run-restore *pair*, and anything that can kill it between the halves leaves the tree looking
+edited by me. So: mutate in the foreground, one at a time; make the harness refuse to start when a
+backup file already exists (a stale backup means the last run died, not that this one may proceed);
+and never use a git verb to restore, since `git checkout --` cannot tell a mutation from a real edit
+and a stale backup is the only evidence of which is which.
+
+## `mypy --strict src` is not `make type`, and the gap is where a moved signature hides
+Broke CI twice in one session, in two repositories, from the same substitution. The gate checks
+`src examples tests` — 919 files against 490 — so when a fix moves a signature, every *test* call site
+it moved under is invisible to the narrower command. Both times the fix was right and the report said
+"mypy --strict green"; both times CI found a test still passing the old shape. **Run the Makefile
+target, not the tool.** The same applies to `ruff`: `make lint` is `check` plus `format --check`, and
+only the pair is the gate. When a report claims a gate, the thing to check is whether it names the
+target or the tool.
+
+## A fixture built past validation is a fixture that supplies the subject
+A guard for two new model fields was green with both fields deleted. Its fixture built the answer with
+`model_copy(update=…)`, which assigns **past** validation — so it was injecting the very fields whose
+survival across the boundary was the property under test. Rewritten through `model_validate` over the
+wire shape, the mutation reds. This is the "a control's fixture is part of its subject" rule arriving
+by a new route: for anything whose subject is a *boundary* (`extra="ignore"`, a decoder, a parser),
+the fixture has to cross that boundary the way production crosses it, or the test is about the
+constructor instead.
 
 ## An absent keyword argument is a behaviour, and a test that reads the source can assert its opposite
 

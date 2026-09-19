@@ -131,6 +131,18 @@ def _read_manifest(directory: Path) -> DatasetManifest:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise VendoredDatasetError(f"no vendored dataset manifest at {path}: {exc}") from exc
+    # `UnicodeDecodeError` is a *sibling* of `json.JSONDecodeError` under `ValueError`, not a child,
+    # and not an `OSError` — so a manifest that is not UTF-8 left this module as a bare
+    # `UnicodeDecodeError`, past the promise in this function's own name, and past
+    # `durable/publish._BAD_DATA_TYPES`, which classifies by class name and lists
+    # `VendoredDatasetError` precisely because "a retry re-reads the same bytes from the same image
+    # layer". The same sentence is what makes the decode error the *most* certain bad data here.
+    except UnicodeDecodeError as exc:
+        raise VendoredDatasetError(
+            f"{path} is not UTF-8: byte {exc.object[exc.start]:#04x} at offset {exc.start} is "
+            f"not valid ({exc.reason}). The manifest is part of the image, so rebuild it rather "
+            "than retrying"
+        ) from exc
     except json.JSONDecodeError as exc:
         raise VendoredDatasetError(f"{path} is not valid JSON: {exc}") from exc
     try:
@@ -158,13 +170,29 @@ def _read_records(directory: Path, manifest: DatasetManifest) -> list[VendoredRe
                 "reviewed — rebuild the image rather than editing the manifest."
             )
 
-    rows = list(csv.DictReader(data.decode("utf-8").splitlines()))
+    try:
+        text = data.decode("utf-8")
+    # The checksum has already passed at this point, so these bytes are provably the ones the review
+    # approved — which makes this a *permanent* property of the image and the one case
+    # `_BAD_DATA_TYPES` exists to fail fast on. Driven before this existed: a latin-1 `records.csv`
+    # whose manifest checksum matched raised a bare `UnicodeDecodeError`, which that list does not
+    # match, so Temporal burned `activity_max_attempts` re-reading identical bytes from an immutable
+    # image layer. The byte and its offset are named because "not UTF-8" over a 40 MB corpus is not
+    # something an operator can act on.
+    except UnicodeDecodeError as exc:
+        raise VendoredDatasetError(
+            f"vendored dataset {manifest.name} has a {path.name} that is not UTF-8: byte "
+            f"{exc.object[exc.start]:#04x} at offset {exc.start} is not valid ({exc.reason}). "
+            "The file is in the image and its checksum matched, so this is what was reviewed — "
+            "re-export it as UTF-8 and rebuild"
+        ) from exc
+    rows = list(csv.DictReader(text.splitlines()))
     if rows and manifest.text_column not in rows[0]:
         raise VendoredDatasetError(
             f"vendored dataset {manifest.name} declares text_column "
             f"{manifest.text_column!r}, which {path} does not have"
         )
-    return [
+    records = [
         VendoredRecord(
             text=row[manifest.text_column],
             smiles=row.get(manifest.smiles_column) if manifest.smiles_column else None,
@@ -173,6 +201,24 @@ def _read_records(directory: Path, manifest: DatasetManifest) -> list[VendoredRe
         for row in rows
         if row.get(manifest.text_column)
     ]
+    # A row whose text cell is empty has nothing to retrieve, so it is dropped rather than refused —
+    # one blank line must not cost a corpus its whole load. But it was dropped with **no log, no
+    # count and no error, immediately after the checksum passed**: the bytes are provably the ones
+    # the review approved, and the loader then served fewer rows than the reviewed file holds, which
+    # is the one loss this module's own checksum argument cannot explain away. Measured: 3 rows in,
+    # 2 loaded, nothing said. One aggregated line per load, for `warn_late_arrivals`' reason — the
+    # count is what a reader needs and a line per row would be a storm on a broken export.
+    if len(records) != len(rows):
+        logger.warning(
+            "vendored dataset %s: %d of %d rows in %s have an empty %r and were not loaded, so "
+            "this corpus serves fewer rows than the file its checksum verified",
+            manifest.name,
+            len(rows) - len(records),
+            len(rows),
+            path.name,
+            manifest.text_column,
+        )
+    return records
 
 
 class VendoredDatasetRetriever:

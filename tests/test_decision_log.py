@@ -1191,6 +1191,24 @@ def test_the_topic_cursor_is_not_ahead_of_the_record() -> None:
 # different claim — "this guarantee is enforced right now, here" — which is why it is checked here
 # and there rather than exempted with the paths.
 _RETIRED_TEST_CITATIONS: dict[str, str] = {
+    # Split in two, because it was one test standing for two different facts and only one of them
+    # was the fact its ADR argued. `D-2026-09-09-a-migration-run-reports-what-it-applied-not-that-
+    # the-schema-matches` justifies the positive-evidence trade entirely on **privilege** — a split
+    # session store whose role may use the store and may not select the ledger — and the code
+    # implemented it by catching `UndefinedTable` beside `InsufficientPrivilege`, so the admitted
+    # shape was much wider than the argued case. `schema_migrations` is created by the first
+    # migration, so its absence is not "the check could not run"; it is the strongest possible
+    # evidence that the check would fail. Driven 2026-09-19 against an empty database under the
+    # chart's shipped `CHEMCLAW_SESSION_STORE=postgres`: `/readyz` answered `200 ready`, so the pod
+    # joined the Route and failed every session write. The ADR's own drive used a *missing table* to
+    # prove the privilege branch, which is why the branch it argues had no test at all until now.
+    "test_a_ledger_it_cannot_read_does_not_take_the_pod_out_of_the_route": (
+        "split into `test_a_database_with_no_migration_ledger_takes_the_pod_out_of_the_route` and "
+        "`test_a_ledger_this_role_may_not_select_does_not_take_the_pod_out_of_the_route` "
+        "(tests/test_service.py). The second keeps the trade this ADR argues and proves it through "
+        "a real `InsufficientPrivilege` for the first time; the first reverses the half the ADR "
+        "never argued, because no ledger at all is a mismatch rather than an unreadable one"
+    ),
     # Retired because it asserted the opposite of what it read. It parsed the AST for an absent
     # `checkpointer=` keyword and concluded the helper graph held no checkpointer — and that absence
     # is precisely how a LangGraph subgraph asks to *inherit* its parent's, so every helper was

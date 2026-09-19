@@ -854,3 +854,75 @@ def test_every_per_turn_counter_survives_a_mid_turn_resume() -> None:
         "carried across a mid-turn resume, so a turn that comes back from a job result gets a "
         "fresh allowance of whatever they bound"
     )
+
+
+def test_the_carry_is_the_channels_own_total_across_a_fan_out() -> None:
+    """A fan-out's carry is the turn's total, not one branch's — driven through the real stream.
+
+    **The guard has to run the stream, because the defect lived in the stream's shape.** Every
+    aggregation `_carry_forward` could do over the `updates` mode was wrong for the same reason, and
+    the reason is invisible from inside the function: with `subgraphs=True` this LangGraph version
+    yields **one node per `updates` payload**, never a superstep dict, so `base` has already
+    advanced past every writer after the first and each later one contributes nothing. Both shapes
+    that shipped here — `max` over the payload's values, and the `TurnTotal` fold over them —
+    answered 2 where the channel held 5, which is 23 calls of fresh allowance on a resumed turn
+    that had spent 25.
+
+    So the assertion is a comparison against the graph's **own** channel value, obtained from a
+    second run of the same graph on a fresh thread rather than written down here: a constant
+    expectation would be satisfiable by a carry that happens to agree at this width, and the number
+    under test is precisely one nobody may re-derive by hand. The fan-out is four wide because one
+    writer is the degenerate case both shapes get right — `base + (value - base) == value` — which
+    is why the defect survived a suite with no fan-out in it.
+    """
+    from langgraph.graph import END, START, StateGraph
+
+    from chemclaw.agent.state import ChemclawState
+
+    width = 4
+
+    def _fan_out() -> Any:
+        graph: Any = StateGraph(ChemclawState)
+
+        def bump(state: dict[str, Any]) -> dict[str, Any]:
+            return {"model_calls": int(state.get("model_calls", 0)) + 1}
+
+        graph.add_node("start", bump)
+        graph.add_edge(START, "start")
+        for index in range(width):
+            graph.add_node(f"w{index}", bump)
+            graph.add_edge("start", f"w{index}")
+            graph.add_edge(f"w{index}", END)
+        return graph.compile()
+
+    async def _run() -> tuple[dict[str, Any], Any]:
+        graph = _fan_out()
+        carry: dict[str, Any] = {}
+        async for _event in graph_events(
+            graph,
+            "go",
+            config={"configurable": {"thread_id": "carry-fan-out"}},
+            trace=ToolCallTrace(),
+            on_signal=lambda _signal: None,
+            usage=_Usage(),
+            carry=carry,
+        ):
+            pass
+        truth = await graph.ainvoke(
+            {"messages": []}, {"configurable": {"thread_id": "carry-truth"}}
+        )
+        return carry, truth.get("model_calls")
+
+    carry, channel_total = asyncio.run(_run())
+
+    assert channel_total == width + 1, (
+        "the fixture no longer stages a fan-out the reducer folds — "
+        f"{width} parallel writers plus one should total {width + 1}, the channel holds "
+        f"{channel_total}, so this test is not about the defect any more"
+    )
+    assert carry.get("model_calls") == channel_total, (
+        f"the carry reads {carry.get('model_calls')} where the turn's own channel holds "
+        f"{channel_total}: a mid-turn resume seeded from this dict would hand the turn "
+        f"{channel_total - int(carry.get('model_calls') or 0)} model calls of allowance it has "
+        "already spent"
+    )

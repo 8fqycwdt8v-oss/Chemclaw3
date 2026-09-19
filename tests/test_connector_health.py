@@ -16,12 +16,19 @@ time-skipping test server cannot stand in here — measured, it answers `Describ
 """
 
 import asyncio
+import contextlib
 import inspect
 import logging
+import threading
 import time
+from collections.abc import Iterator
+from contextlib import AsyncExitStack
 from datetime import timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast, get_args
+from unittest import mock
 
 import pytest
 from temporalio.api.taskqueue.v1 import PollerInfo
@@ -40,8 +47,11 @@ from chemclaw.connectors.health import (
     check_connectors_at_startup,
     probe_connectors,
 )
+from chemclaw.connectors.manifest import BearerAuth, ConnectorManifest, HttpEndpoint
+from chemclaw.connectors.registry import _mcp_connection, open_connector_specs
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
+from chemclaw.core.metrics import Metrics
 
 
 def _jobs_only(name: str) -> str:
@@ -655,3 +665,219 @@ def test_a_state_the_severity_order_has_not_been_taught_still_folds(
 
     assert [health.name for health in folded] == ["calc"]
     assert "queue dark" in folded[0].detail
+
+
+class _HealthyButBroken(BaseHTTPRequestHandler):
+    """`GET /healthz` answers 200; `POST /mcp` answers the failure the class name promises.
+
+    The shape this whole pair of tests is about: a pod that is up, listening, and passing its
+    readiness route while every MCP call to it fails. `mode` is set on the class by `_serving`.
+    """
+
+    mode = "500"
+
+    def _body(self, code: int, body: str, ctype: str = "application/json") -> None:
+        """Write one bounded response — the handler does nothing else."""
+        payload = body.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def do_GET(self) -> None:
+        """The readiness route an operator and the sweep both believe."""
+        if self.path.endswith("/healthz"):
+            self._body(200, '{"status":"ok"}')
+        else:
+            self._body(404, "{}")
+
+    def do_POST(self) -> None:
+        """The MCP route, broken in one of the two ways a real pod breaks."""
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        if type(self).mode == "500":
+            self._body(500, '{"error":"internal"}')
+        else:
+            self._body(200, "<html>not json at all</html>", "text/html")
+
+    def log_message(self, *_args: Any) -> None:
+        """Silence the handler's own stderr logging, which is not what these tests read."""
+
+
+@contextlib.contextmanager
+def _serving(mode: str) -> Iterator[int]:
+    """A real listener on an ephemeral port: 200 on `/healthz`, `mode` on `/mcp`."""
+    handler = type("_Handler", (_HealthyButBroken,), {"mode": mode})
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield int(server.server_address[1])
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=10)
+
+
+def _turn_open(name: str, port: int) -> tuple[int, list[str]]:
+    """Open one connector the way a turn does, and report (tool count, names that did not come up).
+
+    The spec is built through `_mcp_connection` off a real `HttpEndpoint`, which is what a turn
+    uses, so the bearer declaration and the timeouts are the deployment's rather than a fixture's.
+    """
+    endpoint = HttpEndpoint(
+        url=f"http://127.0.0.1:{port}/{name}/mcp",
+        health_url=f"http://127.0.0.1:{port}/{name}/healthz",
+        tools=[f"{name}_lookup"],
+        read_only=[f"{name}_lookup"],
+    )
+    spec = _mcp_connection(cast(ConnectorManifest, SimpleNamespace(name=name)), endpoint)
+
+    async def _open() -> tuple[int, list[str]]:
+        async with AsyncExitStack() as stack:
+            tools, unreachable = await open_connector_specs(stack, [spec])
+            return len(tools), unreachable
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    return asyncio.run(_open())
+
+
+#: How `/mcp` is broken, and the words the WARNING must carry for it. Two shapes, because they
+#: reach the log line by different routes and only one of them has a status code to report: a `500`
+#: raises `httpx.HTTPStatusError` inside the handshake's `TaskGroup`, while a `200` carrying
+#: `text/html` — an ingress error page, which is what a real cluster serves — leaves the MCP client
+#: waiting for a stream that never becomes one, so the open times out. Both used to render as
+#: `ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)`, and the timeout then
+#: rendered as `TimeoutError: ` — the type with the reason missing.
+_BROKEN_MCP: dict[str, tuple[str, ...]] = {
+    "500": ("HTTPStatusError", "500"),
+    "garbage": ("TimeoutError", "handshake did not complete"),
+}
+
+
+@pytest.mark.parametrize("mode", sorted(_BROKEN_MCP))
+def test_a_connector_healthy_on_healthz_and_broken_on_mcp_is_reported_by_the_turn(
+    mode: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The sweep calls it healthy; the *turn* is what names it — so the turn's series must carry it.
+
+    **Driven against a real listener on a real socket, because the gap is between two probes and no
+    stub of either one has it.** Measured on 2026-09-19 against exactly this handler:
+    `/readyz` answered `{"status":"ready","connectors_unhealthy":0}`, the startup line said
+    `molfp=healthy`, and `chemclaw_connectors_unhealthy` held **0** while every MCP call failed —
+    so `ChemclawConnectorsUnhealthy` (`max(chemclaw_connectors_unhealthy) > 0`) could not fire on a
+    connector that was contributing nothing.
+
+    The sweep's verdict is asserted rather than fixed, and that is the decision this test records:
+    `GET /healthz` stays the whole probe. Measured against the four connector apps this repository
+    serves, on loopback with no TLS, `GET /healthz` costs 3.6–4.2 ms and a full MCP
+    handshake + `tools/list` + teardown costs 50–71 ms — **12–19x** — on a route the kubelet runs
+    every 10 s with a 5 s timeout derived from a 2 s per-endpoint budget. And it would buy *less*
+    speed, not more: `ChemclawConnectorsDegradingTurns` fires at `for: 0m` on the first degraded
+    turn, where a sweep-based gauge sits behind `for: 10m`. What a `tools/list` probe would buy is
+    detection with **no traffic**, which is a real gap and is a `docs/planning/BACKLOG.md` row with
+    its own trigger rather than a change made here.
+
+    So what had to change is the *turn's* report, and the three things asserted here are the three
+    that were missing:
+
+    - the connector is in `unreachable`, so the turn degrades and says so (this already held);
+    - `chemclaw_connectors_unreachable_total` carries `connector`, which it did not — it was one
+      bulk increment of an unlabelled series, so neither the new alert nor a dashboard could name
+      which connector had gone dark while its sibling gauge `chemclaw_connector_unhealthy` could;
+    - the WARNING names the leaf. It printed the enclosing `ExceptionGroup` —
+      `unhandled errors in a TaskGroup (1 sub-exception)` — which reads as a network fault whatever
+      happened, while `/healthz` said the pod was fine. The status code was inside the group all
+      along; see `_BROKEN_MCP` for why the `garbage` arm has no status code to name and what it
+      names instead.
+    """
+    metrics = Metrics()
+    with _serving(mode) as port:
+        with (
+            mock.patch("chemclaw.core.metrics_bridge.METRICS", metrics),
+            caplog.at_level(logging.WARNING, logger="chemclaw.connectors.transport"),
+        ):
+            tools, unreachable = _turn_open("probe", port)
+        # The sweep, over the same live listener, through the real registry.
+        _bundles(tmp_path, monkeypatch, probe=_http_serving("probe", port))
+        sweep = asyncio.run(probe_connectors())
+
+    assert _states(sweep) == {"probe": "healthy"}, (
+        f"the readiness sweep no longer calls this connector healthy ({_states(sweep)}); if that "
+        "was deliberate, the decision recorded in this docstring and in BACKLOG.md has changed and "
+        "the alert pair needs revisiting"
+    )
+    assert sum(1 for item in sweep if item.unhealthy) == 0, (
+        "`ChemclawConnectorsUnhealthy` reads `max(chemclaw_connectors_unhealthy) > 0`, so a "
+        "non-zero count here would mean this test is no longer about the case that alert misses"
+    )
+
+    assert (tools, unreachable) == (0, ["probe"]), (
+        f"the turn got {tools} tool(s) and reported {unreachable}; a connector that fails every "
+        "call must contribute nothing and be named"
+    )
+    rendered = metrics.render()
+    assert 'chemclaw_connectors_unreachable_total{connector="probe"} 1' in rendered, (
+        "`ChemclawConnectorsDegradingTurns` reads "
+        "`increase(chemclaw_connectors_unreachable_total[15m]) > 0` and its runbook entry tells an "
+        "operator to read the `connector` label; an unlabelled sample says only that something "
+        f"went dark. Got:\n{rendered}"
+    )
+
+    lines = [record.getMessage() for record in caplog.records if "is unreachable" in record.msg]
+    assert len(lines) == 1, f"expected one unreachable WARNING, got {lines}"
+    assert "ExceptionGroup" not in lines[0], (
+        f"the line still reports the group rather than what failed: {lines[0]}"
+    )
+    missing = [word for word in _BROKEN_MCP[mode] if word not in lines[0]]
+    assert not missing, (
+        f"the line omits {missing}, so the operator is sent after a network fault while "
+        f"`/healthz` says the pod is fine: {lines[0]}"
+    )
+
+
+def test_a_connector_whose_token_is_unset_names_the_variable_rather_than_the_group(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other leaf this path reaches, and the one where nothing about the pod is wrong.
+
+    A manifest declaring `auth: {mode: bearer, token_env: …}` whose variable is unset fails the
+    open before a byte is sent. Driven on 2026-09-19 it produced the *identical* line to the
+    broken-`/mcp` case — `connector … is unreachable (ExceptionGroup: unhandled errors in a
+    TaskGroup (1 sub-exception))` — so two faults with opposite remedies were one sentence, and
+    the sweep called the pod healthy in both.
+
+    Asserted separately from the test above rather than as a third parametrization, because it is
+    the part of the boundary a fix that special-cased `httpx` would have left behind: the leaf here
+    is first-party (`connectors/identity.MissingConnectorCredential`) and reaches the same line
+    through the same group.
+    """
+    monkeypatch.delenv("CHEMCLAW_PROBE_MCP_TOKEN", raising=False)
+    with _serving("500") as port:
+        endpoint = HttpEndpoint(
+            url=f"http://127.0.0.1:{port}/probe/mcp",
+            tools=["probe_lookup"],
+            read_only=["probe_lookup"],
+            auth=BearerAuth(token_env="CHEMCLAW_PROBE_MCP_TOKEN"),
+        )
+        spec = _mcp_connection(cast(ConnectorManifest, SimpleNamespace(name="probe")), endpoint)
+
+        async def _open() -> list[str]:
+            async with AsyncExitStack() as stack:
+                _, unreachable = await open_connector_specs(stack, [spec])
+                return unreachable
+            raise AssertionError("unreachable")  # pragma: no cover
+
+        with caplog.at_level(logging.WARNING, logger="chemclaw.connectors.transport"):
+            unreachable = asyncio.run(_open())
+
+    assert unreachable == ["probe"]
+    line = next(record.getMessage() for record in caplog.records if "is unreachable" in record.msg)
+    assert "ExceptionGroup" not in line, line
+    assert "MissingConnectorCredential" in line and "CHEMCLAW_PROBE_MCP_TOKEN" in line, (
+        "an unset credential and a broken pod are different remedies and must not be one sentence: "
+        f"{line}"
+    )

@@ -455,16 +455,27 @@ async def run_turn(
                 silent = _empty_answer_event(session, tool_trace, ledger)
                 if silent is not None:
                     yield silent
-                    # **`return`, not fall through**, which is what this did. `events.py` names
-                    # the two cap errors as the ones that share their turn with an answer, and
-                    # falling through broke that for `empty_answer` in three ways at once: the
-                    # client got an `AnswerEvent` whose text is `""` (the reference page renders it
-                    # as an empty assistant bubble), `build_answer_event` spent a judge call under
-                    # `verifier_enabled` grading an empty string, and `answered = True` reached
-                    # `record_turn_cost(completed=answered)` — so the cost ledger booked "the user
-                    # got an answer for the money" for precisely the silent-death turn that branch
-                    # exists to name. The teardown below still books the spend and the duration,
-                    # which is right: the turn cost what it cost.
+                # **The stop is a different question from the naming, and writing them as one
+                # condition made one of them dead code.** "Does this silence need an error event of
+                # its own?" is `_empty_answer_event`'s, and it answers *no* for a turn a cap has
+                # already named — see its own comment for the drive. "Is there anything to ship?" is
+                # this one, and it is true of a capped silent turn exactly as much as of an
+                # unexplained one, because the three consequences below do not care why the text is
+                # empty. The first version of this fix asked the cap test here as well, which made
+                # the test inside `_empty_answer_event` unreachable: driven, three mutations of it
+                # stayed green.
+                #
+                # **`return`, not fall through**, which is what this did. `events.py` names
+                # the two cap errors as the ones that share their turn with an answer, and
+                # falling through broke that for `empty_answer` in three ways at once: the
+                # client got an `AnswerEvent` whose text is `""` (the reference page renders it
+                # as an empty assistant bubble), `build_answer_event` spent a judge call under
+                # `verifier_enabled` grading an empty string, and `answered = True` reached
+                # `record_turn_cost(completed=answered)` — so the cost ledger booked "the user
+                # got an answer for the money" for precisely the silent-death turn that branch
+                # exists to name. The teardown below still books the spend and the duration,
+                # which is right: the turn cost what it cost.
+                if not ledger.answer_text.strip():
                     return
                 # Before the answer, because the answer is the turn's final event: a chemist reading
                 # "review the plan and approve it" in the answer text used to have nothing to act on
@@ -1625,6 +1636,23 @@ def _cap_events(session: TurnSession, ledger: _TurnLedger) -> Iterator[ErrorEven
             yield event
 
 
+def _partial_answer_clause(ledger: _TurnLedger) -> str:
+    """How a cap event ends, which depends on whether the turn wrote anything before it fired.
+
+    Both cap events ended `"so the answer below is partial"` unconditionally, and a capped turn does
+    not always have an answer below: driven 2026-09-19 at `agent_max_turn_billed_tokens=1`, the cap
+    fired after 1,020 billed tokens with no prose at all, so the chemist read "the answer below is
+    partial" with nothing following it — and then, one event later, `empty_answer` saying "Nothing
+    was written, so there is nothing below to read" with the opposite `retryable` flag.
+
+    One function because the two caps are one sentence with one number swapped, and a clause fixed
+    in one of them is the shape `tasks/lessons.md` calls a rule written twice.
+    """
+    if ledger.answer_text.strip():
+        return "so the answer below is partial"
+    return "and nothing had been written, so there is nothing below to read"
+
+
 def _loop_cap_event(session: TurnSession, ledger: _TurnLedger) -> ErrorEvent | None:
     """Say out loud that the runaway guard fired, or `None` if it did not.
 
@@ -1654,7 +1682,7 @@ def _loop_cap_event(session: TurnSession, ledger: _TurnLedger) -> ErrorEvent | N
     return ErrorEvent(
         message=(
             f"The turn reached its {settings.harness_max_loop_iterations}-iteration limit "
-            "and stopped with work still open, so the answer below is partial "
+            f"and stopped with work still open, {_partial_answer_clause(ledger)} "
             f"(session {session.session_id})."
         ),
         code="loop_cap_reached",
@@ -1700,8 +1728,8 @@ def _spend_cap_event(session: TurnSession, ledger: _TurnLedger) -> ErrorEvent | 
     return ErrorEvent(
         message=(
             f"The turn reached its {settings.agent_max_turn_billed_tokens:,}-token budget "
-            f"after billing {billed:,} and stopped with work still open, so the answer below "
-            f"is partial (session {session.session_id})."
+            f"after billing {billed:,} and stopped with work still open, "
+            f"{_partial_answer_clause(ledger)} (session {session.session_id})."
         ),
         code="spend_cap_reached",
         retryable=False,
@@ -1761,6 +1789,21 @@ def _empty_answer_event(
     comparison the code does not make.)
     """
     if ledger.answer_text.strip():
+        return None
+    if ledger.loop_capped or ledger.spend_capped:
+        # **A capped turn is not a silent one, and saying so twice contradicted itself.** Driven
+        # 2026-09-19 at `agent_max_turn_billed_tokens=1`: the chemist got `spend_cap_reached`
+        # (`retryable=False`) immediately followed by `empty_answer` (`retryable=True`) about the
+        # same silence, which a surface cannot reconcile — and `chemclaw_turn_empty_answers_total`
+        # moved too, firing `ChemclawTurnsAnsweringEmpty`, whose own description and runbook entry
+        # both said "No error counter moves" and sent the operator after "a model that emitted only
+        # tool calls" while naming neither the cap nor the counter that identifies it. The cap has
+        # its own event, its own counter and its own turn outcome; this series is for the case
+        # nothing explains, which is what makes it worth alerting on at `for: 0m`.
+        #
+        # `_cap_events` runs before this, so the flags are set by the time it is asked. The caller
+        # still stops here — see its own comment — because a capped turn with no prose must not
+        # reach `build_answer_event`.
         return None
     METRICS.increment("chemclaw_turn_empty_answers_total")
     attempted = len(trace.called_tools)

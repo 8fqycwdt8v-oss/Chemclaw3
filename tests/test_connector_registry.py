@@ -11,6 +11,7 @@ Bundles are written to `tmp_path` and `connectors_dir` is pointed at it, so noth
 on which connectors the repo happens to ship today.
 """
 
+import inspect
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
@@ -525,6 +526,108 @@ def test_only_declared_and_present_skill_dirs_are_advertised(
     _bundle(tmp_path, "gamma", _http_manifest("gamma"))
     _use(monkeypatch, tmp_path)
     assert skills_dirs() == [str(with_skills / "skills")]
+
+
+def test_forgetting_discovery_forgets_every_cache_this_module_keeps() -> None:
+    """One reset, derived from what the module caches rather than from what somebody remembered.
+
+    `forget_discovered` is the seam for the one case a directory-keyed cache cannot see: manifests
+    written into a directory already walked. It cleared `_discovered_in` alone, because that was the
+    only cache — and adding `_bundle_dirs_by_name` beside it made "clear the caches" a list with two
+    entries and nothing reconciling them. A second cache left out of that function is a reset that
+    half works: the manifests are re-read and the *directory walk* answers from before the write, so
+    a bundle written into a watched directory loads with the old set of content directories. That is
+    a test-isolation helper silently isolating half of what it names, which is the failure
+    `tasks/lessons.md` records against every hand-kept list.
+
+    Derived from `functools.cache`'s own marker — `cache_clear` on a module attribute — so a third
+    cache is covered by the commit that adds it rather than by this test being updated. It is scoped
+    to what this module *defines*, because `default_ssl_context` is imported here and belongs to
+    `core.http`, whose lifetime is a process rather than a test.
+    """
+    from chemclaw.connectors import registry
+
+    cached = {
+        name
+        for name, value in vars(registry).items()
+        if hasattr(value, "cache_clear") and getattr(value, "__module__", "") == registry.__name__
+    }
+    assert cached, (
+        "no cached function was found in connectors.registry, so this check now proves nothing — "
+        "either the caches are gone (delete this) or they stopped being `functools.cache`"
+    )
+    cleared = {
+        line.split(".cache_clear")[0].strip()
+        for line in inspect.getsource(registry.forget_discovered).splitlines()
+        if ".cache_clear()" in line and not line.strip().startswith("#")
+    }
+    assert cached <= cleared, (
+        f"`forget_discovered` clears {sorted(cleared)} and this module caches {sorted(cached)}. "
+        f"{sorted(cached - cleared)} would answer from before a manifest was written into a "
+        "directory the registry has already walked, which is the one case that function exists for."
+    )
+
+
+def test_a_shadowed_bundles_content_is_still_reachable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Winning a name collision replaces the tool surface, never the files on disk.
+
+    `Chemclaw3-mcp` ports this repository's `safety` bundle under the **same** name — same three
+    tools, same arguments, deliberately, so that exactly one of the two answers
+    (`CHEMCLAW_CONNECTOR_URLS` is keyed by the name). Its manifest declares no `skills:`, and its
+    own header says the absence is deliberate because a `SKILL.md` is architecture layer 3 *here*,
+    ending: *"Whoever wires this server up must keep that skill reachable."*
+
+    `skills_dirs` derived the directory from the **winning** manifest, and asked that manifest
+    whether the bundle declared skills at all. So in the wiring order both of that repository's own
+    documents publish — `manifests/` first — the answer was no, and
+    `connectors/safety/skills/safety-screening/SKILL.md` was dropped: 132 lines carrying *why an
+    empty result is never "safe"*, which is the judgment `D-2026-08-15-safety-is-a-tool-not-a-gate`
+    deliberately left out of the deterministic table. No error, no warning, no log line. Driven
+    through this registry in both orders before the fix: reachable core-first, unreachable
+    fleet-first, and the only remedy — `CHEMCLAW_SKILLS_DIR` — was named in no wiring document in
+    either repository.
+
+    **Both halves of the defect are driven here, and either alone would have left it live.** The
+    shadowed *directory* has to be read, and the winner's *declaration* must not be the gate: the
+    fleet's manifest declares nothing, so a fix that only widened the directory search would still
+    have skipped the bundle before looking.
+
+    The winner's own content still comes first, because that is the precedence a collision decides.
+    """
+    private = tmp_path / "private"
+    shipped = tmp_path / "shipped"
+    # The winner: same name, same tools, and no `skills:` key at all — the fleet's shape exactly.
+    _bundle(private, "alpha", _http_manifest("alpha", port=7777))
+    # The loser: declares its skill and ships it beside the manifest, as this tree's bundles do.
+    shadowed = _bundle(
+        shipped, "alpha", _http_manifest("alpha", port=8888) + "skills:\n  - judgment\n"
+    )
+    (shadowed / "skills" / "judgment").mkdir(parents=True)
+    monkeypatch.setattr("chemclaw.core.config.settings.connectors_dir", f"{private}:{shipped}")
+    monkeypatch.setattr("chemclaw.core.config.settings.connectors_enabled", "")
+
+    # The surface is the winner's, unchanged: a collision still resolves to one manifest.
+    (manifest,) = enabled()
+    assert isinstance(manifest.endpoint, HttpEndpoint | StdioEndpoint)
+    assert "7777" in str(manifest.endpoint), "the name collision must still resolve to one surface"
+    assert not manifest.skills, "the winning manifest is the one that declares no skills"
+
+    # ...and the judgment that shipped beside the losing manifest is still reachable.
+    assert str(shadowed / "skills") in skills_dirs(), (
+        f"skills_dirs() answered {skills_dirs()}. A bundle that won the name collision while "
+        "declaring no skills has silently removed the shadowed bundle's SKILL.md — which is the "
+        "safety-screening defect, reproduced. A collision decides which manifest describes the "
+        "capability; it does not decide which files exist."
+    )
+
+    # And the winner's own content keeps precedence, which is what a collision does decide.
+    (private / "alpha" / "skills" / "judgment").mkdir(parents=True)
+    assert skills_dirs() == [str(private / "alpha" / "skills"), str(shadowed / "skills")], (
+        f"skills_dirs() answered {skills_dirs()}; the winning directory must come first, because "
+        "the skills backend resolves a duplicate skill name by root order"
+    )
 
 
 def test_the_first_connectors_dir_wins_a_name_collision(

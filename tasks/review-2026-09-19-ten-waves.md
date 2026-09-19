@@ -125,9 +125,17 @@ chose the name comparison deliberately).
 
 Did **not** survive my re-driving: the claim that `_signal_event`'s unguarded `NoteRecordedEvent`
 tail is a live hazard — `mypy --strict` genuinely catches a new unhandled union member, driven with a
-probe signal (2 `union-attr` errors). And the notice-arithmetic defect does **not** reproduce without
-the `SERVED_BY` stamp, so my first reproduction was a false negative until I gave the request real
-connector metadata; worth recording because the same mistake would have dismissed a HIGH.
+probe signal (2 `union-attr` errors).
+
+A second entry stood here and was **wrong**, which is worth more than the entry was: it said "the
+notice-arithmetic defect does not reproduce without the `SERVED_BY` stamp". It reproduces on the
+non-connector path too — any tool name in `scratchpad_tools()` or `subagent_tool_names()` takes
+`frame_connector_results._defanged`, which re-bounds for the same reason `_framed` does. Driven at the
+shipped ceiling on an expanding payload with **no connector metadata anywhere**: `179,807 of 239,465
+characters removed` for a tool that returned 59,900, against `179,900 of 239,554` on the framed branch
+— the same defect at the same magnitude. What the original reproduction actually hit was a payload the
+escape does not expand (`"Z" * n`), not a missing stamp. Recording the wrong cause is why the whole
+`_defanged` half went unguarded: dropping the fix on that branch alone was green over 50 tests.
 
 ## Wave 4 — the MCP fleet (`Chemclaw3-mcp`)
 

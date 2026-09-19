@@ -50,6 +50,23 @@ class PlanEvent(BaseModel):
     Always a non-empty string here, and that is a property of the emitter rather than of this model
     — `plan_identity` returns `None` for an empty plan (hashing "nothing" yields a constant every
     session in every deployment also proposes), and `graph_stream` does not emit an empty plan.
+
+    **`scope` is here for the same reason, one decision later.** A plan approval authorizes the
+    tools its steps declared and nothing else
+    (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`), so the scope is the half
+    of what a person is deciding about that the steps do not say — that ADR puts it in as many
+    words: *"a surface that rendered the steps alone would be collecting a yes to something it had
+    not displayed"*. It was added to `GET /sessions/{id}/plan` only, and D-167 had already put
+    `plan_hash` on the stream precisely so that a client would not need that fetch — so the route
+    carrying the scope is the one a card rendered from the stream never calls, and the chemist was
+    shown the steps of a plan whose authorization they could not see. Not a gate bypass: the scope
+    is part of the plan identity, so a widening rewrite changes `plan_hash` and the decision 409s.
+    It is non-disclosure, which is the failure the ADR names.
+
+    Both fields are the *same* read of the *same* steps as the fetch route's — `plan_identity` and
+    `plan_scope.declared_scope` over `_plan_steps(update)`, the two functions
+    `routes/plan._read_plan` calls — because a stream and a route disagreeing about what a plan
+    authorizes is a surface that cannot be believed either way.
     """
 
     type: Literal["plan"] = "plan"
@@ -58,6 +75,11 @@ class PlanEvent(BaseModel):
     # string means "this event predates the hash", which a client must treat as "fetch it" rather
     # than as a hash — never as one that will match.
     plan_hash: str = ""
+    # Defaulted for the same reason, and an empty list is *ambiguous* in a way the empty hash is
+    # not: a plan whose every step declares nothing genuinely authorizes nothing, and an event from
+    # before this field carries the same `[]`. A surface that must tell those apart reads
+    # `plan_hash` — an event carrying a hash and no scope is a plan that declared nothing.
+    scope: list[str] = []
 
 
 # Which agent raised an event, when it was not the one the chemist is talking to (M9).

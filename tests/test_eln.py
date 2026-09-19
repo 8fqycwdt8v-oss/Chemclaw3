@@ -413,6 +413,181 @@ def test_fetch_logs_the_skipped_corrupt_file(
     assert "corrupt.json" in caplog.text  # the specific file is identified, not silently lost
 
 
+def _filed_refusals(monkeypatch: pytest.MonkeyPatch, module: str) -> dict[str, dict[str, str]]:
+    """Capture what an adapter files in the rejection ledger, without a database under it.
+
+    The ledger write is the half of these findings that matters most: an entry that vanishes with a
+    WARNING is a question nobody can be answered (`D-2026-08-27-a-refused-record-is-a-question-
+    somebody-will-ask`), and a log line is not queryable. `record_refusals` is patched at the
+    adapter's own import site so what is asserted is the call that adapter makes.
+    """
+    filed: dict[str, dict[str, str]] = {}
+
+    async def _spy(source: str, refusals: dict[str, str]) -> None:
+        filed.setdefault(source, {}).update(refusals)
+
+    monkeypatch.setattr(f"chemclaw.ingest.eln.{module}.record_refusals", _spy)
+    return filed
+
+
+async def test_one_non_utf8_json_export_does_not_abort_the_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file the codec cannot read costs itself, like every other unreadable export.
+
+    The twin of `test_one_non_utf8_ord_export_does_not_abort_the_directory`, on the adapter that
+    `data_sources` **ships enabled**. `UnicodeDecodeError` derives from `ValueError`, so it is a
+    *sibling* of `json.JSONDecodeError` rather than a child, and it is not an `OSError` — the file
+    opens and reads fine, the bytes are simply not UTF-8 — so it escaped the enumerated `except`,
+    escaped `asyncio.to_thread` and aborted `fetch_new_entries`. Driven with three exports in one
+    drop directory, the middle one latin-1 with `heat to 60°C`: the fetch raised and **neither** of
+    the two well-formed files was returned, against this method's own skip-and-continue contract and
+    with nothing in the rejection ledger, because the handler that writes it never ran.
+
+    The ordering is load-bearing: the bad file sorts in the middle, so under the defect the first
+    file is parsed and then lost with the rest — the assertion below fails on an empty list.
+
+    Permanent, not transient, which is why the ledger row matters here more than elsewhere: the file
+    stays in the directory, so every later run fails identically and the cursor never advances.
+    """
+    filed = _filed_refusals(monkeypatch, "json_adapter")
+    _write_entry(tmp_path / "a-good.json", "a", "2026-01-01T00:00:00Z")
+    (tmp_path / "b-latin1.json").write_bytes(
+        json.dumps(
+            {"id": "b", "timestamp": "2026-01-01T00:00:00Z", "procedure": "heat to 60°C"},
+            ensure_ascii=False,
+        ).encode("latin-1")
+    )
+    _write_entry(tmp_path / "c-good.json", "c", "2026-01-01T00:00:00Z")
+
+    entries = await JsonExportAdapter(str(tmp_path), name="eln-json").fetch_new_entries(_EPOCH)
+
+    assert [entry.entry_id for entry in entries] == ["a", "c"], (
+        "the unreadable export must cost itself and nothing else"
+    )
+    assert "b-latin1" in filed["eln-json"], (
+        "a skipped export reaches the rejection ledger; a WARNING alone is not an answer a chemist "
+        "can be given"
+    )
+    assert "utf-8" in filed["eln-json"]["b-latin1"]
+
+
+async def test_two_json_exports_sharing_one_entry_id_are_both_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One id claimed by two files is not two records, and it used to be reported as two.
+
+    `reaction_records` is keyed `(ingest_source, reaction_id)` with every column refreshed on
+    conflict, so the second write replaces the first entirely — and `sync_entries` appended both to
+    `ingested`. Driven before this: `files=2 entries returned=2 ids=['EXP-88', 'EXP-88']`, one
+    experiment absent from the corpus, and a summary saying two arrived.
+
+    Both are refused rather than one kept, for the reason `records._one_of` gives about the same
+    ambiguity one layer up: returning either is a coin flip that reads as a fact. The ledger row
+    names both files, which is what makes the loss answerable.
+    """
+    filed = _filed_refusals(monkeypatch, "json_adapter")
+    for name in ("batch1_run7.json", "batch2_run7.json"):
+        _write_entry(tmp_path / name, "EXP-88", "2026-01-01T00:00:00Z")
+    _write_entry(tmp_path / "batch3_run8.json", "EXP-89", "2026-01-01T00:00:00Z")
+
+    entries = await JsonExportAdapter(str(tmp_path), name="eln-json").fetch_new_entries(_EPOCH)
+
+    assert [entry.entry_id for entry in entries] == ["EXP-89"], (
+        "an id two files claim names no run; the unambiguous entry beside it is unaffected"
+    )
+    reason = filed["eln-json"]["EXP-88"]
+    assert "batch1_run7.json" in reason and "batch2_run7.json" in reason
+
+
+async def test_two_ord_exports_sharing_one_reaction_id_are_both_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ORD adapter is wired to the same rule, because its key collides the same way.
+
+    Separate from the JSON case rather than parametrised with it: the two adapters read a different
+    id field out of a different shape, and what is being checked is that *this* one reaches the
+    shared refusal — the half a parametrised fixture would hide behind one construction.
+    """
+    filed = _filed_refusals(monkeypatch, "ord_adapter")
+    for name in ("one.json", "two.json"):
+        (tmp_path / name).write_text(
+            json.dumps(
+                {
+                    "reaction_id": "ord-7",
+                    "provenance": {"record_created": {"time": {"value": "2026-06-01T00:00:00Z"}}},
+                    "inputs": {},
+                    "outcomes": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    entries = await OrdJsonAdapter(str(tmp_path)).fetch_new_entries(_EPOCH)
+
+    assert entries == []
+    assert "one.json" in filed["eln-ord"]["ord-7"]
+
+
+@pytest.mark.parametrize(
+    ("stated", "expected_id"),
+    [
+        (0, "0"),
+        (12, "12"),
+        ("", None),
+        ("   ", None),
+        (False, None),
+    ],
+)
+async def test_a_falsy_stated_entry_id_is_not_silently_the_file_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stated: object, expected_id: str | None
+) -> None:
+    """`payload.get("id") or path.stem` is truthiness, and three falsy ids are not one answer.
+
+    Measured before this: `id=0`, `id=""` and `id=false` in `EXP_2026_0412.json` **all** produced
+    `entry_id='EXP_2026_0412'`, and the record was then stored, cited and asked about under an id
+    the source never used. An integer `0` is an id; a blank string and a JSON boolean are a stated
+    field that names nothing, and the file name is not what the source said.
+    """
+    filed = _filed_refusals(monkeypatch, "json_adapter")
+    payload: dict[str, Any] = {
+        "id": stated,
+        "timestamp": "2026-01-01T00:00:00Z",
+        "reactants": [{"smiles": "CCO"}],
+        "products": [{"smiles": "CCO"}],
+    }
+    (tmp_path / "EXP_2026_0412.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    entries = await JsonExportAdapter(str(tmp_path), name="eln-json").fetch_new_entries(_EPOCH)
+
+    assert [entry.entry_id for entry in entries] == ([expected_id] if expected_id else [])
+    if expected_id is None:
+        assert "names no entry" in filed["eln-json"]["EXP_2026_0412"]
+    else:
+        assert not filed.get("eln-json"), "a stated id is transcribed, not refused"
+
+
+async def test_an_entry_with_no_id_field_at_all_is_still_named_by_its_file(tmp_path: Path) -> None:
+    """The documented fallback, pinned beside the refusal above so the two cannot merge.
+
+    An export that carries no `id` key has no id but its file name, which is the only identifier
+    such a file has and is what this adapter has always used. Refusing it would break every
+    deployment whose ELN names its exports rather than stamping them.
+    """
+    (tmp_path / "EXP_2026_0412.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "reactants": [{"smiles": "CCO"}],
+                "products": [{"smiles": "CCO"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    entries = await JsonExportAdapter(str(tmp_path)).fetch_new_entries(_EPOCH)
+    assert [entry.entry_id for entry in entries] == ["EXP_2026_0412"]
+
+
 def _set_mtime(path: Path, moment: datetime) -> None:
     """Stamp a file's modification time — how a late *arrival* is distinguished from old data."""
     stamp = moment.timestamp()
@@ -1730,6 +1905,103 @@ def test_ord_malformed_component_amount_is_treated_as_absent_not_crashed(tmp_pat
     assert reaction.inputs[0].amount_mmol is None
 
 
+def _ord_charge(*amounts: dict[str, object]) -> dict[str, object]:
+    """An ORD reaction charging one reactant per `amounts` entry, each an `Amount` message."""
+    return _ord_reaction_with(
+        inputs={
+            "m1": {
+                "components": [
+                    {
+                        "identifiers": [{"type": "SMILES", "value": smiles}],
+                        "reactionRole": "REACTANT",
+                        "amount": amount,
+                    }
+                    for smiles, amount in zip(("Nc1ccccc1", "CC(=O)Cl"), amounts, strict=False)
+                ]
+            }
+        }
+    )
+
+
+def test_an_ord_reactant_charged_by_volume_reaches_the_record_and_its_scale(
+    tmp_path: Path,
+) -> None:
+    """`Amount` is a `oneof` over mass | moles | volume | unmeasured, and two of four were read.
+
+    A neat liquid reactant charged by volume is the ordinary case and every solvent is one. Driven
+    on a 9.3 g (10 mL) plus 40 g charge: the volumetric component came back `(None, None)`, `_scale`
+    reported **"40 g of reactants charged"** for a 49.3 g charge, and the charge sheet said "amount
+    not recorded" for a species whose amount the source *had* recorded. Under-reporting scale is the
+    direction `record._scale` argues matters — it makes a pilot batch read as a bench run — and this
+    reproduced it by a kind that function cannot see.
+
+    Not converted to grams: that needs a density this record does not carry, and inventing one would
+    present a derived number as a recorded one. A third labelled term is the honest form.
+    """
+    payload = _ord_charge(
+        {"volume": {"value": 10.0, "units": "MILLILITER"}},
+        {"mass": {"value": 40.0, "units": "GRAM"}},
+    )
+    (tmp_path / "by_volume.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    async def _run() -> OrdReaction:
+        adapter = OrdJsonAdapter(str(tmp_path))
+        entries = await adapter.fetch_new_entries(_EPOCH)
+        return adapter.map_to_ord(entries[0])
+
+    reaction = asyncio.run(_run())
+    assert [component.volume_ml for component in reaction.inputs] == [10.0, None]
+    note = record_from_ord_reaction(reaction)
+    assert "scale: 40 g + 10 mL of reactants charged" in note.body
+    assert "amount not recorded" not in note.body, (
+        "the source recorded this amount; saying it did not is the false half of the same defect"
+    )
+
+
+def test_an_ord_amount_the_source_declared_unmeasured_says_so(tmp_path: Path) -> None:
+    """`unmeasured` is a statement, not an absence, and it is the fourth arm of the `oneof`.
+
+    A catalytic or saturated charge is a real ORD message, so refusing the reaction over one would
+    lose a good record — it is carried as an attribute instead, which is where "whatever else the
+    source recorded about this species" belongs. The charge row then says the amount was not
+    recorded *and* why, rather than implying nobody wrote it down.
+    """
+    payload = _ord_charge({"unmeasured": {"type": "SATURATED"}})
+    (tmp_path / "unmeasured.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    async def _run() -> OrdReaction:
+        adapter = OrdJsonAdapter(str(tmp_path))
+        entries = await adapter.fetch_new_entries(_EPOCH)
+        return adapter.map_to_ord(entries[0])
+
+    reaction = asyncio.run(_run())
+    assert reaction.inputs[0].attributes == {"amount_unmeasured": "saturated"}
+    assert "amount_unmeasured: saturated" in record_from_ord_reaction(reaction).body
+
+
+def test_an_ord_amount_of_a_kind_this_ingest_cannot_read_is_refused_by_name(
+    tmp_path: Path,
+) -> None:
+    """After the four known kinds, an unread one can only be a kind ORD added since.
+
+    The defect this closes is a *silent* one — `(None, None)` for an amount the source stated — so
+    the remedy for a kind nobody has written a reader for is a refusal that names it and reaches the
+    rejection ledger, not a record that quietly under-reports its own scale. A malformed `amount`
+    that is not a mapping at all stays "treated as absent", which the sibling test above pins: that
+    one is a shape error, and this one is a statement in a vocabulary this code does not know.
+    """
+    payload = _ord_charge({"activity": {"value": 3.0, "units": "UNIT"}})
+    (tmp_path / "unknown_kind.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    async def _run() -> OrdReaction:
+        adapter = OrdJsonAdapter(str(tmp_path))
+        entries = await adapter.fetch_new_entries(_EPOCH)
+        return adapter.map_to_ord(entries[0])
+
+    with pytest.raises(OrdFormatError, match="states none of"):
+        asyncio.run(_run())
+
+
 def test_ord_malformed_workup_input_is_treated_as_absent_not_crashed(tmp_path: Path) -> None:
     """A workup whose `input` is a list (not an object) never crashes the mapper.
 
@@ -1835,6 +2107,68 @@ def test_a_search_hit_id_is_the_note_id_the_ingest_wrote() -> None:
     reaction = _ester()
     cited = note_id_for_reaction(record_from_ord_reaction(reaction).reaction_id)
     assert cited.removeprefix("reaction-") == reaction.reaction_id
+
+
+def test_an_impurity_known_only_by_its_rrt_is_named_rather_than_dropped() -> None:
+    """The remedy `Impurity._identifiable` prescribes, taken at the adapter that needed it.
+
+    That validator refuses a row carrying only `rrt` **and says where such a row belongs**: an RRT
+    is how a chemist refers to an unknown — "the RRT 0.94 peak" — and that reference is a name. The
+    decision was taken at the model and the action was never taken here, so the adapter dropped the
+    row two lines above the line that reads `rrt`, with a WARNING and nothing in the ledger
+    (in-entry drops are not filed). Driven: a three-row HPLC table came back with two rows, and
+    a table of unresolved peaks alone came back **empty** — a 1.9 area% peak and a 0.42% one gone,
+    and the record reading as though it carried no impurity profile at all. The largest peak in
+    a profile is routinely one of these.
+    """
+    entry = RawEntry(
+        entry_id="E-rrt",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        payload={
+            "id": "E-rrt",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "reactants": [{"smiles": "CCO"}],
+            "products": [
+                {
+                    "smiles": "CC=O",
+                    "impurities": [
+                        {"name": "des-bromo", "area_percent": 0.31},
+                        {"rrt": 0.94, "area_percent": 1.9},
+                        {"rrt": 1.0, "area_percent": 0.42},
+                    ],
+                }
+            ],
+        },
+    )
+    profile = JsonExportAdapter().map_to_ord(entry).impurities
+
+    assert [imp.name for imp in profile] == ["des-bromo", "RRT 0.94 peak", "RRT 1 peak"]
+    assert [imp.area_percent for imp in profile] == [0.31, 1.9, 0.42]
+    # The RRT is kept on the row as well as spelled into the name: the name is what a reader and a
+    # lexical search match, the field is what a query over the profile reads.
+    assert [imp.rrt for imp in profile] == [None, 0.94, 1.0]
+
+
+def test_an_impurity_row_that_identifies_nothing_at_all_is_still_dropped() -> None:
+    """The drop this keeps, pinned so the fix above cannot quietly become "never drop a row".
+
+    A row with no name, no structure and no *positive* retention time asserts nothing — a blank line
+    in an analytics table, or an `rrt` of 0, which `Impurity.rrt` refuses as not a chromatographic
+    observation. Dropped rather than rejected, so one such row cannot cost the reaction its record.
+    """
+    entry = RawEntry(
+        entry_id="E-blank",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        payload={
+            "id": "E-blank",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "reactants": [{"smiles": "CCO"}],
+            "products": [
+                {"smiles": "CC=O", "impurities": [{"area_percent": 0.5}, {"rrt": 0, "name": None}]}
+            ],
+        },
+    )
+    assert JsonExportAdapter().map_to_ord(entry).impurities == []
 
 
 # --- impurity structures reach the molecule index -------------------------------------

@@ -78,13 +78,32 @@ def reset_current_identity(tokens: tuple[object, object]) -> None:
 def get_current_actor() -> str | None:
     """The Entra oid of the turn in flight, or None when there is no authenticated user.
 
-    An empty string is treated as no actor (`... or None`): `agent/authz.require_actor` and
-    `authorize_trigger` gate on `is None` / `is not None`, and nothing constrains the contextvar to
-    be non-empty, so a context bound with `set_current_identity("", ...)` would otherwise return
-    `""` and pass the reject-if-absent rule as an authenticated user. Fail closed here, in the one
-    reader every gate shares, rather than at each of the five producers separately.
+    A **blank** string is treated as no actor: `agent/authz.require_actor` and `authorize_trigger`
+    gate on `is None` / `is not None`, and nothing constrains the contextvar to be non-empty, so a
+    context bound with `set_current_identity("", ...)` would otherwise return `""` and pass the
+    reject-if-absent rule as an authenticated user. Fail closed here, in the one reader every gate
+    shares, rather than at each of the five producers separately.
+
+    **`or None` caught `""` and not `"   "`, and the difference is a namespace nobody can erase.**
+    Measured under `entra_required=True`: no actor was refused, `""` was refused, and `"   "` came
+    back as an authenticated actor. `agent/scratchpad.py` then adds the durable `/memories/` route
+    `if store is not None and actor` — a truthy blank passes, so it gets its own store prefix under
+    `memory_namespace("   ")`, which is the exact failure that module's own docstring says it
+    avoids: "a memory written under an 'anonymous' prefix would be a memory nobody can erase". An
+    erasure request names a person; nothing names that prefix. Both producers are
+    `Field(min_length=1)` (`api.auth.Principal.oid`,
+    `durable.template_activities.StepIdentity.actor`), which `" "` passes,
+    so this is an attribution and erasure-integrity hole rather than an authentication bypass — and
+    it is fixed at the same single reader, for the same reason, rather than by tightening five
+    validators into rejecting whitespace.
+
+    **The value is returned stripped, not verbatim, and that is the second half.** `" oid-alice "`
+    and `"oid-alice"` are one person and hashed to two memory namespaces — the same erasure defect
+    one spelling further along — so the reader every gate and every namespace shares normalizes
+    rather than leaving each of them to. Nothing legitimate is lost: an Entra `oid` is a GUID and a
+    template's actor is a configured string, and neither carries meaningful surrounding whitespace.
     """
-    return _current_actor.get() or None
+    return (_current_actor.get() or "").strip() or None
 
 
 def get_current_roles() -> frozenset[str]:
@@ -108,5 +127,11 @@ def get_current_correlation_id() -> str | None:
     None means "no turn stamped one", and the caller falls back to whatever id it was built with —
     which is what the Temporal template activities and the CLI rely on, since they bind a
     meaningful id (the workflow id) at build time and have no per-turn stamp.
+
+    Blank-is-absent for `get_current_actor`'s reason, stated once there. It matters less here and
+    still matters: this is the id that joins a log line to an audit row to a Temporal run, and a
+    whitespace one is a join key that matches nothing while looking present — so the caller's
+    fallback to the id it was built with is what should happen, and `""` already got it while
+    `"   "` did not.
     """
-    return _current_correlation_id.get()
+    return (_current_correlation_id.get() or "").strip() or None

@@ -11,6 +11,7 @@ executed half of this file.
 """
 
 import asyncio
+import re
 import time
 from collections.abc import Awaitable, Callable
 
@@ -368,6 +369,38 @@ async def test_q4_reactions_whose_product_matches_a_smarts() -> None:
     assert {h.named_reaction for h in suzukis.hits if h.source == "smarts-corpus"} == {
         "Bromo Suzuki coupling"
     }
+
+
+def test_the_partial_verdict_can_never_print_a_share_of_100_or_0() -> None:
+    """The branch whose whole job is to say "not complete" printed "(100%)".
+
+    `{share:.0f}` rounds, so 4,999 of 5,000 read **"PARTIAL: … (100%)"** and 1 of 100,000 read
+    **"(0%)"** — a reader takes the first as complete and the second as nothing, inside the sentence
+    that exists to tell them it is neither. Floored to a tenth and clamped, so the printed share
+    cannot reach either edge while the branch it is in is true.
+
+    Asserted as a property over the edges rather than on one string, because the defect is the
+    *rounding*, and a single example fixed by hand would pass with `:.0f` and a special case.
+    """
+    from chemclaw.science.labels.records import CorpusCoverage
+
+    for labelled, total in ((4999, 5000), (99999, 100000), (1, 100000), (1, 5000), (1, 3)):
+        verdict = CorpusCoverage(labelled=labelled, total=total).verdict
+        assert verdict.startswith("PARTIAL")
+        match = re.search(r"\((\d+\.\d)%\)", verdict)
+        assert match is not None, verdict
+        printed = match.group(1)
+        assert printed not in {"100.0", "0.0"}, (
+            f"{labelled} of {total} printed ({printed}%) in the branch that says it is not complete"
+        )
+        assert 0.0 < float(printed) < 100.0
+
+
+def test_a_fully_labelled_scope_still_says_complete() -> None:
+    """The other side of the clamp: 100% belongs to the COMPLETE branch and only to it."""
+    from chemclaw.science.labels.records import CorpusCoverage
+
+    assert CorpusCoverage(labelled=5000, total=5000).verdict.startswith("COMPLETE")
 
 
 async def test_a_corpus_sitting_exactly_on_the_cap_is_not_reported_as_truncated() -> None:

@@ -243,12 +243,162 @@ async def test_a_rejection_after_an_approval_revokes_it(
 
 
 def test_no_session_means_no_gate(approvals: InMemoryPlanApprovalStore) -> None:
-    """Off the harness there is no plan and no autonomous loop, so there is nothing to gate.
+    """With no session there is no plan to approve, so this gate has nothing to decide about.
 
-    A template activity's tool step and a one-shot CLI call land here. They are not ungoverned:
-    `enforce_tool_authz` and `authorize_trigger` still decide, which is what governs them.
+    The behaviour, pinned. **What the docstring here used to say about it was false**, and the same
+    sentence sat in `plan_gate.py` and in `cli/chat.py`: that a session-less call is "not
+    ungoverned — `enforce_tool_authz` and `authorize_trigger` still decide, which is what governs
+    them". Measured, those two reach 6 of the 15 side-effecting registry tools and nine are refused
+    by neither; the test below holds that residual. What governs each session-less path is named in
+    `plan_gate.py` now, and it is a different thing per path — a reviewed, git-committed template
+    file for a `tool` step, a surface the step's agent was never given for an `agent` step, and
+    possession of the terminal for the CLI.
     """
     assert asyncio.run(_call("record_knowledge_note", None))
+
+
+@pytest.mark.parametrize("blank", ["   ", "\t", " \t "])
+def test_a_blank_session_id_is_no_session_rather_than_a_session_of_its_own(
+    approvals: InMemoryPlanApprovalStore, blank: str
+) -> None:
+    r"""The early return above tests `not session_id`, and whitespace is truthy.
+
+    `core/session_context.get_current_session_id` returned the contextvar verbatim, so `""` took the
+    early return and `"   "` did not — it went on to `approved_scope(session_id, …)` and was used as
+    the `plan_approvals` lookup key. Measured before the fix: a whitespace session was refused with
+    `plan_approval_refusal`, which reads as "nobody has approved this plan" for a session no chemist
+    can see, approve, or find in the inbox; and had anything ever *written* an approval under that
+    key it would have been a second, unreachable approval namespace for one conversation.
+
+    Asserted as "the call runs" rather than "the call is refused", because that is what
+    distinguishes the two behaviours: with the reader fixed, a blank id is *absent* and takes the
+    same path as no session at all, which is the answer the gate already argues for.
+    """
+    token = set_current_session_id(blank)
+    try:
+        request = tool_request("record_knowledge_note")
+        object.__setattr__(request, "state", {"todos": []})
+        ran = False
+
+        async def _handler(_request: Any) -> Any:
+            nonlocal ran
+            ran = True
+            return None
+
+        asyncio.run(run_middleware(enforce_plan_approval, request, _handler))
+    finally:
+        reset_current_session_id(token)
+
+    assert ran, (
+        f"a session id of {blank!r} was treated as a session, so the gate consulted "
+        "`plan_approvals` under a key no chemist can approve against"
+    )
+
+
+#: The side-effecting registry tools that **neither** other write gate reaches, so for these the
+#: plan gate is the only one — and it is the one that returns early when there is no session.
+#:
+#: A register rather than a count, for `DEFAULT_WRITE_TOOL_GATES`' own reason: "nine tools are
+#: uncovered" and "these nine tools are uncovered, and here is why that was accepted" are different
+#: documents, and only the second survives somebody adding a tenth. Each of these is a write whose
+#: blast radius is one actor's own conversation state — a preference, a watch, a draft, a workflow
+#: document keyed `(owner, name)` — which is why they were never role-gated; `run_composed_workflow`
+#: is the one that could reach further and it re-checks at run time
+#: (`workflow_tools.py`: `authored_problems(document, side_effecting_tools())` plus
+#: `unapproved_jobs` over a fingerprint recomputed from the stored document).
+_UNGATED_WITHOUT_A_SESSION = frozenset(
+    {
+        "compose_workflow",
+        "draft_experiment_protocol",
+        "forget_preference",
+        "propose_skill",
+        "remember_preference",
+        "run_composed_workflow",
+        "stop_watching",
+        "structure_experiment_request",
+        "watch_for",
+    }
+)
+
+
+def test_what_governs_a_session_less_write_is_registered_rather_than_asserted() -> None:
+    """The residual the early return leaves, held as a set so a tenth tool cannot join it quietly.
+
+    `enforce_plan_approval` returns early when `get_current_session_id()` is empty, and for these
+    nine names it is the only write gate in the tree: `DEFAULT_WRITE_TOOL_GATES` does not name them,
+    so `authorize_tool` refuses nothing for a role-less authenticated actor, and
+    `expensive_actions()` does not either, so `authorize_trigger` does not run. Measured under
+    `entra_required=True` with `entra_privileged_roles` configured: 12 of the 15 side-effecting
+    registry tools executed for an
+    actor holding no application role, and three of those twelve were covered by the trigger gate.
+
+    **Both directions are asserted, and the second is the one that pays.** A new side-effecting tool
+    that no gate covers reds this test on the day it is registered rather than the day somebody
+    re-runs an audit. A name *leaving* the register reds it too — if a tool becomes role-gated the
+    register has to lose it, and a stale entry would be this file claiming a gap that is closed.
+
+    **Over `STATE_CHANGING_TOOLS` rather than `side_effecting_tools()`, and that is not a narrowing
+    of the claim but the only way to state it as an equality.** The other two thirds of that union
+    are discovery: a connector's own declared `state_changing` names and one launcher per *enabled*
+    template. Both are a deployment's choice, so an equality over them asserts whichever registries
+    a test run happened to warm — measured, this test passed alone and failed after
+    `tests/test_authz.py` had enabled templates in the same process, with nine `run_*` launchers
+    added. That difference is a real fact about the residual and it is recorded rather than
+    asserted: a deployment that enables the shipped templates puts nine more uncovered writes behind
+    this early return, each one a launcher for a git-committed, reviewed template, which is the
+    artefact the gate's own comment names as what governs a `tool` step.
+    """
+    from chemclaw.agent import tool_modules  # noqa: F401  (registers the in-process tools)
+    from chemclaw.agent.authz import (
+        DEFAULT_WRITE_TOOL_GATES,
+        STATE_CHANGING_TOOLS,
+        expensive_actions,
+    )
+    from chemclaw.core.tool_registry import registered_tools
+
+    registry = {function.__name__ for function in registered_tools()}
+    writes = STATE_CHANGING_TOOLS & registry
+    residual = writes - DEFAULT_WRITE_TOOL_GATES - expensive_actions()
+
+    assert writes, "no side-effecting tool is registered; this test is measuring nothing"
+    assert residual == _UNGATED_WITHOUT_A_SESSION, (
+        "the set of writes that only the plan gate reaches has changed. Added names are reachable "
+        "with no session id and no approval by anything that can enqueue a template run or type at "
+        f"the CLI; removed names mean this register overstates the gap. added="
+        f"{sorted(residual - _UNGATED_WITHOUT_A_SESSION)} "
+        f"removed={sorted(_UNGATED_WITHOUT_A_SESSION - residual)}"
+    )
+
+
+def test_a_template_agent_step_is_narrowed_rather_than_gated() -> None:
+    """The half of `plan_gate.py`'s corrected comment that is a fact about another module.
+
+    The old comment named "a template activity's tool step" as a path this early return governs. An
+    **agent** step does not reach the line at all, and that is stronger rather than weaker:
+    `step_profile` returns the profile with `harness_enabled=False`, so `gate_applies` is `False`
+    and this middleware is never attached — and the same function subtracts every side-effecting
+    tool the step did not declare from the surface *before the graph is built*, so an undeclared
+    write is a tool the step's agent never held rather than a call something refused.
+
+    Asserted here, beside the comment that relies on it, because the two facts are one claim: "the
+    gate does not apply" is only acceptable while "the surface was narrowed instead" is true.
+    """
+    from chemclaw.durable.template_activities import step_profile
+
+    undeclared = step_profile(None, [])
+    declared = step_profile(None, ["record_knowledge_note"])
+
+    assert not gate_applies(undeclared), (
+        "a template agent step is now plan-gated, so the early return this comment describes is "
+        "reachable from it and the narrowing below is no longer the whole story"
+    )
+    assert "record_knowledge_note" not in (undeclared.tool_names or frozenset()), (
+        "a step that declared no write tools was given one anyway, so the structural narrowing "
+        "that stands in for the plan gate is not happening"
+    )
+    assert "record_knowledge_note" in (declared.tool_names or frozenset()), (
+        "a step that declared a write tool did not get it, so this test passes for the wrong reason"
+    )
 
 
 def _proceed(result: Any) -> bool:

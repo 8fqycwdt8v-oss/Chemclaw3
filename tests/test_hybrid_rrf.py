@@ -27,6 +27,7 @@ The server-backed half needs a real Postgres and skips in the offline sandbox.
 """
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -274,6 +275,67 @@ def test_three_legs_over_one_corpus_vote_once() -> None:
         "vector",
         "sharedrive",
     }
+
+
+def test_an_empty_leg_does_not_pull_its_corpus_tier_toward_neutral() -> None:
+    """The control the comment beside the code claimed and the code did not implement.
+
+    That comment says an empty list "contributes nothing to the ranking and must not skew its
+    corpus's mean either", and `tiers.setdefault(corpus, []).extend(tier or {1.0})` did exactly the
+    second thing: it defaulted the empty leg to the *neutral* tier 1.0 and averaged it in. Measured
+    with `{graph: 1.5, lexical: 1.5, eln: 1.0}` — two legs over one note corpus weigh 1.5, and the
+    lexical leg returning zero chunks weighed **1.25**, a corpus pulled a quarter of the way to
+    neutral by a leg that found nothing.
+
+    Asserted on the weight the cross-corpus stage is given rather than on an output order, because
+    no order flip was observable: RRF is near-flat at `k=60`, which is why this survived as a
+    comment claiming a control. Spying on the recursive call is what makes the internal number a
+    fact — the alternative was asserting a rank that does not move, i.e. a test that passes either
+    way.
+    """
+    from chemclaw.retrieval import hybrid
+
+    legs = [
+        _chunks("graph", ["n1", "n2"], score=1.0),
+        _chunks("lexical", [], score=1.0),
+        _chunks("eln", ["e1", "e2"], score=1.0),
+    ]
+    corpora = ["notes", "notes", "eln"]
+    weights = {"graph": 1.5, "lexical": 1.5, "eln": 1.0}
+    seen: list[dict[str, float]] = []
+    original = hybrid.reciprocal_rank_fusion
+
+    def _spy(
+        lists: Any, *, k: int = 60, weights: Any = None, corpora: Any = None
+    ) -> list[EvidenceChunk]:
+        if corpora is None:  # the cross-corpus stage, whose weights are the corpus tiers
+            seen.append(dict(weights or {}))
+        return original(lists, k=k, weights=weights, corpora=corpora)
+
+    try:
+        hybrid.reciprocal_rank_fusion = _spy  # type: ignore[assignment]
+        original(legs, k=60, weights=weights, corpora=corpora)
+    finally:
+        hybrid.reciprocal_rank_fusion = original
+
+    assert seen[-1] == {"notes": 1.5, "eln": 1.0}, (
+        "a leg that found nothing must not vote on its corpus's tier"
+    )
+
+
+def test_a_corpus_whose_every_leg_came_back_empty_still_has_a_weight() -> None:
+    """The edge the fix above opens, and the one place a neutral default is right.
+
+    Skipping an empty leg means a corpus all of whose legs are empty has no tier at all, and the
+    mean of nothing is a `ZeroDivisionError` on a total retrieval miss for that corpus. It
+    contributes no chunk, so the weight is never applied to anything — which is what makes 1.0
+    the honest answer there rather than a skew.
+    """
+    legs = [_chunks("graph", ["n1"], score=1.0), _chunks("lexical", [], score=1.0)]
+    fused = reciprocal_rank_fusion(
+        legs, k=60, weights={"graph": 1.5, "lexical": 1.5}, corpora=["notes", "empty"]
+    )
+    assert [chunk.source_note_id for chunk in fused] == ["n1"]
 
 
 def test_all_distinct_corpora_fuse_exactly_as_before() -> None:

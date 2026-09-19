@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+import psycopg
 import pytest
 import uvicorn
 from fastapi import FastAPI
@@ -322,18 +323,28 @@ def test_readyz_stays_ready_when_the_schema_is_ahead_of_the_image(
     assert res.json()["status"] == "ready"
 
 
-def test_a_ledger_it_cannot_read_does_not_take_the_pod_out_of_the_route(
+def test_a_database_with_no_migration_ledger_takes_the_pod_out_of_the_route(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The schema verdict gates on positive evidence of a mismatch, never on its absence.
+    """No `schema_migrations` is the strongest evidence of a mismatch, not the absence of any.
 
-    A database with no `schema_migrations` at all is not a supported deployment — every database
-    that can serve as the session store was migrated by the same runner that creates the ledger —
-    but "was" is a claim about somebody else's operations, and the probe reads
-    `session_store_dsn or postgres_dsn`, which under a split session store is a different server
-    from the one `migrate()` runs against. Turning a diagnostic into a fleet-wide outage on a
-    deployment this repository cannot see is the wrong trade, so an unreadable ledger reports
-    itself and stays ready.
+    **This test asserted the opposite until 2026-09-19, and the sentence it asserted was the
+    defect.** It said a database with no ledger "reports itself and stays ready", on the argument
+    that a ledger the probe *cannot read* must not take a pod out of the Route. That argument is
+    about **privilege** — a split session store whose role may use the store and may not select the
+    ledger — and it was implemented by catching `UndefinedTable` beside `InsufficientPrivilege`, so
+    the shape admitted was much wider than the case argued: `schema_migrations` is created by the
+    first migration, so its absence means *nothing has been applied*.
+
+    Driven against an empty database under the chart's shipped `CHEMCLAW_SESSION_STORE=postgres`:
+    `/readyz` answered `200 {"status":"ready","connectors_unhealthy":8}`, so the pod would have
+    joined the Route and failed every session write, every audit row and every owner lookup. Reached
+    by the three paths `_schema_carries_this_image` names (`--no-hooks`, `kubectl set image`, an
+    ArgoCD sync past a failed hook) and by the two-releases-one-database hazard the chart's own
+    `temporal.namespace` refusal admits no guard can cover.
+
+    The privilege case it was standing in for now has its own test below, which is the half nothing
+    covered: it was proved by a *missing table*, which is not what it claims.
     """
     schema = f"{TEST_SCHEMA}_no_ledger"
     base = settings.postgres_dsn.split("?")[0]
@@ -352,10 +363,70 @@ def test_a_ledger_it_cannot_read_does_not_take_the_pod_out_of_the_route(
         monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)
         with _client(_FakeAgent()) as client:
             res = client.get("/readyz")
-        assert res.status_code == 200, f"an unreadable ledger drained the pod: {res.text}"
-        assert res.json()["status"] == "ready"
+        assert res.status_code == 503, (
+            f"a pod with no schema at all reported itself ready: {res.text}"
+        )
+        # The same status the behind-schema case answers, deliberately: it is the same fact at its
+        # limit and the remedy is identical, and the log line is where the two are distinguished.
+        assert res.json()["status"] == "schema behind image", res.text
     finally:
         asyncio.run(drop_test_schema(base, schema))
+
+
+def test_a_ledger_this_role_may_not_select_does_not_take_the_pod_out_of_the_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The case the trade actually argues, proved by a real privilege denial for the first time.
+
+    A split session store can put the probe on a different server from the one `migrate()` runs
+    against, with a role that may use the store and may not read the ledger. Refusing there would
+    turn a diagnostic into a fleet-wide outage over somebody else's grant table, so this stays
+    ready — and it is the *only* unreadable-ledger shape that does.
+
+    **Driven through a real `InsufficientPrivilege`**, which is the point: the trade was covered by
+    a test that dropped the *table*, so what it proved was `UndefinedTable`'s branch and the
+    privilege branch had no test at all. The ledger here exists, is resolvable on the search path,
+    and the session's role has `USAGE` on the schema and no `SELECT` on it — so the failure is
+    exactly "cannot select the ledger" rather than "cannot see the schema".
+
+    `-c role=` in the DSN rather than a second login: the connection runs as the restricted role
+    without a password, a `pg_hba` entry or a second DSN, and the role is dropped in the `finally`.
+    """
+    asyncio.run(migrated_db_or_skip())
+    schema = f"{TEST_SCHEMA}_norights"
+    role = f"{schema}_role"
+    base = settings.postgres_dsn.split("?")[0]
+
+    async def _setup() -> None:
+        async with await psycopg.AsyncConnection.connect(base, autocommit=True) as conn:
+            await conn.execute(f'CREATE SCHEMA "{schema}"')
+            await conn.execute(f'CREATE TABLE "{schema}".schema_migrations (filename text)')
+            await conn.execute(f'CREATE ROLE "{role}" NOLOGIN')
+            # USAGE and no SELECT: the table resolves, reading it does not.
+            await conn.execute(f'GRANT USAGE ON SCHEMA "{schema}" TO "{role}"')
+
+    async def _teardown() -> None:
+        async with await psycopg.AsyncConnection.connect(base, autocommit=True) as conn:
+            await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+            await conn.execute(f'REVOKE ALL ON SCHEMA public FROM "{role}"')
+            await conn.execute(f'DROP ROLE IF EXISTS "{role}"')
+
+    asyncio.run(_setup())
+    try:
+        separator = "&" if "?" in base else "?"
+        options = quote(f"-c search_path={schema} -c role={role}")
+        monkeypatch.setattr(settings, "session_store_dsn", f"{base}{separator}options={options}")
+        monkeypatch.setattr(settings, "session_store", "postgres")
+        monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)
+        with _client(_FakeAgent()) as client:
+            res = client.get("/readyz")
+        assert res.status_code == 200, (
+            "a ledger this role may not select drained the pod, which is the fleet-wide outage "
+            f"the trade exists to avoid: {res.text}"
+        )
+        assert res.json()["status"] == "ready", res.text
+    finally:
+        asyncio.run(_teardown())
 
 
 def test_readyz_reuses_its_database_verdict_inside_the_window(
