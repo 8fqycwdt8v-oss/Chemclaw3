@@ -316,7 +316,7 @@ def test_a_malformed_id_is_still_rejected() -> None:
 # What is asserted instead is that no ADR newer than the cursor can land *unfiled* — it is either
 # cited by a topic row, or named here with the one line saying why it is not a topic. That check
 # would have failed 54 times before it was written, which is why it is written.
-_TOPIC_CURSOR = "D-2026-09-01"
+_TOPIC_CURSOR = "D-2026-08-31"
 
 _NOT_A_TOPIC: dict[str, str] = {
     # Review sweeps. Each is a record of what a set of fresh contexts found across the whole tree,
@@ -380,6 +380,46 @@ def test_no_subject_has_two_topic_rows() -> None:
     assert not duplicates, (
         "the By topic table carries two rows for the same subject, so which decision a reader is "
         f"told is current depends on which line they stop at: {duplicates}"
+    )
+
+
+#: How many ADRs *older* than the cursor no topic row mentions. The cursor bounds what lands
+#: unfiled from here on; this bounds the arrears, which were invisible until they were counted —
+#: a third of the record, in an index whose own header says the record table "is not a way to find
+#: out what is true". It is an allowance in the shape `SERVED_ELSEWHERE_ALLOWANCE` has: it may only
+#: be lowered, by filing an old ADR into the row for its subject, and a commit that raises it is
+#: one that made the record harder to read.
+_UNFILED_ARREARS_ALLOWANCE = 231
+
+
+def test_the_arrears_of_unfiled_adrs_only_shrink() -> None:
+    """The ADRs older than the cursor that no topic row mentions are a bound, not a discovery.
+
+    `_TOPIC_CURSOR` stops a *new* decision landing with this index silent about it, and says
+    nothing about the ones already there. Audited, 231 of 680 were cited by no row — so for a third
+    of the record nothing tells a reader whether the decision is current, while every one of them
+    carries `**Status:** accepted`. That is the shape a reader of a superseded ADR gets no warning
+    from, and it is why `tests/test_dead_vocabulary.py` exists for the three vocabularies where the
+    premise died outright.
+
+    This test does not ask anybody to file them. It asks that the number never go up: filing one is
+    a row edit, and un-filing one is writing an ADR on a subject the table already has a row for
+    without touching that row.
+    """
+    arrears = sorted(
+        adr
+        for adr in _adr_ids()
+        if adr < _TOPIC_CURSOR and adr not in _topic_cited_ids() and adr not in _NOT_A_TOPIC
+    )
+    assert len(arrears) <= _UNFILED_ARREARS_ALLOWANCE, (
+        f"{len(arrears)} ADRs older than {_TOPIC_CURSOR} are cited by no row of the 'By topic' "
+        f"table, against an allowance of {_UNFILED_ARREARS_ALLOWANCE}. Adding one is not allowed: "
+        "an ADR on a subject the table already covers belongs in that subject's row."
+    )
+    assert len(arrears) >= _UNFILED_ARREARS_ALLOWANCE - 25, (
+        f"only {len(arrears)} ADRs are unfiled, well under the allowance of "
+        f"{_UNFILED_ARREARS_ALLOWANCE}. Lower the allowance to what you measured, or this bound "
+        "stops being one."
     )
 
 
