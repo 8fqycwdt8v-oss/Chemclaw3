@@ -2152,10 +2152,18 @@ def test_the_file_share_bounds_the_superstep_at_every_width_this_deployment_allo
     budget = settings.agent_subagent_files_max_chars
     for width in (1, 2, settings.agent_max_parallel_tool_calls, 20):
         for per_call in (1, 8, 600, 5_000):
+            # **Both dimensions are swept; their product is not.** A cell costs `width x per_call`
+            # files to build and bound, so the corner alone is 100,000 of them — and this test
+            # timed out at pytest's 180 s on a loaded CI runner while measuring 10.3 s on a quiet
+            # box, which is a 17x margin that was never real. What the bound needs exercised is
+            # each dimension past its crossover, and 1 x 5,000 and 20 x 600 do that: driven, the
+            # pre-fix accounting reds at 1 x 600 alone. The product buys a slower gate and no
+            # coverage, so it is capped.
+            if width * per_call > 20_000:
+                continue
             # The padded arm only has to make keys dominate, which 600 files does as plainly as
             # 5,000 — and 20 x 5,000 keys of 1,000 characters is 100 M characters of fixture for
-            # one assertion. Tripling a gate test's wall clock to re-say something is how a suite
-            # stops being run.
+            # one assertion.
             for padding in (0, 1_000) if per_call <= 600 else (0,):
                 asked = AIMessage(
                     content="",
