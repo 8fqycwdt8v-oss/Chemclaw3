@@ -27,7 +27,7 @@ import asyncio
 import importlib
 import logging
 import os.path
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from contextlib import AsyncExitStack
 from datetime import timedelta
 from functools import cache
@@ -99,28 +99,51 @@ class ConnectorError(ChemclawError):
     """
 
 
-def _bundle_dirs(dirs: tuple[str, ...]) -> list[Path]:
-    """Every connector bundle directory found across `dirs`, sorted by name.
+@cache
+def _bundle_dirs_by_name(dirs: tuple[str, ...]) -> dict[str, tuple[Path, ...]]:
+    """Every connector bundle directory found across `dirs`, by name, in path order.
 
-    Sorted rather than filesystem order so the advertised tool order is identical on every
+    **Every directory, not only the winner, and that distinction is the whole of
+    `skills_dirs`' fix.** A name collision decides which manifest *describes* the capability —
+    exactly one, because `CHEMCLAW_CONNECTOR_URLS` is keyed by that name and two endpoints under one
+    key are unaddressable. It does not decide which of a deployment's directories exist, and content
+    that ships beside the losing manifest is still on disk. Collapsing the two questions is what let
+    a manifest declaring no skills remove a shadowed bundle's `SKILL.md` with no error, no warning
+    and no log line: see `_bundle_content_dirs`.
+
+    Sorted by name rather than filesystem order so the advertised tool order is identical on every
     machine — tool order is part of the prompt the model sees, and a surface that reshuffles per
-    pod is a reproducibility problem.
+    pod is a reproducibility problem. *Within* a name the path order is kept, because it is the
+    precedence: first directory wins.
 
     The directories are an argument rather than a read of `settings.connectors_dirs`, because this
     is the input `_discovered_in` is cached on and a cached function that reaches past its own
-    parameters for its real input is the defect that made the cache unkeyable (see there).
+    parameters for its real input is the defect that made the cache unkeyable (see there). Cached
+    for the same reason `_discovered_in` is — it walks and stats every bundle directory on every
+    configured root, and `_bundle_content_dirs` is called on every agent build — which is why
+    `forget_discovered` clears this one too.
     """
-    found: dict[str, Path] = {}
+    found: dict[str, list[Path]] = {}
     for directory in dirs:
         root = Path(directory)
         if not root.is_dir():
             continue
         for path in sorted(root.iterdir()):
             if (path / MANIFEST_FILENAME).is_file() and within_root(root, path):
-                # First dir wins, so an operator's private connectors dir listed ahead of the
-                # repo's can override a shipped bundle — the same precedence a `PATH` entry has.
-                found.setdefault(path.name, path)
-    return [found[name] for name in sorted(found)]
+                found.setdefault(path.name, []).append(path)
+    return {name: tuple(found[name]) for name in sorted(found)}
+
+
+def _bundle_dirs(dirs: tuple[str, ...]) -> list[Path]:
+    """The directory that *wins* each bundle name, sorted by name.
+
+    First dir wins, so an operator's private connectors dir listed ahead of the repo's can override
+    a shipped bundle — the same precedence a `PATH` entry has. This is what `_discovered_in` loads,
+    so a shadowed manifest is never parsed: that is deliberate rather than incidental, because a
+    shadowed bundle is one an operator has replaced, and refusing to start over a file the running
+    system does not use would turn a working override into an outage.
+    """
+    return [paths[0] for paths in _bundle_dirs_by_name(dirs).values()]
 
 
 def _load_manifest(bundle: Path) -> ConnectorManifest:
@@ -189,6 +212,10 @@ def forget_discovered() -> None:
     `forget_vector_store`, `forget_open_warehouses` — and this is it.
     """
     _discovered_in.cache_clear()
+    # The directory walk is cached on the same key and goes stale the same way — a manifest written
+    # into an already-walked directory is invisible to both, and clearing one of two caches is how a
+    # test isolation helper stops isolating half of what it names.
+    _bundle_dirs_by_name.cache_clear()
 
 
 def bearer_token_env_names() -> tuple[str, ...]:
@@ -311,20 +338,26 @@ def declared_relations() -> frozenset[str]:
 
 
 def skills_dirs() -> list[str]:
-    """The `skills/` directory of every enabled connector that declares skills.
+    """The `skills/` directory of every enabled connector, wherever on the path it is found.
 
     A connector's judgment ships with its capability: the `SKILL.md` explaining *when* to trust
     a similarity hit belongs to the same bundle as the tool that produces one. Appending these
     to `settings.skills_dirs` means the skills backend discovers them with no new machinery, and
-    the existing enable-list and role gates still narrow them — a bundled skill is an ordinary
-    skill in every respect except where it lives.
+    the existing enable-list, profile, capability and role gates still narrow them — a bundled skill
+    is an ordinary skill in every respect except where it lives.
 
     Only directories that exist are returned: a manifest may declare skills whose folder a
     deployment has not mounted, and `make connector-validate` is where that mismatch is
     reported, so handing a non-existent path to the skills source here would fail the *agent*
     for a *packaging* problem.
+
+    **"Every enabled connector" and not "every enabled connector that declares skills", and that
+    change is the fix rather than a loosening** — a bundle whose manifest wins a name collision
+    while declaring fewer skills than the bundle it shadowed used to remove them silently, which is
+    the shipped wiring order for `Chemclaw3-mcp`'s `safety` port. `_bundle_content_dirs` carries the
+    argument and the measurement.
     """
-    return _bundle_content_dirs("skills", lambda manifest: bool(manifest.skills))
+    return _bundle_content_dirs("skills")
 
 
 def _endpoint_url(connector: str, endpoint: HttpEndpoint) -> str:
@@ -627,19 +660,26 @@ async def open_connector_specs(
 
 
 def profiles_dirs() -> list[str]:
-    """The `profiles/` directory of every enabled connector that declares profiles.
+    """The `profiles/` directory of every enabled connector, wherever on the path it is found.
 
     The bundle-local half of profile discovery (`chemclaw.agent.profile_discovery`), and the same
     rule
     as `skills_dirs`: only directories that exist are returned, because a manifest may declare
     content a deployment has not mounted and that is `make connector-validate`'s complaint to
-    make, not a reason to fail the agent.
+    make, not a reason to fail the agent — and a shadowed bundle's directory is read too, because a
+    name collision decides which manifest describes the capability and not which files exist.
+
+    A profile is the weaker case of the two and is covered by the same mechanism deliberately: what
+    a profile varies is its instructions and its model route, neither of which carries authority
+    (`D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it`), so a shadowed
+    profile that names tools the winning surface does not serve narrows itself to what that surface
+    binds rather than widening anything.
     """
-    return _bundle_content_dirs("profiles", lambda manifest: bool(manifest.profiles))
+    return _bundle_content_dirs("profiles")
 
 
-def _bundle_content_dirs(kind: str, declares: Callable[[ConnectorManifest], bool]) -> list[str]:
-    """Every enabled bundle's `<kind>/` directory, for the bundles that declare that content.
+def _bundle_content_dirs(kind: str) -> list[str]:
+    """Every enabled bundle's `<kind>/` directory, across every directory carrying that name.
 
     `skills_dirs` and `profiles_dirs` were this function twice, three hundred lines apart, differing
     in two tokens and each carrying its own copy of the "only directories that exist" paragraph —
@@ -647,18 +687,58 @@ def _bundle_content_dirs(kind: str, declares: Callable[[ConnectorManifest], bool
     second one, so this is the extraction rather than a speculative one; the third bundle-local
     content type costs a line instead of another twelve.
 
-    `declares` is passed rather than derived from `kind` by `getattr`: the manifest fields are a
-    typed surface, and reaching into them by string would make a renamed field a silently empty list
-    instead of a type error.
+    **A bundle name collision must not silently delete content, and deriving this from the winning
+    manifest alone is what made it do so.** `Chemclaw3-mcp` ports this repository's `safety` bundle
+    under the *same* name — same three tools, same arguments, deliberately, so exactly one of the
+    two answers — and its manifest declares **no** `skills:`, with a comment saying the absence is
+    deliberate and that *"whoever wires this server up must keep that skill reachable"*. The wiring
+    order both that repository's README and its integration doc publish puts `manifests/` first, so
+    that manifest wins the name. This function then asked the winner whether the bundle declares
+    skills, got no, and dropped `connectors/safety/skills/safety-screening/SKILL.md` — 132 lines
+    carrying *why an empty result is never "safe"*, which is the judgment
+    `D-2026-08-15-safety-is-a-tool-not-a-gate` deliberately left out of the deterministic table —
+    with no error, no warning and no log line. Driven through this registry in both orders before
+    the fix: reachable core-first, unreachable fleet-first.
+
+    So the two questions are separated. **The winning manifest decides the tool surface; the
+    directories on disk decide the content.** For each *enabled* bundle, every directory carrying
+    its name contributes its `<kind>/` directory if that directory exists, winner first — which is
+    the
+    precedence the skills and profile backends already resolve by, because both take a list of roots
+    and `settings.skills_dirs` has always been a `PATH`-style list.
+
+    **Why a union rather than a refusal, measured rather than preferred.** The obvious alternative
+    is to refuse to start when a winning manifest declares less content than a shadowed one, and it
+    is
+    the wrong shape here: a genuine replacement — an operator swapping `calc` for their own bundle
+    with a different surface — is a deployment that then cannot start, with no way to say "yes, I
+    meant to drop the judgment too". The risk a union carries instead is publishing a shadowed
+    bundle's judgment about tools the winner does not serve, and that risk is **already covered by a
+    gate built for exactly it**: `agent.skill_access.ToolScopedSkills` hides a skill whose every
+    declared tool is unreachable, on the argument that judgment about absent capability "is not
+    merely useless, it is misleading". `safety-screening` declares precisely the three tools both
+    manifests serve, so it survives that gate here and would not survive it beside a different
+    surface. Measured across the family today the union adds exactly one directory and no skill that
+    gate would hide.
+
+    **The declaration is no longer the gate, and `make connector-validate` is why that is safe.**
+    `cli/validate_connectors._bundle_content_problems` already refuses a bundle in *both* directions
+    — a declared skill with no directory, and a directory no `connector.yaml` declares — so for
+    every bundle this repository ships and validates, "declares it" and "has the directory" are one
+    fact.
+    Using the declaration as the gate bought nothing over reading the disk, and cost the shadowed
+    half of a collision. A `<kind>/` directory that exists is published; whether the manifest beside
+    it says so is a packaging question with a validator of its own, exactly as a *declared*
+    directory that is absent has always been (returning a non-existent path here would fail the
+    agent for a packaging problem).
     """
-    found = discovered()
-    dirs = []
+    dirs: list[str] = []
+    by_name = _bundle_dirs_by_name(tuple(settings.connectors_dirs))
     for manifest in enabled():
-        if not declares(manifest):
-            continue
-        candidate = found[manifest.name][0] / kind
-        if candidate.is_dir():
-            dirs.append(str(candidate))
+        for bundle in by_name.get(manifest.name, ()):
+            candidate = bundle / kind
+            if candidate.is_dir() and str(candidate) not in dirs:
+                dirs.append(str(candidate))
     return dirs
 
 

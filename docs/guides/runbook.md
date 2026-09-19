@@ -515,6 +515,23 @@ override a shipped one), `CHEMCLAW_CONNECTORS_ENABLED`, `CHEMCLAW_CONNECTOR_URLS
 (`endpoint.request_timeout`, `endpoint.auth`); the `bearer` mode names an env var, so no credential is
 ever written into a bundle.
 
+**What a name collision on that path does and does not replace.** The first directory wins the name
+outright and the loser's manifest is not merged, not warned about and not logged — so the winning
+manifest is the whole of the **tool surface**, which is what `CHEMCLAW_CONNECTOR_URLS` being keyed by
+that name already forces. It is *not* the whole of the bundle: a bundle's `skills/` and `profiles/`
+directories are read from **every** directory carrying its name, winner first
+(`connectors/registry._bundle_content_dirs`). That is deliberate and was a defect until it was.
+`Chemclaw3-mcp` ports this repository's `safety` bundle under the same name and declares no `skills:`
+— correctly, because a `SKILL.md` is architecture layer 3 *here* and that fleet has no equivalent
+seam — and in the wiring order that repository's own README and its integration guide publish (a
+file in that checkout, so not linked from here), its manifest wins. Deriving the skills directory from the winner alone therefore removed
+`connectors/safety/skills/safety-screening/` silently: the judgment about *why an empty result is
+never "safe"*, gone, with the screen still answering. **You do not need `CHEMCLAW_SKILLS_DIR` to get
+it back**, and that is the point of fixing it in the registry rather than documenting a workaround —
+that variable was the only remedy and it was named in no wiring document in either repository.
+`tests/test_sibling_manifest_agreement.py` now compares every bundle-level manifest key between the
+two trees, so the next such divergence is caught or written down with what makes it harmless.
+
 **Troubleshooting.** Each enabled connector is probed as one of five states: `healthy`,
 `unreachable` (the health route did not answer), `unpolled` (Temporal answered and nothing polls the
 bundle's `connector-<name>` queue — a bundle that owns durable work and whose worker fleet is at

@@ -42,6 +42,7 @@ from typing import Any
 from langchain_core.messages import AIMessageChunk, ToolMessage
 
 from chemclaw.agent.plan_gate import plan_identity
+from chemclaw.agent.plan_scope import declared_scope
 from chemclaw.agent.state import PEER_DEPTH_ATTR, turn_input
 from chemclaw.api.events import (
     Event,
@@ -479,7 +480,20 @@ async def _from_update(
                 # plan — worse than the missing field it replaces.
                 # Non-empty by construction: `plan_identity` returns `None` only for an empty
                 # plan, which this branch has already excluded.
-                yield PlanEvent(todos=plan, plan_hash=plan_identity(_plan_steps(update)) or "")
+                #
+                # **One read of the steps feeds both fields**, for the reason the pair exists:
+                # `plan_hash` is what a decision is posted against and `scope` is what that
+                # decision would authorize, and the gate binds them together — the identity covers
+                # each step's declaration, so a scope taken over a *second* read of the plan could
+                # name tools the hash beside it was not computed over. The two functions are the
+                # ones `routes/plan._read_plan` calls, in the same order, so the stream and the
+                # fetch cannot describe one plan differently.
+                steps = _plan_steps(update)
+                yield PlanEvent(
+                    todos=plan,
+                    plan_hash=plan_identity(steps) or "",
+                    scope=sorted(declared_scope(steps)),
+                )
         logger.debug("graph node %r produced %d event source(s)", node, len(update))
 
 

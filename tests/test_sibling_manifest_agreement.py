@@ -11,7 +11,20 @@ boundary and asserts the agreement in prose:
    warned about and not logged — so a tool the fleet adds is simply absent in the shipped-first
    order that `infra/live/e2e-full-stack/up.sh` uses, and `connector validation passed` either way.
 
-2. **The `calc` backend seam** has a manifest in *neither* direction that covers it. `calc` is
+   **And it compared three endpoint keys while claiming the surface.** `_SURFACE_FIELDS` was
+   `("tools", "read_only", "state_changing")`, so the five keys a manifest declares *outside* its
+   endpoint — `skills`, `profiles`, `note_types`, `relations`, `jobs` — were read by nothing. One of
+   the five was diverging the whole time: `safety` declares `skills: [safety-screening]` here and no
+   `skills:` key in the fleet, and in the wiring order both of that repository's own documents
+   publish, the manifest with no skills won the name and the 132-line SKILL.md carrying *why an
+   empty result is never "safe"* became unreachable — silently, with `CHEMCLAW_SKILLS_DIR` the only
+   remedy and no document in either repository naming it. That is fixed at the mechanism
+   (`connectors/registry._bundle_content_dirs` reads every directory carrying an enabled bundle's
+   name, not only the winner's), and the comparison now covers every bundle-level key, derived from
+   `ConnectorManifest` so a sixth is compared the day it is added. A divergence is either caught or
+   written down in `_ARGUED_DIVERGENCES` with what makes it harmless.
+
+2. **The backend seams** have a manifest in *neither* direction that covers them. `calc` is
    `mount: backend`, deliberately unloadable as a connector here, and this repository reaches it
    from inside `science/calc/store.py::cached_compute` — so its physics tool names and their
    argument dicts are hardcoded in `connectors/calc/compose.py` and `remote.py` with nothing
@@ -19,6 +32,19 @@ boundary and asserts the agreement in prose:
    rename tripwire, and nothing here read it. `tests/calc_server_fake.py` is a hand-written
    reproduction of that same contract, so a fleet rename left the whole suite green and failed at
    runtime, on the seam that carries every calculation this system does.
+
+   **There are two such seams, and for nine days this file said there was one.** `rxnlabel` is the
+   other `manifests-internal/` backend — `ingest/labels/labeller.py` puts three tool names and their
+   argument keys on its wire — and `_callers`' docstring gave "a different surface and **no
+   `tool-surface.json`**" as the reason it was out of scope. That file has shipped in
+   `servers/rxnlabel/` since 2026-09-05; the sentence was written on 2026-09-14, in a wave titled
+   "the cross-repo contracts", in the file whose whole subject is
+   `D-2026-09-07-a-claim-about-another-repository-is-checked-by-reading-it`. So the recorded surface
+   existed, the reason for not reading it was false, and the seam carrying every atom map and every
+   reaction name in the corpus had no tripwire. Re-measured when the reader was added: three call
+   sites, every tool served, no undeclared argument, no required argument missing — sound, and
+   unchecked, which is the same pair `calc` was in on 2026-09-07. A seam is a **value** now
+   (`_Seam`), so the next one is a row rather than a paragraph explaining its absence.
 
 Measured on 2026-09-07 before any of this was written, both contracts were **sound** — the tool
 lists agreed as sets, and zero argument keys were undeclared. That is the finding, not a
@@ -41,9 +67,9 @@ tools `servers/calc/tool-surface.json` records were named by no site here. Both 
 declined on purpose and for measured, structural reasons — `optimize_geometry` derives the same
 cache key as `relax_structure` while returning a different payload, and `predict_logd` is the one
 tool the server answers `calculation_key` with no key for — so nothing was broken and nothing was
-written down either. `_DECLINED` is where that goes, reconciled against the derived difference in
-both directions, so a ninth tool arriving in the fleet is a decision somebody takes rather than a
-silence.
+written down either. A per-seam declined table is where that goes, reconciled against the derived
+difference in both directions, so a tool arriving in the fleet is a decision somebody takes rather
+than a silence.
 
 **Opt-in, and it can only skip or fail.** Reading a few YAML files and one JSON file needs a
 checkout and no build, which is the property that makes these plausible to run in CI where the
@@ -55,13 +81,16 @@ a pass, and how many it was is what the run says rather than what this paragraph
 from __future__ import annotations
 
 import ast
+import importlib.util
 import json
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import pytest
 import yaml
 
+from chemclaw.connectors.manifest import ConnectorManifest
 from tests.siblings import (
     REPO_ROOT,
     SIBLING_SKIP,
@@ -78,6 +107,94 @@ from tests.siblings import (
 #: absent for the same reason it is not asserted anywhere else — it is prose a model reads, and its
 #: cost is what `tests/test_context_floor.py` bounds.
 _SURFACE_FIELDS = ("tools", "read_only", "state_changing")
+
+
+#: The three keys `_SURFACE_FIELDS` and the `auth` assertion cover, or that decide nothing. Every
+#: other key of either manifest is bundle-level content and is compared.
+_NOT_CONTENT = frozenset({"name", "description", "endpoint"})
+
+
+def _content_keys(mine: dict[str, Any], theirs: dict[str, Any], where: str) -> tuple[str, ...]:
+    """Every *bundle-level* key to compare for one pair of manifests, from two directions at once.
+
+    `_SURFACE_FIELDS` covers the endpoint. Everything a manifest declares outside it — `skills`,
+    `profiles`, `note_types`, `relations`, `jobs` — went uncompared, and one of the five was
+    diverging: `safety` declares `skills: [safety-screening]` here and no `skills:` key in the
+    fleet. That divergence is argued and harmless (see `_ARGUED_DIVERGENCES`), and the reason to
+    compare all five anyway is that nothing could tell an argued one from an accident. A
+    `note_types` or `relations` key the fleet gained and this tree did not would take a note type
+    out of `make kg-validate`'s vocabulary in whichever order wins; a `jobs` divergence would move a
+    durable launcher and its `connector-<name>` queue.
+
+    **The scope is the union of what the model declares and what the two files declare, and that is
+    the second version of this function.** The first read `ConnectorManifest.model_fields` alone,
+    which is a derivation and was still unanchored: emptying it — or narrowing it to a tuple that
+    happens to omit `skills` — turned the whole comparison, *including the stale-row half that is
+    supposed to notice such a change*, into a loop over nothing, and the mutation ran green. Driven.
+    Taking the keys off the files as well means the subject population is the thing under test:
+    while either manifest declares `skills:`, `skills` is compared, whatever this repository's model
+    says this week.
+
+    The model half is kept because it is what makes a *newly added* key compared before either file
+    uses it, and because it is the basis for refusing a key neither side's model knows — `extra=
+    "forbid"` refuses one at load time here, but the fleet's copy is never loaded by this process,
+    so a key nothing understands would otherwise be compared and agree.
+    """
+    declared = frozenset(ConnectorManifest.model_fields) - _NOT_CONTENT
+    present = (frozenset(mine) | frozenset(theirs)) - _NOT_CONTENT
+    unknown = present - declared
+    assert not unknown, (
+        f"{where}: {sorted(unknown)} is declared in a manifest and is not a field of "
+        '`ConnectorManifest`. This repository\'s model is `extra="forbid"`, so such a key fails '
+        "at startup on this side and is simply unread on the other — which is a declaration one "
+        "repository believes it has made and the other cannot act on."
+    )
+    return tuple(sorted(declared | present))
+
+
+def _comparable(value: Any) -> Any:
+    """One manifest value in a form two files can be compared by, ignoring what decides nothing.
+
+    A list of strings is an allow-list and its order decides nothing — the same argument
+    `test_a_bundle_declared_in_both_trees_declares_the_same_surface` makes for `tools`, where the
+    two files genuinely differ in order today. A list of mappings is the `jobs:` block, keyed by
+    each job's `name` because that name is the launcher's tool name and therefore its identity.
+    A missing key and an empty list are the same declaration, which is what makes `skills:` absent
+    comparable to `skills: []`.
+    """
+    if value is None:
+        return frozenset()
+    if isinstance(value, list):
+        if all(isinstance(item, str) for item in value):
+            return frozenset(value)
+        if all(isinstance(item, dict) and "name" in item for item in value):
+            return {str(item["name"]): _comparable_mapping(item) for item in value}
+    return value
+
+
+def _comparable_mapping(mapping: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
+    """One mapping as an order-free pair sequence, with its own list values normalised."""
+    return tuple(sorted((key, _comparable(value)) for key, value in mapping.items()))
+
+
+#: Bundle-level keys that legitimately differ between the two trees, keyed `(bundle, key)`, each
+#: carrying **why** and **what makes it harmless**. A divergence is therefore either caught or
+#: written down — which is the property the comparison existed to have and did not, because it only
+#: ever looked at three endpoint keys.
+#:
+#: The one row is real and was measured: every other key of every shared bundle agrees today.
+_ARGUED_DIVERGENCES: dict[tuple[str, str], str] = {
+    ("safety", "skills"): (
+        "the fleet's manifest declares no `skills:` on purpose, and says so in its own header: a "
+        "SKILL.md is architecture layer 3 in *this* repository and that fleet has no equivalent "
+        "seam, so `connectors/safety/skills/safety-screening/SKILL.md` stays here. What makes it "
+        "harmless is `connectors/registry._bundle_content_dirs`, which reads every directory "
+        "carrying an enabled bundle's name rather than only the one whose manifest won the name — "
+        "so the skill is reachable in either wiring order. Before that it was not: the order both "
+        "that repository's README and its integration doc publish (`manifests/` first) dropped it "
+        "with no error, no warning and no log line."
+    ),
+}
 
 
 def _sibling_or_skip() -> Path:
@@ -98,7 +215,14 @@ def _manifest(path: Path) -> dict[str, Any]:
 
 
 def test_a_bundle_declared_in_both_trees_declares_the_same_surface() -> None:
-    """The three names both repositories declare must agree on what they serve.
+    """A bundle name both trees declare must mean the same bundle in both — every key of it.
+
+    Three things are compared and the third one is new. The endpoint's `_SURFACE_FIELDS` and its
+    `auth.token_env` decide what a turn may call and how it authenticates; **everything else a
+    manifest declares** — `_content_keys`, derived rather than transcribed — decides what judgment,
+    which agent profiles, which note types, which relations and which durable launchers a deployment
+    reaches. Only the first two were read for as long as this file existed, and `safety.skills` was
+    diverging the whole time.
 
     **As sets, not as lists, and the difference is measured rather than assumed.** `chem`'s twelve
     tools are in a different order in the two files today — `enumerate_torsions` is fifth there and
@@ -107,9 +231,9 @@ def test_a_bundle_declared_in_both_trees_declares_the_same_surface() -> None:
     comparison would have failed on that the day it was written, which is the fastest way to teach
     a reader to bump a check rather than read it.
 
-    The three subjects are **derived** from the two trees rather than transcribed — the names both
-    declare — so a fourth port is checked from the commit that lands it, without this file being
-    taught the name.
+    The bundles themselves are **derived** from the two trees rather than transcribed — the names
+    both declare — so a fourth port is checked from the commit that lands it, without this file
+    being taught the name.
     """
     root = _sibling_or_skip()
     here = bundles_declared_here()
@@ -127,6 +251,53 @@ def test_a_bundle_declared_in_both_trees_declares_the_same_surface() -> None:
             "`registry._load_manifest` rejects that outright — the folder is authoritative — so "
             "any deployment that puts the fleet's manifests on CHEMCLAW_CONNECTORS_DIR fails at "
             "startup with a ConnectorError naming this file, not with a differently-named bundle."
+        )
+        # The bundle level first, because a divergence there is what nothing looked at. Read off
+        # the whole manifests, before the two names are rebound to the endpoint blocks below.
+        compared = _content_keys(mine, theirs, f"{here[name]} / {there[name]}")
+        # What the loop below actually looked at, rather than what it was handed. The two differ by
+        # exactly the mutation that emptied the loop and left the stale-row check reading the
+        # *intended* scope — driven, and green.
+        visited: set[str] = set()
+        for field in compared:
+            visited.add(field)
+            argued = _ARGUED_DIVERGENCES.get((name, field))
+            agrees = _comparable(mine.get(field)) == _comparable(theirs.get(field))
+            if argued is not None:
+                assert not agrees, (
+                    f"`{name}`'s `{field}` is recorded as an argued divergence and the two trees "
+                    f"now agree about it. Delete that row from `_ARGUED_DIVERGENCES`: a row that "
+                    "outlives its subject reads as a live exemption, and the reason written beside "
+                    f"it is about a difference that no longer exists.\n\nThe row said: {argued}"
+                )
+                continue
+            assert agrees, (
+                f"`{name}` declares a different `{field}` in the two repositories: "
+                f"{mine.get(field)!r} here against {theirs.get(field)!r} in {there[name]}. First "
+                "directory on CHEMCLAW_CONNECTORS_DIR wins the name outright, so one of these two "
+                "declarations is simply unread in any given deployment — and the keys at this "
+                "level are not the tool surface: `skills` and `profiles` decide what judgment and "
+                "which agent profiles a deployment can reach, `note_types` and `relations` decide "
+                "what `make kg-validate` accepts, and `jobs` decides which durable launchers and "
+                "`connector-<name>` queues exist. Make them agree, or add a row to "
+                "`_ARGUED_DIVERGENCES` saying why they may differ AND what makes that harmless."
+            )
+        # Every argued row for this bundle must have been *reached*, or the exemption is standing
+        # over a key nothing looked at. This is the half the first version of this loop lacked:
+        # narrowing the compared set silently retired the stale-row check along with the comparison.
+        argued_here = {field for (bundle, field) in _ARGUED_DIVERGENCES if bundle == name}
+        unreached = sorted(argued_here - visited)
+        assert not unreached, (
+            f"`{name}` has argued divergences for {unreached}, and those keys were not compared. "
+            "The exemption is therefore standing over nothing — widen `_content_keys` or delete "
+            "the rows."
+        )
+        # And the row's subject has to exist in a file. A row about a key neither manifest declares
+        # any more is a reason nobody can check, kept alive by a comparison that agrees trivially.
+        absent = sorted(field for field in argued_here if field not in mine and field not in theirs)
+        assert not absent, (
+            f"`{name}` has argued divergences for {absent}, which neither manifest declares any "
+            "more. Delete those rows — the difference they excuse is gone."
         )
         mine, theirs = mine["endpoint"], theirs["endpoint"]
         for field in _SURFACE_FIELDS:
@@ -146,19 +317,104 @@ def test_a_bundle_declared_in_both_trees_declares_the_same_surface() -> None:
         )
 
 
+def test_the_compared_key_set_is_anchored_in_both_the_model_and_the_two_files() -> None:
+    """The bundle-level comparison's scope, pinned from both directions it is built from.
+
+    Needs no checkout: it is about `_content_keys` rather than about the manifests, which is exactly
+    why it can hold the half the real fixture cannot reach. Two independent narrownesses were
+    measured as surviving mutations of the comparison above, and each has an assertion here:
+
+    * **The model half alone is not an anchor.** Deriving the scope from
+      `ConnectorManifest.model_fields` only meant a narrowed tuple emptied the comparison *and* the
+      check that was supposed to notice, together. So a key a file declares is compared whatever the
+      model says.
+    * **The file half alone is not an anchor either**, and its own purpose is invisible to the real
+      pair: taking the *intersection* of the two files rather than the union left every real
+      assertion green, because the fleet's manifest is never loaded by this process and a key only
+      it declares would be compared against nothing. That is what the `unknown` refusal is for,
+      and the union is what feeds it.
+    """
+    known = sorted(frozenset(ConnectorManifest.model_fields) - _NOT_CONTENT)
+    assert known, "ConnectorManifest declares no bundle-level content keys; the scope is now empty"
+
+    # A key only *one* side declares is still compared — the safety/skills shape.
+    one_sided = _content_keys({"name": "x", known[0]: ["a"]}, {"name": "x"}, "one-sided")
+    assert known[0] in one_sided
+
+    # A key this repository's model does not declare is refused rather than compared and agreed.
+    # `extra="forbid"` catches it on this side at load; the fleet's copy is never loaded here.
+    with pytest.raises(AssertionError, match="ConnectorManifest"):
+        _content_keys({"name": "x"}, {"name": "x", "mount": "backend"}, "unknown key")
+
+    # And the normaliser's own two rules, which decide whether a difference is one at all.
+    assert _comparable(None) == _comparable([]), (
+        "an absent key and an empty list are one declaration"
+    )
+    assert _comparable(["b", "a"]) == _comparable(["a", "b"]), (
+        "an allow-list's order decides nothing"
+    )
+    assert _comparable(["a"]) != _comparable(["a", "b"]), "a longer allow-list is a different one"
+    assert _comparable([{"name": "j", "queue": "q"}]) != _comparable(
+        [{"name": "j", "queue": "r"}]
+    ), "two jobs of one name on different queues must not compare equal"
+
+
 # ---------------------------------------------------------------------------------------------
 # The `calc` seam: a contract with no manifest on either side.
 # ---------------------------------------------------------------------------------------------
-
-#: The functions in `connectors/calc/` that put a tool name and an argument dict on the wire.
-_DISPATCHERS = frozenset({"cached_remote", "remote_call", "remote_compute", "_call"})
 
 #: Where this repository's own package lives, so the callers below are found rather than listed.
 _SRC = REPO_ROOT / "src"
 
 
-def _callers() -> tuple[str, ...]:
-    """Every module in `src/` that imports a calc dispatcher, as repository-relative paths.
+class _Seam(NamedTuple):
+    """One MCP server this repository calls with tool names and argument keys typed into `src/`.
+
+    **A value rather than four module constants, because there is more than one such seam and the
+    second one had no tripwire for nine days while this file's own prose said it could not have
+    one** (`D-2026-09-07-a-claim-about-another-repository-is-checked-by-reading-it` applied to this
+    file). `_callers`' docstring said `rxnlabel` has "a different surface and **no
+    `tool-surface.json`**"; that server has shipped `servers/rxnlabel/tool-surface.json` since
+    2026-09-05, and the sentence was written on 2026-09-14 — in a wave titled "the cross-repo
+    contracts", in the file whose subject is that ADR. The recorded surface existed and nothing read
+    it, so a top-level rename on either side was caught by nobody. Making the seam a value is what
+    stops the next one being described instead of checked.
+
+    Attributes:
+        name: What this seam is called, for a failure message and for the declined table beside it.
+        module: The dotted module that *defines* the dispatchers. Resolved through `find_spec`, so
+            renaming it fails loudly here rather than silently emptying this seam's caller set —
+            `tasks/lessons.md`'s "derive the scope, do not assert that it is non-empty".
+        dispatchers: The function or method names that put `(tool, arguments)` on the wire.
+        surface: The fleet-relative path of the `tool-surface.json` that server records.
+        declined: Tools the fleet serves that nothing here calls, each with the measured reason.
+    """
+
+    name: str
+    module: str
+    dispatchers: frozenset[str]
+    surface: tuple[str, ...]
+    declined: Mapping[str, str]
+
+
+def _module_path(dotted: str) -> str:
+    """One dotted module as a repository-relative path, or a failure naming what moved.
+
+    `find_spec` rather than a path built from the dots, because that is the form a rename cannot
+    survive quietly: a moved module empties a `rglob` filter and leaves every assertion downstream
+    trivially satisfied, which is the hole `tasks/lessons.md` records as "derive the scope, do not
+    assert that it is non-empty".
+    """
+    spec = importlib.util.find_spec(dotted)
+    assert spec is not None and spec.origin is not None, (
+        f"{dotted} does not resolve, so the seam it defines has no caller set and every check "
+        "over it would pass vacuously. If the module moved, move this name with it."
+    )
+    return str(Path(spec.origin).relative_to(REPO_ROOT))
+
+
+def _callers(seam: _Seam) -> tuple[str, ...]:
+    """Every module in `src/` that imports one of `seam`'s dispatchers, plus the module defining it.
 
     **Derived, because the hand-kept list covered half the seam while claiming all of it**
     (`D-2026-09-14-a-tripwire-over-two-named-modules-covers-the-modules-it-names`). It read
@@ -170,26 +426,29 @@ def _callers() -> tuple[str, ...]:
     that carries `predict_pka`, `predict_solubility` and `compute_xtb_energy` had simply never
     existed.
 
-    The import is what scopes this, not the function name. `ingest/labels/labeller.py` defines its
-    own `_call` — the same spelling as one of `_DISPATCHERS` — against the **rxnlabel** server,
-    which has a different surface and no `tool-surface.json`; matching on the name alone would
-    check its three call sites against `calc`'s tools and fail on a server it never talks to.
+    The import is what scopes this, not the function name — and the scoping is per seam, which is
+    the whole reason a seam is a value. `ingest/labels/labeller.py` defines its own `_call`, the
+    same spelling `calc` uses, against a server with an entirely different surface: matching on the
+    name alone would check its three call sites against `calc`'s tools and fail on a server it never
+    talks to. Each seam is therefore read against **its own** `tool-surface.json`.
+
+    The defining module is added unconditionally, because it does not import what it defines, and
+    its own call sites are as hardcoded as any importer's — `remote.py`'s `calculation_key` calls
+    were the original reason this was ever a list.
     """
-    found: list[str] = []
+    definer = _module_path(seam.module)
+    found = [definer]
     for path in sorted(_SRC.rglob("*.py")):
+        relative = str(path.relative_to(REPO_ROOT))
+        if relative == definer:
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module == _DISPATCHER_MODULE:
-                if any(alias.name in _DISPATCHERS for alias in node.names):
-                    found.append(str(path.relative_to(REPO_ROOT)))
+            if isinstance(node, ast.ImportFrom) and node.module == seam.module:
+                if any(alias.name in seam.dispatchers for alias in node.names):
+                    found.append(relative)
                     break
-    return tuple(found)
-
-
-#: The module the dispatchers are defined in. A caller is a module that imports one from *here* —
-#: which is also where `remote.py`'s own `calculation_key` calls live, and they are as hardcoded as
-#: `compose.py`'s physics ones and break the same way.
-_DISPATCHER_MODULE = "chemclaw.connectors.calc.remote"
+    return tuple(sorted(found))
 
 
 _Bindings = dict[str, frozenset[str] | None]
@@ -237,7 +496,7 @@ def _bindings(tree: ast.Module) -> _Bindings:
     return bound
 
 
-def _hardcoded_calls() -> list[tuple[str, ast.expr, frozenset[str], _Bindings]]:
+def _hardcoded_calls(seam: _Seam) -> list[tuple[str, ast.expr, frozenset[str], _Bindings]]:
     """Each `(module, tool expression, argument keys, name bindings)` written literally there.
 
     A site counts when its *arguments* are a dict literal, because that is what a hardcoded
@@ -245,15 +504,8 @@ def _hardcoded_calls() -> list[tuple[str, ast.expr, frozenset[str], _Bindings]]:
     dispatcher handed a caller's `arguments` parameter — `remote_compute`'s single `_call`, and
     `cached_remote`'s own body — is a pass-through and declares nothing, so it is not a site.
     """
-    callers = _callers()
-    # `remote.py` defines the dispatchers rather than importing them, so it is added by name — the
-    # one module the derivation above cannot see, and the one whose `calculation_key` call sites
-    # were the original reason for a list.
-    definer = "src/chemclaw/connectors/calc/remote.py"
-    if definer not in callers:
-        callers = (*callers, definer)
     sites: list[tuple[str, ast.expr, frozenset[str], _Bindings]] = []
-    for relative in sorted(callers):
+    for relative in _callers(seam):
         tree = ast.parse((REPO_ROOT / relative).read_text(encoding="utf-8"))
         bound = _bindings(tree)
         for node in ast.walk(tree):
@@ -261,7 +513,7 @@ def _hardcoded_calls() -> list[tuple[str, ast.expr, frozenset[str], _Bindings]]:
                 continue
             called = node.func
             name = called.id if isinstance(called, ast.Name) else getattr(called, "attr", None)
-            if name not in _DISPATCHERS:
+            if name not in seam.dispatchers:
                 continue
             for index, argument in enumerate(node.args[:-1]):
                 following = node.args[index + 1]
@@ -276,24 +528,35 @@ def _hardcoded_calls() -> list[tuple[str, ast.expr, frozenset[str], _Bindings]]:
     return sites
 
 
-def test_the_calc_seam_calls_only_tools_the_fleet_records_serving() -> None:
-    """Every hardcoded `calc` call must name a tool, and only arguments, the server declares.
+def _recorded_surface(root: Path, seam: _Seam) -> dict[str, dict[str, Any]]:
+    """The `tool-surface.json` `seam`'s server records, from a `tools/list` against itself."""
+    path = root.joinpath(*seam.surface)
+    assert path.is_file(), (
+        f"Chemclaw3-mcp holds no {'/'.join(seam.surface)}, so the {seam.name} seam has no recorded "
+        "surface to check against. If that file moved, move this path with it — a missing surface "
+        "must not read as a seam with nothing to say."
+    )
+    recorded: dict[str, dict[str, Any]] = json.loads(path.read_text(encoding="utf-8"))
+    return recorded
 
-    `calc` is the one connector with no manifest in either direction — `mount: backend` is what
-    makes it unloadable as a connector here, deliberately — so nothing in the seam that carries
-    *every* calculation this system runs was checked against the server on the other end. The
-    fleet records `servers/calc/tool-surface.json` for exactly this, from its own running server's
-    `tools/list`, and this is the reader it never had.
+
+def _assert_every_call_names_a_served_tool(seam: _Seam) -> None:
+    """Every hardcoded call on `seam` names a tool, and only arguments, its server declares.
+
+    One body over two seams, because the check is identical and a second copy is the shape that
+    drifts: the `calc` half was written first and the `rxnlabel` half was, for nine days, a sentence
+    in `_callers`' docstring saying no surface existed to check.
 
     A renamed tool or a renamed argument fails here, in the pull request that syncs the checkouts,
     rather than at runtime against a pod.
     """
     root = _sibling_or_skip()
-    surface: dict[str, dict[str, Any]] = json.loads(
-        (root / "servers" / "calc" / "tool-surface.json").read_text(encoding="utf-8")
+    surface = _recorded_surface(root, seam)
+    sites = _hardcoded_calls(seam)
+    assert sites, (
+        f"no hardcoded {seam.name} call site was found, so this check is now vacuous. Either the "
+        f"dispatchers moved out of {seam.module} or they stopped taking a literal tool name."
     )
-    sites = _hardcoded_calls()
-    assert sites, "no hardcoded calc call site was found; this test now checks nothing"
     for relative, expression, keys, bound in sites:
         tools = _literal_strings(expression, bound)
         assert tools is not None, (
@@ -304,7 +567,7 @@ def test_the_calc_seam_calls_only_tools_the_fleet_records_serving() -> None:
         for tool in sorted(tools):
             assert tool in surface, (
                 f"{relative}:{expression.lineno} calls `{tool}`, which Chemclaw3-mcp's "
-                f"servers/calc/tool-surface.json does not record serving: {sorted(surface)}."
+                f"{'/'.join(seam.surface)} does not record serving: {sorted(surface)}."
             )
             declared = surface[tool]
             assert keys <= set(declared), (
@@ -347,7 +610,7 @@ def test_the_calc_seam_calls_only_tools_the_fleet_records_serving() -> None:
 #:   caveat naming the pKa to key instead), so `cached_remote` refuses it outright as a miswiring
 #:   rather than recomputing it forever. `connectors/calc/server/tools.py::predict_logd` calls the
 #:   cached `predict_pka` and finishes locally.
-_DECLINED: dict[str, str] = {
+_CALC_DECLINED: dict[str, str] = {
     "optimize_geometry": (
         "shares `relax_structure`'s cache key while returning a different payload, so this "
         "repository composes `embed_structure` + `relax_structure` and stores the one payload "
@@ -360,46 +623,125 @@ _DECLINED: dict[str, str] = {
 }
 
 
-def _tools_named() -> set[str]:
-    """Every `calc` tool name the hardcoded sites put on the wire.
+#: The fleet `rxnlabel` tools no hardcoded site here names, and the measured reason each is
+#: declined. The same shape as `_CALC_DECLINED` and reconciled the same way, which is what makes
+#: this seam's second direction an accounting rather than a silence.
+#:
+#: Both rows are one decision read twice, and it is `ingest/labels/labeller.py`'s own: *"The batch
+#: tools are the ones the drain calls. A 13M-row corpus at one round trip per reaction is 13M round
+#: trips; at `label_batch_size` it is 65,000. The single-reaction tools exist on the server for a
+#: person asking about one reaction, and are not called from here."* Declining them is therefore not
+#: a gap — the batch tool is strictly more general, and a caller that wanted one reaction would send
+#: a batch of one.
+_RXNLABEL_DECLINED: dict[str, str] = {
+    "name_reaction": (
+        "the single-reaction form of `name_reactions`, which is what the drain calls: one round "
+        "trip per reaction is 13M of them on a Pistachio-scale corpus, and a caller wanting one "
+        "reaction sends a batch of one"
+    ),
+    "represent_reaction": (
+        "the single-reaction form of `represent_reactions`, declined for the same reason — and it "
+        "additionally defaults its `species` list out of the reaction SMILES, which the batch form "
+        "refuses to do because a stored species' ordinal comes from `OrdReaction.compounds()` and "
+        "the two orders are not the same"
+    ),
+}
+
+
+#: The two seams, each read against the surface its own server records.
+_CALC_SEAM = _Seam(
+    name="calc",
+    module="chemclaw.connectors.calc.remote",
+    dispatchers=frozenset({"cached_remote", "remote_call", "remote_compute", "_call"}),
+    surface=("servers", "calc", "tool-surface.json"),
+    declined=_CALC_DECLINED,
+)
+
+#: `rxnlabel` is a backend exactly as `calc` is — `manifests-internal/`, `mount: backend`, no
+#: manifest on this side — so the same argument that made the `calc` seam worth reading applies to
+#: it verbatim, and it had no reader. Its dispatcher is a *method*, `RxnLabelServer._call`, which is
+#: why a seam carries its defining module: `labeller.py` imports nothing and would be invisible to
+#: an importer walk.
+_RXNLABEL_SEAM = _Seam(
+    name="rxnlabel",
+    module="chemclaw.ingest.labels.labeller",
+    dispatchers=frozenset({"_call"}),
+    surface=("servers", "rxnlabel", "tool-surface.json"),
+    declined=_RXNLABEL_DECLINED,
+)
+
+
+def _tools_named(seam: _Seam) -> set[str]:
+    """Every tool name `seam`'s hardcoded sites put on the wire.
 
     A site whose tool expression cannot be resolved to literals contributes nothing here and is
-    *not* reported here either: `test_the_calc_seam_calls_only_tools_the_fleet_records_serving`
-    fails on exactly that, and a second assertion about it would be one cause reported twice.
+    *not* reported here either: the check above fails on exactly that, and a second assertion about
+    it would be one cause reported twice.
     """
     named: set[str] = set()
-    for _relative, expression, _keys, bound in _hardcoded_calls():
+    for _relative, expression, _keys, bound in _hardcoded_calls(seam):
         named |= _literal_strings(expression, bound) or frozenset()
     return named
 
 
-def test_every_calc_tool_the_fleet_serves_is_called_here_or_declined_with_a_reason() -> None:
+def _assert_every_served_tool_is_called_or_declined(seam: _Seam) -> None:
     """The seam is accounted for in *both* directions, not only in the one that breaks loudly.
 
-    `test_the_calc_seam_calls_only_tools_the_fleet_records_serving` reads the seam from this side:
-    every name this repository puts on the wire must be one the fleet serves. That direction
-    catches a rename. It cannot catch the other thing a tool surface does — grow. A tool the fleet
-    adds that nothing here calls is either a capability this repository is missing or a duplicate
-    of something it already composes, and both of those are decisions somebody should take
-    deliberately; today they arrive as silence.
+    The check above reads the seam from this side: every name this repository puts on the wire must
+    be one the fleet serves. That direction catches a rename. It cannot catch the other thing a tool
+    surface does — grow. A tool the fleet adds that nothing here calls is either a capability this
+    repository is missing or a duplicate of something it already composes, and both of those are
+    decisions somebody should take deliberately; today they arrive as silence.
 
-    So the difference is derived and reconciled against `_DECLINED`. Nothing here states how many
-    tools are served, how many are called, or how many are declined — `tool-surface.json` and
-    `_hardcoded_calls()` answer the first two, and the third is whatever is left over.
+    So the difference is derived and reconciled against the seam's declined table. Nothing here
+    states how many tools are served, how many are called, or how many are declined —
+    `tool-surface.json` and `_hardcoded_calls` answer the first two, and the third is what is left.
     """
     root = _sibling_or_skip()
-    surface: dict[str, dict[str, Any]] = json.loads(
-        (root / "servers" / "calc" / "tool-surface.json").read_text(encoding="utf-8")
+    surface = _recorded_surface(root, seam)
+    unreached = set(surface) - _tools_named(seam)
+    assert unreached == set(seam.declined), (
+        f"{sorted(unreached - set(seam.declined))} are served by Chemclaw3-mcp's {seam.name} "
+        "server and named by no hardcoded call site here, with no reason recorded — call them, or "
+        f"add a row to the {seam.name} declined table saying why not. And "
+        f"{sorted(set(seam.declined) - unreached)} are recorded as declined while that is no "
+        "longer the state: either this repository now calls one (delete its row) or the fleet has "
+        "withdrawn one (the reason written beside it is about a tool that no longer exists, and "
+        "whatever else that reason justified needs re-reading)."
     )
-    unreached = set(surface) - _tools_named()
-    assert unreached == set(_DECLINED), (
-        f"{sorted(unreached - set(_DECLINED))} are served by Chemclaw3-mcp's calc server and "
-        "named by no hardcoded call site here, with no reason recorded — call them, or add a row "
-        f"to `_DECLINED` saying why not. And {sorted(set(_DECLINED) - unreached)} are recorded as "
-        "declined while that is no longer the state: either this repository now calls one (delete "
-        "its row) or the fleet has withdrawn one (the reason written beside it is about a tool "
-        "that no longer exists, and whatever else that reason justified needs re-reading)."
-    )
+
+
+def test_the_calc_seam_calls_only_tools_the_fleet_records_serving() -> None:
+    """`calc`, the seam that carries every calculation this system runs.
+
+    It is the one connector with no manifest in either direction — `mount: backend` is what makes it
+    unloadable as a connector here, deliberately — so nothing in it was checked against the server
+    on the other end until the fleet's `servers/calc/tool-surface.json` gained a reader.
+    """
+    _assert_every_call_names_a_served_tool(_CALC_SEAM)
+
+
+def test_every_calc_tool_the_fleet_serves_is_called_here_or_declined_with_a_reason() -> None:
+    """The `calc` seam's other direction — a tool the fleet adds is a decision, not a silence."""
+    _assert_every_served_tool_is_called_or_declined(_CALC_SEAM)
+
+
+def test_the_rxnlabel_seam_calls_only_tools_the_fleet_records_serving() -> None:
+    """`rxnlabel`, the second backend seam, which had no reader although its surface existed.
+
+    `servers/rxnlabel/tool-surface.json` has shipped since 2026-09-05. This file's own prose said it
+    did not — written 2026-09-14, in a wave about the cross-repo contracts — so the seam carrying
+    every atom map and every reaction name in the corpus was checked by nothing, and a top-level
+    rename on either side would have been caught by nobody. Measured when this test was written:
+    three call sites, every tool served, no undeclared argument, no required argument missing. That
+    is the finding rather than a reason not to check it, exactly as it was for `calc`.
+    """
+    _assert_every_call_names_a_served_tool(_RXNLABEL_SEAM)
+
+
+def test_every_rxnlabel_tool_the_fleet_serves_is_called_here_or_declined_with_a_reason() -> None:
+    """The `rxnlabel` seam's other direction — its two single-reaction tools are declined."""
+    _assert_every_served_tool_is_called_or_declined(_RXNLABEL_SEAM)
 
 
 def test_the_composite_this_repository_assembles_is_not_also_served_by_the_fleet() -> None:
@@ -411,8 +753,9 @@ def test_the_composite_this_repository_assembles_is_not_also_served_by_the_fleet
     tree noticing.
 
     This test used to carry a second half, asserting that `predict_logd` *is* served and composed
-    here anyway. That half is now `_DECLINED`'s, where it is derived rather than named: a tool this
-    repository declines to call is exactly a tool the fleet serves and nothing here reaches, so the
+    here anyway. That half is now `_CALC_DECLINED`'s, where it is derived rather than named: a tool
+    this repository declines to call is exactly a tool the fleet serves and nothing here reaches, so
+    the
     fleet withdrawing it fails
     `test_every_calc_tool_the_fleet_serves_is_called_here_or_declined_with_a_reason` with the
     reason string it invalidated. Two assertions about one fact is one cause reported twice.
