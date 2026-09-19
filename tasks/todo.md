@@ -21,11 +21,11 @@ condition for revisiting. All 377 statuses read `accepted`. 327/680 ADRs are in 
       a decline carries `Revisit when:`.
 - [x] `src/chemclaw/agent/authz.py` — two comments claiming `synthesize_memory` opens pull requests.
 - [x] `src/chemclaw/durable/schedules.py` — the same dead constraint.
-- [ ] `docs/planning/DEFERRED.md` — delete the answer-revision row (shipped); fix the literature
+- [x] `docs/planning/DEFERRED.md` — delete the answer-revision row (shipped); fix the literature
       reopen condition ("Nothing." against D-135).
-- [ ] `docs/planning/BACKLOG.md` — delete the stale deadline-ratio row; checkbox the five invisible
+- [x] `docs/planning/BACKLOG.md` — delete the stale deadline-ratio row; checkbox the five invisible
       sections; fix five rotted anchors; move the trigger-gated rows to `DEFERRED.md`.
-- [ ] `docs/archive/findings-2026-08.md` — it is a record, so its 221 rows stop being checkboxes.
+- [x] `docs/archive/findings-2026-08.md` — it is a record, so its 221 rows stop being checkboxes.
 - [x] ADR + ledger row.
 
 ## Chemclaw3-mcp
