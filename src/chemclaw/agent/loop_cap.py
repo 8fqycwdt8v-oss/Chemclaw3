@@ -50,9 +50,41 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class _LoopWatch:
-    """One turn's cap mark — `True` once the loop was stopped by its iteration cap."""
+    """One turn's cap mark and its live call count, shared by every branch of the turn.
+
+    `capped` is `True` once the loop was stopped by its iteration cap. `calls` is what the state
+    channel cannot be: a number every concurrent branch of one turn reads and advances.
+
+    **Why the count has to live here as well as in the channel.** `model_calls` is a `TurnTotal`,
+    and
+    `SubAgentMiddleware` hands every helper in a `task` batch the *same pre-superstep* value — so
+    each
+    of `W` branches compared the cap against its own private copy of that base and each
+    independently
+    spent the whole remaining allowance. The channel then folded them additively, which makes the
+    recorded count right and the *bound* wrong: the parent only learns the total once every branch
+    has
+    finished spending it. Measured at a cap of 4 over 8 helpers: **25 model calls**, following
+    `1 + W·(cap − 1)`; at shipped defaults (cap 25, `agent_max_parallel_tool_calls` 8) that is 193
+    calls in one turn. CLAUDE.md's "counted in a `TurnTotal` channel so a fan-out shares one budget"
+    was true of the counting and false of the sharing.
+
+    This is the same shape `agent/spend_cap.py` already relies on for the cost half — `TurnUsage` is
+    one mutable object every branch books into, which is why the spend cap was only partly exposed
+    where this one was fully exposed — and the same shape `tool_result_size.batch_siblings` uses for
+    the file budget (`D-2026-09-18-a-pre-batch-snapshot-cannot-see-its-own-superstep`). A contextvar
+    is *copied* into each branch's task, but the object it points at is not, so a mutation is
+    visible
+    to every sibling; that is the property `record_loop_cap` already depends on and says so.
+
+    The floor is only as wide as the watch: off the request path there is no watch, and the cap
+    falls
+    back to the channel and the thread, which is the pre-existing behaviour rather than a new hole.
+    `docs/planning/BACKLOG.md` carries the row for the two paths that do not open one.
+    """
 
     capped: bool = False
+    calls: int = 0
 
 
 _watch: ContextVar[_LoopWatch | None] = ContextVar("chemclaw_loop_watch", default=None)
@@ -170,7 +202,20 @@ def enforce_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] |
     # here: the increment writes `calls + 1` but the comparison runs before the write, so the two
     # are equal on every call rather than the channel leading by one. Measured at a cap of 4:
     # 0/0, 1/1, 2/2, 3/3, 4/4.
-    calls = max(int(state.get("model_calls", 0)), calls_already_made(state.get("messages")))
+    # **The turn-wide count is the third floor, and it is the only one a sibling branch can move.**
+    # The two below are this branch's own: the channel is the pre-superstep snapshot every helper in
+    # a
+    # `task` batch was handed, and the thread is this branch's messages. See `_LoopWatch` for the
+    # measurement — without this term a fan-out of width `W` spends `W` allowances.
+    watch = _watch.get()
+    # **Two numbers, and folding them into one inflates the channel.** `own` is this branch's own
+    # count and is what the channel advances to, so `TurnTotal`'s `max(value - base, 0)` still folds
+    # to one advance per real call. `turn` is what the *cap* compares against. Writing `turn + 1` to
+    # the channel instead would have every sibling advance past every other sibling's advance and
+    # report a fan-out of 2 calls as 3.
+    own = max(int(state.get("model_calls", 0)), calls_already_made(state.get("messages")))
+    turn = max(own, watch.calls if watch is not None else 0)
+    calls = turn
     if calls >= settings.harness_max_loop_iterations:
         logger.warning("the model loop hit its %d-iteration cap", calls)
         record_loop_cap()
@@ -181,7 +226,14 @@ def enforce_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] |
         # complete answer was marked partial. A comparison on the count is a guess either way round;
         # a flag set by the branch that fires is the fact.
         return {"jump_to": "end", "loop_capped": True}
-    return {"model_calls": calls + 1}
+    # Advanced here rather than where the channel is written, because this is the hook that
+    # *authorises* the call — and mutated rather than rebound, so every branch sharing this object
+    # sees it. `max` rather than `+= 1`: two branches that both read `base` must not each add one to
+    # a number the other has already advanced past, and an absolute write is what `TurnTotal`'s own
+    # docstring says a delta cannot be.
+    if watch is not None:
+        watch.calls = turn + 1
+    return {"model_calls": own + 1}
 
 
 def record_loop_cap() -> None:

@@ -24,11 +24,24 @@ resume longer than a minute reopened the fork the module existed to prevent; and
 real hole on its own.
 """
 
+import asyncio
 from typing import Any, cast
 
+import pytest
+from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 
-from chemclaw.agent.loop_cap import calls_already_made, enforce_loop_cap
+from chemclaw.agent.audit import NullAuditSink
+from chemclaw.agent.langgraph_agent import build_langgraph_agent
+from chemclaw.agent.loop_cap import (
+    begin_loop_watch,
+    calls_already_made,
+    end_loop_watch,
+    enforce_loop_cap,
+)
+from chemclaw.agent.profiles import AgentProfile
+from chemclaw.agent.state import turn_input
 from chemclaw.core.config import settings
 
 
@@ -117,3 +130,140 @@ def test_the_cap_itself_reads_the_floor_and_not_only_the_channel() -> None:
     assert enforce_loop_cap.before_model(cast(Any, fresh), cast(Any, None)) == {"model_calls": 1}, (
         "a turn with nothing behind it is unaffected — the floor must not cap a healthy turn"
     )
+
+
+def test_a_fan_out_shares_one_iteration_budget_rather_than_getting_one_each(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every branch of one turn spends from one allowance — driven as a real `task` fan-out.
+
+    **The defect this holds closed cost 6.25x the cap at the width it was measured on.**
+    `SubAgentMiddleware` hands every helper in a batch the *same pre-superstep* `model_calls`, so
+    each
+    of `W` branches compared the cap against its own private copy of that base and each
+    independently
+    spent the whole remaining allowance. `TurnTotal` folds the branches additively *afterwards*,
+    which
+    makes the recorded count right and the bound wrong — the parent only learns the total once every
+    branch has finished spending it. Measured at a cap of 4 over 8 helpers: **25** model calls,
+    following `1 + W*(cap - 1)`; at the shipped cap of 25 and `agent_max_parallel_tool_calls` of 8,
+    193 calls in one turn.
+
+    **Why `tests/test_spend_cap.py::test_a_fan_out_shares_one_budget_rather_than_getting_one_each`
+    passed throughout.** It asserts the *fold* is exact — `billed_tokens == calls * per_call` —
+    which
+    is true of the defect and is what let the claim survive. Nothing compared the turn's real spend
+    against the cap under a fan-out, so that is what this asserts: the number of calls the fake was
+    actually asked for, against the cap, not the channel against itself.
+
+    The second assertion is the one that stops the fix from being "never let a branch run": an
+    ordinary turn with no fan-out is unchanged, and its channel still reports one advance per call
+    rather than one per sibling.
+    """
+    cap = 4
+    helpers = 8
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", cap)
+    monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
+
+    class _FanOut(GenericFakeChatModel):
+        calls: int = 0
+
+        def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+            return self
+
+        def _generate(
+            self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any
+        ) -> ChatResult:
+            self.calls += 1
+            if self.calls == 1:
+                fan = [
+                    {
+                        "name": "task",
+                        "args": {"description": f"piece {n}", "subagent_type": "general-purpose"},
+                        "id": f"task-{n}",
+                        "type": "tool_call",
+                    }
+                    for n in range(helpers)
+                ]
+                return ChatResult(
+                    generations=[ChatGeneration(message=AIMessage(content="", tool_calls=fan))]
+                )
+            # Every later call keeps looping, so nothing but the cap can stop the turn.
+            return ChatResult(
+                generations=[
+                    ChatGeneration(
+                        message=AIMessage(
+                            content="",
+                            tool_calls=[
+                                {
+                                    "name": "write_todos",
+                                    "args": {"todos": []},
+                                    "id": f"c{self.calls}",
+                                    "type": "tool_call",
+                                }
+                            ],
+                        )
+                    )
+                ]
+            )
+
+    def _drive(model: Any) -> dict[str, Any]:
+        graph = build_langgraph_agent(
+            model=model, audit_sink=NullAuditSink(), profile=AgentProfile(name="default")
+        )
+        token = begin_loop_watch()
+        try:
+            return cast(
+                dict[str, Any],
+                asyncio.run(
+                    graph.ainvoke(
+                        turn_input("split this several ways"),
+                        {"configurable": {"thread_id": "fan-out-cap"}},
+                    )
+                ),
+            )
+        finally:
+            end_loop_watch(token)
+
+    fanning = _FanOut(messages=iter([]))
+    final = _drive(fanning)
+    assert fanning.calls <= cap, (
+        f"a {helpers}-way fan-out made {fanning.calls} model calls against a cap of {cap}: every "
+        "branch is spending the whole allowance instead of sharing one"
+    )
+    assert final.get("model_calls") == fanning.calls, (
+        f"the channel reports {final.get('model_calls')} for {fanning.calls} real calls — the cap "
+        "comparison and the channel advance have been folded into one number"
+    )
+
+    class _Plain(_FanOut):
+        def _generate(
+            self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any
+        ) -> ChatResult:
+            self.calls += 1
+            return ChatResult(
+                generations=[
+                    ChatGeneration(
+                        message=AIMessage(
+                            content="",
+                            tool_calls=[
+                                {
+                                    "name": "write_todos",
+                                    "args": {"todos": []},
+                                    "id": f"p{self.calls}",
+                                    "type": "tool_call",
+                                }
+                            ],
+                        )
+                    )
+                ]
+            )
+
+    plain = _Plain(messages=iter([]))
+    ordinary = _drive(plain)
+    assert plain.calls == cap, (
+        f"an ordinary turn made {plain.calls} calls against a cap of {cap} — the turn-wide "
+        "floor is capping a turn that has no siblings"
+    )
+    assert ordinary.get("model_calls") == cap

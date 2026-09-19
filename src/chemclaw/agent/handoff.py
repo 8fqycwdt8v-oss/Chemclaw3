@@ -223,6 +223,23 @@ def handoff_tools(
             f"peer roster names a profile twice: {sorted(names)} — one `goto` would name two "
             "nodes, and which one runs would depend on insertion order"
         )
+    # **And the same question one fold later, because the *minted* names can collide when the
+    # profile names do not.** `handoff_tool_name` folds `-` to `_` (a tool name cannot carry `-`,
+    # and `data/profiles/property-lookup.yaml` uses one), so `property-lookup` and
+    # `property_lookup` are two legal profile names — both are file stems — that mint one tool.
+    # Driven: `tools_by_name` keeps whichever came last, so the other peer becomes a node no tool
+    # can reach, and the list sent to the provider carries **two functions of one name**, which an
+    # OpenAI-compatible endpoint rejects outright. Neither failure is an authority widening — both
+    # peers are root-bounded — but the unreachable node may be the wider of the two, and this is
+    # exactly the routing ambiguity the check above exists to prevent, in the form it does not see.
+    minted = [handoff_tool_name(name) for name in names]
+    if len(set(minted)) != len(minted):
+        collided = sorted({name for name in minted if minted.count(name) > 1})
+        raise ChemclawError(
+            f"peer roster mints one handoff tool for two profiles: {collided} from {sorted(names)} "
+            "— `-` and `_` fold together in a tool name, so one peer would be unreachable and the "
+            "model would be sent two functions of one name"
+        )
     return [
         _one_handoff_tool(profile, bound, menu_tools, max_handoffs, current)
         for profile, bound in peers

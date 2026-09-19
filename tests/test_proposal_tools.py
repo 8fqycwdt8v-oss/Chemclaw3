@@ -60,7 +60,15 @@ def test_proposing_is_state_changing_so_no_helper_holds_it() -> None:
 _ARGUED = {
     # The proposer imports the queue for `propose` and `content_hash`. It must not reach `decide`,
     # which the symbol check below is what actually holds.
-    "chemclaw.agent.proposal_tools": {"behaviour_proposals"},
+    #
+    # **And `local_skills` for `validated_skill`, which is a read of the tier's admission rules and
+    # not a write into it.** `_validated` used to hand-copy three of that function's four checks and
+    # omit the fourth — the shipped-name conflict — so a proposal that the accept route answers 409
+    # for was recorded as `open` and reported to the chemist as waiting for their decision, with no
+    # way to accept it. The symbol half of this test is what keeps the exemption narrow: the two
+    # writes into the tier (`save_local_skill`, `delete_local_skill`) are in `_WRITES_BEHAVIOUR`, so
+    # naming either of them still reds this test with the import argued.
+    "chemclaw.agent.proposal_tools": {"behaviour_proposals", "local_skills"},
     # The generated `run_*` job launchers, whose whole job is resolving a `module:attribute`
     # reference a bundle's `connector.yaml` declares — so `importlib` is what this module is for,
     # not a way around a static reader. It is guarded on its own terms by `check_driver_module`,

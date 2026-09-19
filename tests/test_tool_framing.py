@@ -39,6 +39,7 @@ from chemclaw.agent.framing import ENVELOPE_TAG, envelope_delimiters
 from chemclaw.agent.langgraph_agent import build_langgraph_agent, tool_call_middleware
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.tool_framing import defanged_payload, frame_connector_results
+from chemclaw.agent.tool_result_size import bound_tool_results
 from chemclaw.connectors.manifest import ConnectorManifest, HttpEndpoint
 from chemclaw.connectors.registry import _mcp_connection, open_connector_specs
 from chemclaw.connectors.server import connector_app
@@ -343,6 +344,73 @@ def test_the_framer_sits_inside_the_converters_and_outside_the_trail() -> None:
     assert names.index("surface_domain_errors") < names.index("frame_connector_results")
     assert names.index("frame_connector_results") < names.index("announce_tool_failures")
     assert names.index("frame_connector_results") < names.index("audit_tool_calls")
+
+
+@pytest.mark.parametrize("returned", [100_000, 200_000, 500_000])
+def test_the_delivered_cut_notice_is_about_what_the_tool_returned(returned: int) -> None:
+    """The one number in a cut notice that matters, over the nesting that was destroying it.
+
+    **Two bounds run on one result and the second re-derived the arithmetic from the first's
+    output.** `frame_connector_results` nests `bound_tool_results` inside itself and re-bounds after
+    escaping, because escaping is what makes the text longer — and both passes place the notice at
+    `_HEAD_SHARE`, so the second cut deletes the first's sentence and writes its own about the
+    60,000-character intermediate. It re-bounds *unconditionally* on this path, because
+    `_framed_content` adds a 94-character envelope to a payload already sitting on the ceiling.
+
+    Measured before the fix, at the shipped ceiling: a connector tool returning 500,000 characters
+    delivered `451 of 60,102 characters removed` — understating the loss by a factor of ~975, in the
+    direction that hides it, in the sentence whose stated purpose is "so the model can say how much
+    it did not see". No adversary and no hostile content: the control arm with no forged delimiter
+    reproduced identically.
+
+    **Why nothing caught it.** `tests/test_tool_result_size.py` exercises `bounded_content`
+    directly,
+    which is one pass; the envelope test above asserts the delivered text is *shorter* than the
+    original and that the payload cannot close its envelope. Both are true of the defect. What
+    nothing asserted is that the numbers in the delivered sentence are about the tool's output, so
+    that is what this asserts — on the real composition, not on either middleware alone.
+    """
+    tool = "fetch_artifact"
+
+    class _Served:
+        name = tool
+        metadata = {SERVED_BY: {"connector": "calc", "build": "probe"}}
+
+    async def _handler(_request: Any) -> ToolMessage:
+        return ToolMessage(content="Z" * returned, tool_call_id="call-1", name=tool)
+
+    async def _sized(request: Any) -> Any:
+        return await run_middleware(bound_tool_results, request, _handler)
+
+    async def _run() -> ToolMessage:
+        return cast(
+            ToolMessage,
+            await run_middleware(
+                frame_connector_results, tool_request(tool, tool=_Served()), _sized
+            ),
+        )
+
+    delivered = asyncio.run(_run())
+    text = delivered.content if isinstance(delivered.content, str) else str(delivered.content)
+    notices = re.findall(r"([\d,]+) of ([\d,]+) characters removed", text)
+
+    assert len(notices) == 1, f"expected exactly one cut notice, found {notices}"
+    removed, total = (int(value.replace(",", "")) for value in notices[0])
+    assert total == returned, (
+        f"the notice says the tool returned {total:,} characters; it returned {returned:,}. The "
+        "outer bound is describing the inner bound's output instead of the tool's."
+    )
+    # **And the removal accounts for everything above the ceiling.** `total` alone is not enough:
+    # the pre-fix notice could have carried the right total beside a removal figure taken from the
+    # intermediate, which is the half that hides the loss. What the arithmetic has to imply is that
+    # the model kept at most a ceiling's worth — pre-fix this implied 99,550 kept characters against
+    # a 60,000 ceiling.
+    ceiling = settings.agent_max_tool_result_chars
+    assert returned - removed <= ceiling, (
+        f"the notice implies {returned - removed:,} characters survived, above the {ceiling:,} "
+        f"ceiling, while the delivered result is {len(text):,} — the removal figure is about an "
+        "intermediate rather than about the tool's output"
+    )
 
 
 def test_an_oversized_connector_result_is_still_one_well_formed_envelope(probe: int) -> None:
