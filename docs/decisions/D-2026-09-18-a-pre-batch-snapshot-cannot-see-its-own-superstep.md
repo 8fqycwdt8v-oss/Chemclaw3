@@ -107,8 +107,13 @@ an ADR saying there is no second writer reads as a bound tighter than the one th
   on the defect, and it discriminates — mutating the call site to `batch_width` reds it at
   `25000 == 199999`.
 - `tests/test_subagents.py::test_the_file_share_bounds_the_superstep_at_every_width_this_deployment_allows`
-  sweeps past the crossover where the per-file floor stops shrinking, which `concurrent` moved down
-  by up to `agent_max_parallel_tool_calls`. Every other floor test pins two or four files.
+  asserts the superstep total. **This bullet shipped claiming it "sweeps past the crossover where
+  the per-file floor stops shrinking", and that was false of the test as written**: it passed
+  `held=budget`, so the share floored to 1 in every cell and neither parameter influenced an
+  assertion — it passed with the whole `concurrent` divisor reverted. Worse, the bound in its own
+  name did not hold, because a per-file cut has a floor and N files each at it is 44N.
+  `D-2026-09-19-a-cap-on-each-file-is-not-a-cap-on-the-command` caps the count as well and gives
+  the test a fresh channel, the total assertion, and widths past `agent_max_parallel_tool_calls`.
 - `tests/test_upstream_surface.py::test_only_the_subagent_middleware_returns_a_command_carrying_the_files_channel`
   is the divisor's dependency assumption, held against the installed distribution rather than
   against this record.
