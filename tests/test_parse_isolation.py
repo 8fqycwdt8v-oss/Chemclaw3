@@ -20,10 +20,12 @@ local IPC. Nothing asserted it in either direction, and the C half of the same c
 """
 
 import asyncio
+import io
 import socket
 import subprocess
 import sys
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -43,14 +45,22 @@ from chemclaw.ingest.documents.isolate import (
     parse_context,
     parse_document_isolated,
 )
-from chemclaw.ingest.documents.parse import ScannedDocumentError
+from chemclaw.ingest.documents.parse import DocumentParseError, ScannedDocumentError
 from tests.egress_probe import egress_posture
 from tests.test_document_formats import _blank_pdf_bytes  # type: ignore[attr-defined]
 
 # A CSV big enough that parsing it is unmistakably longer than the deadline the wedge test sets,
-# and small enough that building it costs nothing. Measured on this tree: 6 MB parses in 0.694 s,
-# so 20 MB is ~2.3 s against a 0.2 s deadline — a factor of ten, not a race.
-_SLOW_CSV = b"aaaa,bbbb,cccc,dddd\n" * 1_000_000
+# and small enough that building it costs nothing.
+#
+# **Wide rows rather than many narrow ones, and that is a memory shape rather than a preference.**
+# The same 20 MB as `b"aaaa,bbbb,cccc,dddd\n" * 1_000_000`, which is what this was, and which now
+# exceeds `document_parse_memory_bytes` and comes back as a refusal instead of a slow parse: a
+# million rows is a million `str` objects in the rendered lines, and a `str` costs ~50 bytes of
+# header before its characters. 100,000 rows of the same total length cost a tenth of that.
+# Re-measured on this tree after the change: 0.56 s isolated against the 0.2 s deadline below, a
+# factor of 2.8 where this comment used to claim ten. Ten is no longer available and that is the
+# budget working: a CSV slow enough for it is a CSV whose rendered text does not fit one parse.
+_SLOW_CSV = (b",".join([b"a" * 24] * 8) + b"\n") * 100_000
 
 
 def test_a_parse_child_is_still_inside_the_no_egress_posture() -> None:
@@ -299,3 +309,149 @@ def test_a_child_that_stalls_after_its_first_byte_still_frees_the_worker_thread(
     assert reported["orphans"][0] == "0", (
         f"{reported['orphans'][0]} grandchild process(es) outlived the kill that freed the slot"
     )
+
+
+def _workbook_of_shared_strings(references: int, wide: bool) -> bytes:
+    r"""A legal `.xlsx` whose text is many times its expanded size, optionally one code point wide.
+
+    Written as raw OOXML rather than through `openpyxl` because the point is a property of the
+    format that `openpyxl` will not produce: a *shared string* is stored once in the archive and
+    referenced from as many cells as the sheet likes, so the text `_parse_xlsx` builds is the
+    length of the string times the number of references while the archive grows by ~30 bytes each.
+    Nothing here is crafted or dishonest — every `file_size` in the central directory is true,
+    which is what `_refuse_a_bomb` reads, and the workbook opens in Excel.
+
+    `wide` adds one more shared string holding a single astral code point, referenced from exactly
+    one cell. Every other character is ASCII. CPython stores a `str` at the width of its widest code
+    point, and `_parse_xlsx` ends in one document-wide `"\\n\\n".join(blocks)`, so that one cell
+    quadruples the whole document.
+
+    Args:
+        references: How many cells point at the long shared string.
+        wide: Whether one further cell holds a single astral code point.
+
+    Returns:
+        The workbook's bytes.
+    """
+    run = ("tetrahydrofuran-4-methoxybenzaldehyde-isolated-yield-" * 19)[:1000]
+    strings = [run, "\U0001f9ea"] if wide else [run]
+    per_row = 20
+    rows = []
+    for row in range(1, references // per_row + 1):
+        cells = "".join(
+            f'<c r="{chr(65 + column)}{row}" t="s"><v>0</v></c>' for column in range(per_row)
+        )
+        rows.append(f'<row r="{row}">{cells}</row>')
+    if wide:
+        rows.append(f'<row r="{len(rows) + 1}"><c r="A{len(rows) + 1}" t="s"><v>1</v></c></row>')
+    main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    package = "http://schemas.openxmlformats.org/package/2006/relationships"
+    document = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    parts = {
+        "[Content_Types].xml": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.'
+            'relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-'
+            'officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.'
+            'openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            '<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.'
+            'openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>'
+        ),
+        "_rels/.rels": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<Relationships xmlns="{package}"><Relationship Id="rId1" '
+            f'Type="{document}/officeDocument" Target="xl/workbook.xml"/></Relationships>'
+        ),
+        "xl/workbook.xml": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<workbook xmlns="{main}" xmlns:r="{document}"><sheets>'
+            '<sheet name="runs" sheetId="1" r:id="rId1"/></sheets></workbook>'
+        ),
+        "xl/_rels/workbook.xml.rels": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<Relationships xmlns="{package}">'
+            f'<Relationship Id="rId1" Type="{document}/worksheet" Target="worksheets/sheet1.xml"/>'
+            f'<Relationship Id="rId2" Type="{document}/sharedStrings" Target="sharedStrings.xml"/>'
+            "</Relationships>"
+        ),
+        "xl/worksheets/sheet1.xml": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<worksheet xmlns="{main}"><sheetData>{"".join(rows)}</sheetData></worksheet>'
+        ),
+        "xl/sharedStrings.xml": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<sst xmlns="{main}" count="{references + int(wide)}" uniqueCount="{len(strings)}">'
+            + "".join(f"<si><t>{one}</t></si>" for one in strings)
+            + "</sst>"
+        ),
+    }
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path, body in parts.items():
+            archive.writestr(path, body)
+    return buffer.getvalue()
+
+
+def _declared_expansion(raw: bytes) -> int:
+    """What `_refuse_a_bomb` reads out of the archive's central directory."""
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        return sum(item.file_size for item in archive.infolist())
+
+
+def test_a_legal_upload_cannot_spend_more_than_the_parse_budget_declares() -> None:
+    """Every ceiling on a document is a number in the archive; this is the one on the parse.
+
+    The workbook here is legal by every bound upstream of the parse — well under
+    `attachment_max_bytes` on the wire and under `document_max_expanded_bytes` expanded, with a
+    central directory that tells the truth about both. It still asks for two hundred million
+    characters, because a shared string is stored once and read from as many cells as the sheet
+    has. Driven in a 1Gi memory cgroup holding the front door's measured 523 MiB idle pair, two
+    concurrent parses of a workbook of this shape — 222,485 bytes on the wire, 5.9 MiB expanded,
+    96.3 M characters — took the parent process with `SIGKILL`, exit 137: a pod OOMKill, every
+    connected turn lost, from an upload nothing was entitled to refuse.
+
+    What refuses it now is `document_parse_memory_bytes`, enforced by the kernel on the child that
+    does the allocating, so nothing written in the archive can move it. Asserted as a refusal
+    rather than as a memory reading because a memory reading of a process this one does not
+    `waitpid` on is not available here: the parse child belongs to the forkserver, so
+    `RUSAGE_CHILDREN` never sees it. The pod-level number is in
+    `tests/test_deploy_chart.py::PARSE_MIB_PER_PARSE_BUDGET_MIB`.
+    """
+    raw = _workbook_of_shared_strings(200_000, wide=False)
+    assert len(raw) < settings.attachment_max_bytes, "the fixture stopped being a legal upload"
+    assert _declared_expansion(raw) < settings.document_max_expanded_bytes, (
+        "the fixture stopped being legal by the expansion ceiling, which is the whole point of it"
+    )
+    with pytest.raises(DocumentParseError) as refusal:
+        parse_document_isolated("runs.xlsx", raw, None, 120.0)
+    assert "memory" in str(refusal.value), (
+        "a document refused for its size must say so; the caller cannot act on 'could not be read'"
+    )
+
+
+def test_one_wide_code_point_does_not_multiply_what_a_parse_may_spend() -> None:
+    r"""The same workbook, one astral character apart, and the budget is the same budget.
+
+    `_parse_xlsx` ends in one document-wide `"\\n\\n".join(blocks)`, and CPython stores a `str` at
+    the width of its widest code point — so a single emoji, superscript minus, `Å` or equilibrium
+    arrow in one cell quadruples the whole extracted document. Measured on a real memory cgroup, a
+    legal 1,089,493-byte upload at 63.4 MiB expanded charged the pod 236 MiB pure-ASCII and 500 MiB
+    with one astral character in it, against a chart constant of 3.1 MiB per expanded MiB that
+    predicted 197 for both.
+
+    Both halves are asserted, and the first is why this is not simply "wide documents are refused":
+    the ASCII twin must still parse, or the bound would have been bought by refusing everything.
+    """
+    narrow = _workbook_of_shared_strings(30_000, wide=False)
+    wide = _workbook_of_shared_strings(30_000, wide=True)
+    assert len(wide) - len(narrow) < 200, "the two fixtures must differ by one character, not more"
+
+    parsed = parse_document_isolated("narrow.xlsx", narrow, None, 120.0)
+    assert parsed.text.isascii() and len(parsed.text) > 30_000_000
+
+    with pytest.raises(DocumentParseError) as refusal:
+        parse_document_isolated("wide.xlsx", wide, None, 120.0)
+    assert "memory" in str(refusal.value)

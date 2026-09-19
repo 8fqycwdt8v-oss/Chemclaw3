@@ -747,25 +747,33 @@ resources:
     # **The memory request is 640Mi because a warm parse forkserver is a second process in this
     # pod, and 512Mi did not cover the idle pair.** `ingest/documents/isolate.py` runs every upload
     # in a killable child forked from a `forkserver` that is started by fork *and exec*, so none of
-    # its pages are copy-on-write with the front door's. Measured on this tree: the real front door
-    # under uvicorn, lifespan started, holds 442,270 kB of unique pages (432 MiB), and warming the
-    # forkserver adds 91 MiB on top — 523 MiB *before a single turn or upload*, against a request
-    # of 512. A pod over its request while idle is a node oversubscribed by the difference and the
-    # first thing evicted under memory pressure, and nothing said so because the chart was sized
-    # before that process existed.
+    # its pages are copy-on-write with the front door's. The pod is therefore over its request
+    # while idle from the first upload onwards — a node oversubscribed by the difference and a pod
+    # first in line for eviction — and nothing said so, because the chart was sized before that
+    # process existed.
     #
-    # The limit stays 1Gi and is not the thing that was wrong: two concurrent parses at
-    # `CHEMCLAW_DOCUMENT_MAX_EXPANDED_BYTES` cost 3.1 MiB per expanded MiB, so the worst legal pair
-    # is 920 MiB of the 1024 the limit allows. `tests/test_deploy_chart.py` holds both inequalities
-    # against the measured constants rather than against these numbers, and measures the
-    # forkserver's own cost live, so a preload that grew would red there rather than in an eviction.
+    # The limit stays 1Gi, and what one parse may spend inside it is
+    # `CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES`, enforced by the kernel on the child that allocates.
+    # It is **not** `CHEMCLAW_DOCUMENT_MAX_EXPANDED_BYTES`, which this comment used to derive the
+    # limit from: a parse is not a function of a document's expanded size, and two legal uploads
+    # inside every declared ceiling OOM-killed this pod in a 1Gi cgroup while the gate stayed green
+    # (`D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse`).
+    #
+    # **No number from that derivation is written here any more, and deleting them is the fix.**
+    # Six were — 432, 91, 523, 920, 404 and 3.1 — restating test constants that nothing reconciled
+    # against this file, so the day one moved this comment became a confident wrong answer about
+    # the pod an operator is reading about. `tests/test_deploy_chart.py` holds both inequalities
+    # against its own measured constants and against the settings that bound the work, and
+    # re-measures the forkserver's cost off a running one, so a preload that grew reds there rather
+    # than in an eviction. Read that file for the arithmetic; this file declares the sizes it
+    # produces.
     #
     # `mcpFace` shares this key and never parses — it serves no upload route, so `parse_context`
     # never starts one there. **Driven rather than asserted**: all five shipped entrypoints report no
     # forkserver after import, and nothing in the suite would notice if one of them started warming
-    # it, because no bound here would break if it did. So the face pays the extra 128Mi for nothing:
-    # 128Mi on one optional replica, against its own 404 MiB resident set, which is why the key is
-    # not split.
+    # it, because no bound here would break if it did. So the face pays the extra request for
+    # memory it does not use, on one optional replica whose own resident set was tight against
+    # 512Mi anyway, which is why the key is not split.
     requests: { cpu: "1", memory: "640Mi" }
     limits: { cpu: "2", memory: "1Gi" }
   # The default for every worker Deployment, core's and a bundle's. A bundle that needs different
