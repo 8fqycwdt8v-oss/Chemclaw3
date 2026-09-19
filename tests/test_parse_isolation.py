@@ -46,7 +46,11 @@ from chemclaw.ingest.documents.isolate import (
     parse_context,
     parse_document_isolated,
 )
-from chemclaw.ingest.documents.parse import DocumentParseError, ScannedDocumentError
+from chemclaw.ingest.documents.parse import (
+    DocumentParseError,
+    ScannedDocumentError,
+    parse_document,
+)
 from tests.egress_probe import egress_posture
 from tests.test_document_formats import _blank_pdf_bytes  # type: ignore[attr-defined]
 
@@ -101,6 +105,27 @@ def test_a_parse_child_is_still_inside_the_no_egress_posture() -> None:
         f"a parse child's outbound connect was {outcome!r} rather than refused by the egress "
         "guard, so untrusted bytes are parsed in a process outside the no-egress posture"
     )
+
+
+#: What one fork-and-answer round trip costs, as the floor a derived deadline may not go under.
+#: Not a `Settings` field, for the reason `_REAP_SECONDS` in `ingest/documents/isolate.py` is not
+#: one: it is the latency of process creation, not a posture. Measured at 13-17 ms over five round
+#: trips on a loaded box; 20 ms is that measurement rounded up, and the margin is applied once at
+#: the assertion rather than twice — padding the constant *and* multiplying it is what made the
+#: first version of this guard refuse a deadline that was already five times the round trip.
+_FORK_ROUND_TRIP_SECONDS = 0.02
+
+
+def _in_process_parse_seconds(raw: bytes) -> float:
+    """What `raw` costs to parse here, so a deadline can be derived instead of transcribed.
+
+    In-process on purpose: the number wanted is the *parse*, and going through
+    `parse_document_isolated` would fold a fork round trip into it and then be compared against a
+    deadline that has to contain one.
+    """
+    started = time.perf_counter()
+    parse_document("slow.csv", raw, None)
+    return time.perf_counter() - started
 
 
 def _warm_the_forkserver() -> None:
@@ -175,18 +200,43 @@ async def test_a_parse_past_its_deadline_frees_its_slot_for_the_next_upload(
     `AttachmentUnavailable`, which is the shape of the production failure: uploads refused by a pod
     that has capacity on paper.
 
-    Three of the four budgets are set against the ~2.3 s parse rather than against each other, so
-    that the defect cannot hide behind any of them. The queue wait is shorter than the parse: if it
-    were longer the second upload would simply outwait the wedge. The caller's backstop is shorter
-    than the parse too, and the shipped 5 s is not — with that in place an in-process parse finishes
-    *inside* the backstop and comes back as a success, so the mutation would be caught by the wrong
-    assertion and this test would not be evidence about slots at all.
+    Three of the four budgets are set against the fixture's *measured* parse rather than against
+    each other, so that the defect cannot hide behind any of them. The queue wait is shorter than
+    the parse: if it were longer the second upload would simply outwait the wedge. The caller's
+    backstop is shorter than the parse too, and the shipped 5 s is not — with that in place an
+    in-process parse finishes *inside* the backstop and comes back as a success, so the mutation
+    would be caught by the wrong assertion and this test would not be evidence about slots at all.
+
+    **The budgets were transcribed against a ~2.3 s parse, and that parse is no longer 2.3 s.**
+    `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse` rewrote `_parse_csv` to
+    render row by row, which cut this fixture to **0.36 s** — leaving the 0.2 s deadline below it by
+    1.8x, so whether the parse outran its deadline came down to how fast the runner was. It passed
+    three local full runs and CI on the commit that caused it, then failed CI with
+    `DID NOT RAISE`. Making the fixture slow again is not available: measured, 15x the cell count
+    buys 0.40 s to 0.73 s, because the cost is in the bytes rather than in the cells, and the size
+    that would buy 2.3 s is now refused by `document_parse_memory_bytes`.
+
+    So the deadline is derived from the fixture instead of written down beside it: a quarter of what
+    the parse actually costs *here*, which holds its ratio on a runner of any speed. The floor is
+    the fork round trip — measured at 17 ms with this box loaded — because the *small* upload has to
+    fit inside the same deadline, and if the parser ever gets fast enough to squeeze those together
+    this fails saying so rather than going quietly marginal again.
     """
     _warm_the_forkserver()
+    cost = _in_process_parse_seconds(_SLOW_CSV)
+    deadline = cost / 4
+    assert deadline >= 3 * _FORK_ROUND_TRIP_SECONDS, (
+        f"_SLOW_CSV now parses in {cost:.3f}s, so a deadline it overruns four times over is "
+        f"{deadline:.3f}s — inside the {_FORK_ROUND_TRIP_SECONDS:.3f}s a fork round trip costs, "
+        "which would time the *small* upload out as well and make this test pass for the wrong "
+        "reason. The fixture has to get slower, or this stops being about the deadline."
+    )
     monkeypatch.setattr(settings, "attachment_max_concurrent_parses", 1)
-    monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", 0.2)
-    monkeypatch.setattr(settings, "attachment_parse_reap_grace_seconds", 0.5)
-    monkeypatch.setattr(settings, "attachment_parse_queue_seconds", 0.5)
+    monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", deadline)
+    monkeypatch.setattr(settings, "attachment_parse_reap_grace_seconds", deadline * 2.5)
+    # Shorter than the parse, for the reason above: a queue wait past it would let the second
+    # upload simply outwait the wedge instead of being shed by it.
+    monkeypatch.setattr(settings, "attachment_parse_queue_seconds", cost / 2)
     monkeypatch.setattr(settings, "attachment_max_bytes", len(_SLOW_CSV) + 1)
 
     with pytest.raises(AttachmentError):
