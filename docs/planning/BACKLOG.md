@@ -147,6 +147,47 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
+- [ ] **The parse budget is what a parse may allocate *on top of the document*, and only one of
+  those two terms is declared anywhere** — [M], opened 2026-09-19 by
+  `D-2026-09-19-a-refusal-that-blames-the-document-is-worse-than-one-that-says-nothing`.
+  `isolate._bound_allocations` reads its baseline from `/proc/self/status` **after** `raw` has been
+  unpickled into the child, so the document is inside the baseline and the ceiling it sets is
+  `document + document_parse_memory_bytes`. Driven: `VmData` 230.4 MiB before a 50 MiB document,
+  280.5 MiB after — the whole 50 MiB, exactly. `tests/test_deploy_chart.py`'s
+  `PARSE_MIB_PER_PARSE_BUDGET_MIB` multiplies **only** the budget, and its comment names two
+  reasons for the coefficient (the parent's unpickled copy; the child's intermediates being inside
+  the ceiling) — the document is not one of them.
+  It holds today and is unbounded tomorrow: the coefficient was measured at the shipped 50 MiB
+  (1.27x for two concurrent parses), and `binding.max_file_bytes` is
+  `Field(default=52_428_800, ge=1024)` — **no upper bound**, set per `datasource.yaml`. A site
+  binding at 200 MiB moves the real per-parse charge to ~360 MiB while the chart inequality does
+  not move at all, which is `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse`'s
+  own "a coefficient of the quantity it is declared against" argument failing on its second
+  quantity.
+  The row is the decision, not the number. Three candidates, each with a cost: charge
+  `max_file_bytes` in the chart inequality (right, and it couples the chart to a per-site manifest
+  field); give `max_file_bytes` an `le=` tied to `document_parse_memory_bytes` (a startup refusal
+  in the shape `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob` already uses, and a
+  behavioural change for a site nobody has yet); or read the baseline **before** the unpickle, so
+  the budget means what its name says (cleanest, and it needs the child to size itself before it
+  is handed its work, which the current `forkserver` entry point does not allow). Not taken here
+  because `tests/test_deploy_chart.py` is being rewritten on another branch and a constant changed
+  in two places at once is how the two disagree.
+  **Anchors:** `src/chemclaw/ingest/documents/isolate.py::_bound_allocations`,
+  `src/chemclaw/ingest/documents/binding.py:156`,
+  `tests/test_deploy_chart.py::PARSE_MIB_PER_PARSE_BUDGET_MIB`.
+
+- [ ] **`.pptx` under the parse memory ceiling is unverified** — [S], opened 2026-09-19 by
+  `D-2026-09-19-a-refusal-that-blames-the-document-is-worse-than-one-that-says-nothing`. That
+  review drove `.docx`, `.xlsx`, `.csv` and plain text against `document_parse_memory_bytes` and
+  found the `.docx` case refused with a message blaming the document; `_parse_pptx` goes through
+  the same lxml layer and was **not** driven, so whether a markup-heavy deck earns the named
+  refusal, the wrong one, or no refusal at all is unknown. The remedy is one fixture beside
+  `_markup_heavy_docx` in `tests/test_parse_isolation.py` and one assertion; it is a row rather
+  than a fix because a deck fixture is a different XML part layout and guessing it is how a test
+  passes without touching the code path. Not a pod risk either way — the `RLIMIT_DATA` is absolute,
+  so the worst case is a wrong sentence, which is exactly what that review found for `.docx`.
+
 - [ ] **The substructure deadline test asserts a timing ratio where it means a record count** —
       [S], `tests/test_molfp.py::test_a_scan_past_its_deadline_stops_instead_of_matching_the_rest_of_the_corpus`.
       Its own docstring states the property as *"went on matching every remaining record"*, which is
@@ -445,10 +486,42 @@ topic).
       so the one part of the pod that scales with load is the part no number covers. The CPU half
       *is* measured (0.581 s of CPU over 8.32 s of wall clock per turn, which is why
       `requests.cpu` is 1); the memory half has never been. What it wants is the same shape as the
-      parse measurement: drive a turn against the mock LLM, sample the pod's `Pss` across it, and
-      express the peak as MiB per admitted permit so `test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares`
-      can take a third term. Anchors: `deploy/helm/chemclaw/values.yaml` `resources.service`,
+      parse measurement: drive a turn against the mock LLM and express the peak as MiB per admitted
+      permit so `test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares` can take a
+      third term. **Sample a memory cgroup's `memory.max_usage_in_bytes`, not `Pss`** — this row
+      said `Pss` until `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse`
+      measured what that is: a system-wide proportional share that understates a cgroup's charge —
+      driven, one unchanged process read 10.3% less `Pss` while six unrelated siblings mapped the
+      same shared objects, and got it back when they exited, where `Rss` moved 0.016%. Anchors:
+      `deploy/helm/chemclaw/values.yaml` `resources.service`,
       `tests/test_deploy_chart.py::test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares`.
+
+- [ ] **One parse budget serves two pods with four times the difference in room** — [S], opened
+      2026-09-19 by `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse`.
+      `CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES` is derived from the front door — 1Gi limit, 523 MiB
+      idle, two parse slots — and the background worker reads the same value with a 4Gi limit and a
+      share binding whose `max_file_bytes` is 50 MiB. Measured, a 50 MiB delimited export needs more
+      than 512 MiB to render even after `_parse_csv` stopped materialising its reader, and a 24.5 M
+      character one needs more than 160 MiB: those files are now refused on a pod that could have
+      afforded them. It is counted (`skipped_unreadable`) and the refusal names the ceiling, so this
+      is a cost rather than a hole. The cheap shape is a per-Deployment override of the one env key
+      the chart already renders; the honest alternative is lowering the binding's `max_file_bytes`
+      to what one parse can hold, which is a site's declaration rather than this chart's. Wants a
+      real corpus before either. Anchors: `src/chemclaw/core/config/sources.py`
+      `document_parse_memory_bytes`, `src/chemclaw/ingest/documents/binding.py` `max_file_bytes`,
+      `tests/test_deploy_chart.py::test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares`.
+
+- [ ] **A parse refused by a C parser's own allocation failure arrives unnamed** — [S], opened
+      2026-09-19 by `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse`.
+      `parse.too_large_to_read` names the ceiling on both paths that raise `MemoryError` — extraction
+      and the pickling of the answer — but a library that handles its own allocation failure never
+      raises one: measured, `lxml` answers "Unable to allocate output buffer", so a markup-heavy
+      `.docx` reaches a chemist as the generic "could not be read". Both are refusals and neither
+      costs the pod; what is lost is the one sentence that tells a chemist to split the file. The
+      shape worth trying is reading `RLIMIT_DATA` back in the broad arm and saying so when the
+      process is at its ceiling, which is a state rather than an exception type. Anchors:
+      `src/chemclaw/ingest/documents/parse.py::parse_document`,
+      `src/chemclaw/ingest/documents/parse.py::too_large_to_read`.
 
 - [ ] **Neither net sees one Postgres server that two DSNs spell differently** — [M], found
       2026-09-05 by a fresh-context review of `D-2026-09-05-a-pool-count-is-not-a-connection-count`,

@@ -73,8 +73,19 @@ def _refuse_a_bomb(name: str, raw: bytes) -> None:
 
     Read from the central directory, so it costs no decompression. **The residual is stated:** a
     hand-crafted archive can understate `file_size`, and this check believes it. That is a bound on
-    the realistic case — a real generator writes true sizes — not a defence against a crafted one,
-    which needs a streaming limit at every read.
+    the realistic case — a real generator writes true sizes — not a defence against a crafted one.
+
+    **What that residual costs stopped being the pod**
+    (`D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse`). This ceiling was the
+    thing the chart's memory budget rested on, so an archive that lied about `file_size` moved a
+    declared bound rather than a real one. It no longer is: `document_parse_memory_bytes` is
+    enforced by the kernel on the process doing the parsing, and it cannot be moved by anything
+    written in a file. That also settles the question this check could never answer honestly — an
+    *honest* archive is as unbounded as a lying one, because a shared string is stored once and
+    read N times and because markup costs memory that no count of text can see. So what is left
+    here is a cheap, early, well-worded refusal: a document refused from its central directory
+    costs no decompression, where the same document refused by the allocation ceiling costs a
+    minute of CPU first.
 
     Raises:
         DocumentParseError: The declared expansion exceeds `document_max_expanded_bytes`.
@@ -91,6 +102,39 @@ def _refuse_a_bomb(name: str, raw: bytes) -> None:
             f"{ceiling}-byte limit. A document this large compressed this well is a data export or "
             "a malformed file rather than a document; extracting the relevant sheet will work."
         )
+
+
+def too_large_to_read(name: str) -> DocumentParseError:
+    """The refusal a document earns by exhausting `document_parse_memory_bytes`.
+
+    One function because the ceiling is hit in three places and a chemist must not be able to tell
+    which: inside `parse_document`, where extraction allocates; inside
+    `ingest/documents/isolate._parse_into`, where the answer is pickled onto the pipe back — which
+    is real memory spent on this document and is deliberately inside the same budget; and wherever
+    a C parser reported the exhaustion as its own error, which the paragraph below is about. Three
+    arms wording one event separately is how the wordings drift.
+
+    **That residual is closed, and it was larger than it read.** A C parser that reports its own
+    allocation failure rather than letting CPython raise reaches neither arm on its own — lxml does
+    exactly that, so a markup-heavy but entirely legal `.docx` was refused as
+    `unknown error (<string>, line 0)`, which does not merely omit the reason: it tells a chemist
+    their document is malformed at line 0, which is worse than the generic wording this function
+    exists to replace. `ingest/documents/isolate._at_ceiling` now renames any failure that happened
+    with the budget spent, so all three arms arrive here. It is a third caller and the reason this
+    is a function stands unchanged.
+
+    Args:
+        name: The document name, for the message.
+
+    Returns:
+        The refusal to raise, or to send back across the parse boundary.
+    """
+    return DocumentParseError(
+        f"{name} needs more memory to read than one parse is allowed to use "
+        f"({settings.document_parse_memory_bytes} bytes). Reading it whole would take the pod's "
+        "memory from every other request in flight; the relevant sheet, or the file split into "
+        "parts, will work."
+    )
 
 
 def _decode(raw: bytes) -> str:
@@ -180,13 +224,22 @@ def _parse_csv(raw: bytes) -> tuple[str, int]:
         dialect = csv.Sniffer().sniff(dialect_sample, delimiters=",;\t|")
     except csv.Error:
         dialect = csv.excel  # a single-column or unusual file is still readable as plain rows
-    rows = list(csv.reader(io.StringIO(text), dialect))
-    if not rows:
+    reader = csv.reader(io.StringIO(text), dialect)
+    header = next(reader, None)
+    if header is None:
         return "", 0
-    header, *body = rows
+    # **Rendered row by row, and it used to be `list(csv.reader(...))` first.** Materialising the
+    # reader holds every *cell* as its own object until the last row is read, and a `str` costs
+    # ~50 bytes of header before its characters: measured, a 50 MiB delimited export needed more
+    # than 512 MiB that way, against ~150 MiB here, because six cells a row over 900,000 rows is
+    # 5.4 M objects alive at once. Joining each row as it arrives frees its cells immediately and
+    # changes nothing about the output.
     lines = [" | ".join(header), "-" * 40]
-    lines += [" | ".join(cell for cell in row) for row in body]
-    return "\n".join(lines), len(body)
+    rows = 0
+    for row in reader:
+        lines.append(" | ".join(row))
+        rows += 1
+    return "\n".join(lines), rows
 
 
 def _parse_pdf(raw: bytes) -> tuple[str, int]:
@@ -354,6 +407,12 @@ def parse_document(name: str, raw: bytes, declared_type: str | None = None) -> P
     except DocumentParseError:
         # Already precise — a refusal the parser named itself, `ScannedDocumentError` included.
         raise
+    except MemoryError as exc:
+        # The parse ran out of the budget `ingest/documents/isolate.py` set on this process. Named
+        # because it is the one failure whose cause is knowable and actionable — the document is
+        # too large to read, not malformed — and because the alternative is the broad arm below
+        # telling a chemist their perfectly good workbook "could not be read".
+        raise too_large_to_read(name) from exc
     except Exception as exc:
         # **One net, at the boundary, around the whole parse.** Each parser used to guard only its
         # *constructor*, which is the one call that is not where these libraries do their work:

@@ -100,16 +100,66 @@ class SourcesSettings(BaseSettings):
     document_sync_schedule_minutes: int = 360
     # The ceiling on a zip-container document's *expanded* size. `.docx`/`.xlsx`/`.pptx` are zips,
     # so a binding's `max_file_bytes` bounds only what the file weighs on the share: a 110 KB
-    # workbook whose sheet XML expands 280× is under every limit and still exhausts the pod's
-    # memory. Applies to uploads too, where the ratio matters more — the chat pod's own
-    # `attachment_max_bytes` is in megabytes. The number is reconciled against where the parse runs.
-    # 512 MB was "far below what OOMs a pod" for the *worker* (4 GiB limit) and false for the *front
-    # door*, which is where `POST /sessions/{id}/attachments` parses and which the chart caps at
-    # 1 GiB: measured, a 1.78 MB upload declaring a legal ~150 MB expansion cleared this and both
-    # other gates, and two concurrent parses (the parse-slot cap) took the pod over its limit.
-    # 64 MB is still far above any real document (a 64 MB *expanded* .docx is enormous) and, at the
-    # ~5-6x RSS the parsers cost, leaves two concurrent parses well inside 1 GiB.
+    # workbook whose sheet XML expands 280× is under every limit and costs minutes of CPU to
+    # decompress and re-parse. Applies to uploads too, where the ratio matters more — the chat
+    # pod's own `attachment_max_bytes` is in megabytes.
+    #
+    # **What this bounds is work, not memory, and it used to be asked for both**
+    # (`D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse`). The prose here said
+    # 64 MB "leaves two concurrent parses well inside 1 GiB" at "the ~5-6x RSS the parsers cost",
+    # and that factor is not a property of the expanded size: measured on this tree over a real
+    # memory cgroup, one legal document at this ceiling charged the pod between 1.8 and 16.5 MiB
+    # per expanded MiB depending on the format, on how much of the archive is text rather than
+    # markup, and on the width CPython stores that text at — a 9× spread on a quantity that was
+    # declared as one number. A markup-heavy `.docx` at 79% of this ceiling charged 840 MiB with
+    # 470,000 characters of text in it. `document_parse_memory_bytes` is the bound on memory now;
+    # this one stays because refusing an archive from its central directory costs no
+    # decompression, and a refusal that names the expansion is a better answer than a parse that
+    # runs for a minute and then hits its allocation ceiling.
     document_max_expanded_bytes: int = 64 * 1024 * 1024
+    # What one parse may *allocate*, in bytes, enforced by the kernel on the process that does it
+    # (`ingest/documents/isolate.py` sets `RLIMIT_DATA` in the child before it reads a byte).
+    #
+    # **The bound is in the unit that kills the pod**, which is the whole argument for it. Every
+    # declarative ceiling upstream of here — `attachment_max_bytes`, a binding's `max_file_bytes`,
+    # `document_max_expanded_bytes` — bounds a number written in the *archive*, and three separate
+    # measurements show none of them predicts what the parse costs: CPython stores a `str` at the
+    # width of its widest code point, so one em dash or one emoji anywhere multiplies a whole
+    # document-wide join by 2 or 4; a workbook's shared-string table is stored once and referenced
+    # N times, so 5.9 MiB of expanded XML produced 96.3 M characters; and `python-docx` builds a
+    # full lxml DOM, which is charged against the markup rather than the text. Modelling any of
+    # those is a coefficient that a library upgrade invalidates in silence. A ceiling the kernel
+    # enforces on the child needs no model of any of them, and covers the format added next year.
+    #
+    # **Derived downwards from the pod rather than chosen.** `resources.service` limits the front
+    # door to 1024 MiB and it holds 523 of them idle with its parse forkserver warm, so two
+    # concurrent parses have 501 MiB between them and one parse charges the pod up to 1.4x its own
+    # budget (`tests/test_deploy_chart.py::PARSE_MIB_PER_PARSE_BUDGET_MIB`): 501 / (2 x 1.4) is
+    # 178.9 MiB. Rounded *down* to 160, which leaves the front-door inequality 53 MiB of the 1024
+    # rather than the 1 MiB that rounding alone would — and that inequality is where raising this
+    # fails, rather than in an OOMKill.
+    #
+    # What it costs a caller, by *shape* rather than by threshold. A 50 MiB plain-text document (the
+    # shipped share binding's whole `max_file_bytes`) parses, and so does a 10 MiB delimited export;
+    # a workbook whose shared-string table is read tens of millions of times, the same workbook with
+    # one astral code point in it, and a `.docx` whose every word is its own styled run are the
+    # three shapes that reach this ceiling, each from an archive well under every declarative bound
+    # above. A refusal names this ceiling; on the share path it lands in `skipped_unreadable`, which
+    # the sync already reports.
+    #
+    # **This comment used to publish six character thresholds and two of them were false**
+    # (`D-2026-09-19-a-refusal-that-blames-the-document-is-worse-than-one-that-says-nothing`): it
+    # said a 52 M character workbook and a 17.2 M character workbook carrying one astral code
+    # point were refused, and re-driven through the shipped path both **parse** — 50.1 M ASCII and
+    # 18.1 M astral parse here, 60.2 M and 20.1 M refuse. Worse than stale: a character count is
+    # not what this bound measures, so the same count parses or refuses depending on the fixture's
+    # shape and on how much of the budget the forkserver's own baseline residency has already
+    # spent — the crossing measured 22 M on one box and 20 M on another with no code between them.
+    # That is the argument of the paragraph three above, applied to the paragraph that was
+    # demonstrating it. What holds the behaviour is `tests/test_parse_isolation.py`, which asserts
+    # refusals and parses on named fixtures rather than thresholds on a quantity this bound does
+    # not read.
+    document_parse_memory_bytes: int = 160 * 1024 * 1024
     # The ceiling on one whole-document read (`ShareDocumentRetriever.read_document`), in
     # characters of *indexed text* rather than bytes on disk: what is being bounded is what reaches
     # a model's context, and the chunks are the only copy left by then.
