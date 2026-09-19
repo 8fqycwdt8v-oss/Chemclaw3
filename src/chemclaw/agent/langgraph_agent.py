@@ -107,6 +107,7 @@ from chemclaw.agent.chemclaw_agent import (
     instructions_for,
 )
 from chemclaw.agent.compaction import context_compaction_middleware, disabled_summarizer
+from chemclaw.agent.handoff import PEER_BRIEF
 from chemclaw.agent.llm_provider import build_chat_model
 from chemclaw.agent.local_skills import (
     LOCAL_SKILLS_LABEL,
@@ -172,6 +173,8 @@ def build_langgraph_agent(
     store: Any | None = None,
     helper: bool = False,
     specialist: AgentProfile | None = None,
+    handoffs: list[Any] | None = None,
+    peer: str = "",
 ) -> Any:
     """Compile the LangGraph conversation agent for one profile.
 
@@ -227,6 +230,23 @@ def build_langgraph_agent(
             `D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor` needs no revisiting. What it
             *does* replace is the instructions and the model route, which are the two dimensions
             that carry no authority.
+        handoffs: The `transfer_to_<peer>` tools this graph may call, from
+            `agent/handoff.handoff_tools`, or `None` for an agent that is not a peer in a turn
+            graph — which is every agent under the shipped configuration, since
+            `agent_peer_roster` is empty by default.
+
+            **A parameter rather than something read from a registry, and that is the whole
+            containment argument.** `_subagents` does not pass it, so a `task` helper cannot hold a
+            handoff tool: there is no set to subtract from and therefore no name anybody can forget
+            to subtract. `SPEAKS_TO_THE_CHEMIST` is the other shape — a name removed from a set —
+            and it works only as long as the next person remembers the name.
+        peer: This agent's name as a node of a turn graph, or `""` for an agent that is not one.
+            It reaches exactly one place: the audit middleware's `agent=`, so every row a peer
+            writes says which peer wrote it. **Empty stops meaning "the agent the chemist talks
+            to" once a turn graph exists**, because then several agents talk to the chemist and a
+            blank column could not tell them apart; under the shipped configuration no turn graph
+            is built, nothing passes this, and the convention
+            `D-2026-09-06-the-one-agent-that-exists-is-named-in-the-trail` states is unchanged.
 
     Returns:
         A compiled graph. No network call happens here; construction only, exactly as
@@ -312,7 +332,12 @@ def build_langgraph_agent(
         # `AuditEvent.agent` states: the trail names the human always and the agent only when it is
         # not the one being spoken to
         # (`D-2026-09-06-the-one-agent-that-exists-is-named-in-the-trail`).
-        agent=prof.name if helper else "",
+        # A peer names itself for the reason the `peer` argument's docstring gives: with several
+        # agents talking to one chemist, a blank column cannot tell them apart. A helper still
+        # wins the precedence, because a helper spawned *by* a peer is a helper first — its calls
+        # were made on a brief the chemist never saw, which is the distinction this column exists
+        # to draw, and `<peer>-helper` says both things at once anyway.
+        agent=prof.name if helper else peer,
     )
     # One walk of the skills trees per build, shared by the backend that routes them and the
     # middleware that labels them. They used to derive it independently — two `_skill_dirs()`
@@ -336,7 +361,7 @@ def build_langgraph_agent(
     # that conversion is per-*process* work happening per turn: `agent/tool_schema.py` says why a
     # first-party tool's schema cannot vary between turns, and what it measured. The connector
     # tools are already `BaseTool`s belonging to this turn's sessions and pass through untouched.
-    bound = _bound_surface(tools, connectors)
+    bound = _bound_surface(tools, connectors, handoffs)
     # **Built after `bound`, and that is what the capability gate is narrowed by.** `skill_permits`'
     # third predicate hides a skill whose *every* declared tool is absent, and the set it measured
     # absence against was `_advertised_names` — the in-process registry plus every enabled bundle's
@@ -374,6 +399,14 @@ def build_langgraph_agent(
             durable_trail=not isinstance(sink, NullAuditSink),
         )
         + (HELPER_BRIEF if helper else "")
+        # A peer is told the one thing its own profile cannot be right about: that it did not
+        # start this conversation, that the chemist reads it directly with nobody relaying, and
+        # that handing on reaches nothing it could not reach itself. Appended for `HELPER_BRIEF`'s
+        # reason — the domain guidance above is exactly as true of a peer as of the agent that
+        # opened the turn, and a peer that had to be told what a knowledge note is would need the
+        # whole prompt rewritten. Mutually exclusive with the helper brief in practice: a helper is
+        # spawned through `task` and `_subagents` passes no `peer`.
+        + (PEER_BRIEF if peer else "")
         + (
             specialist_override(
                 specialist,
@@ -1042,7 +1075,9 @@ def _skills_prompt() -> str:
     return prompt
 
 
-def _bound_surface(tools: list[Any], connectors: Sequence[Any] | None) -> list[Any]:
+def _bound_surface(
+    tools: list[Any], connectors: Sequence[Any] | None, handoffs: Sequence[Any] | None = None
+) -> list[Any]:
     """The turn's whole tool surface, refusing a connector tool that claims a first-party name.
 
     The in-process half is converted here rather than left for `ToolNode` to convert, because that
@@ -1066,7 +1101,14 @@ def _bound_surface(tools: list[Any], connectors: Sequence[Any] | None) -> list[A
     refusal is a `ConnectorError` worded like the registry's, because an operator reading one of
     the two should not have to work out that they are the same rule.
     """
-    first_party = [as_structured_tool(fn) for fn in tools]
+    # The handoff tools arrive already built (`@tool` returns a `StructuredTool`), so they join
+    # `first_party` without conversion — but they join it *before* the check below rather than
+    # being appended afterwards, which is the whole point. A connector bundle declaring a tool
+    # called `transfer_to_safety` would otherwise win the name by arriving second, and the model
+    # would hand the conversation to a server instead of to a peer, with every gate firing
+    # correctly against the name it believed. That is `D-2026-09-12`'s defect with the control flow
+    # as its payload.
+    first_party = [as_structured_tool(fn) for fn in tools] + list(handoffs or [])
     claimed = {tool.name for tool in first_party}
     for tool in connectors or []:
         if tool.name in claimed:

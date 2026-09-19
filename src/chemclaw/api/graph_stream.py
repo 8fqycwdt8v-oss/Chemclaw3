@@ -42,10 +42,11 @@ from typing import Any
 from langchain_core.messages import AIMessageChunk, ToolMessage
 
 from chemclaw.agent.plan_gate import plan_identity
-from chemclaw.agent.state import turn_input
+from chemclaw.agent.state import PEER_DEPTH_ATTR, turn_input
 from chemclaw.api.events import (
     Event,
     EvidenceSourceEvent,
+    HandoffEvent,
     JobStartedEvent,
     NoteRecordedEvent,
     PlanEvent,
@@ -58,6 +59,7 @@ from chemclaw.api.runner_usage import graph_usage_tokens
 from chemclaw.api.schemas import message_text
 from chemclaw.core.turn_signals import _KEY as _SIGNAL_KEY
 from chemclaw.core.turn_signals import (
+    HandoffSignal,
     JobSignal,
     QuestionSignal,
     Signal,
@@ -71,6 +73,44 @@ logger = logging.getLogger(__name__)
 # here silently changes the yielded tuple's arity — a bug that would look like a stream shape
 # mismatch rather than a type mistake.
 _MODES = ["messages", "updates", "custom"]
+
+
+def root_depth(graph: Any) -> int:
+    """How many namespace frames a turn's *own* agent sits behind on this graph.
+
+    **The whole attribution in this module is a root/non-root test, and wrapping the agent inverts
+    it.** Until the turn graph existed there was exactly one shape — the compiled agent *was* the
+    stream's root — so `bool(namespace)` meant "below the root" and nothing else could. With
+    `agent/turn_graph.py` a peer is a node of an enclosing graph, so **every** event a peer
+    produces arrives one frame down. Measured on a compiled mesh: the outer graph's own updates
+    come at depth 0 and every peer's tokens and updates at depth 1, tagged with the peer's node
+    name. Under the old predicate that marks the agent the chemist is talking to as `"subagent"` —
+    and the runner concatenates *unattributed* `TokenEvent`s into the answer, so the turn answers
+    with nothing at all and is classified `empty_answer`, while the plan is withheld because
+    `emit_plan=not below_root`. Three quiet failures from one `bool`.
+
+    So the predicate becomes a *depth* test, and the depth is read off the graph rather than passed
+    in: a call site that had to say "this one is wrapped" is a call site that can be wrong, and
+    there are four of them, while the graph itself always knows.
+
+    **It is a stamp and not a derivation, and the derivation was tried first.** The obvious marker
+    — "a turn graph is the one with an `active_agent` channel" — is wrong, and wrong in the
+    direction that breaks every existing deployment rather than the new feature: `ChemclawState`
+    declares that channel, so **every** compiled agent has it, and a single agent measured
+    `root_depth == 1`. That would have marked every token of every shipped turn as a subagent's
+    and answered every turn empty. Node names are no better a basis — upstream names them, and
+    `_apply_custom_middleware` puts a middleware's own name in the list, so the set moves when a
+    dependency does. What the builder knows for certain is what the builder built, so the builder
+    says so.
+
+    Args:
+        graph: The compiled graph a turn runs on.
+
+    Returns:
+        0 for a single agent (the shipped default and anything without the stamp), 1 for a turn
+        graph whose peers are its nodes.
+    """
+    return int(getattr(graph, PEER_DEPTH_ATTR, 0))
 
 
 async def graph_events(
@@ -132,6 +172,9 @@ async def graph_events(
     # By call id rather than tool name, because a model may issue two calls to one tool in a single
     # batch and only one of them fail.
     failed_calls: set[str] = set()
+    # Read once per turn rather than per event: it is a property of the compiled object, and
+    # re-deriving it 400 times a turn would be the same answer 400 times.
+    depth = root_depth(graph)
     async for namespace, mode, payload in graph.astream(
         {**turn_input(message), **(carry or {})}, config, stream_mode=_MODES, subgraphs=True
     ):
@@ -155,7 +198,7 @@ async def graph_events(
             #
             # The usage is counted either way: a specialist's tokens cost the same money.
             if text:
-                yield TokenEvent(text=text, agent="subagent" if namespace else "")
+                yield TokenEvent(text=text, agent="subagent" if len(namespace) > depth else "")
         elif mode == "custom":
             if isinstance(signal := (payload or {}).get(_SIGNAL_KEY), ToolFailureSignal):
                 # **Every id, the empty one included, and that is a decision rather than an
@@ -209,7 +252,10 @@ async def graph_events(
             # so a helper's todo list has nowhere to say whose it is, and a surface showing it as
             # the
             # turn's plan is worse than a surface not showing it.
-            below_root = bool(namespace)
+            # `> depth` rather than truthiness: on a turn graph a peer *is* the agent the chemist
+            # is talking to and sits one frame down, while a `task` helper spawned inside that peer
+            # sits two. See `root_depth`.
+            below_root = len(namespace) > depth
             if carry is not None:
                 _carry_forward(carry, payload)
             async for event in _from_update(
@@ -227,7 +273,14 @@ async def graph_events(
 # The channels a mid-turn resume has to continue from rather than restart, and nothing else. Named
 # rather than "every int in the update", because the carry is fed back into the graph's *input* and
 # a channel copied there by accident is a caller overriding state the graph owns.
-_CARRIED_CHANNELS = ("model_calls", "billed_tokens")
+#
+# **`handoffs` is here for exactly the reason the other two are**, and leaving it out would have
+# been the same defect one channel over. `_resume_on_job_results` describes itself as continuing
+# "the same turn", and an untracked channel starts at 0 on a second invocation of the graph — so a
+# turn that had already bounced its way to `agent_max_handoffs` would come back from a job result
+# with a fresh allowance, which is the bound not existing for precisely the turns long enough to
+# need one. `active_agent` needs no entry: it is checkpointed, so the resume restores it.
+_CARRIED_CHANNELS = ("model_calls", "billed_tokens", "handoffs")
 
 
 def _carry_forward(carry: dict[str, Any], payload: Any) -> None:
@@ -477,6 +530,20 @@ def _signal_event(signal: Signal) -> Event | None:
         return JobStartedEvent(job_id=signal.job_id, kind=signal.kind, plan_step=signal.plan_step)
     if isinstance(signal, QuestionSignal):
         return QuestionEvent(question=signal.question, options=signal.options)
+    if isinstance(signal, HandoffSignal):
+        # Raised by the transfer tool itself, so it arrives once per call and carries the peer's
+        # real name — `core/turn_signals.HandoffSignal` records what the two attempts at
+        # reconstructing it from a completed node's update got wrong (seven events for two hops,
+        # and a name no profile has).
+        #
+        # Placed above the tail deliberately: this branch was first written into the stream loop
+        # instead, and the signal then fell through *this* chain to the unguarded
+        # `NoteRecordedEvent` below — raising `AttributeError: 'HandoffSignal' object has no
+        # attribute 'note_id'`. Which is precisely what the comment on `SkillLoadedSignal` warns
+        # happens to a new member of this union, in the function it warns about.
+        return HandoffEvent(
+            from_agent=signal.from_agent, to_agent=signal.to_agent, reason=signal.reason
+        )
     if isinstance(signal, ToolFailureSignal):
         # The classification rides on the signal, made from the exception by
         # `agent/audit.refusal_reason` where the exception still existed. This used to re-derive it

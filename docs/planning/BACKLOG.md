@@ -537,6 +537,26 @@ topic).
       answers 200 against the vendor and no gateway is configured. Until the run exists, no claim
       that helpers do or do not pay is evidence about this deployment.
 
+- [ ] **Peer handoff ships off and nothing has measured whether it pays** — [M], opened by
+      `D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it`.
+      `CHEMCLAW_AGENT_PEER_ROSTER` is empty, so the mesh exists and no deployment runs it. That is
+      `D-2026-08-10`'s requirement honoured rather than a gap to close quickly: a mis-routing mesh
+      is worse than the single agent it replaces, and hand-off accuracy against the single-agent
+      baseline is the number that decides it.
+      **It is a second arm on the delegation row above rather than a measurement of its own.**
+      `evals/delegation.py` compares three arms over `data/evals/probes/delegation.yaml`, and a
+      peer arm is a fourth — same corpus, same harness, same pinned model, outcomes per *task*
+      (probe pass or `score_answer`, billed tokens from `turn_costs`, wall clock). Running it needs
+      the same thing the other three need and do not have: an OpenAI-compatible gateway.
+      **What a peer arm must not measure is handoff rate.** That is the mediator `D-2026-08-12`
+      measured at 2/15 and `D-2026-08-13` at 14/15 on the same corpus, and neither was a
+      deployment's rate. What is new here and worth instrumenting: `chemclaw_tool_calls_total`
+      already moves per `transfer_to_…` name, so per-pair hop counts are readable without new code,
+      and `ChemclawState.handoffs` is the per-turn chain length the cap is compared against.
+      **A negative result closes this as legitimately as a positive one**, same as the row above,
+      and the honest failure mode to look for is a chain that bounces: two peers each deciding the
+      other should answer is a turn that spends three model calls to arrive where it started.
+
 - [ ] **An advisor is the one delegation shape every merged decision already permits**
       — [M], and the design is fully determined rather than open.
       `D-2026-08-25-a-summarizer-in-the-thread-and-a-condenser-behind-a-tool` settles the objection

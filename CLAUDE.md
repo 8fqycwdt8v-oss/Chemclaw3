@@ -150,6 +150,44 @@ tool list its *compiled* helper binds, which is what makes `D-2026-08-12`'s iden
 unrepeatable. **It settles nothing about whether delegation pays**: what arrived is a product
 requirement, not evidence, and `evals/delegation.py` has still never run against a model.
 
+**Control can now move *sideways*, and the paragraphs above describe only the hierarchical half**
+(`D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it`). Everything above
+is delegation that returns: `task` invokes a helper inline and the caller regains control, because
+a tool call is a tool call. `agent/turn_graph.py` compiles the other shape — a `StateGraph` whose
+nodes are several `build_langgraph_agent` graphs, moved between by a `transfer_to_<peer>` tool
+returning `Command(goto=…, graph=Command.PARENT)`, with `active_agent` checkpointed so a later turn
+resumes with whoever held the conversation. It **supersedes the topology half of D-2026-08-10** —
+invariant 1 and the choice of supervisor over swarm — and carries invariants 2-4 unchanged.
+**The replacement invariant is stronger rather than looser**: a peer's surface is
+`root_surface ∩ profile.tool_names`, so a chain of any length is bounded by its *first* frame,
+where the pairwise rule promises `C ⊆ B ⊆ A` and says nothing about a fourth hop re-widening — a
+shape a mesh reaches and a tree cannot. The traceability that ADR chose a supervisor *for* is
+answered rather than dropped: a handoff is an ordinary tool call, so it is an audit row, an authz
+decision and a dry-run refusal, carrying the deciding model's own `reason`. `langgraph-swarm` stays
+declined and the ground is now permanent — it builds on `create_react_agent`, deprecated since
+LangGraph 1.0, so the package is the *non*-native path and this is four functions.
+**It ships off** (`CHEMCLAW_AGENT_PEER_ROSTER=""`, `build_turn_graph` returns `None` and the turn
+runs the same object it ran before), because `D-2026-08-10` requires hand-off accuracy measured
+before a team is turned on and `evals/delegation.py` has still never run against a model. Five
+things were measured and four of the five assumptions behind them were wrong, each silently: a
+`Command(graph=PARENT)` terminates the inner agent **without merging its state**, so returning only
+the `ToolMessage` leaves an orphan whose `tool_call_id` matches nothing and the *next* request is
+rejected; peers share the caps (`model_calls` 2 over two peers, not 1 each); and the stream's
+`bool(namespace)` attribution inverts under any wrapper — every peer token marked `"subagent"`,
+every turn answering empty — while the obvious fix for *that*, asking whether the graph declares an
+`active_agent` channel, is true of **every** agent in this tree and measured 1 for a single agent,
+which would have broken every deployment rather than the feature. Two more were caught by the
+multi-hop test rather than by a probe: the chain counter wrote a delta into `TurnTotal`, which
+folds absolute totals, so a two-hop turn counted 1 and the cap was unreachable; and
+`HandoffEvent`'s `from`/`to` pair could not serialise as named, because `sse_frame` dumps without
+`by_alias`; the event's first producer scanned a node's `tool_calls`, which replays every earlier
+hop once the message list travels (**a two-hop turn announced seven**) and cannot recover a peer's
+name, because a tool name carries no `-` — so `record_handoff` returns, with its caller in the same
+commit, which is the condition `D-2026-08-26` set when it deleted the name; and the branch for it
+landed first in the stream loop rather than in `_signal_event`, where the new union member fell
+through to the unguarded `NoteRecordedEvent` tail — the exact failure the comment beside it warns
+about, in the function it warns about. **It settles nothing about whether handing over pays.**
+
 **The isolation it rests on is real, and measuring it found what a helper's report is**
 (`D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread`). Driven on a compiled graph,
 a helper reading ~9.8 kB leaves its caller a thread of **57 characters** — and that is the *whole*
