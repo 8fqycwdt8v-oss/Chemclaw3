@@ -9,7 +9,7 @@ connector job now (D-118), so `tests/test_connector_jobs.py` proves it once for 
 instead of once per hand-written tool.
 """
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -24,7 +24,11 @@ from chemclaw.agent.authz import (
     require_actor,
 )
 from chemclaw.core.config import settings
-from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.core.identity_context import (
+    get_current_actor,
+    reset_current_identity,
+    set_current_identity,
+)
 from tests.surface import surface
 
 
@@ -109,6 +113,71 @@ def test_require_actor_rejects_absent_user(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(settings, "entra_required", True)
     with pytest.raises(AuthorizationError):
         require_actor()
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t", "\n", " \t "])
+def test_a_blank_actor_is_no_actor_and_not_a_new_person(
+    monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    r"""Every spelling of nothing is refused, not just the one `or None` happened to catch.
+
+    `get_current_actor` returned `_current_actor.get() or None`, and its docstring calls that *the*
+    fail-closed point — "here, in the one reader every gate shares, rather than at each of the five
+    producers separately". It caught `""` and let `"   "` through as an authenticated user.
+
+    **The harm is attribution and erasure rather than access.** `agent/scratchpad.py` adds the
+    durable `/memories/` route `if store is not None and actor`, so a truthy blank got its own
+    `memory_namespace` prefix — which `scratchpad.py`'s own docstring names as the thing it avoids:
+    "a memory written under an 'anonymous' prefix would be a memory nobody can erase". Measured
+    before the fix: `"   "` and `"\t"` each minted a distinct namespace, neither equal to the empty
+    actor's and neither equal to a real one, and `require_actor()` returned the blank string under
+    `entra_required=True`.
+
+    Not an authentication bypass: both producers are `Field(min_length=1)`
+    (`api.auth.Principal.oid`, `durable.template_activities.StepIdentity.actor`), which `" "` passes
+    but which nothing untrusted fills in. Parametrized over five spellings because the defect was
+    precisely that one spelling was covered.
+    """
+    monkeypatch.setattr(settings, "entra_required", True)
+    token = set_current_identity(blank, frozenset({"compute"}))
+    try:
+        assert get_current_actor() is None, (
+            f"{blank!r} was returned as an authenticated actor, so every gate that asks "
+            "`is not None` sees a person and every namespace keyed on it is unattributable"
+        )
+        with pytest.raises(AuthorizationError, match="requires an authenticated user"):
+            require_actor()
+    finally:
+        reset_current_identity(token)
+
+
+def test_one_actor_with_stray_whitespace_is_one_memory_namespace() -> None:
+    r"""The second half: `" oid "` and `"oid"` are one person and must not be two prefixes.
+
+    The same erasure argument as above, one spelling further along. `memory_namespace` digests
+    whatever it is handed, so a padded actor hashes to a namespace an erasure request for that
+    person never names — measured, `" oid-alice "` and `"oid-alice"` produced different prefixes.
+    Normalising in the shared reader is what makes the two one, and asserting it through
+    `get_current_actor` rather than by calling `strip` here is deliberate: the reachable path is
+    `scratchpad.durable_backend` reading the ambient, and a test that stripped the value itself
+    would pass with the reader unchanged.
+    """
+    from chemclaw.agent.scratchpad import memory_namespace
+
+    namespaces = set()
+    for spelling in (" oid-alice ", "oid-alice", "\toid-alice\n"):
+        token = set_current_identity(spelling, frozenset())
+        try:
+            actor = get_current_actor()
+            assert actor is not None
+            namespaces.add(memory_namespace(actor))
+        finally:
+            reset_current_identity(token)
+
+    assert len(namespaces) == 1, (
+        f"one actor spelled three ways owns {len(namespaces)} memory namespaces; an erasure "
+        "request names the person and can only reach one of them"
+    )
 
 
 # --- `expensive: true` is the gate's source, not a comment ---------------------------------------
@@ -516,3 +585,150 @@ def test_the_operator_note_lists_no_expensive_job_by_name(monkeypatch: pytest.Mo
         "manifests this repository does not own, so naming any of it here is a claim that goes "
         "stale on a bundle merge — point at the command instead."
     )
+
+
+# --- the durable-memory write gate, and the upstream behaviour it is coupled to ------------------
+
+
+#: The spellings of one durable memory path that `os.path.normpath` collapses onto each other, plus
+#: the bare root upstream routes without a trailing slash. Built **from** `MEMORY_ROOT` rather than
+#: written out, so renaming the root carries this scope instead of emptying it.
+def _memory_spellings() -> dict[str, str]:
+    """One durable path per normalisation the model can spell it, keyed by what it exercises."""
+    from chemclaw.agent.scratchpad import MEMORY_ROOT
+
+    bare = MEMORY_ROOT.strip("/")
+    return {
+        "no leading slash": f"{bare}/a.md",
+        "a dot component": f"/./{bare}/a.md",
+        "a nested key": f"{bare}/sub/b.md",
+        "the bare root": f"/{bare}",
+        "already canonical": f"{MEMORY_ROOT}a.md",
+    }
+
+
+@pytest.mark.parametrize(("what", "spelling"), sorted(_memory_spellings().items()))
+def test_every_spelling_of_a_durable_memory_write_reaches_both_gates(
+    what: str, spelling: str
+) -> None:
+    """A durable per-actor write is gated however the model spelled its path.
+
+    **The gate reads the model's own string, and the backend reads a normalised one**, so anything
+    matching on the raw spelling sits in the gap between them. Driven against the shipped code
+    before the fix: `memories/a.md`, `/./memories/a.md`, `memories/sub/b.md` and `/memories` all
+    answered `False`, and both consumers short-circuit on that answer — `plan_gate.
+    enforce_plan_approval` on `not side_effecting_call(...)` and `tool_authz.dry_run_refusal` the
+    same way — so a write into Postgres under one chemist's namespace landed with neither gate
+    having looked at it, on an unapproved plan and on a dry run alike.
+
+    `side_effecting_call` is asserted beside `writes_durable_memory` rather than instead of it
+    because it is the function both gates actually call; the narrower one being right while the
+    composition drops the answer is a live shape (`side_effecting_tools()` is a name set, and
+    `write_file` is not in it).
+    """
+    from chemclaw.agent.authz import side_effecting_call, writes_durable_memory
+
+    call = {"file_path": spelling, "content": "x"}
+    assert writes_durable_memory("write_file", call), (
+        f"{spelling!r} ({what}) is a durable memory write and the gate says it is not"
+    )
+    assert side_effecting_call("write_file", call), (
+        f"{spelling!r} ({what}) reaches neither the plan gate nor the dry-run refusal"
+    )
+
+
+def test_a_turn_local_scratchpad_write_is_still_ungated() -> None:
+    """The other direction, because a gate that refuses everything is not a gate.
+
+    `/scratch/` dies with the turn (`D-2026-08-15-a-turn-needs-somewhere-to-put-intermediate-work`),
+    and a dry run that denies the agent its own notepad is not a dry run of anything. Without this
+    the parametrised test above is satisfied by `return True`.
+    """
+    from chemclaw.agent.authz import writes_durable_memory
+    from chemclaw.agent.scratchpad import SCRATCH_ROOT
+
+    for spelling in (f"{SCRATCH_ROOT}draft.md", f"{SCRATCH_ROOT.strip('/')}/draft.md"):
+        assert not writes_durable_memory("write_file", {"file_path": spelling}), (
+            f"{spelling!r} is turn-local and the gate calls it a durable write, so a dry run "
+            "refuses the agent its own scratchpad"
+        )
+
+
+def test_upstream_routes_every_spelling_this_gate_calls_durable_to_the_durable_backend() -> None:
+    """The upstream *behaviour* the gate is coupled to, asserted where it is relied on.
+
+    `writes_durable_memory` no longer matches the model's string: it calls upstream's
+    `validate_path` first and matches the result, which is only correct while that normalisation
+    and `CompositeBackend`'s own `_route_for_path` agree about where a path lands. Nothing asserted
+    that agreement — the coupling lived in a docstring, and `tests/test_upstream_surface.py`'s
+    header says behaviour belongs at the use site rather than in that file, so here it is.
+
+    This drives the composite `scratchpad_backend` actually builds, with sentinels in place of the
+    two backends, and asks it where each string goes *after* the middleware's normalisation. If a
+    dependency bump changes either half — `normpath` stops collapsing `/./`, or the bare-root case
+    stops routing to the route — this fails with the spelling that moved, instead of a live turn
+    writing an ungated row.
+    """
+    from deepagents.backends.composite import CompositeBackend
+    from deepagents.backends.utils import validate_path
+
+    from chemclaw.agent.authz import writes_durable_memory
+    from chemclaw.agent.scratchpad import MEMORY_ROOT, SCRATCH_ROOT
+
+    durable = object()
+    default = object()
+    composite = CompositeBackend(
+        default=cast(Any, default), routes={MEMORY_ROOT: cast(Any, durable)}
+    )
+
+    for what, spelling in _memory_spellings().items():
+        assert writes_durable_memory("write_file", {"file_path": spelling}), (
+            f"this test's own fixture broke: {spelling!r} ({what}) is not gated at all"
+        )
+        backend, _key = composite._get_backend_and_key(validate_path(spelling))
+        assert backend is durable, (
+            f"{spelling!r} ({what}) is gated as a durable write and upstream routes it to the "
+            "default backend — the gate and the backend disagree about one path again, which is "
+            "the defect `agent/authz.writes_durable_memory` was rewritten to close"
+        )
+
+    scratch = f"{SCRATCH_ROOT.strip('/')}/draft.md"
+    backend, _key = composite._get_backend_and_key(validate_path(scratch))
+    assert backend is default, (
+        f"upstream now routes {scratch!r} to the durable backend, so a turn-local scratchpad write "
+        "outlives the turn and `agent/authz.writes_durable_memory` calls it ungated"
+    )
+
+
+@pytest.mark.parametrize(
+    ("what", "call"),
+    [
+        ("no file_path at all", {"content": "x"}),
+        ("a non-string path", {"file_path": ["/memories/a.md"]}),
+        ("a null path", {"file_path": None}),
+        ("a traversal validate_path refuses", {"file_path": "../../etc/passwd"}),
+        ("a Windows absolute validate_path refuses", {"file_path": "C:/Users/a.md"}),
+    ],
+)
+def test_an_argument_this_gate_cannot_resolve_counts_as_durable(
+    what: str, call: dict[str, Any]
+) -> None:
+    """An unreadable path is the gated case, never the ungated one.
+
+    `writes_durable_memory`'s docstring states this twice — for a non-string and for a path
+    `validate_path` *refuses* — and both arms answered `False` under a one-token mutation while the
+    whole of `tests/test_authz.py` stayed green, which is how the rest of this file's coverage was
+    mapped. The direction matters because the two consumers read the answer as permission:
+    treating an argument the gate cannot resolve as ungated is how a gate becomes bypassable by
+    malformed input, and a model can spell a malformed path as easily as a well-formed one.
+
+    Loud-but-wrong is the cost of getting it right — a *scratchpad* write that somehow failed
+    validation is refused on a dry run — and that is the trade `agent/authz.py` argues for
+    explicitly.
+    """
+    from chemclaw.agent.authz import side_effecting_call, writes_durable_memory
+
+    assert writes_durable_memory("write_file", call), (
+        f"{what} answered ungated; an argument this gate cannot resolve must be the gated case"
+    )
+    assert side_effecting_call("write_file", call), f"{what} reaches neither gate"

@@ -36,10 +36,31 @@ class DeliveryDriver(Protocol):
     factory a *manifest* named, and the only thing standing between a mistyped `driver:` and a
     message silently going nowhere is an `isinstance` at the moment it is built. A structural check
     is all that is available — the protocol is one method — and one method is what the seam needs.
+
+    **A driver is called at least once per message, and that is a requirement on the driver rather
+    than a wish.** `registry.deliver` walks the enabled channels serially and swallows each one's
+    failure, so the activity around it never fails *because* of a channel — what can fail it is its
+    `start_to_close` expiring mid-walk or the worker dying, both retryable under `BAD_DATA_RETRY`,
+    and a retry re-walks **every** channel including the ones that already took the message. There
+    is no per-channel delivery record, deliberately: a local row can say the POST was sent and never
+    whether it landed, and making a courtesy copy depend on Postgres is a worse trade than a
+    duplicate the destination can recognise. One activity per channel would shrink the window and
+    not close it, because a retry of *that* activity re-sends to *that* channel.
+
+    So every driver must make a redelivery of one message **identifiable at the destination**: carry
+    `message_id(message)` where the destination will key on it, or be idempotent by construction
+    (the file driver is both — the id is its filename). A driver that does neither turns one worker
+    restart into a duplicated ticket somebody closes by hand, and the widening of
+    `delivery_timeout_seconds` that mitigated it is a threshold rather than a bound.
+    `tests/test_delivery.py::test_every_shipped_delivery_driver_makes_a_redelivery_identifiable`
+    holds every discovered channel's driver to it, rather than the two tests that each held one.
     """
 
     async def deliver(self, message: Message) -> None:
-        """Send `message`. Raises on any failure; the caller decides whether that is fatal."""
+        """Send `message`. Raises on any failure; the caller decides whether that is fatal.
+
+        Called at least once per message — see the class docstring for what that requires here.
+        """
         ...
 
 

@@ -321,6 +321,7 @@ def bounded_content(
     mark: str = SYSTEM_SPEECH_MARK,
     remedy: str = TOOL_REMEDY,
     charged_total: int | None = None,
+    expanded_from: int | None = None,
 ) -> tuple[Any, int]:
     """`content` cut to `limit` characters of text, and how many characters that removed.
 
@@ -359,6 +360,39 @@ def bounded_content(
     that number while the *cut* is still made against the text actually in hand. `None` means "this
     content is the whole of it", which is true of every single-pass caller.
 
+    **`charged_total` alone was not enough, and the shape that used it overstated for every result
+    between the ceiling and about four times it.** `charged = max(charged_total, total)` stood here
+    — a clamp against an arithmetic that would otherwise go negative — and it picks the *escaped*
+    total whenever escaping expands past the stamped original, which is exactly the case the second
+    pass exists for. Driven on the shipped ceiling with a payload the escape expands (`"<" * n` plus
+    one soft-hyphen-disguised tag), on the connector-success path **and** on the non-connector one:
+
+    | the tool returned | the delivered notice said |
+    | --- | --- |
+    | 59,900 (*under* the ceiling) | `179,900 of 239,554 characters removed` |
+    | 100,000 | `179,281 of 238,935` |
+    | 150,000 | `179,281 of 238,935` |
+
+    The total is the same number at 100,000 and at 150,000 because it had become a function of
+    `4 x limit` rather than of the tool's output, and `returned - removed` is negative in all three
+    rows. Removing the clamp alone turns that into the mirror-image falsehood: the kept span is
+    counted in *escaped* characters against a total in the tool's own, so the same three rows read
+    "200 of 59,900" — a 75% loss reported as 0.3%, which is the understatement
+    `FingerprintSearch.verdict` is cited here for.
+
+    `expanded_from` is what closes both: the size of the content in hand **before** the caller
+    expanded it. The kept span is then converted back into the tool's own units in proportion
+    (`kept * expanded_from // total`) and the notice's two numbers are both about the tool. `None`
+    means "nothing expanded this", which is true of every single-pass caller and makes the
+    conversion the identity.
+
+    **It is a proportional attribution and not an exact count**, which is worth saying because a
+    number that can only be wrong in one direction is worse than no number: the escape expands some
+    characters and not others, so if the expanding ones cluster in the middle the removal is
+    over-reported and if they cluster at the ends it is under-reported. It is unbiased rather than
+    conservative, it is bounded by the tool's own total in both directions, and an exact count would
+    need the escape to carry an offset map through two middlewares.
+
     Returns:
         The bounded content and the number of characters removed from `content` (0 when nothing
         was) — the real removal from what was passed, which is what a caller counting its own work
@@ -370,7 +404,10 @@ def bounded_content(
         return content, 0
     # The notice speaks about the tool's output; the cut is made against the text in hand. They are
     # the same number for every caller that bounds a result once.
-    charged = total if charged_total is None else max(charged_total, total)
+    charged = total if charged_total is None else charged_total
+    # How much of the text in hand corresponds to one character of the tool's output. `total` when
+    # nothing expanded it, which makes every conversion below the identity.
+    source = total if expanded_from is None else expanded_from
     widest = len(_notice(tool, charged, charged, mark, remedy))
     carrier = _carrier(content, spans)
     if limit < widest:
@@ -389,6 +426,8 @@ def bounded_content(
         # The figure is not written here: it used to say 19 characters and 3,158 calls, and the
         # mark `_notice` gained made both stale in the same commit
         # (`tests/test_tool_result_size.py` measures the crossover instead).
+        # Nothing survives on this branch, so the whole of the tool's output is gone and the
+        # conversion above has nothing to convert.
         brief = _brief_notice(charged, mark)
         if total <= len(brief):
             return content, 0
@@ -401,18 +440,32 @@ def bounded_content(
     # `total`.
     kept = max(limit - widest, 0)
     removed = total - kept
-    notice = _notice(tool, charged - kept, charged, mark, remedy)
+    # What the model can still see, in the tool's own units rather than in the expanded ones. Never
+    # above `charged`, because `kept <= total` and `source <= charged` — which is what keeps
+    # `returned - removed` non-negative without a clamp that discards the tool's own figure.
+    visible = kept * source // total if total else 0
+    notice = _notice(tool, charged - min(visible, charged), charged, mark, remedy)
     return _rebuilt(content, _kept(spans, kept, notice, carrier)), removed
 
 
 #: Where the inner bound records the tool's real output size, for the outer bound to charge.
 #:
-# : On `ToolMessage.response_metadata`, because that is the one field on a result that travels with
-# it
-#: through `model_copy` and is not part of what the model reads. A key rather than a second
+#: On `ToolMessage.response_metadata`, because that is the one field on a result that travels with
+#: it through `model_copy` and is not part of what the model reads. A key rather than a second
 #: middleware-to-middleware channel: the two passes are in one chain on one message, and a
 #: contextvar would be wrong the moment two tool calls in a batch are bounded concurrently.
 ORIGINAL_CHARS_KEY = "chemclaw_original_chars"
+
+
+def text_chars(content: Any) -> int:
+    """How many characters of text a `ToolMessage.content` holds, across every span of it.
+
+    Public because the callers that *expand* a result have to say what they expanded — the second
+    bounding pass writes a notice about the tool's own units and cannot derive the conversion from
+    text it has already rewritten. `_spans` is the same walk and stays private: this is the one
+    question a caller outside this module has.
+    """
+    return sum(len(span) for span in _spans(content))
 
 
 def original_chars(message: Any) -> int | None:
@@ -431,6 +484,7 @@ def bounded_for_batch(
     *,
     mark: str = SYSTEM_SPEECH_MARK,
     charged_total: int | None = None,
+    expanded_from: int | None = None,
     count: bool = True,
 ) -> Any:
     """`content` cut to this call's share of the ceiling, counted, logged, and said so in the text.
@@ -455,13 +509,25 @@ def bounded_for_batch(
     about the pass: the counter and the `tool_result.truncated` row fired twice for one cut, the
     second time with the understated figure, so an operator counting cuts saw 2N for N results.
     The first pass's numbers are the true ones, so the second pass is the one that stays quiet.
+
+    `expanded_from` is the third of the same family and arrived last: `charged_total` kept the
+    notice's *total* about the tool, and this keeps its *removal* about the tool, because the second
+    pass cuts text it has expanded. See `bounded_content` for the two measured falsehoods either one
+    alone leaves behind.
     """
     tool = str(request.tool_call["name"])
     ceiling = settings.agent_max_tool_result_chars
     # The batch's share, never below 1: 0 is the deployment's own "no cap" and a share that rounded
     # to it would restore the unbounded behaviour exactly where the batch is widest.
     limit = max(ceiling // batch_width(request), 1) if ceiling else 0
-    bounded, removed = bounded_content(content, tool, limit, mark=mark, charged_total=charged_total)
+    bounded, removed = bounded_content(
+        content,
+        tool,
+        limit,
+        mark=mark,
+        charged_total=charged_total,
+        expanded_from=expanded_from,
+    )
     if not removed or not count:
         return bounded if removed else content
     # **The metric label is the served name, never the model's string**, and `core/metrics.py`

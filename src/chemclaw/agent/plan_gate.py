@@ -623,9 +623,40 @@ async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> 
     if not side_effecting_call(name, request.tool_call.get("args") or {}):
         return await handler(request)
     session_id = get_current_session_id()
-    # No session means no plan to approve and no autonomous loop to gate — a template activity's
-    # tool step, or a one-shot CLI call. Not a hole: those paths still pass through
-    # `enforce_tool_authz` and `authorize_trigger`, which is what governs them.
+    # No session means no plan to approve and no autonomous loop to gate. **What governs
+    # those calls instead is not what this comment used to say.** It named `enforce_tool_authz`
+    # and `authorize_trigger` "which is what governs them", and measured against a role-less
+    # authenticated actor under `entra_required` with `entra_privileged_roles` configured, the
+    # two of them together reach 6 of the 15 side-effecting tools in the registry: three by
+    # `DEFAULT_WRITE_TOOL_GATES` membership and three more by `expensive_actions()`. For the
+    # other **nine** — `compose_workflow`, `draft_experiment_protocol`, `forget_preference`,
+    # `propose_skill`, `remember_preference`, `run_composed_workflow`, `stop_watching`,
+    # `structure_experiment_request`, `watch_for` — neither gate refuses anything, so naming
+    # them was naming a control that is not there. `tests/test_plan_gate.py`'s
+    # `test_what_governs_a_session_less_write_is_registered_rather_than_asserted` holds that
+    # residual as a set, so it cannot grow in silence.
+    #
+    # The two paths are also not the two this comment named, and each is governed by something
+    # real:
+    #
+    # - **A template `agent` step never reaches this line at all.** `step_profile`
+    #   (`durable/template_activities.py`) returns the profile with `harness_enabled=False`, so
+    #   `gate_applies` is `False` and this middleware is not in the chain — measured. What
+    #   governs it is stronger than a gate: that function subtracts every side-effecting tool
+    #   the step did not declare from the surface *before the graph is built*, so an undeclared
+    #   write is not a refused call, it is a tool the step's agent never held.
+    # - **A template `tool` step does reach it**, through `invoke_governed` with
+    #   `profile=get_profile(None)` — the default profile, which is gated. What governs *it* is
+    #   the artefact: the tool is named in a git-committed, reviewed template file, which
+    #   `templates/manifest.AgentStep` argues is the pre-approved plan ("human-authored,
+    #   git-committed, reviewed, and uncreatable at run time"), and an **agent**-authored
+    #   composed workflow may name no side-effecting tool at all (`templates/composed.py`).
+    #   Reaching this line with an unreviewed write therefore needs the ability to enqueue a
+    #   `TemplateWorkflow`, i.e. broker write access.
+    # - **The CLI reaches it too**, and that one is a posture rather than a control:
+    #   `cli/chat.py` never stamps a session id although it has one, so `/plan` and `/approve`
+    #   write rows no execution path there reads. Its own docstring records that; it is the
+    #   operator's own terminal, running with the process's own credentials.
     if not session_id:
         return await handler(request)
     rewritten = plan_after_batch(request)

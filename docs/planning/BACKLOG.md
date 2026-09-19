@@ -65,6 +65,23 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
+- [ ] **A site-supplied regex from a datasource manifest runs against warehouse cell text with no
+  timeout, so a catastrophic pattern hangs the ingest activity** — [M].
+  `ingest/eln/warehouse/expr.py:234` (`_regex`, `re.search` per row) and `:357`
+  (`_compiled_regex`, which validates the pattern and still returns a plain `re.Pattern`) take
+  `options["pattern"]` straight from the `datasource.yaml` binding. The pattern is checked for
+  *syntax* and never for backtracking behaviour, and Python's `re` has no timeout, so one
+  `(a+)+$`-shaped manifest pattern against a long free-text column pins a worker thread until the
+  activity's `start_to_close` expires — then the retry re-runs the identical pattern over the
+  identical page, which is the `_BAD_DATA_TYPES` argument in reverse. Operator-controlled input, so
+  it is not the untrusted-input case the rest of this section holds, and that is the whole reason it
+  is queued rather than fixed in the same commit as the sibling ReDoS in `core/logging.py`: the
+  remedies are different. Either bound the *input* (`as_text(value)[:n]` per cell, the cheapest
+  honest bound and the one this seam can take without a dependency), or move the match off-thread
+  with a wall clock, or reject a pattern whose shape is a known amplifier at
+  `datasource-validate` time. Decide which, because a fix that only shortens the input is a
+  mitigation and should say so.
+
 - [ ] **The personal skills tier is narrowed in the prompt and not at the backend, so
   `skill_names: []` still hands over the bodies** — [S]. `langgraph_agent.py`'s
   `if LOCAL_SKILLS_ROOT in backend.routes and profile.skill_names != frozenset()` drops `/mine` from
@@ -78,17 +95,6 @@ topic).
   `data/evals/profiles/skills-removed.yaml` is the A/B control arm whose whole value is being clean,
   and every A/B it reports still carries personal judgment whenever the model opens `/mine`. Give
   `ReadOnlyStoreBackend` the same `permits` predicate the shared tier has.
-
-- [ ] **A re-proposal of a *superseded* body is answered as "already waiting to be decided" and can
-  never be proposed again** — [S]. `behaviour_proposals.propose`'s
-  `ON CONFLICT (actor, kind, name, content_hash) DO NOTHING` then re-reads the row *in whatever
-  state it is in*, and `_arrival` branches only on `stored.decided` — `superseded` is deliberately
-  not a decision, so it books `outcome="already_open"`. Driven on both shipped backends: propose V1,
-  propose V2 (V1 superseded), re-propose V1 → the row stays `superseded`, `GET /proposals?state=open`
-  never shows it, `POST /proposals/skill/<name>` with V1's hash 409s, and the model tells the chemist
-  it is waiting for their decision. The module's own rule is that "an unchanged re-proposal cannot
-  reopen a **rejection**"; the idempotence is being applied one state too widely. Either revive a
-  superseded row to `open`, or give `_what_became_of_it` a fourth branch that says so.
 
 - [ ] **`max_concurrent_workflow_tasks` is set nowhere, so nothing this repository chose bounds
   workflow-task concurrency** — [M]. `durable/background_worker.py` sets `max_concurrent_activities`
@@ -171,6 +177,55 @@ topic).
       string is still the caller's to choose.
 
 ## 2 — Answers that are wrong without saying so
+
+- [ ] **A `STANDARDIZATION_VERSION` bump retires the fingerprint rows and re-keys nothing, so the
+      graph keeps a note per superseded spelling forever** — [L],
+      `src/chemclaw/core/chem.py::compound_id`, `src/chemclaw/ingest/eln/compound.py:85-92`.
+      Driven against the live Postgres at `std7` -> `std8`: the fingerprint half works exactly as
+      designed — `CC[NH3+].[Br-]` keys to `compound-b3ba1c117ed7` under `ecfp:…:std7` and
+      `compound-bb572bdd9031` under `…:std8`, and a std8 similarity search returns only the
+      corrected row. `compound_id` carries no version, so the std7-era `compound_note` keeps its own
+      id in the knowledge graph with no cleanup path, which is the **first** consequence the fix
+      commit named ("two `compound_id`s and two `compound_note`s for one substance") and the half a
+      definition bump does not reach.
+
+      Secondary and driven: `compound_dependencies` re-derives `compound_id(note.compound_smiles)`
+      and returns `[]` when it no longer matches the note's own wikilink — so a std7-era note
+      re-submitted under std8 silently loses its compound dependency rather than failing.
+
+      Not fixed here because the two candidate fixes are both decisions rather than defect fixes:
+      folding the version into `compound_id` invalidates every stored id at every future bump and
+      breaks every citation to one, and rewriting the notes is a migration over layer 4 that
+      `kg/record.py` — append and supersede, never rewrite — has no verb for. The recovery that
+      *does* exist is `docs/guides/runbook.md:1866`: delete the corpus's `corpus_cursors` row and
+      re-run the ELN sync. Weigh it against `src/chemclaw/durable/retention.py:498`, which records
+      that a bump is "a permanent doubling" of `molecule_fingerprints`/`reaction_fingerprints`
+      because the runtime role holds no `DELETE`.
+
+- [ ] **A bare guanidinium salt never reaches the neutralisation branch, so it does not collapse
+      onto its free base** — [M], `src/chemclaw/core/chem.py::_is_organic`. `standardize` reaches
+      `Uncharger` only when some fragment is `_is_organic`, which requires a carbon bonded to
+      hydrogen or to another carbon, and guanidinium's carbon has three nitrogen neighbours.
+      Measured: guanidine hydrochloride has `organic == 0`, returns before both the strip and the
+      neutralisation, and does not collapse — before the `std7`/`std8` work and after it. Metformin
+      and acetamidine are covered only because their substituents happen to make them organic by
+      that test, which is why the class-scope claim in
+      `tests/test_compound_identity.py::test_an_amine_salt_drawn_as_an_ion_pair_is_its_free_base`
+      has been narrowed to the shipped corpus. Nothing in `data/` contains a guanidine today, so
+      this is latent; widening `_is_organic` is the fix to weigh, and it moves every fragment-count
+      branch at once, so it needs the `standardize` behaviour table in
+      `test_the_standardization_version_is_pinned_to_the_behaviour_it_names` re-measured and almost
+      certainly a version bump.
+
+- [ ] **Four first-party refusal gates are outside the weekly mutation backstop** — [S],
+      `pyproject.toml` `[tool.mutmut].source_paths`. `agent/authz.py` is covered and
+      `agent/plan_gate.py`, `agent/skill_backend.py`, `agent/spend_cap.py` and `agent/loop_cap.py`
+      are not, although each is a control of the same kind — a refusal whose surviving mutant is a
+      tool call that should not have happened. `core/chem.py` and `core/logging.py` were added on
+      2026-09-19 for exactly that argument, after three mutations of theirs passed a full subset.
+      Not added in the same change because the list is short on purpose — the comment above it
+      records that the run is hours long — so each addition needs its runtime measured rather than
+      assumed. Measure `make mutants` with one of them added before adding the rest.
 
 - [ ] **The substructure deadline test asserts a timing ratio where it means a record count** —
       [S], `tests/test_molfp.py::test_a_scan_past_its_deadline_stops_instead_of_matching_the_rest_of_the_corpus`.
@@ -317,6 +372,39 @@ topic).
       to cut a leg, and that configuration finds three fewer gold notes.
 
 ## 3 — Work that is lost, dropped or invisible
+
+- [ ] **A re-proposal of a *superseded* body is answered as "already waiting to be decided" and can
+  never be proposed again** — [S]. **Moved here from "1 — Untrusted input reaching a privileged
+  surface", where it was misfiled**: nothing untrusted reaches anything, and no surface is
+  privileged — the defect is that a chemist's decision has nowhere to land and the model is told a
+  falsehood about its own proposal, which is this section's subject.
+  `behaviour_proposals.propose`'s
+  `ON CONFLICT (actor, kind, name, content_hash) DO NOTHING` then re-reads the row *in whatever
+  state it is in*, and `_arrival` branches only on `stored.decided` — `superseded` is deliberately
+  not a decision, so it books `outcome="already_open"`. Driven on both shipped backends: propose V1,
+  propose V2 (V1 superseded), re-propose V1 → the row stays `superseded`, `GET /proposals?state=open`
+  never shows it, `POST /proposals/skill/<name>` with V1's hash 409s, and the model tells the chemist
+  it is waiting for their decision. The module's own rule is that "an unchanged re-proposal cannot
+  reopen a **rejection**"; the idempotence is being applied one state too widely. Either revive a
+  superseded row to `open`, or give `_what_became_of_it` a fourth branch that says so.
+
+- [ ] **Three row-projecting tools defang a whole page on the event loop, and one of them is not in
+  the offload test** — [M]. `commitment_tools.review_commitments`,
+  `pending_tools.check_pending_requests` and `memory_tools.recall_observations` each escape every
+  string in every row of their page synchronously, which is correct (the field-level carve-outs each
+  let five to eight unvalidated fields through — see
+  `tests/test_tool_framing.py::test_every_row_projecting_tool_escapes_its_whole_row`) and is not
+  free. Measured on a realistic `Commitment` on a loaded box: **6.9 to 39.2 us/row, 5.7x** the
+  two-field form, so **7.8 ms** of synchronous loop time per `review_commitments` at `_MAX_PAGE` of
+  200 against ~1.4 ms before. A post-merge audit measured the same comparison at 19.3x and 18.9 ms;
+  the ratio moves with the row's string lengths and with machine load, and neither figure is small
+  next to the **2.6 ms** that `skill_manifest.declared_tools`' own docstring calls "the hazard
+  `tests/test_event_loop_offload.py` exists for". None of the three is in that file.
+  **Not fixed here because the cheap fix is the wrong one**: wrapping the comprehension in
+  `asyncio.to_thread` moves 7.8 ms off the loop and buys a thread hop per call on the page sizes that
+  do not need it, and the real question is whether the *page* is the right unit — a 200-row page is
+  already more than a model reads. Trigger to revisit: any of the three appears in a turn-latency
+  profile, or `_MAX_PAGE`/`observation_max_results` is raised.
 
 - [ ] **A chemist's own `/scratch/` writes are unbounded and, by default, permanent** — [M].
   `agent_subagent_files_max_chars` bounds only what a *helper* hands back: it is applied in
@@ -563,6 +651,44 @@ topic).
   `core/config/retrieval.py::gather_evidence_max_chunks`.
 
 ## 4 — Operating it
+
+- [ ] **A worker whose broker is down never opens its probe port, so "Temporal is down" and "the
+  image is broken" are the same picture to everything but the container log** — [M].
+  `durable/background_worker.py:98` calls `connect()` before `Worker(...)` is built and therefore
+  before `durable/serve.py::serve_worker` opens the probe surface, so the process exits 1 at
+  `core/temporal_client.py:209` and `:9000/healthz` and `/readyz` never answer at all. Driven
+  2026-09-19 against a dead address: exit 1, a clear `SubsystemUnavailableError` in the log, and both
+  probe routes unanswered (`curl` → no connection). The PodMonitor target simply disappears, so
+  `ChemclawTargetDown` fires for this exactly as it fires for a broken image.
+  **Not fixed here, and the reason is that the obvious fix may be worse than the gap.** Opening the
+  probe surface before connecting means every worker entrypoint changes shape, and it turns a
+  crash-loop that Kubernetes retries with its own backoff — and that self-heals the moment the broker
+  returns — into a pod that sits up and unready indefinitely, which is the state `serve.py`'s
+  `worker_ready` argument would then have to cover for a worker that has no client at all. The log
+  does distinguish the two causes today; what nothing distinguishes them by is a *probe* or a series.
+  Trigger to revisit: a second dependency joins `connect()` ahead of the probe surface (so the log
+  line stops being decisive), or an operator reports diagnosing a broker outage as a bad image.
+
+- [ ] **The readiness sweep cannot see a connector that is up and broken, so nothing notices it
+  until a turn does** — [M]. `connectors/health.py::_probe` asks `GET <base>/healthz` and nothing
+  else, so a pod answering 200 there and 500 (or an ingress error page) on `/mcp` is reported
+  `healthy`: driven 2026-09-19, `/readyz` said `{"status":"ready","connectors_unhealthy":0}` and
+  `chemclaw_connectors_unhealthy` held 0 while every call failed. The *turn* now reports it —
+  `chemclaw_connectors_unreachable_total{connector}` and `ChemclawConnectorsDegradingTurns` at
+  `for: 0m` — so the case is covered wherever there is traffic, which is why this is a row and not a
+  fix. **A `tools/list` probe was measured and declined**: against the four connector apps this
+  repository serves, on loopback with no TLS, `GET /healthz` is 3.6–4.2 ms and a full MCP
+  handshake + `tools/list` + teardown is 50–71 ms — 12–19x — on a route the kubelet runs every 10 s
+  with `timeoutSeconds: 5` derived from a 2 s per-endpoint budget; it needs the front door to hold
+  every connector's bearer token to *probe* rather than only to *call*; and it mints an MCP session
+  per sweep, which the serving side bounds as memory. For that it would move detection from a rule
+  that fires on the first degraded turn to a gauge behind `for: 10m`. What is left unbought is
+  detection on an **idle** deployment. Trigger to revisit: a deployment reports a connector that was
+  broken for longer than its traffic gap — or `connectors_required` is used as a *runtime* gate
+  rather than a boot gate, at which point the sweep's verdict has to be as strong as a turn's.
+  Guarded by `tests/test_connector_health.py::test_a_connector_healthy_on_healthz_and_broken_on_mcp_is_reported_by_the_turn`,
+  which asserts the sweep's `healthy` verdict, so changing this decision turns that test red rather
+  than leaving two documents disagreeing.
 
 - [ ] **The turn-wide model-call floor only binds where a loop watch is open, and two paths open
   none** — [S]. `agent/loop_cap._LoopWatch.calls` is what makes a `task` fan-out share one iteration

@@ -606,8 +606,9 @@ def _report_sibling_skips(terminalreporter: TerminalReporter) -> None:
         f"{len(skipped)} tests were skipped because there is no Chemclaw3-mcp checkout to read, so "
         "this run is not evidence about the half of the request prefix that fleet serves — the "
         "allowance PREFIX_BOUND is built from and both compaction defaults are derived from — nor "
-        "about whether the two repositories still declare the same connector surface and the same "
-        "`calc` tool names. Clone it beside this one, or set CHEMCLAW_MCP_REPO."
+        "about whether the two repositories still declare the same connector surface, or still "
+        "agree about the tool names and argument keys on the `calc` and `rxnlabel` backend seams. "
+        "Clone it beside this one, or set CHEMCLAW_MCP_REPO."
     )
 
 

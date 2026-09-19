@@ -127,6 +127,60 @@ async def test_the_drain_pages_by_keyset_and_records_what_it_reads() -> None:
     assert {r.reaction_id for r in await index.stale("any", limit=50)} == {"p1", "p2", "p3"}
 
 
+async def test_a_field_the_source_supplied_and_the_drain_cannot_read_is_counted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A NULL nobody counted, in a report whose own field description says "Counted, never silent".
+
+    `_number` correctly refuses to coerce an unreadable value to zero — zero is a real temperature
+    and a real yield — and then lost it with no counter of any kind. Measured over eleven realistic
+    corpus cells, eight became `NULL`: `'60 °C'`, `'60C'`, `'333 K'`, `'60-65'`, `'rt'`, `'reflux'`,
+    `''` and `'1,20'`. `search.py`'s facets filter on `temperature_c`, so a precedent search for a
+    temperature window silently excludes every row whose column was written with a unit, and
+    `CorpusCoverage`'s verdict is about *labelling* coverage rather than field coverage, so nothing
+    in the answer says so. A site can declare a `transform:`, which is why this is a missing counter
+    and not a weak parser.
+
+    The blank cell is deliberately **not** counted: an empty column is the source recording nothing,
+    and putting the ordinary case in this counter would make it useless for the thing it is for.
+    """
+    import logging
+
+    binding = dict(_BINDING)
+    # No `transform:` on this field, which is where the silence lives: a declared `number`
+    # transform *raises* `TransformError` on an unreadable cell and takes the whole batch with it
+    # (loud, and non-retryable), while a plainly-bound column leaves `_number`'s own `float()` as
+    # the only parser — and that one answered `None` and said nothing.
+    binding["temperature_c"] = {"path": "root.TEMP"}
+    rows = _rows()[:2]
+    rows[0]["TEMP"] = "60 °C"
+    rows[1]["TEMP"] = ""
+    warehouse = KeysetWarehouse({_RELATION: rows}, _RELATION, "REACTION_ID")
+
+    with caplog.at_level(logging.WARNING):
+        report = await drain_corpus(
+            warehouse,
+            CorpusBinding.model_validate(binding),
+            InMemoryLabelIndex(),
+            "pistachio",
+            limit=5,
+        )
+
+    assert (report.read, report.recorded) == (2, 2), "the rows are recorded, without the field"
+    assert report.unreadable_fields == 1, "the unit-carrying cell is counted; the blank one is not"
+    assert "could not be read" in caplog.text
+
+
+async def test_a_readable_corpus_counts_no_unreadable_fields() -> None:
+    """The counter's zero, so that a rise in it means something.
+
+    A test whose measured value is always nonzero cannot tell a reader that the ordinary case is
+    quiet, which is the half that makes the counter above worth reading.
+    """
+    report = await drain_corpus(_fake(), _binding(), InMemoryLabelIndex(), "pistachio", limit=5)
+    assert report.unreadable_fields == 0
+
+
 async def test_a_recorded_row_carries_the_citation_the_conditions_and_the_species() -> None:
     """A precedent a chemist cannot follow back is not a precedent — so the citation is required."""
     index = InMemoryLabelIndex()

@@ -589,6 +589,18 @@ def _metric(results: Any, metric: RegressionMetricsEnum) -> float:
     return float(results.get_metric(metric).iloc[0])
 
 
+def _is_flat(spread: float, column: pd.Series) -> bool:
+    """Whether these observations carry too little range for "variance explained" to mean anything.
+
+    Relative to the response's own magnitude, because R² is scale-free and this comparison must not
+    be: a spread of 1e-9 is the whole story on a column reading 42.0 and is nothing on one reading
+    1e-12. `abs(mean)` is the magnitude, so a column centred on zero needs an exactly flat spread —
+    which is the right answer there, since nothing else is available to scale by and a response
+    genuinely centred on zero with a 1e-30 range is not a case chemistry produces.
+    """
+    return spread <= abs(float(column.mean())) * settings.bo_flat_response_relative_spread
+
+
 def _resolve_folds(folds: int | None, n_observations: int) -> int:
     """How many folds to cross-validate over: the caller's number, or one the data can carry.
 
@@ -636,15 +648,29 @@ def _fit_quality_from(
             # it has no denominator. `get_metric` answers 1.0 there — measured on eight runs all
             # reading 42 — so a flatlined assay was published as a perfect model. The spread is
             # taken off the same frame the folds are cut from, so it is the spread of exactly the
-            # runs the score would have been about.
-            spread = float(frame[objective.name].max() - frame[objective.name].min())
+            # runs the score would have been about, and it is reported beside the score because R²
+            # is scale-free and a reader cannot otherwise see what range it is a fraction of.
+            column = frame[objective.name]
+            spread = float(column.max() - column.min())
             scores.append(
                 FitQuality(
                     objective=objective.name,
-                    r2=None if spread == 0.0 else _metric(test, RegressionMetricsEnum.R2),
+                    # **Relative, not `spread == 0.0`.** Exact equality catches a stuck assay and is
+                    # defeated by a systematic drift below its own noise: driven, eight runs of 42.0
+                    # differing by 1e-10 scored R² 0.9991 and published "predicts held-out runs with
+                    # R² 1.00", while pure 1e-9 jitter over the same values scored 0.175 — random
+                    # flatlines score honestly and a *trend* in the last decimal does not. See
+                    # `bo_flat_response_relative_spread` for why the threshold is a claim about
+                    # assays rather than about float arithmetic.
+                    r2=(
+                        None
+                        if _is_flat(spread, column)
+                        else _metric(test, RegressionMetricsEnum.R2)
+                    ),
                     mae=_metric(test, RegressionMetricsEnum.MAE),
                     folds=folds,
                     n_observations=n,
+                    response_range=spread,
                 )
             )
     return scores

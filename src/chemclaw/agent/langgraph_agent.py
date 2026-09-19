@@ -1347,17 +1347,35 @@ def _skill_dirs() -> list[str]:
 
 
 def shipped_skill_names() -> frozenset[str]:
-    """Every skill name this deployment's *reviewed* trees declare.
+    """Every name this deployment's *reviewed* trees occupy — declared, or held by a broken file.
 
     Public because `api/routes/skills.py` needs it to refuse a personal skill that would take a
     shipped skill's name, and it has to be asked of the same walk the graph does — a route that
     re-derived the tree list would answer about a different set than the one the model is served.
+    `agent/proposal_tools.validated_skill` is the second caller, since `propose_skill` routes
+    through it.
+
+    **"Declare" was the wrong word and is now "occupy", because a *broken* `SKILL.md` is in here
+    too.** `skill_manifest._declared_pair` keys an unreadable manifest by its **directory** name
+    (fail-closed: the frontmatter is the thing that could not be read, so its `tools:` declaration
+    cannot be trusted), so that directory name reaches this set. Driven on a tree holding one skill
+    with `name: '   '`: the map is keyed `'empty-name'`, and both `POST /skills/mine` and
+    `propose_skill` then refuse that name with "is the name of a skill this deployment already
+    ships" — about a skill whose frontmatter declares nothing at all.
+
+    **That is the behaviour this deployment wants, and it is a decision rather than a side effect.**
+    The alternative is for a directory with a broken manifest to leave its name free, which lets a
+    chemist's personal skill quietly shadow — or be shadowed by — a shipped skill that is one typo
+    away from working again; `make skill-validate` requires a directory and its `name` to match, so
+    the directory is the name that tree is going to occupy the moment the file is fixed. Refusing it
+    costs one confusing message on a corpus CI would already have failed; allowing it costs a
+    collision nobody can see. `tests/test_local_skills.py` is what holds it.
 
     Cheap to call per request: `declared_tools` is `@cache`d on the directory tuple, so the cost is
     `_skill_dirs`' `Path.is_dir()` fan-out over the enabled bundles and nothing else.
 
     Returns:
-        The declared names, including every enabled connector bundle's own `skills/`.
+        Every occupied name, including every enabled connector bundle's own `skills/`.
     """
     return frozenset(declared_tools([directory for _label, directory in _labelled(_skill_dirs())]))
 

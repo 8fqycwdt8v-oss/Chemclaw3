@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+from chemclaw.core.chem import STANDARDIZATION_VERSION
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.ingest.labels.enrich import label_stale
@@ -29,14 +30,22 @@ from chemclaw.ingest.labels.labeller import (
     ReactionNaming,
     ReactionRepresentation,
     RxnLabelServer,
+    stamped,
 )
 from chemclaw.ingest.labels.merge import merge
 from chemclaw.science.labels.policy import LabelPolicy
 from chemclaw.science.labels.records import ReactionLabel, SpeciesLabel
 from chemclaw.science.labels.store import InMemoryLabelIndex
-from chemclaw.science.labels.vocabulary import LabelGroup, SpeciesRole
+from chemclaw.science.labels.vocabulary import VOCABULARY_VERSION, LabelGroup, SpeciesRole
 
 _VERSION = "rxnlabel@1:std5:roles1"
+#: The stamp a *current* labeller mints, in the shape `labeller_version` composes —
+#: `f"{remote}:{STANDARDIZATION_VERSION}:{VOCABULARY_VERSION}"`. Derived rather than written out,
+#: because the literal it replaced named `std7` and the labeller had moved to `std8`: the staleness
+#: assertion still passed (any version unequal to `_VERSION` is stale) while the string claimed to
+#: be a stamp nothing mints. This is the third place `STANDARDIZATION_VERSION` reaches, and
+#: `tests/test_compound_identity.py` pins the other two.
+_NEXT_VERSION = f"rxnlabel@2:{STANDARDIZATION_VERSION}:{VOCABULARY_VERSION}"
 
 # A Buchwald-Hartwig, because it is the reaction three of the six precedent questions name and the
 # only one where every role in the vocabulary is actually distinguishable.
@@ -471,6 +480,118 @@ async def test_a_pass_that_derived_nothing_does_not_report_the_corpus_complete()
     assert row.named_reaction == "Buchwald-Hartwig amination"
 
 
+async def test_a_degraded_answer_is_stamped_so_it_re_labels_against_a_healthy_pod() -> None:
+    """A component that ran and failed must not leave its row claiming a healthy labeller.
+
+    `Chemclaw3-mcp`'s `servers/rxnlabel` answers each reaction with `labeller_version(degraded)`
+    when a component was installed, ran on that reaction and threw — `mapper@failed` in the slot
+    where a pod that never installed a mapper says `mapper@absent`. It was built that way on
+    purpose, in the commit that added it, *"so it is stale against a healthy pod and re-labels"*.
+
+    This side threw both halves away. `ReactionRepresentation`/`ReactionNaming` declare
+    `extra="ignore"`, so `version` and `degraded` were **dropped in transit**, and
+    `label_stale` stamped every row with the pass-level string `plan_label_sync` read once — which
+    reports the components the server *probed*, not what happened on this call. Driven through this
+    drain before the fix: a row whose mapper failed was stamped
+    `…:mapper@absent:namer@absent`, identical to a healthy pass's, so `stale()` never returned it
+    and no later pass revisited it until the deployment's component versions moved.
+
+    **The assertion is that the row is still stale, not that the stamp differs.** A stamp that
+    differed for any *other* reason — a locally-derived string, a nonce, the remote version without
+    `stamped`'s two local halves — would also "differ", and one of those would make the row stale
+    forever instead of once. So both directions are checked: stale while the component is broken,
+    and *not* stale once the same pass version is answered by a healthy pod.
+
+    Both halves of an answer are exercised, because the two carry different components and a fix
+    that read only `representation.degraded` would leave a broken classifier stamping healthy.
+
+    **And the pod below answers through `model_validate` rather than `model_copy(update=…)`,
+    because the first version of this test did the latter and was green with both fields deleted
+    from the model.** `model_copy` assigns past validation, so the fixture was supplying the very
+    fields whose survival is the subject — a control whose fixture builds its own subject, which is
+    the shape `tasks/lessons.md` records. The answer arrives from another repository's pod as JSON
+    and `extra="ignore"` is what decides whether a field survives that crossing, so the fixture
+    crosses it too.
+    """
+    # The two shapes the server distinguishes, spelled the way it spells them.
+    healthy_remote = "rxnlabel@2:rdkit@2026.3.5:mapper@present:namer@present"
+    mapper_failed = "rxnlabel@2:rdkit@2026.3.5:mapper@failed:namer@present"
+    namer_failed = "rxnlabel@2:rdkit@2026.3.5:mapper@present:namer@failed"
+    # Folded through the *same* function `Labeller.version` folds with, so a stamp that skipped it
+    # could not match a healthy pass either and this test would not be able to tell the two apart.
+    healthy = stamped(healthy_remote)
+
+    class _Pod:
+        """A labelling server whose named component is installed and failing."""
+
+        def __init__(self, *, mapper: bool = True, namer: bool = True) -> None:
+            self._mapper = mapper
+            self._namer = namer
+
+        async def version(self) -> str:
+            return healthy
+
+        async def represent(
+            self, reactions: list[tuple[str, str, list[str]]]
+        ) -> dict[str, ReactionRepresentation]:
+            broken = not self._mapper
+            # **Built through `model_validate` over the wire shape, never `model_copy(update=…)`.**
+            # `model_copy` sets attributes without going through validation, so it attaches
+            # `version` and `degraded` to the instance whether or not the model declares them —
+            # which made the first version of this test pass with both fields deleted from
+            # `ReactionRepresentation`, i.e. green over the exact defect it names. The answer
+            # reaches this drain as JSON from another repository's pod, and `extra="ignore"` is what
+            # decides whether a field survives that, so the fixture has to cross the same boundary.
+            return {
+                rid: ReactionRepresentation.model_validate(
+                    {
+                        **_representation(rid).model_dump(),
+                        "version": mapper_failed if broken else healthy_remote,
+                        "degraded": ["atom_mapper"] if broken else [],
+                    }
+                )
+                for rid, _smiles, _species in reactions
+            }
+
+        async def name(self, reactions: list[tuple[str, str]]) -> dict[str, ReactionNaming]:
+            broken = not self._namer
+            return {
+                rid: ReactionNaming.model_validate(
+                    {
+                        **_naming(rid).model_dump(),
+                        "version": namer_failed if broken else healthy_remote,
+                        "degraded": ["reaction_namer"] if broken else [],
+                    }
+                )
+                for rid, _smiles in reactions
+            }
+
+    for label, pod, failed in (
+        ("mapper", _Pod(mapper=False), mapper_failed),
+        ("namer", _Pod(namer=False), namer_failed),
+    ):
+        index = InMemoryLabelIndex()
+        await index.record(_row("r0"))
+        await label_stale(index, pod, {}, healthy, limit=10)
+        [row] = list(index._rows.values())
+        assert row.labeller_version == stamped(failed), (
+            f"a row whose {label} ran and failed was stamped {row.labeller_version!r}. The stamp "
+            "has to be the version the server derived for *this answer*, folded through "
+            "`labeller.stamped` — anything else either claims a healthy labeller or can never "
+            "match one"
+        )
+        assert await index.stale(healthy, 10), (
+            f"the row is not stale against a healthy pass although its {label} failed, so nothing "
+            "will ever re-label it and the degradation is permanent in the corpus"
+        )
+        # The other direction: once the component works, the same pass version settles the row.
+        await label_stale(index, _Pod(), {}, healthy, limit=10)
+        assert not await index.stale(healthy, 10), (
+            f"the row is still stale after a healthy pod answered it, so a {label} that recovered "
+            "leaves the drain re-reading the same batch forever"
+        )
+
+
 async def test_an_underived_row_leaves_the_stale_set_and_returns_at_the_next_version() -> None:
     """Both halves of the stamp, because a fix to one of them breaks the other.
 
@@ -485,7 +606,7 @@ async def test_an_underived_row_leaves_the_stale_set_and_returns_at_the_next_ver
     await label_stale(index, _FakeLabeller(refuse={"r0"}), {}, _VERSION, limit=10)
 
     assert await index.stale(_VERSION, limit=10) == []
-    assert [r.reaction_id for r in await index.stale("rxnlabel@2:std7:roles1", 10)] == ["r0"]
+    assert [r.reaction_id for r in await index.stale(_NEXT_VERSION, 10)] == ["r0"]
 
 
 async def test_a_degraded_pass_does_not_advance_the_version_every_tool_reads() -> None:

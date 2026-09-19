@@ -220,7 +220,14 @@
          point — so an unconditional value would be a second statement of the image's layout on
          every release, including the ones that mount nothing. The mounted directory comes first:
          earlier directories win a name collision, which is the precedence `registry._bundle_dirs`
-         documents and the fleet's `manifests/` relies on for `chem` and `safety`. */}}
+         documents and the fleet's `manifests/` relies on for `chem` and `safety`.
+
+         Mounted-first decides the tool surface and nothing else. A shadowed bundle's `skills/` and
+         `profiles/` directories are still read (`registry._bundle_content_dirs`), so an operator
+         who mounts the fleet's `safety` manifest — which declares no `skills:`, deliberately — does
+         not thereby lose `connectors/safety/skills/safety-screening/`. Deriving that directory from
+         the winning manifest alone did lose it, silently, and no chart value or document named the
+         `CHEMCLAW_SKILLS_DIR` that would have brought it back. */}}
   {{- if .Values.extraConnectors.bundles }}
   CHEMCLAW_CONNECTORS_DIR: {{ printf "%s:%s" .Values.extraConnectors.mountPath .Values.extraConnectors.shippedPath | quote }}
   {{- end }}

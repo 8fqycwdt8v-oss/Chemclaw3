@@ -554,6 +554,14 @@ class FitQuality(BaseModel):
     mae: float = Field(ge=0.0)
     folds: int = Field(ge=2)
     n_observations: int = Field(ge=2)
+    # `max - min` over the very runs the folds were cut from. **R² is scale-free and this is the
+    # scale**, and without it a reader cannot tell a model that explains a 50-point yield range from
+    # one that explains a nanounit of drift: driven over a real fit, eight runs of 42.0 with a
+    # systematic 1e-10 drift scored R² 0.9991 and published "predicts held-out runs with R² 1.00",
+    # and neither caveat fires because both are about run *count*. Stated in `summary` beside the
+    # score, in the objective's own units, so the number a chemist over-reads arrives with the range
+    # it is about.
+    response_range: float = Field(ge=0.0, allow_inf_nan=False)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -568,18 +576,25 @@ class FitQuality(BaseModel):
         if self.r2 is None:
             # Returned whole rather than joined with the caveats below: both of those qualify a
             # score, and the point of this branch is that there is no score to qualify.
+            #
+            # The range is stated rather than the older "every one of them reports the same value",
+            # which was true of the exact-equality guard this replaced and false of the one that
+            # catches a sub-noise drift: those runs differ, by an amount no assay resolves.
             return (
                 f"The {self.n_observations} run(s) supplied for {self.objective!r} carry **no "
-                "variance** — every one of them reports the same value — so there is nothing for "
-                "a model to predict and no fit quality exists. This is a statement about the "
-                "runs, not about the surrogate: an assay reading the same number every time is "
-                "the finding, and it is usually a dead catalyst, a saturated response or an "
-                "instrument fault rather than a flat response surface."
+                f"usable variance** — their whole range is {self.response_range:.2g}, which is "
+                "nothing beside the values themselves — so there is nothing for a model to predict "
+                "and no fit quality exists. This is a statement about the runs, not about the "
+                "surrogate: an assay reading the same number every time is the finding, and it is "
+                "usually a dead catalyst, a saturated response or an instrument fault rather "
+                "than a flat response surface."
             )
         stated = (
             f"Cross-validated on {self.n_observations} run(s) over {self.folds} folds, the "
             f"surrogate for {self.objective!r} predicts held-out runs with R² {self.r2:.2f} and "
-            f"mean absolute error {self.mae:.2g}."
+            f"mean absolute error {self.mae:.2g}. Those runs span a response range of "
+            f"{self.response_range:.3g} in the objective's own units — R² is a fraction of that "
+            "range and says nothing about how large it is."
         )
         repeatability = (
             " Re-running this on the same runs gives a different number — the GP's hyperparameter "

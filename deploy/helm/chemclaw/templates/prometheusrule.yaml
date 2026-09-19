@@ -472,6 +472,33 @@ spec:
               Turns are being answered without these capabilities and nothing in the answer says
               so.
 
+        {{- /* The *turn's* half of the same question, and it is a different question — which is why
+               it is a second rule rather than a wider selector on the one above. Driven on
+               2026-09-19: a connector answering 200 on `/healthz` and 500 on `/mcp` is reported
+               `healthy` by the readiness sweep (`connectors/health.py` asks the health route and
+               nothing else), so `chemclaw_connectors_unhealthy` measured **0** against a connector
+               that failed every call, and `ChemclawConnectorsUnhealthy` could not fire. The only
+               series that moved was this one, from the per-turn open — and no rule read it, so a
+               capability was silently absent from every answer with nothing alerting and nothing on
+               a dashboard able to name it (the counter was unlabelled too). `for: 0m` and an
+               `increase`, on the same reasoning as ChemclawSubsystemUnavailable: every increment is
+               a turn that has already answered without a capability, so there is nothing to wait
+               to confirm. */}}
+        - alert: ChemclawConnectorsDegradingTurns
+          expr: increase(chemclaw_connectors_unreachable_total[15m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawconnectorsdegradingturns
+            summary: Turns are answering without a connector's tools
+            description: >-
+              This connector did not come up when a turn opened it, so its tools were absent from
+              that answer and the transcript looks like any other. It fires for a connector the
+              readiness sweep calls healthy — a pod whose `/healthz` answers 200 while `/mcp` fails,
+              a missing bearer token, an MCP handshake that never completes — so a flat
+              `chemclaw_connectors_unhealthy` is not evidence against it.
+
         {{- /* The request-path sibling of ChemclawDurableUnreachable, and separate from it on
                purpose (D-2026-08-08-a-rollback-that-is-not-a-schema-step): that alert reads a
                per-turn Temporal probe, this one reads per-request shedding for *any* unavailable
@@ -944,7 +971,14 @@ spec:
               tail, and the cause is upstream of the timeout rather than in it.
 
         {{- /* The quietest bad outcome in the system: the turn succeeded, the stream closed, and
-               the answer was empty. Nothing failed, so nothing else fires. */}}
+               the answer was empty. Nothing failed, so nothing else fires — **and the description
+               used to say that unconditionally, which was measured false.** A spend-capped turn
+               with no prose booked this counter as well as `chemclaw_turn_spend_caps_total`, so
+               this rule fired for a turn whose cause was named one event earlier and whose remedy
+               is a number in a values file, while pointing the operator at "a model that emitted
+               only tool calls". `api/runner._empty_answer_event` now steps aside for a cap, so the
+               series is once again only the unexplained case, and the sentence is once again
+               true. */}}
         - alert: ChemclawTurnsAnsweringEmpty
           expr: increase(chemclaw_turn_empty_answers_total[15m]) > 0
           for: 0m
@@ -954,10 +988,65 @@ spec:
             runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawturnsansweringempty
             summary: Turns are completing with no answer text
             description: >-
-              The turn ended normally and produced nothing for the chemist to read. This is not an
-              error path — no counter above moves — which is exactly why it needs its own rule.
+              The turn ended normally and produced nothing for the chemist to read, and nothing
+              explains it — a turn stopped by either cap is excluded, because those name themselves.
               Usually a model that emitted only tool calls, or a middleware that short-circuited
               after the last one.
+
+        {{- /* `chemclaw_tool_calls_total{tool,outcome}` had panels and no rule, so a connector
+               tool failing every call was a graph nobody was looking at — the request-path twin of
+               ChemclawConnectorsDegradingTurns, which covers a connector that never comes up at all
+               while this covers one that comes up and then fails. **By `tool`**, because that is
+               the whole diagnostic value and a fleet-wide ratio hides one broken tool among forty
+               working ones; `outcome="error"` is a raised exception or a connector answering
+               `isError=True`, never a governance refusal, which is a separate outcome with its own
+               counter. Ratio plus a floor on its own denominator, like the other three
+               (`test_every_ratio_alert_has_a_traffic_floor`): a tool called twice an hour is at
+               100% on its first error otherwise. */}}
+        - alert: ChemclawToolCallsFailing
+          expr: >-
+            sum by (tool) (rate(chemclaw_tool_calls_total{outcome="error"}[15m]))
+            / sum by (tool) (rate(chemclaw_tool_calls_total[15m]))
+            > {{ .Values.monitoring.alerts.toolErrorRatio }}
+            and sum by (tool) (rate(chemclaw_tool_calls_total[15m]))
+            > {{ .Values.monitoring.alerts.toolCallsFloorPerSecond }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawtoolcallsfailing
+            summary: Most calls to one tool are failing
+            description: >-
+              Turns are still answering, from whatever this tool would have contributed — so the
+              transcript of a degraded answer looks like any other, which is why this needs a rule
+              rather than a panel. The `tool` label names it. A connector tool points at that
+              connector's pod; an in-process one points at this image.
+
+        {{- /* The two caps, which had every observable except a rule. `values.yaml` tells an
+               operator in as many words that `chemclaw_turn_spend_caps_total` "is what says whether
+               the number you chose is biting" — so the chart pointed at a series neither the alert
+               set nor the runbook carried, which is a claim about a control that does not exist.
+               Read off `chemclaw_turns_finished_total` rather than off the two cap counters, because
+               the outcome is what an operator groups a turn record by and `outcome` is already a
+               label on it: one rule covers both caps and says which. `for: 0m` and an `increase`,
+               like the timeout rule above: a capped turn is a chemist who asked a question and got
+               a partial answer, and the first one is worth knowing about. */}}
+        - alert: ChemclawTurnsHittingACap
+          expr: >-
+            increase(chemclaw_turns_finished_total{outcome=~"spend_capped|loop_capped"}[15m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawturnshittingacap
+            summary: Turns are being stopped by a per-turn cap
+            description: >-
+              A chemist's turn was cut short with work still open and told so, so this is not a
+              silent failure — it is the question of whether the ceiling is right. `outcome`
+              says which cap: `spend_capped` is `CHEMCLAW_AGENT_MAX_TURN_BILLED_TOKENS` and
+              `loop_capped` is `CHEMCLAW_HARNESS_MAX_LOOP_ITERATIONS`. If it moves on turns that
+              were doing real work, the number is too low; if it moves on runaway ones, it is doing
+              its job and the request is what to look at.
 
     {{- /* The durable tier, which **not one rule read** before this group existed. Every alert in
            this file was a front-door alert: a connector whose every job failed, an outbox that

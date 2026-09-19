@@ -73,6 +73,7 @@
     },
     "plan": {
       "plan_hash": "str",
+      "scope": "list[str]",
       "todos": "list[str]"
     },
     "question": {

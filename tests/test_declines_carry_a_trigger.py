@@ -119,7 +119,8 @@ _EXEMPT: dict[str, str] = {
         "declined for reasons derived on every run — `optimize_geometry` collides with "
         "`relax_structure`'s cache key, `predict_logd` has no key at all — and "
         "`test_every_calc_tool_the_fleet_serves_is_called_here_or_declined_with_a_reason` "
-        "reconciles `_DECLINED` against the fleet's published surface, so the day either reason "
+        "reconciles `_CALC_DECLINED` against the fleet's published surface, so the day either "
+        "reason "
         "stops holding the suite reds. A sentence saying 'revisit when the key stops colliding' "
         "would be a weaker copy of a check that already runs"
     ),

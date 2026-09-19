@@ -480,21 +480,39 @@ fail_under = 84
 # mutants over an hours-long suite, and most of them land in code where a surviving mutant means
 # nothing (a log message, a docstring-shaped constant). The count here is not written down for the
 # reason the rest of this repository does not write down counts that drift — read the list. What it
-# covers: the authorization gate, the PR-gate and the note schema behind it, the calculation cache's
-# identity, the budget guard, the durable audit sink, `runner_trace.py` (which shipped a real defect
-# on 2026-08-04 and is therefore the best available test of whether its own tests are any good), the
-# offline lexical proxy both hybrid indexes share (`core/fulltext.py` — found 2026-09-04 by the
-# review that asked whether this suite can fail: a mutant reverting `_WORD` to its own comment's
-# named-bad ASCII-only spelling survived 349 green tests), the template resolver's whole-string
-# anchor (`templates/resolve.py`, same review), and the quantity-grounding module the same review's
-# fixture-reach probe found undertested (`core/quantities.py`).
+# covers: the authorization gate, the note schema and the one knowledge write path, the calculation
+# cache's identity, the budget guard, the durable audit sink, `runner_trace.py` (which shipped a real
+# defect on 2026-08-04 and is therefore the best available test of whether its own tests are any
+# good), the offline lexical proxy both hybrid indexes share (`core/fulltext.py` — found 2026-09-04
+# by the review that asked whether this suite can fail: a mutant reverting `_WORD` to its own
+# comment's named-bad ASCII-only spelling survived 349 green tests), the template resolver's
+# whole-string anchor (`templates/resolve.py`, same review), and the quantity-grounding module the
+# same review's fixture-reach probe found undertested (`core/quantities.py`).
+#
+# **`kg/note.py` and `kg/git_writer.py` used to be described here as "the PR-gate and the note
+# schema behind it", and there is no PR-gate** — `D-2026-09-05-the-gate-follows-behaviour-not-
+# knowledge` deleted it and every module behind it, and `git_writer.py` opens by saying so. The two
+# modules stay for what they actually are: the note schema, and the single write path into the
+# knowledge graph whose ordering is load-bearing.
+#
+# **`core/chem.py` and `core/logging.py` were added 2026-09-19**, by the audit of the commit that
+# changed both of them. `chem.py` mints `compound_id`, the calculation cache's key and the
+# definition both fingerprint indices filter on, which makes it at least as invariant-bearing as
+# `science/calc/store.py` beside it; measured on that commit, two mutations of its neutralisation
+# guard and one of `STANDARDIZATION_VERSION` itself passed the whole 343-test chem subset.
+# `core/logging.py` is the secret-redaction filter, where a surviving mutant is a credential on
+# stdout: measured on the same commit, leaving one of the two PEM header tails greedy passed all 120
+# of its own tests at 117 s per call, and making both possessive passed them while leaking a private
+# key body verbatim.
 [tool.mutmut]
 source_paths = [
     "src/chemclaw/agent/authz.py",
     "src/chemclaw/agent/audit_store.py",
     "src/chemclaw/api/budget.py",
     "src/chemclaw/api/runner_trace.py",
+    "src/chemclaw/core/chem.py",
     "src/chemclaw/core/fulltext.py",
+    "src/chemclaw/core/logging.py",
     "src/chemclaw/core/quantities.py",
     "src/chemclaw/kg/note.py",
     "src/chemclaw/kg/record.py",

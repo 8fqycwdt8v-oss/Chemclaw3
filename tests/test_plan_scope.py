@@ -475,6 +475,88 @@ def test_the_decision_route_records_what_the_plan_declared(
     )
 
 
+def test_the_stream_and_the_route_name_the_same_scope_for_one_plan(
+    monkeypatch: pytest.MonkeyPatch, approvals: InMemoryPlanApprovalStore
+) -> None:
+    """A plan card rendered from the stream must see what approving it would authorize.
+
+    The test above asserts `GET .../plan` carries the scope. That route is the one a client built
+    on D-167 never calls: `plan_hash` was put on the **stream** precisely so a surface could answer
+    the plan it had just rendered without a second round trip that races the agent's next revision
+    — and `scope` was added to the **fetch** only. So the disclosure this ADR requires
+    (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`: *"a surface that rendered
+    the steps alone would be collecting a yes to something it had not displayed"*) held on a route
+    nobody had a reason to call, and the companion UI's card returns early once it holds the hash
+    and the steps. Driven before the fix: `scope` on the route, absent from the `plan` event.
+
+    **It is asserted as an equality between the two surfaces rather than as a field being present**,
+    because presence is the weaker claim by exactly the margin that matters. A stream that carried
+    a `scope` recomputed from a different reading of the plan — the rendered checkbox lines rather
+    than the steps, the step in progress rather than the union, a stale `todos` — would satisfy
+    "the field is there" while showing a chemist an authorization the gate does not enforce. That is
+    the same trap `plan_hash` already walked into once and is asserted against in
+    `tests/test_langgraph_stream.py`, one field over.
+
+    Both halves are driven for real: the front door's own route through `TestClient`, and the stream
+    emitter through `graph_stream._from_update` over the state update a node actually produces.
+    """
+    import asyncio as _asyncio
+
+    from fastapi.testclient import TestClient
+
+    from chemclaw.api.app import create_app
+    from chemclaw.api.auth import Principal, require_principal
+    from chemclaw.api.graph_stream import _from_update
+    from chemclaw.api.routes import plan as plan_routes
+    from chemclaw.api.runner_trace import ToolCallTrace
+    from tests.test_service import _FakeOwnerStore, _no_connectors
+
+    steps = [
+        _step("write up the result", "record_knowledge_note"),
+        _step("watch the reactor", "watch_for", "record_knowledge_note"),
+        _step("read the table"),
+    ]
+
+    async def _read(session_id: str, **_kwargs: Any) -> list[dict[str, Any]]:
+        return steps
+
+    monkeypatch.setattr(plan_routes, "session_plan", _read)
+    app = create_app(owner_store=_FakeOwnerStore(), connector_factory=_no_connectors)
+    app.state.plan_approvals = approvals
+    app.dependency_overrides[require_principal] = lambda: Principal(
+        oid="alice", upn="alice@corp", roles=frozenset()
+    )
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["session_id"]
+    fetched = client.get(f"/sessions/{session_id}/plan").json()
+
+    async def _stream() -> list[Any]:
+        trace = ToolCallTrace()
+        return [
+            event
+            async for event in _from_update(
+                {"agent": {"todos": steps}}, agent="", emit_plan=True, trace=trace, todos=[]
+            )
+        ]
+
+    (streamed,) = [event for event in _asyncio.run(_stream()) if event.type == "plan"]
+    assert streamed.scope, (
+        "the streamed plan named no tool although its steps declare some, so a card rendered from "
+        "the stream asks for a yes to an authorization it cannot display"
+    )
+    assert streamed.scope == fetched["scope"], (
+        f"the stream says approving this plan authorizes {streamed.scope} and "
+        f"`GET /sessions/{{id}}/plan` says {fetched['scope']}. One plan, two answers about what a "
+        "chemist is being asked to authorize — whichever they read, the other surface is lying. "
+        "Both must come from `plan_scope.declared_scope` over the same steps the identity is "
+        "hashed from."
+    )
+    assert streamed.plan_hash == fetched["plan_hash"], (
+        "the scopes agree and the identities do not, so the two surfaces are describing different "
+        "plans and the agreement above is a coincidence"
+    )
+
+
 def test_a_rewrite_that_widens_a_declaration_does_not_pass_the_freshness_guard(
     monkeypatch: pytest.MonkeyPatch, approvals: InMemoryPlanApprovalStore
 ) -> None:

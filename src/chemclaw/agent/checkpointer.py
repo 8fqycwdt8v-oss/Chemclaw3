@@ -524,9 +524,25 @@ def _is_untracked(annotation: Any) -> bool:
 
     The unwrapping is what makes it work on the declarations `agent/state.py` actually writes:
     a channel arrives as `NotRequired[Annotated[int, TurnTotal(int)]]`, so the `__metadata__`
-    carrying the channel instance is one `NotRequired` in. Measured on `ChemclawState`: reading
+    carrying the channel is one `NotRequired` in. Measured on `ChemclawState`: reading
     `__metadata__` off the outer annotation finds nothing for any of the six, which would have made
     this predicate answer `False` for every one of them and changed nothing.
+
+    **Both the instance and the class count, and testing only the instance missed the very spelling
+    this module cites as the shape's origin.** LangGraph resolves a bare channel *class* in an
+    annotation by constructing it, so `Annotated[int, UntrackedValue]` is as untracked as
+    `Annotated[int, TurnTotal(int)]` — and `Annotated[int, UntrackedValue]` is exactly how
+    `ModelCallLimitMiddleware` declares `run_model_call_count`, quoted verbatim in
+    `agent/state.py`'s own docstring as where this repository's shape comes from. Driven: one
+    channel added in that spelling landed in the *stamp* instead of in the excluded half, and the
+    next ordinary turn of a session written by the previous build was refused with
+    `CheckpointSchemaMismatch` against a real Postgres, with all 19 tests in
+    `tests/test_checkpointer_schema.py` green — the fleet-wide refusal this predicate exists to
+    close, live again, through the one shape its own docstring had promised was covered.
+
+    A `type` test rather than `issubclass` guarded by `isinstance(bound, type)`, because
+    `issubclass` raises `TypeError` on a channel *instance* and the instance arm has to keep
+    working.
 
     Args:
         annotation: The channel's type hint, as `get_type_hints(..., include_extras=True)` gives it.
@@ -540,7 +556,11 @@ def _is_untracked(annotation: Any) -> bool:
         if not args:
             break
         inner = args[0]
-    return any(isinstance(bound, UntrackedValue) for bound in getattr(inner, "__metadata__", ()))
+    return any(
+        isinstance(bound, UntrackedValue)
+        or (isinstance(bound, type) and issubclass(bound, UntrackedValue))
+        for bound in getattr(inner, "__metadata__", ())
+    )
 
 
 FIRST_PARTY_CHANNELS = _first_party_channels(ChemclawState)

@@ -9,7 +9,21 @@ was decomposed, because shipping one whole swallows the nested entries that are 
 What stayed is what a stateless server cannot hold:
 
 - `store.py` and `postgres_store.py` — the D-011 cache. An identical calculation is computed once,
-  ever, and `CALCULATION_EPOCH` is the one constant both repositories must change in the same PR.
+  ever. **`CALCULATION_EPOCH` is not a constant the two repositories have to change together**, and
+  saying it was — the sentence that stood here, inherited from
+  `D-2026-08-16-the-physics-leaves-the-cache-stays` — was already contradicted by the module that
+  does the folding: `connectors/calc/remote.remote_key` says "it would have appeared to work".
+  The two epochs **compose**: the server folds its own into the `params_hash` it answers with, and
+  `remote_key` folds this side's over that digest, so a bump on either side alone invalidates every
+  stored row. Measured over all four combinations against the fleet's real `params_hash` at both of
+  its values — all four keys distinct, either bump alone sufficient. They are moved together by
+  convention, because it keeps the two epoch logs readable side by side, and not by an invariant
+  anything can enforce: neither repository can read the other's constant at runtime, which is
+  exactly why an agreement stated in prose is the shape
+  `D-2026-09-07-a-claim-about-another-repository-is-checked-by-reading-it` refuses.
+  `tests/test_calc_remote.py::test_the_two_epochs_compose_rather_than_having_to_match` is the
+  executable form, and it already existed while this sentence said the opposite — which is the
+  reason to name it here rather than to restate the rule a third time.
 - `calibration.py` — the prediction ledger, keyed exactly on `(calc_type, calc_version,
   input_hash)`. The version comes off a result or from `calculation_key`; **nothing here derives
   one**, and `tests/test_calc_remote.py` asserts that statically because getting it wrong is silent.

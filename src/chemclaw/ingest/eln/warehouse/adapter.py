@@ -20,7 +20,13 @@ from pydantic import ValidationError
 
 from chemclaw.core.config import settings
 from chemclaw.ingest.eln.adapter import ElnMappingError, RawEntry, parse_iso_utc
-from chemclaw.ingest.eln.ord import Component, Impurity, OrdReaction, Role
+from chemclaw.ingest.eln.ord import (
+    Component,
+    Impurity,
+    OrdReaction,
+    Role,
+    unresolved_peak_name,
+)
 from chemclaw.ingest.eln.warehouse import sql
 from chemclaw.ingest.eln.warehouse.binding import (
     AttributeBinding,
@@ -187,7 +193,18 @@ class WarehouseElnAdapter:
         if not rows:
             return []
 
-        keyed = [row for row in rows if row.get(entry.key)]
+        # entry key -> why it was refused. Filed below, and the two in-fetch loss paths here are in
+        # it for the same reason the unreadable-`created_at` one is: a worker log line is not an
+        # explanation a chemist can be given, and these rows never become a `RawEntry`, so they are
+        # absent from the `IngestSummary.rejected` the sync files for every other refusal
+        # (`D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask`).
+        refused: dict[str, str] = {}
+
+        # **Truthiness, not presence, is what used to drop a row here**: an integer primary key of
+        # `0` and an empty-string key are both falsy, so a real row was removed from the fetch by
+        # the same test that removes a NULL one. `is None` plus a blank check says what is meant,
+        # and the blank case is a refusal rather than a silent skip.
+        keyed = [row for row in rows if _has_key(row, entry.key)]
         if len(keyed) != len(rows):
             logger.warning(
                 "%s: %d of %d rows carried no %s and were skipped",
@@ -195,6 +212,16 @@ class WarehouseElnAdapter:
                 len(rows) - len(keyed),
                 len(rows),
                 entry.key,
+            )
+            # One row per fetch rather than per offending row, keyed by the column that was empty:
+            # these rows have no id, so there is nothing to key them by individually, and the
+            # ledger's `occurrences`/`last_seen` then answer "is this still happening, and since
+            # when" — which is the question a keyless row can be asked.
+            refused[f"<no {entry.key}>"] = (
+                f"{len(rows) - len(keyed)} of {len(rows)} rows fetched from {entry.relation} "
+                f"carried no {entry.key!r} and could not be ingested: the binding's `key` is what "
+                "identifies a reaction, and a row without one cannot be cited, amended or "
+                "withdrawn. Bind `key` to a column that is always populated, or narrow `where:`"
             )
         bundles = {str(row[entry.key]): {ROOT: row} for row in keyed}
         if len(bundles) != len(keyed):
@@ -211,16 +238,30 @@ class WarehouseElnAdapter:
                 entry.key,
                 entry.relation,
             )
+            # Keyed by the id that was shared, which is also the id the survivor is ingested under:
+            # the ledger row is what says a record answering to it is one of several, which is the
+            # honest statement and the one a citation of that id needs. Refusing *both* is what the
+            # file-drop adapters do (`adapter.refuse_colliding_ids`) and is not available here — a
+            # page is a slice of a relation, so the two rows behind one key may not even be in the
+            # same fetch, and dropping the survivor would refuse a record this source can still
+            # amend.
+            for shared, count in _repeated_keys(keyed, entry.key).items():
+                refused[shared] = (
+                    f"{count} rows in {entry.relation} share the {entry.key!r} {shared!r}; only "
+                    "one of them is ingested under it and the rest are lost, so a citation of it "
+                    "does not name one run. The declared `key` is not unique in that relation — "
+                    "bind it to the reaction's own key, or point `relation:` at a view with one "
+                    "row per reaction"
+                )
         await self._attach_related(warehouse, bundles)
         entries: list[RawEntry] = []
-        # entry key -> why it was refused. A row whose bound `created_at` is NULL, empty or
-        # unparseable costs itself and nothing else: `_raw_entry` used to raise straight out of
-        # this method, outside every per-entry handler `sync_entries` has, and `ElnMappingError`
-        # is non-retryable (`durable/publish._BAD_DATA_TYPES`) — so one draft row with no timestamp
-        # stopped the source, the cursor never advanced, and every later run re-fetched the same
-        # page and failed identically. The two file-drop adapters have always skipped-and-continued
-        # on the same fault.
-        refused: dict[str, str] = {}
+        # A row whose bound `created_at` is NULL, empty or unparseable costs itself and nothing
+        # else: `_raw_entry` used to raise straight out of this method, outside every per-entry
+        # handler `sync_entries` has, and `ElnMappingError` is non-retryable
+        # (`durable/publish._BAD_DATA_TYPES`) — so one draft row with no timestamp stopped the
+        # source, the cursor never advanced, and every later run re-fetched the same page and
+        # failed identically. The two file-drop adapters have always skipped-and-continued on the
+        # same fault.
         for key, bundle in bundles.items():
             try:
                 entries.append(self._raw_entry(key, bundle))
@@ -314,7 +355,9 @@ class WarehouseElnAdapter:
             entry_id=key,
             created_at=_timestamp(row.get(entry.created_at), entry.created_at, key),
             modified_at=(
-                _optional_timestamp(row.get(entry.modified_at)) if entry.modified_at else None
+                _stated_timestamp(row.get(entry.modified_at), entry.modified_at, key)
+                if entry.modified_at
+                else None
             ),
             payload=bundle,
             # The site's own withdrawal, when the binding names the column that carries it. Absent
@@ -322,7 +365,9 @@ class WarehouseElnAdapter:
             # disappearance from a page says nothing at all
             # (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`).
             retracted_at=(
-                _optional_timestamp(row.get(entry.retracted_at)) if entry.retracted_at else None
+                _stated_timestamp(row.get(entry.retracted_at), entry.retracted_at, key)
+                if entry.retracted_at
+                else None
             ),
         )
 
@@ -403,10 +448,16 @@ class WarehouseElnAdapter:
                 scope = {ROOT: row, **row}
                 name = _read(block.name, scope) if block.name else None
                 smiles = _read(block.smiles, scope) if block.smiles else None
-                if not name and not smiles:
-                    continue
                 area = _read(block.area_percent, scope) if block.area_percent else None
                 rrt = _read(block.rrt, scope) if block.rrt else None
+                # An RRT-only row is identified by where it eluted, so it is named rather than
+                # dropped — the remedy `Impurity._identifiable` prescribes, and the identical hole
+                # `json_adapter._impurities` had. The unresolved peaks in a site's analytics table
+                # are routinely its largest.
+                if not name and not smiles and isinstance(rrt, (int, float)) and rrt > 0:
+                    name = unresolved_peak_name(float(rrt))
+                if not name and not smiles:
+                    continue
                 try:
                     found.append(
                         Impurity(
@@ -541,6 +592,31 @@ def _provenance(template: str, payload: dict[str, Any], entry_id: str) -> str:
     return rendered or f"warehouse:{entry_id}"
 
 
+def _has_key(row: dict[str, Any], column: str) -> bool:
+    """Whether this row carries a usable entry key in `column`.
+
+    `row.get(column)` was the test, which is truthiness: a warehouse integer primary key of `0`, or
+    an empty-string key, removed the row from the fetch by the same branch that removes a NULL one.
+    A `0` is a key; `NULL` and a blank string are not, and the blank one is refused rather than
+    skipped, because a column that holds `''` is a column somebody bound to the wrong thing.
+    """
+    value = row.get(column)
+    return value is not None and str(value).strip() != ""
+
+
+def _repeated_keys(rows: list[dict[str, Any]], column: str) -> dict[str, int]:
+    """How many rows claim each entry key that more than one row claims.
+
+    Counted after the fact rather than while building `bundles`, so the dict comprehension that
+    collapses them stays the one place the surviving row is chosen.
+    """
+    counts: dict[str, int] = {}
+    for row in rows:
+        key = str(row[column])
+        counts[key] = counts.get(key, 0) + 1
+    return {key: count for key, count in counts.items() if count > 1}
+
+
 def _timestamp(value: Any, column: str, entry_id: str) -> datetime:
     """Read a required timestamp column, or reject the row naming what was missing."""
     parsed = _optional_timestamp(value)
@@ -552,8 +628,55 @@ def _timestamp(value: Any, column: str, entry_id: str) -> datetime:
     return parsed
 
 
+def _stated_timestamp(value: Any, column: str, entry_id: str) -> datetime | None:
+    """An amendment or withdrawal stamp: `None` only when the column is genuinely empty.
+
+    **Absent and unparseable are different facts and `_optional_timestamp` answers `None` to both**,
+    which is safe for the watermark and wrong here. `json_adapter._optional_timestamp` states the
+    rule this restores: "a present but unparseable value is bad data and is raised, because silently
+    treating it as absent would reinstate the exact silence this field exists to break". Driven over
+    the two same-named readers, 6 of 9 realistic warehouse cell values diverged — `01/09/2026`,
+    `0000-00-00 00:00:00`, `N/A`, `-`, `01-SEP-2026` and a Unix epoch integer all raised in the JSON
+    adapter and read as absent here.
+
+    What each silence costs is specific. A `modified_at` of `None` makes `entry_window` fall back to
+    creation, so an **amended row never re-enters the fetch window and the correction is never
+    ingested** — the binding at `ElnWarehouseAdapter.fetch_new_entries` says exactly that. A
+    `retracted_at` of `None` means a source's explicit withdrawal is never seen and the withdrawn
+    record stays live as current knowledge, against
+    `D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`.
+
+    Raising costs the row its ingest this run and files it in the rejection ledger naming the column
+    — `_raw_entry`'s caller catches `ElnMappingError` per entry — which is the trade
+    `D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask` names: a refusal somebody can
+    ask about beats a correction that silently never arrives.
+
+    **`_watermark` deliberately keeps the lenient reader.** What decides whether a page got past the
+    cursor is what the *warehouse* sorted on, and a row with no usable timestamp must read as no
+    later than the cursor so the fetch keeps paging; it is this function that then refuses the row.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, datetime) and not str(value).strip():
+        return None
+    parsed = _optional_timestamp(value)
+    if parsed is None:
+        raise ElnMappingError(
+            f"entry {entry_id!r} carries {str(value)[:60]!r} in {column!r}, which is not a "
+            "timestamp this ingest can read. The column is bound as an amendment or withdrawal "
+            "stamp, and reading an unparseable one as absent would drop the amendment silently — "
+            "bind a column with a parseable value, or declare a `transform:` for this one"
+        )
+    return parsed
+
+
 def _optional_timestamp(value: Any) -> datetime | None:
-    """Read a timestamp from a driver-native value or an ISO string; `None` when absent."""
+    """Read a timestamp from a driver-native value or an ISO string; `None` when absent.
+
+    Lenient by design and by one caller only: `_watermark` orders pages on whatever the warehouse
+    sorted on and must keep paging past a value it cannot read. Everything a *record* is built from
+    goes through `_stated_timestamp` or `_timestamp`, which refuse rather than answer `None`.
+    """
     if value is None:
         return None
     if isinstance(value, datetime):

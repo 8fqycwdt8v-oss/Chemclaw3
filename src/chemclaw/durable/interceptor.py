@@ -54,6 +54,8 @@ from typing import Any
 from temporalio import activity
 from temporalio.worker import ActivityInboundInterceptor, ExecuteActivityInput, Interceptor
 
+from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import (
     reset_current_correlation_id,
     reset_current_identity,
@@ -244,6 +246,40 @@ def activity_context(args: Sequence[Any], fn: Any = None) -> ActivityContext:
     )
 
 
+class ActivityResultTooLarge(ChemclawError):
+    """An activity produced a result the broker will refuse to store, so it is refused here first.
+
+    **A `ChemclawError`, hence non-retryable** (its name is in `durable/publish._BAD_DATA_TYPES`),
+    because the result is a deterministic function of the arguments: the next attempt serializes to
+    the same number of bytes and is refused again. That is not a theoretical claim — it is what the
+    unrefused version *did*. Driven against a live broker on 2026-09-19 with a 6 MB result, the
+    worker retried the attempt indefinitely against a gRPC `ResourceExhausted`, each attempt logging
+    `activity.finished … completed`, while the workflow sat `RUNNING` and the chemist's call timed
+    out.
+
+    The message names the size, the ceiling and the setting, because the operator's next action is
+    either to bound the activity's output or to raise both this ceiling and the broker's blob limit,
+    and neither is derivable from "payload too large".
+    """
+
+
+def _result_payload_bytes(result: Any) -> int:
+    """The serialized size of an activity's result, as the broker will count it.
+
+    Measured through the activity's *own* payload converter (`activity.payload_converter()`), not
+    through a serializer chosen here: this worker runs `pydantic_data_converter`, a codec would
+    change the bytes again, and a number taken off a different serializer is a number about a
+    different wire (`tasks/lessons.md`, "take the number off the wire, not off a serializer you
+    chose").
+
+    `ByteSize()` of each payload rather than `len(payload.data)`, because Temporal's blob limit is
+    charged against the whole payload — metadata included. Measured on a 6,000,000-byte string the
+    two differ by 36 bytes, which is noise at this ceiling and would not be at a small one.
+    """
+    payloads = activity.payload_converter().to_payloads([result])
+    return sum(payload.ByteSize() for payload in payloads)
+
+
 class _ObservedActivity(ActivityInboundInterceptor):
     """Bind the turn's ids, record the attempt, and say how it ended — around every activity."""
 
@@ -306,6 +342,26 @@ class _ObservedActivity(ActivityInboundInterceptor):
                 **fields,
             )
             result = await self.next.execute_activity(input)
+            # **The upload is outside this frame, so the size has to be checked before the
+            # return.** `self.next.execute_activity` hands the result back to the worker's task
+            # handler, which converts it and calls `RespondActivityTaskCompleted` — after this
+            # method has returned, outside this `try`, and therefore outside the failure counter,
+            # the `activity.finished` line and the workflow's terminal record. An
+            # `ActivityOutbound` interceptor does not see the upload either; a pre-check is the
+            # only hook this layer has.
+            #
+            # Inside the `try` on purpose: the raise below is what books
+            # `chemclaw_activity_failures_total`, logs `activity.finished … failed` and reaches the
+            # workflow, which is the whole point — three reports that a refused result used to move
+            # not at all. See `ActivityResultTooLarge` for the drive.
+            size = _result_payload_bytes(result)
+            if size > settings.activity_result_max_bytes:
+                raise ActivityResultTooLarge(
+                    f"{info.activity_type} produced a {size}-byte result, over the "
+                    f"{settings.activity_result_max_bytes}-byte ceiling the broker would refuse "
+                    "it at (CHEMCLAW_ACTIVITY_RESULT_MAX_BYTES); bound the activity's output or "
+                    "raise both this ceiling and the broker's limit.blobSize.error"
+                )
         except BaseException as exc:
             elapsed = time.perf_counter() - started
             # One row **per attempt**, which is the whole point: a counter booked once per

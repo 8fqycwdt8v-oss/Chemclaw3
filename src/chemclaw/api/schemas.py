@@ -258,7 +258,21 @@ class WorkflowApprovalOut(BaseModel):
 
 
 class PendingRequestOut(BaseModel):
-    """One held-open question, as an inbox renders it."""
+    """One held-open question, as an inbox renders it.
+
+    **Narrower than the stored record, and that is the shape rather than an omission.** It is built
+    from `durable.pending_store.PendingRequest` by `**model_dump()`, and it used to restate that
+    record's `answered_at`, `answered_by` and `answer` too — three fields the only route that builds
+    this model cannot ever fill: `pending_store.open_requests` is `WHERE state = 'waiting'` in SQL,
+    so an answered row never reaches here. A response field that is structurally always empty is not
+    a quiet feature a client might one day read, it is boilerplate, and a surface that does serve
+    answered rows will need to say what an answer *is* — whose payload it carries, who may see it —
+    which is a decision to take then rather than a default to inherit now.
+
+    `reminders` stays, and it is the one field here that earns its place by saying something the
+    rest cannot: on a waiting row it separates "asked an hour ago" from "asked on Tuesday and
+    chased three times", which is the difference between an inbox and a list.
+    """
 
     request_id: str
     kind: str
@@ -270,9 +284,6 @@ class PendingRequestOut(BaseModel):
     state: str = "waiting"
     due_at: str = ""
     reminders: int = 0
-    answered_at: str = ""
-    answered_by: str = ""
-    answer: dict[str, Any] = Field(default_factory=dict)
     created_at: str = ""
 
 

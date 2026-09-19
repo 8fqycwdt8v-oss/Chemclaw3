@@ -1395,6 +1395,25 @@ monitoring:
     # cannot mean anything yet.
     turnsFloorPerSecond: 0.01
     jobsFloorPerSecond: 0.002
+    # The share of one tool's calls that may end `error` before the turns group warns, and the
+    # floor under its own denominator — the third ratio, on the same argument as the two above.
+    #
+    # **Per tool, not fleet-wide**, because that is the whole diagnostic value:
+    # `chemclaw_tool_calls_total` already carries `tool`, one broken connector tool among forty
+    # healthy ones is invisible in a fleet ratio, and "which tool" is the operator's first question.
+    # `outcome="error"` is a raised exception *or* a connector answering `isError=True`
+    # (`agent/audit.py`) — never a governance refusal, which has its own outcome and its own
+    # counter — so a steady non-zero rate is a tool that is failing rather than a gate that is
+    # working.
+    #
+    # 0.5 rather than the turn group's 0.1: a *tool* legitimately refuses bad input by raising
+    # (`Chemclaw3-mcp`'s "refuse rather than approximate" rule makes an unknown solvent an error,
+    # deliberately), so a minority error rate is normal traffic and only a majority is a fault.
+    # The floor is per tool as well, and looser than the turn floor for the same reason it has to
+    # be: a tool called twice an hour cannot have a meaningful ratio.
+    #   toolCallsFloorPerSecond 0.005 = ~4.5 calls of that one tool in the rule's 15-minute window
+    toolErrorRatio: 0.5
+    toolCallsFloorPerSecond: 0.005
     # How long a result publication may sit undelivered before the outbox counts as stuck, in
     # seconds. Read off `chemclaw_outbox_oldest_pending_seconds`, the age gauge, and NOT off
     # queued-minus-published: dead-lettered rows never leave that difference, and its two counters

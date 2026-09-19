@@ -22,6 +22,7 @@ from typing import Annotated, Any, Generic, NotRequired, TypedDict, TypeVar, get
 import pytest
 from langchain.agents.middleware.todo import PlanningState
 from langgraph.channels.last_value import LastValue
+from langgraph.channels.untracked_value import UntrackedValue
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
@@ -270,6 +271,15 @@ def test_the_stamp_covers_this_repository_s_channels_and_not_the_upstream_base_s
     # time a per-turn counter was added, and pre-empted nothing, because a channel absent from
     # every build's checkpoint cannot be missing from one build's relative to another's.
     # `_first_party_channels` now excludes them; the exclusion itself is asserted here.
+    #
+    # **And this assertion cannot fail for `ChemclawState` by construction, which is worth saying
+    # rather than leaving to read as stronger than it is.** Both tuples come from one walk of
+    # `_own_channels` partitioned by one predicate, so for the shipped state class they are disjoint
+    # whatever `_is_untracked` answers. What it does catch is a mutation of `_untracked_channels`
+    # itself — dropping the `if` there reds it — so it is a guard on the *derivation* staying a
+    # partition, not on the membership being right. The membership is
+    # `test_a_channel_declared_with_the_untracked_class_is_not_stamped` below, which drives a state
+    # class this file declares and therefore has two independent answers to compare.
     assert declared.isdisjoint(ckpt.UNTRACKED_CHANNELS), (
         f"the stamp covers untracked channels {sorted(declared & set(ckpt.UNTRACKED_CHANNELS))}, "
         "which no checkpoint holds — so adding one would refuse every live thread and prevent "
@@ -310,6 +320,9 @@ def test_the_declared_channels_partition_the_state() -> None:
     assert not (first_party & upstream), (
         f"{sorted(first_party & upstream)} is claimed by both halves"
     )
+    # Same narrowness as the sibling assertion above and for the same reason: one walk, one
+    # predicate, so this holds for `ChemclawState` however `_is_untracked` answers. It reds on a
+    # mutation of `_untracked_channels`, which is what it is for.
     assert not (declared & untracked), (
         f"{sorted(declared & untracked)} is both stamped and untracked, so the partition of the "
         "first-party half is not one"
@@ -470,26 +483,46 @@ def test_a_thread_that_never_held_a_channel_this_build_declares_is_refused_by_na
 def test_a_channel_this_build_no_longer_declares_does_not_refuse_the_thread() -> None:
     """A dropped field is measured harmless above, so the guard must not end sessions over one.
 
-    Staged as the deploy stages it: the thread was stamped with today's channels, and the build
-    reading it declares one fewer. The assertion is on the accumulated `messages` channel, because
-    that is what proves the checkpoint was *restored* rather than quietly skipped.
+    Staged as the deploy stages it: the thread was stamped with channels the *writing* build
+    declared, and the build reading it declares one fewer. The assertion is on the accumulated
+    `messages` channel, because that is what proves the checkpoint was *restored* rather than
+    quietly skipped.
+
+    **The staging is written both ways round, because slicing the live tuple degenerated.** This
+    patched `FIRST_PARTY_CHANNELS[:-1]`, and the fix that excluded every untracked channel left the
+    stamp as the 1-tuple `('active_agent',)` — so `[:-1]` is `()`, and the scenario silently stopped
+    being "declares one fewer" and became "declares none at all", which is the trivial case where
+    `missing` is empty for any stamp whatsoever. It still caught a symmetric-comparison defect, so
+    it was not vacuous, but nothing in it said the drop it staged had disappeared.
+
+    So the *writing* build is the one given the extra channel now, which is the direction a deploy
+    actually moves: the thread is stamped with `(…, 'retired_channel')` and the reading build
+    declares only what ships today. That is a genuine one-fewer regardless of how many channels the
+    stamp holds, and it stays real if `FIRST_PARTY_CHANNELS` ever shrinks to nothing at all.
     """
+    retired = (*ckpt.FIRST_PARTY_CHANNELS, "retired_channel")
 
     async def _run() -> list[str]:
         await migrated_db_or_skip()
         saver = await ckpt.checkpointer()
         try:
-            await _turn(saver, "sess-channel-dropped", "q1")
+            # Turn one runs under the *old* build, which declared one channel this build does not.
             patch = pytest.MonkeyPatch()
-            patch.setattr(ckpt, "FIRST_PARTY_CHANNELS", ckpt.FIRST_PARTY_CHANNELS[:-1])
+            patch.setattr(ckpt, "FIRST_PARTY_CHANNELS", retired)
             try:
-                final = await _turn(saver, "sess-channel-dropped", "q2")
+                await _turn(saver, "sess-channel-dropped", "q1")
             finally:
                 patch.undo()
+            # Turn two runs under today's, which declares one fewer than the stamp records.
+            final = await _turn(saver, "sess-channel-dropped", "q2")
             return list(final["messages"])
         finally:
             await ckpt.close_checkpointer()
 
+    assert len(retired) == len(ckpt.FIRST_PARTY_CHANNELS) + 1, (
+        "the staged scenario is not 'declares one fewer' any more, so this test is about the "
+        "degenerate case rather than about a dropped channel"
+    )
     assert asyncio.run(_run()) == ["q1", "answered", "q2", "answered"]
 
 
@@ -812,3 +845,88 @@ def test_upstream_default_serde_is_still_permissive() -> None:
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
     assert JsonPlusSerializer()._allowed_msgpack_modules is True
+
+
+def test_a_channel_declared_with_the_untracked_class_is_not_stamped() -> None:
+    """The one untracked spelling `_is_untracked` missed, which is the one its origin uses.
+
+    **`isinstance(bound, UntrackedValue)` is a test on a channel *instance*, and upstream declares
+    its own untracked channel with the *class*.** `ModelCallLimitMiddleware` writes
+    `run_model_call_count: NotRequired[Annotated[int, UntrackedValue, PrivateStateAttr]]`, and
+    `agent/state.py` quotes that line verbatim as where this repository's shape comes from —
+    LangGraph resolves a bare channel class in an annotation by constructing it, so the two
+    spellings mean the same thing.
+
+    Driven before the fix, with one channel added in exactly that spelling: it landed in
+    `FIRST_PARTY_CHANNELS` rather than in `UNTRACKED_CHANNELS`, and the next ordinary turn of a
+    session written by the previous build was refused against a real Postgres —
+    `refusing turn state for session sess-a5-probe: it never held state channel(s) probe_counter`,
+    `CheckpointSchemaMismatch: … Start a new session`. The fleet-wide refusal the whole derivation
+    exists to close, live again, with all 19 tests in this file green, through the one shape
+    `_is_untracked`'s own docstring promised was covered ("read off the annotation rather than off a
+    list of class names, so a sixth untracked channel shape is covered the day it is written").
+
+    Both directions, and the second is the reason this is not just a repeat of the sibling test
+    above: a predicate widened to "any class in the metadata" would also swallow a *restorable*
+    channel declared by class, so `LastValue` in the same position must still be stamped.
+
+    Four class-form spellings rather than one, because three one-token narrowings of the predicate
+    were watched passing against fewer:
+
+    - the **bare class** (`UntrackedValue`), which is upstream's own;
+    - a **subclass as a class** (`TurnTotal`, not `TurnTotal(int)`), which `bound is UntrackedValue`
+      admits and which is how this repository's own channels would read if anybody dropped the call;
+    - the marker **beside another** and **after** it, because upstream's declaration carries
+      `PrivateStateAttr` in the same `Annotated` and the order of two markers is arbitrary — a
+      predicate reading `__metadata__[0]` passes every spelling that happens to put it first.
+    """
+    response = TypeVar("response")
+
+    class _Upstream(TypedDict, Generic[response]):
+        messages: list[str]
+
+    class _ByClass(_Upstream[int]):
+        active_agent: NotRequired[Annotated[str, LastValue(str)]]
+        probe_counter: NotRequired[Annotated[int, UntrackedValue]]
+
+    class _SubclassByClass(_Upstream[int]):
+        active_agent: NotRequired[Annotated[str, LastValue(str)]]
+        probe_counter: NotRequired[Annotated[int, TurnTotal]]
+
+    class _ByClassBesideAnotherMarker(_Upstream[int]):
+        active_agent: NotRequired[Annotated[str, LastValue(str)]]
+        probe_counter: NotRequired[Annotated[int, UntrackedValue, "a second marker"]]
+
+    class _ByClassAfterAnotherMarker(_Upstream[int]):
+        active_agent: NotRequired[Annotated[str, LastValue(str)]]
+        probe_counter: NotRequired[Annotated[int, "a first marker", UntrackedValue]]
+
+    class _RestorableByClass(_Upstream[int]):
+        active_agent: NotRequired[Annotated[str, LastValue(str)]]
+        retrieved_notes: NotRequired[Annotated[list[str], LastValue]]
+
+    assert ckpt._first_party_channels(_ByClass) == ("active_agent",), (
+        "a channel declared with the `UntrackedValue` class is in the stamp, so adding one refuses "
+        "the next ordinary turn of every live session for a channel no checkpoint holds — the "
+        "exact spelling `agent/state.py` cites as this shape's origin"
+    )
+    assert ckpt._untracked_channels(_ByClass) == ("probe_counter",), (
+        "the class-declared channel is in neither half, so nothing names the exclusion and the "
+        "partition test cannot see it"
+    )
+    assert ckpt._first_party_channels(_SubclassByClass) == ("active_agent",), (
+        "a `TurnTotal` written as a class rather than as `TurnTotal(int)` is in the stamp, so the "
+        "class arm recognises `UntrackedValue` itself and not what inherits from it"
+    )
+    assert ckpt._first_party_channels(_ByClassBesideAnotherMarker) == ("active_agent",), (
+        "the class form is not recognised beside a second marker; upstream's own declaration "
+        "carries `PrivateStateAttr` in the same `Annotated`"
+    )
+    assert ckpt._first_party_channels(_ByClassAfterAnotherMarker) == ("active_agent",), (
+        "the class form is only recognised as the *first* marker, and the order of two markers in "
+        "one `Annotated` is arbitrary — upstream could reorder its own declaration tomorrow"
+    )
+    assert ckpt._first_party_channels(_RestorableByClass) == ("active_agent", "retrieved_notes"), (
+        "a restorable channel declared by class is now excluded from the stamp, so the predicate "
+        "has become 'any class in the metadata' and the guard refuses nothing"
+    )

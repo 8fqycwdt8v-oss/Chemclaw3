@@ -157,6 +157,169 @@ def _one_reaction(binding: dict[str, Any], tables: dict[str, list[dict[str, Any]
     return adapter.map_to_ord(entries[0])
 
 
+def _filed(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """Capture what the adapter files in the rejection ledger, with no database under it.
+
+    The ledger is the point of these three assertions: a row this fetch loses is a record a chemist
+    will later assume is in the corpus, and a worker log line is not an answer anybody can be given
+    (`D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask`).
+    """
+    filed: dict[str, str] = {}
+
+    async def _spy(source: str, refusals: dict[str, str]) -> None:
+        filed.update(refusals)
+
+    monkeypatch.setattr("chemclaw.ingest.eln.warehouse.adapter.record_refusals", _spy)
+    return filed
+
+
+def test_an_unparseable_amendment_stamp_is_refused_rather_than_read_as_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A present-but-unreadable `modified_at` is bad data, and it read as "never amended".
+
+    The two same-named `_optional_timestamp` functions — this module's and `json_adapter`'s —
+    diverged on **6 of 9** realistic warehouse cell values: `01/09/2026`, `0000-00-00 00:00:00`,
+    `N/A`, `-`, `01-SEP-2026` and a Unix epoch integer all raised there and answered `None` here.
+    The JSON twin's docstring states the rule this restores: treating a present but unparseable
+    value as absent "would reinstate the exact silence this field exists to break".
+
+    What the silence costs is specific to this column: `entry_window` falls back to creation, so
+    the row never re-enters the fetch window and **the correction is never ingested** — which is
+    the failure `test_the_cursor_filters_on_the_later_of_created_and_modified` exists to prevent,
+    arriving through the reader instead of through the SQL.
+    """
+    filed = _filed(monkeypatch)
+    tables = _rows()
+    tables["V_REACTION"][0]["LAST_MODIFIED_TS"] = "01/09/2026"
+
+    _, entries = _fetch(_binding(), tables)
+
+    assert entries == [], "a row whose amendment stamp cannot be read is refused, not ingested"
+    assert "LAST_MODIFIED_TS" in filed["RX-1"] and "01/09/2026" in filed["RX-1"]
+
+
+def test_an_unparseable_withdrawal_stamp_is_refused_rather_than_read_as_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same reader, on the column where the silence keeps a withdrawn record answering.
+
+    `retracted_at` reading `None` means the source's explicit withdrawal is never seen and the row
+    stays live as current knowledge, against
+    `D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`. Asserted separately from the amendment
+    case because the two call sites are separate and only one of them was covered by anything.
+    """
+    filed = _filed(monkeypatch)
+    binding = _binding()
+    binding["ingest"]["entry"]["retracted_at"] = "WITHDRAWN_TS"
+    tables = _rows()
+    tables["V_REACTION"][0]["WITHDRAWN_TS"] = "N/A"
+
+    _, entries = _fetch(binding, tables)
+
+    assert entries == []
+    assert "WITHDRAWN_TS" in filed["RX-1"]
+
+
+def test_a_blank_amendment_stamp_is_still_simply_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The half that must not become a refusal: an empty cell is a row nobody has amended.
+
+    Pinned beside the two above because the obvious over-fix — refusing anything that does not
+    parse — would refuse every un-amended row in every warehouse, i.e. the whole corpus. `NULL`,
+    `''` and whitespace are the source saying nothing, which is the ordinary state.
+    """
+    filed = _filed(monkeypatch)
+    for blank in (None, "", "   "):
+        tables = _rows()
+        tables["V_REACTION"][0]["LAST_MODIFIED_TS"] = blank
+        _, entries = _fetch(_binding(), tables)
+        assert [entry.entry_id for entry in entries] == ["RX-1"], blank
+        assert entries[0].modified_at is None
+    assert filed == {}
+
+
+def test_a_row_with_no_usable_key_reaches_the_rejection_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two faults in one assertion's neighbourhood: truthiness, and a WARNING-only loss.
+
+    `keyed = [row for row in rows if row.get(entry.key)]` dropped on **truthiness**, so an integer
+    primary key of `0` and an empty-string key were removed by the same test that removes a NULL.
+    The `0` row now survives; the blank one is refused *into the ledger* rather than counted in a
+    worker log, which is what the third loss path in the same method already did.
+    """
+    filed = _filed(monkeypatch)
+    tables = _rows()
+    header = tables["V_REACTION"][0]
+    tables["V_REACTION"] = [
+        {**header, "REACTION_ID": 0},
+        {**header, "REACTION_ID": "  "},
+    ]
+    tables["V_CHARGE"] = [{**row, "REACTION_ID": 0} for row in tables["V_CHARGE"]]
+
+    _, entries = _fetch(_binding(), tables)
+
+    assert [entry.entry_id for entry in entries] == ["0"], (
+        "an integer key of 0 is a key; truthiness removed a real row from the fetch"
+    )
+    assert "REACTION_ID" in filed["<no REACTION_ID>"]
+
+
+def test_two_rows_sharing_one_key_leave_a_ledger_row_naming_the_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repeated key collapses two reactions, and the comment beside it says so itself.
+
+    "The reactions it collapses would otherwise vanish with no explanation at all" — and a worker
+    log line is not an explanation a chemist can be given. Both are refused into the ledger under
+    the id they share, which is also the id the survivor is ingested under: that row is what tells a
+    citation of it that it does not name one run.
+    """
+    filed = _filed(monkeypatch)
+    tables = _rows()
+    tables["V_REACTION"].append({**tables["V_REACTION"][0], "YIELD_PCT": "11.0"})
+
+    _, entries = _fetch(_binding(), tables)
+
+    assert [entry.entry_id for entry in entries] == ["RX-1"]
+    assert "2 rows" in filed["RX-1"] and "V_REACTION" in filed["RX-1"]
+
+
+def test_a_warehouse_impurity_known_only_by_its_rrt_is_named_rather_than_dropped() -> None:
+    """The identical hole `json_adapter._impurities` had, in the other adapter.
+
+    `Impurity._identifiable` refuses an RRT-only row and prescribes the remedy — a name of the form
+    "the RRT 0.94 peak" — and both adapters dropped the row instead. A site's analytics table is
+    exactly where unresolved peaks live, and they are routinely the largest ones in the profile.
+    """
+    binding = _binding()
+    binding["ingest"]["impurities"] = [
+        {
+            "from": "peaks",
+            "name": {"path": "PEAK_NAME"},
+            "area_percent": {"path": "AREA_PCT", "transform": [{"number": {}}]},
+            "rrt": {"path": "RRT", "transform": [{"number": {}}]},
+        }
+    ]
+    binding["ingest"]["related"].append(
+        {
+            "name": "peaks",
+            "relation": "V_PEAK",
+            "foreign_key": "REACTION_ID",
+            "order_by": "PEAK_SEQ",
+        }
+    )
+    tables = _rows()
+    tables["V_PEAK"] = [
+        {"REACTION_ID": "RX-1", "PEAK_SEQ": 1, "PEAK_NAME": "des-bromo", "AREA_PCT": "0.31"},
+        {"REACTION_ID": "RX-1", "PEAK_SEQ": 2, "PEAK_NAME": None, "AREA_PCT": "1.9", "RRT": "0.94"},
+    ]
+
+    reaction = _one_reaction(binding, tables)
+
+    assert [impurity.name for impurity in reaction.impurities] == ["des-bromo", "RRT 0.94 peak"]
+
+
 def test_the_cursor_filters_on_the_later_of_created_and_modified() -> None:
     """An amended run counts as new, which is the ELN sync's contract and not a nicety.
 

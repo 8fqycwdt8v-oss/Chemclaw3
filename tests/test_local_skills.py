@@ -6,6 +6,7 @@ conditions driven rather than restated.
 """
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -485,3 +486,44 @@ async def test_a_name_that_could_never_have_been_written_reads_as_absent() -> No
     store = InMemoryStore()
     assert await read_local_skill(store, "alice", "a\x00b") is None
     assert await delete_local_skill(store, "alice", "a\x00b") is False
+
+
+def test_a_directory_whose_manifest_is_broken_still_occupies_its_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reviewed tree's directory name is taken even when its `SKILL.md` declares nothing.
+
+    **An undocumented interaction between two fixes, fail-closed, and now a decision rather than a
+    side effect.** `skill_manifest._declared_pair` keys an unreadable manifest by its *directory*
+    (the frontmatter is the thing that could not be read, so its `tools:` declaration cannot be
+    trusted), and `langgraph_agent.shipped_skill_names` is `frozenset(declared_tools(...))` — so
+    that directory name reaches the set both `POST /skills/mine` and `propose_skill` refuse against.
+    `propose_skill` newly routes through `validated_skill`, which is what brought the second caller
+    in. Driven: a tree holding one skill with `name: '   '` is keyed `'empty-name'`, and a chemist
+    naming their own skill `empty-name` is told it "is the name of a skill this deployment already
+    ships" — about a skill that ships nothing.
+
+    **Kept, and the docstring changed to say so.** `make skill-validate` requires a directory and
+    its frontmatter `name` to agree, so the directory is the name that tree will occupy the moment
+    the file is fixed; leaving it free lets a personal skill shadow, or be shadowed by, a shipped
+    skill one typo away from working. The cost is one confusing message on a corpus CI would
+    already have failed. `shipped_skill_names` says "occupy" rather than "declare" for exactly this
+    reason, and this is the test that makes the word true.
+    """
+    from chemclaw.agent.langgraph_agent import shipped_skill_names
+    from chemclaw.agent.skill_manifest import _declared_tools
+
+    broken = tmp_path / "half-written-skill"
+    broken.mkdir()
+    (broken / "SKILL.md").write_text("---\nname: '   '\ndescription: d\n---\n\nbody\n")
+    monkeypatch.setattr(settings, "skills_dir", str(tmp_path))
+    _declared_tools.cache_clear()
+    try:
+        occupied = shipped_skill_names()
+    finally:
+        _declared_tools.cache_clear()
+
+    assert "half-written-skill" in occupied, (
+        "a reviewed directory whose manifest cannot be read leaves its name free, so a personal "
+        "skill can take it and then be shadowed the moment the frontmatter is fixed"
+    )

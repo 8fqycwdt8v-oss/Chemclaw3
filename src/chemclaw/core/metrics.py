@@ -456,8 +456,8 @@ _COUNTERS: dict[str, str] = {
     # all discarded it (REV-6). Counted per unreachable connector rather than per degraded turn, so
     # "one connector is dark" and "the fleet is dark" are different rates.
     "chemclaw_connectors_unreachable_total": (
-        "Connectors that failed to come up when a turn or template step opened them; their tools "
-        "were absent from that turn."
+        "Connectors that failed to come up when a turn or template step opened them, by connector; "
+        "their tools were absent from that turn."
     ),
     "chemclaw_event_streams_rejected_total": (
         "Push-back event streams rejected with 429 at the per-user or per-process cap."
@@ -1255,6 +1255,13 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_turns_finished_total": ("outcome",),
     "chemclaw_jobs_finished_total": ("connector", "outcome"),
     "chemclaw_activity_failures_total": ("activity",),
+    # A bundle name off the connector registry — a deployment's own `CHEMCLAW_ENABLED_CONNECTORS`
+    # entry, never a caller's string, which is the same rule every label in this table follows. It
+    # is the label the sibling gauge `chemclaw_connector_unhealthy` already carries, and the reason
+    # it is here is that the counter without it could not say *which* connector went dark: the
+    # `ChemclawConnectorsDegradingTurns` rule groups by it, and a dashboard reading the unlabelled
+    # form could only report that something had.
+    "chemclaw_connectors_unreachable_total": ("connector",),
     "chemclaw_calc_cache_total": ("outcome",),
     "chemclaw_calc_backend_at_capacity_total": ("tool",),
     "chemclaw_ingest_records_total": ("source", "outcome"),
