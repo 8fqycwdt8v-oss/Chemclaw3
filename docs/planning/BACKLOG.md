@@ -368,6 +368,14 @@ topic).
       before building it, the way
       `D-2026-09-11-the-debt-was-in-the-claims-not-in-the-code` measured 82.9% and declined.
 
+      **This row is now the only live instance of its shape, which is worth saying because it is
+      not the whole shape.** "A guard satisfied while the thing it protects is false" was worked on
+      `tests/test_repo_map.py` and `tests/test_readiness_record.py` by
+      `D-2026-09-18-a-mutation-watched-failing-is-half-a-guard` — six mutations, all green over a
+      live false statement, all closed. None of that touches this row: what is open here is the
+      *universe* those two prose-contract guards read and the patterns they read it with, and no
+      derivation used there reaches it. A reader who takes the class as closed would skip this.
+
 - [ ] **An agent-recorded note the model could not date reaches no subscriber who has a
       watermark** — [M], found 2026-09-15 in the review of the wave 2/4/7 merge.
       `durable/digest._is_new` reads an absent `valid_from` as *open-ended* — true for as long as

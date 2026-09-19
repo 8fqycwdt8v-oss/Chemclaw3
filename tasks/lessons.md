@@ -3123,3 +3123,50 @@ isolation is not evidence that it covers what it names, and "it passes" and "it 
 shipped surface" are different claims. Before believing a new control, ask what its fixture builds
 and whether that is the thing the sentence in its docstring is about — then run the whole suite,
 because a green targeted run is exactly the evidence that misses this.
+
+## 2026-09-18 — a mutation watched failing is half a guard
+
+A fresh-context review drove seven mutations against two guards I had written the day before and
+hardened. All ten of the commit's claims reproduced, both merge resolutions were provably lossless,
+and the guards were genuinely better than what they replaced. Six of the seven mutations were
+nonetheless **green over a live, false statement**, and four of them in the very files that had
+carried the original defect:
+
+- the readiness guard's subject population was *backticked* tokens, so a reword that also dropped
+  the backticks removed the row from the owed set as well as from the claimed set;
+- the prose guard's new basis was `assert scanned_in_package` — an *any* basis over a four-file
+  package where one file carries the surface, so moving that one file out left the basis satisfied;
+- the other half of the same scope, in the same function, had no basis at all;
+- the pairing window was one sentence, so a full stop was an exemption;
+- the file-level exemption was argued as a quotation exemption and skipped a thousand lines;
+- one adjective between the cardinal and "tools" evaded the pattern the comment said covered it.
+
+**Why the previous session's work felt finished.** `tasks/lessons.md` already carries the rule that
+a guard is not written until its mutation has been watched failing, and I obeyed it exactly: every
+claim in that commit was driven, and every one reproduced. What I did not do is the complement.
+Watching a guard *fail* tells you the guard is connected to the defect. It tells you nothing about
+the boundary of what it catches, and the boundary is where the next instance of the same defect
+lands — because the next author is not re-introducing your mutation, they are writing a sentence.
+
+**Rule: a guard is finished when *other* mutations of the same property have been watched still
+failing — at least two, and at least one of them a reword rather than a deletion.** The first
+mutation proves connection; the others map the boundary. If the only mutation that reds is the one
+the guard was written for, what shipped is a regression test for a fixed bug, which is a smaller and
+different thing than a guard.
+
+**Rule: derive the scope, do not assert that it is non-empty.** Both prose-guard holes were an
+unanchored string, and the first fix for that was a stronger assertion over the same string. The
+assertion is the weaker move every time: `find_spec` on the module that defines the surface, or the
+`name:` its own manifest declares, makes a rename *carry* the scope instead of emptying it, and
+leaves the assertion to guard only the residue resolution cannot see. Say which residue that is.
+
+**Rule: state a guard's narrowness in the same breath as its rule, and prefer widening when the
+false-positive cost measures zero.** Three of the six holes were narrownesses the docstring had
+honestly described and the `#:` comment had then overstated ("any cardinal immediately before
+'tools' is refused"). A reader believes the comment. Every widening in this round was measured
+first — zero new offenders in each case — which is what made the choice an argument rather than a
+preference.
+
+**Rule: an exemption is exempt from something. Name what.** "This file quotes the sentences it
+refuses" licenses the *quotations*, not the file; the implementation licensed the file, and a
+previous commit had already had to hand-delete two fresh counts from it.

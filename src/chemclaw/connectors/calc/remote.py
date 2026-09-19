@@ -499,8 +499,12 @@ async def cached_remote(
 ) -> tuple[ResultPayload, bool]:
     """One calculation: look it up by the server's own key, compute remotely only on a miss.
 
-    This is what the twelve `run_cached_*` wrappers become, and the whole point of leaving the
-    cache behind. D-011's rule is that a *persisted* result is never recomputed, and it survives
+    This is what the per-calculator `run_cached_*` wrappers in `science/calc/store.py` *became*
+    when the physics left, and the whole point of leaving the cache behind. Past tense and no
+    count, deliberately: none of those symbols exists in `src/` any more, so a present-tense
+    sentence naming a number of them sends a reader to a `grep` that returns nothing — which is
+    `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` over a symbol family instead of a
+    `make` target. D-011's rule is that a *persisted* result is never recomputed, and it survives
     the split unchanged — what changed is only that the miss path crosses a wire.
 
     One session for both calls rather than one each, which is the only sharing that is safe: both
@@ -512,8 +516,10 @@ async def cached_remote(
     used to fall through to computing every time, on the reasoning that `predict_logd` had no cache
     row of its own. That reasoning was right and the branch was still wrong: `predict_logd` is
     composed *client-side* from a cached remote pKa plus a local Crippen sum, so it never reaches
-    this function — measured, every one of the eleven tools production actually passes here returns
-    a key, and the server refuses to key exactly one tool, which is the one that never arrives. A
+    this function — measured, every tool this tree actually passes here returns a key, and the
+    server refuses to key exactly one tool, which is the one that never arrives. The figure that
+    stood here said eleven against fifteen literal tool names at the call sites, which is the same
+    staleness one sentence apart. A
     branch that cannot execute is not a safety net; it is a place for a future miswiring to land
     quietly and recompute forever.
     """
