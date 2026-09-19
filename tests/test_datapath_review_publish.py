@@ -138,7 +138,7 @@ def test_claiming_publishes_no_backlog_reading_because_a_claim_delivers_nothing(
     # against discovered manifests and this file is testing the reading, not discovery.
     monkeypatch.setattr(outbox, "enabled_names", lambda: [sink])
 
-    async def run() -> list[int]:
+    async def run() -> list[outbox.Lease]:
         async with db.connection(settings.postgres_dsn) as conn:
             await conn.execute("DELETE FROM result_publications WHERE sink = %s", (sink,))
             await conn.execute(
@@ -150,9 +150,9 @@ def test_claiming_publishes_no_backlog_reading_because_a_claim_delivers_nothing(
             await conn.commit()
         claimed = await outbox.claim(sink, 10)
         assert len(claimed) == 3
-        return [row[0] for row in claimed]
+        return [row.lease for row in claimed]
 
-    ids = asyncio.run(run())
+    leases = asyncio.run(run())
 
     assert sink not in outbox._PENDING_GAUGE, (
         "claim() published a backlog reading for rows it has not delivered"
@@ -164,7 +164,7 @@ def test_claiming_publishes_no_backlog_reading_because_a_claim_delivers_nothing(
     assert _series("chemclaw_outbox_pending", sink=sink) == 3.0
 
     # And what the pass now publishes instead, once the rows have actually gone.
-    asyncio.run(outbox.mark_delivered(ids))
+    asyncio.run(outbox.mark_delivered(leases))
     asyncio.run(outbox.refresh_backlog())
     assert _series("chemclaw_outbox_pending", sink=sink) == 0.0
 
