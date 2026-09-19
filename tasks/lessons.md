@@ -334,6 +334,16 @@ the question is "was this recomputed?", assert the **call count**, not the clock
 immune to load and is what D-011 actually claims. I did eventually measure it that way (`0 computed`
 on the repeat) and that is the number that belongs in the report.
 
+**It is not only the clock, and one reading of a stable-looking quantity is not a measurement
+either (2026-09-19).** Re-deriving `FORKSERVER_RSS_CEILING_MIB`, a single reading of the `jinja2`
+arm at load average ~10 came back 121.9 MiB and I wrote a paragraph explaining a "+5.8 MiB, ~10%
+allocator scaling" from it. Four repeats at load 1.1 read 117.7–117.9 — **+1.6 MiB, exactly the
+increment the record already held** — and the shipped arm read 116.2 at both loads, so the
+inference was built on the one arm that happened to be noisy. `VmRSS` is stable to 0.1 MiB when it
+is repeated and was not stable when it was not. **Repeat every arm you are going to compare, not
+just the one you expect to move**, and when a difference has to be explained, first check whether
+it survives a repeat.
+
 ## 2026-08-16 — when a key is derived on the other side of a wire, ask what it names
 
 **Pattern.** Three defects in one migration, all the same shape: the cache key is derived by the

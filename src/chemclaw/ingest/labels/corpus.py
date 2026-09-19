@@ -91,6 +91,21 @@ class CorpusReport(BaseModel):
             "conflating the two would report a corpus as less complete than it is."
         ),
     )
+    unreadable_fields: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Optional fields a row carried and this drain could not read — a temperature written "
+            "'60 °C' or '333 K', a range '60-65', 'rt', 'reflux', a decimal comma. The column is "
+            "written NULL, which is right (zero is a real temperature and coercing to it would "
+            "fabricate a recorded fact) and was **silent**: measured, 8 of 11 realistic corpus "
+            "cells became a NULL nobody counted. `search.py`'s facets filter on `temperature_c`, "
+            "so a precedent search for a temperature window excludes every such row while "
+            "`CorpusCoverage`'s verdict — which is about labelling coverage, not field coverage — "
+            "says nothing about it. Counted, never silent, like `skipped`; a site that sees this "
+            "rise declares a `transform:` for the column."
+        ),
+    )
     cursor: str = ""
     has_more: bool = False
     advanced: bool = Field(
@@ -211,7 +226,7 @@ async def _drain_page(
         cursor_value = row.get(binding.cursor_column)
         if cursor_value is not None:
             report.cursor = as_text(cursor_value)
-        label = _record(bundle, binding, source, key)
+        label = _record(bundle, binding, source, key, report)
         if label is None:
             report.skipped += 1
             continue
@@ -239,6 +254,15 @@ async def _drain_page(
             "were skipped; the drain still advanced past them",
             source,
             report.skipped,
+            report.read,
+        )
+    if report.unreadable_fields:
+        logger.warning(
+            "%s: %d optional field value(s) across %d row(s) could not be read and were stored as "
+            "NULL, so a facet search on them excludes those rows; declare a `transform:` for the "
+            "column if they matter",
+            source,
+            report.unreadable_fields,
             report.read,
         )
     return report
@@ -341,7 +365,7 @@ def _collect_fingerprint(
 
 
 def _record(
-    bundle: dict[str, Any], binding: CorpusBinding, source: str, key: str
+    bundle: dict[str, Any], binding: CorpusBinding, source: str, key: str, report: CorpusReport
 ) -> ReactionLabel | None:
     """One row as a record-phase label, or `None` when it lacks what a precedent needs.
 
@@ -361,10 +385,10 @@ def _record(
         reaction_id=key,
         record_smiles=reaction,
         citation=citation,
-        performed_on=_date(bundle, binding.published_on),
-        temperature_c=_number(bundle, binding.temperature_c),
-        time_h=_number(bundle, binding.time_h),
-        yield_percent=_number(bundle, binding.yield_percent),
+        performed_on=_date(bundle, binding.published_on, report),
+        temperature_c=_number(bundle, binding.temperature_c, report),
+        time_h=_number(bundle, binding.time_h, report),
+        yield_percent=_number(bundle, binding.yield_percent, report),
         workup_text=_field(bundle, binding.workup_text) or None,
         species=species,
         named_reaction=_field(bundle, binding.named_reaction) or None,
@@ -440,24 +464,35 @@ def _field(bundle: dict[str, Any], field: FieldBinding | None) -> str:
     return as_text(value) if value is not None else ""
 
 
-def _number(bundle: dict[str, Any], field: FieldBinding | None) -> float | None:
+def _number(
+    bundle: dict[str, Any], field: FieldBinding | None, report: CorpusReport
+) -> float | None:
     """One bound field as a float, or `None`. A value that will not convert is `None`, not a zero.
 
     Zero is a real temperature and a real yield, so coercing an unparseable one to it would put a
     fabricated number into a column a chemist reads as recorded fact.
+
+    **Refusing to coerce is right and losing it silently was not.** A value the source supplied and
+    this function cannot read is counted on `report.unreadable_fields`, for the reason that field's
+    description gives: the row is written with a NULL that reads exactly like "the source did not
+    record a temperature", and a facet search then excludes it with nothing in the answer saying so.
     """
     if field is None:
         return None
     value = _resolve(bundle, field)
-    if value is None:
+    # A blank cell is the source recording nothing, exactly like a NULL, so it is not a value this
+    # function failed to read — counting it would put the ordinary case in a counter whose whole
+    # purpose is to be zero when nothing was lost.
+    if value is None or (isinstance(value, str) and not value.strip()):
         return None
     try:
         return float(value)
     except (TypeError, ValueError):
+        report.unreadable_fields += 1
         return None
 
 
-def _date(bundle: dict[str, Any], field: FieldBinding | None) -> Any:
+def _date(bundle: dict[str, Any], field: FieldBinding | None, report: CorpusReport) -> Any:
     """One bound field as whatever its `iso_date` transform produced, or `None`.
 
     Typed loosely on purpose: the transform vocabulary owns the conversion (`iso_date` /
@@ -466,7 +501,12 @@ def _date(bundle: dict[str, Any], field: FieldBinding | None) -> Any:
     """
     if field is None:
         return None
-    return _resolve(bundle, field)
+    value = _resolve(bundle, field)
+    # A date the transform vocabulary could not turn into one is the same loss `_number` counts: the
+    # source wrote something in that column and the record says nothing was written.
+    if value is None and resolve_path(field.path, bundle) is not None:
+        report.unreadable_fields += 1
+    return value
 
 
 def _resolve(bundle: dict[str, Any], field: FieldBinding) -> Any:

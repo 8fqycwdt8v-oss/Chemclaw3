@@ -65,6 +65,23 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
+- [ ] **A site-supplied regex from a datasource manifest runs against warehouse cell text with no
+  timeout, so a catastrophic pattern hangs the ingest activity** — [M].
+  `ingest/eln/warehouse/expr.py:234` (`_regex`, `re.search` per row) and `:357`
+  (`_compiled_regex`, which validates the pattern and still returns a plain `re.Pattern`) take
+  `options["pattern"]` straight from the `datasource.yaml` binding. The pattern is checked for
+  *syntax* and never for backtracking behaviour, and Python's `re` has no timeout, so one
+  `(a+)+$`-shaped manifest pattern against a long free-text column pins a worker thread until the
+  activity's `start_to_close` expires — then the retry re-runs the identical pattern over the
+  identical page, which is the `_BAD_DATA_TYPES` argument in reverse. Operator-controlled input, so
+  it is not the untrusted-input case the rest of this section holds, and that is the whole reason it
+  is queued rather than fixed in the same commit as the sibling ReDoS in `core/logging.py`: the
+  remedies are different. Either bound the *input* (`as_text(value)[:n]` per cell, the cheapest
+  honest bound and the one this seam can take without a dependency), or move the match off-thread
+  with a wall clock, or reject a pattern whose shape is a known amplifier at
+  `datasource-validate` time. Decide which, because a fix that only shortens the input is a
+  mitigation and should say so.
+
 - [ ] **The personal skills tier is narrowed in the prompt and not at the backend, so
   `skill_names: []` still hands over the bodies** — [S]. `langgraph_agent.py`'s
   `if LOCAL_SKILLS_ROOT in backend.routes and profile.skill_names != frozenset()` drops `/mine` from

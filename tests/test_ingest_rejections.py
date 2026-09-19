@@ -592,7 +592,12 @@ async def test_a_json_export_the_fetch_drops_leaves_a_ledger_row(tmp_path: Path)
 
     rows = {row[0]: row[1] for row in await _rows("eln-site-a")}
     assert sorted(rows) == ["late", "truncated"], "a dropped export left no question to answer"
-    assert "unreadable" in rows["truncated"]
+    # "refused", not "unreadable": the same handler now also files an export whose *stated* `id` is
+    # blank, which reads fine and names nothing, so the one word that covers both is the verdict
+    # rather than a guess at the cause. The cause is in the reason text after it, which is what the
+    # second half of this assertion reads.
+    assert rows["truncated"].startswith("refused ELN export truncated.json")
+    assert "Unterminated string" in rows["truncated"]
     assert "arrived after the sync cursor" in rows["late"]
     await _clear("eln-site-a")
 

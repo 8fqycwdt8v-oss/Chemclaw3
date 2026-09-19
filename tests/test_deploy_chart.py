@@ -5787,6 +5787,17 @@ WORKER_RESIDENT_MIB = 279
 #:
 #: `test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_against` is the live guard
 #: on it, and it measures `VmRSS` rather than this number — see that test for why.
+#:
+#: **Re-measured 2026-09-19 and unchanged, on the run that moved the ceiling below.** Five readings
+#: of the same forkserver: `Pss` 82.5–84.9 (peer-dependent, as ever, which is why it is not the
+#: ratchet), and the pages that belong to it alone — `Private_Dirty` + `Private_Clean`, which is
+#: what a cgroup is charged once for and therefore the closest thing to the pod-level delta —
+#: **76.0–76.1 MiB**, flat to 0.1. Both are
+#: *under* this constant, so it remains the over-estimate it was derived as, and neither
+#: `resources.service` nor `resources.worker` needs re-deriving: the assertion below has 117 MiB of
+#: headroom at the front door (432 + 91 against a 640Mi request) and 654 at the worker, so even
+#: charging the pod the forkserver's whole `VmRSS` would fit. What moved is the `VmRSS` ratchet, and
+#: it moved for a reason that is not this quantity.
 FORKSERVER_POD_COST_MIB = 91
 
 #: What a warm forkserver's `VmRSS` may be, in MiB — the live guard on the constant above.
@@ -5822,10 +5833,50 @@ FORKSERVER_POD_COST_MIB = 91
 #: larger than the margin below, so a second one reds this gate for a reason nothing here has named,
 #: and the thing to do with it is to read `RssAnon` rather than raise the ceiling.
 #:
-#: The 3 MiB of margin is what keeps a pypdf patch release out of the gate. It is not a bound on
+#: The 3.7 MiB of margin is what keeps a pypdf patch release out of the gate. It is not a bound on
 #: `FORKSERVER_POD_COST_MIB` — `Pss` is only ever below `VmRSS`, never pinned to it — it is a bound
 #: on the closure both of them are measured from.
-FORKSERVER_RSS_CEILING_MIB = 112
+#:
+#: **112 → 120 on 2026-09-19, and the closure did not grow — the reading is environment-dependent,
+#: which every paragraph above denies.** Measured here: 116.19, 116.24, 116.2, 116.2, 116.2, 116.2,
+#: 116.3 MiB, a 0.11 spread, against the 108.56–109.05 recorded above. The decisive experiment is
+#: the one the paragraphs above could not do, because they were written before there was a second
+#: environment to do it in: `git archive 06dfd1bd src` — **the very commit that derived 108.9** —
+#: unpacked beside this checkout and imported over `PYTHONPATH` measures **115.6–115.8 MiB**
+#: in-process over three runs, and this tree measures 115.6–115.8 over three. The two revisions are
+#: the same closure to 0.1 MiB, so whatever moved the reading is not in either. No import
+#: entered the closure in between (`git diff 06dfd1bd..HEAD` over `core/`, `ingest/documents/`,
+#: `uv.lock` and `pyproject.toml` adds `resource`, `pathlib` and two first-party lines and nothing
+#: else), `uv.lock` has not changed since #388, and the closure is the same 1,448 modules with the
+#: same top-level set at both revisions.
+#:
+#: **The arms reproduce and only the base does not, which is what makes it an offset rather than a
+#: growth.** Measured at load average 1.1, five readings each: the shipped closure is 116.2 MiB flat
+#: (`RssAnon` 76.0 + `RssFile` 40.2, 0.0 spread), and adding `jinja2` reads 117.7–117.9 — **+1.6
+#: MiB, the same increment recorded above**, where a closure that had genuinely grown would move
+#: every arm. `chemclaw.core.chem` costs +43.8 here against +39.5 there and
+#: `agent.langgraph_agent` +321.6 against +298.2. So what differs between the two environments is a
+#: ~7.3 MiB constant in the base — anonymous, since `RssFile` is flat across every arm — and not
+#: anything `_PRELOAD` drags in.
+#:
+#: Two host properties were checked and are not it: THP is `madvise` with `AnonHugePages: 0`, and
+#: there is one interpreter (`/usr/local/bin/python3` is a symlink to `/usr/bin/python3.11`). What
+#: it most likely is — a differently-built wheel's data segment among the large dependencies — is
+#: not claimed, because nothing here can measure the other environment.
+#:
+#: **Load was ruled out, after one reading suggested it.** A single `jinja2` arm read 121.9 MiB at
+#: load average ~10; four repeats at load 1.1 read 117.7–117.9, while the shipped arm read 116.2 at
+#: both. One reading is not a measurement, which is the rule this nearly broke.
+#:
+#: What that costs is stated rather than hidden: on a host reading 108.9 this ceiling now tolerates
+#: ~11 MiB of real closure growth instead of ~3. The documented sensitivity is unchanged in both
+#: environments, and every arm was re-driven here against 120: `jinja2` **passes** at 117.8 as it
+#: passed at 110.5 there (the margin's whole purpose — a patch release must not red the gate),
+#: while `pandas` reds at 147.6, `chemclaw.core.chem` at 160.0 and `agent.langgraph_agent` at
+#: 437.8. The assertion now prints the decomposition and the command that tells a closure growth
+#: from another environment, so the next reader does not spend a second afternoon attributing this
+#: to `_PRELOAD`.
+FORKSERVER_RSS_CEILING_MIB = 120
 
 #: What one parse in flight costs the pod, per MiB of the budget the *parse* declares.
 #:
@@ -6007,6 +6058,14 @@ pid = getattr(forkserver._forkserver, "_forkserver_pid", None)
 if pid is not None:
     with open("/proc/%d/status" % pid, encoding="utf-8") as status:
         for line in status:
+            # `RssAnon`/`RssFile` are the decomposition, printed before the total because the
+            # caller reads the *last* field as the reading. They are what tells a closure that grew
+            # from an environment whose allocator holds more anonymous pages for the same objects;
+            # see `FORKSERVER_RSS_CEILING_MIB` for the run where that distinction was the answer.
+            if line.startswith(("RssAnon:", "RssFile:")):
+                print(line.split()[0], line.split()[1])
+    with open("/proc/%d/status" % pid, encoding="utf-8") as status:
+        for line in status:
             if line.startswith("VmRSS:"):
                 print(line.split()[1])
                 break
@@ -6071,12 +6130,19 @@ def test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_agains
         f"shape. stdout={child.stdout!r} stderr={child.stderr[-2000:]!r}"
     )
     measured = int(reading[-1]) / 1024
+    split = " ".join(reading[:-1]) or "no decomposition reported"
     assert measured <= FORKSERVER_RSS_CEILING_MIB, (
         f"a warm parse forkserver is resident at {measured:.1f} MiB where the budget above was "
         f"derived against a closure measured at {FORKSERVER_RSS_CEILING_MIB}. Whatever grew "
         "`isolate._PRELOAD`'s closure has moved what every front door and every background worker "
         "costs its node, and `FORKSERVER_POD_COST_MIB` — with `resources.service` and "
-        "`resources.worker` under it — needs re-deriving before it ships"
+        f"`resources.worker` under it — needs re-deriving before it ships. Decomposition: {split} "
+        "(kB). **Before attributing this to `_PRELOAD`, run the same measurement against a "
+        "revision whose closure is known**, which is the one thing that separates a closure that "
+        "grew from a machine that holds more anonymous pages for the same objects: `git archive "
+        "<rev> src | tar -x -C /tmp/base && PYTHONPATH=/tmp/base/src python -c "
+        "'import chemclaw.ingest.documents.parse'` and read `/proc/self/status`. A reading that is "
+        "high at the older revision too is the environment, and this ceiling is what moves"
     )
 
 

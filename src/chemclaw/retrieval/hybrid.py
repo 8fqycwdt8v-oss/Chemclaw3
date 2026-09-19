@@ -132,10 +132,17 @@ def _fuse_by_corpus(
     for corpus, chunks in zip(corpora, ranked_lists, strict=True):
         grouped.setdefault(corpus, []).append(chunks)
         # The tier of each *list*, taken from the retriever that produced it. Read off the chunks
-        # rather than from a source name the fusion is not given, and defaulted for an empty list,
-        # which contributes nothing to the ranking and must not skew its corpus's mean either.
-        tier = {(weights or {}).get(chunk.retriever, 1.0) for chunk in chunks}
-        tiers.setdefault(corpus, []).extend(tier or {1.0})
+        # rather than from a source name the fusion is not given, and an empty list is **skipped**,
+        # because it contributes nothing to the ranking and must not skew its corpus's mean either.
+        #
+        # That second half is what the code did not do: `extend(tier or {1.0})` defaulted an empty
+        # leg to the *neutral* tier and then averaged it in. Measured with
+        # `{graph: 1.5, lexical: 1.5, eln: 1.0}`: two legs over one note corpus give 1.5, and the
+        # lexical leg returning zero chunks gives **1.25** — a corpus pulled a quarter of the way to
+        # neutral by a leg that found nothing. No order flip was observed (RRF is near-flat at
+        # `k=60`), which is why this was a comment claiming a control rather than a visible defect.
+        tiers.setdefault(corpus, [])
+        tiers[corpus].extend({(weights or {}).get(chunk.retriever, 1.0) for chunk in chunks})
     fused_per_corpus = {
         corpus: reciprocal_rank_fusion(lists, k=k, weights=weights)
         for corpus, lists in grouped.items()
@@ -147,7 +154,12 @@ def _fuse_by_corpus(
     relabelled: list[list[EvidenceChunk]] = []
     corpus_weights: dict[str, float] = {}
     for corpus, chunks in fused_per_corpus.items():
-        corpus_weights[corpus] = sum(tiers[corpus]) / len(tiers[corpus])
+        # `or [1.0]` for the corpus every one of whose legs came back empty: it has no chunk in the
+        # fusion, so the weight is never applied to anything, and the alternative is a
+        # `ZeroDivisionError` on a total retrieval miss for that corpus. It is the one place a
+        # neutral default is right — there is no ranking here for it to skew.
+        weighted = tiers[corpus] or [1.0]
+        corpus_weights[corpus] = sum(weighted) / len(weighted)
         relabelled.append([chunk.model_copy(update={"retriever": corpus}) for chunk in chunks])
     order = reciprocal_rank_fusion(relabelled, k=k, weights=corpus_weights)
     # Back to the originals, by note id: the relabelled copies were a vehicle for the weight key.
