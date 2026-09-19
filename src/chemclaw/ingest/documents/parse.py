@@ -107,16 +107,21 @@ def _refuse_a_bomb(name: str, raw: bytes) -> None:
 def too_large_to_read(name: str) -> DocumentParseError:
     """The refusal a document earns by exhausting `document_parse_memory_bytes`.
 
-    One function because the ceiling is hit in two places and a chemist must not be able to tell
-    which: inside `parse_document`, where extraction allocates, and inside
+    One function because the ceiling is hit in three places and a chemist must not be able to tell
+    which: inside `parse_document`, where extraction allocates; inside
     `ingest/documents/isolate._parse_into`, where the answer is pickled onto the pipe back — which
-    is real memory spent on this document and is deliberately inside the same budget. Two arms
-    wording one event separately is how the two wordings drift.
+    is real memory spent on this document and is deliberately inside the same budget; and wherever
+    a C parser reported the exhaustion as its own error, which the paragraph below is about. Three
+    arms wording one event separately is how the wordings drift.
 
-    **The residual is stated:** a C parser that reports its own allocation failure rather than
-    letting CPython raise does not reach either arm. Measured, `lxml` does exactly that ("Unable to
-    allocate output buffer"), so a markup-heavy `.docx` gets the generic "could not be read". Both
-    are refusals; only one of them says why.
+    **That residual is closed, and it was larger than it read.** A C parser that reports its own
+    allocation failure rather than letting CPython raise reaches neither arm on its own — lxml does
+    exactly that, so a markup-heavy but entirely legal `.docx` was refused as
+    `unknown error (<string>, line 0)`, which does not merely omit the reason: it tells a chemist
+    their document is malformed at line 0, which is worse than the generic wording this function
+    exists to replace. `ingest/documents/isolate._at_ceiling` now renames any failure that happened
+    with the budget spent, so all three arms arrive here. It is a third caller and the reason this
+    is a function stands unchanged.
 
     Args:
         name: The document name, for the message.

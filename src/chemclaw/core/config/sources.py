@@ -139,11 +139,26 @@ class SourcesSettings(BaseSettings):
     # rather than the 1 MiB that rounding alone would — and that inequality is where raising this
     # fails, rather than in an OOMKill.
     #
-    # What it costs a caller, measured on this tree: a 50 MiB plain-text document (the shipped share
-    # binding's whole `max_file_bytes`) parses, a 10 MiB delimited export parses, a 17.2 M-character
-    # workbook parses. Refused: a 24.5 M-character delimited export, a 52 M-character workbook, and
-    # a 17.2 M-character workbook carrying one astral code point. A refusal names this ceiling; on
-    # the share path it lands in `skipped_unreadable`, which the sync already reports.
+    # What it costs a caller, by *shape* rather than by threshold. A 50 MiB plain-text document (the
+    # shipped share binding's whole `max_file_bytes`) parses, and so does a 10 MiB delimited export;
+    # a workbook whose shared-string table is read tens of millions of times, the same workbook with
+    # one astral code point in it, and a `.docx` whose every word is its own styled run are the
+    # three shapes that reach this ceiling, each from an archive well under every declarative bound
+    # above. A refusal names this ceiling; on the share path it lands in `skipped_unreadable`, which
+    # the sync already reports.
+    #
+    # **This comment used to publish six character thresholds and two of them were false**
+    # (`D-2026-09-19-a-refusal-that-blames-the-document-is-worse-than-one-that-says-nothing`): it
+    # said a 52 M character workbook and a 17.2 M character workbook carrying one astral code
+    # point were refused, and re-driven through the shipped path both **parse** — 50.1 M ASCII and
+    # 18.1 M astral parse here, 60.2 M and 20.1 M refuse. Worse than stale: a character count is
+    # not what this bound measures, so the same count parses or refuses depending on the fixture's
+    # shape and on how much of the budget the forkserver's own baseline residency has already
+    # spent — the crossing measured 22 M on one box and 20 M on another with no code between them.
+    # That is the argument of the paragraph three above, applied to the paragraph that was
+    # demonstrating it. What holds the behaviour is `tests/test_parse_isolation.py`, which asserts
+    # refusals and parses on named fixtures rather than thresholds on a quantity this bound does
+    # not read.
     document_parse_memory_bytes: int = 160 * 1024 * 1024
     # The ceiling on one whole-document read (`ShareDocumentRetriever.read_document`), in
     # characters of *indexed text* rather than bytes on disk: what is being bounded is what reaches

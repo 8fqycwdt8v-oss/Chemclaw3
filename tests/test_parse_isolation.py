@@ -24,6 +24,7 @@ import io
 import socket
 import subprocess
 import sys
+import textwrap
 import time
 import zipfile
 from pathlib import Path
@@ -455,3 +456,130 @@ def test_one_wide_code_point_does_not_multiply_what_a_parse_may_spend() -> None:
     with pytest.raises(DocumentParseError) as refusal:
         parse_document_isolated("wide.xlsx", wide, None, 120.0)
     assert "memory" in str(refusal.value)
+
+
+def _markup_heavy_docx(paragraphs: int, runs: int) -> bytes:
+    """A legal Word report whose cost is its markup rather than its text.
+
+    Every word its own styled run, which is what Word itself produces after tracked changes, mixed
+    fonts, a spell-check language pass or a round-trip through another tool. `python-docx` builds an
+    lxml DOM out of that markup, so the cost is in the elements and not in the characters — which is
+    why no ceiling read out of the archive predicts it.
+    """
+    body = "".join(
+        "<w:p><w:pPr><w:jc w:val='both'/></w:pPr>"
+        + "".join(
+            '<w:r><w:rPr><w:b/><w:color w:val="1F4E79"/><w:sz w:val="22"/></w:rPr>'
+            f'<w:t xml:space="preserve">word{run} </w:t></w:r>'
+            for run in range(runs)
+        )
+        + "</w:p>"
+        for _ in range(paragraphs)
+    )
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"<w:body>{body}<w:sectPr/></w:body></w:document>"
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "[Content_Types].xml",
+            '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/'
+            'content-types"><Default Extension="xml" ContentType="application/xml"/>'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.'
+            'relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/'
+            'vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+        )
+        archive.writestr(
+            "_rels/.rels",
+            '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/'
+            '2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/'
+            'officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+            "</Relationships>",
+        )
+        archive.writestr(
+            "word/_rels/document.xml.rels",
+            '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/'
+            '2006/relationships"/>',
+        )
+        archive.writestr("word/document.xml", document)
+    return buffer.getvalue()
+
+
+def test_a_document_stopped_by_the_budget_says_so_even_when_a_c_parser_reported_it() -> None:
+    """The refusal a markup-heavy `.docx` earns, which used to say the document was malformed.
+
+    **lxml reports its own allocation failure rather than letting CPython raise**, so the
+    `except MemoryError` arm that names this ceiling never fired for the one format that most needs
+    it. Measured on the shipped path before this: a 485,186-byte Word report — 2,000 paragraphs of
+    200 styled runs, 2,979,999 characters of text, legal by every bound upstream — came back as
+    `could not read report.docx: unknown error (<string>, line 0)`. That is not a missing reason, it
+    is a wrong one: it tells a chemist their perfectly good report is broken at line 0, which is
+    worse than the generic wording `too_large_to_read` exists to replace.
+
+    `_at_ceiling` is what renames it, and both arms are asserted because either alone passes on the
+    wrong implementation. A document that is *really* unreadable must keep its own message, or the
+    fix is "call everything a memory problem" — driven, the two populations do not overlap: a
+    parse stopped by the budget fails with 0.1 MiB of its allowance left, and a truncated archive
+    fails with the whole 160 MiB unspent.
+    """
+    raw = _markup_heavy_docx(2_000, 200)
+    assert len(raw) < settings.attachment_max_bytes, "the fixture stopped being a legal upload"
+    assert _declared_expansion(raw) < settings.document_max_expanded_bytes, (
+        "the fixture stopped being legal by the expansion ceiling, which is the point of it"
+    )
+
+    with pytest.raises(DocumentParseError) as refusal:
+        parse_document_isolated("report.docx", raw, None, 120.0)
+    assert "memory" in str(refusal.value), (
+        f"a document the budget stopped was refused as {str(refusal.value)!r}, which reads as "
+        "'your file is malformed' and names neither the ceiling nor the knob that moves it"
+    )
+
+    broken = io.BytesIO()
+    with zipfile.ZipFile(broken, "w") as archive:
+        archive.writestr("word/document.xml", "<w:document><not closed")
+    with pytest.raises(DocumentParseError) as unreadable:
+        parse_document_isolated("broken.docx", broken.getvalue(), None, 120.0)
+    assert "memory" not in str(unreadable.value), (
+        "a genuinely unreadable document was blamed on the memory budget, so the assertion above "
+        "proves nothing — every refusal would pass it"
+    )
+
+
+def test_an_ambient_hard_limit_below_the_budget_is_a_smaller_budget_not_a_dead_parser() -> None:
+    """`setrlimit` cannot raise a maximum, and that used to make every document unreadable.
+
+    A process tree carrying any hard `RLIMIT_DATA` below `VmData + document_parse_memory_bytes` — a
+    systemd `LimitDATA=`, a container security profile, an operator raising the knob above what the
+    platform allows — made `_bound_allocations` raise `ValueError: not allowed to raise maximum
+    limit`. In `_parse_into` that lands in the broad arm, so **every upload and every share document
+    of every format** came back as "could not be read", with the cause only in a log line.
+
+    Driven in a subprocess, because the limit has to be lowered before the call and a test process
+    that lowers its own hard limit cannot put it back.
+    """
+    probe = textwrap.dedent(
+        """
+        import resource, sys
+        from chemclaw.ingest.documents.isolate import _anonymous_bytes, _bound_allocations
+
+        base = _anonymous_bytes()
+        tight = base + 8 * 1024 * 1024
+        resource.setrlimit(resource.RLIMIT_DATA, (tight, tight))
+        ceiling = _bound_allocations(160 * 1024 * 1024)
+        print("CLAMPED" if ceiling == tight else f"UNEXPECTED:{ceiling}")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert result.returncode == 0, (
+        "a hard RLIMIT_DATA below the parse budget took the bound out with an exception, so every "
+        f"document of every format is refused as unreadable: {result.stderr[-400:]}"
+    )
+    assert "CLAMPED" in result.stdout, (
+        "the ambient ceiling did not become the budget; a lower platform limit is a smaller "
+        f"budget, which is what this knob is for: {result.stdout!r}"
+    )

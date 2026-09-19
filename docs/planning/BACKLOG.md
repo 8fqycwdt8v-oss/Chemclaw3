@@ -145,6 +145,17 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
+- [ ] **`.pptx` under the parse memory ceiling is unverified** — [S], opened 2026-09-19 by
+  `D-2026-09-19-a-refusal-that-blames-the-document-is-worse-than-one-that-says-nothing`. That
+  review drove `.docx`, `.xlsx`, `.csv` and plain text against `document_parse_memory_bytes` and
+  found the `.docx` case refused with a message blaming the document; `_parse_pptx` goes through
+  the same lxml layer and was **not** driven, so whether a markup-heavy deck earns the named
+  refusal, the wrong one, or no refusal at all is unknown. The remedy is one fixture beside
+  `_markup_heavy_docx` in `tests/test_parse_isolation.py` and one assertion; it is a row rather
+  than a fix because a deck fixture is a different XML part layout and guessing it is how a test
+  passes without touching the code path. Not a pod risk either way — the `RLIMIT_DATA` is absolute,
+  so the worst case is a wrong sentence, which is exactly what that review found for `.docx`.
+
 - [ ] **The substructure deadline test asserts a timing ratio where it means a record count** —
       [S], `tests/test_molfp.py::test_a_scan_past_its_deadline_stops_instead_of_matching_the_rest_of_the_corpus`.
       Its own docstring states the property as *"went on matching every remaining record"*, which is
