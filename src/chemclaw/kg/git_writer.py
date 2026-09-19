@@ -39,15 +39,16 @@ import hashlib
 import logging
 import os
 import re
+import stat
 import tempfile
 import time
-from collections.abc import AsyncIterator, Iterable, Iterator
+from collections.abc import AsyncIterator, Iterable, Iterator, Sequence
 from pathlib import Path
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.logging import log_event, secret_env_names
-from chemclaw.kg.graph import invalidate_cache
+from chemclaw.kg.graph import invalidate_cache, scan_notes_dir
 from chemclaw.kg.note import NoteError, parse_note
 from chemclaw.kg.record import NoteFile, NoteWrite, NoteWriter, WriteOutcome
 
@@ -85,7 +86,7 @@ def _git_child_env() -> dict[str, str]:
     return {name: value for name, value in os.environ.items() if name not in scrub}
 
 
-def _replace_atomically(path: Path, content: str) -> None:
+def _replace_atomically(path: Path, content: bytes) -> None:
     """Put `content` at `path` in one step, so a concurrent reader never sees half of it.
 
     `Path.write_text` truncates and then writes, and readers of this tree hold no lock — measured,
@@ -94,17 +95,51 @@ def _replace_atomically(path: Path, content: str) -> None:
     from the graph rather than the file being skipped. The worktree this writer replaced made that
     window structurally impossible; `os.replace` is what restores it. Same directory, because
     `os.replace` is only atomic within one filesystem.
+
+    **It takes bytes, and that is the rollback's requirement rather than a style preference.**
+    `_write_and_commit` reads each target's prior content with `read_bytes` and puts it back through
+    here; while this took `str` that restore had to `content.decode("utf-8")`, which *raises* for a
+    note holding non-UTF-8 bytes (a cp1252 `°` out of an exported ELN) — inside the
+    `except BaseException` handler, so the remaining restores and the index un-stage never ran.
+    Driven: the second file stayed rewritten, both blobs stayed staged, and the `UnicodeDecodeError`
+    masked the real `GitWriteError`, while being neither a `ChemclawError` (so the model never
+    learns the reason) nor a registered non-retryable type. Bytes round-trip, so a restore can no
+    longer fail on the content it is restoring.
+
+    **The replacement keeps the target's permissions, and the temporary file's are not a note's.**
+    `NamedTemporaryFile` creates 0600 by design — it is a *temporary* file — and `os.replace`
+    carries that mode onto the note, so every note this writer touched became owner-read-only and an
+    existing 0644 was silently downgraded. Driven: both. The tree is a Git checkout shared with the
+    sidecar that clones it and the scan that reads it, so a mode nobody chose is a mode somebody
+    debugs. An existing file keeps what it had; a new one gets what `open()` would have given it.
     """
     with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
+        "wb", dir=path.parent, prefix=f".{path.name}.", delete=False
     ) as handle:
         handle.write(content)
         temporary = Path(handle.name)
     try:
+        os.chmod(temporary, _mode_for(path))
         os.replace(temporary, path)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def _mode_for(path: Path) -> int:
+    """The permission bits a replacement of `path` should land with.
+
+    What the file already has, or — for one that does not exist yet — 0666 masked by the process
+    umask, which is the answer `open()` gives. The umask is read by setting it and putting it back,
+    because there is no other way to read it; the value set inside that two-call window is the
+    *restrictive* one, so a file another thread creates in it is private rather than world-readable.
+    """
+    try:
+        return stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        umask = os.umask(0o077)
+        os.umask(umask)
+        return 0o666 & ~umask
 
 
 def _git_dir(repo_dir: str) -> Path:
@@ -879,26 +914,35 @@ class GitNoteWriter:
         # on the third file used to leave the first two on disk, readable as knowledge by a scan
         # that no longer has a gate in front of it — so validation is a separate pass.
         planned: list[tuple[Path, NoteFile]] = []
-        for file in write.files:
-            note_path = self._contained_note_path(file.path)
+        # **One scan of the tree for the whole write, not one per file.** Every planned path asks
+        # the same question of the same corpus, and the scan is the cost: measured over a 10,000-
+        # note corpus, scanning per file put a single note write at 992 ms and a fifty-note backfill
+        # commit at 315.9 ms per note, against the 8.5 ms per note
+        # `D-2026-09-13-the-lock-is-not-the-bound-the-commit-is` measured for batching at fifty.
+        # Hoisted, the whole write pays one scan whatever it carries.
+        contained = [self._contained_note_path(file.path) for file in write.files]
+        curated_by_id = self._persons_notes_claiming(contained)
+        for note_path, file in zip(contained, write.files, strict=True):
             if not file.overwrite and note_path.exists():
                 continue
             # An amendment to somebody's own note is dropped rather than refused, and only an
             # amendment: the subject note keeps the hard refusal, because writing an agent note
             # over a curated one at the same id is the forgery the check exists for. See
             # `_refuse_to_clobber_a_person` for why the unit must not die with the amendment.
-            if file.amendment and self._is_a_persons_note(note_path):
+            curated = curated_by_id.get(note_path.stem)
+            if file.amendment and curated is not None:
                 log_event(
                     log,
                     "kg.write.amendment_left_alone",
                     "left %s alone: it is a human's note, so it is not retired in place — the "
                     "note recorded alongside it still lands and marks it as contradicted",
-                    file.path,
+                    curated,
                     level=logging.WARNING,
                     path=file.path,
+                    curated_path=str(curated),
                 )
                 continue
-            self._refuse_to_clobber_a_person(note_path, file.path)
+            self._refuse_to_clobber_a_person(curated, file.path)
             planned.append((note_path, file))
         if not planned:
             return WriteOutcome(reference=self._base, notes=0)
@@ -910,7 +954,7 @@ class GitNoteWriter:
         try:
             for note_path, file in planned:
                 note_path.parent.mkdir(parents=True, exist_ok=True)
-                _replace_atomically(note_path, file.content)
+                _replace_atomically(note_path, file.content.encode("utf-8"))
             # `--` ends option parsing before the note paths: `_contained_note_path` only checks
             # containment, and a leading-dash relative path (e.g. `-x`) resolves *inside* the repo
             # and would otherwise reach git as an option rather than a pathspec.
@@ -938,11 +982,33 @@ class GitNoteWriter:
         except BaseException:
             # The bytes are in the tree readers scan, so leaving a half-written unit there is
             # publishing it. Restore what each target held and re-raise.
+            #
+            # **Every restore is independent, because one that raises used to skip the rest of the
+            # rollback *and* the un-stage below.** The restore decoded the prior bytes to `str`, so
+            # a note holding non-UTF-8 bytes raised `UnicodeDecodeError` from inside this handler:
+            # driven, the remaining files stayed rewritten, both blobs stayed staged, and the
+            # escaping exception replaced the real `GitWriteError` with one that is neither a
+            # `ChemclawError` nor a registered non-retryable type. `_replace_atomically` now takes
+            # bytes so that particular failure is gone, but a restore still touches the filesystem
+            # (a full disk, a revoked permission on the note's directory) and the guarantee this
+            # handler exists to make — *no* half-written unit is left readable — cannot be
+            # conditional on the first file being the lucky one. So each is attempted, each failure
+            # is reported with the path a person has to repair by hand, and the original exception
+            # is what propagates.
             for note_path, content in prior.items():
-                if content is None:
-                    note_path.unlink(missing_ok=True)
-                else:
-                    _replace_atomically(note_path, content.decode("utf-8"))
+                try:
+                    if content is None:
+                        note_path.unlink(missing_ok=True)
+                    else:
+                        _replace_atomically(note_path, content)
+                except Exception:
+                    log.exception(
+                        "kg.write.rollback_failed: could not restore %s — it may still hold the "
+                        "bytes of a write that did not land, and needs a manual "
+                        "`git checkout -- <path>` in %s",
+                        note_path,
+                        self._repo_dir,
+                    )
             # **The tree is only half of what this write touched.** If the failure came after the
             # `git add` above — a `pre-commit` hook, an `index.lock`, `_exec`'s timeout kill — the
             # index still holds the blob just retracted, and restoring the tree does not remove it.
@@ -1025,7 +1091,51 @@ class GitNoteWriter:
             return False
         return existing.created_by == "human"
 
-    def _refuse_to_clobber_a_person(self, note_path: Path, relative: str) -> None:
+    def _persons_notes_claiming(self, targets: Sequence[Path]) -> dict[str, Path]:
+        """For each id a write is about to take, the human-authored note already holding it.
+
+        **A note's identity is its id, and the check that used to guard curated knowledge was
+        scoped to a path.** `graph._parse_notes` resolves two files claiming one id by keeping the
+        **first in path order**, so an agent note written at `campaign/<id>.md` takes an id a
+        chemist curated at `playbook/<id>.md` — `campaign` sorts first — without ever touching
+        their file, and therefore without the path-scoped check ever seeing it. Driven with two
+        legitimate types: the served note's `created_by` went `human` → `agent` and its body became
+        the agent's, while the curated file sat untouched on disk, invisible to every query.
+        `graph.note_file_fingerprints` keys on `path.stem` the same way, so
+        `retrieval.vector_index.reindex_notes` then re-embeds the agent's text under the curated
+        id — the eviction captures retrieval as well as the graph. And `contradicts`, which
+        `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` names as the replacement for the
+        review that used to catch this, only works while the thing to be contradicted is still
+        served.
+
+        So the id is what is looked up, over the same file set the graph resolves among
+        (`graph.scan_notes_dir`, recursive, path-ordered). The id of a file **is** its stem: that is
+        the one filename shape a note is written under (`note.note_relative_path`) and
+        `kg.validate` fails a tree where a note's `id` and its filename disagree, which is what
+        makes a stem comparison here the same question as the graph's. The knowledge root is the
+        note path's grandparent for the same reason — `<knowledge_dir>/<type>/<id>.md` is that
+        shape.
+
+        A target's own path needs no special case: it is inside the scanned tree, so an agent write
+        over a chemist's file at the same path and one taking that id from another directory are the
+        same lookup. Ties go to the **first in path order**, which is the file the graph serves.
+
+        Only the stems this write touches are parsed, so the cost is the stat scan rather than the
+        corpus — one scan for the whole write, which is why this takes every target at once.
+        """
+        wanted = {path.stem for path in targets}
+        found: dict[str, Path] = {}
+        for root in sorted({path.parent.parent for path in targets}):
+            if not root.is_dir():
+                continue
+            for candidate, _ in scan_notes_dir(root):
+                if candidate.stem not in wanted or candidate.stem in found:
+                    continue
+                if self._is_a_persons_note(candidate):
+                    found[candidate.stem] = candidate
+        return found
+
+    def _refuse_to_clobber_a_person(self, curated: Path | None, relative: str) -> None:
         """Refuse to overwrite a note a human authored.
 
         **The control the PR-gate used to be.** `record_note` checks `created_by` on the note it is
@@ -1047,13 +1157,37 @@ class GitNoteWriter:
         amendment steps aside in `_write_and_commit` instead, which leaves exactly the state
         `close_refuted_note` documents as the truthful one for a claim this system may not close:
         the note stays open, served, and permanently marked as contradicted.
+
+        `curated` is `_persons_notes_claiming`'s answer for this note's id, so the refusal covers a
+        curated note at another path claiming that id as well as one at this path. The message names
+        that file when it is not the one being written, because "refusing to overwrite
+        `campaign/x.md`" about a chemist's `playbook/x.md` is not something a reader can act on.
         """
-        if self._is_a_persons_note(note_path):
-            raise GitWriteError(
-                f"refusing to overwrite {relative!r}: it is authored by a human, and an agent "
-                "write may not replace or retire curated knowledge in place. Record a new note "
-                "that contradicts or supersedes it instead."
-            )
+        if curated is None:
+            return
+        held = self._relative_to_checkout(curated)
+        elsewhere = (
+            ""
+            if held == relative
+            else f" — note id {curated.stem!r} is already held by {held!r}, which the graph serves "
+            "in preference to this path"
+        )
+        raise GitWriteError(
+            f"refusing to write {relative!r}{elsewhere}: it is authored by a human, and an agent "
+            "write may not replace, retire or take the id of curated knowledge. Record a new note "
+            "that contradicts or supersedes it instead."
+        )
+
+    def _relative_to_checkout(self, path: Path) -> str:
+        """`path` as this checkout sees it, for a message a person can paste into `git`.
+
+        Absolute paths in an error the model relays leak a pod's `emptyDir` mount point and are not
+        what a reader would type; a path outside the checkout is kept whole rather than guessed at.
+        """
+        try:
+            return path.relative_to(Path(self._repo_dir).resolve()).as_posix()
+        except ValueError:
+            return path.as_posix()
 
 
 def _in_sequential_order(files: Iterable[NoteFile]) -> list[NoteFile]:

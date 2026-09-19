@@ -191,6 +191,24 @@ async def _eligible_notes(directory: Path, filters: dict[str, Any]) -> dict[str,
     return await asyncio.to_thread(_eligible_sync, directory, filters, date.today())
 
 
+def _is_windowed(filters: dict[str, Any]) -> bool:
+    """Whether this sweep names a period, which is what decides *both* date rules it applies.
+
+    One definition, because there are two consumers and they have to agree: `_eligible_sync` skips
+    the currency check for a windowed sweep, and `_conflict_index` has to scan the same set that
+    skip admits. They were written independently and disagreed — the sweep served notes retired
+    today while the conflict index was computed `as_of=date.today()`, so `find_conflicts` never
+    scanned them and every chunk came back with `conflicts_with=[]`. Driven on three notes, two of
+    them declaring `[[contradicts:]]` on each other: the same corpus left open-ended reports one
+    conflict on each of the pair, and retired inside the requested window reports zero on all three.
+    A flag that is *structurally* empty is worse than absent, because an empty list is what an
+    unconflicted note looks like — and contradiction is one of the three mechanisms
+    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` names as what makes unreviewed knowledge
+    safe.
+    """
+    return filters.get("since") is not None or filters.get("until") is not None
+
+
 def _eligible_sync(directory: Path, filters: dict[str, Any], today: date) -> dict[str, Note]:
     """The synchronous body of `_eligible_notes`: load, then filter, in one worker thread.
 
@@ -212,7 +230,7 @@ def _eligible_sync(directory: Path, filters: dict[str, Any], today: date) -> dic
     # the event loop before it. It is a small syscall, but this runs per retriever per query on the
     # loop that serves every other concurrent turn, and the reason the load below is offloaded
     # applies to it unchanged.
-    windowed = since is not None or until is not None
+    windowed = _is_windowed(filters)
     for note in _load_if_present(directory):
         if want_type is not None and note.type != want_type:
             continue
@@ -344,7 +362,7 @@ def _in_window(note: Note, since: date | None, until: date | None) -> bool:
     return not (until is not None and note.valid_from > until)
 
 
-async def _conflict_index(directory: Path) -> dict[str, NoteConflicts]:
+async def _conflict_index(directory: Path, filters: dict[str, Any]) -> dict[str, NoteConflicts]:
     """Map each note id to what it is known or suspected to disagree with (KM-8).
 
     The whole computation goes to a worker thread, not only the note load: the scan over the corpus
@@ -352,9 +370,19 @@ async def _conflict_index(directory: Path) -> dict[str, NoteConflicts]:
     used to run on the event loop, where it stalled every other concurrent turn on the worker.
     `chemclaw.kg.conflicts.conflict_index` caches the result behind the same stat fingerprint the
     parsed notes and the assembled graph are cached behind, so the three note-backed retrievers of
-    one sweep now compute it once between them instead of once each.
+    one sweep now compute it once between them instead of once each — and behind `as_of` too, so
+    the two rules below are two cache entries rather than one stale one.
+
+    **`as_of` is the sweep's own date rule, not today's date.** `find_conflicts` scans only the
+    notes current at `as_of`, so an unwindowed sweep gets today (a retired note is not in the
+    evidence either, so flagging it would be noise) and a windowed one gets `None` — the whole
+    corpus, matching the currency check `_eligible_sync` deliberately skips for a window. There is
+    no single date that would do instead: a windowed sweep serves every note whose subject falls in
+    the period, which is not the set current on any one day of it, and `until` in particular misses
+    exactly the notes that retired inside the window. See `_is_windowed` for what that measured.
     """
-    return await asyncio.to_thread(conflict_index, directory, date.today())
+    as_of = None if _is_windowed(filters) else date.today()
+    return await asyncio.to_thread(conflict_index, directory, as_of)
 
 
 class GraphRetriever:
@@ -410,7 +438,7 @@ class GraphRetriever:
         chosen, found = await asyncio.to_thread(
             _rank_by_terms, self._dir, filters, terms, date.today()
         )
-        conflicts = await _conflict_index(self._dir)
+        conflicts = await _conflict_index(self._dir, filters)
         # **`found` is the pre-cut total, and this leg is the one that can honestly report it.**
         # It scores every eligible note and then truncates, so both numbers exist here. Measured on
         # 5,000 notes that all matched every term, `gather_evidence` reported `chunks=8,
@@ -661,6 +689,13 @@ def _chunk_for(
         created_by=note.created_by,
         source=note.source or "",
         confidence=note.confidence,
+        # **The date the note stopped being valid, because a windowed sweep serves retired notes.**
+        # `_eligible_sync` admits a note whose subject falls inside the requested period whether or
+        # not it is still current — which is right, and left the chunk byte-identical to one built
+        # from a live note. The conflict flag above is the other half of the same gap and is not a
+        # substitute: a note can be retired without anything contradicting it. `None` means the
+        # note's validity window is open, which is every note an unwindowed sweep can return.
+        valid_to=note.valid_to,
         # `None`, not `[]`, when the caller offered no terms: "not reported" rather than
         # "nothing matched", the distinction `Hits.found` argues one class over.
         matched_terms=matched_terms(note, terms) if terms else None,
@@ -740,7 +775,7 @@ class VectorRetriever:
         # a word the chemist typed is *in* the body then that is the part of it they can check.
         # Where none is, `_excerpt` falls back to the head exactly as before.
         return _chunks_from_hits(
-            hits, notes, self.name, await _conflict_index(self._dir), query_terms(query)
+            hits, notes, self.name, await _conflict_index(self._dir, filters), query_terms(query)
         )
 
 
@@ -788,5 +823,5 @@ class LexicalRetriever:
         # Scoped to the eligible notes for the same recall reason as the dense retriever.
         hits = await self._index.search_lexical(query, settings.retrieval_top_k, within=set(notes))
         return _chunks_from_hits(
-            hits, notes, self.name, await _conflict_index(self._dir), query_terms(query)
+            hits, notes, self.name, await _conflict_index(self._dir, filters), query_terms(query)
         )

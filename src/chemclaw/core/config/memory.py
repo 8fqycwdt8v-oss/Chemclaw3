@@ -27,6 +27,25 @@ class MemorySettings(BaseSettings):
     # the playbook floor: an optimization series is the same reaction re-run, not merely related
     # chemistry, so the grouping must be tight to avoid merging distinct transformations.
     optimization_similarity_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
+    # How much memory one block of `memory.similarity`'s pairwise product may hold. **The clustering
+    # is O(n^2) in comparisons and this is what stops it being O(n^2) in *bytes*.** The sparse
+    # product was chosen over a dense `X @ X.T` partly on the argument that it "allocates one entry
+    # per bit-sharing pair rather than an n^2 float64 matrix, which at 10^4 reactions is 800 MB" —
+    # measured, a third to over a half of all DRFP pairs share at least one bit, so the sparse
+    # product is *larger* than the dense matrix it was contrasted with: at 10,000 synthetic
+    # 30-of-2048-bit fingerprints (36% of pairs sharing a bit) the whole-corpus form peaked at
+    # **1,339 MB** of traced allocation, and a real DRFP corpus at 55% is worse. That is the same
+    # quadratic the `memory_corpus_max_reactions` cap was calibrated against a *linear* ~40 kB per
+    # reaction, so the cap no longer bounded the job it was written to bound.
+    #
+    # Blocking the product keeps the peak at this budget plus O(n) for the partition, which is what
+    # makes the cap's arithmetic true again. 64 MB is chosen to be small beside the corpus read
+    # itself (~4 GB at the cap) and large enough that the per-block overhead does not show: measured
+    # at n=10,000, traced peak 1,339 MB -> 57 MB, clusters bit-identical, and wall clock 5.02 s ->
+    # 1.78 s rather than worse, because the whole-corpus form spent its time on the 1.3 GB.
+    # Raise it to trade memory for time if a profile ever shows the blocking costing any; it changes
+    # no result either way.
+    memory_similarity_block_bytes: int = Field(default=64 * 1024 * 1024, gt=0)
     memory_job_timeout_seconds: float = Field(default=300.0, gt=0)
     # Most notes one synthesis run may write (0 = unbounded). The three jobs rescan the whole
     # corpus with no cursor, so a large import would write a note per cluster in one run. The

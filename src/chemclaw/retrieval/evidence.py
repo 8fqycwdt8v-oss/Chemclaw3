@@ -9,6 +9,7 @@ external literature — is a new retriever behind this interface, never a change
 """
 
 from collections.abc import Iterable
+from datetime import date
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
@@ -88,6 +89,19 @@ class EvidenceChunk(BaseModel):
     created_by: str = ""
     source: str = ""
     confidence: float | None = None
+    # When the source note stopped being valid, or `None` while its window is open.
+    #
+    # **Carried because a date-windowed sweep serves retired notes and nothing said so.** An
+    # unwindowed sweep drops a note that is not current today (KM-7, D-055), so every chunk it
+    # returns is live and this field is `None`; a sweep naming a period deliberately does not apply
+    # that rule — "what did we recommend in 2024" is asking for exactly the notes that have since
+    # been retired — and the chunk it built was byte-identical to one from a live note. A reader
+    # with the note's `confidence`, its author and its source but no idea it was withdrawn is being
+    # handed the most confident-looking form of superseded advice.
+    #
+    # Not a filter, for the same reason `conflicts_with` is not one: which of a retired note and
+    # its replacement answers the question is the caller's, and the caller asked for the period.
+    valid_to: date | None = None
     # Which of the query's terms (`kg.search.query_terms`) this chunk's note actually contains.
     #
     # **Because an absent answer was indistinguishable from a present one.** `GraphRetriever`

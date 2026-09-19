@@ -23,9 +23,10 @@ things that happen after a result is durable.
 
 import logging
 import time
+from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 import psycopg
 from psycopg.rows import TupleRow
@@ -39,6 +40,43 @@ from chemclaw.publish.record import CONTRACT_VERSION, Publication, ResultRecord
 from chemclaw.publish.registry import enabled_names, publishing_enabled
 
 logger = logging.getLogger(__name__)
+
+
+class Lease(NamedTuple):
+    """One claimed row's fence: which row, and the attempt number the claim spent on it.
+
+    **The reason marking takes this rather than a bare id.** A lease is a timestamp
+    (`claimed_at`), which says a row is in somebody's hands but not *whose* — so both marks keyed on
+    `id` alone, and a superseded pass's `mark_failed` released the live pass's lease and put the row
+    back in the queue at the cost of one attempt out of eight. `attempts` is the fencing token
+    because `_CLAIM` increments it in the same statement that takes the lease: it is monotonic
+    per row, so the number a pass held names that pass's claim and cannot name a later one. Passing
+    it from `claim` to `mark_*` as one value is what stops the two halves drifting apart, which is
+    how the fence would be forgotten on one of the four call sites in the drain.
+    """
+
+    row_id: int
+    #: The value of `attempts` *after* the claim that handed this row out.
+    attempt: int
+
+
+class ClaimedRow(NamedTuple):
+    """A leased row: what to deliver, and the fence that says this pass still owns it."""
+
+    lease: Lease
+    calc_ref: str
+    document: dict[str, Any]
+
+
+def _lease_columns(leases: Sequence[Lease]) -> tuple[list[int], list[int]]:
+    """Split leases into the two parallel arrays `unnest(bigint[], integer[])` takes.
+
+    Two arrays rather than one array of composites: psycopg adapts a `list[int]` to a Postgres array
+    without a registered composite type, and `unnest` over two arrays is the standard join shape for
+    a pairwise `IN`.
+    """
+    return [lease.row_id for lease in leases], [lease.attempt for lease in leases]
+
 
 # `ON CONFLICT DO NOTHING` on the identity index is what makes every enqueue path idempotent: the
 # three call sites need no coordination, a retried Temporal activity cannot double-queue, and the
@@ -88,6 +126,16 @@ _UNLEASED = "(claimed_at IS NULL OR claimed_at < now() - make_interval(secs => %
 #
 # Oldest first, so a backlog drains in the order it accumulated and a burst of fresh results cannot
 # starve what was already waiting.
+#
+# **`attempts` comes back with the row, and it is the fence.** `claimed_at` says *that* a row is
+# leased; it does not say *whose* lease it is, and both marks keyed on `id` alone — so a superseded
+# pass reporting an old outage set `claimed_at = NULL` on a row a live pass was mid-delivery on,
+# putting it straight back in the queue. Driven against real Postgres: one row, a claim, one stale
+# `mark_failed`, and the next claim took the same row again — each stale mark costs one attempt out
+# of eight and delivers nothing, so a budget sized for eight destination outages empties on a
+# release nobody intended. `attempts` is the token that fixes it because `_CLAIM` increments it in
+# the same statement: it is monotonic per row, so the value a pass was handed identifies that pass's
+# claim and no later one. No column and no migration — see `_MARK_DELIVERED`.
 _CLAIM = f"""
     UPDATE result_publications
     SET attempts = attempts + 1, claimed_at = now()
@@ -99,7 +147,7 @@ _CLAIM = f"""
         LIMIT %s
         FOR UPDATE SKIP LOCKED
     )
-    RETURNING id, calc_ref, document
+    RETURNING id, calc_ref, document, attempts
 """
 
 # **The fourth state the three-state contract does not name, and how a row leaves it.** `_CLAIM`
@@ -141,10 +189,24 @@ _REAP_EXHAUSTED = f"""
 
 # Releases the lease as well as recording the outcome: `claimed_at = NULL` is what "nobody is
 # working on this row" means, and a delivered row is nobody's.
+#
+# **Matched on the lease, not on the id, and guarded on `pending`.** Both were missing and each is
+# its own defect. Without the fence a pass could release a lease it no longer held (see `_CLAIM`).
+# Without the state guard this statement could walk a row *backwards*: driven against real Postgres,
+# a row already at `state='failed'` with its budget spent — dead-lettered, counted on
+# `chemclaw_results_dead_lettered_total`, listed by `backfill_publications --requeue` — became
+# `'delivered'` on a stale `mark_delivered`, so the queue reported a publication that never happened
+# and the dead-letter count and the table disagreed permanently. A claimed row is `pending` by
+# construction, exactly as `_MARK_FAILED` already argued for itself.
+#
+# `RETURNING id` is what makes `chemclaw_results_published_total` a count of transitions rather than
+# of call arguments — the same correction `_MARK_FAILED`'s `RETURNING state` is.
 _MARK_DELIVERED = """
-    UPDATE result_publications
+    UPDATE result_publications AS p
     SET state = 'delivered', delivered_at = now(), last_error = '', claimed_at = NULL
-    WHERE id = ANY(%s)
+    FROM unnest(%s::bigint[], %s::integer[]) AS lease(id, attempt)
+    WHERE p.id = lease.id AND p.attempts = lease.attempt AND p.state = 'pending'
+    RETURNING p.id
 """
 
 # Records why an attempt failed, and retires the row once its budget is gone. **It does not
@@ -170,13 +232,18 @@ _MARK_DELIVERED = """
 # back into the queue, and a row that is still leased is not in the queue — so without the release
 # a destination's outage would cost one retry per *lease period* rather than one per drain pass,
 # which at the shipped numbers is the difference between the next pass and two minutes of nothing.
+#
+# **Matched on the lease rather than on the id, for the reason `_CLAIM` gives.** Setting
+# `claimed_at = NULL` is the release a stale pass must not perform, so the row it lands on has to
+# be one this pass still holds — `p.attempts = lease.attempt` is that check, and it costs no column.
 _MARK_FAILED = """
-    UPDATE result_publications
+    UPDATE result_publications AS p
     SET last_error = %s,
         claimed_at = NULL,
-        state = CASE WHEN attempts >= %s THEN 'failed' ELSE 'pending' END
-    WHERE id = ANY(%s) AND state = 'pending'
-    RETURNING state
+        state = CASE WHEN p.attempts >= %s THEN 'failed' ELSE 'pending' END
+    FROM unnest(%s::bigint[], %s::integer[]) AS lease(id, attempt)
+    WHERE p.id = lease.id AND p.attempts = lease.attempt AND p.state = 'pending'
+    RETURNING p.state
 """
 
 # The backlog, per sink, in the two numbers that are actually a backlog. `count(*)` and
@@ -502,8 +569,8 @@ async def enqueue_payload(
     return await enqueue(records)
 
 
-async def claim(sink: str, limit: int) -> list[tuple[int, str, dict[str, Any]]]:
-    """Claim up to `limit` pending rows for `sink`, as `(id, calc_ref, document)`.
+async def claim(sink: str, limit: int) -> list[ClaimedRow]:
+    """Claim up to `limit` pending rows for `sink`, each with the lease that fences its mark.
 
     **Claiming spends the attempt** — see `_CLAIM` for why that has to happen in the same statement
     rather than after the delivery.
@@ -579,55 +646,100 @@ async def claim(sink: str, limit: int) -> list[tuple[int, str, dict[str, Any]]]:
             sink=sink,
             dead_lettered=reaped,
         )
-    return [(int(row[0]), str(row[1]), row[2]) for row in rows]
+    return [ClaimedRow(Lease(int(row[0]), int(row[3])), str(row[1]), row[2]) for row in rows]
 
 
-async def mark_delivered(ids: list[int]) -> None:
-    """Record that these rows reached their sink."""
-    if not ids:
+async def mark_delivered(leases: Sequence[Lease]) -> None:
+    """Record that these rows reached their sink, for the leases this pass still holds.
+
+    A row whose lease has moved on is *not* marked — see `Lease` and `_MARK_DELIVERED`. That is
+    at-least-once delivery working as designed rather than a loss: the record reached the
+    destination, every write on the far side is an upsert onto a content hash, and the pass that now
+    holds the lease will deliver and mark it. What must not happen is this pass releasing that lease
+    or overwriting an outcome another pass recorded.
+
+    `chemclaw_results_published_total` counts the rows that actually changed state, not the
+    arguments: a re-run of the same mark books nothing, which is what makes the counter a count of
+    publications.
+    """
+    if not leases:
         return
     async with _connect("outbox_mark_delivered") as conn:
-        await conn.execute(_MARK_DELIVERED, (ids,))
+        cursor = await conn.execute(_MARK_DELIVERED, _lease_columns(leases))
+        marked = len(await cursor.fetchall())
         await conn.commit()
-    record_metric(lambda m: m.increment("chemclaw_results_published_total", len(ids)))
+    if marked:
+        record_metric(lambda m: m.increment("chemclaw_results_published_total", marked))
+    _log_fenced_off("delivered", len(leases) - marked)
 
 
-async def mark_failed(ids: list[int], reason: str) -> None:
+async def mark_failed(leases: Sequence[Lease], reason: str) -> None:
     """Record a failed attempt, retiring a row only once it has spent its attempt budget.
 
     A retired row is never deleted: it is the record that something was *not* published, and an
     operator re-queues it with the backfill CLI once the cause is fixed. Deleting it would turn an
     outage into a silent gap.
+
+    Fenced on the lease, which is the half this had to grow: `claimed_at = NULL` is a *release*, and
+    a pass whose lease has expired releasing a row a live pass is delivering is how one destination
+    outage spent several attempts for one real try. See `Lease`.
     """
-    if not ids:
+    if not leases:
         return
     async with _connect("outbox_mark_failed") as conn:
         cursor = await conn.execute(
-            _MARK_FAILED, (reason[:2000], settings.result_publish_max_attempts, ids)
+            _MARK_FAILED,
+            (reason[:2000], settings.result_publish_max_attempts, *_lease_columns(leases)),
         )
         states = [str(row[0]) for row in await cursor.fetchall()]
         await conn.commit()
     retired = sum(1 for state in states if state == "failed")
+    _log_fenced_off("failed", len(leases) - len(states))
     # **This is one delivery attempt per row, and it is not the only thing on this counter.**
     # `chemclaw_result_publish_failures_total` also carries a sink-resolution failure, a local
     # queue-write failure and the enqueue activity's own failure — four unrelated events on one
     # series, which is exactly the argument this module makes for keeping projection failures
     # apart. The counter cannot be split without a label it does not declare, so every site says
     # which stage it is in its log line instead; `stage=delivery` is this one.
-    record_metric(lambda m: m.increment("chemclaw_result_publish_failures_total", len(ids)))
+    record_metric(lambda m: m.increment("chemclaw_result_publish_failures_total", len(states)))
     if retired:
         record_metric(lambda m: m.increment("chemclaw_results_dead_lettered_total", retired))
     log_event(
         logger,
         "publish.attempt_failed",
         "publish[delivery]: %d row(s) failed an attempt, %d retired to dead-letter: %s",
-        len(ids),
+        len(states),
         retired,
         reason[:200],
         level=logging.WARNING if retired else logging.INFO,
         stage="delivery",
-        rows=len(ids),
+        rows=len(states),
         dead_lettered=retired,
+    )
+
+
+def _log_fenced_off(outcome: str, fenced: int) -> None:
+    """Say when a mark reached no row, because silence there is indistinguishable from success.
+
+    A fence miss means this pass no longer holds the lease — its rows were re-claimed after its
+    lease expired, which is a pass that ran longer than `result_publish_lease_seconds` and is worth
+    an operator knowing about. It is not an error: the row is somebody else's now and will be
+    delivered and marked by them.
+    """
+    if fenced <= 0:
+        return
+    log_event(
+        logger,
+        "publish.mark_fenced_off",
+        "publish[delivery]: %d row(s) could not be marked %s — this pass no longer holds their "
+        "lease, so another drain re-claimed them after %.0fs and owns their outcome",
+        fenced,
+        outcome,
+        settings.result_publish_lease_seconds,
+        level=logging.WARNING,
+        stage="delivery",
+        rows=fenced,
+        outcome=outcome,
     )
 
 

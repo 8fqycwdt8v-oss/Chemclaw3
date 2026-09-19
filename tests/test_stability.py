@@ -246,3 +246,120 @@ def test_a_flat_attribute_reports_r_squared_as_one_rather_than_zero() -> None:
         flat, AcceptanceCriterion("imp", maximum=Measurement.of(0.50, "area%"))
     )
     assert estimate.r_squared == 1.0
+
+
+def test_an_in_control_profile_whose_noise_happens_to_fall_is_not_read_as_falling() -> None:
+    """The flat case above was gated on bit-exact `slope == 0.0`, and real data is never that flat.
+
+    0.10, 0.11, 0.10, 0.11 area% is what an in-control largest-unspecified impurity at the reporting
+    threshold looks like, and the second of those orderings fits a *negative* slope — so it was
+    "falling", looked for a minimum, and was refused against a specification stating only a
+    maximum, which is every impurity specification. Driven over 2,000 simulated truly-flat series,
+    749 of them (37%) were refused, and the two halves of the split differ only in the sign of the
+    noise: the two series below are the same measurements in a different order, and one used to
+    error.
+
+    Asserted as the *pair* rather than as the failing one alone, because the defect is that they
+    disagree — a test on only the negative ordering would pass with the rule rewritten to always
+    answer "upper", which would break the refusal two tests down.
+    """
+    criterion = AcceptanceCriterion("imp", maximum=Measurement.of(0.20, "area%"))
+    noise_up = _points("area%", [(0, 0.10), (3, 0.11), (6, 0.10), (9, 0.11)])
+    noise_down = _points("area%", [(0, 0.11), (3, 0.10), (6, 0.11), (9, 0.10)])
+
+    up = estimate_trend(noise_up, criterion)
+    down = estimate_trend(noise_down, criterion)
+
+    assert up.slope_per_month > 0 and down.slope_per_month < 0, (
+        "the premise: these two orderings fit slopes of opposite sign"
+    )
+    assert up.bounded_side == down.bounded_side == "upper"
+    assert up.months_to_limit == down.months_to_limit is None
+
+
+def test_a_real_drift_towards_an_unspecified_side_is_still_refused() -> None:
+    """The refusal the significance test must not swallow, asserted where it could have been.
+
+    `RISING` grows ~0.033 area%/month over five timepoints — a drift no confidence band hides — and
+    a criterion stating only a minimum puts nothing in front of it. Treating every slope as noise
+    when the criterion does not bound its side would have answered about the *other* bound instead,
+    which is a longer estimate about a question nobody asked. So the sign is only overridden when
+    the fit cannot distinguish it from zero.
+    """
+    with pytest.raises(StabilityError, match="rising.*no maximum"):
+        estimate_trend(RISING, AcceptanceCriterion("imp", minimum=Measurement.of(0.01, "area%")))
+
+
+def test_the_crossing_is_searched_from_the_first_measurement_not_from_time_zero() -> None:
+    """A compliant batch answered `months_to_limit = 0.0`, and that is the number a chemist reads.
+
+    The band's half-width grows with `(t - x̄)²`, so on a 24/30/36-month programme it is at its
+    *widest* before any data exists — and the bracket, and the "already past the limit" check in
+    front of it, were both pinned to `t = 0.0`, a point the study never observed and Q1E never
+    extrapolates backwards to. Driven on 98.5 / 98.3 / 97.4 % w/w against a 95.0 % minimum: the
+    lower bound is **96.97% at the first pull**, it crosses 95.0% at **39.2 months** — inside the
+    48-month ceiling Q1E §2.4 allows for 36 months of data — and the function answered `0.0` with
+    "this data does not support any period".
+
+    The two numbers below are computed from the returned fit rather than transcribed, so the
+    assertion cannot be satisfied by a fixture that happens to agree with it.
+    """
+    late = _points("% w/w", [(24, 98.5), (30, 98.3), (36, 97.4)])
+    minimum = AcceptanceCriterion("assay", minimum=Measurement.of(95.0, "% w/w"))
+    estimate = estimate_trend(late, minimum)
+
+    assert estimate.months_to_limit is not None
+    assert 36.0 < estimate.months_to_limit < 48.0, (
+        f"the crossing must land inside Q1E's window, not at zero: {estimate.months_to_limit}"
+    )
+    assert estimate.intercept + estimate.slope_per_month * 24.0 > 95.0, (
+        "the premise: the fitted assay is comfortably in specification at the first pull"
+    )
+    assert "at the first timepoint" not in estimate.note
+    assert "does not support any period" not in estimate.note
+
+
+def test_a_bound_already_past_the_limit_at_the_first_pull_still_supports_no_period() -> None:
+    """The branch the fix narrowed, kept where it belongs: at the first measurement.
+
+    Moving the check from `t = 0` must not delete it. A batch whose lower bound is already under
+    the limit at the timepoint it was actually measured at supports no period at all, and the note
+    has to name that timepoint rather than "time zero" — a study whose first pull is at 24 months
+    has no observation at zero to be talking about.
+    """
+    failing = _points("% w/w", [(24, 95.4), (30, 94.4), (36, 94.6)])
+    estimate = estimate_trend(
+        failing, AcceptanceCriterion("assay", minimum=Measurement.of(95.0, "% w/w"))
+    )
+
+    assert estimate.months_to_limit == 0.0
+    assert "first timepoint (24 months)" in estimate.note, estimate.note
+    assert "does not support any period" in estimate.note
+
+
+def test_the_bisection_bracket_is_the_first_measurement_and_not_only_the_guard() -> None:
+    """The bracket's own edge, driven — a guard in front of a wrong bracket is not the fix.
+
+    Bisection needs `low` to be on the inside of the limit, and the band is not monotone in `t`: its
+    half-width grows away from the mean in *both* directions, so on a 24/27/30-month programme
+    the lower bound dips under 95.0 % w/w before 21 months and comes back up. Q1E's ceiling for
+    30 months of data is 42, whose midpoint is 21 — so a search bracketed at 0.0 takes its first
+    step into that spurious region, follows it down, and returns **0.00 months** for a batch at
+    99.96 % w/w at its first pull. Bracketed at the first measurement the same data answers
+    **32.9 months**.
+
+    This is the assertion the "already past the limit at the first pull" guard does *not* make: the
+    guard passes here, because the bound at 24 months is 96.95 %.
+    """
+    late = _points("% w/w", [(24, 99.75), (27, 100.385), (30, 99.74)])
+    minimum = AcceptanceCriterion("assay", minimum=Measurement.of(95.0, "% w/w"))
+    estimate = estimate_trend(late, minimum)
+
+    assert estimate.months_to_limit is not None
+    assert estimate.months_to_limit > 24.0, (
+        "a crossing before the first measurement is a root of the band's low-side dip, not a "
+        f"period this study supports: {estimate.months_to_limit}"
+    )
+    assert estimate.intercept + estimate.slope_per_month * 24.0 > 99.0, (
+        "the premise: the fitted assay is nowhere near the limit at the first pull"
+    )
