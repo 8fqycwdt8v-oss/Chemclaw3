@@ -132,8 +132,9 @@ async def post_message(
     claims: SessionTurns | None = front.turn_claims
     lease = settings.service_turn_claim_lease_seconds
     semaphore = front.turn_semaphore
-    # **Per actor — the half of a pair `routes/streams.py` already ships whole.** The semaphore
-    # below bounds this *process* and is actor-blind, so one principal opening
+    # **Per actor — the half of a pair `src/chemclaw/api/routes/streams.py` already ships
+    # whole.** The semaphore below bounds this *process* and is actor-blind, so one principal
+    # opening
     # `service_max_concurrent_turns` sessions holds every permit on the replica and every other
     # chemist is shed `at_capacity` (`chemclaw.api.detach` has the measurement: one hang-up per
     # permit). One bound does not imply the other.

@@ -152,8 +152,9 @@ class ServiceSettings(BaseSettings):
     # `service_max_concurrent_turns` sessions holds every permit on the replica and every other
     # chemist is shed `at_capacity` — the measurement is in `chemclaw.api.detach`, one hang-up per
     # permit. The per-actor *rate* limit below does not reach it: 120/min is two orders of
-    # magnitude above 12 concurrent turns. `routes/streams.py` already bounds its own resource
-    # twice, per user and per process, on the argument that one bound does not imply the other;
+    # magnitude above 12 concurrent turns. `src/chemclaw/api/routes/streams.py` already bounds
+    # its own resource twice, per user and per process, on the argument that one bound does not
+    # imply the other;
     # turns had only the second. Counted across an actor's *other* sessions, since one turn per
     # session is already a 409.
     #

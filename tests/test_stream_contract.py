@@ -642,12 +642,12 @@ def test_an_expired_lease_does_not_hold_an_actors_slot() -> None:
     """The anti-brick guard, and the whole reason the count is derived rather than kept.
 
     A `dict[str, int]` keyed by principal is the obvious shape for a per-actor cap and is what
-    `routes/streams.py` uses for streams. It is wrong here because a turn has a window neither
-    teardown covers — a client gone after the streaming response was handed off but before its
-    generator was first advanced runs no `finally` at all — so an integer would stay incremented
-    for the pod's lifetime and refuse that human forever. Reading the lease map instead means the
-    same expiry that stops a stale entry answering 409 also stops it answering 429: the cost of a
-    skipped teardown is one lease width, not a restart.
+    `src/chemclaw/api/routes/streams.py` uses for streams. It is wrong here because a turn has a
+    window neither teardown covers — a client gone after the streaming response was handed off but
+    before its generator was first advanced runs no `finally` at all — so an integer would stay
+    incremented for the pod's lifetime and refuse that human forever. Reading the lease map instead
+    means the same expiry that stops a stale entry answering 409 also stops it answering 429: the
+    cost of a skipped teardown is one lease width, not a restart.
     """
     active: dict[str, Any] = {}
     token = _claim_turn_slot(active, "s1", actor="alice")
