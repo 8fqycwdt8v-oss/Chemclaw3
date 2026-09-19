@@ -816,3 +816,41 @@ async def test_a_mid_turn_resume_continues_the_turns_caps_instead_of_restarting_
         "the resume restarted the turn's model-call count, so one turn got two allowances of "
         f"both in-graph caps; the carry reads {carry}"
     )
+
+
+def test_every_per_turn_counter_survives_a_mid_turn_resume() -> None:
+    """`_CARRIED_CHANNELS` names every accumulating per-turn channel, derived rather than listed.
+
+    The test above drives the two that existed when it was written. This is the guard on the
+    *membership*, and it exists because the list is exactly the shape that goes stale: a
+    `TurnTotal` is by construction a counter that accumulates across a turn and resets between
+    turns, so every one of them has the same reason to be carried — and a new one added three
+    modules away is carried only if somebody remembers this tuple.
+
+    That is not hypothetical. `handoffs` arrived with
+    `D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it` and was omitted
+    from the carry in its first draft, which would have handed a turn a fresh chain allowance every
+    time it came back from a job result — the bound not existing for precisely the turns long
+    enough to need one, which is the defect `_CARRIED_CHANNELS` was created to fix, one channel
+    over.
+
+    `active_agent` is deliberately not here and is not a `TurnTotal`: it is checkpointed, so a
+    resume restores it rather than carrying it.
+    """
+    from typing import get_type_hints
+
+    from chemclaw.agent.state import ChemclawState, TurnTotal
+    from chemclaw.api.graph_stream import _CARRIED_CHANNELS
+
+    accumulating = {
+        name
+        for name, annotation in get_type_hints(ChemclawState, include_extras=True).items()
+        if any(isinstance(marker, TurnTotal) for marker in getattr(annotation, "__metadata__", ()))
+        or "TurnTotal" in repr(annotation)
+    }
+
+    assert accumulating <= set(_CARRIED_CHANNELS), (
+        f"{sorted(accumulating - set(_CARRIED_CHANNELS))} accumulate across a turn but are not "
+        "carried across a mid-turn resume, so a turn that comes back from a job result gets a "
+        "fresh allowance of whatever they bound"
+    )

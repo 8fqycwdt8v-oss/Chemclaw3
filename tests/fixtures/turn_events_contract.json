@@ -49,6 +49,11 @@
       "failed": "bool",
       "source": "str"
     },
+    "handoff": {
+      "from_agent": "str",
+      "reason": "str",
+      "to_agent": "str"
+    },
     "job_completed": {
       "job_id": "str",
       "summary": "dict[str, object]"

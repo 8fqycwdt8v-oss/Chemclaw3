@@ -600,8 +600,18 @@ topic).
       billed tokens from `turn_costs`, wall clock — through one harness, on one pinned model, with
       at least three repeats. The denominator problem disappears the moment the unit is a task.
 
-      **The arms**: no helper, helper on the caller's model, and helper on its own via
-      `CHEMCLAW_MODEL_ROUTES='{"helper": "…"}'`. **A negative result closes the question as
+      **The arms**: no helper, helper on the caller's model, helper on its own via
+      `CHEMCLAW_MODEL_ROUTES='{"helper": "…"}'`, and — since
+      `D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it` — a **peer**
+      arm with `agent_peer_roster` set, which is a different act rather than a fourth flavour of
+      the same one: a helper reads and reports, a peer keeps the conversation. It belongs on this
+      row rather than on one of its own, because a row per arm is what this row was four of.
+      Nothing about peer handoff is evidence that it pays; it ships off for that reason, and
+      `chemclaw_tool_calls_total` already moves per `transfer_to_…` name while
+      `ChemclawState.handoffs` is the per-turn chain length, so the hop data needs no new code.
+      The failure mode worth instrumenting is a chain that bounces: two peers each deciding the
+      other should answer is three model calls to arrive where the turn started.
+      **A negative result closes the question as
       legitimately as a positive one** — written down because the retired specialist team was added
       to be ready and stayed off, and a disappointing answer is not a reason to re-open a
       measurement.

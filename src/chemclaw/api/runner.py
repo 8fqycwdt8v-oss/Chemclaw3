@@ -46,7 +46,6 @@ from chemclaw.agent.context_budget import (
 )
 from chemclaw.agent.framing import frame_untrusted
 from chemclaw.agent.job_results import await_job_results
-from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.local_skills import personal_skills_available
 from chemclaw.agent.loop_cap import begin_loop_watch, end_loop_watch, loop_hit_cap
 from chemclaw.agent.plan_gate import (
@@ -73,6 +72,7 @@ from chemclaw.agent.spend_cap import (
 from chemclaw.agent.state import turn_config
 from chemclaw.agent.tool_result_size import bounded_content
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
+from chemclaw.agent.turn_graph import build_turn_agent
 from chemclaw.agent.turn_usage import (
     InFlightPrompts,
     TurnUsage,
@@ -192,7 +192,7 @@ async def run_turn(
     connectors: Sequence[Any] | None = None,
     history: Any | None = None,
     profile: str | None = None,
-    graph_factory: Callable[..., Any] = build_langgraph_agent,
+    graph_factory: Callable[..., Any] = build_turn_agent,
     deadline: float | None = None,
 ) -> AsyncIterator[Event]:
     """Run one turn and yield its events (tokens, tool calls, jobs, then the answer).

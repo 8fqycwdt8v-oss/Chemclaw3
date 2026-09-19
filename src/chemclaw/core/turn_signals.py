@@ -162,7 +162,43 @@ class SkillLoadedSignal(BaseModel):
     skill: str
 
 
-Signal = JobSignal | NoteRecordedSignal | QuestionSignal | SkillLoadedSignal | ToolFailureSignal
+class HandoffSignal(BaseModel):
+    """Control moved from one peer agent to another, raised by the handoff tool itself.
+
+    **A signal rather than something the stream reads off the update, and both attempts at the
+    latter were wrong.** The obvious producer scans a completed node's `tool_calls` for a transfer,
+    which fails twice over: a handoff carries its agent's *whole* message list into the parent (it
+    must, or the `AIMessage` holding the call is dropped and the thread keeps an orphan
+    `ToolMessage`), so every later update replays every earlier hop — measured, a two-hop turn
+    announced **seven** handoffs. And the peer's name is not recoverable from the tool's name,
+    because a tool name cannot carry `-`: `transfer_to_evidence_peer` reads back as
+    `evidence_peer` for a profile called `evidence-peer`, so a surface would print a name no
+    profile has.
+
+    Raised from the tool, both problems are gone rather than mitigated: it fires once per call
+    because a call happens once, and it carries the peer's real name because the name is what the
+    tool closed over. That is the same argument every other member of this union rests on — a
+    signal comes from the act itself, never from anything a model can author or a reader can
+    reconstruct.
+    """
+
+    #: The peer giving up control.
+    from_agent: str
+    #: The peer receiving it, and the author of what the chemist reads next.
+    to_agent: str
+    #: The handing model's own stated reason, written for the agent it hands to. Prose for a
+    #: human; nothing branches on it.
+    reason: str
+
+
+Signal = (
+    JobSignal
+    | NoteRecordedSignal
+    | QuestionSignal
+    | SkillLoadedSignal
+    | ToolFailureSignal
+    | HandoffSignal
+)
 
 
 # The key a signal rides under in the graph's custom stream. Namespaced because the channel is
@@ -267,3 +303,21 @@ def record_tool_failure(
     gate to name: the gates refuse by raising.
     """
     _emit(ToolFailureSignal(tool=tool, message=message, call_id=call_id, reason=reason))
+
+
+def record_handoff(from_agent: str, to_agent: str, reason: str) -> None:
+    """Announce that control moved to `to_agent`, from inside the tool that moved it.
+
+    **This name existed before and was deleted for having no caller**
+    (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`): the specialist team
+    that was supposed to call it never did, and a function kept alive by a test that calls it
+    directly is a claim that a control exists. It returns with a caller in the same commit —
+    `agent/handoff.py`'s transfer tool — which is the condition that ADR set and the one
+    `tests/test_event_producers.py` now enforces one layer out.
+
+    Args:
+        from_agent: The peer giving up control; empty only if the turn graph could not name it.
+        to_agent: The peer receiving it.
+        reason: The handing model's own account of why.
+    """
+    _emit(HandoffSignal(from_agent=from_agent, to_agent=to_agent, reason=reason))

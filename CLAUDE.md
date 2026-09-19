@@ -62,6 +62,21 @@ already opened and opens none of its own. Its report is **defanged, not framed**
 system's own paraphrase, and `agent/tool_result_shape.py` is the one function both result-rewriting
 middlewares go through, because `task` returns a `Command` rather than a `ToolMessage`.
 
+**Handoff.** Delegation returns; a handoff does not. With `agent_peer_roster` set,
+`agent/turn_graph.py` compiles a `StateGraph` whose nodes are several `build_langgraph_agent`
+graphs, and a `transfer_to_<peer>` tool moves the conversation between them with
+`Command(goto=…, graph=Command.PARENT)`; `active_agent` is checkpointed, so a later turn resumes
+with whoever held it. A peer keeps the acting tools and answers the chemist directly, which is what
+a helper may not do. **A handoff redistributes the turn's authority and cannot extend it**
+(`D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it`): a peer's surface
+is *the **root's** surface ∩ what the profile names*, so a chain of any length is bounded by its
+first frame — strictly stronger than `D-2026-08-10` invariant 1, whose pairwise form says nothing
+about a hop that re-widens after two narrowings. That ADR's topology half is superseded; its
+invariants 2-4 hold, and a handoff being an ordinary tool call is what answers its objection that a
+swarm loses the routing node where delegation is visible. It **ships off**, so `build_turn_graph`
+returns `None` and a turn runs the same object it always did. `langgraph-swarm` stays declined:
+it builds on `create_react_agent`, deprecated since LangGraph 1.0.
+
 **The constraint that binds whoever adds delegation**: deepagents builds a bare `SubAgent` dict with
 *only* `spec["middleware"]`, so anything not compiled by `build_langgraph_agent` runs with **no audit
 trail, no authorization and no plan gate — silently.** What is still open is whether delegation pays:

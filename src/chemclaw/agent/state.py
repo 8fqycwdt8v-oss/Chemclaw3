@@ -70,9 +70,21 @@ from typing import Annotated, Any, NotRequired
 
 from langchain.agents.middleware.todo import PlanningState
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.channels.last_value import LastValue
 from langgraph.channels.untracked_value import UntrackedValue
 
 from chemclaw.core.config import settings
+
+#: The attribute `agent/turn_graph.py` stamps on a compiled mesh, naming how many namespace frames
+#: a turn's own agent sits behind on it. `api/graph_stream.root_depth` is the reader.
+#:
+#: **Here rather than in either of those modules**, because it is the one fact both must agree on
+#: and they sit on opposite sides of a layering edge: `agent` may not import `api`
+#: (`tests/test_layering.py`), and `api` importing the turn-graph builder to read one string would
+#: drag the whole agent builder into the front door's import graph. This module is what both
+#: already import, and a marker about the shape of the conversation graph is what this module is
+#: about.
+PEER_DEPTH_ATTR = "chemclaw_peer_depth"
 
 
 class TurnTotal(UntrackedValue[int]):
@@ -133,6 +145,38 @@ class TurnFlag(UntrackedValue[bool]):
         if not values:
             return False
         self.value = any(values) or (self.is_available() and bool(self.value))
+        return True
+
+
+class LastPeer(LastValue[str]):
+    """A checkpointed name that takes the **first** writer in a superstep instead of refusing.
+
+    `LastValue` — what a plain `str` annotation resolves to — raises `InvalidUpdateError` when one
+    superstep delivers two values, and the shape that delivers two is a model emitting two
+    `transfer_to_…` calls in one assistant message. `TurnTotal`'s docstring records the same
+    failure arriving through `task`, and the same reasoning applies: refusing kills the whole turn
+    after the work has been done, which is worse than any defensible choice between the two values.
+
+    **First rather than last, and the asymmetry is deliberate.** `LastValue` keeps `values[-1]`,
+    and there is no ordering guarantee worth relying on across a superstep's writers — but the
+    handoff tools are executed in the order the assistant message listed them, so the *first*
+    transfer a model asked for is the one it reasoned about with the most context behind it, and
+    every later one in the same message is a second thought written before the first was answered.
+    Taking the first also composes with what the turn graph does about the matching hazard on the
+    control side: two `Command(goto=…)`s in one superstep enter two peers, so `turn_graph` binds
+    the handoff tools such that a turn which has already handed over refuses the rest
+    (`handoff.refuse_a_handoff_past_the_cap`), and the channel agreeing with that refusal is what
+    keeps `active_agent` and the node that actually ran from disagreeing.
+
+    Checkpointed, unlike every other channel this module adds — see `active_agent`'s own comment
+    for why that is the point rather than an oversight.
+    """
+
+    def update(self, values: Sequence[str]) -> bool:
+        """Store the first name written this superstep, keeping what is there when none is."""
+        if not values:
+            return False
+        self.value = values[0]
         return True
 
 
@@ -214,6 +258,47 @@ class ChemclawState(PlanningState):
     # does not bill, so a capped turn and a turn that spent its last allowed token and then
     # finished both end at the same number.
     spend_capped: NotRequired[Annotated[bool, TurnFlag(bool)]]
+
+    # Which peer agent holds the conversation — the one field on this state that is deliberately
+    # **per-thread** rather than per-turn, and the only reason `agent/turn_graph.py` needs a state
+    # channel at all.
+    #
+    # Every other field here is untracked, and three paragraphs above argue at length that a
+    # checkpointed field on this state is how a session gets bricked. This one is the case those
+    # paragraphs are the exception to, and the difference is what the field *means*: `model_calls`
+    # describes work this turn did, so carrying it across turns is a miscount; `active_agent`
+    # describes who the chemist is talking to, so *not* carrying it across turns is the bug. A
+    # chemist handed to the safety agent, who then asks a follow-up question, is still talking to
+    # the safety agent — that continuity is the whole difference between a swarm and a supervisor
+    # that re-routes from scratch every turn, and it is the property
+    # `D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it` names.
+    #
+    # It carries no authority. Two things make that structural rather than asserted: the value is
+    # only ever a name the turn graph compiled a node for (`turn_graph.entry_peer` falls back to
+    # the root when it reads a name it does not know, so a hand-edited checkpoint routes to the
+    # root rather than anywhere interesting), and every peer's surface was already intersected
+    # against the root's before any of them was compiled. Restoring it selects which of several
+    # already-bounded agents answers; it cannot select a surface.
+    #
+    # **`LastPeer` rather than a plain field, for `TurnTotal`'s reason.** A plain annotation
+    # resolves to `LastValue`, which raises `InvalidUpdateError` when one superstep delivers two
+    # values — and a model that emits two `transfer_to_…` calls in one assistant message is one
+    # superstep with two writers. That is not hypothetical: the same shape is why `model_calls`
+    # is a `TurnTotal`, and a turn lost to it would be lost *after* both peers had been entered.
+    active_agent: NotRequired[Annotated[str, LastPeer(str)]]
+
+    # How many times this turn has handed between agents — the bound on a chain, and per-turn for
+    # the reason `active_agent` is not. A conversation that moves between agents over twenty turns
+    # is working; a turn that bounces four times is a loop, and only the second is a runaway.
+    #
+    # `TurnTotal` because the fold is additive over each writer's advance, which is what counting
+    # hops means when two peers write in one superstep. The handoff tool therefore writes the
+    # **running total** rather than `1`: this channel is defined against absolute values, and a
+    # constant delta contributes 0 on every hop after the first — measured, a two-hop turn counted
+    # 1 and the cap could never be reached. Untracked so the count is the turn's:
+    # a thread that had handed over three times in earlier turns must not start its fourth turn
+    # already at the cap, which is `agent/loop_cap.py`'s bricked-session defect in a new field.
+    handoffs: NotRequired[Annotated[int, TurnTotal(int)]]
 
 
 def turn_input(message: str) -> dict[str, Any]:
