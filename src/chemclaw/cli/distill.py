@@ -6,8 +6,11 @@ here to distil"; this one distils, and puts what it finds in the queue
 changes any behaviour: a proposal waits for the person it belongs to.
 
 **On demand, never on a timer**, for the rule `CLAUDE.md` states and the campaign and playbook
-miners already follow: no Temporal Schedule opens a pull request, and knowledge never arrives on a
-timer. A miner that ran hourly would fill a queue nobody asked it to fill.
+miners already follow: no Temporal Schedule mines knowledge, and knowledge never arrives on a
+timer. (The rule was phrased as "no Schedule opens a pull request" until
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted the gate; nothing in this
+tree opens one, and who asked is what the rule was ever about.) A miner that ran hourly would
+fill a queue nobody asked it to fill.
 
 **Dry by default.** Printing what it would propose costs nothing and is what somebody running this
 for the first time wants; `--propose` is the flag that writes. That ordering is deliberate rather

@@ -144,9 +144,13 @@ def planned_schedules() -> list[PlannedSchedule]:
     Pure and side-effect-free (no client), so a test can assert the set of jobs and their
     configured cadences without a live Temporal server.
 
-    **No Schedule here opens a pull request** (D-2026-08-25). Campaign synthesis, playbook
-    distillation and optimization-campaign detection used to fire hourly and propose PR-gated notes
-    with nobody having asked, which is knowledge arriving on a timer. The miners are unchanged and
+    **No Schedule here mines knowledge on a timer** (D-2026-08-25). Campaign synthesis, playbook
+    distillation and optimization-campaign detection used to fire hourly and propose notes with
+    nobody having asked, which is knowledge arriving on a timer. The rule was written as "no
+    Schedule opens a pull request" and outlived its mechanism:
+    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted the gate, so no path in this
+    tree opens one and the phrasing named the thing that went rather than the thing that matters,
+    which is who asked. The miners are unchanged and
     still run — `CampaignSynthesisWorkflow`, `PlaybookDistillationWorkflow` and
     `OptimizationCampaignWorkflow` are started on demand, by a chemist or by an agent workflow that
     has a reason to look. What is left on a timer is ingestion, indexing, eviction and retention:
