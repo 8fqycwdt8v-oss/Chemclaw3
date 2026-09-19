@@ -139,6 +139,33 @@ def _fork_round_trip_seconds() -> float:
     return time.perf_counter() - started
 
 
+def _budgets_the_slow_fixture_overruns() -> tuple[float, float]:
+    """`(cost, deadline)` for `_SLOW_CSV`, measured here rather than written down.
+
+    **Three tests in this file time themselves against this fixture, and every one of them had a
+    constant in it.** `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse` rewrote
+    `_parse_csv` to render row by row and cut the parse from ~2.3 s to 0.36 s here and **0.258 s**
+    on the CI runner, which left a hardcoded 0.2 s deadline ahead of it by 1.3x. Two of the three
+    raced, on separate runs, and each was found and fixed on its own — which is how the third was
+    still sitting there with a 2x margin.
+
+    So the budgets are derived from what the parse costs on the box running the test. A quarter is
+    the margin; the floor is one fork round trip, because a deadline under that kills the child
+    before it reads a byte and the test would be about process creation instead.
+    """
+    cost = _in_process_parse_seconds(_SLOW_CSV)
+    fork = _fork_round_trip_seconds()
+    deadline = cost / 4
+    assert deadline > fork, (
+        f"_SLOW_CSV parses in {cost:.3f}s here, so a deadline it overruns four times over is "
+        f"{deadline:.3f}s — under the {fork:.3f}s a fork round trip costs, so the child would be "
+        "killed before it read a byte and this would be about process creation rather than about a "
+        "parse outrunning its deadline. Growing the fixture is not the way out: driven, 40 MB of "
+        "the same CSV is refused by `document_parse_memory_bytes` before the deadline is reached."
+    )
+    return cost, deadline
+
+
 def _warm_the_forkserver() -> None:
     """Pay the forkserver's one-off start before a test measures anything.
 
@@ -188,10 +215,11 @@ def test_a_parsers_refusal_crosses_the_process_boundary_as_itself() -> None:
 def test_a_parse_past_its_deadline_is_killed_and_counted() -> None:
     """The direct form of the fix: the child is killed, and the kill is visible from a scrape."""
     _warm_the_forkserver()
+    _, deadline = _budgets_the_slow_fixture_overruns()
     before = METRICS.value("chemclaw_document_parse_kills_total")
     started = time.monotonic()
     with pytest.raises(ParseWorkerLost):
-        parse_document_isolated("slow.csv", _SLOW_CSV, None, 0.2)
+        parse_document_isolated("slow.csv", _SLOW_CSV, None, deadline)
     elapsed = time.monotonic() - started
     # The caller is freed on the deadline rather than on the parse: the whole point is that the
     # thread ends. Generous on the upper side because sending 20 MB to the child is real work.
@@ -242,16 +270,8 @@ async def test_a_parse_past_its_deadline_frees_its_slot_for_the_next_upload(
     is reached at all, so the test would pass on a memory refusal while claiming to be about time.
     """
     _warm_the_forkserver()
-    cost = _in_process_parse_seconds(_SLOW_CSV)
+    cost, deadline = _budgets_the_slow_fixture_overruns()
     fork = _fork_round_trip_seconds()
-    deadline = cost / 4
-    assert deadline > fork, (
-        f"_SLOW_CSV parses in {cost:.3f}s here, so a deadline it overruns four times over is "
-        f"{deadline:.3f}s — under the {fork:.3f}s a fork round trip costs, so the child would be "
-        "killed before it read a byte and this would be about process creation rather than about a "
-        "parse outrunning its deadline. Growing the fixture is not the way out: driven, 40 MB of "
-        "the same CSV is refused by `document_parse_memory_bytes` before the deadline is reached."
-    )
     monkeypatch.setattr(settings, "attachment_max_concurrent_parses", 1)
     monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", deadline)
     monkeypatch.setattr(settings, "attachment_parse_reap_grace_seconds", deadline * 2.5)
@@ -302,7 +322,11 @@ async def test_the_cap_still_sheds_when_the_slots_are_genuinely_busy(
     _warm_the_forkserver()
     monkeypatch.setattr(settings, "attachment_max_concurrent_parses", 1)
     monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", 30.0)
-    monkeypatch.setattr(settings, "attachment_parse_queue_seconds", 0.1)
+    # Derived for the same reason the other two are: the holder has to still be parsing when this
+    # wait elapses, and against a fixture that now costs 0.26-0.36 s the 0.1 s constant that stood
+    # here was a 2x margin nobody had looked at since `_parse_csv` got faster.
+    cost, _ = _budgets_the_slow_fixture_overruns()
+    monkeypatch.setattr(settings, "attachment_parse_queue_seconds", cost / 4)
     monkeypatch.setattr(settings, "attachment_max_bytes", len(_SLOW_CSV) + 1)
 
     holder = asyncio.create_task(parse_attachment_off_loop("slow.csv", _SLOW_CSV))
