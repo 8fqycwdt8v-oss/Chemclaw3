@@ -27,11 +27,15 @@ where a second copy of the `isinstance` guard would inherit the same hole.
 """
 
 import dataclasses
+import logging
 from collections.abc import Callable
 from typing import Any
 
+from deepagents.backends.utils import create_file_data
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
+
+logger = logging.getLogger(__name__)
 
 
 def rewritten_tool_messages(result: Any, rewrite: Callable[[ToolMessage], ToolMessage]) -> Any:
@@ -84,8 +88,34 @@ def rewritten_tool_messages(result: Any, rewrite: Callable[[ToolMessage], ToolMe
     return dataclasses.replace(result, update={**result.update, "messages": rewritten})
 
 
+#: Where the one entry naming a dropped set lands. A path rather than a per-file marker, because
+#: the whole point is that the count is what had to be bounded: one notice for the set keeps the
+#: total bounded, where a marker each is the 44N the cap exists to stop.
+_DROPPED_PATH = "/scratch/_files_the_budget_could_not_hold.md"
+
+
+def _dropped_notice(paths: list[str]) -> str:
+    """The one entry that stands for every file the channel could not represent.
+
+    Names the count and a bounded sample of the paths rather than all of them, or the notice is the
+    unbounded thing. `agent_subagent_files_max_chars` is named so a reader knows which knob moved
+    it, and the text says the files were **not stored** rather than truncated — reading one back
+    fails, which is the outcome this is honest about.
+    """
+    sample = ", ".join(paths[:10])
+    more = f" and {len(paths) - 10} more" if len(paths) > 10 else ""
+    return (
+        f"[system] {len(paths)} file(s) a helper wrote were **not stored**: this caller's `files` "
+        f"budget (`agent_subagent_files_max_chars`) cannot hold them even as truncation notices. "
+        f"Reading one back will fail. Dropped: {sample}{more}."
+    )
+
+
 def rewritten_command_files(
-    result: Any, rewrite: Callable[[str, int], str], existing: Any = None
+    result: Any,
+    rewrite: Callable[[str, int], str],
+    existing: Any = None,
+    capacity: int | None = None,
 ) -> Any:
     """Apply `rewrite` to every file a `Command` **changes** in its caller's state.
 
@@ -113,6 +143,20 @@ def rewritten_command_files(
     200,000-character file came back as 45 characters because a helper had returned, with the
     truncation logged as "a file a helper wrote".
 
+    **A cap on each file's size is not a cap on the command, because the cut has a floor.**
+    `bounded_content` never returns less than the notice that says it cut — a bound paid for by
+    saying nothing is not what this module is for — so N files each cut to that notice is 44N, and
+    past a crossover the total grows linearly in N again. Driven before `capacity` existed: eight
+    concurrent `task` calls of 600 changed files each landed 206,400 characters against a
+    200,000-character budget, and one call of 5,000 files landed 215,000. The per-file share had
+    already floored, so dividing it further could not help.
+
+    So the count is capped too. Files past `capacity` are **omitted** rather than stored empty, and
+    one entry at `_DROPPED_PATH` names how many went and why. Omitting is the louder failure of the
+    two: reading a dropped path back fails with "no such file", where an empty one hands a chemist a
+    document that simply stops — the silent cut this module exists to prevent. One notice covers the
+    whole dropped set, which is what keeps the total bounded rather than moving the problem.
+
     Skipping them is not merely kinder, it is what the channel does anyway. Upstream's reducer is
     `result[key] = value`, so re-delivering a file whose text is unchanged is a no-op on the
     channel — the bound could only ever have cost bytes, never saved any. What is left to bound is
@@ -127,6 +171,9 @@ def rewritten_command_files(
         existing: The caller's `files` before this command lands. Files whose text it already holds
             unchanged are passed through untouched. `None` bounds every file, which is the old
             behaviour and is kept only for a caller that has no state to compare against.
+        capacity: How many changed files the remaining budget can represent *at all*. `None` keeps
+            every one, which is right for a caller with no budget to spend. See the paragraph
+            below for why a cap on the count is needed beside the cap on each file's size.
 
     Returns:
         The same shape, with its changed files rewritten.
@@ -157,14 +204,32 @@ def rewritten_command_files(
     )
     rewritten: dict[str, Any] = {}
     changed = False
+    kept = 0
+    dropped: list[str] = []
+    # The share is computed over what will actually be stored, not over what arrived: dividing the
+    # budget by files this command is about to drop would shrink every kept file for nothing.
+    storable = sharing if capacity is None else min(sharing, capacity)
     for path, data in files.items():
         content = data.get("content") if isinstance(data, dict) else None
         if not isinstance(content, str) or _is_unchanged(path, content):
             rewritten[path] = data
             continue
-        bounded = rewrite(content, sharing)
+        if capacity is not None and kept >= capacity:
+            dropped.append(path)
+            changed = True
+            continue
+        kept += 1
+        bounded = rewrite(content, storable)
         rewritten[path] = data if bounded is content else {**data, "content": bounded}
         changed = changed or bounded is not content
+    if dropped:
+        rewritten[_DROPPED_PATH] = create_file_data(_dropped_notice(dropped))
+        logger.warning(
+            "dropped %d file(s) a helper wrote: the caller's `files` budget cannot represent them "
+            "even as truncation notices, so %s names the set rather than storing each one empty",
+            len(dropped),
+            _DROPPED_PATH,
+        )
     if not changed:
         return result
     return dataclasses.replace(result, update={**result.update, "files": rewritten})

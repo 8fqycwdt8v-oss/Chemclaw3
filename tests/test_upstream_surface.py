@@ -2198,8 +2198,16 @@ def test_only_the_subagent_middleware_returns_a_command_carrying_the_files_chann
     `deepagents.middleware.subagents._return_command_with_state_update` copies every key not in
     `_EXCLUDED_STATE_KEYS`, so it is the producer; the assertion is that it stays the only one.
 
-    **Three sites, and only one of them originates anything** — which is why the assertion names
-    all three rather than filtering two away, since a filter is where a fourth would hide.
+    **Three sites, and only one of them originates anything.** The assertion names all three
+    rather than collapsing them to the one that matters, so a new site is read rather than assumed.
+
+    **It does filter, and this docstring used to say it did not** — `update` must be an `ast.Dict`
+    carrying a `**spread` or a literal `"files"` key, which is what reduces the installed
+    distribution's 19 `Command(...)` constructions to these three. Two `summarization` sites build
+    their update in a local and pass it by name, so they can never be reported here however they
+    change. Both are `wrap_model_call` commands in a middleware this deployment replaces with
+    `disabled_summarizer`, so nothing is unchecked today — but "a filter is where a fourth would
+    hide" was exactly the wrong sentence to write above a filter.
     `filesystem`'s pair rebuild a wrapped tool's result as `{**update, "messages": …}`, so the
     `files` they can carry is the wrapped tool's, already counted wherever it came from; they relay
     a producer and cannot invent one. A **new** entry in this list is the thing to look at.

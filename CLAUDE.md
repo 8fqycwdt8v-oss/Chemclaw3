@@ -92,8 +92,9 @@ the one suppression that is a string comparison rather than a registry lookup th
 model swap — so the roster is a graph `build_langgraph_agent` compiled, carrying the whole chain.
 Reading the deletion paragraph above as "no delegation" is therefore wrong in the direction that
 matters, and it stayed wrong long enough for the helper's surface to drift from its description:
-the `task` tool said isolation and parallel reading while the helper held its caller's **54**
-in-process tools, nine `run_*` launchers and `record_knowledge_note` among them. The unnamed helper
+the `task` tool said isolation and parallel reading while the helper held its caller's whole
+in-process set — **60** of them today, ten `run_*` launchers and `record_knowledge_note` among
+them; it said 54 and nine, which were the figures on the commit that wrote the sentence. The unnamed helper
 now holds **21** of them — its caller's set minus `authz.side_effecting_tools()` (derived from the partition
 that already exists, so a bundle added next year is out of reach the day it is enabled) and minus
 `ask_clarifying_question`, which changes nothing and still writes a question onto the *chemist's*

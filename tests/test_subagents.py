@@ -2043,39 +2043,76 @@ def test_the_fan_out_divisor_counts_the_tools_that_write_files_not_the_whole_bat
 
 
 def test_the_file_share_bounds_the_superstep_at_every_width_this_deployment_allows() -> None:
-    """The per-file floor is a notice, so past a crossover the total grows linearly again.
+    """The superstep total, which is the thing this is named for and did not assert.
 
-    **The counterpart `bounded_for_batch` already has and this budget did not.**
-    `tests/test_tool_result_size.py::test_the_batch_share_bounds_the_batch_at_every_width` exists
-    because a share driven below `bounded_content`'s brief form stops shrinking — the notice is
-    ~44 characters and nothing returns less — so N files each at the floor is 44N, which passes
-    the budget again at a large enough N. Every floor test beside this one pins `sharing=2` or
-    `sharing=4`, comfortably inside the crossover, which is the exact blind spot that test's own
-    docstring records about its first version.
+    **This test shipped degenerate and a fresh-context review caught it.** It passed `held=budget`,
+    so the numerator was 0 in every cell, `max(0 // anything, 1)` floored the share to 1, and
+    neither `sharing` nor `concurrent` influenced a single assertion — it passed with the whole
+    `concurrent` divisor reverted. Its docstring claimed to sweep "past the crossover"; at an
+    exhausted budget every cell is already past it, so it visited neither side.
 
-    It matters more since `concurrent` joined the denominator: multiplying it by up to
-    `agent_max_parallel_tool_calls` moves the crossover down by the same factor, measured from
-    ~4,444 files per command at width 1 to ~555 at width 8.
+    Worse, the bound in its own name did not hold. Driven through the shipped `bound_tool_results`
+    before `capacity` existed, budget 200,000:
 
-    So this sweeps the widths a deployment can actually reach, and asserts the thing worth
-    asserting — that the notice is what remains, rather than content. A floor that stores only
-    system text is a bound doing its job at the edge; a floor that stores a helper's bytes is not.
+        width= 8  files/call=  600  ->   206,400   OVER
+        width= 8  files/call= 5000  -> 1,720,000   OVER
+        width= 1  files/call= 5000  ->   215,000   OVER
+
+    and `(5000, 8)` was literally a cell in this test's own grid. `bounded_content` floors at the
+    notice saying it cut, so N files each at that floor is 44N: dividing the share further cannot
+    help once it has floored, which is why the fix caps the *count* and not only each file's size.
+
+    So: a fresh channel, so the share actually varies; the **total** asserted, which is what
+    `test_the_batch_share_bounds_the_batch_at_every_width` asserts for the sibling resource and
+    what this one omitted; and widths past `agent_max_parallel_tool_calls`, because that setting is
+    LangGraph's `max_concurrency` and this module's own docstring says twenty calls still return
+    twenty results — nothing clamps a batch.
     """
-    from chemclaw.agent.tool_result_size import _bounded_file
+    import asyncio
+    from types import SimpleNamespace
+
+    from deepagents.backends.utils import create_file_data
+    from langgraph.types import Command
+
+    from chemclaw.agent.tool_result_size import bound_tool_results
 
     budget = settings.agent_subagent_files_max_chars
-    content = "z" * 10_000
-    for concurrent in (1, 2, 4, settings.agent_max_parallel_tool_calls):
-        for sharing in (1, 8, 600, 5_000):
-            stored = _bounded_file(content, sharing, budget, concurrent)
-            assert len(stored) < len(content), (
-                f"at {sharing} file(s) across {concurrent} call(s) on an exhausted budget, "
-                f"{len(stored)} of {len(content)} characters were stored uncut"
+    for width in (1, 2, settings.agent_max_parallel_tool_calls, 20):
+        for per_call in (1, 8, 600, 5_000):
+            asked = AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "task", "args": {}, "id": f"w{i}", "type": "tool_call"}
+                    for i in range(width)
+                ],
             )
-            assert "z" * 100 not in stored, (
-                f"at {sharing} file(s) across {concurrent} call(s) the floor kept a run of the "
-                "helper's own bytes; past the crossover what remains must be the notice, or the "
-                f"superstep total grows linearly again ({len(stored)} characters each)"
+
+            async def _handler(request: Any, *, n: int = per_call) -> Any:
+                which = request.tool_call["id"]
+                return Command(
+                    update={
+                        "files": {
+                            f"/scratch/{which}-{j}.md": create_file_data("z" * 2_000)
+                            for j in range(n)
+                        }
+                    }
+                )
+
+            landed = 0
+            for i in range(width):
+                request = SimpleNamespace(
+                    tool_call={"id": f"w{i}", "name": "task"},
+                    state={"messages": [asked], "files": {}},
+                )
+                call = bound_tool_results.awrap_tool_call(request, _handler)  # type: ignore[arg-type]
+                bounded = cast("Any", asyncio.run(call))
+                landed += sum(
+                    len(str(d.get("content", ""))) for d in bounded.update["files"].values()
+                )
+
+            assert landed <= budget, (
+                f"{width} concurrent call(s) of {per_call} file(s) each landed {landed:,} "
+                f"characters in one superstep against a {budget:,}-character budget"
             )
 
 
