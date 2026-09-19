@@ -9,6 +9,7 @@ registry that holds a dict. CI provides Postgres; the offline sandbox skips (`te
 """
 
 import asyncio
+import time
 from typing import Any
 
 import pytest
@@ -234,7 +235,9 @@ def test_a_session_with_a_turn_in_flight_refuses_the_delete() -> None:
     assert asyncio.run(_rows_for(session_id)) > 0
 
     asyncio.run(SessionTurnClaims().release(session_id, "another-worker"))
-    app.state.active_turns[session_id] = TurnLease(token="live-turn", deadline=float("inf"))
+    app.state.active_turns[session_id] = TurnLease(
+        token="live-turn", deadline=float("inf"), actor="alice", claimed_at=time.monotonic()
+    )
     assert client.delete(f"/sessions/{session_id}").status_code == 409, (
         "a delete was admitted while this process was running a turn on the session"
     )
@@ -275,7 +278,9 @@ def test_a_session_with_a_turn_in_flight_refuses_the_fork() -> None:
     )
 
     asyncio.run(SessionTurnClaims().release(session_id, "another-worker"))
-    app.state.active_turns[session_id] = TurnLease(token="live-turn", deadline=float("inf"))
+    app.state.active_turns[session_id] = TurnLease(
+        token="live-turn", deadline=float("inf"), actor="alice", claimed_at=time.monotonic()
+    )
     assert client.post(f"/sessions/{session_id}/fork").status_code == 409, (
         "a fork was admitted while this process was running a turn on the session"
     )

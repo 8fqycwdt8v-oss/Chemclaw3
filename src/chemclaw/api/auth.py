@@ -50,7 +50,11 @@ __all__ = ["GROUP_ROLE_PREFIX", "AuthError", "Principal", "require_principal", "
 
 # The dev stand-in used only when `entra_required` is False (local, no tenant). Never reached in a
 # real deployment, where every request is a validated Entra token.
-_DEV_PRINCIPAL_OID = "dev-user"
+DEV_PRINCIPAL_OID = "dev-user"
+# The private spelling is kept because this module and its tests use it throughout; the public one
+# exists because a guard that divides a pod *per actor* has to be able to recognise the one
+# principal that is not an actor. See `chemclaw.api.routes.turns`.
+_DEV_PRINCIPAL_OID = DEV_PRINCIPAL_OID
 
 
 class Principal(BaseModel):

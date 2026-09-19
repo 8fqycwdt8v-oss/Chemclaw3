@@ -147,7 +147,9 @@ async def fork_session_route(
     # Nothing may sit between this claim and the `try` — the rule `delete_session` states: the
     # reservation has no expiry until `_start_turn_lease` starts one, which nothing here ever does,
     # so only that `finally` gives it back.
-    slot = _claim_turn_slot(front.active_turns, session_id)
+    # `actor=None`: a momentary hold taken to *exclude* a turn is not a turn, so it must not
+    # count against this caller's per-actor concurrent-turn cap (`_actor_turns_in_flight`).
+    slot = _claim_turn_slot(front.active_turns, session_id, actor=None)
     if slot is None:
         raise HTTPException(
             status_code=409,
@@ -351,7 +353,8 @@ async def delete_session(
     # Nothing may sit between this claim and the `try` — the same rule the turn route states: the
     # reservation it takes has no expiry until `_start_turn_lease` starts one, which nothing here
     # ever does, so only that `finally` gives it back.
-    slot = _claim_turn_slot(front.active_turns, session_id)
+    # `actor=None`, the same reason the fork route gives: this hold excludes a turn, it is not one.
+    slot = _claim_turn_slot(front.active_turns, session_id, actor=None)
     if slot is None:
         raise HTTPException(
             status_code=409,

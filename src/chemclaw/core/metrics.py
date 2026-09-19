@@ -142,6 +142,17 @@ _COUNTERS: dict[str, str] = {
         "event on an open stream, previously an HTTP 503)."
     ),
     "chemclaw_turns_refused_budget_total": "Turns refused with 429 by the turn/token budget.",
+    # Deliberately unlabelled, and `actor` is the label that must never be added: `/metrics` is
+    # unauthenticated, and an `oid` is an unbounded *caller-chosen* key — minting oids is the way
+    # around a per-principal limit, so the series cap would silence this counter exactly when it
+    # matters. The identity is in the WARNING beside the increment. Not folded into
+    # `chemclaw_turns_conflict_total{scope=…}` either: that counter's population is 409 conflicts
+    # on one session, whose remedy is to wait for your own turn, and this one's is a 429 across
+    # sessions — two populations under one denominator nobody can interpret.
+    "chemclaw_turns_refused_actor_cap_total": (
+        "Turns refused with 429 because the actor already held "
+        "`service_max_concurrent_turns_per_actor` concurrent turns on this process."
+    ),
     # The revision loop over a flagged answer. Two series rather than one, because "how often
     # does the verifier reject an answer" and "how often does rejecting it fail to help" are
     # different questions and only the second is a defect: a deployment whose revisions always
@@ -1299,6 +1310,12 @@ _GAUGES: dict[str, str] = {
         "Name lookups the LD_PRELOAD egress interposer refused in this process."
     ),
     "chemclaw_turn_capacity": "Configured maximum concurrent turns (the admission cap).",
+    # Published so a deployment that never set the key reads as an explicit 0 on a dashboard
+    # rather than as an absence of refusals, which is what an unset fairness cap and a working
+    # one look like from a scrape.
+    "chemclaw_turn_actor_capacity": (
+        "Configured maximum concurrent turns one actor may hold on this process (0 = disabled)."
+    ),
     # The right-hand side of the only question the per-process cap cannot answer. `sum()` of the
     # gauge above across pods is what the fleet is *admitting* right now; this is what it was
     # declared to be allowed to admit. Config validation catches the product at deploy time, but it

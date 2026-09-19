@@ -686,6 +686,26 @@ class Settings(
                     "service_max_concurrent_turns or the replica ceiling, or raise "
                     "service_fleet_max_concurrent_turns if the LLM endpoint can serve it."
                 )
+        # **A fairness cap at or above the cap it divides refuses nothing while reading as
+        # protection**, and it publishes that reading on `chemclaw_turn_actor_capacity`. The chart's
+        # own pair is held apart by `tests/test_deploy_chart.py`, but that test reads `values.yaml`
+        # — so a `--set config.CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS=4` on a small node, or an env
+        # override of either key, escapes it entirely and ships a guard consulted on every request
+        # that can never fire. Checked here because this is the only place that sees the
+        # configuration a pod actually runs, which is the same argument the fleet product above
+        # makes. Zero is untouched: it is the documented off switch, not a narrow cap.
+        if (
+            self.service_max_concurrent_turns_per_actor
+            and self.service_max_concurrent_turns_per_actor >= self.service_max_concurrent_turns
+        ):
+            raise ValueError(
+                f"service_max_concurrent_turns_per_actor is "
+                f"{self.service_max_concurrent_turns_per_actor} against a per-process "
+                f"admission cap of {self.service_max_concurrent_turns}, so one actor may "
+                "hold every permit and "
+                "the guard refuses nothing. Set it strictly below "
+                "service_max_concurrent_turns, or to 0 to disable it deliberately."
+            )
         # The socket backstop against what this process's own caps can occupy — the cross-check
         # that was missing beside the three fleet ones below it.
         #

@@ -2067,6 +2067,16 @@ def test_event_streams_are_capped_per_user(monkeypatch) -> None:  # type: ignore
                     await asyncio.sleep(0.01)
             second = await client.get(f"/sessions/{session_id}/events")
             assert second.status_code == 429  # the per-user cap binds
+            # **And it carries `Retry-After`**, which decides how the shipped client renders it:
+            # `Chemclaw3_ui`'s `errorFromStatus` splits 429 on the header's *presence*, and without
+            # one it raises `budget_exhausted` — "the usage budget for this service is exhausted" —
+            # which locks the composer and which that module's own comment says nothing in the UI
+            # clears. This cap lifts the moment the client closes a stream, so both halves of that
+            # sentence would be false. Found while the turn route was being hardened against the
+            # identical mistake.
+            assert second.headers.get("retry-after"), (
+                "a 429 with no Retry-After renders as a permanent budget_exhausted in the UI"
+            )
             first.cancel()
             with contextlib.suppress(asyncio.CancelledError, httpx.HTTPError):
                 await first

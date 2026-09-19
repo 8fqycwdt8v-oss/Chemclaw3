@@ -520,6 +520,10 @@ def create_app(
     METRICS.bind_gauge(
         "chemclaw_turn_capacity", lambda: float(settings.service_max_concurrent_turns)
     )
+    METRICS.bind_gauge(
+        "chemclaw_turn_actor_capacity",
+        lambda: float(settings.service_max_concurrent_turns_per_actor),
+    )
     # Per-pod capacity summed across pods is what the fleet admits; this is what it was declared
     # allowed to admit. Config validation refuses the product at startup, but only for the shape the
     # chart rendered — a hand-scaled Deployment or an in-cluster HPA edit never re-reads it, and

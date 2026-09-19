@@ -341,7 +341,10 @@ def test_the_in_flight_gauge_counts_demand_and_can_exceed_the_permit_count(
     every permit but one free.
 
     Keeping demand rather than switching to a permits gauge is
-    `D-2026-09-05-a-lease-is-demand-and-a-permit-is-occupancy`: the queued term is the leading half
+    `src/chemclaw/api/detach.py`'s module docstring (an ADR of that name has never existed — this
+    pointer was dangling before the per-actor cap cited it, and
+    `D-2026-09-19-a-pod-wide-cap-is-not-a-fair-one` is where the argument is now recorded): the
+    queued term is the leading half
     of the signal an autoscaler wants, and a detached turn is a turn still spending this pod's CPU,
     its model tokens and its database connection — the permit came back as fairness to a *waiting
     client*, not because the work stopped.
@@ -472,3 +475,72 @@ def test_shutdown_gives_up_on_a_turn_that_outlasts_the_grace_it_is_given(
     assert any("did not finish" in message for message in said), (
         f"a turn abandoned at shutdown left no line an operator could find it by: {said}"
     )
+
+
+def test_a_detached_turn_still_holds_its_actors_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The permit comes back at a detach and the per-actor slot deliberately does not.
+
+    These two guards answer the same event in opposite directions, and the inconsistency is the
+    design rather than an oversight — so it is pinned here, where a later tidy-up would land.
+    The **permit** is fairness to a *waiting client*, and a detached turn has none, so it is
+    released (the test above measures what holding it costs). The **per-actor slot** rations one
+    principal's share of this replica, and a detached turn is still spending that share: it is
+    burning CPU, model tokens and a store connection until the loop cap or
+    `service_turn_timeout_seconds` stops it.
+
+    Releasing the slot on a detach would hand the cap straight back to the case the test above
+    measured — POST and hang up, now unbounded, because each hang-up would free both the permit
+    and the actor's slot while leaving a pump running for the full turn timeout. So a cap that
+    released here would bind only on well-behaved clients, which is the population that was never
+    the problem.
+    """
+    # **One permit, not two.** `asyncio.Semaphore.locked()` is `value == 0`, so with a cap of two
+    # and a single detached turn it reads False whether or not the permit came back — the assertion
+    # below would have passed against a regression. Driven: keeping the permit on detach reddens
+    # the two neighbouring tests and left this one green. At a cap of one it is load-bearing.
+    monkeypatch.setattr(settings, "service_max_concurrent_turns", 1)
+    monkeypatch.setattr(settings, "service_max_concurrent_turns_per_actor", 1)
+    agent = _SlowerThanAdmission()
+
+    # A *named* principal, because the cap deliberately skips the shared dev one: with
+    # `entra_required` false every caller is one oid, so "per actor" would mean "per pod" and one
+    # client would refuse everybody. This app is served by a real uvicorn, so the override has to
+    # be installed on the app object before it starts.
+    from chemclaw.api.auth import Principal, require_principal
+
+    app = _app(agent)
+    app.dependency_overrides[require_principal] = lambda: Principal(
+        oid="detach-alice", upn="a@corp", roles=frozenset()
+    )
+
+    with _Served(app) as served, httpx.Client(base_url=served.base, timeout=30) as client:
+        abandoned = client.post("/sessions").json()["session_id"]
+        _hang_up_mid_turn(client, abandoned)
+
+        # The permit came back — polled, because the detach hook runs in the server's own task and
+        # `_hang_up_mid_turn` returns as soon as the socket is closed. At a cap of one this is a
+        # real assertion: `locked()` is `value == 0`, so it can only clear if the permit was
+        # actually released while the turn is still running.
+        deadline = time.monotonic() + 10.0
+        while served.app.state.turn_semaphore.locked():
+            if time.monotonic() > deadline:  # pragma: no cover - only on a real regression
+                raise AssertionError(
+                    "the detached turn kept its admission permit; the guard above regressed"
+                )
+            time.sleep(0.01)
+        # ...and the lease did not, so the actor is still counted as running a turn.
+        assert abandoned in served.app.state.active_turns
+
+        follow_up = client.post("/sessions").json()["session_id"]
+        refused = client.post(f"/sessions/{follow_up}/messages", json={"message": "hi"})
+        assert refused.status_code == 429, (
+            "hanging up freed the actor's slot, so POST-and-hang-up is unbounded again"
+        )
+
+        served.wait_for_slot_release(abandoned)
+        # Once the detached turn genuinely ends, the slot comes back with it.
+        served_again = client.post(f"/sessions/{follow_up}/messages", json={"message": "hi"})
+        assert served_again.status_code == 200
+        served.wait_for_slot_release(follow_up)

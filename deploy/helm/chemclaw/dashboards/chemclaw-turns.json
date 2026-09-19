@@ -674,6 +674,57 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 16,
+      "type": "singlestat",
+      "title": "Per-actor turn cap",
+      "description": "What one principal may hold of the admission capacity beside it. 0 means the chart did not set it and one chemist can take every permit on the replica; that is why this is a panel rather than left to read off the config.",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 44
+      },
+      "span": 2,
+      "format": "short",
+      "decimals": 0,
+      "valueName": "current",
+      "sparkline": {
+        "show": false
+      },
+      "targets": [
+        {
+          "expr": "max(chemclaw_turn_actor_capacity)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "graph",
+      "title": "Turns refused by the per-actor cap",
+      "description": "One chemist asking for more of this replica than their share. Rising here while chemclaw_turns_shed_total stays flat is the cap working; rising *together* means the pod is genuinely full as well. It carries no actor label by design \u2014 /metrics is unauthenticated and an oid is a caller-chosen key \u2014 so attribution is in the per-request logs, which is also the signal the ADR's revisit trigger names.",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 4,
+        "y": 44
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(chemclaw_turns_refused_actor_cap_total[5m]))",
+          "legendFormat": "per-actor cap",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(chemclaw_turns_shed_total[5m]))",
+          "legendFormat": "pod at capacity",
+          "refId": "B"
+        }
+      ]
     }
   ],
   "refresh": "30s",
