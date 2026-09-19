@@ -105,16 +105,48 @@ def _dropped_head(count: int) -> str:
     The only variable is the count, so its length grows monotonically with it — which is what lets
     a caller reserve against the number of files that *could* be dropped and be sure the notice for
     the number actually dropped fits.
+
+    **"this call's share" rather than "the budget".** What is spent here is what
+    `agent/tool_result_size._files_budget` handed over, which is the channel's remaining allowance
+    divided by the calls in this superstep that name this tool — and that divisor charges siblings
+    that wrote nothing, which `batch_siblings` argues is the only arithmetic available before their
+    results exist. An absolute "the budget cannot hold them" is therefore false in the commonest
+    case of all: a lone writer among seven silent siblings.
     """
     return (
-        f"[system] {count} file(s) a helper wrote were **not stored**: this caller's `files` "
-        f"budget (`agent_subagent_files_max_chars`) cannot hold them even as truncation notices. "
-        f"Reading one back will fail."
+        f"[system] {count} file(s) a helper wrote were **not stored**: this call's share of the "
+        f"`files` budget (`agent_subagent_files_max_chars`, divided across the calls in this step) "
+        f"could not hold them even as truncation notices."
     )
 
 
-def _dropped_notice(paths: list[str], budget: int) -> str:
+def _reverted_head(count: int) -> str:
+    """The same fact for a file the caller *already held*, where the outcome is the opposite.
+
+    **A dropped path is not always a missing file.** deepagents' channel reducer is
+    `result[key] = value`, so omitting a key leaves whatever the caller had there — which for a
+    document the helper *edited* means `read_file` succeeds and returns the **pre-edit** text. That
+    is the silent stale read this module exists to prevent, and the notice used to tell the model
+    the opposite ("reading one back will fail"), which is worse than saying nothing: a model that
+    retries the read gets confirmation of the stale content.
+
+    Driven at an exhausted channel: a chemist's `/notes/mine.md` came back as `'STALE VERSION'`
+    after a helper wrote `'FRESH VERSION THE HELPER WROTE'` to it, under a notice claiming the read
+    would fail. These paths are served *first* now, so this sentence is rare; it is here because
+    rare is not never.
+    """
+    return (
+        f"[system] {count} file(s) the helper edited were **left as this caller already had "
+        f"them**: this call's share of the `files` budget could not hold the new text, so a read "
+        f"returns the version from before the helper ran, not an error."
+    )
+
+
+def _dropped_notice(new: list[str], reverted: list[str], budget: int) -> str:
     """The one entry that stands for every file the channel could not represent.
+
+    Two sentences rather than one, because the two outcomes are opposite and a caller acts on them
+    differently — see `_dropped_head` and `_reverted_head`.
 
     **The sample is cut to fit `budget`, and it used to be cut to ten paths.** That bounded the
     count of the sample and not its length, and a path is not text this system wrote: it is the
@@ -123,14 +155,23 @@ def _dropped_notice(paths: list[str], budget: int) -> str:
     201,517 — the notice being the unbounded thing this docstring's own previous version said it
     must not be.
 
-    What it never drops is the count and the fact that reading one back will fail, because those
-    are the two things a caller cannot act correctly without. The sample is the part that is nice
-    to have, so the sample is the part that shrinks.
+    What it never drops is the counts and what happens on a read, because those are what a caller
+    cannot act correctly without. The sample is the part that is nice to have, so the sample is the
+    part that shrinks.
     """
-    head = _dropped_head(len(paths))
+    heads = [
+        head
+        for head, paths in (
+            (_dropped_head(len(new)), new),
+            (_reverted_head(len(reverted)), reverted),
+        )
+        if paths
+    ]
+    head = " ".join(heads)
+    paths = new + reverted
     # Reserved at the *widest* form of the "and N more" clause — `len(paths)` bounds that N — for
     # the same reason `bounded_content` measures its notice at the widest form of its own numbers.
-    used = len(head) + len(" Dropped: ") + len(f" and {len(paths)} more") + len(".")
+    used = len(head) + len(" Affected: ") + len(f" and {len(paths)} more") + len(".")
     sample: list[str] = []
     for path in paths:
         step = len(path) + (2 if sample else 0)
@@ -141,7 +182,7 @@ def _dropped_notice(paths: list[str], budget: int) -> str:
     if not sample:
         return head
     more = f" and {len(paths) - len(sample)} more" if len(sample) < len(paths) else ""
-    return f"{head} Dropped: {', '.join(sample)}{more}."
+    return f"{head} Affected: {', '.join(sample)}{more}."
 
 
 def rewritten_command_files(
@@ -249,20 +290,29 @@ def rewritten_command_files(
         and isinstance(data.get("content"), str)
         and not _is_unchanged(path, str(data["content"]))
     ]
-    # Room for the one entry that names a dropped set, taken off the top before anything is spent.
-    # `_dropped_head`'s only variable is the count and its length grows with it, so reserving
-    # against every changed file is enough for the notice about however many actually went.
-    reserve = 0 if budget is None else len(_DROPPED_PATH) + len(_dropped_head(len(changed_paths)))
+    # **A path the caller already holds is served first**, because its failure mode is the opposite
+    # of a new file's and strictly worse: omitting it leaves the caller's *previous* text in the
+    # channel, so a document the helper edited reads back pre-edit rather than failing. Stable, so
+    # the order within each group is still the command's own.
+    ordered = sorted(changed_paths, key=lambda path: path not in held)
+    # Room for the one entry that names what did not fit, taken off the top before anything is
+    # spent. Both heads, because either sentence may be the one needed, and their lengths grow
+    # monotonically with their counts — so reserving against every changed file is enough.
+    reserve = (
+        0
+        if budget is None
+        else len(_DROPPED_PATH)
+        + len(_dropped_head(len(changed_paths)))
+        + len(_reverted_head(len(changed_paths)))
+        + 1
+    )
     remaining = None if budget is None else max(budget - reserve, 0)
-    left = len(changed_paths)
-    rewritten: dict[str, Any] = {}
-    changed = False
+    left = len(ordered)
+    stored: dict[str, str] = {}
     dropped: list[str] = []
-    for path, data in files.items():
-        content = data.get("content") if isinstance(data, dict) else None
-        if not isinstance(content, str) or _is_unchanged(path, content):
-            rewritten[path] = data
-            continue
+    reverted: list[str] = []
+    for path in ordered:
+        content = str(files[path]["content"])
         # The share is what is left divided by the files still to come, less this file's own key.
         # Dividing the *remainder* rather than the budget is what makes the bound exact: a file
         # that came in under its share hands what it did not spend to the ones after it, and a
@@ -271,20 +321,32 @@ def rewritten_command_files(
         left -= 1
         bounded = rewrite(content, share)
         if remaining is not None and len(path) + len(bounded) > remaining:
-            dropped.append(path)
-            changed = True
+            (reverted if path in held else dropped).append(path)
             continue
         if remaining is not None:
             remaining -= len(path) + len(bounded)
-        rewritten[path] = data if bounded is content else {**data, "content": bounded}
-        changed = changed or bounded is not content
-    if dropped:
+        stored[path] = bounded
+    rewritten: dict[str, Any] = {}
+    changed = bool(dropped or reverted)
+    for path, data in files.items():
+        text = data.get("content") if isinstance(data, dict) else None
+        if not isinstance(text, str) or _is_unchanged(path, text):
+            rewritten[path] = data
+            continue
+        if path not in stored:
+            continue
+        kept = stored[path]
+        rewritten[path] = data if kept is text else {**data, "content": kept}
+        changed = changed or kept is not text
+    if dropped or reverted:
         room = reserve - len(_DROPPED_PATH) + (remaining or 0)
-        rewritten[_DROPPED_PATH] = create_file_data(_dropped_notice(dropped, room))
+        rewritten[_DROPPED_PATH] = create_file_data(_dropped_notice(dropped, reverted, room))
         logger.warning(
-            "dropped %d file(s) a helper wrote: the caller's `files` budget cannot represent them "
-            "even as truncation notices, so %s names the set rather than storing each one empty",
+            "could not store %d file(s) a helper wrote and %d it edited: this call's share of the "
+            "`files` budget cannot represent them even as truncation notices, so %s names the set "
+            "rather than storing each one empty",
             len(dropped),
+            len(reverted),
             _DROPPED_PATH,
         )
     if not changed:

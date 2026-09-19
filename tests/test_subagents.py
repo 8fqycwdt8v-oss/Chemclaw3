@@ -2335,3 +2335,78 @@ def test_a_roster_description_names_the_bound_surface_and_nothing_beside_it() ->
 
     assert {"a", "b"} <= listed
     assert "c" not in listed, "the description advertised a tool the helper does not bind"
+
+
+def test_a_file_the_helper_edited_is_served_before_a_file_it_invented() -> None:
+    """A dropped path is not always a missing file, and the notice used to say it was.
+
+    deepagents' channel reducer is `result[key] = value`
+    (`deepagents.middleware.filesystem._file_data_delta_reducer`), so omitting a key leaves
+    whatever the caller already had at it. For a document the helper **edited**, that means
+    `read_file` succeeds and returns the **pre-edit** text — the silent stale read this module
+    exists to prevent — while the notice said "Reading one back will fail", which is worse than
+    saying nothing: a model that retries the read gets confirmation of the stale content.
+
+    Driven at an exhausted channel before this: a chemist's `/notes/mine.md` came back as
+    `'STALE VERSION'` after a helper wrote `'FRESH VERSION THE HELPER WROTE'` to it.
+
+    Two arms, because the fix is two things and either alone is passable. Given room, a path the
+    caller already holds is served **first**, since reverting an edit is strictly worse than a new
+    file not appearing. Given none, the notice says which of the two happened.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from deepagents.backends.utils import create_file_data
+    from langgraph.types import Command
+
+    from chemclaw.agent.tool_result_shape import _DROPPED_PATH
+    from chemclaw.agent.tool_result_size import bound_tool_results
+
+    budget = settings.agent_subagent_files_max_chars
+    edited = "/notes/mine.md"
+    fresh = "FRESH VERSION THE HELPER WROTE"
+    # The edited path arrives **last**, so what saves it is the priority order and not the order
+    # the helper happened to hand its files back in — without that, this arm passes on an
+    # implementation that has no priority at all.
+    returned = {f"/scratch/new{i}.md": create_file_data("z" * 2_000) for i in range(5_000)}
+    returned[edited] = create_file_data(fresh)
+
+    def _land(filler: int) -> dict[str, Any]:
+        held = {
+            edited: create_file_data("STALE VERSION"),
+            "/scratch/filler.md": create_file_data("f" * filler),
+        }
+        asked = AIMessage(
+            content="",
+            tool_calls=[{"name": "task", "args": {}, "id": "w0", "type": "tool_call"}],
+        )
+        request = SimpleNamespace(
+            tool_call={"id": "w0", "name": "task"},
+            state={"messages": [asked], "files": held},
+        )
+
+        async def _handler(_request: Any) -> Any:
+            return Command(update={"files": returned})
+
+        call = bound_tool_results.awrap_tool_call(request, _handler)  # type: ignore[arg-type]
+        landed = cast("Any", asyncio.run(call))
+        return cast("dict[str, Any]", landed.update["files"])
+
+    with_room = _land(budget // 2)
+    assert str(with_room[edited]["content"]) == fresh, (
+        "a file the helper edited was dropped while fifty files it invented were stored, so the "
+        "caller reads back the version from before the helper ran and nothing failed to tell it so"
+    )
+
+    exhausted = _land(budget)
+    assert edited not in exhausted, "the fixture stopped exhausting the channel"
+    notice = str(exhausted[_DROPPED_PATH]["content"])
+    assert "left as this caller already had them" in notice, (
+        f"the notice does not distinguish a file that is now missing from one that silently "
+        f"reverted, and a caller acts on those two differently: {notice!r}"
+    )
+    assert "Reading one back will fail" not in notice, (
+        "the notice still claims a read will fail, which is false for exactly the path where "
+        "being wrong is worst — the read succeeds and returns the pre-edit text"
+    )

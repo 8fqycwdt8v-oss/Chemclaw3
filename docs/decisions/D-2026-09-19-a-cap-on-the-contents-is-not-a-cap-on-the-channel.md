@@ -76,6 +76,34 @@ charged 37% over. At a channel already **at** its budget nothing new is stored a
 previous behaviour left a 44-character marker per file, which is the linear growth the cap exists
 to stop.
 
+## A dropped path is not always a missing file
+
+The same review found the decision this revisits told the model something false about what it had
+done. deepagents' channel reducer is `result[key] = value`
+(`deepagents.middleware.filesystem._file_data_delta_reducer`), so **omitting a key leaves whatever
+the caller already had at it**. For a document the helper *edited*, `read_file` then succeeds and
+returns the pre-edit text — the silent stale read this module exists to prevent — while the notice
+said "Reading one back will fail". That is worse than saying nothing: a model that retries the read
+gets confirmation of the stale content. Driven at an exhausted channel, a chemist's `/notes/mine.md`
+came back as `'STALE VERSION'` after a helper wrote `'FRESH VERSION THE HELPER WROTE'` to it.
+
+Two things follow, and the first is the one that matters:
+
+- **A path the caller already holds is served first.** Reverting an edit is strictly worse than a
+  new file not appearing, so the remainder is spent on those before anything the helper invented.
+  Measured: with the channel half full, the edited path survives whole while it is the 5,001st file
+  the helper hands back.
+- **The notice states both outcomes separately**, because a caller acts on them differently: files
+  that are not there and will fail to read, and files whose previous version is still there.
+
+And the sentence it opens with is no longer an absolute. `_files_budget` divides by
+`batch_siblings`, which charges siblings that wrote nothing — `batch_siblings`'s own docstring
+argues that is the only arithmetic available before their results exist, and it was harmless while
+the over-charge only made a file *shorter*. It is not harmless now that it can decide a file is not
+stored at all, so the notice says **"this call's share of the `files` budget"** rather than "the
+budget": a lone writer among seven silent siblings is the commonest case there is, and "the budget
+cannot hold them" is false in it.
+
 ## Consequences
 
 - The superstep sweep now measures keys and text, and sweeps a path-padding dimension. Driven, the
@@ -92,6 +120,7 @@ to stop.
 - `tests/test_subagents.py::test_the_file_share_bounds_the_superstep_at_every_width_this_deployment_allows`
 - `tests/test_subagents.py::test_a_dropped_set_is_named_while_there_is_room_to_name_it`
 - `tests/test_subagents.py::test_a_chemists_own_file_survives_a_delegation_it_had_nothing_to_do_with`
+- `tests/test_subagents.py::test_a_file_the_helper_edited_is_served_before_a_file_it_invented`
 - `tests/test_subagents.py::test_several_files_share_one_budget`
 - `tests/test_subagents.py::test_an_exhausted_budget_still_cuts_when_more_than_one_file_crosses`
 - `tests/test_subagents.py::test_the_file_cap_set_to_zero_is_off_rather_than_absolute`
