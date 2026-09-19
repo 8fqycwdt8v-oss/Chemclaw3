@@ -107,15 +107,6 @@ def test_a_parse_child_is_still_inside_the_no_egress_posture() -> None:
     )
 
 
-#: What one fork-and-answer round trip costs, as the floor a derived deadline may not go under.
-#: Not a `Settings` field, for the reason `_REAP_SECONDS` in `ingest/documents/isolate.py` is not
-#: one: it is the latency of process creation, not a posture. Measured at 13-17 ms over five round
-#: trips on a loaded box; 20 ms is that measurement rounded up, and the margin is applied once at
-#: the assertion rather than twice — padding the constant *and* multiplying it is what made the
-#: first version of this guard refuse a deadline that was already five times the round trip.
-_FORK_ROUND_TRIP_SECONDS = 0.02
-
-
 def _in_process_parse_seconds(raw: bytes) -> float:
     """What `raw` costs to parse here, so a deadline can be derived instead of transcribed.
 
@@ -125,6 +116,26 @@ def _in_process_parse_seconds(raw: bytes) -> float:
     """
     started = time.perf_counter()
     parse_document("slow.csv", raw, None)
+    return time.perf_counter() - started
+
+
+def _fork_round_trip_seconds() -> float:
+    """What one fork-and-answer costs, measured rather than written down.
+
+    **The constant this replaces was wrong twice, in both directions.** It stood for the floor a
+    derived deadline may not go under — the *small* upload has to fit inside the same deadline — and
+    an absolute number cannot do that job when every other term in the comparison scales with the
+    machine. First it was padded to 50 ms and then multiplied by three, refusing a deadline already
+    five times the round trip; corrected to 20 ms it then refused CI, where the parse it is measured
+    against is 0.203 s rather than the 0.36 s this box sees, so the derived deadline fell to 51 ms
+    and the fixed floor did not move with it.
+
+    Measuring both ends is what makes the comparison scale-free: a faster runner shortens the parse
+    and the fork together, and their ratio is the thing the test actually depends on.
+    """
+    _warm_the_forkserver()
+    started = time.perf_counter()
+    parse_document_isolated("small.csv", b"id,yield\nR-1,88\n", None, 30.0)
     return time.perf_counter() - started
 
 
@@ -218,18 +229,28 @@ async def test_a_parse_past_its_deadline_frees_its_slot_for_the_next_upload(
 
     So the deadline is derived from the fixture instead of written down beside it: a quarter of what
     the parse actually costs *here*, which holds its ratio on a runner of any speed. The floor is
-    the fork round trip — measured at 17 ms with this box loaded — because the *small* upload has to
-    fit inside the same deadline, and if the parser ever gets fast enough to squeeze those together
-    this fails saying so rather than going quietly marginal again.
+    the fork round trip, **measured here too rather than written down**, because the *small* upload
+    has to fit inside the same deadline. A fixed floor does not do that job: the constant that stood
+    there refused CI, where this parse costs 0.203 s against the 0.36 s this box sees, so the
+    derived deadline fell to 51 ms while the floor stayed where it was. Measuring both ends makes
+    the comparison scale-free — a faster runner shortens the parse and the fork together, and their
+    ratio is what this test actually depends on — and if the parser ever does get fast enough to
+    squeeze them together this fails saying so rather than going quietly marginal again.
+
+    Growing the fixture is not the way out, and that is measured rather than assumed: at 40 MB of
+    the same CSV the isolated parse is refused by `document_parse_memory_bytes` before the deadline
+    is reached at all, so the test would pass on a memory refusal while claiming to be about time.
     """
     _warm_the_forkserver()
     cost = _in_process_parse_seconds(_SLOW_CSV)
+    fork = _fork_round_trip_seconds()
     deadline = cost / 4
-    assert deadline >= 3 * _FORK_ROUND_TRIP_SECONDS, (
-        f"_SLOW_CSV now parses in {cost:.3f}s, so a deadline it overruns four times over is "
-        f"{deadline:.3f}s — inside the {_FORK_ROUND_TRIP_SECONDS:.3f}s a fork round trip costs, "
-        "which would time the *small* upload out as well and make this test pass for the wrong "
-        "reason. The fixture has to get slower, or this stops being about the deadline."
+    assert deadline >= 3 * fork, (
+        f"_SLOW_CSV parses in {cost:.3f}s here, so a deadline it overruns four times over is "
+        f"{deadline:.3f}s — under three times the {fork:.3f}s a fork round trip costs, which would "
+        "time the *small* upload out as well and make this test pass for the wrong reason. Growing "
+        "the fixture is not the way out: driven, 40 MB of the same CSV is refused by "
+        "`document_parse_memory_bytes` before the deadline is reached at all."
     )
     monkeypatch.setattr(settings, "attachment_max_concurrent_parses", 1)
     monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", deadline)
