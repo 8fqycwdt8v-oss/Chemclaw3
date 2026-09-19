@@ -47,6 +47,7 @@ from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import get_profile, registered_profile_names
 from chemclaw.agent.session_events import stream_new_events
 from chemclaw.agent.subagents import refuse_an_unknown_roster
+from chemclaw.agent.turn_graph import refuse_an_unknown_peer_roster
 from chemclaw.agent.verifier import require_verifier_capability
 from chemclaw.api.budget import BudgetTracker, drain_pending
 from chemclaw.api.deps import CurrentUser
@@ -280,6 +281,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # this loud check necessary rather than redundant, since a capability nobody is told is missing
     # is one nobody restores.
     refuse_an_unknown_roster(registered_profile_names(), lambda name: get_profile(name).description)
+    # The **peer** roster is the same class of configuration error one topology over, and it is
+    # worth failing on for a sharper reason than the helper roster's: a misspelled peer does not
+    # make a menu entry absent, it makes the mesh one agent smaller, and a two-name roster with one
+    # typo silently becomes a single agent that behaves exactly like the shipped default. That is
+    # indistinguishable, from the outside, from the feature being off.
+    refuse_an_unknown_peer_roster(registered_profile_names())
     # After `configure_logging()` so the line is formatted the way the operator asked, and after
     # the profiles load so a malformed one fails before anything claims the deployment is sound.
     _report_inventory()

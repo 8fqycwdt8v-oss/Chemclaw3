@@ -594,6 +594,42 @@ class EvidenceSourceEvent(BaseModel):
     failed: bool = False
 
 
+class HandoffEvent(BaseModel):
+    """The conversation moved from one peer agent to another, and why.
+
+    **This event existed once, with nothing able to emit it, and that is the whole reason its
+    shape is argued here rather than assumed.** `D-2026-08-26-an-attribution-nothing-can-write-is-
+    not-an-attribution` deleted the machinery behind it; the member itself survived two more ADRs
+    on the argument that dropping a union member is a coordinated change across `Chemclaw3_ui`,
+    until `D-2026-09-07-an-event-nobody-emits-is-a-renderer-somebody-else-maintains` measured what
+    keeping it had cost — a renderer, four state modules and a UI type, all maintained for an event
+    that had never been sent. `tests/test_event_producers.py` is what stops the third occurrence,
+    and it is satisfied here by `api/graph_stream.py` constructing this class in the same commit
+    that declares it.
+
+    **What a surface should do with it is show a boundary, not a speaker.** The chemist is talking
+    to one system; the useful thing is that the answer after this point comes from an agent with a
+    different surface and a different brief, which is why `reason` is on the event. That text is
+    the handing model's own words, written to be read by the agent it hands to
+    (`agent/handoff.py`), so it is the one account of the decision that exists — the alternative,
+    inferring a reason from what the receiving agent then does, is a guess presented as a record.
+
+    **The two agent fields are named `from_agent`/`to_agent`, and the obvious `from`/`to` pair is
+    what they replaced after one measurement.** `from` is a Python keyword, so the field has to be
+    spelled `from_` and carry an alias — and `sse_frame` dumps with `model_dump_json()`, which does
+    **not** apply a serialization alias unless it is passed `by_alias=True`. Driven: the frame went
+    out carrying `"from_"`, the name the alias existed to hide, so every surface would have parsed
+    the underscore while this file claimed otherwise. Adding `by_alias=True` would fix this event
+    by changing how *sixteen* others serialise, which is a contract change three repositories read.
+    A field name that needs no alias is the smaller answer, and it cannot come apart.
+    """
+
+    type: Literal["handoff"] = "handoff"
+    from_agent: str
+    to_agent: str
+    reason: str
+
+
 # The closed set of events a turn can emit. New surfaces switch on `type`; adding an event is a new
 # class here plus one branch in the runner and the UI — never a bespoke per-surface stream.
 Event = (
@@ -613,6 +649,7 @@ Event = (
     | ToolFailedEvent
     | ToolResultEvent
     | EvidenceSourceEvent
+    | HandoffEvent
     | ErrorEvent
 )
 
