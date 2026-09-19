@@ -1320,6 +1320,35 @@ gauge is 0 by default.
 `chemclaw_connector_unhealthy{connector}` names which; the data dashboard has it. Then
 `ChemclawTargetDown` for whether the pod is gone or merely unreachable.
 
+**This one reads the readiness sweep, which asks `GET /healthz` and nothing else** — so it is silent
+for a connector whose pod is up and whose `/mcp` is broken. Measured on 2026-09-19 against a stub
+answering `200` on `/healthz` and `500` on `/mcp`: `/readyz` said `{"status":"ready",
+"connectors_unhealthy":0}`, the startup line said `molfp=healthy`, and this alert's series held `0`
+while every tool call to that connector failed. `ChemclawConnectorsDegradingTurns` is the rule for
+that case, and a flat `chemclaw_connectors_unhealthy` is not evidence against it.
+
+#### ChemclawConnectorsDegradingTurns
+`warning`. A turn opened this connector and it did not come up, so the turn answered without its
+tools. `chemclaw_connectors_unreachable_total{connector}` is the series, one increment per connector
+per turn, and the pod's own `connector … is unreachable` WARNING carries the reason and the
+correlation id — it names the leaf now (an `HTTPStatusError` with the status code, a
+`MissingConnectorCredential` with the variable that is unset), where it used to print the enclosing
+`ExceptionGroup` and read as a network fault whatever had happened.
+
+Three causes worth separating, because only the first is what `ChemclawConnectorsUnhealthy` would
+also catch:
+
+1. **the pod is gone or refusing connections** — `ChemclawTargetDown` and
+   `ChemclawConnectorsUnhealthy` fire beside this one;
+2. **the pod is up and `/mcp` is broken** — a 500, a garbage body, an MCP handshake that never
+   completes. The readiness sweep calls it healthy, so this alert is the *only* one that fires;
+3. **the bearer token is missing** — `CHEMCLAW_<NAME>_MCP_TOKEN` unset or empty for a connector
+   whose manifest declares `auth: {mode: bearer}`. Nothing about the pod is wrong; the WARNING names
+   the variable.
+
+`chemclaw_tool_calls_total{tool,outcome="error"}` is the other half of the same picture, for a
+connector that *does* come up and then fails its calls (§(x-c) `chemclaw.turns`).
+
 #### ChemclawSubsystemUnavailable
 `warning`. Requests are being shed with 503 because a dependency did not answer — the durable broker
 or the document index. The `shedding` log line on the same pod names the method, the path and the
@@ -1527,8 +1556,61 @@ timeout.
 
 #### ChemclawTurnsAnsweringEmpty
 `warning`, and the quietest bad outcome in the system: the turn succeeded and produced nothing to
-read. No error counter moves. Usually a model that emitted only tool calls, or a middleware that
-short-circuited after the last one; `make explain <session>` reconstructs the turn.
+read, **and nothing explains it** — a turn stopped by either cap is excluded from the counter, so
+`ChemclawTurnsHittingACap` is the rule for that and this one is not. Usually a model that emitted
+only tool calls, or a middleware that short-circuited after the last one; `make explain <session>`
+reconstructs the turn.
+
+This entry said "No error counter moves" and that was measured false on 2026-09-19: a spend-capped
+turn with no prose booked `chemclaw_turn_empty_answers_total` *as well as*
+`chemclaw_turn_spend_caps_total`, and the chemist got `spend_cap_reached` (`retryable=false`)
+followed immediately by `empty_answer` (`retryable=true`) about the same silence. So this rule fired
+for a turn whose cause was named one event earlier, while the sentence above told the operator no
+error counter had moved. `api/runner._empty_answer_event` steps aside for a cap now, which is what
+makes the sentence true again rather than only better worded.
+
+#### ChemclawToolCallsFailing
+`warning`. Most calls to one tool are failing, and turns are still answering without whatever it
+would have contributed — so the transcript of a degraded answer looks like any other, which is why
+this is a rule and not only a panel. The `tool` label names it;
+`sum by (tool, outcome) (rate(chemclaw_tool_calls_total[15m]))` is the breakdown.
+
+`outcome="error"` is a raised exception **or** a connector answering `isError=True`
+(`agent/audit.py` records both as `error`, which is the fix for a returned failure being written as
+`ok`). It is never a governance refusal — that is `outcome="refused"` and
+`chemclaw_tool_refusals_total{reason}`, and a dry run or an unapproved plan moving those is the
+control working. So this rule is about faults, and the threshold is
+`monitoring.alerts.toolErrorRatio` rather than anything near zero because a tool legitimately
+refuses bad input by raising.
+
+For a connector tool, read `ChemclawConnectorsDegradingTurns` beside it: that one is a connector
+that never came up, this one is a connector that came up and fails its calls, and only this one can
+name the tool. An in-process tool points at this image instead.
+
+#### ChemclawTurnsHittingACap
+`warning`. A turn was cut short with work still open. **Not a silent failure** — the chemist was told
+in the same stream, as `spend_cap_reached` or `loop_cap_reached` — so the question this alert asks is
+whether the ceiling is right, not whether something broke.
+
+`sum by (outcome) (increase(chemclaw_turns_finished_total{outcome=~"spend_capped|loop_capped"}[1h]))`
+says which cap and how often. The two have different remedies:
+
+| `outcome` | the ceiling | the counter that isolates it |
+| --- | --- | --- |
+| `spend_capped` | `CHEMCLAW_AGENT_MAX_TURN_BILLED_TOKENS` | `chemclaw_turn_spend_caps_total` |
+| `loop_capped` | `CHEMCLAW_HARNESS_MAX_LOOP_ITERATIONS` | `chemclaw_turn_loop_caps_total` |
+
+The judgement is the one `deploy/helm/chemclaw/values.yaml` states beside the spend setting: if it
+moves on turns that were doing real work, the number is too low; if it moves on runaway ones, the
+guard is working and the request is what to look at. `make explain <session>` reconstructs the turn,
+and the pod's `the turn for session … hit its N billed-token cap after M tokens` WARNING carries both
+numbers. The budget is a **request**-spend bound rather than a thread bound — see
+`CHEMCLAW_AGENT_CONTEXT_TOKEN_BUDGET` and §(viii) before raising it, because a turn whose prefix is
+already large spends most of its allowance re-sending context.
+
+Until 2026-09-19 neither cap counter had an alert or an entry here, while `values.yaml` told the
+operator that `chemclaw_turn_spend_caps_total` "is what says whether the number you chose is biting"
+— a chart pointing at a control that did not exist.
 
 ### chemclaw.durable — the expensive half
 
@@ -1546,6 +1628,31 @@ the next stop (§(x)).
 progress or has already given up. The Temporal event history for a workflow using it is the fastest
 route to the exception (§(x)); `chemclaw_jobs_finished_total{outcome="failed"}` says whether jobs are
 dying with it.
+
+**`ActivityResultTooLarge` is the one exception here that is not a bug in the activity's body**, and
+it is worth recognising by name because the alert could not fire on it at all until 2026-09-19. It
+means the activity produced a result bigger than `CHEMCLAW_ACTIVITY_RESULT_MAX_BYTES`, which ships at
+the broker's own 2 MiB `limit.blobSize.error`. The refusal is raised by `durable/interceptor.py`
+*before* the result is uploaded, on purpose: the upload happens in the worker's task handler, after
+every first-party report has already been written, so when the broker refused it instead —
+
+- over 2 MiB, under the 4 MiB gRPC frame: the workflow failed immediately, and
+- over the gRPC frame: the worker retried for ever against a `ResourceExhausted` it logs as a
+  **network** error, leaving the workflow `RUNNING` until its own timeout
+
+— the only evidence either way was a Rust `temporalio_sdk_core` WARN with no correlation id, our own
+line said `activity.finished … completed`, `chemclaw_activity_failures_total` stayed flat (so *this*
+alert could not fire) and `chemclaw_jobs_finished_total{outcome="failed"}` never moved either, which
+*suppressed* `ChemclawDurableJobsFailing` by holding its numerator at zero while its denominator
+rose. All of that is measured; the refusal is non-retryable, so it costs one attempt rather than
+`CHEMCLAW_ACTIVITY_MAX_ATTEMPTS`.
+
+The fix is almost always to bound the activity's output rather than to raise the ceiling — the
+message names the activity and the byte count. `collect_digests` is the one shipped activity whose
+result has no bound of its own (one entry per subscription, each carrying every matching note id and
+headline), so a large corpus with many subscriptions is where to look first. Raising the ceiling
+means raising the broker's `limit.blobSize.error` in the same change, or the refusal simply moves
+back to the invisible side.
 
 #### ChemclawPushBackDropped
 `warning`. A finished job's result never reached the session that asked for it. The job succeeded

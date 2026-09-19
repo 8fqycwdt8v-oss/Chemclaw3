@@ -273,14 +273,20 @@ async def _schema_carries_this_image(conn: psycopg.AsyncConnection[Any]) -> bool
     `/readyz` answered `200 {"status": "ready"}` while `outbox`, `calculation_results.epoch` and
     `turn_costs.turn_id` were all missing.
 
-    **It gates on positive evidence only.** A ledger that cannot be read at all — no
-    `schema_migrations` table, or a role that cannot select it — returns True, because the
-    alternative turns a diagnostic into a fleet-wide outage in a deployment this repository cannot
-    see. The probe reads `session_store_dsn or postgres_dsn`, which under a split session store is
-    a *different* server from the one `migrate()` runs against; any database that can serve as the
-    session store was migrated by this same runner and so carries the ledger, but "was" is a claim
-    about someone else's operations, and readiness is the wrong place to be right about it by
-    refusing.
+    **It admits a ledger it is not allowed to read, and not a ledger that is not there** — and
+    those were one branch until 2026-09-19, which made the admitted shape wider than the case it
+    argues. The argument is about *privilege*: the probe reads `session_store_dsn or postgres_dsn`,
+    which under a split session store is a *different* server from the one `migrate()` runs against,
+    and a role that may use the store but may not select the ledger is a legitimate deployment this
+    repository cannot see. Refusing there turns a diagnostic into a fleet-wide outage over someone
+    else's grant table, so `InsufficientPrivilege` still returns True.
+
+    `UndefinedTable` is not that case. `schema_migrations` is created by the first migration, so its
+    absence is not "the check could not run" — it is the strongest possible evidence that the check
+    would fail, because *nothing* has been applied. Measured against an empty database with
+    `session_store="postgres"`: `200 {"status": "ready"}`, the pod in the Route, and every session
+    write failing. It is the same fact as the behind-schema case at its limit and takes the same
+    answer, with the same remedy in the same log line.
 
     Readiness, not startup: a pod that came up against an old schema becomes ready again the moment
     an operator applies the migration, with no restart — and a schema mismatch drains the pod from
@@ -300,10 +306,33 @@ async def _schema_carries_this_image(conn: psycopg.AsyncConnection[Any]) -> bool
             "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE filename = %s)", (newest,)
         )
         row = await cursor.fetchone()
-    except (psycopg.errors.UndefinedTable, psycopg.errors.InsufficientPrivilege):
+    except psycopg.errors.UndefinedTable:
+        # **No ledger is not an unreadable ledger, and admitting both was wider than the case
+        # argued below.** `schema_migrations` is created by the first migration, so its absence
+        # means *no* migration has been applied — the extreme of the very fact this probe exists to
+        # catch, not a diagnostic that could not run. Driven 2026-09-19 against an empty database
+        # under the chart's shipped `CHEMCLAW_SESSION_STORE=postgres`: `/readyz` answered
+        # `200 {"status":"ready"}`, so the pod joined the Route and failed every session write.
+        # Reachable by the three paths this function's docstring already names, and by the
+        # two-releases-one-database hazard the chart's own `temporal.namespace` error message admits
+        # no guard can cover.
         log.warning(
-            "readiness: cannot read schema_migrations, so the schema is not being checked "
-            "against this image (newest shipped: %s)",
+            "readiness: schema_migrations does not exist, so no migration has been applied to "
+            "this database at all — this pod's code is ahead of the schema and would fail in "
+            "traffic. Run the migration (the chart's pre-upgrade hook Job, or `make db-migrate`). "
+            "Newest shipped: %s",
+            newest,
+            exc_info=True,
+        )
+        return False
+    except psycopg.errors.InsufficientPrivilege:
+        # **This is the case the paragraph above argues, and the only one.** A role that may use the
+        # session store but may not select the ledger is a legitimate split-store deployment this
+        # repository cannot see, the probe genuinely could not run, and refusing would turn a
+        # diagnostic into an outage in a cluster nobody here configured.
+        log.warning(
+            "readiness: schema_migrations exists but cannot be selected by this role, so the "
+            "schema is not being checked against this image (newest shipped: %s)",
             newest,
             exc_info=True,
         )

@@ -89,6 +89,13 @@ _BAD_DATA_TYPES = [
     "ElnFormatError",
     "OrdFormatError",
     "IngestError",
+    # An activity result over `activity_result_max_bytes` — the ceiling
+    # `durable/interceptor.py` refuses at so the broker does not refuse it invisibly. Bad data
+    # rather than transient, and this is the one entry in this list whose retryability was
+    # *measured*: unrefused, the worker retried a 6 MB result for ever against a gRPC
+    # `ResourceExhausted` while every attempt logged `completed`. The result is a deterministic
+    # function of the arguments, so the next attempt is the same number of bytes.
+    "ActivityResultTooLarge",
     "MetricError",
     "PlaybookError",
     # A campaign's recorded points and its decision space disagreeing, or a design space whose

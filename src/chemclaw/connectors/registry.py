@@ -30,7 +30,7 @@ import os.path
 from collections.abc import Iterable
 from contextlib import AsyncExitStack
 from datetime import timedelta
-from functools import cache
+from functools import cache, partial
 from pathlib import Path
 from types import ModuleType
 from typing import Any, assert_never
@@ -56,6 +56,7 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.core.http import default_ssl_context
 from chemclaw.core.manifest_io import read_manifest, within_root
 from chemclaw.core.mcp_session import CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_GRACE_SECONDS
+from chemclaw.core.metrics import Metrics
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.tool_registry import CapabilityTool, registered_tools
 
@@ -599,6 +600,17 @@ def mcp_connections() -> list[ConnectorSpec]:
     ]
 
 
+def _count_unreachable(connector: str, metrics: Metrics) -> None:
+    """Book one connector's absence from one turn, by name.
+
+    A module function rather than a lambda in the loop because a lambda closing over the loop
+    variable is a late-binding bug and the default-argument form that dodges it is untypeable —
+    `mypy --strict` cannot infer a lambda with a defaulted parameter. `partial` binds the name at
+    the call site, which is the same fix without either problem.
+    """
+    metrics.increment("chemclaw_connectors_unreachable_total", labels={"connector": connector})
+
+
 async def open_connector_specs(
     stack: AsyncExitStack, specs: Iterable[ConnectorSpec]
 ) -> tuple[list[BaseTool], list[str]]:
@@ -653,9 +665,15 @@ async def open_connector_specs(
             len(unreachable),
             ", ".join(unreachable),
         )
-        record_metric(
-            lambda m: m.increment("chemclaw_connectors_unreachable_total", len(unreachable))
-        )
+        # **One increment per connector, carrying its name.** It was one bulk increment of an
+        # unlabelled series, so the only question it could answer was "did anything go dark" — and
+        # the gauge beside it (`chemclaw_connector_unhealthy`) already carries `connector`, so the
+        # two halves of one fact disagreed about whether it was nameable. The name is a bundle from
+        # this registry, never a caller's string, which is what makes it a safe label
+        # (`core/metrics._COUNTER_LABELS`). Driven: a connector answering 500 on `/mcp` while its
+        # `/healthz` said 200 moved this counter and nothing else, and the sample said only `1.0`.
+        for name in unreachable:
+            record_metric(partial(_count_unreachable, name))
     return [tool for tools in opened for tool in tools], unreachable
 
 

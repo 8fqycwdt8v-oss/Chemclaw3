@@ -164,6 +164,31 @@ class TemporalSettings(BaseSettings):
     # ends, so its ceiling is about memory, not connections, and its chart entry says so.
     worker_max_concurrent_activities: int = Field(default=8, ge=1)
 
+    # The ceiling `durable/interceptor.py` holds every activity *result* to, measured as the
+    # serialized payload the worker is about to upload.
+    #
+    # **Two broker limits sit above this number and they have two different failure shapes**, which
+    # is why the check is here rather than left to either of them. Driven against a live broker on
+    # 2026-09-19:
+    #
+    # - Temporal's server-side **blob limit** (`limit.blobSize.error`, 2 MiB by default) refuses a
+    #   single payload over it. A 3,000,000-byte result failed the workflow immediately — but our
+    #   own `activity.finished` line had already said `completed`, because the upload happens after
+    #   the interceptor returns.
+    # - the SDK's **gRPC frame limit** (4 MiB after decompression) refuses the whole
+    #   `RespondActivityTaskCompleted` message. A 6,000,000-byte result made the worker retry the
+    #   attempt for ever against a `ResourceExhausted` it reports as a *network* error, and the
+    #   workflow sat `RUNNING` until its own timeout — the shape an operator cannot diagnose,
+    #   because no first-party series moves and no Python log line is written.
+    #
+    # 2 MiB, so the number this refuses at is the smaller of the two the broker enforces: a result
+    # this check admits is one the shipped broker accepts, and a result it refuses is one that was
+    # never going to arrive. A deployment that raises `limit.blobSize.error` (or installs a codec
+    # that compresses payloads) raises this to match; one that lowers the server's limit lowers this
+    # first, because a refusal *here* is counted, logged and attributed to a turn, and a refusal
+    # there is a Rust WARN with no correlation id.
+    activity_result_max_bytes: int = Field(default=2 * 1024 * 1024, gt=0)
+
     # The heartbeat timeout for core's own *long* background activities — the note reindex, the
     # retention sweep, the result-publication drain (`durable/note_index.py`,
     # `durable/retention.py`, `durable/publish_results.py`).

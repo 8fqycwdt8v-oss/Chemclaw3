@@ -635,6 +635,44 @@ topic).
 
 ## 4 — Operating it
 
+- [ ] **A worker whose broker is down never opens its probe port, so "Temporal is down" and "the
+  image is broken" are the same picture to everything but the container log** — [M].
+  `durable/background_worker.py:98` calls `connect()` before `Worker(...)` is built and therefore
+  before `durable/serve.py::serve_worker` opens the probe surface, so the process exits 1 at
+  `core/temporal_client.py:209` and `:9000/healthz` and `/readyz` never answer at all. Driven
+  2026-09-19 against a dead address: exit 1, a clear `SubsystemUnavailableError` in the log, and both
+  probe routes unanswered (`curl` → no connection). The PodMonitor target simply disappears, so
+  `ChemclawTargetDown` fires for this exactly as it fires for a broken image.
+  **Not fixed here, and the reason is that the obvious fix may be worse than the gap.** Opening the
+  probe surface before connecting means every worker entrypoint changes shape, and it turns a
+  crash-loop that Kubernetes retries with its own backoff — and that self-heals the moment the broker
+  returns — into a pod that sits up and unready indefinitely, which is the state `serve.py`'s
+  `worker_ready` argument would then have to cover for a worker that has no client at all. The log
+  does distinguish the two causes today; what nothing distinguishes them by is a *probe* or a series.
+  Trigger to revisit: a second dependency joins `connect()` ahead of the probe surface (so the log
+  line stops being decisive), or an operator reports diagnosing a broker outage as a bad image.
+
+- [ ] **The readiness sweep cannot see a connector that is up and broken, so nothing notices it
+  until a turn does** — [M]. `connectors/health.py::_probe` asks `GET <base>/healthz` and nothing
+  else, so a pod answering 200 there and 500 (or an ingress error page) on `/mcp` is reported
+  `healthy`: driven 2026-09-19, `/readyz` said `{"status":"ready","connectors_unhealthy":0}` and
+  `chemclaw_connectors_unhealthy` held 0 while every call failed. The *turn* now reports it —
+  `chemclaw_connectors_unreachable_total{connector}` and `ChemclawConnectorsDegradingTurns` at
+  `for: 0m` — so the case is covered wherever there is traffic, which is why this is a row and not a
+  fix. **A `tools/list` probe was measured and declined**: against the four connector apps this
+  repository serves, on loopback with no TLS, `GET /healthz` is 3.6–4.2 ms and a full MCP
+  handshake + `tools/list` + teardown is 50–71 ms — 12–19x — on a route the kubelet runs every 10 s
+  with `timeoutSeconds: 5` derived from a 2 s per-endpoint budget; it needs the front door to hold
+  every connector's bearer token to *probe* rather than only to *call*; and it mints an MCP session
+  per sweep, which the serving side bounds as memory. For that it would move detection from a rule
+  that fires on the first degraded turn to a gauge behind `for: 10m`. What is left unbought is
+  detection on an **idle** deployment. Trigger to revisit: a deployment reports a connector that was
+  broken for longer than its traffic gap — or `connectors_required` is used as a *runtime* gate
+  rather than a boot gate, at which point the sweep's verdict has to be as strong as a turn's.
+  Guarded by `tests/test_connector_health.py::test_a_connector_healthy_on_healthz_and_broken_on_mcp_is_reported_by_the_turn`,
+  which asserts the sweep's `healthy` verdict, so changing this decision turns that test red rather
+  than leaving two documents disagreeing.
+
 - [ ] **The turn-wide model-call floor only binds where a loop watch is open, and two paths open
   none** — [S]. `agent/loop_cap._LoopWatch.calls` is what makes a `task` fan-out share one iteration
   allowance (it was `1 + W*(cap - 1)` calls before, measured at 25 against a cap of 4 over 8

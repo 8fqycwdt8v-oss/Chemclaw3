@@ -154,6 +154,24 @@ spec:
       port: {{ .Values.service.port }}
       targetPort: {{ .Values.service.port }}
 {{- if .Values.mcpFace.route.enabled }}
+{{- /* **A Route with no router peer publishes an address every request to which this chart's own
+       policy drops.** `templates/networkpolicy.yaml`'s `mcp-face-ingress` allows `podSelector`
+       (which NetworkPolicy scopes to *this* namespace) plus whatever `mcpFace.ingressNamespaces`
+       names; the router runs in its own namespace, so with that list empty the router is not a
+       permitted peer. The front door does not have this shape — `networkPolicy.ingressNamespaces`
+       ships with the router's own selector — and the two lists are deliberately separate, which is
+       exactly why one cannot be defaulted from the other: `mcpFace.ingressNamespaces` names who may
+       reach a surface whose whole authorization is one bearer token, and inheriting the chat front
+       door's answer would widen that surface to grant an unrelated one.
+
+       So this refuses rather than defaults, the same shape as the three other unstated postures
+       this chart will not render (`retention`, `networkPolicy` egress, `temporal.namespace`). It is
+       the pair that is unstated, not either half: a face reachable only from inside the cluster is a
+       coherent posture, and so is a published one — `route.enabled` with an empty peer list is
+       neither. */ -}}
+{{- if not .Values.mcpFace.ingressNamespaces }}
+{{- fail "mcpFace.route.enabled is true but mcpFace.ingressNamespaces is empty: the Route would publish an address the chart's own `mcp-face-ingress` NetworkPolicy drops, because that policy permits this release's own pods and the namespaces this list names, and the router is in neither. Name the router's namespace selector here (the front door's is `networkPolicy.ingressNamespaces`, and it is a separate list on purpose — this one governs a surface authorized by one bearer token), or set mcpFace.route.enabled=false and reach the face from inside the cluster." }}
+{{- end }}
 ---
 {{- /* Publishing the face outside the cluster is opt-in and off by default. A partner agent
        reaching it is the point of the component, and it is still a surface serving this

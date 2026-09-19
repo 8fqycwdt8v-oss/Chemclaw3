@@ -951,3 +951,92 @@ def test_a_classic_turn_never_asks_for_plan_approval(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(runner, "session_plan", _plan)
     assert [e for e in _run_turn() if isinstance(e, ApprovalRequestEvent)] == []
+
+
+class _CappedAndSilentAgent(ScriptedTurn):
+    """A turn whose cap fired before the model wrote anything — `cap` picks which cap."""
+
+    def __init__(self, cap: str) -> None:
+        self._cap = cap
+
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
+        """Record the cap and yield no prose, which is what the drive at `cap=1` produced."""
+        if self._cap == "spend":
+            record_spend_cap(1_020)
+        else:
+            record_loop_cap()
+        yield ""
+
+
+@pytest.mark.parametrize(
+    ("cap", "code"), [("spend", "spend_cap_reached"), ("loop", "loop_cap_reached")]
+)
+def test_a_capped_turn_that_wrote_nothing_says_so_once(cap: str, code: str) -> None:
+    """One event, one counter, and a message that does not promise an answer that is not there.
+
+    **Driven through `run_turn` at the shipped cap, because the defect is the *sequence* of two
+    events and neither helper has one.** Measured 2026-09-19 with
+    `CHEMCLAW_AGENT_MAX_TURN_BILLED_TOKENS=1` against the live mock gateway, and reproduced here:
+
+        error {"code":"spend_cap_reached","retryable":false,
+               "message":"… so the answer below is partial (session …)"}
+        error {"code":"empty_answer","retryable":true,
+               "message":"… Nothing was written, so there is nothing below to read …"}
+        chemclaw_turn_spend_caps_total 2.0
+        chemclaw_turn_empty_answers_total 2.0
+
+    Three things wrong in that, all asserted below:
+
+    - **two errors about one silence, with opposite `retryable` flags**, which a surface cannot
+      reconcile — `Chemclaw3_ui` branches on exactly that field;
+    - **`chemclaw_turn_empty_answers_total` moved**, firing `ChemclawTurnsAnsweringEmpty` at
+      `for: 0m`, whose own description and runbook entry both said "No error counter moves" and sent
+      the operator after "a model that emitted only tool calls" — naming neither the cap nor the
+      counter that identifies it;
+    - **the cap's message said "so the answer below is partial"** with nothing below it.
+
+    Parametrized over both caps rather than only the spend one: the two events are one sentence with
+    one number swapped, `events.py` names both as the errors that share a turn with an answer, and a
+    fix applied to one of them is the shape `tasks/lessons.md` calls a rule written twice.
+
+    The turn's own outcome is unchanged and is asserted in `tests/test_api_observability.py`; what
+    is asserted here is that `chemclaw_turns_finished_total` — the series
+    `ChemclawTurnsHittingACap` reads — is what carries it, rather than the emptiness counter.
+    """
+    empties = METRICS.value("chemclaw_turn_empty_answers_total")
+    events = _events(_CappedAndSilentAgent(cap))
+    errors = [event for event in events if isinstance(event, ErrorEvent)]
+
+    assert [error.code for error in errors] == [code], (
+        f"a capped silent turn emitted {[e.code for e in errors]}; two errors about one silence "
+        "with opposite `retryable` flags is what a surface cannot reconcile"
+    )
+    assert METRICS.value("chemclaw_turn_empty_answers_total") == empties, (
+        "`chemclaw_turn_empty_answers_total` moved for a turn a cap had already named, so "
+        "`ChemclawTurnsAnsweringEmpty` fires with its own description ('nothing explains it') "
+        "false and the operator is sent after the wrong cause"
+    )
+    assert "nothing below to read" in errors[0].message, (
+        f"the cap event still promises an answer that was never written: {errors[0].message}"
+    )
+    assert "the answer below is partial" not in errors[0].message, errors[0].message
+    # No `AnswerEvent` at all: an empty one renders as a blank assistant bubble, costs a judge call
+    # under `verifier_enabled`, and books `completed=True` for a turn that answered nothing.
+    assert not [event for event in events if isinstance(event, AnswerEvent)], (
+        "a capped silent turn shipped an AnswerEvent, so it books as answered"
+    )
+
+
+def test_a_capped_turn_that_did_write_still_calls_its_answer_partial() -> None:
+    """The other side of the same boundary — the wording is conditional, not replaced.
+
+    Without this, a fix that simply reworded both cap messages to "nothing below to read" would pass
+    the test above while telling every chemist whose capped turn *did* produce a partial answer that
+    there was nothing to read. `Chemclaw3_ui`'s `PARTIAL_ANSWER_CODES` renders that answer as
+    partial, so the sentence and the surface have to agree.
+    """
+    events = _events(_CappedSpendAgent())
+    errors = [event for event in events if isinstance(event, ErrorEvent)]
+    assert [error.code for error in errors] == ["spend_cap_reached"]
+    assert "so the answer below is partial" in errors[0].message, errors[0].message
+    assert _answer(events).text == "as much as the budget bought"

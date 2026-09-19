@@ -2946,6 +2946,15 @@ def test_every_ratio_alert_has_a_traffic_floor() -> None:
     RevisionsNotHelping` divides `increase()` by `increase()`. Both functions produce a range
     vector and both have the same idle-window problem, so both are matched now, and the floor may
     be expressed with either.
+
+    **And a second time, one level in: `sum by (…)`.** The floor pattern required a bare
+    `and sum(rate(`, which is every ratio this chart happened to hold — all three are
+    fleet-wide. `ChemclawToolCallsFailing` is per `tool`, so both its halves are
+    `sum by (tool) (rate(…))` and its floor, which is *stronger* than a fleet-wide one because it is
+    charged per series, did not match the pattern at all. The grouping clause is optional in the
+    pattern now. The lesson both instances carry is the one in `tasks/lessons.md`: a derived scope
+    that is derived by a *string shape* is only as general as the shapes its author happened to have
+    in front of them, and the detector, not the rules, is what goes stale.
     """
     rules = re.split(r"\n\s*- alert: ", (CHART / "templates" / "prometheusrule.yaml").read_text())
     ratios = []
@@ -2965,7 +2974,7 @@ def test_every_ratio_alert_has_a_traffic_floor() -> None:
             f"{name} still guards its denominator with clamp_min, which converts an idle window "
             "into a large finite ratio instead of no sample"
         )
-        assert re.search(r"\band\s+sum\((?:rate|increase)\(", expr), (
+        assert re.search(r"\band\s+sum(?:\s+by\s*\([^)]*\))?\s*\((?:rate|increase)\(", expr), (
             f"{name} divides two range vectors with no absolute floor on the denominator, so one "
             "event in an idle window is a 100% failure rate"
         )
@@ -3054,9 +3063,35 @@ def test_the_metrics_that_were_designed_to_alert_actually_alert() -> None:
 
     Pinned by metric name rather than by rule count so renaming a metric without moving its alert
     fails here, which is the drift that makes an alerting stack quietly stop covering anything.
+
+    **The last three were added on 2026-09-19 and each was a control that read as present.**
+    `test_every_declared_metric_has_a_consumer` is satisfied by a *dashboard panel*, so each had a
+    reader and no rule, and the operability audit measured what that bought:
+
+    - `chemclaw_connectors_unreachable_total` was the **only** series that moved for a connector
+      answering 500 on `/mcp` while its `/healthz` answered 200 — the readiness gauge held 0, so
+      `ChemclawConnectorsUnhealthy` could not fire and nothing else read this one;
+    - `chemclaw_tool_calls_total{outcome="error"}` is the same fact for a connector that *does* come
+      up and then fails its calls, and had panels only;
+    - `chemclaw_turns_finished_total` carries `outcome="spend_capped"`, which `values.yaml` tells an
+      operator in as many words "is what says whether the number you chose is biting" — a chart
+      pointing at a control that did not exist.
+
+    The runbook half is guarded separately and derivably by
+    `test_every_alert_carries_a_runbook_url_that_resolves`, so an alert added here without an entry
+    there fails without needing a fourth name in this list.
+
+    **Read off the rules' PromQL, not off the file, and this test was doing the very thing
+    `_alert_expressions` exists to prevent.** It asserted `metric in rule` over the whole template,
+    so a Go-template comment or an annotation *mentioning* a series made it "alerted". Driven: the
+    `ChemclawToolCallsFailing` expression was repointed at another counter entirely and this test
+    stayed green, satisfied by the comment above that rule naming `chemclaw_tool_calls_total`. That
+    is the same false coverage `_alert_expressions`' own docstring describes, in the test one screen
+    away from it.
     """
     rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
     assert "kind: PrometheusRule" in rule
+    alerted = _series_referenced(_alert_expressions())
     for metric in [
         "chemclaw_audit_sink_failures_total",
         "chemclaw_notes_publish_failures_total",
@@ -3066,8 +3101,14 @@ def test_the_metrics_that_were_designed_to_alert_actually_alert() -> None:
         "chemclaw_connectors_unhealthy",
         "chemclaw_db_unavailable_total",
         "chemclaw_tokens_total",
+        "chemclaw_connectors_unreachable_total",
+        "chemclaw_tool_calls_total",
+        "chemclaw_turns_finished_total",
     ]:
-        assert metric in rule, f"{metric} has no alert"
+        assert metric in alerted, (
+            f"{metric} is in no alert *expression* — a mention in a comment or in an "
+            "annotation is not an alert"
+        )
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
@@ -3891,7 +3932,17 @@ _SWITCH_PREREQUISITES: dict[str, tuple[str, ...]] = {
         "--set",
         "monitoring.alertmanager.defaultReceiver=chemclaw-oncall",
     ),
-    "mcpFace.route.enabled": ("--set", "mcpFace.enabled=true"),
+    # Two, and the second is a posture rather than a prerequisite object: the chart refuses to
+    # publish the face until a deployment names who may reach it, because the `mcp-face-ingress`
+    # policy would otherwise drop every request the Route admits. Stated here as the router's own
+    # selector — the value the front door's list already ships — so this render is the posture a
+    # real publishing release takes.
+    "mcpFace.route.enabled": (
+        "--set",
+        "mcpFace.enabled=true",
+        "--set-json",
+        'mcpFace.ingressNamespaces=[{"network.openshift.io/policy-group":"ingress"}]',
+    ),
 }
 
 
@@ -6046,4 +6097,88 @@ def test_the_chart_caps_turns_per_actor_strictly_below_the_process_cap() -> None
     assert per_actor < per_process, (
         f"a per-actor cap of {per_actor} against {per_process} permits refuses nothing; one "
         f"principal can still hold every permit on the replica"
+    )
+
+
+#: The router's own namespace selector, as `networkPolicy.ingressNamespaces` already ships it for
+#: the chat front door. Written once here because the two tests below need the same value on
+#: opposite sides of one assertion — one renders with it, the other without.
+_ROUTER_PEER = 'mcpFace.ingressNamespaces=[{"network.openshift.io/policy-group":"ingress"}]'
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_publishing_the_face_without_a_router_peer_refuses_to_render() -> None:
+    """`route.enabled` and an empty peer list published an address this chart's own policy drops.
+
+    The pair the chart shipped: `mcpFace.route.enabled=true` renders a `Route`, and
+    `templates/networkpolicy.yaml`'s `mcp-face-ingress` permits `podSelector` — which NetworkPolicy
+    scopes to the policy's own namespace — plus whatever `mcpFace.ingressNamespaces` names, which
+    defaults to `[]`. The router is in neither, so every request the Route admitted was dropped
+    before it reached the pod. The front door does not have this shape: `networkPolicy.ingress
+    Namespaces` ships the router's selector, in the same file, which is what makes the omission a
+    defect rather than a posture.
+
+    **Asserted through a real render in three directions**, because a `fail` is as easy to write too
+    wide as too narrow, and the too-wide version — refusing whenever `ingressNamespaces` is empty —
+    would break the coherent posture of a face reachable only from inside the cluster:
+
+    1. route on, list empty: refused, and the message names the key an operator has to set;
+    2. route on, list named: renders, and both the `Route` and the policy are there with the peer;
+    3. face on, route off: renders, with an empty peer list, because that is a stated posture.
+
+    Not defaulted from `networkPolicy.ingressNamespaces`, and the chart says why in the same words
+    the guard does: that list answers who may reach a surface behind Entra, this one answers who may
+    reach a surface whose whole authorization is one bearer token, and inheriting the first to grant
+    the second is the widening the two-list split exists to prevent.
+    """
+    unstated = _render("--set", "mcpFace.enabled=true", "--set", "mcpFace.route.enabled=true")
+    assert unstated.returncode != 0, (
+        "the chart published a Route whose traffic its own `mcp-face-ingress` policy drops:\n"
+        f"{unstated.stdout[:2000]}"
+    )
+    assert "mcpFace.ingressNamespaces" in unstated.stderr, (
+        f"the refusal does not name the key that fixes it: {unstated.stderr}"
+    )
+
+    stated = _render(
+        "--set",
+        "mcpFace.enabled=true",
+        "--set",
+        "mcpFace.route.enabled=true",
+        "--set-json",
+        _ROUTER_PEER,
+    )
+    assert stated.returncode == 0, stated.stderr
+    published = [
+        document
+        for document in yaml.safe_load_all(stated.stdout)
+        if document and document.get("metadata", {}).get("name", "").endswith("-mcp-face")
+    ]
+    assert {document["kind"] for document in published} >= {"Route", "Service"}, (
+        f"naming the peer did not publish the face: {[d['kind'] for d in published]}"
+    )
+    policy = next(
+        document
+        for document in yaml.safe_load_all(stated.stdout)
+        if document and document.get("metadata", {}).get("name", "").endswith("-mcp-face-ingress")
+    )
+    peers = policy["spec"]["ingress"][0]["from"]
+    assert any("namespaceSelector" in peer for peer in peers), (
+        "the policy still admits only this namespace's pods, so the Route the chart just agreed to "
+        f"publish is still dropped: {peers}"
+    )
+
+    # The narrow direction: an unpublished face with no peers is a posture, not an omission.
+    internal = _render("--set", "mcpFace.enabled=true")
+    assert internal.returncode == 0, internal.stderr
+    names = {
+        (document.get("kind"), document.get("metadata", {}).get("name"))
+        for document in yaml.safe_load_all(internal.stdout)
+        if document
+    }
+    assert ("NetworkPolicy", "chemclaw-mcp-face-ingress") in names, sorted(names)
+    # By parsed name, not by a substring of the whole render: the *chat* front door renders its own
+    # `Route` in the same output, so a text search finds one and says nothing about the face.
+    assert ("Route", "chemclaw-mcp-face") not in names, (
+        f"an unpublished face rendered a Route anyway: {sorted(names)}"
     )
