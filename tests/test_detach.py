@@ -496,7 +496,11 @@ def test_a_detached_turn_still_holds_its_actors_slot(
     released here would bind only on well-behaved clients, which is the population that was never
     the problem.
     """
-    monkeypatch.setattr(settings, "service_max_concurrent_turns", 2)
+    # **One permit, not two.** `asyncio.Semaphore.locked()` is `value == 0`, so with a cap of two
+    # and a single detached turn it reads False whether or not the permit came back — the assertion
+    # below would have passed against a regression. Driven: keeping the permit on detach reddens
+    # the two neighbouring tests and left this one green. At a cap of one it is load-bearing.
+    monkeypatch.setattr(settings, "service_max_concurrent_turns", 1)
     monkeypatch.setattr(settings, "service_max_concurrent_turns_per_actor", 1)
     agent = _SlowerThanAdmission()
 
@@ -515,10 +519,17 @@ def test_a_detached_turn_still_holds_its_actors_slot(
         abandoned = client.post("/sessions").json()["session_id"]
         _hang_up_mid_turn(client, abandoned)
 
-        # The permit came back — the semaphore is uncontended with the detached turn still live.
-        assert not served.app.state.turn_semaphore.locked(), (
-            "the detached turn kept its admission permit; the guard above regressed"
-        )
+        # The permit came back — polled, because the detach hook runs in the server's own task and
+        # `_hang_up_mid_turn` returns as soon as the socket is closed. At a cap of one this is a
+        # real assertion: `locked()` is `value == 0`, so it can only clear if the permit was
+        # actually released while the turn is still running.
+        deadline = time.monotonic() + 10.0
+        while served.app.state.turn_semaphore.locked():
+            if time.monotonic() > deadline:  # pragma: no cover - only on a real regression
+                raise AssertionError(
+                    "the detached turn kept its admission permit; the guard above regressed"
+                )
+            time.sleep(0.01)
         # ...and the lease did not, so the actor is still counted as running a turn.
         assert abandoned in served.app.state.active_turns
 

@@ -92,6 +92,26 @@ async def _drain(held: list[asyncio.Task[httpx.Response]]) -> None:
             await task
 
 
+async def _expect_refused(client: httpx.AsyncClient, session_id: str) -> httpx.Response:
+    """POST a turn that must be refused, and fail fast rather than hang if it is not.
+
+    A working cap answers from a dict scan, so this returns in milliseconds. A *broken* cap admits
+    the turn, which then parks on `_ParkedTurn.release` and blocks this await until the suite-wide
+    timeout — and that timeout's own epilogue says "these assertions never ran … nothing above is
+    evidence about the code under test", so the shipped diagnostic for the one defect these tests
+    exist to catch is a message that disclaims itself. Bounding it here turns that into a named
+    failure on the line that meant it.
+    """
+    try:
+        return await asyncio.wait_for(
+            client.post(f"/sessions/{session_id}/messages", json={"message": "hi"}), timeout=10
+        )
+    except TimeoutError:  # pragma: no cover - only when the cap is broken
+        raise AssertionError(
+            "the turn was admitted and is streaming; the per-actor cap did not refuse it"
+        ) from None
+
+
 def test_an_actor_at_the_cap_is_refused_while_another_actor_is_admitted(monkeypatch: Any) -> None:
     """The case the whole change exists for — and both halves are the test.
 
@@ -109,7 +129,7 @@ def test_an_actor_at_the_cap_is_refused_while_another_actor_is_admitted(monkeypa
 
             _as(app, ALICE)
             third = (await client.post("/sessions")).json()["session_id"]
-            refused = await client.post(f"/sessions/{third}/messages", json={"message": "hi"})
+            refused = await _expect_refused(client, third)
             assert refused.status_code == 429, "alice's third concurrent turn was admitted"
             assert "concurrent turns" in refused.json()["detail"]
             # The header is what the client classifies on, not the status — see the test below.
@@ -148,13 +168,25 @@ def test_a_finished_turn_frees_the_actors_slot(monkeypatch: Any) -> None:
         app = _app(agent, owner_store=_FakeOwnerStore())
         async with asgi_client(app) as client:
             held = await _hold_turns(app, client, ALICE, 2)
-            assert [lease.actor for lease in app.state.active_turns.values()] == ["alice"] * 2
+            # **Wait for a *started* lease before reading `actor`.** At claim time the field is
+            # already "alice", so asserting it on a reservation passes whether or not
+            # `_start_turn_lease` carried it across the restamp — which is the thing this test
+            # says it pins. A finite deadline is what "the restamp ran" looks like from here.
+            async with asyncio.timeout(10):
+                while not any(
+                    lease.deadline != float("inf") for lease in app.state.active_turns.values()
+                ):
+                    await asyncio.sleep(0.01)
+            started = [
+                lease for lease in app.state.active_turns.values() if lease.deadline != float("inf")
+            ]
+            assert all(lease.actor == "alice" for lease in started), (
+                "_start_turn_lease dropped `actor`; the cap counts nothing once a turn streams"
+            )
 
             _as(app, ALICE)
             third = (await client.post("/sessions")).json()["session_id"]
-            assert (
-                await client.post(f"/sessions/{third}/messages", json={"message": "hi"})
-            ).status_code == 429
+            assert (await _expect_refused(client, third)).status_code == 429
 
             agent.release.set()
             await _drain(held)
@@ -188,7 +220,7 @@ def test_a_double_submit_to_one_session_is_still_409_not_429(monkeypatch: Any) -
             running = next(iter(app.state.active_turns))
 
             _as(app, ALICE)
-            again = await client.post(f"/sessions/{running}/messages", json={"message": "hi"})
+            again = await _expect_refused(client, running)
             assert again.status_code == 409, "the per-actor cap swallowed the session conflict"
             assert "already running" in again.json()["detail"]
 
@@ -198,7 +230,7 @@ def test_a_double_submit_to_one_session_is_still_409_not_429(monkeypatch: Any) -
     asyncio.run(_run())
 
 
-def test_the_actor_cap_is_off_in_code() -> None:
+def test_the_actor_cap_is_off_in_code(monkeypatch: Any) -> None:
     """0 is the code default, and `chemclaw.cli.live_storm` is the concrete reason.
 
     That instrument's family A sweeps the *admission* cap end to end, driving 48 concurrent turns
@@ -211,6 +243,9 @@ def test_the_actor_cap_is_off_in_code() -> None:
     """
     from chemclaw.core.config.service import ServiceSettings
 
+    # `_env_file=None` does not stop pydantic-settings reading the process environment, so an
+    # exported override would fail this for a reason that is not the code's.
+    monkeypatch.delenv("CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS_PER_ACTOR", raising=False)
     assert ServiceSettings().service_max_concurrent_turns_per_actor == 0
 
 
@@ -220,6 +255,8 @@ def test_one_actor_can_still_fill_the_pod_when_the_cap_is_off(monkeypatch: Any) 
     A cap that ships "off" by being set very high is a different thing from one that is not
     consulted, and only the second leaves `live_storm`'s offered-load sweep measuring what it says.
     """
+    from chemclaw.core.metrics import METRICS
+
     monkeypatch.setattr(settings, "service_max_concurrent_turns_per_actor", 0)
     monkeypatch.setattr(settings, "service_max_concurrent_turns", 3)
     agent = _ParkedTurn()
@@ -227,8 +264,13 @@ def test_one_actor_can_still_fill_the_pod_when_the_cap_is_off(monkeypatch: Any) 
     async def _run() -> None:
         app = _app(agent, owner_store=_FakeOwnerStore())
         async with asgi_client(app) as client:
+            before = METRICS.value("chemclaw_turns_refused_actor_cap_total")
             held = await _hold_turns(app, client, ALICE, 3)
-            assert len(app.state.active_turns) == 3, "one actor could not fill the pod"
+            # The count is implied by `_hold_turns` returning at all; what this test means is that
+            # the guard refused nothing on the way.
+            assert METRICS.value("chemclaw_turns_refused_actor_cap_total") == before, (
+                "the guard refused a turn while configured off"
+            )
             agent.release.set()
             await _drain(held)
 
@@ -281,7 +323,7 @@ def test_the_refusal_carries_retry_after_because_the_client_splits_429_on_it(
 
             _as(app, ALICE)
             second = (await client.post("/sessions")).json()["session_id"]
-            refused = await client.post(f"/sessions/{second}/messages", json={"message": "hi"})
+            refused = await _expect_refused(client, second)
 
             assert refused.status_code == 429
             hint = int(refused.headers["retry-after"])
@@ -293,7 +335,7 @@ def test_the_refusal_carries_retry_after_because_the_client_splits_429_on_it(
             # Derived from the setting rather than written here: move the setting, move the hint.
             monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 30.0)
             third = (await client.post("/sessions")).json()["session_id"]
-            again = await client.post(f"/sessions/{third}/messages", json={"message": "hi"})
+            again = await _expect_refused(client, third)
             assert again.status_code == 429
             assert int(again.headers["retry-after"]) > 10, (
                 "the hint is a literal, not the configured admission wait"
@@ -327,9 +369,7 @@ def test_the_refusal_actually_increments_its_counter(monkeypatch: Any) -> None:
 
             _as(app, ALICE)
             second = (await client.post("/sessions")).json()["session_id"]
-            assert (
-                await client.post(f"/sessions/{second}/messages", json={"message": "hi"})
-            ).status_code == 429
+            assert (await _expect_refused(client, second)).status_code == 429
 
             after = METRICS.value("chemclaw_turns_refused_actor_cap_total")
             assert after == before + 1, "the refusal did not reach its counter"
@@ -413,6 +453,67 @@ def test_the_cap_is_inert_under_the_shared_dev_principal(monkeypatch: Any) -> No
             assert (await second_turn).status_code == 200, (
                 "the cap acted on the shared principal and refused the whole pod"
             )
+            await _drain(held)
+
+    asyncio.run(_run())
+
+
+def test_the_retry_hint_is_jittered_and_never_zero(monkeypatch: Any) -> None:
+    """Both properties, because a mutation removing them killed no test.
+
+    The jitter is the whole reason this is not a constant: every client refused by this guard is
+    handed the same hint, and without a spread they re-converge on one cadence and arrive together
+    at the pod that just refused them. The ceiling is why `Retry-After: 0` — which means "retry
+    immediately", turning a hint into a spin — cannot be produced from a sub-second setting.
+    """
+    from chemclaw.api.routes.turns import _retry_after_hint
+
+    monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 5.0)
+    draws = {_retry_after_hint() for _ in range(50)}
+    assert len(draws) > 1, f"the hint is a constant, not a jittered cadence: {draws}"
+    assert all(5 <= int(d) <= 10 for d in draws), f"outside base..2x base: {sorted(draws)}"
+
+    # A sub-second setting must still round up to a real wait rather than to "immediately".
+    monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 0.4)
+    assert {int(_retry_after_hint()) for _ in range(20)} == {1}
+
+
+def test_the_refusal_names_the_measured_count_not_the_configured_cap(
+    monkeypatch: Any, caplog: Any
+) -> None:
+    """Deleting the log line killed no test, and the line is where attribution lives.
+
+    The counter carries no actor label by design, so this record is the only place a refusal is
+    tied to a principal. It reports `held` rather than `actor_cap` on purpose: the predicate is
+    `>=`, so a count *above* the cap is legitimate and is the one observable symptom of a lease
+    outliving its turn — logging the configured number in its place would hide exactly that.
+    """
+    import logging
+
+    monkeypatch.setattr(settings, "service_max_concurrent_turns_per_actor", 1)
+    agent = _ParkedTurn()
+
+    async def _run() -> None:
+        app = _app(agent, owner_store=_FakeOwnerStore())
+        async with asgi_client(app) as client:
+            held = await _hold_turns(app, client, ALICE, 1)
+
+            _as(app, ALICE)
+            second = (await client.post("/sessions")).json()["session_id"]
+            with caplog.at_level(logging.INFO, logger="chemclaw.api.routes.turns"):
+                refused = await _expect_refused(client, second)
+            assert refused.status_code == 429
+
+            records = [
+                r.getMessage() for r in caplog.records if "refusing a turn" in r.getMessage()
+            ]
+            assert records, "the refusal reached no log record; attribution has nowhere to live"
+            assert "alice" in records[0], "the refusal does not name the principal"
+            assert "holding 1 concurrent turn(s)" in records[0], (
+                f"the refusal does not report the measured count: {records[0]}"
+            )
+
+            agent.release.set()
             await _drain(held)
 
     asyncio.run(_run())

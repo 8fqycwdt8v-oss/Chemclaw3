@@ -37,7 +37,7 @@ registers the one that is a decision.
 - [x] `service_max_concurrent_turns_per_actor` (default 0); chart sets 4 against 12.
 - [x] `chemclaw_turns_refused_actor_cap_total` (unlabelled) + `chemclaw_turn_actor_capacity` gauge.
 - [x] `D-2026-09-19-a-pod-wide-cap-is-not-a-fair-one` + ledger row + topic-table row.
-- [x] Tests: `tests/test_turn_fairness.py` (10), `test_detach.py` (1), `test_stream_contract.py` (3),
+- [x] Tests: `tests/test_turn_fairness.py` (12), `test_detach.py` (1), `test_stream_contract.py` (3),
       `test_deploy_chart.py` (1).
 
 ## Part 2 — the register repairs
@@ -111,3 +111,25 @@ was more confident than the code, which is the failure this repository is organi
   have hidden a count *above* the cap — the one observable symptom of a lease outliving its turn.
 - **Nothing asserted the counter increments**, so the dashboard panel could have read zero for ever
   while every test stayed green.
+
+**A mutation sweep then found four mutations that killed no test at all**, which is the finding
+line coverage cannot produce — every one of those lines was *executed* by the suite and asserted by
+nothing:
+
+- deleting the refusal log line entirely (the only place a refusal is tied to a principal, since
+  the counter carries no actor label);
+- removing the `Retry-After` jitter *and* its ceiling (the assertions were `1 <= hint <= 10`, which
+  a bare constant satisfies);
+- the cross-field config validator, which had no test and whose file `[tool.coverage.run] omit`
+  excludes, so the floor could never have noticed;
+- `cap or 1000` — "0 means very lenient" instead of "0 means not consulted". Left unfixed
+  deliberately: the two are not observably different without holding a thousand turns, so a test
+  for it would be a mechanism with one caller. The *real* defect in that test — an assertion
+  implied by the helper that produced it — is fixed by asserting the refusal counter did not move.
+
+And one assertion of mine was **inert**: `test_a_detached_turn_still_holds_its_actors_slot` checked
+`semaphore.locked()` with a cap of two and one detached turn, where the value is 1 either way. A
+mutation keeping the permit on detach reddened its two neighbours and left it green. It now runs at
+a cap of one and polls, because the detach hook runs in the server's own task.
+
+All three fixable mutations now fail a named test; re-driven to confirm rather than assumed.

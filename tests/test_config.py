@@ -1925,3 +1925,55 @@ def test_the_dispatch_count_each_bounded_drain_declares_is_the_one_it_runs() -> 
             f"_BOUNDED_DRAINS declares {declared} — the run-ceiling arithmetic is now wrong by "
             f"a factor of {counted / declared:.2f}"
         )
+
+
+def test_a_per_actor_cap_at_or_above_the_process_cap_is_refused_at_startup() -> None:
+    """A fairness cap that cannot fire is worse than none: it publishes itself as protection.
+
+    `chemclaw_turn_actor_capacity` reports the configured number to a dashboard, so a per-actor cap
+    of 12 against 12 permits reads exactly like a working guard while refusing nothing — the
+    request is checked, the count is scanned, and the predicate can never be true. The chart's own
+    pair is held apart by `tests/test_deploy_chart.py`, but that test reads `values.yaml`, so a
+    `--set` on the process cap or an env override of either key escaped it entirely. This is the
+    same argument the fleet-ceiling validator above makes: only this object sees the configuration
+    a pod actually runs.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            service_max_concurrent_turns=12,
+            service_max_concurrent_turns_per_actor=12,
+        )
+    message = str(excinfo.value)
+    assert "service_max_concurrent_turns_per_actor" in message
+    # Both numbers, because the remedy is to move one of them and the operator has to know which.
+    assert "12" in message
+
+    with pytest.raises(ValueError):
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            service_max_concurrent_turns=4,
+            service_max_concurrent_turns_per_actor=8,
+        )
+
+
+def test_zero_is_the_off_switch_and_is_never_refused() -> None:
+    """0 is "not consulted", which is the shipped code default and must survive the guard above.
+
+    `chemclaw.cli.live_storm` drives tens of concurrent turns from one credential, so a code
+    default that refused the combination would break the instrument that sweeps the admission cap.
+    """
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        service_max_concurrent_turns=1,
+        service_max_concurrent_turns_per_actor=0,
+    )
+    assert settings.service_max_concurrent_turns_per_actor == 0
+
+    # And strictly-below is accepted, which is what the chart ships.
+    ok = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        service_max_concurrent_turns=12,
+        service_max_concurrent_turns_per_actor=4,
+    )
+    assert ok.service_max_concurrent_turns_per_actor == 4
