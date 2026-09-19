@@ -12,10 +12,13 @@ decline, 1 carries the marker.
 
 The sharper half of that finding is that the condition is the cheap part and watching it is the
 expensive one. `D-092` did state its reopening condition, precisely — *"revisit only if a deployment
-vendors the weight files into the container image at build time"*. That condition was **met**:
-`D-135` decided a dataset may be vendored into the image at build time, and
-`src/chemclaw/ingest/sources/vendored_dataset.py` is the mechanism that does it. The decision stayed
-closed anyway, for the only reason it could — nothing watches a condition. So state plainly what
+vendors the weight files into the container image at build time"* — and it **was met**, in the
+sibling fleet: `servers/rxnpredict/Containerfile` and `servers/rxnlabel/Containerfile` bake
+SHA-pinned checkpoints in a build stage under an egress allowlist, and run offline. Nobody noticed,
+because nothing watches a condition — and this file's own first draft read the trigger as satisfied
+by `D-135` in *this* repository, which is a dataset retriever that has never carried a third-party
+corpus. The right answer off the wrong evidence is what an unwatched trigger buys you.
+So state plainly what
 this file is: **a bound on the trigger being written, not a measurement of anyone checking it.** It
 makes the question askable. It does not answer it, and an ADR whose trigger is executable — a test
 that reds when the blocker lifts — is worth more than one whose trigger is a sentence.

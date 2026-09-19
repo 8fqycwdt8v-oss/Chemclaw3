@@ -408,8 +408,10 @@ reserve, nothing to coordinate with other sessions.
   stronger word. `tests/test_declines_carry_a_trigger.py` holds it from its cursor forward. That is
   a bound on the trigger being *written*, not on anyone checking it: `D-092` stated a precise one
   ("revisit only if a deployment vendors the weight files into the container image at build time"),
-  `D-135` and `ingest/sources/vendored_dataset.py` met it, and the decision stayed closed because
-  nothing watches a condition. Make the trigger executable where you can.
+  and it was met — in `Chemclaw3-mcp`, twice, by SHA-pinned build-time weight bakes that no reader
+  of `D-092` was watching — while `DEFERRED.md` had separately rewritten one of the two blockers the
+  trigger was written for. Nobody noticed either. **Make the trigger executable where you can**, and
+  name the file that would show it had fired.
 
 The id is the *whole stem*, not the date — two ADRs on one day is normal here, and an id naming two
 decisions is the failure the ledger exists to prevent.

@@ -48,12 +48,28 @@ Ten declining ADRs were checked against the tree and found to rest on an expired
 ten rest on one of two deletions — the PR-gate and the second LLM provider. The sharpest is not in
 that six:
 
-> **`D-092` stated its reopening condition, the condition was met, and the decision stayed closed.**
-> It declined ML interatomic potentials and AiZynthFinder retrosynthesis, and wrote down exactly
-> what would change its mind: *"Revisit only if a deployment vendors the weight files into the
-> container image at build time as an explicit, reviewed infrastructure decision."* `D-135` took
-> that decision and `ingest/sources/vendored_dataset.py` ships it. Nothing fired, because nothing
-> watches a condition.
+> **`D-092` stated its reopening condition, it was met in another repository, and nobody noticed —
+> including the first draft of this ADR, which got the conclusion right off the wrong evidence.**
+> It declined ML interatomic potentials and AiZynthFinder retrosynthesis under one condition:
+> *"Revisit only if a deployment vendors the weight files into the container image at build time as
+> an explicit, reviewed infrastructure decision… not as a quiet runtime fetch."*
+>
+> That is shipped, **twice**, in `Chemclaw3-mcp`: `servers/rxnpredict/Containerfile` and
+> `servers/rxnlabel/Containerfile` fetch their checkpoints in a build stage, pinned to 40-hex commit
+> SHAs, under an `MCP_EGRESS_ALLOW` allowlist **with the egress guard armed**, and the runtime stage
+> sets `HF_HUB_OFFLINE=1` and re-arms the guard. Reviewed, explicit, build-time, not quiet.
+>
+> This ADR's first draft cited `D-135` and `data/vendored/` instead — and that is a *dataset
+> retriever* whose one shipped corpus is 1.9 kB of first-party CSV and whose manifest says in its own
+> `retrieved_from` field that *"no third-party corpus has been vendored yet"*. Right conclusion,
+> wrong mechanism, wrong repository. **And for the retrosynthesis half the condition was the wrong
+> one entirely**: `docs/planning/DEFERRED.md` moved that blocker on 2026-08-13 — *"its blocker is not
+> the weights and not their licence, it is the dependency closure"* — four mutually exclusive pins
+> against `rdkit`, `numpy`, `networkx` and `pandas`, which vendoring cannot fix.
+>
+> So the condition was met by a mechanism nobody was watching, in a repository nobody was watching
+> it from, while the register had quietly rewritten half of what it was a condition *for*. A trigger
+> is not a control. It makes a question askable and answers nothing.
 
 And the cause of the volume, which is the cause of everything above: **60% of these files read as
 defect reports and 14% weigh an alternative.** A bug fix is being minted as a permanent,
@@ -111,7 +127,12 @@ boundary, no agent-written `SKILL.md`, `manifests-internal`, no `assert` in serv
 *no* stopped applying, not the `no`s.
 
 **It does not reopen the ten.** Each is now visible as revisitable; whether to revisit any is its own
-decision, and `D-092`'s is the one with a met trigger and therefore the first candidate.
+decision. `D-092` was checked first, and the answer is that it splits rather than reopens: its
+MACE-OFF/MACE-MP half is refusable on a firmer ground than it ever stated (the *weights* carry a
+non-commercial Academic Software Licence, while the code is MIT), its ANI-2x/AIMNet2 half is blocked
+on **demand rather than on vendoring**, and its retrosynthesis half is governed by a live
+`DEFERRED.md` row whose blocker is a dependency closure. That is a separate decision and gets a
+separate ADR.
 
 ## Revisit when
 
