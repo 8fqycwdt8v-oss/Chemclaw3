@@ -38,8 +38,9 @@ authorization refusal or an audit row cannot depend on which engine ran. How man
 `len(tool_call_middleware(...))`. Skills come from `deepagents.SkillsMiddleware` over a backend
 narrowed by three predicates (`agent/skill_backend.py`) — the gate is in the backend because
 deepagents publishes skill *paths* into the prompt. The plan is `TodoListMiddleware`'s todo list,
-read by `agent/plan_gate.py` as it stands at that instant. The runaway cap is a first-party
-`before_model` counter over `ChemclawState.model_calls` (`agent/loop_cap.py`).
+read by `agent/plan_gate.py` as it stands at that instant, and the runaway cap is a first-party
+`before_model` counter over `ChemclawState.model_calls` (`agent/loop_cap.py`), so the number that
+enforces the limit and the number that records it are the same number.
 
 **`ModelCallLimitMiddleware` is unsafe to compose with any middleware that jumps from
 `after_model`**, which is the general rule left by trying it and reverting: upstream counts in

@@ -412,6 +412,21 @@ topic).
       table that is in `retention._NOT_PRUNED` on purpose. `durable/awaiting.py`,
       `durable/pending_store.py`.
 
+- [ ] **The forkserver RSS ceiling is red on `main` and the budget under it has not moved** — [H],
+      found 2026-09-19 running the full gate. `test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_against`
+      measures a warm parse forkserver at **117.6 MiB** against a `FORKSERVER_RSS_CEILING_MIB` of
+      112, and it is red on `origin/main` at the same figure (117.59 there, 117.65 on a branch that
+      touches no import) — so this is a closure that grew under the ceiling, not a branch's
+      regression, and `make test` has been failing for whoever runs it serially. The ceiling is not
+      a number to bump: its own message says `FORKSERVER_POD_COST_MIB`, and `resources.service` and
+      `resources.worker` under it, need re-deriving **before it ships**, which is a pod-sizing
+      decision rather than a constant. What it wants first is `git log -S'_PRELOAD'` over
+      `ingest/documents/isolate.py` to name what entered the closure, then the same measurement the
+      original derivation used. Anchors: `tests/test_deploy_chart.py::test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_against`,
+      `src/chemclaw/ingest/documents/isolate.py` `_PRELOAD`, `deploy/helm/chemclaw/values.yaml`
+      `resources.service`. Sits directly above the row that wants a third term in the *other*
+      forkserver budget; they are the same pod and want measuring together.
+
 - [ ] **Nothing bounds what a turn costs the front door's memory** — [M], opened 2026-09-18 by
       `D-2026-09-18-a-second-process-in-the-pod-is-memory-the-chart-never-declared`, which sized
       `resources.service` against a resident set with **no turn in flight**: 431.9 MiB measured on
