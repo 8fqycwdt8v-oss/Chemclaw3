@@ -472,3 +472,50 @@ def test_shutdown_gives_up_on_a_turn_that_outlasts_the_grace_it_is_given(
     assert any("did not finish" in message for message in said), (
         f"a turn abandoned at shutdown left no line an operator could find it by: {said}"
     )
+
+
+def test_a_detached_turn_still_holds_its_actors_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The permit comes back at a detach and the per-actor slot deliberately does not.
+
+    These two guards answer the same event in opposite directions, and the inconsistency is the
+    design rather than an oversight — so it is pinned here, where a later tidy-up would land.
+    The **permit** is fairness to a *waiting client*, and a detached turn has none, so it is
+    released (the test above measures what holding it costs). The **per-actor slot** rations one
+    principal's share of this replica, and a detached turn is still spending that share: it is
+    burning CPU, model tokens and a store connection until the loop cap or
+    `service_turn_timeout_seconds` stops it.
+
+    Releasing the slot on a detach would hand the cap straight back to the case the test above
+    measured — POST and hang up, now unbounded, because each hang-up would free both the permit
+    and the actor's slot while leaving a pump running for the full turn timeout. So a cap that
+    released here would bind only on well-behaved clients, which is the population that was never
+    the problem.
+    """
+    monkeypatch.setattr(settings, "service_max_concurrent_turns", 2)
+    monkeypatch.setattr(settings, "service_max_concurrent_turns_per_actor", 1)
+    agent = _SlowerThanAdmission()
+
+    with _Served(_app(agent)) as served, httpx.Client(base_url=served.base, timeout=30) as client:
+        abandoned = client.post("/sessions").json()["session_id"]
+        _hang_up_mid_turn(client, abandoned)
+
+        # The permit came back — the semaphore is uncontended with the detached turn still live.
+        assert not served.app.state.turn_semaphore.locked(), (
+            "the detached turn kept its admission permit; the guard above regressed"
+        )
+        # ...and the lease did not, so the actor is still counted as running a turn.
+        assert abandoned in served.app.state.active_turns
+
+        follow_up = client.post("/sessions").json()["session_id"]
+        refused = client.post(f"/sessions/{follow_up}/messages", json={"message": "hi"})
+        assert refused.status_code == 429, (
+            "hanging up freed the actor's slot, so POST-and-hang-up is unbounded again"
+        )
+
+        served.wait_for_slot_release(abandoned)
+        # Once the detached turn genuinely ends, the slot comes back with it.
+        served_again = client.post(f"/sessions/{follow_up}/messages", json={"message": "hi"})
+        assert served_again.status_code == 200
+        served.wait_for_slot_release(follow_up)

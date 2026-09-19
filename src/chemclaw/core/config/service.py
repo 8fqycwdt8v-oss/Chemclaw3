@@ -148,6 +148,27 @@ class ServiceSettings(BaseSettings):
     # will actually take.
     service_max_concurrent_turns: int = Field(default=12, gt=0)
     service_turn_admission_timeout_seconds: float = Field(default=5.0, gt=0)
+    # **The cap above is actor-blind, and this is its missing half.** One principal opening
+    # `service_max_concurrent_turns` sessions holds every permit on the replica and every other
+    # chemist is shed `at_capacity` — the measurement is in `chemclaw.api.detach`, one hang-up per
+    # permit. The per-actor *rate* limit below does not reach it: 120/min is two orders of
+    # magnitude above 12 concurrent turns. `routes/streams.py` already bounds its own resource
+    # twice, per user and per process, on the argument that one bound does not imply the other;
+    # turns had only the second. Counted across an actor's *other* sessions, since one turn per
+    # session is already a 409.
+    #
+    # **0 disables, and off is right as a code default** (D-142/REV-16), here for a reason that is
+    # measured rather than doctrinal: `chemclaw.cli.live_storm` drives up to 48 concurrent turns
+    # from one credential, and family A exists to measure this cap's shedding curve — an
+    # on-by-default per-actor cap turns those sheds into 429s and breaks the one instrument that
+    # validates admission control. The chart carries the posture.
+    #
+    # Per process, like `service_max_concurrent_turns`, and with the same caveat: `maxReplicas`
+    # multiplies the real ceiling, so an actor spread over the fleet holds that multiple, and a
+    # fleet-wide per-actor limit belongs at the ingress (SCALE-1). A value at or above
+    # `service_max_concurrent_turns` enforces nothing while reading as protection — the chart test
+    # is what holds the two apart.
+    service_max_concurrent_turns_per_actor: int = Field(default=0, ge=0)
     # Threads kept *above* whatever this process's own admission caps can occupy, in the one
     # `asyncio.to_thread` pool they all share (`core/executor.py`). They exist for the calls that
     # are microseconds long and must never wait behind a corpus parse or an embedding: bearer-token

@@ -29,6 +29,7 @@ from chemclaw.api.schemas import MessageIn, session_title
 from chemclaw.api.state import (
     SessionTurns,
     TurnLease,
+    _actor_turns_in_flight,
     _claim_turn_slot,
     _hold_turn_claim,
     _release_turn_claim,
@@ -131,10 +132,66 @@ async def post_message(
     claims: SessionTurns | None = front.turn_claims
     lease = settings.service_turn_claim_lease_seconds
     semaphore = front.turn_semaphore
+    # **Per actor — the half of a pair `routes/streams.py` already ships whole.** The semaphore
+    # below bounds this *process* and is actor-blind, so one principal opening
+    # `service_max_concurrent_turns` sessions holds every permit on the replica and every other
+    # chemist is shed `at_capacity` (`chemclaw.api.detach` has the measurement: one hang-up per
+    # permit). One bound does not imply the other.
+    #
+    # **Refused here rather than beside `semaphore.acquire()`, and that is not a re-litigation of
+    # D-166.** What D-166 moved onto the stream was the *wait*, which was invisible — up to
+    # `service_turn_admission_timeout_seconds` with no response at all. This is a refusal: decided
+    # by a dict scan, final for this request, and identical on a retry a millisecond later. So it
+    # gets a status code, like the durable 409 below and like the stream cap's own 429. Answering
+    # it with `at_capacity` would also name the wrong full resource — the replica may be idle; the
+    # caller's own turns are the limit — and `retryable=True` would tell a UI to keep hammering a
+    # condition only that client can clear.
+    #
+    # **`Retry-After` is sent, and the reason is the client rather than the server.** This process
+    # cannot predict when one of the caller's turns ends, so on its own terms the honest answer is
+    # "no number" — which is what this refusal shipped until the client was read. `Chemclaw3_ui`'s
+    # `errorFromStatus` splits 429 on the *presence* of the header: with one it renders a transient
+    # `rate_limited` banner with a countdown, without one it renders `budget_exhausted` — "the usage
+    # budget for this service is exhausted" — which locks the composer, is false here, and which
+    # that module's own comment says nothing in the UI clears. A machine-readable `code` cannot
+    # carry it either: `streamTurn.ts` does not pass `errorFromStatus` its `code` argument at all,
+    # so an older client would still lock. The admission timeout is the right hint because it is
+    # already this system's answer to "how long is it reasonable to wait for a turn permit" — it is
+    # a configured number rather than an invented one, and a client that retries into a still-full
+    # cap simply gets the same hint again, exactly as the token-bucket limiter's 429 behaves.
+    #
+    # **Above `_claim_turn_slot`, and the line order is the guard.** That claim's reservation
+    # carries `deadline=math.inf` until `_start_turn_lease` starts its clock, so a raise between it
+    # and the `try` below leaks the session's slot with no expiry — 409-bricking that session for
+    # the pod's lifetime.
+    actor_cap = settings.service_max_concurrent_turns_per_actor
+    if (
+        actor_cap
+        and _actor_turns_in_flight(active_turns, principal.oid, besides=session_id) >= actor_cap
+    ):
+        METRICS.increment("chemclaw_turns_refused_actor_cap_total")
+        # The identity is logged and deliberately not a label: `/metrics` is unauthenticated, and
+        # an `oid` is an unbounded, caller-chosen key — minting them is precisely the way around a
+        # per-principal limit, so a labelled counter would stop counting at the series cap exactly
+        # when it matters. Same split the rate limiter takes.
+        logger.warning(
+            "refusing a turn for %s: already holding %d concurrent turn(s), the per-actor cap",
+            principal.oid,
+            actor_cap,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail="too many concurrent turns for this user; wait for one to finish",
+            headers={
+                "Retry-After": str(
+                    max(1, int(settings.service_turn_admission_timeout_seconds + 0.999))
+                )
+            },
+        )
     # Nothing may sit between this claim and the `try` below — no `await`, and nothing that can
     # raise — because the reservation it takes does not expire until `_start_turn_lease` starts its
     # clock, and until then only that `try`'s `finally` gives it back.
-    slot = _claim_turn_slot(active_turns, session_id)
+    slot = _claim_turn_slot(active_turns, session_id, actor=principal.oid)
     if slot is None:
         METRICS.increment("chemclaw_turns_conflict_total", labels={"scope": "process"})
         raise HTTPException(status_code=409, detail="a turn is already running for this session")

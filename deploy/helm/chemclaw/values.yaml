@@ -1087,6 +1087,24 @@ config:
   # 500m: twelve permits are ~0.84 cores of steady demand, which a half-core request does not
   # guarantee under node contention.
   CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS: "12"
+  # How much of that a single chemist may hold. The cap above is actor-blind, so without this one
+  # principal opening twelve sessions takes every permit on the replica and everyone else is shed
+  # `at_capacity` — measured as one hang-up per permit (`chemclaw.api.detach`). The per-actor rate
+  # limit below never reaches it: 120/min is two orders of magnitude above twelve concurrent turns.
+  #
+  # 4 of 12: one actor takes at most a third of a replica, so three distinct chemists are needed
+  # to fill a pod, and a full pod always has at least three people on it. It is already more
+  # parallelism than the shipped UI generates by hand — the browser holds one turn per open
+  # session view and `CHEMCLAW_SERVICE_MAX_EVENT_STREAMS_PER_USER` is 5.
+  #
+  # **Must stay strictly below `CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS`**; at or above it the guard
+  # enforces nothing while reading as protection, and `tests/test_helm_chart.py` is what holds the
+  # two apart. Off in code (0) because `chemclaw.cli.live_storm` drives 48 concurrent turns from
+  # one credential to measure this very cap's shedding curve; the posture lives here.
+  #
+  # Per process, so `service.autoscaling.maxReplicas` multiplies it — an actor spread over the
+  # fleet holds that multiple, and a fleet-wide per-actor limit belongs at the ingress (SCALE-1).
+  CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS_PER_ACTOR: "4"
   # What the shared LLM endpoint may be asked to serve by this whole deployment, at once.
   #
   # The admission cap is per-process and stays that way (SCALE-1: a fleet-wide counter would cost a
