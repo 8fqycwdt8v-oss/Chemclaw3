@@ -245,12 +245,12 @@ async def test_a_parse_past_its_deadline_frees_its_slot_for_the_next_upload(
     cost = _in_process_parse_seconds(_SLOW_CSV)
     fork = _fork_round_trip_seconds()
     deadline = cost / 4
-    assert deadline >= 3 * fork, (
+    assert deadline > fork, (
         f"_SLOW_CSV parses in {cost:.3f}s here, so a deadline it overruns four times over is "
-        f"{deadline:.3f}s — under three times the {fork:.3f}s a fork round trip costs, which would "
-        "time the *small* upload out as well and make this test pass for the wrong reason. Growing "
-        "the fixture is not the way out: driven, 40 MB of the same CSV is refused by "
-        "`document_parse_memory_bytes` before the deadline is reached at all."
+        f"{deadline:.3f}s — under the {fork:.3f}s a fork round trip costs, so the child would be "
+        "killed before it read a byte and this would be about process creation rather than about a "
+        "parse outrunning its deadline. Growing the fixture is not the way out: driven, 40 MB of "
+        "the same CSV is refused by `document_parse_memory_bytes` before the deadline is reached."
     )
     monkeypatch.setattr(settings, "attachment_max_concurrent_parses", 1)
     monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", deadline)
@@ -266,6 +266,21 @@ async def test_a_parse_past_its_deadline_frees_its_slot_for_the_next_upload(
     # so it lands on the next turn of the loop rather than before this coroutine resumes.
     await asyncio.sleep(0)
     assert attachments._PARSE_SLOTS.in_flight == 0
+
+    # **The second upload gets its own deadline, and that is the whole reason this test is stable.**
+    # One setting was doing two jobs: the slow parse has to *overrun* it and the small file has to
+    # *fit inside* it, which needs the parse to cost many times a fork round trip. On this box that
+    # ratio is ~25 and on the CI runner it is 8.6 (0.258 s against 0.030 s), so a guard demanding
+    # four times one and three times the other could not be satisfied there at all — driven, twice.
+    # Nothing about the subject needs them shared: what is asserted below is that the slot was
+    # *free*, measured against the queue wait, and a slot that is still held sheds the upload no
+    # matter how long its deadline is.
+    monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", cost)
+    assert settings.attachment_parse_queue_seconds > 2 * fork, (
+        f"the queue wait is {settings.attachment_parse_queue_seconds:.3f}s and a fork round trip "
+        f"is {fork:.3f}s, so the assertion below would be measuring process creation rather than "
+        "whether the slot came back"
+    )
 
     started = time.monotonic()
     parsed = await parse_attachment_off_loop("small.csv", b"id,yield\nR-1,88\n")
