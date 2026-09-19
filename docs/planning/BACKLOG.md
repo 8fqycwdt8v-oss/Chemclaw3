@@ -12,14 +12,15 @@ had and D-154 fixed there with this one rule.
 **Rows are grouped by what they ask for, not by which review produced them.** A finding's date and
 its reviewing pass are provenance, and provenance belongs in
 [`docs/archive/findings-2026-08.md`](../archive/findings-2026-08.md) — the long-form record of every
-row this queue has ever carried. How many rows either file holds is a `grep`, not a sentence —
-`grep -c '^- \[ \]' docs/archive/findings-2026-08.md` and the same over this file — and the two
-counts do not subtract: promoting a row **restates** it, so a queued row is still open there under
-its original wording, and matching the two sets by title matched only 7 of the 30 this queue held
-when that was measured. §5 is the first thing here that is not a defect this repository found
-in itself, and none of its rows is in the archive at all. The overlap is real and unmeasurable by
-`grep`, which is why neither number is a difference. When a queued row needs its full measurement
-history, that file has it under the review that found it.
+row this queue has ever carried. How many rows this file holds is a `grep`, not a sentence —
+`grep -c '^- \[ \]' docs/planning/BACKLOG.md`. **The archive is not counted at all**, and that is
+the point of it being a record: its findings are plain bullets rather than checkboxes, so no `grep`
+answers "how many are open there", because none of them is open. The two sets do not subtract
+either: promoting a row **restates** it, so a queued row is still open there
+under its original wording, and matching the two sets by title matched only a small minority of
+what this queue held when that was measured. §5 is the first thing here that is not a defect this
+repository found in itself, and none of its rows is in the archive at all. The overlap is real
+and unmeasurable by `grep`, which is why neither number is a difference.
 
 Both counts *were* written here, and both were wrong — 223 against 221, and 41 against 45 — each
 printed beside the command that disproves it, which is the whole argument of
@@ -49,7 +50,8 @@ exactly the state the paragraph above is about.
 **And the pass that wrote the two paragraphs above is not exempt from them.** An audit later the
 same day found its own numbers stale in the way it was written to catch: it said "nine tables" for
 an erasure that clears twelve; it filed a hazard as unpinned that
-`tests/test_connector_registry.py:293` had already pinned; and five of the anchors it wrote no
+`tests/test_connector_registry.py::test_the_health_probe_follows_an_override_that_moves_the_path_too`
+had already pinned; and five of the anchors it wrote no
 longer resolved to the construct they named by the time the branch was audited, four of them off by
 a handful of lines. None of that is neglect — it is a measurement taken hours before the tree moved
 under it, which is the failure mode this file has rather than an exception to it. Re-measure on the
@@ -116,7 +118,7 @@ topic).
 - [ ] **The unauthenticated `X-Chemclaw-Actor` header becomes durable attribution** — [M], and
       **narrower than this row used to claim**. It does not reach `job_records` or the audit trail:
       the durable path takes the actor as an argument sourced from core's validated front-door
-      principal (`ConnectorJobInput.requested_by`, `durable/connector_job.py:164` — the row named a
+      principal (`ConnectorJobInput.requested_by`, `durable/connector_job.py:184` — the row named a
       field called `actor`, which does not exist, and an anchor that has since drifted four lines),
       and never reads the header. Re-driven 2026-09-12: a forged `X-Chemclaw-Actor` reaches the tool
       body verbatim and lands as `unverified:<id>` in exactly two columns on the synchronous MCP
@@ -192,7 +194,6 @@ topic).
       The cost of leaving it is bounded and one-sided — a chemist is offered their own skill about a
       tool this profile lacks, and the worst outcome is judgment they wrote being unhelpful to them.
 
-
 - [ ] **`Chemclaw3_ui` has no surface for the four `/skills/mine` routes** — [M], opened by
       `D-2026-09-18-a-skill-a-chemist-keeps-is-behaviour-they-approved`. That ADR grants the
       personal tier its exemption from review *on the condition* that a chemist can see what is
@@ -208,7 +209,6 @@ topic).
       worth rendering rather than swallowing are the 409s: a name this deployment already ships,
       and the row cap, which says in its detail why it exists (every personal skill is in the
       prompt of every turn its owner takes).
-
 
 - [ ] **Both published tool-utility results were measured against a control arm that also swaps
       the prompt** — [M], `data/evals/profiles/no-tools.yaml` (`instructions:`),
@@ -325,7 +325,6 @@ topic).
   chemist's own document, which is a different act from truncating a helper's. Anchors:
   `agent/scratchpad.py`, `deepagents.backends.state.StateBackend`, `agent/tool_result_size.py::_bounded_file`.
 
-
 - [ ] **The helper file budget is charged to siblings that wrote nothing, and two write verbs are
   charged to nobody** — [M], opened by
   `D-2026-09-18-a-pre-batch-snapshot-cannot-see-its-own-superstep`, which closed the fan-out's
@@ -397,7 +396,7 @@ topic).
       `experiment-proposal` 1). Two producers are closed —
       `retrieval.harness.report_note(drafted_on=…)` and
       `durable.job_record.note_with_run_provenance(ran_on=…)`, both cases where validity and
-      arrival are the same day by construction. `agent/graph_tools.py:527`
+      arrival are the same day by construction. `agent/graph_tools.py:554`
       (`record_knowledge_note`) is not: the model may legitimately not know when a fact became
       true, and defaulting `valid_from` to today would trade a silence for a false claim about
       chemistry. **The real fix is an arrival signal separate from `valid_from`**, which the
@@ -408,19 +407,8 @@ topic).
       add-date in one subprocess, cacheable behind the same corpus fingerprint `load_notes` already
       uses. Measure that scan on a 10k-note corpus before building it.
 
-- [ ] **The delegation A/B has a comparator and no runner** — [L], found 2026-09-15.
-      `evals/delegation.py` is a pure comparison over `ArmRun`s, and **nothing constructs one**:
-      `grep -rn "ArmRun" src/ tests/ data/ Makefile` finds the module and its own test, nothing
-      records `delegated`, and no profile, prompt or runner builds the `no-helper` arm
-      (`data/evals/profiles/` holds `no-tools.yaml` and `tools-removed.yaml`). The module docstring called this "the
-      run half is what needs [a gateway]", which reads as a runner waiting on a credential. What it
-      owes: a `no-helper` profile whose system prompt asks the model not to call `task`, a runner
-      that records `delegated` per repeat off the turn's own trace, and `MINIMUM_REPEATS` repeats
-      per (task, arm) against a real gateway. Until then the comparator's guards
-      (`MINIMUM_COMPARED_SHARE`, `partially_delegated`) are tested and unexercised.
-
 - [ ] **A `pending_requests` row whose run was terminated, or lost with its worker, has no
-      collector** — [M]. What is left of the row above after
+      collector** — [M]. What is left of the `pending_requests` settle row after
       `D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-the-row-waiting`, which closed
       the three windows a *cancellation* could slip through and measured the "racy settle" reading
       false: with every child past its open activity, 0 of 78 settles were lost across six runs, and
@@ -434,6 +422,30 @@ topic).
       decision rather than an edit: a new Temporal Schedule, with its own disposal rule, against a
       table that is in `retention._NOT_PRUNED` on purpose. `durable/awaiting.py`,
       `durable/pending_store.py`.
+
+- [ ] **The forkserver RSS ratchet reds under memory pressure, and its docstring says it cannot** —
+      [M], measured 2026-09-19. `test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_against`
+      reads a warm forkserver's `VmRSS` against a ceiling of 112 MiB. Measured on one checkout in one
+      afternoon: **117.65 and 117.59 MiB** with four subagents and the compose stack running, twice,
+      on two commits between which nothing touched an import; **109.0 MiB** and four consecutive
+      passes on the same tree once the machine was quiet. CI is green on the same commits. The
+      closure did not move, so the reading moved for another reason.
+      That other reason is what the test says is impossible. Its docstring rejects `Pss` because
+      "a page's share depends on how many other processes happen to map it" and then asserts
+      *"`VmRSS` belongs to the process alone and moves with the same closure"* — and the constant's
+      own comment says the closure "is the only thing that moves either". One of those two sentences
+      is false, and which one decides the fix: if `VmRSS` really is load-sensitive here the unit is
+      wrong again, and if it is not, something in the fork path is. **Measure before changing the
+      number** — raising 112 would hide whichever it is, and the ceiling is not the output anyway
+      (`FORKSERVER_POD_COST_MIB`, `resources.service` and `resources.worker` are derived under it).
+      Worth knowing the shape: the forkserver is a *suite-wide singleton*, so it is forked from
+      whatever the parent had imported when the first parse ran, which the docstring notes and the
+      "belongs to the process alone" claim does not account for. Anchors:
+      `tests/test_deploy_chart.py::test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_against`,
+      `tests/test_deploy_chart.py` `FORKSERVER_RSS_CEILING_MIB`, `src/chemclaw/ingest/documents/isolate.py`
+      `_PRELOAD`. Sits above the row that wants a third term in the other forkserver budget; same pod,
+      and a ratchet that reds for a scheduling artefact teaches everybody to re-run, which is the
+      argument `D-2026-09-13-a-stable-failure-set-is-not-two-green-runs` already made about the gate.
 
 - [ ] **Nothing bounds what a turn costs the front door's memory** — [M], opened 2026-09-18 by
       `D-2026-09-18-a-second-process-in-the-pod-is-memory-the-chart-never-declared`, which sized
@@ -541,217 +553,77 @@ topic).
       prompt vocabulary nobody measures.
       The cheap first step is a measurement rather than a design: whether a helper that read
       injected evidence actually propagates the instruction into its report. That needs a live
-      model, so it belongs with the delegation row above rather than ahead of it.
+      model, so it belongs with the delegation row below rather than ahead of it.
 
+- [ ] **The delegation experiment: build the runner, then run it against a gateway** — [L]
+      (issue #359), opened by `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller` and
+      the gate on Wave 3's roster. **It is one row because it was four**, and four statements of a
+      single blocked experiment made the queue read four times more blocked than it is: "the
+      delegation A/B has a comparator and no runner", "measure whether delegation pays", "run the
+      comparison against a real gateway", and the first step of the helper-provenance row above.
 
-- [ ] **Measure whether delegation pays, with an instrument the deleted one could not be**
-      — [M] (issue #359), opened by `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller`. The corpus
-      that was supposed to settle this (`data/evals/probes/m12/routing.yaml`, deleted with the
-      specialist team) measured **delegation rate** over fifteen one-tool probes. Rate is a mediator
-      rather than an outcome, and a one-tool question gives context isolation no mechanism by which
-      it could appear — so the instrument could not observe the benefit it was built to detect, and
-      its two runs disagree sevenfold (2/15 through the front door with connectors and history;
-      14/15 on the compiled agent with neither, one sample per probe) because they measured
-      different systems.
-      **What to build instead**: outcomes per *task* — probe pass or `score_answer`, billed tokens
-      from `turn_costs`, wall clock — over reading-heavy multi-source work (a six-source evidence
-      sweep, a twenty-compound property table, a multi-document comparison), through **one**
-      harness, on one pinned model, with at least three repeats. The denominator problem disappears
-      the moment the unit is a task rather than a delegation.
-      **The arms exist as of that ADR**: no helper (the model simply not calling `task`), helper on
-      the caller's model, and helper on its own via `CHEMCLAW_MODEL_ROUTES='{"helper": "…"}'`.
+      **What exists.** `chemclaw.evals.delegation.compare_arms` is the comparator — genuinely new
+      rather than a use of `evals/ab.py`, which is pairwise and dimensionless where this comparison
+      is three-armed with two cost axes, so quality goes through `ab.py`'s own noise floor while
+      billed tokens and wall clock are reported beside it rather than folded in ("cheaper but
+      worse" and "better but slower" are different answers that one number hides).
+      `data/evals/probes/delegation.yaml` is the corpus: eight reading-heavy multi-source tasks,
+      chosen so that context isolation has a mechanism by which it could appear at all.
 
-      **The instrument and the corpus exist as of 2026-09-13, and "nothing here needs new code" was
-      wrong.** That sentence stood here until the work was attempted: `evals/ab.py` is pairwise and
-      dimensionless, and this comparison is three-armed and has two cost axes, so
-      `chemclaw.evals.delegation.compare_arms` is genuinely new — quality through `ab.py`'s own
-      noise floor, billed tokens and wall clock reported beside it rather than folded in, because
-      "cheaper but worse" and "better but slower" are different answers that one number hides.
-      `data/evals/probes/delegation.yaml` is the corpus, eight reading-heavy multi-source tasks
-      chosen so that isolation has a mechanism by which it could appear at all.
-      One design fact worth carrying: the `no-helper` arm is **behavioural**, because `task` cannot
-      be removed — `SubAgentMiddleware` is required and an empty roster makes upstream re-insert its
-      own. So compliance is observed per run, and a baseline that delegated anyway is reported as
-      contaminated rather than averaged in.
+      **What does not, and is buildable offline.** Nothing constructs an `ArmRun` —
+      `grep -rn "ArmRun" src/ tests/ data/ Makefile` finds the module and its own test, nothing
+      records `delegated`, and `data/evals/profiles/` holds `no-tools.yaml`, `skills-removed.yaml`
+      and `tools-removed.yaml` with no `no-helper` among them. What it owes: a `no-helper` profile
+      whose system prompt asks the model not to call `task`, a runner that records `delegated` per
+      repeat off the turn's own trace, and `MINIMUM_REPEATS` repeats per (task, arm). The
+      `no-helper` arm is **behavioural**, because `task` cannot be removed — `SubAgentMiddleware`
+      is required and an empty roster makes upstream re-insert its own — so compliance is observed
+      per run and a baseline that delegated anyway is reported as contaminated rather than averaged
+      in. Until the runner exists the comparator's guards (`MINIMUM_COMPARED_SHARE`,
+      `partially_delegated`) are tested and unexercised.
 
-      **What is left is the run, and it needs a gateway.** Nothing in `src/` dials a vendor
-      (`D-2026-09-04-a-gateway-is-the-only-provider`), so the environment's `API-KEY` is a
-      credential *for* a gateway rather than one this stack can use — probed 2026-09-13, the key
-      answers 200 against the vendor and no gateway is configured. Until the run exists, no claim
-      that helpers do or do not pay is evidence about this deployment.
+      **What the instrument must not be.** The deleted corpus
+      (`data/evals/probes/m12/routing.yaml`, removed with the specialist team) measured
+      **delegation rate** over fifteen one-tool probes. Rate is a mediator rather than an outcome,
+      and a one-tool question gives isolation no mechanism by which it could appear, so that
+      instrument could not observe the benefit it was built to detect: its two runs disagree
+      sevenfold (2/15 through the front door with connectors and history, 14/15 on the compiled
+      agent with neither, one sample per probe) because they measured different systems, and two of
+      the fifteen probes span two specialists, so the figure had an unpassable floor before any
+      model was involved. What replaces it is outcomes per **task** — probe pass or `score_answer`,
+      billed tokens from `turn_costs`, wall clock — through one harness, on one pinned model, with
+      at least three repeats. The denominator problem disappears the moment the unit is a task.
 
-- [ ] **An advisor is the one delegation shape every merged decision already permits**
-      — [M], and the design is fully determined rather than open.
-      `D-2026-08-25-a-summarizer-in-the-thread-and-a-condenser-behind-a-tool` settles the objection
-      that killed the summarizer three times. Its table is about **thread versus tool**: a model
-      call whose output returns as a `ToolMessage` has the framing envelope re-applied on the way
-      out, is audited, authorized, dry-run refused, citable per row, withdrawable by taking one name
-      out of the registry, and is cleared by `ClearToolUsesEdit` like any other result. A summarizer
-      has none of those, which is why it launders an injected instruction into the model's own voice
-      and replays it every turn. **An advisor as a tool sits on the permitted side of all seven
-      rows** — and Anthropic's own advisor arrives as an `advisor_tool_result` block, which is the
-      same answer reached independently.
-      It is also already metered, and the trap that used to sit here is **closed**:
-      `agent/condense.py` makes an in-tool model call whose usage reaches `agent/spend_cap.py`
-      **because it passes no explicit `config`**, an absence
-      `tests/test_spend_cap.py::test_no_in_tool_model_call_passes_its_own_callbacks` guards — and
-      that scan named `condense.py` until
-      `D-2026-08-29-a-guard-that-names-one-file-guards-one-file` made it derive every module that
-      defines a registered tool and builds a model. So an advisor is covered wherever it lands,
-      with no edit to the test, and the natural mistake it would have made silently — copying
-      `verifier.py`'s correct `config=off_stream_metering()` into a tool body — now fails naming
-      the file and the line.
-      **`D-2026-08-16-a-second-judge-is-a-second-answer-about-the-same-answer` does not bind it**:
-      that ADR declined a *judge* (it cannot reuse `score_answer`, and a failed grading returns the
-      ungraded answer). An advisor does not grade and does not gate — it answers a question the
-      agent asked, mid-turn, and the agent remains the author of the answer.
-      **What it is actually blocked on**: a deployment whose endpoint serves a second, more capable
-      model tier — `build_chat_model("advisor")` is the whole mechanism now that
-      `AgentProfile.model_route` exists — and evidence that the self-critique gap
-      `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability` named as real is closed by
-      consulting rather than by thinking longer at higher `effort`. Measure the cheaper lever first.
+      **The arms**: no helper, helper on the caller's model, and helper on its own via
+      `CHEMCLAW_MODEL_ROUTES='{"helper": "…"}'`. **A negative result closes the question as
+      legitimately as a positive one** — written down because the retired specialist team was added
+      to be ready and stayed off, and a disappointing answer is not a reason to re-open a
+      measurement.
 
-- [ ] **A corpus read is ~40 kB of memory per entry, and only 25 kB of it is boundable** — [M],
-      measured 2026-09-14
-      (`D-2026-09-14-the-memory-corpus-is-a-memory-bound-not-a-time-bound`), and it replaces the
-      "three times per scheduled run" row rather than continuing it. **Two of that row's three
-      clauses were stale**: `D-2026-08-25` removed the timer, so there is no scheduled run, and
-      `synthesize_memory(kind)` starts one workflow per call.
+      **The run needs a gateway, and this environment's credential is a state rather than a fact.**
+      Nothing in `src/` dials a vendor (`D-2026-09-04-a-gateway-is-the-only-provider`), so `API-KEY`
+      is a credential *for* a gateway rather than one this stack can use: probed 2026-09-13 it
+      answered 200 against the vendor with no gateway configured, and a gateway probed for the
+      tool-utility A/B answered HTTP 400, "credit balance is too low". So probe first —
+      `printenv 'API-KEY'` plus one cheap call **through a gateway** — and then run the measurement
+      in the same session, because tomorrow's state is not evidence about today's. Until the run
+      exists, no claim that helpers do or do not pay is evidence about this deployment.
+      Anchors: `src/chemclaw/evals/delegation.py`, `data/evals/probes/delegation.yaml`,
+      `data/evals/profiles/`, `infra/live/e2e-full-stack/up.sh`.
 
-      What is real, over a 10,000-record ORD drop directory: **396.8 MB** traced peak and 6.9 s
-      unbounded, **144.2 MB** at a cap of 1. So a mapped `OrdReaction` is **25.3 kB** resident and
-      the adapter's own page of `RawEntry` is **14.4 kB** per entry. At a real deployment's ~500,000
-      entries that is **~20 GB in one activity's process**, of which **~7.2 GB** is the page. The
-      read does not get slow; the worker is killed.
-
-      `memory_corpus_max_reactions` now bounds the miner's half and marks a capped pass incomplete.
-      **It cannot bound the adapter's page**: `OrdJsonAdapter.fetch_new_entries` accepts `limit` and
-      ignores it deliberately (an unsorted scan would return an arbitrary subset and advance the
-      cursor past what it skipped), so for a drop directory the page *is* the corpus and no argument
-      `read_corpus` can pass changes that.
-
-      **What is left is the streaming protocol**, which is what the old row already identified
-      without a number: either `ElnAdapter` gains a fetch-by-id or a bounded iterator (every source
-      pays), or the three miners stop taking a `list` — they are whole-corpus algorithms today (DRFP
-      fingerprinting, O(n²) Tanimoto, NetworkX components), so this is a reformulation rather than a
-      refactor. **Trigger**: a deployment whose corpus exceeds `memory_corpus_max_reactions`, which
-      the WARNING now names by number. It is still the trigger on the `DEFERRED.md` row for
-      reagent/solvent set diffs — one change answers both.
-
-- [ ] **A stalled append-only feed has no first-party signal** — [S]. `corpus_cursors`
-      (`infra/sql/072`) records where each feed's drain stopped, and nothing reads `updated_at`:
-      `ingest/labels/cursor.py::load_corpus_cursor` selects `after` only. The module declines a lag gauge for a
-      stated reason — a keyset position is opaque, so "how far behind" would have to be invented,
-      unlike `sync_cursors`' datetime twin which exports `chemclaw_ingest_cursor_lag_seconds`. What
-      was offered instead does not hold, and `cursor.py`'s module docstring now says so: `ReactionCorpusWorkflow`
-      returns **one** report aggregated over every source at the end of the whole `continue_as_new`
-      chain (`durable/corpus_sync.py::ReactionCorpusWorkflow`), not one per pass, and builds it without `has_more` — so
-      a feed whose source stopped exporting looks exactly like a feed with nothing new.
-      **A record counter cannot close this and it was briefly thought it could.** The corpus drain
-      now emits `chemclaw_ingest_records_total{source,outcome}` per data source, which delivers the
-      per-source *visibility* half — but a stopped feed and an idle one both produce an empty page
-      and so both book `ingested=0, rejected=0`, identically. The discriminator has to be a
-      staleness gauge over `corpus_cursors.updated_at` — age since the last *advance*, a real number
-      even when the keyset position is opaque.
-      **The second is now buildable and was not when this row was
-      written**: the cursor was stored on every page, so `updated_at` re-stamped on every fire and
-      measured when the feed was last *looked at* rather than when it last moved.
-      `D-2026-08-28-a-watermark-that-is-rewritten-has-no-age` gates that write on
-      `report.advanced`; what is left here is a reader.
-      **Trigger:** the first deployment that runs an `append_only:` source, since no shipped
-      binding sets it (`D-2026-08-28-a-feed-is-a-corpus-that-does-not-stop`).
-
-- [ ] **The results store has no live target** — [M]. `D-2026-08-25-a-cache-is-not-a-record` ships
-      the whole path — `src/chemclaw/publish/`, the canonical schema in `schema/result-store/`, two
-      drivers, the outbox (migration 050) and the drain — and it is proven end to end against a
-      local Postgres running the shipped DDL (`tests/test_publish_sql.py`). What has not happened is
-      an actual deployment pointing at an actual results database: `CHEMCLAW_RESULT_SINKS` is empty
-      by default and `src/chemclaw/publish/sinks/postgres/sink.yaml` addresses a host nobody runs.
-      Attaching one is configuration (`make sink-schema`, apply, set the variable), so this is a
-      deployment action rather than code — but until it happens, no number below has been measured
-      against a real corpus. `D-2026-08-26-a-route-is-not-a-shape` is why that matters more than it
-      reads: the composite half of the path was inert for a release and no test noticed, because
-      every test started at a projector rather than at a hook. A live target is the only thing that
-      would have made it obvious.
-
-      **And attaching one opens a data-protection question this repository cannot answer for it**
-      (found 2026-08-28, with the erasure sweep). `schema/result-store/001_core.sql` gives the
-      external store a `calculation_publication` table with its own `actor` and `session_id`
-      columns and an index on `actor`. `agent/leaver.py` reaches a database this system owns; it
-      cannot reach that one, and no ADR says who does. The outbox row on this side is now counted
-      and named in the erasure report as retained (`_RETAINED_IN_PAYLOAD`), so an operator sees
-      that the receipt stays — but the copy downstream is somebody else's sweep, and the first
-      deployment to point at a real store inherits the obligation. Settle it with that
-      deployment, not before: the answer depends on whose database it is.
 - [ ] **`tool_result_blobs` ships its retention window at zero, and nobody chose zero** — [S].
-      What this row used to say — *"six tables still say `nothing bounds it`"* — is **false of the
-      current code**, and re-checked on 2026-09-15 before cutting it down: the phrase appears three
-      times in `durable/retention.py` and all three are meta-comments *about* the historical
-      wording (`:287`, `:292`, `:446`), never a register entry. Each of the six now states a
-      decision: `molecule_fingerprints` and `reaction_fingerprints` bounded by the corpus times the
-      definitions ever written with no runtime DELETE (`:501`, `:505`), `user_preferences` bounded
-      by its writer (`:506`), `store` bounded by `BoundedStoreBackend` (`:453`), and `predictions`
-      and `measurements` **unbounded and accepted**, each saying why (`:519`, `:523`). The five
-      decisions this row was opened to collect have been taken.
+      `retention_tool_results_days` defaults to **0** (`core/config/memory.py:125`), which is the
+      same value as every other window that means "off", so a deliberate uniformity is
+      indistinguishable from an unconsidered default. Decide whether a tool-result blob has a
+      retention answer of its own, and if it does not, say so in `durable/retention.py`'s register
+      the way `predictions` does rather than by sharing a zero.
 
-      What survives is the one question it called "of a different kind", and it is smaller than the
-      row it is left in: `retention_tool_results_days` defaults to **0**
-      (`core/config/memory.py:125`), which is the same value as every other window that means "off",
-      so a deliberate uniformity is indistinguishable from an unconsidered default. Decide whether
-      a tool-result blob has a retention answer of its own, and if it does not, say so in the
-      register the way `predictions` does rather than by sharing a zero.
+      What this row used to carry — *"six tables still say `nothing bounds it`"* — is **false of
+      the current code**, re-checked 2026-09-15 before cutting it down: the phrase appears three
+      times in `durable/retention.py` and every one of them is a meta-comment *about* the
+      historical wording (`:287`, `:292`, `:447`), never a register entry. Each of those six tables
+      now states a decision of its own, so the ones this row was opened to collect have been taken.
       **Anchors:** `src/chemclaw/core/config/memory.py`, `src/chemclaw/durable/retention.py`.
-
-- [ ] **Postgres and Temporal are neither deployed nor owned** — [L]. The chart dials
-      `chemclaw-temporal-frontend.temporal.svc:7233` and namespace `chemclaw`; there is no subchart
-      and no statement of who runs either. `docs/guides/runbook.md:972-997` (§ xiii, "Restore a
-      store") states what this system *requires* of those stores and documents a Postgres restore
-      procedure — what does not exist
-      anywhere is tooling that performs or **verifies** a restore, and that cannot be built against
-      a store this repo does not own. (The former separate "no backup tooling" row is folded in
-      here; it was downstream of this one and overcounted the stores.)
-
-- [ ] **Nothing audits the `github-actions` closure for advisories** — [S], the accepted risk
-      `.github/dependabot.yml` now names out loud
-      (`D-2026-09-14-a-gate-for-one-ecosystem-is-not-a-gate-for-the-file`). Actions are pinned by
-      commit, which bounds *what runs* and says nothing about whether it is vulnerable, and
-      `make ci` reads that ecosystem nowhere.
-      **Not built yet because the set is empty, and that is the argument rather than the excuse**:
-      measured 2026-09-14 against OSV's `GitHub Actions` ecosystem, all four actions this
-      repository uses carry zero advisories at any version, so a gate merged today would be a
-      control that ships green forever with nothing behind it —
-      `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability`.
-      The data source is named so the next person does not have to find it: OSV's
-      `/v1/querybatch` takes `{"package": {"name": "owner/repo", "ecosystem": "GitHub Actions"},
-      "version": ...}`, and the version is the `# vX.Y.Z` comment
-      `test_every_action_is_pinned_to_a_commit_not_a_tag` already requires beside every pin — which
-      is a *claim* about the SHA rather than a resolution of it, and any gate built on it should
-      say so. Trigger: the first advisory that lands on an action in `.github/workflows/`.
-      Anchors: `Makefile::ci`, `.github/dependabot.yml`,
-      `tests/test_deploy_chart.py::test_every_declared_ecosystem_is_audited_or_accepted`.
-
-- [ ] **Nothing has ever run two background workers against one `background-jobs` queue** — [M].
-      `workers.background.replicas` is still 1, and as of
-      `D-2026-09-16-a-fingerprint-that-names-a-checkout-is-not-a-fingerprint-of-a-note` the reason
-      is that **nobody has driven two**, not that two are known to break. Every reason previously
-      written down is closed: the D-069 checkout lock became a Postgres advisory lock
-      (`kg/git_writer.py::_cluster_lock`), the reindex's *retirement* half became revision-bounded
-      (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`), and its *re-embedding*
-      half became a content hash — two clones of one commit now agree about every note, driven,
-      40 of 40 re-embedded per pass before and 0 after.
-      What is left is an argument nobody has run: `values.yaml` claims the rest of this queue is
-      indifferent to the worker count because the periodic jobs are Temporal Schedules under `SKIP`,
-      the ELN cursor has one writer, retention re-checks every predicate inside its own `DELETE`,
-      and the result outbox claims rows with `FOR UPDATE SKIP LOCKED`. Each is plausible and none
-      has been observed with two workers polling. **What would close this is a lane, not a reading**:
-      two workers on one broker against one database, driving each of those four, and an assertion
-      about what each one did rather than about whether it raised. It needs the live Temporal edge
-      that is open elsewhere in this file, which is why it is not a `[S]`.
-      Note that `strategy: Recreate` does not ride on this: its replay justification
-      (`D-2026-09-09-a-replay-control-needs-an-archived-history-not-a-patch`) is independent of the
-      replica count. Anchors: `deploy/helm/chemclaw/values.yaml`,
-      `deploy/helm/chemclaw/templates/deployment-workers.yaml`,
-      `tests/test_deploy_chart.py::test_the_singleton_worker_is_a_singleton_across_a_rollout_too`.
 
 ---
 
@@ -764,23 +636,6 @@ sections above: none of them names broken code. Each names a place where somethi
 repository now has a **measured** better answer to a problem this repository solved earlier and has
 not revisited. That is a different kind of debt and it needs its own section, because a queue that
 only holds defects can only ever restore the system to what it already intended to be.
-
-- [ ] **A deadline test asserts a wall-clock ratio, and a shared runner decides it** — [S], found
-  2026-09-18 by CI. `tests/test_molfp.py::test_a_scan_past_its_deadline_stops_instead_of_matching_the_rest_of_the_corpus`
-  ends `assert bounded < unbounded / 4`, where both are `time.perf_counter()` deltas. On a GitHub
-  runner it failed at **0.339s against a 1.302s/4 = 0.326s budget — 14 ms over** — while passing
-  5 of 5 locally, so what it measured that afternoon was the runner. The property it exists for is
-  real and worth keeping: a scan past its deadline must stop rather than match the rest of the
-  corpus. The ratio is one *instrument* for it and the fragile one.
-  **This repository already has the argument and the better instrument.**
-  `tests/test_compaction.py` states it — *"a stopwatch on a shared runner measures the runner"* —
-  and asserts on thread identity instead of a duration. The equivalent here is what the scan
-  *examined*: a bounded run that stops early has visited fewer corpus rows than an unbounded one,
-  which is exact, needs no clock, and cannot be decided by a busy runner. That needs the scan to
-  report its row count, or a counter a test can read, which is the piece to design.
-  Not folded into the pull request that found it (#399), which touches nothing near `molfp`:
-  widening a PR to fix an unrelated fragile test is how a red gate becomes two.
-  **Anchors:** `tests/test_molfp.py`, `tests/test_compaction.py`.
 
 - [ ] **One sibling bundle that will not import takes the whole allowance bound with it** — [S].
   `tests/test_context_floor.py::_sibling_tool_tokens` passes every name in `SERVED_ELSEWHERE` to
@@ -795,62 +650,6 @@ only holds defects can only ever restore the system to what it already intended 
   shrinks is worse than one that says what it did not look at". A per-bundle subprocess would skip
   only the bundle that will not import and name it; the cost is one process spawn per bundle on a
   test that already spawns one. Anchor: `_sibling_tool_tokens` in `tests/test_context_floor.py`.
-
-- [ ] **Nothing mines the edit a chemist makes to a generated protocol** — [M], and the data for it
-      starts accumulating now. `experiment_protocol_revisions` is append-only and carries
-      `author_kind`, so `protocols.diff.diff_designs` between an `agent` revision and the `human`
-      revision derived from it is a *labelled correction*: the field a chemist changed, from what to
-      what, made by the person with the most context at the moment they had it. That is the
-      highest-quality supervision this system can collect about its own suggestions and it is
-      currently written and never read.
-
-      **Deliberately not built yet, and the reason is the one `reject_widening` was deleted for**: a
-      miner over an empty table is a mechanism whose only caller is its own test. What is owed first
-      is a count — over the designs on disk, how many carry a human revision at all, and do the
-      changed paths concentrate anywhere — and that count needs a deployment that has been used.
-      The anchor when it does: `protocols/diff.py` and
-      `experiment_protocol_revisions.author_kind`.
-
-- [ ] **The `default` profile carries eleven names it could narrow, worth 5,787 tokens** — [M], and
-      it is what the eighteen-tools row became once measured
-      (`D-2026-08-27-eighteen-names-for-a-primitive-set`). **The probe half is closed**: seventeen
-      probes landed — seventeen, not eighteen, because `transform_structure` was deleted rather
-      than implemented — and the grandfathered list is gone rather than left holding an empty set.
-      The redundant-pair question is answered too: the two bond-strength names are two
-      capabilities, since the job's cleavage list is mandatory and so it cannot answer from a
-      SMILES at all.
-
-      **The ceiling was deliberately not lowered**, because nothing was reduced: 28,114 tokens
-      before and after, against a ceiling since raised to 29,500 by three unrelated merges. What
-      the measurement found is where a reduction actually lives — a `default` allow-list is worth
-      **-5,787 tokens (-21%)** — plus two facts that make it more than a one-line edit: the saving
-      is flat in the six `enumerate_*` endpoint tools, which an offline floor cannot see at all,
-      and the skills listing does not move (3,034 tokens in every arm), because `ensemble-workflows`
-      stays listed after every tool it routes to is gone. So this needs the profile allow-list *and*
-      the skill gate. The two single-job wrapper templates (681 tokens) are the other candidate, and
-      deleting a named protocol the shipped skill routes to is its own decision.
-
-      **Two independent surfaces raised the ceiling within two days, which is the argument for this
-      row rather than against it.** `D-2026-08-28-a-protocol-is-prescriptive-and-a-record-is-not`
-      added the prescriptive protocol tools (29,500 → 33,000, measuring 32,184), and the eight
-      infrastructure findings of 2026-08-29 added five more to `default` — `review_activity`,
-      `request_external_input`, `check_pending_requests`, `review_commitments`,
-      `assemble_evidence_pack` — measured at **2,170 tokens** after a trimming pass. Four of those
-      five are what makes the manager persona answerable at all, so both are capability rather than
-      drift. The allow-list's **-5,787** is larger than either surface cost and larger than the
-      headroom now left. Still blocked on the live lane for the reason above.
-
-      **Every absolute above is a lower bound, and the case is stronger rather than weaker for it.**
-      All of them were measured on a basis the 2026-08-29 re-baseline corrected: the ratchet counted
-      the registry's callables, not the tools the graph binds, and under-measured `default` by
-      **8,126 tokens (24%)** — 34,379 reported against 42,505 paid. (That paragraph also said
-      "ceiling now 44,500" and the live ceiling is `CEILINGS["__default__"]` in
-      `tests/test_context_floor.py`, which has since moved well past it — read the constant, not a
-      figure here, for the reason that file's own header gives.) So 28,114
-      and −5,787 both understate what this narrowing is worth, and the eleven names should be
-      re-measured on the bound basis when the row is worked. What does not change is why it is
-      blocked: the saving is still partly in endpoint tools no offline floor can see, and it still
-      needs the skill gate beside the allow-list.
 
 - [ ] **A tool schema is 72% description, and the rationale vein the old row named is already
       closed** — [M], re-measured 2026-09-14 on the bound surface
@@ -911,21 +710,6 @@ only holds defects can only ever restore the system to what it already intended 
       that matters — that corpus choice is task-dependent: reaction prediction wants literature,
       nomenclature wants structured databases. A process chemist asking "has anyone run this coupling
       on a deactivated aryl chloride" currently gets whatever those 40 notes happen to say.
-
-- [ ] **A profile should be able to supply prompt *blocks*, not only a string** — [M], and this is
-      the general form of `D-2026-09-14-a-profiles-prose-is-text-this-repository-wrote`. The default
-      prompt is 31 `PromptBlock`s, each declaring `requires`/`absent_unless`, so a sentence naming a
-      tool this deployment lacks is dropped before the model reads it. A profile's `instructions:`
-      is one opaque string and gets none of that — the exemption `instructions_for` states is for a
-      *site's* manifest, which this repository cannot cut into blocks, and it is right about that.
-      What it leaves open is that a site narrowing a profile's tools has no way to narrow its own
-      prose either: the field would have to accept a list of `{text, requires, absent_unless}` with
-      the same ten rules, and the reason it is a row rather than a commit is that it has **no
-      caller** — all six shipped profiles are strings, the repository-owned half is now guarded by a
-      test, and a second-domain deployment is hypothetical. Build it with the first site profile
-      that narrows tools, not before. This is also the honest remainder of Wave 7's "the prompt into
-      profile data": the prose is already data (`data/profiles/*.yaml`), what is not is its
-      *structure*.
 
 - [ ] **A cut tool result is unrecoverable, and the store that would hold it is downstream of the
       cut** — [M], the last open Wave 1 item ("make a cleared tool result retrievable by address").
@@ -991,17 +775,6 @@ only holds defects can only ever restore the system to what it already intended 
       exist). Cheap to decide now, a migration to decide later. A chat-room connector is separate
       work on top and wants 1–4 finished first.
 
-- [ ] **Run the delegation comparison against a real gateway, and accept a negative result**
-      — [M], and it is the gate on Wave 3's roster. `evals/delegation.py` and
-      `data/evals/probes/delegation.yaml` exist and have never been run against a model; the blocker
-      is an OpenAI-compatible endpoint, the same one #359/#360 wait on. **A negative result closes
-      the question as legitimately as a positive one** — written down because the retired specialist
-      team was added to be ready and stayed off, and because a disappointing answer is not a reason
-      to re-open a measurement. What would *not* close it is another delegation-*rate* number:
-      `D-2026-08-12` measured 2 of 15, `D-2026-08-13` measured 14/15 against 14/15 with the old arm
-      at ceiling, and two of those probes span two specialists, so that figure had an unpassable
-      floor before any model was involved.
-
 - [ ] **A routing corpus where the right profile is not inferable from the question's surface**
       — [M]. Seven profiles ship and genuinely narrow (`evidence` reaches zero side-effecting tools,
       `safety` one, `default` all 49); what `D-2026-08-15` deleted is automatic routing between
@@ -1009,93 +782,6 @@ only holds defects can only ever restore the system to what it already intended 
       question *needs* differs from the profile its wording suggests, compared on **answers** rather
       than on which specialist was picked. Until that corpus exists a router is a guess with a
       metric attached, and this row is the corpus rather than the router.
-
-- [ ] **This environment's `API-KEY` comes and goes, and one row is blocked exactly while it is
-      down** — [S], and it is operational rather than code. It was three until 2026-09-04, when the
-      credential answered and the tool-utility A/B was built and run through it in one session
-      (`D-2026-09-04-tools-help-a-third-of-the-time-and-hurt-a-quarter`) — which is the row's own
-      prescription working: probe first, then measure in the same session. Measured 2026-08-25:
-      `anthropic.AuthenticationError: 401` with and without the session's `ANTHROPIC_BASE_URL`
-      cleared. **Re-measured 2026-08-27: the same variable answers** (a haiku call returned 200; the
-      day's verifier-margin run spent ~120 calls through it), so present-and-rejected is a *state*
-      of this environment rather than a fact about it, and the worse case remains the stale one —
-      it reads as a defect rather than as a missing credential.
-      **Nothing in the suite probes it any more**: `tests/test_prompt_caching.py` did, skipping with
-      a reason that named which case it was, and that file went with the prompt-caching mechanism
-      when the provider concept was removed (`D-2026-09-04-a-gateway-is-the-only-provider`). The
-      key is also no longer usable by `src/` directly — every model call goes to the gateway
-      `CHEMCLAW_LLM_BASE_URL` names, so this credential is only a credential *for* a gateway
-      (`infra/live/e2e-full-stack/up.sh` maps it onto `CHEMCLAW_LLM_API_KEY` when one is
-      configured). The *live* half of the eval plan (the bucket-C control arm, any external
-      benchmark, grading any probe on the model's judgement) needs the working state and nothing
-      else — probe first (`printenv 'API-KEY'`, one cheap call **through a gateway**), then run the
-      measurement in the same session, because tomorrow's state is not evidence about today's.
-
-- [ ] **Memory records; it does not change what the next turn does** — [L], and it needs an ADR
-      before it needs code. Six tiers exist and all six are *read on request*:
-      `memory/campaign.py`, `interaction.py`, `failure.py`, `playbook.py`, `progression.py`,
-      `observations.py`, surfaced by `recall_observations`, `find_past_jobs` and `record_failure`.
-      Nothing in that set changes the agent's behaviour on the next turn unless a human writes a
-      `SKILL.md` — `skills/playbook-distillation/SKILL.md` is the distillation *judgment*, and the
-      loop is manual end to end. The 2026 work (SkillRL, SkillForge and the self-evolving surveys)
-      is specifically about abstracting recurring trajectories into reusable procedure
-      automatically. What is owed first is a measurement rather than a mechanism: over the sessions
-      on disk, how many recurring trajectories *are* there, and would a distilled one have changed
-      a later answer? A generator built before that number is a routing hypothesis nobody measured,
-      which is the mistake `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability` already
-      made once here.
-
-      **The measurement is no longer owed; the corpus is.**
-      `D-2026-08-27-count-the-trajectories-before-building-the-distiller` defines the recurring
-      trajectory and ships `make trajectory-census` (`chemclaw.cli.trajectory_census`), which
-      prints its own verdict against the greenlight numbers. It was blind to half the signal —
-      recurrence was an identical tool-name *sequence*, so a corpus dense in repeated **failure**
-      reported zero — and `D-2026-09-05-a-census-that-counts-only-success-is-blind-to-half-the-signal`
-      gave it a second arm over tools that errored across sessions. Read `any_greenlit`, not
-      `generator_greenlit`. Both arms report zero on a database that has never served a user
-      (measured 2026-08-27: 0 sessions, 0 turns; `session_turns` 0, `observations` 0), so the
-      block is **deployment history**, not effort. The day a deployment has sessions this row is
-      one command to check.
-
-      **The tier question this row used to carry is settled**
-      (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`, and
-      `D-2026-09-05-the-gate-is-deleted-not-dormant` which deleted the PR-gate and all 2,232 lines
-      behind it). Knowledge is global the moment it is learned and is corrected rather than
-      pre-approved; a **skill** is the opposite case, because it is injected into the prompt with
-      no citation trail, and no agent path may write one
-      (`agent/skill_backend.SkillsReadOnlyRefusal`). So a distilled playbook does not become
-      knowledge through a review queue — it lands through `kg/record.py` like any other note, and
-      what needs an admin is the `SKILL.md` a distiller would want to write. What is open here is
-      the generator alone, plus the per-actor skills directory that tier needs, which is blocked on
-      the same generator because nothing writes one until a distiller exists.
-
-      **Review scaling and convergence, ideated 2026-09-05 and not built.** The owner asked how an
-      admin avoids drowning in near-identical proposals and how local and global skills stay
-      convergent. Every part of that ideation is downstream of the distiller, and the one piece
-      that was built — a reviewer seeing every earlier version of a note
-      (`D-2026-09-05-a-rejection-nobody-reads-is-a-decision-taken-twice`) — was built against the
-      PR-gate's review queue and deleted with it hours later, on the same day. Recorded so it is
-      not re-derived: promotion thresholds on skills (used N times **and** by ≥ 2 distinct
-      chemists — D-161's two-threshold shape, and the single most effective flood control
-      available); duplicate suppression in the **generator** rather than in a queue (propose an
-      edit to the nearest existing skill unless none is close); cluster review over
-      `cluster_by_similarity`; benefit-ranked triage over `evals/ab.py`, with the machine ordering
-      and the human still deciding, which is why it does not re-open `D-2026-08-16`; and the
-      convergence half — global-wins-on-conflict with the conflict surfaced, promotion retiring the
-      local variants that fed it via `memory/supersede.py`, expiry on disuse read as a signal about
-      the *distiller* rather than about review capacity, and `skill-validate` run on local skills at
-      write time so form converges even where content does not. One constraint binds all of it:
-      `D-2026-08-25` ends with **no Temporal Schedule opens a pull request**, so a reconciliation
-      job may cluster, measure and report, and a human opens the proposal.
-
-      **Two findings from the reviewed framework (WikiSkill, arXiv 2608.27454) are recorded because
-      they contradict the obvious design and cost nothing to carry**: giving the *executing* agent
-      the accumulated experience measured **worse** than not (63.7% → 60.9%), while giving it to the
-      *proposer* was the largest ablation (+15.0pp) — so experience is compiled into skills, never
-      injected into the turn; and rejected proposals were load-bearing input, which this tree no
-      longer retains at all. `kg/proposal.py` and its `rejected_version` went with the gate, and
-      `durable/retention.py:413` still refuses to prune `note_proposals` for a reason whose subject
-      no longer exists. A distiller that wants its own rejections has to keep them itself.
 
 ### The upstream-capability register — what our pinned dependencies now ship that we build ourselves
 
@@ -1214,34 +900,44 @@ re-proposal a future session can settle in an afternoon and a fabricated number 
 
 ## The turn-time comparison cannot diff what the ELN gives structured
 
-On a prose-only ELN the *mined* `optimization-campaign` note produces excellent condition deltas —
-`solvent DMF → 2-MeTHF`, `reagent cesium carbonate → potassium carbonate` — because
-`memory.progression.changes_between` reads the species set of each role off `OrdReaction.inputs`.
-The **turn-time** comparison cannot: `agent.condense._changes` diffs `ProcessConditions` plus the
-solvent its prose reader extracted, and `reaction_records` keeps `reaction_id, body,
-compound_smiles, project, performed_at, conditions, source` — the component list survives only as
-prose inside `body`. So on the one schema where the components are the *most* reliable thing the
-source provides, the artifact a chemist is answered with in the turn is the one that cannot use them.
+- [ ] **The turn-time comparison cannot diff what the ELN gives structured** — [M].
+      On a prose-only ELN the *mined* `optimization-campaign` note produces excellent condition deltas —
+      `solvent DMF → 2-MeTHF`, `reagent cesium carbonate → potassium carbonate` — because
+      `memory.progression.changes_between` reads the species set of each role off `OrdReaction.inputs`.
+      The **turn-time** comparison cannot: `agent.condense._changes` diffs `ProcessConditions` plus the
+      solvent its prose reader extracted, and `reaction_records` keeps `reaction_id, body,
+      compound_smiles, project, performed_at, conditions, source` — the component list survives only as
+      prose inside `body`. So on the one schema where the components are the *most* reliable thing the
+      source provides, the artifact a chemist is answered with in the turn is the one that cannot use them.
 
-Measured (`D-2026-08-26-silence-is-not-a-successful-run`, four runs): the mined note named all three
-swaps; the turn-time table rendered `—` in every "Changed vs previous" cell.
+      Measured (`D-2026-08-26-silence-is-not-a-successful-run`, four runs): the mined note named all three
+      swaps; the turn-time table rendered `—` in every "Changed vs previous" cell.
 
-Nothing is wrong today — the campaign note is retrievable, `experiment-progression` already starts
-from it, and the two artifacts together answer the question. What is unresolved is whether the
-deterministic delta should be available without a mining pass. The cheap shape is a column on
-`reaction_records` carrying the per-role canonical species sets (a projection, not the charge list,
-so it stays a serving copy rather than a second record); the expensive one is handing `Protocol` a
-component list, which `agent.condense` deliberately does not have because a share document has none.
-Wants its own ADR and a measurement of what the extra column costs on a real corpus.
+      Nothing is wrong today — the campaign note is retrievable, `experiment-progression` already starts
+      from it, and the two artifacts together answer the question. What is unresolved is whether the
+      deterministic delta should be available without a mining pass. The cheap shape is a column on
+      `reaction_records` carrying the per-role canonical species sets (a projection, not the charge list,
+      so it stays a serving copy rather than a second record); the expensive one is handing `Protocol` a
+      component list, which `agent.condense` deliberately does not have because a share document has none.
+      Wants its own ADR and a measurement of what the extra column costs on a real corpus.
 
 ## Everything else
 
-The open findings live in [`docs/archive/findings-2026-08.md`](../archive/findings-2026-08.md)
-(`grep -c '^- \[ \]'` on that file counts them), grouped by the review that found them, with their
-full measurements. That set **overlaps** this queue rather than extending it — promotion restates a row,
-so a queued row is still open there under its original wording, and the header's "~185 further"
-was a subtraction nobody could reproduce. They are open, not abandoned — promote one into the queue
-above when it becomes the next thing worth doing, and delete it from here when it is done.
+The long-form findings live in [`docs/archive/findings-2026-08.md`](../archive/findings-2026-08.md),
+grouped by the review that found them, with their full measurements. **That file is a record and
+not a second queue**, which its own header says and this paragraph used to contradict: it carried
+the reviews run between 2026-07-24 and 2026-08-15, and a share of them name a subsystem that no
+longer exists — the Microsoft Agent Framework, the HPC/Nextflow/Seqera tier, the PR-gate, the GxP
+hash chain, the specialist team. A finding there is **provenance to promote from**, not work
+somebody is waiting on: read it for what was measured, on what date, by which pass, and with what
+evidence, then write the row here from the tree as it stands today. Nothing there is scheduled and
+nothing there is a commitment; its findings are plain bullets rather than checkboxes for that
+reason, and there is deliberately no `grep` that counts them — a record's length is not a number
+anybody has to act on.
+
+Promotion **restates** a finding rather than moving it, so this queue and that record overlap
+rather than partition — the header's "~185 further" was a subtraction nobody could reproduce, and
+matching the two by title matched a small minority of what this queue then held.
 
 The large multi-item programmes that used to be tracked here as sections are records now, not
 plans: the F0–F9 foundation build, the F10 parity pass, the F11 gap closure, the BO capability
@@ -1252,102 +948,106 @@ those belong in.
 
 ## The same three questions cost 2.1x more on one boot than on another
 
-Found by `make live-turn-cost`, the lane
-`D-2026-09-14-a-cost-metric-that-reads-a-file-measures-the-file` built. Across two boots of the
-**same commit**, the same scripted three-turn workload cost **900,198** and **429,076** billed
-token-equivalents — stable and byte-identical within each boot across repeated runs, so this is a
-property of the process rather than of the run.
+- [ ] **The same three questions cost 2.1x more on one boot than on another, and a binding race is the leading candidate** — [M].
+      Found by `make live-turn-cost`, the lane
+      `D-2026-09-14-a-cost-metric-that-reads-a-file-measures-the-file` built. Across two boots of the
+      **same commit**, the same scripted three-turn workload cost **900,198** and **429,076** billed
+      token-equivalents — stable and byte-identical within each boot across repeated runs, so this is a
+      property of the process rather than of the run.
 
-What the ledger already says about the difference: `context_unreducible` true on 3 of 3 turns of the
-expensive boot and false on 3 of 3 of the cheap one, the model calling a tool on 3 of 3 turns
-against 1 of 3, and a per-model-call request of 299,826 characters against 214,206. The ~21,000
-estimated tokens between them is the size of two or three connectors' tool schemas against a
-measured total of 31,208 (`chemclaw_connector_tool_schema_tokens`), so **a bundle whose tools were
-not bound on one boot is the leading candidate and is not evidence** — nothing was observed binding
-a different set, and the inventory line was identical in both.
+      What the ledger already says about the difference: `context_unreducible` true on 3 of 3 turns of the
+      expensive boot and false on 3 of 3 of the cheap one, the model calling a tool on 3 of 3 turns
+      against 1 of 3, and a per-model-call request of 299,826 characters against 214,206. The ~21,000
+      estimated tokens between them is the size of two or three connectors' tool schemas against a
+      measured total of 31,208 (`chemclaw_connector_tool_schema_tokens`), so **a bundle whose tools were
+      not bound on one boot is the leading candidate and is not evidence** — nothing was observed binding
+      a different set, and the inventory line was identical in both.
 
-Why it matters beyond the lane: if it is a binding race, a deployment can serve a *narrower tool
-surface* than it advertises, silently, and the only trace is a cost half what the other pod's is.
-The next step is to record the bound tool names and the schema gauge at each boot and compare, which
-`make live-turn-cost`'s regime line now makes visible from outside.
+      Why it matters beyond the lane: if it is a binding race, a deployment can serve a *narrower tool
+      surface* than it advertises, silently, and the only trace is a cost half what the other pod's is.
+      The next step is to record the bound tool names and the schema gauge at each boot and compare, which
+      `make live-turn-cost`'s regime line now makes visible from outside.
 
 ## Recover the flow-Suzuki screen, or decide it stays out
 
-`Chemclaw3_mock` seeds 10,011 ORD records and **5,760 of them — 57% — cannot be ingested at all**.
-Every refusal is the Perera flow-Suzuki set (*Science* 2018, 359, 429), whose second coupling
-partner the source spreadsheet publishes only as its own shorthand (`2a, Boronic Acid`).
-`ord_adapter._smiles` refuses rather than inventing a structure, which is right and is pinned by
-`test_ord_compound_with_no_resolvable_identifier_is_still_refused` — but that docstring's own words
-are "57% of a real corpus lost, including the yield data on components that *were* resolvable",
-and the widening it documents (INCHI, then NAME through `resolve_compound_name`) moved the number
-from 5,761 refused to 5,760.
+- [ ] **5,760 ORD records — 57% of the seeded corpus — cannot be ingested at all** — [L].
+      `Chemclaw3_mock` seeds 10,011 ORD records and **5,760 of them — 57% — cannot be ingested at all**.
+      Every refusal is the Perera flow-Suzuki set (*Science* 2018, 359, 429), whose second coupling
+      partner the source spreadsheet publishes only as its own shorthand (`2a, Boronic Acid`).
+      `ord_adapter._smiles` refuses rather than inventing a structure, which is right and is pinned by
+      `test_ord_compound_with_no_resolvable_identifier_is_still_refused` — but that docstring's own words
+      are "57% of a real corpus lost, including the yield data on components that *were* resolvable",
+      and the widening it documents (INCHI, then NAME through `resolve_compound_name`) moved the number
+      from 5,761 refused to 5,760.
 
-The open question is whether a reaction with one structure-less participant is worth keeping as
-*evidence*: its yield, ligand, base and halide are all real, and questions like "which base wins on
-this halide" need none of the missing structure. The two candidate shapes are (a) a `Component`
-that may carry a name instead of SMILES, with the reaction excluded from every fingerprint index,
-and (b) a separate lower-tier record type that retrieval can cite but similarity cannot reach.
-Both change what a `Component` is, so this wants its own ADR and its own measurement of what a
-partially-structured reaction does to retrieval — not a patch to `_smiles`. Measured and declared
-by `make live-data`; see `D-2026-08-18-a-corpus-is-not-reachable-because-it-is-on-disk`.
+      The open question is whether a reaction with one structure-less participant is worth keeping as
+      *evidence*: its yield, ligand, base and halide are all real, and questions like "which base wins on
+      this halide" need none of the missing structure. The two candidate shapes are (a) a `Component`
+      that may carry a name instead of SMILES, with the reaction excluded from every fingerprint index,
+      and (b) a separate lower-tier record type that retrieval can cite but similarity cannot reach.
+      Both change what a `Component` is, so this wants its own ADR and its own measurement of what a
+      partially-structured reaction does to retrieval — not a patch to `_smiles`. Measured and declared
+      by `make live-data`; see `D-2026-08-18-a-corpus-is-not-reachable-because-it-is-on-disk`.
 
 ## Template step roles cross the durable boundary on an unsigned payload
 
-`durable/template_activities.py::_acting_as` binds `StepIdentity.roles` — the requester's real role
-set, lifted out of a workflow argument. Every other reader of that payload binds
-`frozenset()` on purpose (`durable/interceptor.py::activity_context`, `D-2026-08-28`): a relayed
-argument is data, not a verified claim, so a role taken from it is a role anyone who can enqueue an
-activity could forge.
+- [ ] **A template step's roles cross the durable boundary on an unsigned payload** — [L].
+      `durable/template_activities.py::_acting_as` binds `StepIdentity.roles` — the requester's real role
+      set, lifted out of a workflow argument. Every other reader of that payload binds
+      `frozenset()` on purpose (`durable/interceptor.py::activity_context`, `D-2026-08-28`): a relayed
+      argument is data, not a verified claim, so a role taken from it is a role anyone who can enqueue an
+      activity could forge.
 
-The template path is the exception and the exception is argued, not an oversight.
-`authorize_job_step` is the **first** authorization a template step gets — a step launched by
-another step has no front-door pre-check behind it — so binding empty there would refuse every
-entitled template job rather than fail closed on a forgery. Measured: neutering only the role bind
-leaves `test_an_expensive_job_step_is_refused_for_an_unentitled_requester` still refusing and fails
-`test_an_entitled_requester_passes_the_same_gate` outright.
+      The template path is the exception and the exception is argued, not an oversight.
+      `authorize_job_step` is the **first** authorization a template step gets — a step launched by
+      another step has no front-door pre-check behind it — so binding empty there would refuse every
+      entitled template job rather than fail closed on a forgery. Measured: neutering only the role bind
+      leaves `test_an_expensive_job_step_is_refused_for_an_unentitled_requester` still refusing and fails
+      `test_an_entitled_requester_passes_the_same_gate` outright.
 
-**What it rests on today is broker write access being restricted** — Temporal mTLS, enforced under
-`entra_required` — which is a deployment property rather than a check this code makes. Closing it
-properly means a **signed payload**: a Temporal codec (or payload converter) that signs
-`StepIdentity` on the way out and verifies on the way in, after which `_acting_as` binds a verified
-claim and the exception disappears. That is a new piece of work with its own release story (a codec
-is cluster-wide and both sides must be deployed before either relies on it), not an edit.
+      **What it rests on today is broker write access being restricted** — Temporal mTLS, enforced under
+      `entra_required` — which is a deployment property rather than a check this code makes. Closing it
+      properly means a **signed payload**: a Temporal codec (or payload converter) that signs
+      `StepIdentity` on the way out and verifies on the way in, after which `_acting_as` binds a verified
+      claim and the exception disappears. That is a new piece of work with its own release story (a codec
+      is cluster-wide and both sides must be deployed before either relies on it), not an edit.
 
-**Trigger.** A deployment that runs `TemplateWorkflow` on a broker whose write access is not
-restricted to this system's own workers — a shared cluster without mTLS, or a namespace other
-teams can enqueue into.
+      **Trigger.** A deployment that runs `TemplateWorkflow` on a broker whose write access is not
+      restricted to this system's own workers — a shared cluster without mTLS, or a namespace other
+      teams can enqueue into.
 
-Anchors: `durable/template_activities.py::_acting_as` (the bind and its eleven-line comment),
-`durable/interceptor.py::activity_context` (the fail-closed reader beside it),
-`tests/test_template_job_step.py` (the pair that fails in opposite directions).
+      Anchors: `durable/template_activities.py::_acting_as` (the bind and its eleven-line comment),
+      `durable/interceptor.py::activity_context` (the fail-closed reader beside it),
+      `tests/test_template_job_step.py` (the pair that fails in opposite directions).
 
-Replaces "two producers bind a template step's ambient identity, and only one of them is needed",
-whose title was its premise: the two producers disagree about `roles`, on purpose, and collapsing
-them would refuse entitled work rather than weaken a refusal
-(`D-2026-09-12-two-producers-of-one-identity-are-not-redundant-when-they-disagree`).
+      Replaces "two producers bind a template step's ambient identity, and only one of them is needed",
+      whose title was its premise: the two producers disagree about `roles`, on purpose, and collapsing
+      them would refuse entitled work rather than weaken a refusal
+      (`D-2026-09-12-two-producers-of-one-identity-are-not-redundant-when-they-disagree`).
 
 ## A truncated argument document is completed by upstream and the tool runs on the guess
 
-`D-2026-08-27-an-unparseable-tool-call-is-a-visible-failure` §3 recorded this as open and named the
-order to close it in: change the storm's document, **then** decide the `finish_reason` question.
-Only the first half happened. The 2026-08-28 campaign replaced `'{"text": "unterminated'` with the
-unclosable `'{"text": }'` — correct, and the only payload that reaches `invalid_tool_calls` — and
-`D-2026-08-29-a-call-the-tool-chain-never-sees-is-a-call-the-tool-chain-cannot-announce` then closed
-F6 against that payload. The truncation hazard went with the old payload and is now asserted by no
-check and no row anywhere.
+- [ ] **A streamed tool call cut mid-document is completed by upstream and the tool runs on the guess** — [M].
+      `D-2026-08-27-an-unparseable-tool-call-is-a-visible-failure` §3 recorded this as open and named the
+      order to close it in: change the storm's document, **then** decide the `finish_reason` question.
+      Only the first half happened. The 2026-08-28 campaign replaced `'{"text": "unterminated'` with the
+      unclosable `'{"text": }'` — correct, and the only payload that reaches `invalid_tool_calls` — and
+      `D-2026-08-29-a-call-the-tool-chain-never-sees-is-a-call-the-tool-chain-cannot-announce` then closed
+      F6 against that payload. The truncation hazard went with the old payload and is now asserted by no
+      check and no row anywhere.
 
-What is still true, and is not the same defect: LangChain runs a streamed call's argument fragments
-through `parse_partial_json`, which closes an unterminated string and an unclosed brace. So
-`'{"smiles": "CC'` — a stream cut mid-document — arrives as a **valid** `tool_calls` entry reading
-`{"smiles": "CC"}` and the tool runs on a truncated molecule, with nothing anywhere saying the
-document was incomplete. `tests/test_invalid_tool_calls.py::test_a_streamed_truncation_is_completed_by_upstream_and_never_becomes_invalid`
-pins that this is what happens; nothing decides whether it *should*.
+      What is still true, and is not the same defect: LangChain runs a streamed call's argument fragments
+      through `parse_partial_json`, which closes an unterminated string and an unclosed brace. So
+      `'{"smiles": "CC'` — a stream cut mid-document — arrives as a **valid** `tool_calls` entry reading
+      `{"smiles": "CC"}` and the tool runs on a truncated molecule, with nothing anywhere saying the
+      document was incomplete. `tests/test_invalid_tool_calls.py::test_a_streamed_truncation_is_completed_by_upstream_and_never_becomes_invalid`
+      pins that this is what happens; nothing decides whether it *should*.
 
-The signal upstream leaves is `finish_reason` (`length` when the provider stopped mid-emission),
-which is on the response and not on the call, so telling "the model finished this document" from
-"the transport cut it" is a response-level question this middleware does not currently ask. Closing
-it means deciding what a `length` finish with tool calls means — refuse the reply and re-ask, or
-run the completion and say so — and that decision is what §3 asked for and did not get.
+      The signal upstream leaves is `finish_reason` (`length` when the provider stopped mid-emission),
+      which is on the response and not on the call, so telling "the model finished this document" from
+      "the transport cut it" is a response-level question this middleware does not currently ask. Closing
+      it means deciding what a `length` finish with tool calls means — refuse the reply and re-ask, or
+      run the completion and say so — and that decision is what §3 asked for and did not get.
 
 ## A calibrated calculator names a fleet tool through a caller the seam walker cannot resolve
 

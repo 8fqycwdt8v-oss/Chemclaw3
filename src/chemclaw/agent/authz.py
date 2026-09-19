@@ -71,8 +71,11 @@ class AuthorizationError(Exception):
 # gets it without configuring anything — the same property the manifest derivation gives bundles.
 #
 # `synthesize_memory` joins it for the same reason and one more: it re-reads every reaction from
-# every ingest source and opens pull requests in the knowledge repository, so it is both unbounded
-# in the corpus and outward-facing in its effect.
+# every ingest source and writes notes straight into the knowledge graph, so it is both unbounded
+# in the corpus and outward-facing in its effect. The reason used to be stated as "opens pull
+# requests in the knowledge repository", which has not been true since
+# `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`; the classification is unchanged, because
+# a write that lands immediately is *more* outward-facing than one a human had to merge.
 CORE_EXPENSIVE_ACTIONS: frozenset[str] = frozenset(
     {
         "request_development_report",
@@ -236,10 +239,11 @@ KNOWLEDGE_READ_TOOLS: frozenset[str] = frozenset(
 # the knowledge graph or the memory tiers at all. Every path into them is one of these six, because
 # the write path is in-process and the memory stores are this repository's own.
 #
-# `synthesize_memory` is here although it *launches* rather than writes: the job it starts opens
-# pull requests against the knowledge repository, so a turn that called it is a turn that put
-# something back. `forget_preference` is here although it captures nothing: it changes the durable
-# record, which is what this column reports on.
+# `synthesize_memory` is here although it *launches* rather than writes: the job it starts records
+# notes in the knowledge graph directly, so a turn that called it is a turn that put something
+# back. It said "opens pull requests against the knowledge repository" until the gate was
+# deleted; nothing in this tree opens one now. `forget_preference` is here although it captures
+# nothing: it changes the durable record, which is what this column reports on.
 #
 # `tests/test_turn_knowledge.py` asserts this stays inside `side_effecting_tools()`, so a write
 # that stops being gated cannot go on being counted as one.
