@@ -5727,25 +5727,35 @@ FORKSERVER_POD_COST_MIB = 91
 #: What a warm forkserver's `VmRSS` may be, in MiB — the live guard on the constant above.
 #:
 #: `VmRSS` and not `Pss` because this is the quantity that belongs to the process alone, and that
-#: half is now driven rather than asserted: 46 readings across eleven arms — a bare parent, a
-#: 417 MiB one, pytest's own 459 MiB one, eight CPU hogs, the compose stack plus four peers holding
-#: 2.4 GB and mapping these same libraries, a dropped page cache, a deleted `__pycache__`, 1/25/100
-#: parses through the singleton, one CPU — read **108.56–109.02 MiB**, a 0.4% spread. The same
-#: forkserver's `Pss` read 93.4 MiB quiet and **81.1 MiB** with those four peers up: 12.3 MiB apart
-#: with nothing whatever touching the closure, which is the reason the test below gives for
+#: half is now driven rather than asserted: **109 readings across twelve arms** — a bare parent, a
+#: 417 MiB one, pytest's own 459 MiB one, `--cov`, eight CPU hogs, the compose stack plus four peers
+#: holding 2.4 GB and mapping these same libraries, a dropped page cache, a deleted `__pycache__`,
+#: 1/25/100 parses through the singleton, one CPU — read **108.56–109.05 MiB**, a 0.5% spread. The
+#: same forkserver's `Pss` read 93.4 MiB quiet and **81.1 MiB** with those four peers up: 12.3 MiB
+#: apart with nothing whatever touching the closure, which is the reason the test below gives for
 #: rejecting `Pss`, measured instead of argued.
 #:
 #: **What the closure is not is the only thing that moves `VmRSS`, and this comment used to say it
 #: was.** `forkserver` starts its server by fork *and exec*, so the server inherits the process's
 #: *environment* — and `site` then runs this virtualenv's `a1_coverage.pth` inside it, which imports
-#: `coverage` whenever `COVERAGE_PROCESS_START` is set. Driven: 113.9 MiB against 108.9, +5.0 MiB,
-#: `_PRELOAD` untouched — 45% of this ceiling's headroom spent on how the gate happened to be
-#: invoked. That is why the test below measures in a child started with those injectors dropped,
-#: rather than reading the forkserver this pytest process happens to be holding.
+#: `coverage` whenever `COVERAGE_PROCESS_START` is set. Driven: **113.81–113.90 MiB** against 108.9,
+#: `_PRELOAD` untouched, which is not a dent in the 3 MiB margin below but straight through this
+#: ceiling — the shape this test had until today reds outright on a gate run with subprocess
+#: coverage on, and names the preload list as the thing that grew. That is why the measurement now
+#: happens in a child started with those injectors dropped, rather than against the forkserver this
+#: pytest process happens to be holding.
 #:
-#: The closure is what it is *meant* to move with, and does: driven, adding
-#: `chemclaw.agent.langgraph_agent` to the preload list measures 406.6 MiB, `chemclaw.core.chem`
-#: 148.7 and `jinja2` 114.7.
+#: The closure is what it is *meant* to move with, and does: driven by editing `_PRELOAD` itself,
+#: adding `chemclaw.agent.langgraph_agent` measures 407.1 MiB, `chemclaw.core.chem` 148.4 and
+#: `jinja2` 110.5 — the last of those passing, correctly, because 1.6 MiB is inside the margin
+#: below.
+#:
+#: **One reading in roughly 150 is not explained by any of this**, and it is recorded rather than
+#: smoothed over: a single sample of that `jinja2` arm read 114.7, 4.1 MiB high in `RssAnon` alone
+#: with everything else flat, and 13 repeats of the identical arm then read 110.45–110.56. Nothing
+#: reproduced it — not 60 consecutive repeats of the shipped closure, not any arm above. It is
+#: larger than the margin below, so a second one reds this gate for a reason nothing here has named,
+#: and the thing to do with it is to read `RssAnon` rather than raise the ceiling.
 #:
 #: The 3 MiB of margin is what keeps a pypdf patch release out of the gate. It is not a bound on
 #: `FORKSERVER_POD_COST_MIB` — `Pss` is only ever below `VmRSS`, never pinned to it — it is a bound
@@ -5887,11 +5897,11 @@ def test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_agains
     **What it does not belong to alone is `isolate._PRELOAD`, which is why the measurement moved
     into a child.** `forkserver` starts its server by fork *and exec*, so the server inherits this
     process's environment, and `site` runs this virtualenv's `a1_coverage.pth` inside it: with
-    `COVERAGE_PROCESS_START` set, the same untouched preload list measures 113.9 MiB against 108.9.
-    Reading the singleton makes how the gate was invoked part of the ratchet — 5.0 MiB of an 11 MiB
-    margin, spent silently. A child started with those injectors dropped measures the list and
-    nothing else, and it costs ~2.0 s, of which 0.86 s is the forkserver start this test was paying
-    anyway when it ran first in a session.
+    `COVERAGE_PROCESS_START` set, the same untouched preload list measures 113.81–113.90 MiB against
+    108.9 — through the ceiling, not into the margin, so reading the singleton makes *how the gate
+    was invoked* red this assertion and blame `_PRELOAD` for it. A child started with those
+    injectors dropped measures the list and nothing else, and it costs ~2.0 s, of which 0.86 s is
+    the forkserver start this test was paying anyway whenever it ran first in a session.
     """
     environment = {k: v for k, v in os.environ.items() if k not in _PTH_INJECTORS}
     child = subprocess.run(
