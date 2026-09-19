@@ -204,6 +204,58 @@ def test_a_salt_and_its_free_base_are_one_compound() -> None:
     assert compound_id("CC(=O)[O-].[Na+]") == compound_id("CC(=O)O")
 
 
+def test_an_amine_salt_drawn_as_an_ion_pair_is_its_free_base() -> None:
+    """The half of the rule above that its own spellings could not reach.
+
+    **Both assertions in `test_a_salt_and_its_free_base_are_one_compound` dodge the cationic case,
+    and it broke without either of them noticing.** `CCN.Cl` is the *neutral* spelling — `Cleanup`
+    leaves it neutral, so `Uncharger` is a no-op and nothing asks whether the neutralisation added
+    or removed a proton — and `CC(=O)[O-].[Na+]` is an **anion**, which is the side
+    `_neutralization_is_protonation` was written about. The other side is a protonated amine, drawn
+    as an ion pair, which is how a supplier catalogue and an ELN both write a hydrochloride.
+
+    That guard asked the hydrogen count of a cation, where neutralisation *removes* a proton, so it
+    refused — and every one of these split into two `compound_id`s and two `compound_note`s, took a
+    cache miss on work D-011 promises never to repeat, and ranked against itself as merely similar.
+    The module docstring names this exact case as one that must work ("that claim holds for an amine
+    hydrochloride").
+
+    The list is drug salts rather than one probe because the failure was uniform across the class
+    and a single case reads as a special one. The nicotine-bitartrate test also missed it: that
+    salt has *two* organic fragments, so there is no
+    `FragmentParent`, the proton moves N->O, the net H count is unchanged, and the guard passes.
+    """
+    for name, base, salt in (
+        ("ethylamine", "CCN", "CC[NH3+].[Br-]"),
+        ("pyridine", "c1ccncc1", "c1cc[nH+]cc1.[Cl-]"),
+        ("lidocaine", "CCN(CC)CC(=O)Nc1c(C)cccc1C", "CC[NH+](CC)CC(=O)Nc1c(C)cccc1C.[Cl-]"),
+        ("propranolol", "CC(C)NCC(O)COc1cccc2ccccc12", "CC(C)[NH2+]CC(O)COc1cccc2ccccc12.[Cl-]"),
+        ("metformin", "CN(C)C(=N)N=C(N)N", "CN(C)C(=[NH2+])N=C(N)N.[Cl-]"),
+    ):
+        assert compound_id(salt) == compound_id(base), (
+            f"{name} as an ion pair is a different compound from its free base: "
+            f"{standard_smiles(salt)!r} against {standard_smiles(base)!r}"
+        )
+
+
+def test_the_anion_the_neutralisation_guard_exists_for_is_still_kept_as_written() -> None:
+    """The other direction, so the fix above cannot be a widening.
+
+    `_neutralization_is_protonation` exists because sodium triacetoxyborohydride's charge sits on
+    boron, which has no room for a fourth substituent — the only route to neutral is to *remove* the
+    hydride, and letting that happen made a reducing agent share one `compound_id` with
+    triacetoxyborane, a Lewis acid that reduces nothing. Exempting cations must not exempt that:
+    it is an **anion**, so it still reaches the hydrogen-count test.
+    """
+    assert "[BH-]" in standard_smiles("CC(=O)O[BH-](OC(C)=O)OC(C)=O.[Na+]"), (
+        "sodium triacetoxyborohydride was neutralised to triacetoxyborane, which reduces nothing"
+    )
+    assert standard_smiles("[BH4-].[Na+]") == "[BH4-].[Na+]"
+    # And the anionic conjugate bases the guard is *meant* to collapse still collapse.
+    assert standard_smiles("CC(=O)[O-].[Na+]") == "CC(=O)O"
+    assert standard_smiles("CC(C)(C)[O-].[K+]") == "CC(C)(C)O"
+
+
 def test_two_tautomers_are_one_compound() -> None:
     """Two spellings of one substance, which a chemist would never file separately."""
     assert compound_id("CC(O)=NC") == compound_id("CC(=O)NC")

@@ -124,7 +124,15 @@ from chemclaw.core.ids import stable_hash
 # search rather than being silently compared against rows built under a newer one — the guard
 # `science/fingerprints/store.py` already applies to a changed radius or bit width, extended to the
 # other thing that decides what a row *is*.
-STANDARDIZATION_VERSION = "std7"
+#
+# `std7` -> `std8` because `_neutralization_is_protonation` asked the hydrogen-count question of a
+# *cation*, which refused every protonated amine and pyridinium salt its docstring says must keep
+# working — so every `std7` row for such a salt is indexed under a `compound_id` that is not
+# the free base's. Bumping is what makes those rows fall out of similarity search instead of
+# being compared
+# against `std8` rows built under the corrected notion of sameness; re-indexing is what brings them
+# back. This is the same reason `std6` -> `std7` was owed, one notion of sameness later.
+STANDARDIZATION_VERSION = "std8"
 
 # The d- and f-block by atomic number — Sc→Zn, Y→Cd, La→Hg (lanthanides included) and Ac onward.
 # A block rather than a hand-picked element list, because the property being asserted is a block
@@ -302,7 +310,39 @@ def _neutralization_is_protonation(before: Chem.Mol, after: Chem.Mol) -> bool:
     between them, and a rule written over boron would miss whatever the next such anion is made of.
     Where it fails the species is kept as written, charge and all, which is exactly what
     `[BH4-].[Na+]` already gets from the organic-fragment count one branch up.
+
+    **The hydrogen count alone is the wrong question for a *cation*, and asking it of one broke
+    every amine salt in the corpus.** A conjugate acid/base pair has two sides and the paragraph
+    above lists only one: a carboxylate, an alkoxide and an amide are all **anions**, and all three
+    are neutralised by *gaining* a proton. A protonated amine is the other side — it is neutralised
+    by *losing* one — so the hydrogen count falls and this guard refused a species the module
+    docstring names as the case that must keep working ("that claim holds for an amine
+    hydrochloride"). Measured across the standardization the window shipped (`std6` -> `std7`):
+
+    | written as | free base | salt |
+    | --- | --- | --- |
+    | ethylamine·HCl | `CCN` | `CC[NH3+]` |
+    | pyridinium chloride | `c1ccncc1` | `c1cc[nH+]cc1` |
+    | lidocaine·HCl | free base | cation |
+    | propranolol·HCl | free base | cation |
+    | metformin·HCl | free base | cation |
+
+    Two `compound_id`s for one substance, so two `compound_note`s; a cache miss on work D-011
+    promises never to repeat; and a molecule ranking against itself as merely similar. It reaches
+    the reaction fingerprint too, because `rxnfp._standardize_species` standardizes one
+    `.`-separated
+    token at a time, so a bare `C[NH3+]` token arrives here with `organic == 1` — driven, a DRFP
+    Tanimoto between the ionised and neutral spellings of one reaction fell from 0.9444 to 0.6957.
+
+    So the charge decides which question to ask, and it is the charge of the species *before*
+    neutralisation because that is what names the side of the pair. `NaBH(OAc)3` — the case this
+    guard exists for — is an **anion**, so it still reaches the hydrogen-count test and is still
+    kept as written. A cation that cannot be neutralised at all, a quaternary ammonium, is
+    unaffected
+    either way: `Uncharger` leaves it alone, so the two molecules are the same one.
     """
+    if Chem.GetFormalCharge(before) > 0:
+        return True
     return _hydrogen_count(after) >= _hydrogen_count(before)
 
 

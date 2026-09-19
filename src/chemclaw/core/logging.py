@@ -875,7 +875,41 @@ _NOT_MID_TOKEN = r"(?<![A-Za-z0-9_\-.])"
 #: as literals rather than as a widened character class because the class would need `-` and `:`,
 #: and a run class containing `-` walks through `-----END` and keeps going. The tails are bounded
 #: to what the format can hold and stop at a line break, so each alternative matches one line.
-_PEM_RFC1421 = r"Proc-Type:[^\r\n\\]{0,40}|DEK-Info:[^\r\n\\]{0,96}"
+#: **The tails are possessive (`{0,40}+`), and without that this rule was a denial of service.**
+#: "Disjoint on their first character" — which the separator below correctly claims — is not the
+#: same property as unambiguous. `[^\r\n\\]` includes whitespace, and so does the separator's
+#: sibling `[\s\\]` branch, so `Proc-Type:` followed by *k* spaces has *k+1* distinct ways to
+#: be consumed:
+#: the tail takes *j* of them and the enclosing `{0,64}` repetition takes the rest, one at a time.
+#: With a lookahead that must ultimately fail — no 20-character base64 run follows — the engine
+#: enumerates the product. Measured at ~26x per group:
+#:
+#: | payload | before | after |
+#: | --- | --- | --- |
+#: | 128 B | 2.1 ms | 0.00 ms |
+#: | 228 B | 1.05 s | 0.00 ms |
+#: | 278 B | **14.4 s** | 0.00 ms |
+#:
+#: 328 bytes is minutes. This filter runs inside `Handler.handle`, so it holds the stdlib logging
+#: lock for every other thread, and on the front door it runs on the single event loop; the bare
+#: `except Exception` around it cannot interrupt a regex. It is reachable from model-authored text —
+#: `logger.exception` renders `record.exc_info` itself and that text is unbounded, `api/runner.py`
+#: logs a failed turn that way, and `core/mcp_session` raises `McpRequestRefused` carrying a remote
+#: server's own message — and from an unbounded `Note.body` through `kg/record.py`.
+#:
+#: A possessive quantifier removes the ambiguity rather than narrowing the class, so the language
+#: matched is unchanged: the tail is maximal either way, and it is bounded by `\r`, `\n` and `\\`,
+#: every one of which is what separates a header line from the body in both the real and the
+#: JSON-escaped spelling — so there is nothing after it the tail could have wrongly eaten. Driven
+#: against ten PEM shapes (plain, RSA, EC, JSON-escaped, both encrypted spellings, CRLF, leading
+#: whitespace, tabbed, and a non-key): **identical output on all ten, zero leaks**.
+#:
+#: The existing guard cannot see this and it is worth saying why:
+#: `test_redaction_cannot_be_made_quadratic_by_a_log_line` grows the *line length* with `unit * N`,
+#: and the `pem` unit pins the number of header lines at two per repetition — so it grows the number
+#: of start positions, which is linear, and never the number of separator alternations after one
+#: header, which is the exponential axis. The exploit is 328 bytes against the 80 KB that test uses.
+_PEM_RFC1421 = r"Proc-Type:[^\r\n\\]{0,40}+|DEK-Info:[^\r\n\\]{0,96}+"
 
 #: One step of the gap between a PEM header and its body: a JSON escape taken as a unit, one
 #: whitespace or backslash character, or one RFC 1421 header line. The three branches are disjoint
