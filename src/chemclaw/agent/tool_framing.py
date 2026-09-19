@@ -120,7 +120,7 @@ from chemclaw.agent.framing import (
     neutralise_marks,
 )
 from chemclaw.agent.tool_result_shape import rewritten_tool_messages
-from chemclaw.agent.tool_result_size import bounded_for_batch, original_chars
+from chemclaw.agent.tool_result_size import bounded_for_batch, original_chars, text_chars
 from chemclaw.connectors.transport import SERVED_BY
 
 #: What `defanged_payload` preserves: a payload comes back as the type it went in as.
@@ -467,18 +467,32 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
         # against a bound the deployment believed it had. The inner cut is not wrong and is not
         # moved — a ceiling is enforced on what the model is actually sent, so the layer that does
         # the expanding is the layer that has to re-check.
-        # `charged_total`/`count`: the nested `bound_tool_results` has already cut the raw payload
-        # and recorded what the tool returned, so this pass writes a notice about *that* number and
-        # does not count the cut a second time. Without it the delivered sentence described the
-        # intermediate — measured, a 200,000-character result reaching the model as "451 of 60,102
-        # characters removed" — and the truncation counter fired twice for one cut.
+        # `charged_total`/`expanded_from`/`count`: the nested `bound_tool_results` has already cut
+        # the raw payload and recorded what the tool returned, so this pass writes a notice about
+        # *that* number and does not count the cut a second time. Without it the delivered sentence
+        # described the intermediate — measured, a 200,000-character result reaching the model as
+        # "451 of 60,102 characters removed" — and the truncation counter fired twice for one cut.
+        #
+        # **`charged_total` falls back to the size in hand rather than to `None`, and that was the
+        # first half of a live overstatement.** When the inner pass does *not* cut — a result under
+        # the ceiling that only escaping pushes over it — nothing stamps `ORIGINAL_CHARS_KEY`, so
+        # `bounded_content` fell back to the escaped total and a tool returning 59,900 characters
+        # delivered "179,900 of 239,554 characters removed". The size in hand *is* what the tool
+        # returned on that path, so it is the honest fallback; `original_chars` still wins when it
+        # is there, because then the text in hand is already a cut of the tool's output.
+        #
+        # `expanded_from` is the second half: this pass hands on text it has expanded, so the kept
+        # span has to be converted back into the tool's own units or the notice understates by the
+        # expansion factor. See `bounded_content`.
+        in_hand = text_chars(message.content)
         escaped = _rewritten(message.content, defang)
         return message.model_copy(
             update={
                 "content": bounded_for_batch(
                     request,
                     escaped,
-                    charged_total=original_chars(message),
+                    charged_total=original_chars(message) or in_hand,
+                    expanded_from=in_hand,
                     count=original_chars(message) is None,
                 )
             }
@@ -531,14 +545,18 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
             # by contract (`bounded_content`: "the notice is charged against `limit`"), so
             # anything appended afterwards breaks it — the mark has to be the escaped one *while*
             # the notice is being sized.
+            in_hand = text_chars(message.content)
             framed = _framed_content(message.content, origin)
-            # See `_defanged` above for `charged_total`/`count`: this branch re-bounds the *framed*
-            # string, so the same double-pass arithmetic applies to it.
+            # See `_defanged` above for `charged_total`/`expanded_from`/`count`: this branch
+            # re-bounds the *framed* string, so the same double-pass arithmetic applies to it —
+            # including the fallback for a result the inner pass never cut, which is where the
+            # overstatement was measured on this path too.
             bounded = bounded_for_batch(
                 request,
                 framed,
                 mark=neutralise_marks(SYSTEM_SPEECH_MARK),
-                charged_total=original_chars(message),
+                charged_total=original_chars(message) or in_hand,
+                expanded_from=in_hand,
                 count=original_chars(message) is None,
             )
             return message.model_copy(update={"content": bounded})

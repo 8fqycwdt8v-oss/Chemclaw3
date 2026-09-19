@@ -79,17 +79,6 @@ topic).
   and every A/B it reports still carries personal judgment whenever the model opens `/mine`. Give
   `ReadOnlyStoreBackend` the same `permits` predicate the shared tier has.
 
-- [ ] **A re-proposal of a *superseded* body is answered as "already waiting to be decided" and can
-  never be proposed again** — [S]. `behaviour_proposals.propose`'s
-  `ON CONFLICT (actor, kind, name, content_hash) DO NOTHING` then re-reads the row *in whatever
-  state it is in*, and `_arrival` branches only on `stored.decided` — `superseded` is deliberately
-  not a decision, so it books `outcome="already_open"`. Driven on both shipped backends: propose V1,
-  propose V2 (V1 superseded), re-propose V1 → the row stays `superseded`, `GET /proposals?state=open`
-  never shows it, `POST /proposals/skill/<name>` with V1's hash 409s, and the model tells the chemist
-  it is waiting for their decision. The module's own rule is that "an unchanged re-proposal cannot
-  reopen a **rejection**"; the idempotence is being applied one state too widely. Either revive a
-  superseded row to `open`, or give `_what_became_of_it` a fourth branch that says so.
-
 - [ ] **`max_concurrent_workflow_tasks` is set nowhere, so nothing this repository chose bounds
   workflow-task concurrency** — [M]. `durable/background_worker.py` sets `max_concurrent_activities`
   and stops there, so the workflow-task ceiling is whatever the SDK defaults to. A **child workflow
@@ -317,6 +306,39 @@ topic).
       to cut a leg, and that configuration finds three fewer gold notes.
 
 ## 3 — Work that is lost, dropped or invisible
+
+- [ ] **A re-proposal of a *superseded* body is answered as "already waiting to be decided" and can
+  never be proposed again** — [S]. **Moved here from "1 — Untrusted input reaching a privileged
+  surface", where it was misfiled**: nothing untrusted reaches anything, and no surface is
+  privileged — the defect is that a chemist's decision has nowhere to land and the model is told a
+  falsehood about its own proposal, which is this section's subject.
+  `behaviour_proposals.propose`'s
+  `ON CONFLICT (actor, kind, name, content_hash) DO NOTHING` then re-reads the row *in whatever
+  state it is in*, and `_arrival` branches only on `stored.decided` — `superseded` is deliberately
+  not a decision, so it books `outcome="already_open"`. Driven on both shipped backends: propose V1,
+  propose V2 (V1 superseded), re-propose V1 → the row stays `superseded`, `GET /proposals?state=open`
+  never shows it, `POST /proposals/skill/<name>` with V1's hash 409s, and the model tells the chemist
+  it is waiting for their decision. The module's own rule is that "an unchanged re-proposal cannot
+  reopen a **rejection**"; the idempotence is being applied one state too widely. Either revive a
+  superseded row to `open`, or give `_what_became_of_it` a fourth branch that says so.
+
+- [ ] **Three row-projecting tools defang a whole page on the event loop, and one of them is not in
+  the offload test** — [M]. `commitment_tools.review_commitments`,
+  `pending_tools.check_pending_requests` and `memory_tools.recall_observations` each escape every
+  string in every row of their page synchronously, which is correct (the field-level carve-outs each
+  let five to eight unvalidated fields through — see
+  `tests/test_tool_framing.py::test_every_row_projecting_tool_escapes_its_whole_row`) and is not
+  free. Measured on a realistic `Commitment` on a loaded box: **6.9 to 39.2 us/row, 5.7x** the
+  two-field form, so **7.8 ms** of synchronous loop time per `review_commitments` at `_MAX_PAGE` of
+  200 against ~1.4 ms before. A post-merge audit measured the same comparison at 19.3x and 18.9 ms;
+  the ratio moves with the row's string lengths and with machine load, and neither figure is small
+  next to the **2.6 ms** that `skill_manifest.declared_tools`' own docstring calls "the hazard
+  `tests/test_event_loop_offload.py` exists for". None of the three is in that file.
+  **Not fixed here because the cheap fix is the wrong one**: wrapping the comprehension in
+  `asyncio.to_thread` moves 7.8 ms off the loop and buys a thread hop per call on the page sizes that
+  do not need it, and the real question is whether the *page* is the right unit — a 200-row page is
+  already more than a model reads. Trigger to revisit: any of the three appears in a turn-latency
+  profile, or `_MAX_PAGE`/`observation_max_results` is raised.
 
 - [ ] **A chemist's own `/scratch/` writes are unbounded and, by default, permanent** — [M].
   `agent_subagent_files_max_chars` bounds only what a *helper* hands back: it is applied in

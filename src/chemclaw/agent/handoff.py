@@ -77,6 +77,7 @@ rather than duplicative because `messages` reduces with `add_messages`, which ke
 """
 
 import logging
+import re
 from collections.abc import Iterable, Sequence
 from typing import Annotated, Any
 
@@ -121,15 +122,29 @@ asking another agent for it that you could not have reached yourself. If a tool 
 from your own surface, say so — do not hand over in the hope that somebody else has it."""
 
 
+#: Every character a minted handoff tool name may carry, beyond which one is folded to `_`.
+#:
+#: **An allow-list rather than the one separator this repository happens to use**, which is the fix
+#: for a fold that named `-` alone. A profile is a file stem and `agent/profile_discovery.py`
+#: validates no charset on it, so `data/profiles/property lookup.yaml` is a legal deployment file
+#: and minted `transfer_to_property lookup`; `property.lookup` minted `transfer_to_property.lookup`.
+#: Both are invalid tool names by the very argument that folds `-`, and nothing refused either — the
+#: provider does, on the request, which surfaces as a model failure on a turn nobody changed.
+#:
+#: Folding more characters cannot fail open: two names that fold together are a *collision*, and
+#: `handoff_tools` refuses a roster that mints one tool for two profiles before anything is bound.
+_TOOL_NAME_CHARS = re.compile(r"[^0-9A-Za-z_]")
+
+
 def handoff_tool_name(peer: str) -> str:
     """The tool name that hands control to `peer`.
 
     One function so the spelling is derived in every place that needs it rather than formatted
     twice — the turn graph mints the tools, the context ratchet looks for them by name, and the
-    helper test asserts their absence. The peer name reaches a model as part of a tool name, so
-    the characters a tool name may carry are the constraint: `-` is the separator this repository's
-    profile files use (`property-lookup`) and is not valid in an OpenAI tool name, so it is folded
-    to `_` here and nowhere else.
+    helper test asserts their absence. The peer name reaches a model as part of a tool name, so the
+    characters a tool name may carry are the constraint, and every character outside
+    `_TOOL_NAME_CHARS` is folded to `_` here and nowhere else — see that constant for why it is an
+    allow-list and not the single separator this repository's own profile files use.
 
     Args:
         peer: The profile name of the agent to hand to.
@@ -137,7 +152,7 @@ def handoff_tool_name(peer: str) -> str:
     Returns:
         The tool name, e.g. `transfer_to_property_lookup` for the `property-lookup` profile.
     """
-    return f"{HANDOFF_PREFIX}{peer.replace('-', '_')}"
+    return f"{HANDOFF_PREFIX}{_TOOL_NAME_CHARS.sub('_', peer)}"
 
 
 def describe_peer(profile: AgentProfile, bound: Iterable[str], menu_tools: int) -> str:

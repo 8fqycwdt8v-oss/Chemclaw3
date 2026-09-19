@@ -280,10 +280,80 @@ def test_a_skill_with_no_readable_name_is_scoped_to_nothing(tmp_path: Path) -> N
 
     # **The half that makes the assertion above mean something.** A key in the map is only
     # conservative if the value cannot be satisfied, so this asks the consumer rather than trusting
-    # the sentinel's name: against a profile holding no tools at all, none of the three is visible.
-    narrowing = ToolScopedSkills(declared=declared, available=frozenset())
-    assert [name for name in declared if narrowing._permits(name)] == [], (
-        "a skill with an unreadable manifest is still visible to a profile holding no tools"
+    # the sentinel's name.
+    #
+    # **`available=frozenset()` alone is the one value that cannot tell the two apart**, and it was
+    # the only one asserted. An empty surface satisfies no declaration whatever it names, so setting
+    # the sentinel to a real tool name (`frozenset({"predict_pka"})`) left 91 tests green — while a
+    # profile holding `predict_pka`, which `data/profiles/` ships, saw every skill with an
+    # unreadable manifest. So the surfaces below include realistic non-empty ones, and the widest
+    # of them is every name this deployment can actually serve.
+    from tests.surface import surface
+
+    served = surface().tool_names
+    assert served, (
+        "the shipped profile advertises no tools, so the widest arm below asserts nothing"
+    )
+    for available in (frozenset(), frozenset({"predict_pka"}), frozenset({"find_notes"}), served):
+        narrowing = ToolScopedSkills(declared=declared, available=available)
+        visible = [name for name in declared if narrowing._permits(name)]
+        assert visible == [], (
+            f"{visible} has an unreadable manifest and is visible to a profile holding "
+            f"{sorted(available)[:4]}{'…' if len(available) > 4 else ''}"
+        )
+
+    # **And the sentinel's unsatisfiability is derived, not asserted about its wording.** The reason
+    # `required & available` is always empty is that the name carries a NUL, which no tool name in
+    # this deployment can — so that is what is checked, against the served surface rather than
+    # against a sentence. A sentinel changed to any name a real profile could hold fails here as
+    # well as in the loop above, which is what makes the two independent.
+    assert any("\x00" in name for name in UNREADABLE_DECLARATION), (
+        f"the unreadable-manifest sentinel {sorted(UNREADABLE_DECLARATION)} holds no character a "
+        "tool name cannot, so nothing stops a real profile satisfying it"
+    )
+    assert not [name for name in served if "\x00" in name], (
+        "a served tool name carries a NUL, so the sentinel is no longer unsatisfiable by "
+        "construction and needs a different basis"
     )
 
     _declared_tools.cache_clear()
+
+
+def test_a_skill_manifest_pair_is_always_a_pair(tmp_path: Path) -> None:
+    """`_declared_pair` is total, over every way a manifest can fail to be read.
+
+    **The dead code this replaces was invisible to `mypy --strict`.** The function was annotated
+    `-> tuple[str, frozenset[str]] | None`, its summary line said "or None (logged) if the file
+    cannot be read at all", and `_declared_tools` guarded on `if pair is not None:` — all three long
+    after the `except` arm was changed to return `(directory name, UNREADABLE_DECLARATION)`. Nothing
+    can return `None` any more, so the guard was a branch no test could cover and the annotation was
+    a licence: a future `return None` would type-check, pass the guard, drop the entry, and leave
+    the skill **visible**, which is the fail-open answer that arm exists to refuse.
+
+    So the annotation is narrowed and this is what holds it. Driven over five shapes, which is the
+    set that reaches the `except` for five different reasons — a file that is not there at all, a
+    name that is empty, a name that is only whitespace, bytes no decoder accepts, and a `tools:` key
+    of the wrong type.
+    """
+    from chemclaw.agent.skill_manifest import UNREADABLE_DECLARATION, _declared_pair
+
+    cases = {
+        "gone": None,
+        "empty-name": "---\nname: ''\n---\nbody\n",
+        "ws-name": "---\nname: '   '\n---\nbody\n",
+        "scalar-tools": "---\nname: scalar-tools\ntools: nope\n---\nbody\n",
+    }
+    for directory, body in cases.items():
+        (tmp_path / directory).mkdir()
+        if body is not None:
+            (tmp_path / directory / "SKILL.md").write_text(body)
+    (tmp_path / "bad-bytes").mkdir()
+    (tmp_path / "bad-bytes" / "SKILL.md").write_bytes(b"---\nname: \xff\xfe\n---\nbody\n")
+
+    for directory in (*cases, "bad-bytes"):
+        pair = _declared_pair(tmp_path / directory / "SKILL.md")
+        assert pair == (directory, UNREADABLE_DECLARATION), (
+            f"{directory} answered {pair!r}; an unreadable manifest must be a pair keyed by its "
+            "directory and scoped to nothing — `None` drops the entry, and a missing entry reads "
+            "as 'declares nothing', which leaves the skill visible to every profile"
+        )

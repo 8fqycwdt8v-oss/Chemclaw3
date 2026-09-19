@@ -25,6 +25,7 @@ import threading
 import warnings
 from contextlib import AsyncExitStack
 from enum import StrEnum
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -344,6 +345,27 @@ def test_the_framer_sits_inside_the_converters_and_outside_the_trail() -> None:
     assert names.index("surface_domain_errors") < names.index("frame_connector_results")
     assert names.index("frame_connector_results") < names.index("announce_tool_failures")
     assert names.index("frame_connector_results") < names.index("audit_tool_calls")
+
+
+#: The two payload shapes the second bounding pass behaves differently on, keyed by what they are
+#: for. **Size alone does not reach the defect and the guard that only varied size was green over
+#: it**: `"Z" * n` never escapes, so the escaped total equals the size in hand and every conversion
+#: in `bounded_content` is the identity. The expanding shape is the one `_defanged`'s and
+#: `_framed`'s own docstrings say the re-bound exists for — a disguised delimiter tag turns on
+#: `framing._defang`'s second pass, which escapes every `<` in the content at four characters each.
+_PAYLOAD_SHAPES = {
+    "inert": lambda n: "Z" * n,
+    "expanding": lambda n: (
+        f"{envelope_delimiters('probe')[0][0]}\u00ad{envelope_delimiters('probe')[0][1:]}"
+        + "<" * max(n - len(envelope_delimiters("probe")[0]) - 1, 0)
+    ),
+}
+
+
+#: Both branches the second bounding pass has, and the tool name that selects each. `_framed` is the
+#: connector-success branch; `_defanged` serves helper `task` reports, the scratchpad verbs and
+#: connector **error** results, and dropping its half of the fix alone was green over 50 tests.
+_REBOUND_BRANCHES = {"framed": True, "defanged": False}
 
 
 @pytest.mark.parametrize("returned", [100_000, 200_000, 500_000])
@@ -947,4 +969,448 @@ def test_a_connector_success_survives_the_ceiling_instead_of_being_evicted(probe
     assert delivered <= ceiling, (
         f"a connector success delivered {delivered} characters against a {ceiling} ceiling "
         f"({delivered / ceiling:.2f}x)"
+    )
+
+
+# --------------------------------------------------------------------------------------------
+# A tool that projects a site-supplied row escapes the whole row, not the fields somebody classified
+# --------------------------------------------------------------------------------------------
+
+
+def _spells_the_delimiter(blob: Any, *, skip: frozenset[str] = frozenset()) -> list[str]:
+    """Every path inside `blob` whose string still spells a closing envelope delimiter verbatim.
+
+    Walked rather than compared against an expected document, because the property is about *every*
+    string in a payload of unknown shape — which is the same reason `defanged_payload` recurses
+    instead of naming fields. `skip` is for the one field that legitimately carries a delimiter: a
+    framed statement's envelope is its own.
+    """
+    _opening, closing = envelope_delimiters("probe")
+    found: list[str] = []
+
+    def walk(node: Any, path: str) -> None:
+        if isinstance(node, str):
+            if closing in node:
+                found.append(path)
+        elif isinstance(node, dict):
+            for key, value in node.items():
+                if key in skip:
+                    continue
+                walk(key, f"{path}.<key {key!r}>")
+                walk(value, f"{path}.{key}")
+        elif isinstance(node, list | tuple | set | frozenset):
+            for index, value in enumerate(node):
+                walk(value, f"{path}[{index}]")
+        elif hasattr(node, "model_dump"):
+            walk(node.model_dump(mode="json"), path)
+
+    walk(blob, "")
+    return found
+
+
+def _poisoned(model: type[BaseModel], mark: str) -> BaseModel:
+    """An instance of `model` with the closing delimiter in **every** string-shaped field.
+
+    Built from `model_fields` rather than written out, so a field added to the row is poisoned
+    without this helper being remembered — which is the same property the fix under test claims, and
+    a fixture that hardcoded a field list would be the carve-out it replaced, one layer up.
+    """
+    from typing import get_args, get_origin
+
+    values: dict[str, Any] = {}
+    for name, field in model.model_fields.items():
+        annotation = field.annotation
+        origin = get_origin(annotation)
+        if annotation is str:
+            values[name] = f"{name}{mark}"
+        elif origin in (list, set, frozenset) and get_args(annotation) == (str,):
+            values[name] = [f"{name}{mark}"]
+        elif origin is dict:
+            values[name] = {f"k{mark}": f"v{mark}"}
+        elif annotation is int:
+            values[name] = 0
+    return model(**values)
+
+
+async def _pending_rows(mark: str, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """`check_pending_requests`' projection of one poisoned `PendingRequest`."""
+    from chemclaw.agent import pending_tools
+    from chemclaw.durable.pending_store import PendingRequest
+
+    row = _poisoned(PendingRequest, mark)
+    page = SimpleNamespace(requests=[row], total_waiting=1, limit_applied=10)
+
+    async def _open(**_kwargs: Any) -> Any:
+        return page
+
+    monkeypatch.setattr(pending_tools.pending_store, "open_requests", _open)
+    overview = await pending_tools.check_pending_requests(asked_of="", limit=10)
+    return overview.requests
+
+
+async def _commitment_rows(mark: str, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """`review_commitments`' projection of one poisoned `Commitment`."""
+    from chemclaw.agent import commitment_tools
+    from chemclaw.ingest.commitments.models import Commitment
+
+    row = _poisoned(Commitment, mark)
+    page = SimpleNamespace(
+        commitments=[row], total_outstanding=1, limit_applied=10, mirrored_at=None
+    )
+
+    async def _outstanding(**_kwargs: Any) -> Any:
+        return page
+
+    async def _freshness(_source: Any) -> Any:
+        return None
+
+    monkeypatch.setattr(commitment_tools, "outstanding", _outstanding)
+    monkeypatch.setattr(commitment_tools, "mirror_freshness", _freshness)
+    review = await commitment_tools.review_commitments(owner="", source="", limit=10)
+    return review.commitments
+
+
+async def _observation_rows(mark: str, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """`recall_observations`' projection of one poisoned `Observation`."""
+    from chemclaw.agent import memory_tools
+    from chemclaw.memory.observations import Observation
+
+    row = _poisoned(Observation, mark)
+
+    async def _open(_limit: Any = None) -> Any:
+        return [row]
+
+    async def _count() -> int:
+        return 1
+
+    monkeypatch.setattr(settings, "observations_enabled", True)
+    monkeypatch.setattr(memory_tools, "open_observations", _open)
+    monkeypatch.setattr(memory_tools, "count_open_observations", _count)
+    recall = await memory_tools.recall_observations(limit=10)
+    return recall.observations
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "project", "framed"),
+    [
+        ("check_pending_requests", _pending_rows, frozenset()),
+        ("review_commitments", _commitment_rows, frozenset()),
+        # `statement` is deliberately an *envelope* rather than a bare escape — it is the one field
+        # a citation is made against — so the delimiter inside it is the envelope's own.
+        ("recall_observations", _observation_rows, frozenset({"statement"})),
+    ],
+)
+def test_every_row_projecting_tool_escapes_its_whole_row(
+    tool_name: str,
+    project: Any,
+    framed: frozenset[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tool that puts a site-supplied row in front of a model escapes all of it.
+
+    **Three tools, one property, because the same carve-out was written three times and a prose
+    count said it had been fixed.** Each of these projected a row by escaping the two or three
+    fields somebody had classified as free text and letting the rest through, and each
+    classification was
+    measurably wrong:
+
+    - `PendingRequest` carries **no `Literal` at all** — `kind`, `state`, `asked_of`,
+      `requested_by`, `session_id`, `answered_by` and `premise_note_ids` are unvalidated strings
+      filled by a turn, and `request_id` is minted from them. Eight fields reached the model
+      unescaped.
+    - `Observation`'s `scope` and `evidence_note_ids` were argued to be "built from validated note
+      ids"; `scope` is composed from note bodies. Three fields, and they ride **outside** the
+      envelope, where a forged delimiter reads as the envelope closing.
+    - `Commitment`'s `source`, `external_id`, `parent_id`, `note_ids`, `job_ids` and `compounds`
+    come
+      from a site-supplied adapter over a portfolio export. Five fields.
+
+    The merged commit body claimed the first two were already closed by the same wave. They were
+    not, which is why this is one parametrised property over all three rather than a third
+    single-tool test — a claim about a set belongs to a test over that set.
+
+    The poisoned row is built from each model's own `model_fields`, so a string field added next
+    year is covered here as well as by the fix; and the assertion walks the whole projection rather
+    than naming fields, for the same reason `defanged_payload` recurses.
+    """
+    mark_source = envelope_delimiters("probe")[1]
+    rows = asyncio.run(project(mark_source, monkeypatch))
+
+    assert rows, f"{tool_name} projected nothing, so this test asserts nothing about it"
+    leaked = _spells_the_delimiter(rows, skip=framed)
+    assert not leaked, (
+        f"{tool_name} let {len(leaked)} field(s) through unescaped — {leaked} — so a site-supplied "
+        "string can close the envelope early and everything after it reads as this system speaking"
+    )
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "project", "model_path", "argued_absences"),
+    [
+        # `answer` is deliberately absent: these are the *open* requests, so it is empty by
+        # construction and this overview is about what is still waiting.
+        (
+            "check_pending_requests",
+            _pending_rows,
+            "chemclaw.durable.pending_store:PendingRequest",
+            frozenset({"answer"}),
+        ),
+        (
+            "review_commitments",
+            _commitment_rows,
+            "chemclaw.ingest.commitments.models:Commitment",
+            frozenset(),
+        ),
+        (
+            "recall_observations",
+            _observation_rows,
+            "chemclaw.memory.observations:Observation",
+            frozenset(),
+        ),
+    ],
+)
+def test_a_row_projection_still_carries_every_field_it_does_not_argue_away(
+    tool_name: str,
+    project: Any,
+    model_path: str,
+    argued_absences: frozenset[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other direction, because escaping everything is satisfied by delivering nothing.
+
+    The property above is met by a projection that *drops* every string field, which is exactly what
+    a too-eager `exclude=` does — and the model would then be reading a row with its identifiers
+    missing rather than neutralised, which is the worse of the two failures: an escaped identifier
+    is still the identifier, an absent one is a row nobody can act on. Measured: widening
+    `pending_tools`' exclusion set to the eleven fields the fix was about left the escaping property
+    green.
+
+    **The expected field set is read off the row's own model**, not written here, so it is the fix's
+    own claim ("a field added to that model next year is covered") asserted in both directions at
+    once. An absence has to be argued in this test's own table, which is where a reader looks for
+    the reason one is missing.
+    """
+    import importlib
+
+    module_name, class_name = model_path.split(":")
+    model = getattr(importlib.import_module(module_name), class_name)
+    owed = set(model.model_fields) - argued_absences
+
+    rows = asyncio.run(project(envelope_delimiters("probe")[1], monkeypatch))
+    payload = rows[0] if not hasattr(rows[0], "model_dump") else rows[0].model_dump(mode="json")
+
+    assert owed <= set(payload), (
+        f"{tool_name} drops {sorted(owed - set(payload))} from the row it shows the model; the "
+        "escape has become a redaction. If a field genuinely should not be shown, add it to this "
+        "test's `argued_absences` with the reason"
+    )
+    escaped = [key for key in owed if isinstance(payload.get(key), str) and payload[key]]
+    assert escaped, f"{tool_name} delivers no text at all, so nothing here is about escaping"
+
+
+# --------------------------------------------------------------------------------------------
+# The cut notice's arithmetic: content-parametrised, on both branches of the second pass
+# --------------------------------------------------------------------------------------------
+
+
+def _delivered_through_the_rebound(payload: str, *, served: bool, tool: str = "read_file") -> str:
+    """One result through `bound_tool_results` nested inside `frame_connector_results`.
+
+    `served` picks the branch: a `SERVED_BY` stamp takes the connector-success path (`_framed`),
+    without it a name in `scratchpad_tools()` takes the defanging one (`_defanged`). Both re-bound,
+    and the second one had no guard at all.
+    """
+
+    class _Served:
+        name = tool
+        metadata = {SERVED_BY: {"connector": "calc", "build": "probe"}}
+
+    async def _handler(_request: Any) -> ToolMessage:
+        return ToolMessage(content=payload, tool_call_id="call-1", name=tool)
+
+    async def _sized(request: Any) -> Any:
+        return await run_middleware(bound_tool_results, request, _handler)
+
+    async def _run() -> ToolMessage:
+        made = tool_request(tool, tool=_Served()) if served else tool_request(tool)
+        return cast(ToolMessage, await run_middleware(frame_connector_results, made, _sized))
+
+    delivered = asyncio.run(_run())
+    return delivered.content if isinstance(delivered.content, str) else str(delivered.content)
+
+
+@pytest.mark.parametrize("branch", sorted(_REBOUND_BRANCHES))
+@pytest.mark.parametrize("shape", sorted(_PAYLOAD_SHAPES))
+@pytest.mark.parametrize("returned", [59_900, 100_000, 150_000, 500_000])
+def test_the_cut_notice_is_about_the_tool_on_both_branches_and_both_content_shapes(
+    branch: str, shape: str, returned: int
+) -> None:
+    """The notice's two numbers are the tool's, whatever the content and whichever branch ran.
+
+    **Three narrownesses in the guard this replaces, each of which was green over a live false
+    sentence.**
+
+    - It was **size-parametrised and content-blind**. `"Z" * n` never escapes, so the expanded total
+      equals the size in hand and the whole double-pass conversion is the identity. Swapping only
+      the content at the same sizes reds merged code with "the notice says the tool returned 239,012
+      characters; it returned 100,000".
+    - It drove only the **connector-success** branch. Dropping `charged_total`/`count` on
+      `_defanged` alone — helper `task` reports, the scratchpad verbs and connector *error* results
+      — was green over 50 tests and reproduced the original defect at full magnitude there.
+    - Its sizes all sat **above** the ceiling, so the case where the inner pass never cuts at all —
+      and therefore stamps nothing for the outer one to charge against — was outside it. 59,900 is
+      under the shipped 60,000 and delivered `179,894 of 239,552 characters removed`.
+
+    Both directions are asserted, because each alone admits the other's falsehood: the clamp that
+    stood here overstated (a total that was a function of `4 x ceiling`, identical at 100,000 and at
+    150,000, with `returned - removed` negative), and removing it without converting the kept span
+    understates (75% of a result lost, reported as 0.3%).
+    """
+    served = _REBOUND_BRANCHES[branch]
+    payload = _PAYLOAD_SHAPES[shape](returned)
+    assert len(payload) == returned, "the payload builder no longer produces the size asked for"
+
+    text = _delivered_through_the_rebound(payload, served=served)
+    notices = re.findall(r"([\d,]+) of ([\d,]+) characters removed", text)
+
+    ceiling = settings.agent_max_tool_result_chars
+    if shape == "inert" and returned <= ceiling:
+        # Nothing expands and nothing is over the ceiling, so no cut is owed and no notice may be
+        # invented — the other direction of "a cut is never silent", asserted rather than skipped.
+        assert not notices, (
+            f"a {returned:,}-character result under the {ceiling:,} ceiling was cut on the "
+            f"{branch} branch and told the model so: {notices}"
+        )
+        assert payload in text, "an uncut result must reach the model whole"
+        return
+
+    assert len(notices) == 1, (
+        f"expected exactly one cut notice on the {branch} branch for a {shape} payload of "
+        f"{returned:,}, found {notices}"
+    )
+    removed, total = (int(value.replace(",", "")) for value in notices[0])
+
+    assert total == returned, (
+        f"the notice says the tool returned {total:,} characters; it returned {returned:,}. The "
+        f"outer bound is describing its own expanded intermediate ({len(text):,} delivered) rather "
+        "than the tool's output"
+    )
+    assert 0 <= removed <= total, (
+        f"the notice claims {removed:,} of {total:,} characters removed, which leaves "
+        f"{total - removed:,} — a result cannot have less than nothing left"
+    )
+    # The understatement half. The model is sent `len(text)` characters of *expanded* text, so at
+    # most that many of the tool's own characters can still be visible — and on an expanding payload
+    # far fewer. Without this the clamp can be replaced by "charge the tool's total, count the kept
+    # span in escaped characters", which is the mirror-image falsehood.
+    assert total - removed <= len(text), (
+        f"the notice implies {total - removed:,} of the tool's characters survived while only "
+        f"{len(text):,} characters were delivered at all — the removal is counted in the expanded "
+        "units and the loss is understated by the expansion factor"
+    )
+
+
+@pytest.mark.parametrize("branch", sorted(_REBOUND_BRANCHES))
+def test_a_notice_total_that_tracks_the_tool_and_not_the_ceiling(branch: str) -> None:
+    """Two different results must not produce the same stated total.
+
+    **The tell the per-size assertions cannot give, because each of them passes or fails alone.**
+    Under the clamp the notice's total was `4 x limit` whenever escaping expanded past the stamped
+    original, so 100,000 and 150,000 both delivered `179,275 of 238,933` — a constant function of
+    the *deployment's ceiling* in a sentence whose subject is the tool's output. Equality across two
+    sizes is the shape of that defect and nothing else's.
+    """
+    served = _REBOUND_BRANCHES[branch]
+    expanding = _PAYLOAD_SHAPES["expanding"]
+
+    totals = []
+    for returned in (100_000, 150_000):
+        text = _delivered_through_the_rebound(expanding(returned), served=served)
+        found = re.findall(r"([\d,]+) of ([\d,]+) characters removed", text)
+        assert found, f"no cut notice for {returned:,} on the {branch} branch"
+        totals.append(int(found[0][1].replace(",", "")))
+
+    assert totals[0] != totals[1], (
+        f"a 100,000-character result and a 150,000-character one both state a total of "
+        f"{totals[0]:,}: the notice's total is a function of the ceiling rather than of the tool"
+    )
+
+
+@pytest.mark.parametrize("branch", sorted(_REBOUND_BRANCHES))
+def test_one_cut_counts_once_however_many_passes_bounded_it(branch: str) -> None:
+    """The truncation metric is about the result, not about the number of passes over it.
+
+    **The whole count-once half of that fix had nothing behind it.** `tests/
+    test_tool_result_size.py` asserted only `> before`, which both passes counting also satisfies —
+    so making the metric fire on every pass (`if not removed:` in place of `if not removed or not
+    count:`) was green over 50 tests while advancing
+    `chemclaw_tool_results_truncated_total` by **2.0** for one oversized connector result. An
+    operator counting cuts would read 2N for N results, and the second row carries the *understated*
+    figure, because the second pass is the one that no longer knows what the tool returned.
+
+    Driven through the real composition — the nested `bound_tool_results` plus the outer re-bound —
+    on both branches, because `_defanged` and `_framed` each pass `count=` and only one of them was
+    ever driven. Asserted as an exact delta rather than as a bound, for the reason above.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    served = _REBOUND_BRANCHES[branch]
+    payload = _PAYLOAD_SHAPES["expanding"](200_000)
+
+    before = METRICS.value("chemclaw_tool_results_truncated_total")
+    text = _delivered_through_the_rebound(payload, served=served)
+    after = METRICS.value("chemclaw_tool_results_truncated_total")
+
+    assert len(text) < len(payload), "the fixture no longer produces a cut, so nothing is counted"
+    assert after - before == 1.0, (
+        f"one cut on the {branch} branch advanced the truncation counter by {after - before}; two "
+        "bounding passes over one result must count it once, and the pass that counts has to be "
+        "the one that still knows what the tool returned"
+    )
+
+
+def _survived_per_the_notice(payload: str, *, served: bool) -> int:
+    """How many of the tool's own characters the delivered notice claims are still readable."""
+    text = _delivered_through_the_rebound(payload, served=served)
+    found = re.findall(r"([\d,]+) of ([\d,]+) characters removed", text)
+    assert found, f"no cut notice for a {len(payload):,}-character payload"
+    removed, total = (int(value.replace(",", "")) for value in found[0])
+    return total - removed
+
+
+@pytest.mark.parametrize("branch", sorted(_REBOUND_BRANCHES))
+@pytest.mark.parametrize("returned", [100_000, 150_000, 500_000])
+def test_an_expanding_payload_survives_less_of_itself_than_an_inert_one_of_the_same_size(
+    branch: str, returned: int
+) -> None:
+    """The paired control, which is the only assertion here that separates the two falsehoods.
+
+    **Both wrong shapes keep the arithmetic internally tidy, so no single-arm assertion catches
+    them.** The clamp that shipped overstated; removing it without converting the kept span back
+    into the tool's own units understates — and the understating form passes a
+    `returned - removed <= len(delivered)` bound, because the delivered text is *expanded*, so that
+    bound is loose by exactly the expansion factor the defect is about. Measured: the understating
+    mutation reports 59,700 of the tool's 59,900 characters still readable while the model was sent
+    59,700 characters of text in which every original `<` occupies five.
+
+    The control is the same size of payload that the escape leaves alone. Both arms get the same
+    delivered budget, so strictly less of an expanding result can survive it — measured 14,979
+    against 59,557 on the framed branch, a ratio that tracks the escape's own expansion. Under
+    either wrong shape the expanding arm reports as much as or more than the inert one, which is
+    the shape of the defect and of nothing else.
+
+    A ratio is not asserted: the escape's expansion factor is a property of `framing._defang` and
+    pinning it here would make this test fail on an unrelated improvement to the escape. The
+    *ordering* is what the arithmetic has to get right.
+    """
+    served = _REBOUND_BRANCHES[branch]
+
+    inert = _survived_per_the_notice(_PAYLOAD_SHAPES["inert"](returned), served=served)
+    expanded = _survived_per_the_notice(_PAYLOAD_SHAPES["expanding"](returned), served=served)
+
+    assert expanded < inert, (
+        f"on the {branch} branch a {returned:,}-character result whose escape expands it reports "
+        f"{expanded:,} characters still readable, against {inert:,} for one the escape leaves "
+        "alone. Both were sent the same budget, so the expanding one must have lost more: the "
+        "notice is counting the kept span in expanded characters against a total in the tool's own"
     )

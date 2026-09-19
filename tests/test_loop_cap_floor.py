@@ -115,21 +115,44 @@ def test_the_cap_itself_reads_the_floor_and_not_only_the_channel() -> None:
 
     The decorator wraps the function into a middleware, so the hook is reached as `.before_model`;
     the runtime is unused by it, which is why `None` is enough.
+
+    **Both watch states, because the one this originally drove is the one production never has.**
+    `api/runner.py:1016` calls `begin_loop_watch()` on **every** turn, so a live turn always reaches
+    this hook with a watch open — and with no watch open the two per-branch floors are the only
+    terms in the comparison, which hides what the third term does to them. Driven: the mutation
+    that has the watch *replace* the floors rather than join them (`turn = watch.calls if watch is
+    not None else own`) leaves 104 tests green, and at a cap of 25 the no-watch arm still answers
+    `{'jump_to': 'end', 'loop_capped': True}` while the same state with a watch answers
+    `{'model_calls': 26}` — a turn whose thread already holds the whole budget authorised one more
+    call, on every turn a deployment actually serves.
+
+    The watch starts at 0, which is what makes it a *floor* rather than the count: a fresh watch
+    must not lower a bound the thread has already established.
     """
     cap = settings.harness_max_loop_iterations
     resumed = {
         "model_calls": 0,  # the channel, reset by the new run
         "messages": [HumanMessage("this turn"), *[AIMessage(f"call {n}") for n in range(cap)]],
     }
-    decision = enforce_loop_cap.before_model(cast(Any, resumed), cast(Any, None))
-    assert decision == {"jump_to": "end", "loop_capped": True}, (
-        "a resumed turn that already spent the whole budget must stop, not start again at zero"
-    )
-
     fresh = {"model_calls": 0, "messages": [HumanMessage("this turn")]}
-    assert enforce_loop_cap.before_model(cast(Any, fresh), cast(Any, None)) == {"model_calls": 1}, (
-        "a turn with nothing behind it is unaffected — the floor must not cap a healthy turn"
-    )
+
+    for watching in (False, True):
+        token = begin_loop_watch() if watching else None
+        try:
+            how = "with a watch open" if watching else "with no watch"
+            decision = enforce_loop_cap.before_model(cast(Any, dict(resumed)), cast(Any, None))
+            assert decision == {"jump_to": "end", "loop_capped": True}, (
+                f"{how}, a resumed turn that already spent the whole budget did not stop: "
+                f"{decision}. It started again from the channel's zero"
+            )
+            allowed = enforce_loop_cap.before_model(cast(Any, dict(fresh)), cast(Any, None))
+            assert allowed == {"model_calls": 1}, (
+                f"{how}, a turn with nothing behind it was affected ({allowed}) — the floor must "
+                "not cap a healthy turn"
+            )
+        finally:
+            if token is not None:
+                end_loop_watch(token)
 
 
 def test_a_fan_out_shares_one_iteration_budget_rather_than_getting_one_each(

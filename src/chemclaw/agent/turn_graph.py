@@ -196,9 +196,16 @@ def _peer_surface(root: frozenset[str], peer: AgentProfile) -> frozenset[str]:
 #: opposite — `peer_profile.model_copy(update={"tool_names": surface})`, whose own comment argued
 #: that copying the peer meant "a field added to `AgentProfile` next year travels here without this
 #: line being remembered". It did travel, and that was the defect: `harness_enabled`,
-# : `harness_autonomy`, `mcp_server_names` and `skill_names` all reached a peer unbounded by the
-# root.
-#: `tests/test_turn_graph.py` holds this set against the model's fields in both directions.
+#: `harness_autonomy`, `mcp_server_names` and `skill_names` all reached a peer unbounded by the
+#: root.
+#:
+#: **Membership alone is not the property, and holding only that is what let this line be false for
+#: a wave.** `tests/test_turn_graph.py` holds the set against the model's fields in both directions
+#: — every name here is a real field, and every field not here is the root's on the built profile —
+#: and beside it holds the consequence, because adding two *authority-bearing* names to this set
+#: satisfies the membership test by construction: `test_a_peer_can_neither_turn_the_plan_gate_off_
+#: nor_on` drives `gate_applies` over every combination of the two harness fields' declared
+#: values.
 PEER_OWNED_FIELDS: frozenset[str] = frozenset({"name", "instructions", "effort", "model_route"})
 
 

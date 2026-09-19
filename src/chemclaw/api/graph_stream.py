@@ -69,10 +69,17 @@ from chemclaw.core.turn_signals import (
 
 logger = logging.getLogger(__name__)
 
-# The three modes, as a list. `astream` tests `isinstance(stream_mode, list)` literally, so a tuple
+# The four modes, as a list. `astream` tests `isinstance(stream_mode, list)` literally, so a tuple
 # here silently changes the yielded tuple's arity — a bug that would look like a stream shape
 # mismatch rather than a type mistake.
-_MODES = ["messages", "updates", "custom"]
+#
+# **`values` is here for the carry and for nothing else**, and it is the only route to the number:
+# the carried channels are `UntrackedValue` subclasses, so `aget_state(config).values` does not
+# carry them at all (driven — `model_calls` reads `ABSENT` off a snapshot of a run that returned 3),
+# and no arithmetic over `updates` can reconstruct them (see `_carry_forward`). Measured cost on a
+# 30-superstep turn: +4 to +12 ms, flat in thread length (same delta at 10, 60 and 400 messages in
+# the thread), because the payload holds the channels' own objects rather than copies of them.
+_MODES = ["messages", "updates", "custom", "values"]
 
 
 def root_depth(graph: Any) -> int:
@@ -256,8 +263,6 @@ async def graph_events(
             # is talking to and sits one frame down, while a `task` helper spawned inside that peer
             # sits two. See `root_depth`.
             below_root = len(namespace) > depth
-            if carry is not None:
-                _carry_forward(carry, payload)
             async for event in _from_update(
                 payload,
                 "subagent" if below_root else "",
@@ -268,6 +273,14 @@ async def graph_events(
                 emit_plan=not below_root,
             ):
                 yield event
+        elif mode == "values":
+            # **The outermost graph's own channels, which is where the carry comes from.** The
+            # namespace test is `not namespace` rather than `> depth`: a peer's or a helper's state
+            # has already been folded into the enclosing graph's channels by the reducer that owns
+            # them (`ChemclawState.TurnTotal`), so the shallowest frame is the only one holding the
+            # turn's total and every deeper frame holds a part of it. Nothing else reads this mode.
+            if carry is not None and not namespace:
+                _carry_forward(carry, payload)
 
 
 # The channels a mid-turn resume has to continue from rather than restart, and nothing else. Named
@@ -284,41 +297,47 @@ _CARRIED_CHANNELS = ("model_calls", "billed_tokens", "handoffs")
 
 
 def _carry_forward(carry: dict[str, Any], payload: Any) -> None:
-    """Record this superstep's per-turn counters, so a resume continues them instead of restarting.
+    """Copy the turn's per-turn counters off the graph's own channels, so a resume continues them.
 
-    **This folds the superstep the way `TurnTotal` does, and taking the highest value did not.**
-    One `updates` payload is a whole superstep — node name onto that node's own update — and every
-    channel here is a `TurnTotal`, whose `update` sums `max(value - base, 0)` over the writers with
-    `base` the *pre-superstep* value. A `max` over the same writers therefore keeps one branch's
-    advance and discards the rest.
+    **Read from the channel, because nothing derived from the `updates` stream can reconstruct
+    it.** Two shapes were tried here and both were measured wrong, in the same direction:
 
-    On an ordinary turn the two agree, because there is one writer per superstep; on a fan-out they
-    do not. Driven at a cap of 4 over 8 helpers: the turn spent 25 calls and 25,000 tokens, and the
-    carry a resume would have been seeded with was `{"model_calls": 4, "billed_tokens": 4000}` — 21
-    calls and 21,000 tokens of fresh allowance, on a turn that had already exhausted its budget.
-    That is precisely what the previous docstring said this must never do ("a cap may bind one call
-    early; it must never bind late"); the `max` is the right guard against a *late-arriving smaller*
-    update and the wrong aggregation against an additive reducer, and both properties are kept here
-    by summing the advances rather than the values.
+    - `max` over the values in one payload, and
+    - the `TurnTotal` fold (`base + Σ max(value - base, 0)`) over the same values.
 
-    `base` is the carry as it stood before this superstep, which is the same number `TurnTotal`
-    sees,
-    so a writer that reports less than the turn has already counted contributes 0 rather than
-    walking the count backwards.
+    Both assume one `updates` payload is a whole superstep — node name onto that node's own
+    update — and in this LangGraph version it is not: with `subgraphs=True` the stream yields **one
+    node per payload**. Driven on four parallel nodes writing one `TurnTotal` through this module's
+    own call shape, the five payloads arrive as `{'start': …}`, `{'a': …}`, `{'b': …}`, `{'c': …}`,
+    `{'d': …}`; the channel's own total is **5** and *both* shapes answered **2**, because `base`
+    has already advanced past every writer after the first, so each later one contributes
+    `max(value - base, 0) == 0`. The two were therefore behaviourally indistinguishable for exactly
+    the fan-out the fold was written for, and `subgraphs=True` makes the real `task` case worse
+    rather than better — every helper gets its own namespace and so its own payload.
+
+    The scenario that makes the undercount matter: a turn spends 25 calls across 8 helpers, the
+    request dies, and `api/runner._resume_on_job_results` reseeds the graph from this dict — a carry
+    of 2 is 23 calls of fresh allowance on a turn that had already exhausted its budget.
+
+    So the number is taken from the graph's `values` stream instead, which is the channel's own
+    value after the superstep and therefore cannot disagree with the reducer. `aget_state` is not
+    an option and was checked: every carried channel is an `UntrackedValue` subclass, so a snapshot
+    of a finished run reads `ABSENT` for all of them (driven against a run that returned 3).
+
+    `max` against what the carry already holds for the same reason `TurnTotal.update` clamps its
+    own advances: this count is what a cap is compared against, and no payload may walk it back.
+
+    Args:
+        carry: The turn's carry, updated in place.
+        payload: One `values` payload from the outermost namespace — the whole state, keyed by
+            channel.
     """
     if not isinstance(payload, dict):
         return
     for channel in _CARRIED_CHANNELS:
-        base = int(carry.get(channel, 0))
-        advanced = 0
-        for update in payload.values():
-            if not isinstance(update, dict):
-                continue
-            value = update.get(channel)
-            if isinstance(value, int) and not isinstance(value, bool):
-                advanced += max(value - base, 0)
-        if advanced:
-            carry[channel] = base + advanced
+        value = payload.get(channel)
+        if isinstance(value, int) and not isinstance(value, bool):
+            carry[channel] = max(value, int(carry.get(channel, 0)))
 
 
 def _custom_event(payload: Any, on_signal: Any) -> Event | None:

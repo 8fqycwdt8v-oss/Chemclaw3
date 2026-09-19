@@ -140,9 +140,18 @@ async def review_commitments(
             # `defanged_payload` rather than five more `defang(...)` entries, for the reason
             # `protocol_design_tools._readable` uses it: a field added to that model next year is
             # covered without this line being remembered, and a `Literal` or a datetime has no
-            # delimiter to spell so escaping it costs nothing. It was the one field-level omission
-            # left after this wave closed the identical gap in `graph_tools`, `pending_tools`,
-            # `memory_tools`, `research_tools` and `durable_tools`.
+            # delimiter to spell so escaping it costs nothing.
+            #
+            # **This was claimed to be "the one field-level omission left" after the same wave
+            # closed the gap in `graph_tools`, `pending_tools`, `memory_tools`, `research_tools` and
+            # `durable_tools`, and two of those five had not been closed.** `pending_tools` still
+            # escaped two fields of a `PendingRequest` carrying **no `Literal` at all** — weaker
+            # than the `Commitment` case this comment argues from — and `memory_tools` escaped two
+            # fields of an `Observation` on the false ground that its `scope` and
+            # `evidence_note_ids` are "built from validated note ids". Driven, eight fields and
+            # three fields reached the model unescaped. Both are closed now, and
+            # `tests/test_tool_framing.py::test_every_row_projecting_tool_escapes_its_whole_row`
+            # is what holds all three together rather than a sentence counting them.
             defanged_payload(row.model_dump(mode="json"))
             for row in page.commitments
         ],

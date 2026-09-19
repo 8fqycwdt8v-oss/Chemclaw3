@@ -239,8 +239,34 @@ def test_a_helper_holds_no_handoff_tool() -> None:
 # --------------------------------------------------------------------------------------------
 
 
+#: A connector tool no rostered peer's profile names, so the mesh every test here compiles is one
+#: where the connector half of the bound is *load-bearing*.
+#:
+#: **`connectors=[]` is why the root-bound invariant test was green over a live leak.** With no open
+#: connector tools, `_peer_connectors` has nothing to filter and `connectors=connectors` — dropping
+#: the narrowing entirely — is indistinguishable from the shipped line. Driven with the shipped
+#: `safety` profile and one open tool, the unfiltered form binds `similar_reactions` onto a peer
+#: whose profile names it nowhere.
+MESH_CONNECTOR = "similar_reactions"
+
+
+def _connector_tool(name: str) -> Any:
+    """One already-open connector tool, of the shape `build_turn_graph` takes on `connectors=`."""
+    from langchain_core.tools import StructuredTool
+
+    return StructuredTool.from_function(
+        func=lambda: "ok", name=name, description=f"The {name} connector tool."
+    )
+
+
 def _mesh(monkeypatch: Any, scripts: dict[str, list[Any]]) -> Any:
-    """A compiled turn graph whose peers replay the given scripts, keyed by peer name."""
+    """A compiled turn graph whose peers replay the given scripts, keyed by peer name.
+
+    **The peers carry harness fields and the mesh is built with an open connector tool**, because
+    both halves of `_peer_profile`'s bound are invisible without them: a peer profile that sets
+    neither harness field cannot show the gate moving, and an empty `connectors=` cannot show a
+    connector reaching a peer that does not name it.
+    """
     from chemclaw.agent import profiles as profiles_module
 
     # Registration is process-global and `register_profile` refuses a duplicate, so this is
@@ -252,6 +278,11 @@ def _mesh(monkeypatch: Any, scripts: dict[str, list[Any]]) -> Any:
                     name=name,
                     description=f"The {name}.",
                     tool_names=frozenset({"find_notes", "expand_note"}),
+                    # The value a peer must not be able to impose on the turn: the root below is
+                    # whatever `get_profile(None)` resolves to, and `gate_applies` must read the
+                    # root's answer for every peer regardless of this.
+                    harness_enabled=False,
+                    harness_autonomy="execute",
                 )
             )
     monkeypatch.setattr(
@@ -272,7 +303,9 @@ def _mesh(monkeypatch: Any, scripts: dict[str, list[Any]]) -> Any:
 
     monkeypatch.setattr("chemclaw.agent.turn_graph.build_langgraph_agent", _spy)
     graph = build_turn_graph(
-        ScriptedChatModel(["unused"]), audit_sink=NullAuditSink(), connectors=[]
+        ScriptedChatModel(["unused"]),
+        audit_sink=NullAuditSink(),
+        connectors=[_connector_tool(MESH_CONNECTOR)],
     )
     assert graph is not None, "the roster should have produced a mesh"
     return graph
@@ -319,6 +352,22 @@ def test_a_turn_hands_twice_and_the_thread_stays_well_formed(monkeypatch: Any) -
     assert answer_text(result) == "No genotoxic alerts on that scaffold."
 
 
+def _structural_tools() -> frozenset[str]:
+    """What a compiled agent binds regardless of what its profile names — the middleware floor.
+
+    Compiled rather than written down, so `SubAgentMiddleware`, `TodoListMiddleware` and the
+    scratchpad verbs stay out of every surface comparison in this file without any of them being
+    named here. A profile naming *nothing* is the derivation: anything still bound is structural.
+    """
+    floor = build_langgraph_agent(
+        ScriptedChatModel(["unused"]),
+        audit_sink=NullAuditSink(),
+        connectors=[],
+        profile=AgentProfile(name="structural-floor", description="x", tool_names=frozenset()),
+    )
+    return frozenset(floor.nodes["tools"].bound.tools_by_name)
+
+
 def test_the_second_hop_is_bounded_by_the_root_not_by_the_first(monkeypatch: Any) -> None:
     """A chain re-widening after a narrowing is the shape a mesh reaches and a tree cannot.
 
@@ -335,6 +384,8 @@ def test_the_second_hop_is_bounded_by_the_root_not_by_the_first(monkeypatch: Any
         },
     )
 
+    from chemclaw.agent import profiles as profiles_module
+
     surfaces = {
         name: set(node.bound.nodes["tools"].bound.tools_by_name)
         for name, node in graph.nodes.items()
@@ -348,6 +399,31 @@ def test_the_second_hop_is_bounded_by_the_root_not_by_the_first(monkeypatch: Any
             f"peer {name!r} binds {sorted(capability - root)}, which the root does not hold — "
             "the root-bound invariant is broken and a handoff has become a widening"
         )
+        # **`⊆ root` alone cannot see a connector leak, and that is why one shipped.** The root
+        # binds every open connector tool by definition, so a peer that took the whole
+        # `connectors=` list untouched is still a subset of the root and still holds a tool its own
+        # profile names nowhere. The named bound is the one `_peer_surface` promises, and it is the
+        # one a *chemist* reads the roster entry as: `root ∩ what this profile names`.
+        if name == "default":
+            continue
+        named = profiles_module.get_profile(name).tool_names or frozenset()
+        # The middleware floor is subtracted rather than listed: `write_todos`, `task` and the
+        # scratchpad verbs are attached by middleware whatever a profile names, so they are not part
+        # of the surface `tool_names` decides and cannot be evidence of a leak. Derived by compiling
+        # an agent whose profile names nothing and which holds no connectors — everything it binds
+        # is structural by construction, so a middleware added next year carries the set instead of
+        # reding this.
+        capability -= _structural_tools()
+        assert capability <= (root & named), (
+            f"peer {name!r} binds {sorted(capability - (root & named))}, which its own profile "
+            "names nowhere — its name promises something specific and it can reach past it. Both "
+            "halves of the surface have to be narrowed: `_peer_surface` for the in-process tools "
+            "and `_peer_connectors` for the ones already open on this turn"
+        )
+    assert MESH_CONNECTOR in root, (
+        f"the fixture no longer opens {MESH_CONNECTOR!r} on the turn, so the connector half of the "
+        "bound is untested and dropping `_peer_connectors` is invisible again"
+    )
 
 
 # --------------------------------------------------------------------------------------------
@@ -537,6 +613,11 @@ def test_the_root_peer_binds_what_it_would_have_bound_alone(monkeypatch: Any) ->
     So this compares the two compiled surfaces directly rather than trusting that argument. The
     handoff tools are the only permitted difference, and they are subtracted by name: they are what
     the mesh *adds*, and everything else must be untouched.
+
+    **Both sides are handed the same open connector tools**, which is the only comparison that means
+    anything: `_mesh` now compiles with one, and a solo agent built with none would differ by that
+    tool whatever the root peer's narrowing did — turning this assertion into a statement about the
+    fixture rather than about the mesh.
     """
     graph = _mesh(
         monkeypatch,
@@ -545,7 +626,7 @@ def test_the_root_peer_binds_what_it_would_have_bound_alone(monkeypatch: Any) ->
     alone = build_langgraph_agent(
         ScriptedChatModel(["done"]),
         audit_sink=NullAuditSink(),
-        connectors=[],
+        connectors=[_connector_tool(MESH_CONNECTOR)],
     )
 
     in_mesh = {
@@ -559,3 +640,239 @@ def test_the_root_peer_binds_what_it_would_have_bound_alone(monkeypatch: Any) ->
         "the root agent's own surface moved when the mesh was turned on — added "
         f"{sorted(in_mesh - alone_binds)}, lost {sorted(alone_binds - in_mesh)}"
     )
+
+
+# --------------------------------------------------------------------------------------------
+# `PEER_OWNED_FIELDS`: what a peer brings with it, held in both directions and by consequence
+# --------------------------------------------------------------------------------------------
+
+
+def test_every_profile_field_a_peer_does_not_own_comes_from_the_root() -> None:
+    """The set's two directions, over the model's own field list rather than a copy of it.
+
+    `turn_graph.py` claimed *"`tests/test_turn_graph.py` holds this set against the model's fields
+    in both directions"* while `PEER_OWNED_FIELDS` appeared in no test in the tree — `grep -rl
+    PEER_OWNED tests/` answered nothing. This is that claim.
+
+    - **Forwards**: every name in the set is a real `AgentProfile` field. A typo is a no-op that
+      reads as an exemption, so the field it was meant to name is silently root-derived and the line
+      documents a decision nobody took.
+    - **Backwards**: every field *not* in the set is the root's on the built profile — either taken
+      outright, or narrowed to no more than the root holds for the three allow-lists. Driven with a
+      peer whose every field differs from the root's and whose allow-lists are strictly wider, which
+      is the only fixture that can tell a root-derived field from a peer-derived one.
+
+    A field added to `AgentProfile` next year lands in the backwards half with nothing to change
+    here, which is the "derived-by-exclusion fails safe" claim the set is built on — asserted rather
+    than argued.
+    """
+    from chemclaw.agent.turn_graph import PEER_OWNED_FIELDS, _peer_profile
+
+    fields = set(AgentProfile.model_fields)
+    assert PEER_OWNED_FIELDS <= fields, (
+        f"{sorted(PEER_OWNED_FIELDS - fields)} is not an `AgentProfile` field, so `_peer_profile` "
+        "copies nothing for it and the root's value wins while this set says the peer's does"
+    )
+
+    root = AgentProfile(
+        name="root",
+        description="the root",
+        instructions="root instructions",
+        tool_names=frozenset({"find_notes", "expand_note"}),
+        mcp_server_names=frozenset({"molfp"}),
+        skill_names=frozenset({"triage"}),
+        harness_enabled=True,
+        harness_autonomy="plan_only",
+        effort="low",
+        model_route="root-route",
+    )
+    peer = AgentProfile(
+        name="peer",
+        description="the peer",
+        instructions="peer instructions",
+        # Strictly wider than the root on all three allow-lists, which is the whole hazard.
+        tool_names=frozenset({"find_notes", "expand_note", "record_note"}),
+        mcp_server_names=frozenset({"molfp", "rxnfp"}),
+        skill_names=frozenset({"triage", "hazards"}),
+        harness_enabled=False,
+        harness_autonomy="execute",
+        effort="high",
+        model_route="peer-route",
+    )
+    surface = _peer_surface(root.tool_names or frozenset(), peer)
+    built = _peer_profile(root, peer, surface)
+    narrowed = {"tool_names", "mcp_server_names", "skill_names"}
+
+    for field in sorted(fields):
+        got = getattr(built, field)
+        if field in PEER_OWNED_FIELDS:
+            assert got == getattr(peer, field), (
+                f"{field!r} is declared peer-owned and the built profile does not carry the peer's "
+                f"value: {got!r} != {getattr(peer, field)!r}"
+            )
+        elif field in narrowed:
+            assert got is not None and got <= (getattr(root, field) or frozenset()), (
+                f"{field!r} reached the peer wider than the root holds it: {sorted(got or ())} "
+                f"against the root's {sorted(getattr(root, field) or ())} — a handoff has become a "
+                "widening on a dimension `tool_names` does not cover"
+            )
+        else:
+            assert got == getattr(root, field), (
+                f"{field!r} travelled from the rostered profile unbounded ({got!r}, where the root "
+                f"holds {getattr(root, field)!r}) and is not declared in `PEER_OWNED_FIELDS`. "
+                "If it carries no authority, add it there and say so; if it does, it must come "
+                "from the root"
+            )
+
+
+def test_a_peer_can_neither_turn_the_plan_gate_off_nor_on() -> None:
+    """The consequence, because membership alone is satisfied by adding an authority-bearing name.
+
+    **This is the half the membership test above cannot hold.** Adding `harness_enabled` and
+    `harness_autonomy` to `PEER_OWNED_FIELDS` makes the built profile carry the peer's values, which
+    is exactly what the forwards direction then asserts — so the set's own test goes green over the
+    defect. Driven: with the two names added, `gate_applies` for an ungated peer under a gated root
+    goes `True → False`, and the plan gate is not attached to that peer at all.
+
+    Both directions are the same defect mirrored and both are reachable with shipped files
+    (`data/profiles/computation.yaml` pins `harness_enabled: true`):
+
+    - an **ungated peer under a gated root** keeps the root's acting tools with no plan gate;
+    - a **gated peer under an ungated root** makes a chemist approve a plan `api/runner` then never
+      spends, because the runner computes `plan_gated` from the root — and that approval stands for
+      every later turn on the session.
+
+    The combinations are taken off the two fields' declared types rather than written out, so a
+    third autonomy mode is covered the day it is declared.
+    """
+    from typing import Literal, get_args, get_type_hints
+
+    from chemclaw.agent.plan_gate import gate_applies
+    from chemclaw.agent.turn_graph import _peer_profile
+
+    hints = get_type_hints(AgentProfile)
+    autonomies: tuple[Any, ...] = tuple(
+        arg for arg in get_args(hints["harness_autonomy"]) if isinstance(arg, str)
+    ) or get_args(Literal["plan_only", "execute"])
+    assert autonomies, "no declared autonomy values, so this test covers nothing"
+
+    tools = frozenset({"find_notes"})
+    for root_enabled in (True, False):
+        for root_autonomy in autonomies:
+            root = AgentProfile(
+                name="root",
+                description="x",
+                tool_names=tools,
+                harness_enabled=root_enabled,
+                harness_autonomy=root_autonomy,
+            )
+            for peer_enabled in (True, False):
+                for peer_autonomy in autonomies:
+                    peer = AgentProfile(
+                        name="peer",
+                        description="x",
+                        tool_names=tools,
+                        harness_enabled=peer_enabled,
+                        harness_autonomy=peer_autonomy,
+                    )
+                    built = _peer_profile(root, peer, _peer_surface(tools, peer))
+                    assert gate_applies(built) == gate_applies(root), (
+                        f"a peer at (enabled={peer_enabled}, autonomy={peer_autonomy!r}) moved the "
+                        f"plan gate from {gate_applies(root)} to {gate_applies(built)} under a "
+                        f"root at (enabled={root_enabled}, autonomy={root_autonomy!r}) — a handoff "
+                        "has redistributed the turn's authority by extending it"
+                    )
+
+
+# --------------------------------------------------------------------------------------------
+# The minted tool name: what it may carry, and what a collision in it does
+# --------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "stem",
+    [
+        "property-lookup",
+        "property lookup",
+        "property.lookup",
+        "property/lookup",
+        "property:lookup",
+        "property+lookup",
+        "property(lookup)",
+    ],
+)
+def test_a_minted_handoff_tool_name_carries_only_what_a_tool_name_may_carry(stem: str) -> None:
+    """A profile name reaches a provider inside a tool name, so the charset is the constraint.
+
+    `handoff_tool_name` folded `-` and nothing else, argued from the one separator this repository's
+    own profile files happen to use. A profile is a **file stem** and `agent/profile_discovery.py`
+    validates no charset on it, so every spelling here is a legal deployment file: `data/profiles/
+    property lookup.yaml` minted `transfer_to_property lookup` and `property.lookup` minted
+    `transfer_to_property.lookup`, both invalid by the fold's own argument and both refused by
+    nothing on this side — the provider refuses them, on the request, which reads as a model failure
+    on a turn nobody touched.
+
+    The pattern is written out here rather than imported from `agent/handoff.py`, for
+    `tests/test_identity_contract.py`'s reason one repository over: a test that imports the constant
+    it is checking agrees with it however wrong it is.
+    """
+    import re
+
+    name = handoff_tool_name(stem)
+
+    assert re.fullmatch(r"[0-9A-Za-z_]{1,64}", name), (
+        f"{stem!r} mints {name!r}, which a provider rejects; a profile name is a file stem and "
+        "nothing validates its charset, so the fold is what has to"
+    )
+    assert name.startswith(HANDOFF_PREFIX), (
+        f"{name!r} lost the prefix three modules compare against"
+    )
+
+
+def test_two_profiles_that_mint_one_tool_name_are_refused_at_build_time() -> None:
+    """The collision the profile-name check cannot see, refused before anything is bound.
+
+    `property-lookup` and `property_lookup` are two legal profile names — both are file stems, and
+    both are distinct to the duplicate-*name* check one fold earlier — that mint one tool. Driven
+    with the refusal removed: `handoff_tools` built without complaint, `tools_by_name` kept
+    whichever came last, and the peer that lost became a node no tool can reach while the list sent
+    to the provider carried two functions of one name.
+
+    Neither failure is an authority widening — both peers are root-bounded — and that is precisely
+    why nothing else in this file would catch it: every surface assertion here passes over a mesh
+    with an unreachable node in it.
+
+    **Widened by the fold, not narrowed**, so the third case is asserted too: now that every
+    character outside the tool-name charset folds to `_`, `property lookup` collides with both of
+    them, and that is the fold failing *closed*.
+    """
+    from chemclaw.core.errors import ChemclawError
+
+    for pair in (
+        ("property-lookup", "property_lookup"),
+        ("property lookup", "property_lookup"),
+        ("property.lookup", "property-lookup"),
+    ):
+        peers = [(_profile(name, {"find_notes"}), ["find_notes"]) for name in pair]
+        minted = {handoff_tool_name(name) for name in pair}
+        assert len(minted) == 1, (
+            f"this test's own fixture broke: {pair} no longer mint one name, they mint {minted}"
+        )
+        with pytest.raises(ChemclawError, match="mints one handoff tool"):
+            handoff_tools(peers, menu_tools=3, max_handoffs=2, current="somebody-else")
+
+
+def test_two_profiles_that_mint_two_names_are_not_refused() -> None:
+    """The other direction, because a build that refuses every roster is not a check.
+
+    Without this, the refusal above is satisfied by raising unconditionally — which would take the
+    whole feature out on every deployment that has more than one peer.
+    """
+    peers = [(_profile(name, {"find_notes"}), ["find_notes"]) for name in ("evidence", "safety")]
+
+    tools = handoff_tools(peers, menu_tools=3, max_handoffs=2, current="somebody-else")
+
+    assert {tool.name for tool in tools} == {
+        handoff_tool_name("evidence"),
+        handoff_tool_name("safety"),
+    }

@@ -16,6 +16,7 @@ from chemclaw.agent.behaviour_proposals import (
     content_hash,
     default_proposal_store,
 )
+from chemclaw.agent.langgraph_agent import shipped_skill_names
 from chemclaw.agent.proposal_tools import propose_skill
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
@@ -31,6 +32,14 @@ def _queue(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(settings, "session_store", "memory")
     monkeypatch.setattr(behaviour_proposals, "_IN_MEMORY", InMemoryProposalStore())
+
+
+#: One name this deployment's reviewed trees already occupy, for the refusal table below.
+#:
+#: Read off `shipped_skill_names()` rather than written out, and at module scope because a
+#: `parametrize` decorator is evaluated at collection: a literal would stop being a shipped name the
+#: next time `skills/` is renamed, and the row would then pass for the wrong reason.
+_A_SHIPPED_NAME = sorted(shipped_skill_names())[0]
 
 
 def _call(**kwargs: str) -> str:
@@ -225,6 +234,26 @@ def test_the_model_is_told_which_of_three_things_happened() -> None:
         (
             {"name": "a/b", "body": "---\nname: a/b\ndescription: d\n---\n\nb\n", "rationale": "r"},
             "a '/' is the traversal shape",
+        ),
+        # **The arm the fix was about, and the table had no row for it.** `_validated` used to
+        # hand-copy three of `validated_skill`'s four checks and omit the fourth — that the name is
+        # not one the deployment already ships — and the commit's only test change was an import
+        # allowlist. Swallowing the `conflict=True` refusal leaves 34 tests green (48 with
+        # `test_api_proposals` and `test_local_skills`) and reproduces the defect verbatim: shipped
+        # code refuses `'protocol-generation' is the name of a skill this deployment already ships`,
+        # the mutation answers "proposed … waiting for this chemist to accept or decline" while
+        # `POST /proposals/skill/protocol-generation` answers **409**, so the proposal cannot be
+        # accepted and the only exit is declining one they wanted.
+        #
+        # The name is taken from `shipped_skill_names()` rather than written down, so a rename in
+        # `skills/` carries this row instead of emptying it.
+        (
+            {
+                "name": _A_SHIPPED_NAME,
+                "body": f"---\nname: {_A_SHIPPED_NAME}\ndescription: d\n---\n\nb\n",
+                "rationale": "r",
+            },
+            "the name is one this deployment already ships",
         ),
     ],
 )
