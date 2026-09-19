@@ -512,3 +512,65 @@ def test_a_wavenumber_list_that_does_not_match_the_intensities_is_refused() -> N
     """Two lists the server says are parallel, that are not, cannot be paired at all."""
     with pytest.raises(ValueError, match="wavenumbers for"):
         thermo._align_intensities(np.asarray(_XTB_ROWS), 3, _co2_at(0.0), _XTB_WAVENUMBERS[:-1])
+
+
+def test_an_unpairable_spectrum_costs_the_bands_and_not_the_free_energy() -> None:
+    """The alignment refusal was raised out of the whole calculation, and it is about one field.
+
+    Not one term of the partition function reads an IR intensity: they feed the spectrum and nothing
+    else. But `_align_intensities` raised into `thermochemistry_from_hessian`, so a geometry inside
+    the ~2.3-degree window where the two sides disagree about linearity — `_LINEAR_INERTIA_RATIO`
+    calls CO2 linear to about 177.7 degrees while xtb says non-linear at 179.0 — returned **no** G,
+    H, S or `is_minimum` at all. Driven on this payload before the fix: `ValueError`, and every one
+    of those numbers was correct.
+
+    So the refusal moved to the field it is about. The message is unchanged and still reaches a
+    reader; what changed is that it no longer discards the rest of the result.
+    """
+    structure, recorded = _recorded("carbon_dioxide")
+    hessian = recorded.model_copy(
+        update={"ir_intensities": _XTB_ROWS, "ir_wavenumbers_cm": _XTB_WAVENUMBERS}
+    )
+    bent = _co2_at(0.02)
+
+    result = thermochemistry_from_hessian(ThermoSettings(symmetry_number=2), bent, hessian)
+
+    assert result.spectrum_unavailable is not None
+    assert "would shift every band" in result.spectrum_unavailable
+    assert [mode.ir_intensity_km_per_mol for mode in result.modes] == [None] * len(result.modes), (
+        "an unknown intensity is `None`, not 0.00 — a spectrum of zero-intensity bands is the "
+        "silent failure this module refuses for a Hessian with no intensity data at all"
+    )
+    assert result.entropy_cal_per_mol_k > 0.0
+    assert result.gibbs_free_energy_hartree < result.enthalpy_hartree
+    assert result.is_minimum is True
+    assert result.lowest_wavenumbers_cm, "the wavenumbers were never in doubt"
+    # Truncation must still work with nothing to rank by, rather than raising on a `None`.
+    assert len(result.strongest_bands(2)) <= len(result.modes)
+
+
+def test_a_pairable_spectrum_still_reports_its_intensities_and_no_reason() -> None:
+    """The control for the test above: the field must stay `None` when the pairing succeeds.
+
+    Otherwise "the spectrum is unavailable" would be indistinguishable from "the spectrum is fine",
+    which is the shape of the defect being fixed rather than the fix.
+    """
+    structure, recorded = _recorded("carbon_dioxide")
+    # The agreeing payload, built from this projection's *own* wavenumbers rather than transcribed:
+    # `_XTB_WAVENUMBERS` was recorded at 179 degrees, where xtb projects out six of nine, and the
+    # whole point of the test above is that this side finds four. Deriving the list here is what
+    # makes "the two sides agree" the premise rather than a number that could silently stop holding.
+    bands = thermochemistry_from_hessian(ThermoSettings(symmetry_number=2), structure, recorded)
+    external = 9 - len(bands.modes)
+    wavenumbers = [0.0] * external + [mode.wavenumber_cm for mode in bands.modes]
+    marks = [0.0] * external + [11.0, 22.0, 33.0, 44.0][: len(bands.modes)]
+    hessian = recorded.model_copy(
+        update={"ir_intensities": marks, "ir_wavenumbers_cm": wavenumbers}
+    )
+
+    result = thermochemistry_from_hessian(ThermoSettings(symmetry_number=2), structure, hessian)
+
+    assert result.spectrum_unavailable is None
+    assert [mode.ir_intensity_km_per_mol for mode in result.modes] == marks[external:], (
+        "the real intensities land on the real modes, unshifted"
+    )

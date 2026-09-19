@@ -523,6 +523,45 @@ topic).
       revisiting if psycopg gains a cancel that respects a deadline. Anchors:
       `api/routes/ops.py::_probe_database`, `core/db.py::connection`.
 
+- [ ] **A batched flush books the whole batch as notes recorded when any one of them committed** —
+  [S]. `kg/git_writer.py::BatchingNoteWriter.flush` returns
+  `notes=len(batch) if outcome.written else 0`, and `outcome.written` is `notes > 0` on the *inner*
+  write, which is one commit however many files it carried. Driven against a local bare remote: a
+  batch of four where three notes were byte-identical to what the tree already held and one was new
+  committed once and reported `notes=4`, so `chemclaw_notes_recorded_total` moved by four for one
+  note reaching the graph — the same class of error
+  `D-2026-09-14-a-counter-of-commits-is-not-a-counter-of-notes` fixed in the other direction, now
+  overcounting instead of undercounting. Backfill-only (`cli/backfill_corpus`); the conversational
+  path is one note per write and is exact.
+
+  **Not fixed as a defect because the honest number is not available at that layer and making it
+  available is a contract change.** `WriteOutcome.notes` means "notes that reached the graph", and
+  the inner writer knows only "something was committed": it has the bytes each target held (`prior`)
+  and could count the files that changed, but that number counts *dependency* notes and retirement
+  rewrites too, which is a third meaning of the field beside the two D-2026-09-14 already weighs. The
+  fix is either `WriteOutcome` carrying the paths it wrote so the batcher can count its own subjects,
+  or a decision that the counter counts note *files* — both of which are ADR-sized rather than a
+  commit and a test. Anchors: `kg/git_writer.py::BatchingNoteWriter.flush`,
+  `kg/record.py::WriteOutcome`, `D-2026-09-14-a-counter-of-commits-is-not-a-counter-of-notes`.
+
+- [ ] **`retrieval_source_weights` has no upper bound, and the mix it produces is not a property of
+  the weight alone** — [S]. `core/config/retrieval.py`'s validator refuses non-finite and
+  non-positive weights and stops there. Driven over five legs at `retrieval_fusion_k=60`, counting
+  the retriever of each kept chunk: uniform weighting keeps `graph 2 / lexical 2 / share 2 /
+  vector 1 / warehouse 1` out of eight, `{"graph": 10}` keeps `graph 8` and nothing else, and at a
+  thirty-chunk cut it keeps `graph 22` against 2 from each other leg. That is the starvation
+  `D-2026-08-01-a-cap-that-starves-a-source` is about, reachable through a knob rather than a cap.
+
+  **Not reachable at the shipped numbers, which is why it is a row.** `retrieval_top_k` is 8 and
+  `gather_evidence_max_chunks` is 40, so five legs offer at most 40 candidates into a cut of 40 and
+  the merge cap never binds — no weight can starve anything until a deployment raises the leg count
+  or lowers the cap. And there is no ceiling to add: the validator's own docstring argues the point
+  ("a weight has no upper bound to clamp toward"), and measured, the damage is a function of
+  `weight x legs x cut` rather than of the weight, so a bound belongs on the surviving *mix* — a
+  per-source floor in the merge — not on the number a deployment writes down. Anchors:
+  `core/config/retrieval.py::_weights_are_positive`, `retrieval/hybrid.py::reciprocal_rank_fusion`,
+  `core/config/retrieval.py::gather_evidence_max_chunks`.
+
 ## 4 — Operating it
 
 - [ ] **The turn-wide model-call floor only binds where a loop watch is open, and two paths open

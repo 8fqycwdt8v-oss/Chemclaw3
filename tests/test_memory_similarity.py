@@ -20,8 +20,11 @@ many pairs share at least one bit — are properties of the chemistry, not of th
 at 50% density would exercise a regime this function never sees.
 """
 
+import tracemalloc
+
 import pytest
 
+from chemclaw.core.config import settings
 from chemclaw.memory.similarity import cluster_by_similarity
 from chemclaw.science.fingerprints.rxnfp.fingerprint import drfp_bitstring
 from chemclaw.science.fingerprints.store import FingerprintError, tanimoto
@@ -162,3 +165,69 @@ def test_a_bitstring_that_is_not_bits_is_refused() -> None:
     """
     with pytest.raises(FingerprintError, match="not a bit"):
         cluster_by_similarity({"a": "1010", "b": "10x0"}, 0.5)
+
+
+@pytest.mark.parametrize("threshold", [0.1, 0.3, 0.5, 0.7, 0.9])
+def test_taking_the_product_a_block_at_a_time_is_the_same_grouping(
+    corpus: dict[str, str], threshold: float, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The blocking must be invisible in the answer, including when nearly every block is one row.
+
+    The product is taken in row blocks sized from `memory_similarity_block_bytes`, and each block is
+    folded into a running partition rather than into an edge list — so a link found in block 40
+    between a node in block 3 and one in block 12 has to merge the components those blocks had
+    already built. That is the part a single-block corpus never exercises: at the shipped budget
+    this fixture is one block, so every test above it would pass with the fold broken.
+
+    One byte of budget forces one row per block — ~250 blocks over this corpus — which is the most
+    adversarial arrangement of the same arithmetic.
+    """
+    monkeypatch.setattr(settings, "memory_similarity_block_bytes", 1)
+    assert cluster_by_similarity(corpus, threshold) == _reference_clusters(corpus, threshold)
+
+
+def test_the_peak_memory_of_clustering_grows_with_the_corpus_and_not_with_its_square(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bound the shipped corpus cap was calibrated on, which the sparse product had removed.
+
+    `cluster_by_similarity`'s own docstring argued the sparse product against "an n² float64 matrix,
+    which at 10⁴ reactions is 800 MB" — but 36% of synthetic DRFP pairs and ~55% of real ones share
+    at least one bit, so it stored more than the matrix it was contrasted with. Driven at
+    threshold 0.3 on the whole-corpus form: **130 MB of traced allocation at n=3,000 and 1,339 MB at
+    n=10,000**, while `memory_corpus_max_reactions` defaults to 100,000 and all three miners cluster
+    the whole capped corpus — so the ~40 kB-per-reaction figure that cap was sized on had stopped
+    bounding the job.
+
+    Asserted as a *doubling ratio* rather than as a byte count, because a byte count is a fact about
+    this interpreter on this box and would be re-baselined the first time it moved, which is how a
+    resource guard stops guarding. Quadratic growth doubles the corpus and quadruples the peak;
+    measured on this worst case, where every pair shares every bit, the whole-corpus form went
+    139.3 MB → 544.1 MB (3.91x) and the blocked form goes 10.7 MB → 17.3 MB (1.61x). The ceiling
+    below sits between the two and well clear of both.
+
+    The budget is set small so the bound bites at a corpus size this suite can afford; it is the
+    same code path the default exercises at ~25x the size.
+    """
+    monkeypatch.setattr(settings, "memory_similarity_block_bytes", 4 * 1024 * 1024)
+    one_fingerprint = "1" * 30 + "0" * 2018
+
+    def peak_bytes(size: int) -> int:
+        """Traced peak of clustering `size` copies of one fingerprint — every pair links."""
+        fingerprints = {f"rxn-{index}": one_fingerprint for index in range(size)}
+        tracemalloc.start()
+        try:
+            clusters = cluster_by_similarity(fingerprints, 0.5)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        assert clusters == [sorted(fingerprints)], "the premise: the whole corpus is one cluster"
+        return peak
+
+    small = peak_bytes(1500)
+    large = peak_bytes(3000)
+    assert large / small < 2.6, (
+        f"doubling the corpus took the peak from {small / 1e6:.1f} MB to {large / 1e6:.1f} MB "
+        f"({large / small:.2f}x) — a ratio near 4 means the pairwise product is being held whole "
+        "again, which is what puts a capped corpus over the pod's memory"
+    )

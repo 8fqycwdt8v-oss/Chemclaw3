@@ -103,8 +103,10 @@ def test_the_dead_letter_count_is_per_transition_not_per_call() -> None:
             )
             ids = [int(row[0]) for row in await cursor.fetchall()]
             await conn.commit()
-        await outbox.mark_failed(ids, "the endpoint refused")
-        await outbox.mark_failed(ids, "the endpoint refused")
+        # Inserted at the budget rather than claimed, so the fence value is the attempts on the row.
+        leases = [outbox.Lease(row_id, settings.result_publish_max_attempts) for row_id in ids]
+        await outbox.mark_failed(leases, "the endpoint refused")
+        await outbox.mark_failed(leases, "the endpoint refused")
 
     asyncio.run(run())
 
@@ -136,7 +138,7 @@ def test_claiming_publishes_no_backlog_reading_because_a_claim_delivers_nothing(
     # against discovered manifests and this file is testing the reading, not discovery.
     monkeypatch.setattr(outbox, "enabled_names", lambda: [sink])
 
-    async def run() -> list[int]:
+    async def run() -> list[outbox.Lease]:
         async with db.connection(settings.postgres_dsn) as conn:
             await conn.execute("DELETE FROM result_publications WHERE sink = %s", (sink,))
             await conn.execute(
@@ -148,9 +150,9 @@ def test_claiming_publishes_no_backlog_reading_because_a_claim_delivers_nothing(
             await conn.commit()
         claimed = await outbox.claim(sink, 10)
         assert len(claimed) == 3
-        return [row[0] for row in claimed]
+        return [row.lease for row in claimed]
 
-    ids = asyncio.run(run())
+    leases = asyncio.run(run())
 
     assert sink not in outbox._PENDING_GAUGE, (
         "claim() published a backlog reading for rows it has not delivered"
@@ -162,7 +164,7 @@ def test_claiming_publishes_no_backlog_reading_because_a_claim_delivers_nothing(
     assert _series("chemclaw_outbox_pending", sink=sink) == 3.0
 
     # And what the pass now publishes instead, once the rows have actually gone.
-    asyncio.run(outbox.mark_delivered(ids))
+    asyncio.run(outbox.mark_delivered(leases))
     asyncio.run(outbox.refresh_backlog())
     assert _series("chemclaw_outbox_pending", sink=sink) == 0.0
 
@@ -228,3 +230,125 @@ def test_a_drain_pass_refreshes_the_backlog_once_after_every_sink() -> None:
     # both of these read 1.0 — the row each sink was about to deliver, published as its backlog.
     assert outbox._PENDING_GAUGE.get("review-alpha", 0.0) == 0.0
     assert outbox._PENDING_GAUGE.get("review-beta", 0.0) == 0.0
+
+
+async def _row(sink: str, calc_ref: str = "calc-fence") -> int:
+    """One fresh pending row for `sink`, with anything already there removed."""
+    async with db.connection(settings.postgres_dsn) as conn:
+        await conn.execute("DELETE FROM result_publications WHERE sink = %s", (sink,))
+        cursor = await conn.execute(
+            "INSERT INTO result_publications (sink, calc_ref, document, schema_version) "
+            "VALUES (%s, %s, '{}'::jsonb, 1) RETURNING id",
+            (sink, calc_ref),
+        )
+        row = await cursor.fetchone()
+        await conn.commit()
+    assert row is not None
+    return int(row[0])
+
+
+async def _row_state(row_id: int) -> tuple[str, int, bool]:
+    """`(state, attempts, lease_released)` for one row."""
+    async with db.connection(settings.postgres_dsn) as conn:
+        cursor = await conn.execute(
+            "SELECT state, attempts, claimed_at IS NULL FROM result_publications WHERE id = %s",
+            (row_id,),
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    return str(row[0]), int(row[1]), bool(row[2])
+
+
+def test_a_superseded_pass_cannot_release_the_lease_the_live_pass_holds() -> None:
+    """The lease said *that* a row was claimed and not *whose* claim it was.
+
+    `claimed_at = NULL` is a release, and both marks keyed on `id = ANY(%s)` alone — so a pass whose
+    lease had expired, reporting the outage it saw, put a row a live pass was mid-delivery on
+    straight back into the queue. Driven against real Postgres before the fence: the stale
+    `mark_failed` released the lease and the *next* claim took the same row again, so a budget of
+    `result_publish_max_attempts` destination outages was being spent on releases nobody intended —
+    zero deliveries per attempt.
+
+    The fence is `attempts`, which `_CLAIM` increments in the same statement that takes the lease,
+    so the number a pass holds names that pass's claim and no later one. No new column.
+    """
+    asyncio.run(migrated_db_or_skip())
+
+    async def run() -> tuple[tuple[str, int, bool], int]:
+        row_id = await _row("review-fence")
+        claimed = await outbox.claim("review-fence", 10)
+        assert [row.lease.row_id for row in claimed] == [row_id]
+        held = claimed[0].lease
+
+        # A superseded pass: same row, a lease value it no longer holds.
+        await outbox.mark_failed([outbox.Lease(row_id, held.attempt - 1)], "a stale pass's outage")
+        after_stale = await _row_state(row_id)
+        # Nothing may be claimable while the live pass still holds it.
+        again = await outbox.claim("review-fence", 10)
+        # The pass that does hold the lease is still able to record its outcome.
+        await outbox.mark_failed([held], "the destination refused")
+        return after_stale, len(again)
+
+    after_stale, reclaimed = asyncio.run(run())
+
+    state, attempts, released = after_stale
+    assert (state, attempts) == ("pending", 1)
+    assert released is False, (
+        "the stale mark released the live pass's lease — the row goes back in the queue and the "
+        "next claim spends another attempt for no delivery"
+    )
+    assert reclaimed == 0, "so no second drain could take the row while it was still leased"
+
+
+def test_a_stale_mark_delivered_cannot_walk_a_dead_lettered_row_back() -> None:
+    """`_MARK_DELIVERED` had no state guard at all, where `_MARK_FAILED` had argued for one.
+
+    Driven against real Postgres: a row already `state='failed'` with its budget spent — counted on
+    `chemclaw_results_dead_lettered_total`, listed by `backfill_publications --requeue` — became
+    `'delivered'` on a `mark_delivered` carrying its id, so the queue reported a publication that
+    never happened and the dead-letter count and the table disagreed for good. A claimed row is
+    `pending` by construction, so the guard is the transition's own precondition.
+    """
+    asyncio.run(migrated_db_or_skip())
+    before = _counter("chemclaw_results_published_total")
+
+    async def run() -> tuple[str, int, bool]:
+        row_id = await _row("review-fence-dead")
+        async with db.connection(settings.postgres_dsn) as conn:
+            await conn.execute(
+                "UPDATE result_publications SET state = 'failed', attempts = %s, "
+                "last_error = 'the destination refused' WHERE id = %s",
+                (settings.result_publish_max_attempts, row_id),
+            )
+            await conn.commit()
+        await outbox.mark_delivered([outbox.Lease(row_id, settings.result_publish_max_attempts)])
+        return await _row_state(row_id)
+
+    state, _, _ = asyncio.run(run())
+
+    assert state == "failed", "a dead-lettered row is the record that something was not published"
+    assert _counter("chemclaw_results_published_total") == before, (
+        "and nothing may be booked as published, or the counter stops counting transitions"
+    )
+
+
+def test_the_pass_that_holds_the_lease_delivers_and_marks_normally() -> None:
+    """The fence must not cost the ordinary path, asserted beside the two refusals above.
+
+    A guard that also blocks the legitimate mark would show up as a queue that never drains, which
+    is a worse failure than the one being fixed — so the happy path is pinned here rather than
+    inferred from the two tests that prove the fence bites.
+    """
+    asyncio.run(migrated_db_or_skip())
+    before = _counter("chemclaw_results_published_total")
+
+    async def run() -> tuple[str, int, bool]:
+        row_id = await _row("review-fence-ok")
+        claimed = await outbox.claim("review-fence-ok", 10)
+        await outbox.mark_delivered([row.lease for row in claimed])
+        return await _row_state(row_id)
+
+    state, attempts, released = asyncio.run(run())
+
+    assert (state, attempts, released) == ("delivered", 1, True)
+    assert _counter("chemclaw_results_published_total") == before + 1

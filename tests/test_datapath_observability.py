@@ -775,8 +775,13 @@ def test_a_row_that_spent_its_attempts_is_counted_as_dead_lettered() -> None:
             )
             rows = await cursor.fetchall()
             await conn.commit()
+        # The lease is `(id, attempts)`: these rows were inserted at the budget rather than
+        # claimed, so the fence value is the attempts they carry.
         ids = [int(row[0]) for row in rows]
-        await outbox.mark_failed(ids, "the endpoint refused")
+        await outbox.mark_failed(
+            [outbox.Lease(row_id, settings.result_publish_max_attempts) for row_id in ids],
+            "the endpoint refused",
+        )
         return ids
 
     asyncio.run(run())

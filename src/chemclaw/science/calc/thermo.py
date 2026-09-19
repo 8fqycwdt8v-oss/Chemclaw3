@@ -169,6 +169,27 @@ def _atomic_masses(elements: list[int]) -> np.ndarray:
 _EXTERNAL_MODE_CM = 0.01
 
 
+class IntensityAlignmentError(ValueError):
+    """The server's intensities cannot be paired with this projection's modes.
+
+    **A separate class because the failure is confined to the spectrum, and it used to take the
+    whole result down.** Pairing needs both sides to agree on how many modes are external, and they
+    decide it by different criteria (see `_align_intensities`) — so a geometry inside the
+    ~2.3-degree window where they disagree raised out of `thermochemistry_from_hessian`, and a
+    caller got **no** G, H, S or `is_minimum` for a Hessian whose thermochemistry was entirely
+    correct. The intensities feed the spectrum and nothing else: not one term of the partition
+    function reads them.
+
+    So the fail-loud stays and moves to the field it is about.
+    `ThermochemistryResult.spectrum_unavailable` carries this message and every
+    `VibrationalMode.ir_intensity_km_per_mol` is `None`, which is a statement rather than the silent
+    zero-intensity spectrum this module already refuses to produce one branch further down.
+
+    A `ValueError` still, so a direct caller of `_align_intensities` — and the messages a model
+    reads — are unchanged.
+    """
+
+
 def _align_intensities(
     intensities: np.ndarray,
     modes: int,
@@ -197,14 +218,14 @@ def _align_intensities(
     """
     if wavenumbers_cm is not None:
         if len(wavenumbers_cm) != intensities.size:
-            raise ValueError(
+            raise IntensityAlignmentError(
                 f"the server sent {len(wavenumbers_cm)} wavenumbers for {intensities.size} "
                 f"intensities for {structure.smiles or structure.structure_id}"
             )
         internal = np.abs(np.asarray(wavenumbers_cm)) >= _EXTERNAL_MODE_CM
         paired = np.asarray(intensities[internal])
         if paired.size != modes:
-            raise ValueError(
+            raise IntensityAlignmentError(
                 f"the server projected out {intensities.size - paired.size} external mode(s) "
                 f"leaving {paired.size}, and this projection found {modes} "
                 f"for {structure.smiles or structure.structure_id}; pairing them would shift "
@@ -213,7 +234,7 @@ def _align_intensities(
         return paired
     external = intensities.size - modes
     if external < 0:
-        raise ValueError(
+        raise IntensityAlignmentError(
             f"the server reported {intensities.size} modes but the projection found {modes} "
             f"for {structure.smiles or structure.structure_id}"
         )
@@ -442,13 +463,22 @@ def thermochemistry_from_hessian(
     matrix = unpack_npy(hessian.hessian_npy)
     wavenumbers, vectors = _normal_modes(matrix, masses, positions)
     electronic = hessian.electronic_energy_hartree
+    # `None` means "this result carries no spectrum, and here is why" — see
+    # `IntensityAlignmentError`. Every term below is computed from the wavenumbers and the geometry,
+    # so a pairing that cannot be trusted costs the bands and nothing else.
+    intensities: np.ndarray | None
+    spectrum_unavailable: str | None = None
     if hessian.ir_intensities is not None:
-        intensities = _align_intensities(
-            np.asarray(hessian.ir_intensities),
-            wavenumbers.size,
-            structure,
-            hessian.ir_wavenumbers_cm,
-        )
+        try:
+            intensities = _align_intensities(
+                np.asarray(hessian.ir_intensities),
+                wavenumbers.size,
+                structure,
+                hessian.ir_wavenumbers_cm,
+            )
+        except IntensityAlignmentError as mismatch:
+            intensities = None
+            spectrum_unavailable = str(mismatch)
     elif hessian.dipole_derivatives_npy is not None:
         intensities = _ir_intensities(unpack_npy(hessian.dipole_derivatives_npy), vectors, masses)
     else:
@@ -459,6 +489,11 @@ def thermochemistry_from_hessian(
             f"the Hessian for {structure.smiles or structure.structure_id} carries neither IR "
             "intensities nor dipole derivatives, so no spectrum can be derived from it"
         )
+
+    # One entry per mode either way, so the zip below stays strict.
+    per_mode: list[float | None] = (
+        [None] * int(wavenumbers.size) if intensities is None else list(intensities)
+    )
 
     temperature = spec.temperature_k
     # The reference state is the medium's, not the caller's — see `_reference_pressure`. Everything
@@ -531,12 +566,17 @@ def thermochemistry_from_hessian(
         imaginary_frequencies_cm=imaginary,
         is_stationary=stationary,
         max_gradient_hartree_per_angstrom=gradient,
+        spectrum_unavailable=spectrum_unavailable,
         modes=[
             VibrationalMode(
                 wavenumber_cm=round(float(wavenumber), 1),
-                ir_intensity_km_per_mol=round(float(intensity), 2),
+                ir_intensity_km_per_mol=None if band is None else round(float(band), 2),
             )
-            for wavenumber, intensity in zip(wavenumbers, intensities, strict=True)
+            # `strict=True` rather than indexing by position, which is what this used to be and is
+            # worth keeping: length agreement is the property `_align_intensities` exists to
+            # establish, and an intensity array *longer* than the mode set would be silently
+            # truncated here — the same off-by-one band shift that function refuses.
+            for wavenumber, band in zip(wavenumbers, per_mode, strict=True)
         ],
         mode_count=len(wavenumbers),
         lowest_wavenumbers_cm=[round(float(value), 1) for value in wavenumbers[:5]],

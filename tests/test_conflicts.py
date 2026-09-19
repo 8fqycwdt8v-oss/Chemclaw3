@@ -597,6 +597,49 @@ def test_failures_against_finds_what_a_design_cites_and_what_it_charges() -> Non
     assert failures_against(corpus) == [], "asking about nothing must not return everything"
 
 
+def test_a_failure_matches_a_design_whatever_spelling_the_smiles_arrived_in() -> None:
+    """The structural arm compared raw strings, under an Args block saying "Canonical SMILES".
+
+    Nothing canonicalizes a note's `compound_smiles` on the way in — a chemist writes whatever their
+    ELN exported — so a failure recorded against `OCC`, `C(O)C` or `[CH3][CH2][OH]` was invisible to
+    a design charging `CCO`, and `no_documented_failure` came back clean over a corpus that held the
+    warning. Driven on those four spellings of ethanol before the fix: one of four matched. The
+    sibling this function's own docstring names as "the same shape", `kg/conflicts.py`, has keyed on
+    `canonical_smiles` since it was written.
+
+    The negative arm is asserted too, because "canonicalize both sides" is one line away from
+    "match everything": ethanol must still not match ethylamine.
+    """
+    spellings = ["OCC", "C(O)C", "[CH3][CH2][OH]", "CCO"]
+    corpus = [
+        failure_note(
+            refutes=f"some-note-{index}",
+            what_happened="the alcohol was the wrong nucleophile",
+            reported_by="ana",
+            compound_smiles=spelling,
+        )
+        for index, spelling in enumerate(spellings)
+    ]
+    other = failure_note(
+        refutes="some-other-note",
+        what_happened="the amine oxidised on standing",
+        reported_by="ben",
+        compound_smiles="CCN",
+    )
+
+    found = failures_against([*corpus, other], structures=["CCO"])
+
+    assert {note.compound_smiles for note in found} == set(spellings), (
+        "every spelling of the molecule the design charges has to be the same join key"
+    )
+    assert failures_against([*corpus, other], structures=["OCC"]) != [], (
+        "and the design's own spelling is canonicalized too, not only the note's"
+    )
+    assert [note.id for note in failures_against([*corpus, other], structures=["CCN"])] == [
+        other.id
+    ], "ethanol is not ethylamine — canonicalizing must not widen the join to everything"
+
+
 def test_only_failure_notes_answer_a_failure_query() -> None:
     """A playbook that happens to cite the same id is not a record of it failing.
 

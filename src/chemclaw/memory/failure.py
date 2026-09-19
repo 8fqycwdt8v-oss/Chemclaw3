@@ -173,10 +173,21 @@ def failures_against(
     - **`cited`** — note ids the design rests on. A failure's `contradicts` edge names the note it
       refutes, so this is an equality rather than a resemblance. It is the case the audit named and
       it needs no fuzzy matching to be right.
-    - **`structures`** — canonical SMILES the design uses. A failure recorded against a molecule
-      bears on a design that charges it even when the design cites nothing. Weaker, because a
-      molecule appearing in two routes is not the same claim twice, which is why what comes back is
-      offered as a warning rather than a blocker.
+    - **`structures`** — SMILES the design uses. A failure recorded against a molecule bears on a
+      design that charges it even when the design cites nothing. Weaker, because a molecule
+      appearing in two routes is not the same claim twice, which is why what comes back is offered
+      as a warning rather than a blocker.
+
+      **Canonicalized on both sides, because this was a raw-string comparison under an Args block
+      that said "Canonical SMILES".** Nothing canonicalizes a note's `compound_smiles` on the way
+      in — a chemist writes what their ELN exported — so a failure noted against `OCC`, `C(O)C` or
+      `[CH3][CH2][OH]` was invisible to a design charging `CCO`, and `no_documented_failure` came
+      back clean. Driven on those four spellings of ethanol: one of four matched. The sibling this
+      docstring names as "the same shape", `kg/conflicts.py`, keys its groups on
+      `core.chem.canonical_smiles` for exactly this reason, so recall no longer depends on whose
+      keyboard the SMILES came off. `canonical_smiles` rather than `standard_smiles`: a salt or a
+      charge state is genuinely a different substance to charge into a flask, and this is a warning
+      about a specific one.
 
     Both are read off notes the caller already loaded, so this makes no I/O and holds no opinion
     about where the corpus lives — the same shape `kg/conflicts.py` has for the same reason.
@@ -184,7 +195,7 @@ def failures_against(
     Args:
         notes: The corpus, or any subset of it. Non-`failure-mode` notes are ignored.
         cited: Note ids the design cites.
-        structures: Canonical SMILES the design uses.
+        structures: SMILES the design uses, in any spelling — canonicalized here.
 
     **Notes rather than a reduced model, because `protocols` may not import `memory`.**
     `tests/test_layering.py` allows `protocols -> core` and `protocols -> science` and nothing else,
@@ -195,15 +206,20 @@ def failures_against(
     Returns:
         The failure notes that bear on either, deduplicated by id, in corpus order.
     """
+    # Deferred for the reason `kg/conflicts.py` defers the same import: it pulls RDKit, and this
+    # module is imported by callers that only ever write a failure note.
+    from chemclaw.core.chem import canonical_smiles
+
     wanted_ids = {ref for ref in cited if ref}
-    wanted_structures = {smiles for smiles in structures if smiles}
+    wanted_structures = {canonical_smiles(smiles) for smiles in structures if smiles}
     found: dict[str, Note] = {}
     for note in notes:
         if note.type != "failure-mode":
             continue
         refuted = [rel.to for rel in note.outgoing_relations() if rel.rel == "contradicts"]
         by_citation = any(target in wanted_ids for target in refuted)
-        by_structure = bool(note.compound_smiles) and note.compound_smiles in wanted_structures
+        smiles = note.compound_smiles or ""
+        by_structure = bool(smiles) and canonical_smiles(smiles) in wanted_structures
         if by_citation or by_structure:
             found.setdefault(note.id, note)
     return list(found.values())

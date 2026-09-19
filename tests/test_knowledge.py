@@ -10,6 +10,7 @@ import ast
 import asyncio
 import logging
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -19,12 +20,14 @@ from pathlib import Path
 import pytest
 
 from chemclaw.core.config import settings
+from chemclaw.kg import git_writer
 from chemclaw.kg.git_writer import (
     GitNoteWriter,
     GitRemoteError,
     GitWriteError,
     _replace_atomically,
 )
+from chemclaw.kg.graph import invalidate_cache, load_notes, note_file_fingerprints
 from chemclaw.kg.note import Note
 from chemclaw.kg.record import NoteFile, NoteWrite, record_note
 
@@ -996,11 +999,41 @@ def test_a_note_is_replaced_in_one_step_so_a_reader_never_sees_half_of_it(tmp_pa
     target.write_text("---\nid: n\ntype: reaction\ncreated_by: agent\n---\nold\n", encoding="utf-8")
     inode_before = target.stat().st_ino
 
-    _replace_atomically(target, "---\nid: n\ntype: reaction\ncreated_by: agent\n---\nnew\n")
+    _replace_atomically(target, b"---\nid: n\ntype: reaction\ncreated_by: agent\n---\nnew\n")
 
     assert "new" in target.read_text(encoding="utf-8")
     assert target.stat().st_ino != inode_before, "the file was replaced, not truncated in place"
     assert not list(tmp_path.glob(".note.md.*")), "no temporary file is left behind"
+
+
+def test_a_replacement_keeps_the_notes_permissions_rather_than_the_temporary_files(
+    tmp_path: Path,
+) -> None:
+    """`os.replace` carries the *temporary* file's mode onto the note, and 0600 is not a note's.
+
+    `NamedTemporaryFile` creates 0600 because it is making a temporary file. Driven: every note
+    this writer touched came out owner-read-only, and an existing 0644 was silently downgraded — in
+    a Git checkout the sync sidecar clones and every reader scans, which is where a permission
+    nobody chose gets debugged rather than noticed.
+    """
+    existing = tmp_path / "existing.md"
+    existing.write_text("old\n", encoding="utf-8")
+    existing.chmod(0o644)
+
+    _replace_atomically(existing, b"new\n")
+
+    assert stat.S_IMODE(existing.stat().st_mode) == 0o644, "an existing mode is preserved"
+
+    fresh = tmp_path / "fresh.md"
+    saved = os.umask(0o022)
+    try:
+        _replace_atomically(fresh, b"new\n")
+    finally:
+        os.umask(saved)
+
+    assert stat.S_IMODE(fresh.stat().st_mode) == 0o644, (
+        "and a new note gets what `open()` would have given it under this umask, not 0600"
+    )
 
 
 def test_a_no_op_rewrite_beside_a_stray_stage_is_a_no_op_and_not_an_error(tmp_path: Path) -> None:
@@ -1352,3 +1385,269 @@ def test_a_failed_push_tells_the_caller_the_note_is_already_readable_here(tmp_pa
     message = str(raised.value)
     assert "already" in message and "readable here" in message, message
     assert "re-record nothing" in message, message
+
+
+def test_an_agent_write_may_not_take_the_id_of_a_human_note_filed_under_another_type(
+    tmp_path: Path,
+) -> None:
+    """A note's identity is its id; the refusal above was scoped to a path, which is not the same.
+
+    `graph._parse_notes` resolves two files claiming one id by keeping the **first in path order**,
+    so an agent note at `campaign/<id>.md` takes an id a chemist curated at `playbook/<id>.md` —
+    `campaign` sorts first — without ever touching their file. Driven before the fix: the served
+    note's `created_by` went `human` -> `agent` and its body became the agent's, while the curated
+    file sat untouched on disk and unreachable by every query. Both types are legitimate, so this
+    needs no malformed input.
+
+    `note_file_fingerprints` keys on `path.stem` the same way, so `reindex_notes` then re-embeds the
+    agent's text under the curated id — the eviction takes retrieval with it. And `contradicts`,
+    which `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` names as the replacement for the
+    review that used to catch this, only works while the thing to be contradicted is still served.
+    """
+    _, work = _make_remote_and_clone(tmp_path)
+    curated = work / "knowledge" / "playbook" / "shared-id.md"
+    curated.parent.mkdir(parents=True)
+    curated.write_text(
+        "---\nid: shared-id\ntype: playbook\ncreated_by: human\n---\nPd(dppf)Cl2, 2-MeTHF.\n",
+        encoding="utf-8",
+    )
+    for command in (["add", "-A"], ["commit", "-qm", "curated"], ["push", "-q", "origin", "main"]):
+        subprocess.run(["git", "-C", str(work), *command], check=True)
+
+    invalidate_cache()
+    assert [note.created_by for note in load_notes(work / "knowledge")] == ["human"]
+
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    with pytest.raises(GitWriteError, match="authored by a human") as raised:
+        asyncio.run(
+            writer.write(
+                NoteWrite(
+                    files=[
+                        NoteFile(
+                            path="knowledge/campaign/shared-id.md",
+                            content="---\nid: shared-id\ntype: campaign\n"
+                            "created_by: agent\n---\nPdCl2, DMF.\n",
+                        )
+                    ],
+                    message="Add campaign note: shared-id",
+                )
+            )
+        )
+    assert "knowledge/playbook/shared-id.md" in str(raised.value), (
+        "the refusal must name the file holding the id, not only the path that was refused — "
+        f"otherwise a reader cannot act on it: {raised.value}"
+    )
+    assert not (work / "knowledge" / "campaign" / "shared-id.md").exists()
+
+    invalidate_cache()
+    served = load_notes(work / "knowledge")
+    assert [note.created_by for note in served] == ["human"], (
+        "the chemist's note is still the one the graph serves for this id"
+    )
+    assert "2-MeTHF" in served[0].body
+    assert sorted(note_file_fingerprints(work / "knowledge")) == ["shared-id"], (
+        "and the retrieval index still fingerprints the curated file under that id"
+    )
+
+
+def test_a_retirement_of_a_persons_note_under_another_type_is_dropped_not_refused(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The amendment half of the same id-scoping, which must keep stepping aside rather than refuse.
+
+    `record_failure` puts the failure note and the retirement of what it refutes in one `NoteWrite`,
+    so a refusal here discards the observation as well as the date. Making the clobber check answer
+    on the *id* must not turn an amendment against a curated note into that refusal just because
+    the id resolves to a file at a path the amendment did not name.
+    """
+    _, work = _make_remote_and_clone(tmp_path)
+    curated = work / "knowledge" / "playbook" / "shared-id.md"
+    curated.parent.mkdir(parents=True)
+    curated.write_text(
+        "---\nid: shared-id\ntype: playbook\ncreated_by: human\n---\nPd(dppf)Cl2, 2-MeTHF.\n",
+        encoding="utf-8",
+    )
+    for command in (["add", "-A"], ["commit", "-qm", "curated"], ["push", "-q", "origin", "main"]):
+        subprocess.run(["git", "-C", str(work), *command], check=True)
+
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    with caplog.at_level(logging.WARNING, logger="chemclaw.kg.git_writer"):
+        outcome = asyncio.run(
+            writer.write(
+                NoteWrite(
+                    files=[
+                        NoteFile(
+                            path="knowledge/failure-mode/failure-shared.md",
+                            content="---\nid: failure-shared\ntype: failure-mode\n"
+                            "created_by: agent\n---\n[[contradicts:shared-id]] stalled at 12%.\n",
+                        ),
+                        NoteFile(
+                            path="knowledge/campaign/shared-id.md",
+                            content="---\nid: shared-id\ntype: campaign\ncreated_by: human\n"
+                            "valid_to: 2026-03-01\n---\nPd(dppf)Cl2, 2-MeTHF.\n",
+                            amendment=True,
+                        ),
+                    ],
+                    message="Add failure-mode note: failure-shared",
+                )
+            )
+        )
+
+    assert outcome.notes == 1, "the observation is the highest-value half and must survive"
+    assert (work / "knowledge" / "failure-mode" / "failure-shared.md").exists()
+    assert not (work / "knowledge" / "campaign" / "shared-id.md").exists()
+    assert "valid_to" not in curated.read_text(encoding="utf-8")
+    assert any("amendment_left_alone" in record.message for record in caplog.records), (
+        "dropping a person's retirement silently would be the other half of the same defect"
+    )
+
+
+def test_a_failed_write_restores_every_file_even_one_holding_non_utf8_bytes(
+    tmp_path: Path,
+) -> None:
+    """The all-or-nothing rollback used to raise from inside its own `except BaseException`.
+
+    `prior` holds each target's bytes, and the restore decoded them to `str` — so a note carrying a
+    cp1252 `°` out of an exported ELN raised `UnicodeDecodeError` *inside* the handler. Driven:
+    every restore after it was skipped, the index un-stage never ran, and the escaping exception —
+    neither a `ChemclawError` (so the model never learns the reason) nor a registered non-retryable
+    type — replaced the real `GitWriteError`. Such a file reaches the plan pass because
+    `_is_a_persons_note` catches `NoteError` and answers False.
+
+    Two files, the undecodable one first, so a rollback that stops at its first failure leaves the
+    second rewritten and both blobs staged.
+    """
+    _, work = _make_remote_and_clone(tmp_path)
+    notes = work / "knowledge" / "reaction"
+    notes.mkdir(parents=True)
+    latin = notes / "latin.md"
+    body = "---\nid: latin\ntype: reaction\ncreated_by: agent\n---\nRan at 80\xb0C.\n"
+    latin_bytes = body.encode("cp1252")
+    latin.write_bytes(latin_bytes)
+    other = notes / "other.md"
+    other.write_text(
+        "---\nid: other\ntype: reaction\ncreated_by: agent\n---\nOriginal other.\n",
+        encoding="utf-8",
+    )
+    for command in (["add", "-A"], ["commit", "-qm", "seed"], ["push", "-q", "origin", "main"]):
+        subprocess.run(["git", "-C", str(work), *command], check=True)
+
+    # A failing `pre-commit` hook: the cheapest way to fail *after* the `git add`, which is the
+    # arm where the index residue matters.
+    hook = work / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    with pytest.raises(GitWriteError):
+        asyncio.run(
+            writer.write(
+                NoteWrite(
+                    files=[
+                        NoteFile(
+                            path="knowledge/reaction/latin.md",
+                            content="---\nid: latin\ntype: reaction\n"
+                            "created_by: agent\n---\nREWRITTEN.\n",
+                        ),
+                        NoteFile(
+                            path="knowledge/reaction/other.md",
+                            content="---\nid: other\ntype: reaction\n"
+                            "created_by: agent\n---\nREWRITTEN.\n",
+                        ),
+                    ],
+                    message="Rewrite two notes",
+                )
+            )
+        )
+
+    assert latin.read_bytes() == latin_bytes, "the undecodable note is restored byte for byte"
+    assert "Original other" in other.read_text(encoding="utf-8"), (
+        "the file after it in the plan is restored too — a rollback that stops at its first "
+        "failure publishes the rest of a write that did not land"
+    )
+    staged = subprocess.run(
+        ["git", "-C", str(work), "diff", "--cached", "--name-only"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert staged == [], f"the un-stage after the restores must still run, staged: {staged}"
+
+
+def test_a_restore_that_fails_does_not_skip_the_remaining_restores_or_the_unstage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The guarantee the rollback exists to make cannot be conditional on the first file.
+
+    The `UnicodeDecodeError` above is one way a restore raises and it is now structurally gone, but
+    a restore still touches the filesystem — a full disk, a revoked permission on the note's
+    directory — and the handler's promise is that *no* half-written unit is left readable. So the
+    failure is injected at the restore itself rather than at a cause, because the cause is not the
+    invariant: the first file's restore raises, and the second file and the index un-stage must
+    still happen.
+
+    Injected rather than provoked because this suite runs as root, where `chmod` grants no
+    permission failure to observe.
+    """
+    _, work = _make_remote_and_clone(tmp_path)
+    notes = work / "knowledge" / "reaction"
+    notes.mkdir(parents=True)
+    first, second = notes / "aaa.md", notes / "bbb.md"
+    for path, note_id in ((first, "aaa"), (second, "bbb")):
+        path.write_text(
+            f"---\nid: {note_id}\ntype: reaction\ncreated_by: agent\n---\nOriginal {note_id}.\n",
+            encoding="utf-8",
+        )
+    for command in (["add", "-A"], ["commit", "-qm", "seed"], ["push", "-q", "origin", "main"]):
+        subprocess.run(["git", "-C", str(work), *command], check=True)
+
+    hook = work / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+    real = git_writer._replace_atomically
+    seen: list[Path] = []
+
+    def failing_on_the_first_restore(path: Path, content: bytes) -> None:
+        """Let both forward writes through; raise on the restore of the first planned file."""
+        seen.append(path)
+        if path == first and seen.count(first) == 2:
+            raise OSError(28, "No space left on device")
+        real(path, content)
+
+    monkeypatch.setattr(git_writer, "_replace_atomically", failing_on_the_first_restore)
+
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    with (
+        caplog.at_level(logging.ERROR, logger="chemclaw.kg.git_writer"),
+        pytest.raises(GitWriteError),
+    ):
+        asyncio.run(
+            writer.write(
+                NoteWrite(
+                    files=[
+                        NoteFile(
+                            path=f"knowledge/reaction/{note_id}.md",
+                            content=f"---\nid: {note_id}\ntype: reaction\n"
+                            "created_by: agent\n---\nREWRITTEN.\n",
+                        )
+                        for note_id in ("aaa", "bbb")
+                    ],
+                    message="Rewrite two notes",
+                )
+            )
+        )
+
+    assert "Original bbb" in second.read_text(encoding="utf-8"), (
+        "the second file's restore must run even though the first one raised"
+    )
+    staged = subprocess.run(
+        ["git", "-C", str(work), "diff", "--cached", "--name-only"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert staged == [], f"and the index un-stage must still run, staged: {staged}"
+    assert any("rollback_failed" in record.message for record in caplog.records), (
+        "a file left holding bytes that were never committed has to name itself to an operator"
+    )
