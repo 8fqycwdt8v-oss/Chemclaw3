@@ -453,30 +453,6 @@ topic).
       table that is in `retention._NOT_PRUNED` on purpose. `durable/awaiting.py`,
       `durable/pending_store.py`.
 
-- [ ] **The forkserver RSS ratchet reds under memory pressure, and its docstring says it cannot** —
-      [M], measured 2026-09-19. `test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_against`
-      reads a warm forkserver's `VmRSS` against a ceiling of 112 MiB. Measured on one checkout in one
-      afternoon: **117.65 and 117.59 MiB** with four subagents and the compose stack running, twice,
-      on two commits between which nothing touched an import; **109.0 MiB** and four consecutive
-      passes on the same tree once the machine was quiet. CI is green on the same commits. The
-      closure did not move, so the reading moved for another reason.
-      That other reason is what the test says is impossible. Its docstring rejects `Pss` because
-      "a page's share depends on how many other processes happen to map it" and then asserts
-      *"`VmRSS` belongs to the process alone and moves with the same closure"* — and the constant's
-      own comment says the closure "is the only thing that moves either". One of those two sentences
-      is false, and which one decides the fix: if `VmRSS` really is load-sensitive here the unit is
-      wrong again, and if it is not, something in the fork path is. **Measure before changing the
-      number** — raising 112 would hide whichever it is, and the ceiling is not the output anyway
-      (`FORKSERVER_POD_COST_MIB`, `resources.service` and `resources.worker` are derived under it).
-      Worth knowing the shape: the forkserver is a *suite-wide singleton*, so it is forked from
-      whatever the parent had imported when the first parse ran, which the docstring notes and the
-      "belongs to the process alone" claim does not account for. Anchors:
-      `tests/test_deploy_chart.py::test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_against`,
-      `tests/test_deploy_chart.py` `FORKSERVER_RSS_CEILING_MIB`, `src/chemclaw/ingest/documents/isolate.py`
-      `_PRELOAD`. Sits above the row that wants a third term in the other forkserver budget; same pod,
-      and a ratchet that reds for a scheduling artefact teaches everybody to re-run, which is the
-      argument `D-2026-09-13-a-stable-failure-set-is-not-two-green-runs` already made about the gate.
-
 - [ ] **Nothing bounds what a turn costs the front door's memory** — [M], opened 2026-09-18 by
       `D-2026-09-18-a-second-process-in-the-pod-is-memory-the-chart-never-declared`, which sized
       `resources.service` against a resident set with **no turn in flight**: 431.9 MiB measured on

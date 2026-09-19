@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from functools import cache
 from pathlib import Path
@@ -5739,13 +5740,36 @@ FORKSERVER_POD_COST_MIB = 91
 
 #: What a warm forkserver's `VmRSS` may be, in MiB — the live guard on the constant above.
 #:
-#: `VmRSS` and not `Pss` because this is the quantity that belongs to the process alone: measured
-#: 108.9–109.1 MiB across five different parents and two virtualenvs, a 0.2% spread, where the same
-#: forkserver's `Pss` read 90.0–91.0 MiB in five runs and above 95 in the sixth — a ratchet whose
-#: reading depends on what else happens to be mapping the same pages is one that reds for a
-#: scheduling artefact, which is what that sixth run did. Both numbers move with
-#: `isolate._PRELOAD`'s import closure, which is the only thing that moves either: driven, adding
-#: `chemclaw.agent.langgraph_agent` to the preload list measures 406.6 MiB.
+#: `VmRSS` and not `Pss` because this is the quantity that belongs to the process alone, and that
+#: half is now driven rather than asserted: **109 readings across twelve arms** — a bare parent, a
+#: 417 MiB one, pytest's own 459 MiB one, `--cov`, eight CPU hogs, the compose stack plus four peers
+#: holding 2.4 GB and mapping these same libraries, a dropped page cache, a deleted `__pycache__`,
+#: 1/25/100 parses through the singleton, one CPU — read **108.56–109.05 MiB**, a 0.5% spread. The
+#: same forkserver's `Pss` read 93.4 MiB quiet and **81.1 MiB** with those four peers up: 12.3 MiB
+#: apart with nothing whatever touching the closure, which is the reason the test below gives for
+#: rejecting `Pss`, measured instead of argued.
+#:
+#: **What the closure is not is the only thing that moves `VmRSS`, and this comment used to say it
+#: was.** `forkserver` starts its server by fork *and exec*, so the server inherits the process's
+#: *environment* — and `site` then runs this virtualenv's `a1_coverage.pth` inside it, which imports
+#: `coverage` whenever `COVERAGE_PROCESS_START` is set. Driven: **113.81–113.90 MiB** against 108.9,
+#: `_PRELOAD` untouched, which is not a dent in the 3 MiB margin below but straight through this
+#: ceiling — the shape this test had until today reds outright on a gate run with subprocess
+#: coverage on, and names the preload list as the thing that grew. That is why the measurement now
+#: happens in a child started with those injectors dropped, rather than against the forkserver this
+#: pytest process happens to be holding.
+#:
+#: The closure is what it is *meant* to move with, and does: driven by editing `_PRELOAD` itself,
+#: adding `chemclaw.agent.langgraph_agent` measures 407.1 MiB, `chemclaw.core.chem` 148.4 and
+#: `jinja2` 110.5 — the last of those passing, correctly, because 1.6 MiB is inside the margin
+#: below.
+#:
+#: **One reading in roughly 150 is not explained by any of this**, and it is recorded rather than
+#: smoothed over: a single sample of that `jinja2` arm read 114.7, 4.1 MiB high in `RssAnon` alone
+#: with everything else flat, and 13 repeats of the identical arm then read 110.45–110.56. Nothing
+#: reproduced it — not 60 consecutive repeats of the shipped closure, not any arm above. It is
+#: larger than the margin below, so a second one reds this gate for a reason nothing here has named,
+#: and the thing to do with it is to read `RssAnon` rather than raise the ceiling.
 #:
 #: The 3 MiB of margin is what keeps a pypdf patch release out of the gate. It is not a bound on
 #: `FORKSERVER_POD_COST_MIB` — `Pss` is only ever below `VmRSS`, never pinned to it — it is a bound
@@ -5869,6 +5893,36 @@ def test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares() -> N
         )
 
 
+#: The program the measurement runs, in a child of this process rather than in it.
+#:
+#: `_PRELOAD` is never named here: the child imports the shipped module and parses through it, so
+#: this stays a ratchet on the real list rather than on a transcription of it. A child that reaches
+#: the end without a forkserver prints nothing, which is the failure the caller names.
+_FORKSERVER_RSS_PROGRAM = """
+from multiprocessing import forkserver
+
+from chemclaw.ingest.documents.isolate import parse_document_isolated
+
+parse_document_isolated("budget.csv", b"id,yield\\nR-1,88\\n", None, 60.0)
+# Read through `getattr` because the pid is not on typeshed's `ForkServer`: upstream keeps no
+# public handle on the process it starts, and the alternative -- matching a `/proc` child by its
+# command line -- would be a second private shape with more code around it.
+pid = getattr(forkserver._forkserver, "_forkserver_pid", None)
+if pid is not None:
+    with open("/proc/%d/status" % pid, encoding="utf-8") as status:
+        for line in status:
+            if line.startswith("VmRSS:"):
+                print(line.split()[1])
+                break
+"""
+
+#: Environment variables that put a module into *every* interpreter this virtualenv starts, through
+#: a `.pth` in `site-packages`, and so into the process being measured rather than into the closure
+#: being measured. Dropped for the measurement: driven, `COVERAGE_PROCESS_START` alone moves the
+#: reading +5.0 MiB with `isolate._PRELOAD` untouched.
+_PTH_INJECTORS = ("COVERAGE_PROCESS_START", "COVERAGE_PROCESS_CONFIG")
+
+
 @pytest.mark.skipif(not Path("/proc/self/status").exists(), reason="needs a Linux /proc")
 def test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_against() -> None:
     """The constant the chart rests on is re-measured here, against the shipped preload list.
@@ -5879,31 +5933,48 @@ def test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_agains
     constant transcribed from a measurement five days old is exactly what `docs/planning/BACKLOG.md`
     carried, and it was 30% out.
 
-    So the closure is measured off a running forkserver rather than restated — this process's own,
-    since `parse_context` is a singleton and every other parse test in this suite shares it.
+    So the closure is measured off a running forkserver rather than restated — **in a child of this
+    process, and no longer the forkserver this one is holding.** That is the correction this test
+    carries, and it is not the one the reading's first flake suggested.
 
     **What is measured is `VmRSS`, and the first draft of this test measured `Pss` and flaked.**
     `Pss` is the right unit for the *budget*, because a cgroup is charged once for a unique page; it
     is the wrong unit for a *ratchet*, because a page's share depends on how many other processes
     happen to map it. Observed: the first run of that draft inside a freshly created virtualenv read
     above its 95 MiB ceiling and failed, and five later runs of the identical assertion read
-    90.0–91.0 MiB and passed. `VmRSS` belongs to the process alone and moves with the same closure.
+    90.0–91.0 MiB and passed. That reason is now driven rather than reasoned: four peers mapping
+    these same libraries pulled the forkserver's `Pss` from 93.4 MiB to 81.1 while its `VmRSS`
+    stayed inside 0.1 MiB. `VmRSS` does belong to the process alone, across every arm it was put
+    under — a 417 MiB parent, pytest's own, eight CPU hogs, 2.4 GB of peers, a dropped page cache,
+    a deleted `__pycache__`, a hundred parses through one singleton.
+
+    **What it does not belong to alone is `isolate._PRELOAD`, which is why the measurement moved
+    into a child.** `forkserver` starts its server by fork *and exec*, so the server inherits this
+    process's environment, and `site` runs this virtualenv's `a1_coverage.pth` inside it: with
+    `COVERAGE_PROCESS_START` set, the same untouched preload list measures 113.81–113.90 MiB against
+    108.9 — through the ceiling, not into the margin, so reading the singleton makes *how the gate
+    was invoked* red this assertion and blame `_PRELOAD` for it. A child started with those
+    injectors dropped measures the list and nothing else, and it costs ~2.0 s, of which 0.86 s is
+    the forkserver start this test was paying anyway whenever it ran first in a session.
     """
-    from multiprocessing import forkserver
-
-    from chemclaw.ingest.documents.isolate import parse_document_isolated
-
-    parse_document_isolated("budget.csv", b"id,yield\nR-1,88\n", None, 60.0)
-    # Read through `getattr` because the pid is not on typeshed's `ForkServer`: upstream keeps no
-    # public handle on the process it starts, and the alternative — matching a `/proc` child by its
-    # command line — would be a second private shape with more code around it. The `is not None`
-    # below is what turns an upstream rename into a named failure rather than a silent skip.
-    pid = getattr(forkserver._forkserver, "_forkserver_pid", None)
-    assert pid is not None, "a parse ran without a forkserver; this budget describes another shape"
-    status = Path(f"/proc/{pid}/status").read_text()
-    lines = status.splitlines()
-    rss_kib = next(int(line.split()[1]) for line in lines if line.startswith("VmRSS:"))
-    measured = rss_kib / 1024
+    environment = {k: v for k, v in os.environ.items() if k not in _PTH_INJECTORS}
+    child = subprocess.run(
+        [sys.executable, "-c", _FORKSERVER_RSS_PROGRAM],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+        timeout=180,
+    )
+    reading = child.stdout.split()
+    # An empty answer is a parse that ran without a forkserver, or an upstream rename of the handle
+    # the child reads — a named failure rather than a silent skip, which is what this used to be.
+    assert child.returncode == 0 and reading and reading[-1].isdigit(), (
+        "the measurement child reported no forkserver `VmRSS`: a parse ran without a forkserver, "
+        "or upstream renamed the private handle it reads, and this budget then describes another "
+        f"shape. stdout={child.stdout!r} stderr={child.stderr[-2000:]!r}"
+    )
+    measured = int(reading[-1]) / 1024
     assert measured <= FORKSERVER_RSS_CEILING_MIB, (
         f"a warm parse forkserver is resident at {measured:.1f} MiB where the budget above was "
         f"derived against a closure measured at {FORKSERVER_RSS_CEILING_MIB}. Whatever grew "
