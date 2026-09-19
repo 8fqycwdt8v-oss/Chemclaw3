@@ -45,6 +45,26 @@ precise here: `propose_knowledge_note` and `note_proposals` are the gate's own s
 kept as the one two-word phrase, on measurement rather than on taste — 5 of its 6 occurrences are
 the dead LLM seam, and the sixth is argued below rather than being reason to widen the net.
 
+`MAF` is the case where "matches ordinary prose" had to be *measured* rather than reasoned about,
+because a three-letter string is exactly the shape that hides inside a longer word. It does not:
+of its 145 occurrences across the corpus, **zero** have an alphanumeric or underscore immediately
+either side, so a word-boundary form would buy nothing — which is the useful answer, since
+`_matcher` escapes its patterns and a boundary anchor could not be expressed here anyway.
+Sampled, every occurrence is the framework. Two spellings were measured and **dropped**: lowercase
+`maf` is a *live* value — `session_messages.message_shape = 'maf'` still stamps every row written
+before M13, and it is also how the four superseded ADRs spell it in their own frozen filenames, so
+a pattern folding case would demand a substitution the schema forbids. The spelled-out name was
+dropped for the opposite reason: the corpus writes it exactly twice, once as `Microsoft Agent
+Framework` (`D-001`, which is numbered and therefore never in scope) and once hyphenated, in an ADR
+`MAF` already catches — so it adds no reach, and choosing one of two separator spellings is the
+coverage nobody has that the barren test below exists to refuse.
+
+The other three candidates in the hand-over list are the `PR gate` case again: `AgentThread`,
+`ChatAgent` and `AgentRunResponse` match **zero** files each — this corpus discusses the framework
+by its acronym, its distribution name and its import path, not by its type surface. The one type
+name it does discuss is `AgentSession`, which is dead in both trees (nothing in `src/` or `tests/`
+defines or constructs one; `agent/session.py` is what replaced it) and so is kept.
+
 ## What this bounds
 
 That the substitution is *written down* and that the pile stops growing. Not that anybody reads it,
@@ -80,6 +100,10 @@ _DEAD: dict[str, tuple[str, tuple[str, ...]]] = {
     "a second LLM provider": (
         "D-2026-09-04-a-gateway-is-the-only-provider",
         ("ChatAnthropic", "langchain_anthropic", "CHEMCLAW_LLM_PROVIDER", "provider seam"),
+    ),
+    "the Microsoft Agent Framework": (
+        "D-2026-08-10-langgraph-rebuild-of-the-conversation-layer",
+        ("MAF", "agent_framework", "agent-framework", "AgentSession"),
     ),
 }
 
@@ -186,6 +210,87 @@ _ARGUED: dict[tuple[str, str], str] = {
         "the phrase names `agent/llm_provider.py` and `tests/test_llm_provider.py`, which still "
         "exist and still hold the client-import buckets; the module name outlived the choice it "
         "was named for, and renaming a live seam is not what the substitution asks for"
+    ),
+    # ---- the Microsoft Agent Framework, on and after 2026-08-10 -----------------------------
+    (
+        "the Microsoft Agent Framework",
+        "D-2026-08-10-a-list-of-ids-is-not-a-conversation-list",
+    ): (
+        "quotes `infra/sql/008_sessions.sql`'s own comment verbatim — 'a MAF message-shape change "
+        "is a value change, not a schema change' — as the reason the title is a column rather than "
+        "a `message->'contents'` expression; the dead name is inside the quoted rule"
+    ),
+    (
+        "the Microsoft Agent Framework",
+        "D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor",
+    ): (
+        "companion to the killing ADR, and its precedent *is* the framework: "
+        "`AgentModeProvider.before_run` injected the `mode_set` tool that let the model record its "
+        "own approval under the chemist's oid, which is the failure the attenuation rule prevents"
+    ),
+    (
+        "the Microsoft Agent Framework",
+        "D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has",
+    ): (
+        "its subtitle is 'the context policy the framework removal took with it' — it opens by "
+        "stating that `agent-framework-*` was removed in M13, because the audit's whole subject is "
+        "which of that policy deepagents does and does not replace"
+    ),
+    ("the Microsoft Agent Framework", "D-2026-08-11-what-the-removal-found"): (
+        "the removal record itself: it names the three distributions taken out of `pyproject.toml` "
+        "and its §4 measures the ~180 present-tense `MAF` mentions left in `src/` as a defect "
+        "class — a deletion that cannot say what it deleted is not a record"
+    ),
+    (
+        "the Microsoft Agent Framework",
+        "D-2026-08-27-a-conversion-that-cannot-be-rolled-back-is-not-a-pre-upgrade-step",
+    ): (
+        "the stored shape is what is being converted: it seeds a three-row exchange 'in MAF shape' "
+        "to measure the rollback, and bounds the affected rows by history — 'nothing has written a "
+        "MAF-shaped row since M13 removed the framework'"
+    ),
+    ("the Microsoft Agent Framework", "D-2026-08-27-a-job-names-the-step-it-serves"): (
+        "recovers a link that was deleted twice, and says which mechanism it belonged to: under "
+        "the framework a todo waiting on a durable job was marked by an `awaiting-job:` prefix in "
+        "its own `content`, the convention D-2026-08-11 and D-2026-08-12 retired"
+    ),
+    (
+        "the Microsoft Agent Framework",
+        "D-2026-08-27-the-cap-is-a-property-of-the-loop-not-of-the-mode",
+    ): (
+        "quotes the gating rationale it is retiring — 'matching MAF: the classic agent has no todo "
+        "list and no loop cap' — and the decision is that M13 deleted the other engine, so the "
+        "quoted reason expired with it"
+    ),
+    (
+        "the Microsoft Agent Framework",
+        "D-2026-09-05-a-quotable-row-is-one-this-system-recorded-from-a-person",
+    ): (
+        "quotes the present-tense comment `make db-migrate` falsified — 'an unstamped row is MAF' "
+        "— and measures against a seeded MAF `role: user` row; the dead word is the defect being "
+        "reported, not a claim about what writes rows now"
+    ),
+    ("the Microsoft Agent Framework", "D-2026-09-06-a-sweep-and-a-live-turn-are-two-writers"): (
+        "names the reader's `MAF` branch as where a row whose text merely contains the word "
+        "`contents` raised, which is the evidence that two readers of one column disagreed and the "
+        "one that disagreed was the one that deletes"
+    ),
+    (
+        "the Microsoft Agent Framework",
+        "D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read",
+    ): (
+        "retires `test_both_engines_hash_a_plan_to_the_same_identity` by naming the subject that "
+        "vanished — parity with MAF, 'which has not existed since M13' — which is what makes "
+        "deleting a green test the right move rather than a loss of coverage"
+    ),
+    (
+        "the Microsoft Agent Framework",
+        "D-2026-09-14-a-gate-for-one-ecosystem-is-not-a-gate-for-the-file",
+    ): (
+        "the supply-chain finding is that GitHub's dependency graph still lists "
+        "`agent-framework-anthropic`/`-core`/`-openai` although M13 deleted them from "
+        "`pyproject.toml`: the removed distributions are the evidence the graph is a union over "
+        "branch history rather than a snapshot of the manifests"
     ),
 }
 
