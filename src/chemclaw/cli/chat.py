@@ -327,10 +327,18 @@ async def _repl(agent: Any, actor: str, saver: Any) -> None:
     the front door's middleware and runner, a template activity, and the durable interceptor. So
     the gate has never applied to this REPL, `/plan` and `/approve` write `plan_approvals` rows no
     execution path here reads, and a state-changing tool typed at this prompt runs without them.
-    That is not a hole — `plan_gate` argues the session-less skip deliberately, and these calls
-    still cross `enforce_tool_authz` and `authorize_trigger`, which is what governs them — but it
-    is not what this docstring said, and D-2026-09-13 making the harness the default turned a
-    harmless overstatement into one a reader would act on.
+    That is not a hole — `plan_gate` argues the session-less skip deliberately — but it is not what
+    this docstring said, and D-2026-09-13 making the harness the default turned a harmless
+    overstatement into one a reader would act on.
+
+    **The sentence that replaced it was wrong in its own way, and this is the correction.** It said
+    these calls "still cross `enforce_tool_authz` and `authorize_trigger`, which is what governs
+    them". They do cross both, and measured against a role-less authenticated actor those two reach
+    6 of the 15 side-effecting tools in the registry — three by `DEFAULT_WRITE_TOOL_GATES` and three
+    by `expensive_actions()`. Nine, `remember_preference` and `run_composed_workflow` among them,
+    are refused by neither. What actually governs a write typed at this prompt is who has the
+    terminal: `resolve_identity` makes this surface single-user admin, running with the process's
+    own credentials. That is a defensible posture and it is not the same claim.
     """
     # **Every operator command is named here, because there is no `/help`.** `/approve-workflow`
     # is a two-step ritual — read the procedure, then type back the fingerprint it prints — and an

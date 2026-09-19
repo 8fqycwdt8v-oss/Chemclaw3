@@ -11,9 +11,10 @@ The multi-hop test is the centre of it. Everything else here is a bound on a way
 
 import asyncio
 import os
-from typing import Any
+from typing import Any, cast
 
 import pytest
+from langchain_core.runnables import RunnableConfig
 
 from chemclaw.agent.audit import NullAuditSink
 from chemclaw.agent.handoff import (
@@ -259,13 +260,16 @@ def _connector_tool(name: str) -> Any:
     )
 
 
-def _mesh(monkeypatch: Any, scripts: dict[str, list[Any]]) -> Any:
+def _mesh(monkeypatch: Any, scripts: dict[str, list[Any]], checkpointer: Any | None = None) -> Any:
     """A compiled turn graph whose peers replay the given scripts, keyed by peer name.
 
     **The peers carry harness fields and the mesh is built with an open connector tool**, because
     both halves of `_peer_profile`'s bound are invisible without them: a peer profile that sets
     neither harness field cannot show the gate moving, and an empty `connectors=` cannot show a
     connector reaching a peer that does not name it.
+    `checkpointer` is optional because only one assertion needs one: that a dry-run turn does not
+    *durably* move `active_agent`, which is a claim about what the saver holds afterwards rather
+    than about the state the invocation returns.
     """
     from chemclaw.agent import profiles as profiles_module
 
@@ -306,6 +310,7 @@ def _mesh(monkeypatch: Any, scripts: dict[str, list[Any]]) -> Any:
         ScriptedChatModel(["unused"]),
         audit_sink=NullAuditSink(),
         connectors=[_connector_tool(MESH_CONNECTOR)],
+        checkpointer=checkpointer,
     )
     assert graph is not None, "the roster should have produced a mesh"
     return graph
@@ -366,6 +371,107 @@ def _structural_tools() -> frozenset[str]:
         profile=AgentProfile(name="structural-floor", description="x", tool_names=frozenset()),
     )
     return frozenset(floor.nodes["tools"].bound.tools_by_name)
+
+
+def test_a_dry_run_turn_is_refused_the_handoff_and_leaves_the_conversation_where_it_was(
+    monkeypatch: Any,
+) -> None:
+    """A turn the chemist marked "do nothing" may not decide who answers every later turn.
+
+    `agent/handoff.py` opens by stating that a handoff "lands in the audit trail as a row, passes
+    the authorization gate, **is refused under dry-run**, and is counted by `repeat_guard`". Three
+    of those four were true. Measured with `set_dry_run(True)`: `dry_run_refusal` returned `None`
+    for every `transfer_to_<peer>`, because it gates on `authz.side_effecting_call` and a handoff
+    was in
+    neither of that predicate's halves — not in `side_effecting_tools()`, which cannot name a tool
+    minted per peer at build time, and not in the argument-driven half, which reads a `file_path`.
+
+    **And the consequence is durable, which is why this test drives a whole turn against a
+    checkpointer rather than asserting the predicate.** `active_agent` is a checkpointed channel
+    precisely so a later turn resumes with whoever holds it. Measured before the fix: turn 1 under
+    `dry_run=True` came back `handoffs=1`, and the checkpoint carried `active_agent='p-right'` — so
+    the conversation was reassigned by the one kind of turn that promises, in the refusal text on
+    that same turn, that "Nothing was started".
+
+    The other direction is asserted too: the turn still *answers*. A dry-run refusal is an ordinary
+    tool result the model reads, so the agent that was already holding the conversation says what it
+    would have done, which is what `dry_run_refusal`'s own `sanctioned_path` tells it to do.
+    """
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from chemclaw.core.turn_flags import reset_dry_run, set_dry_run
+
+    saver = InMemorySaver()
+    graph = _mesh(
+        monkeypatch,
+        {
+            "default": [
+                {"name": handoff_tool_name("evidence-peer"), "args": {"reason": "lookup"}},
+                "I would have handed this to the evidence agent and asked it to look up CX-4711.",
+            ],
+            "evidence-peer": ["I am the evidence agent and I should never have been reached."],
+        },
+        checkpointer=saver,
+    )
+    config = turn_config("dry-run-handoff")
+
+    token = set_dry_run(True)
+    try:
+        result = asyncio.run(graph.ainvoke(turn_input("dry run: what would you do?"), config))
+    finally:
+        reset_dry_run(token)
+
+    refusals = [
+        m.content
+        for m in result["messages"]
+        if type(m).__name__ == "ToolMessage" and "DRY RUN" in str(m.content)
+    ]
+    assert refusals, (
+        "the handoff was not refused under dry-run: "
+        f"{[getattr(m, 'content', m) for m in result['messages']]}"
+    )
+    assert not result.get("handoffs"), f"a dry-run turn counted a hop: {result.get('handoffs')}"
+    assert result.get("active_agent") in (None, "", "default"), (
+        f"a dry-run turn moved the conversation to {result.get('active_agent')!r}"
+    )
+
+    # `cast` for the reason `test_agent_observability_checkpointer.py` casts: `turn_config` returns
+    # a plain `dict[str, Any]` (it carries a recursion limit and a fan-out bound as well as the
+    # thread), and the saver's signature wants the `RunnableConfig` TypedDict.
+    saved = saver.get(cast(RunnableConfig, config))
+    checkpointed = (saved["channel_values"] if saved else {}).get("active_agent")
+    assert checkpointed in (None, "", "default"), (
+        f"a dry-run turn durably reassigned the conversation to {checkpointed!r}; every later turn "
+        "on this thread would resume there, and the turn that did it said nothing was started"
+    )
+    assert answer_text(result), "the turn must still answer, from the agent that already held it"
+
+
+def test_a_handoff_is_counted_by_the_repeat_guard() -> None:
+    """The fourth claim in that sentence, which nothing had instrumented either.
+
+    `agent/handoff.py` claims a handoff "is counted by `repeat_guard`". It is — the guard keys on
+    `(name, arguments)` with no exemption list, so a peer bounced at with one unchanged `reason`
+    earns the same refusal any repeated tool call does. Asserted rather than assumed because the
+    three claims beside it were checked and one of them was false: a sentence whose neighbours were
+    wrong is not evidence about itself.
+    """
+    from chemclaw.agent.repeat_guard import begin_call_watch, count_call, end_call_watch
+    from chemclaw.core.config import settings
+
+    name = handoff_tool_name("evidence-peer")
+    arguments = {"reason": "same reason every time"}
+    token = begin_call_watch()
+    try:
+        limit = settings.max_identical_tool_calls
+        refusals = [count_call(name, arguments) for _ in range(limit + 2)]
+    finally:
+        end_call_watch(token)
+
+    assert any(refusal is not None for refusal in refusals), (
+        "the repeat guard never refused a handoff repeated 12 times with identical arguments, so "
+        "`handoff.py`'s claim that it is counted is false"
+    )
 
 
 def test_the_second_hop_is_bounded_by_the_root_not_by_the_first(monkeypatch: Any) -> None:
@@ -853,7 +959,7 @@ def test_two_profiles_that_mint_one_tool_name_are_refused_at_build_time() -> Non
         ("property lookup", "property_lookup"),
         ("property.lookup", "property-lookup"),
     ):
-        peers = [(_profile(name, {"find_notes"}), ["find_notes"]) for name in pair]
+        peers = [(_profile(name, {"find_notes"}), frozenset({"find_notes"})) for name in pair]
         minted = {handoff_tool_name(name) for name in pair}
         assert len(minted) == 1, (
             f"this test's own fixture broke: {pair} no longer mint one name, they mint {minted}"
@@ -868,7 +974,10 @@ def test_two_profiles_that_mint_two_names_are_not_refused() -> None:
     Without this, the refusal above is satisfied by raising unconditionally — which would take the
     whole feature out on every deployment that has more than one peer.
     """
-    peers = [(_profile(name, {"find_notes"}), ["find_notes"]) for name in ("evidence", "safety")]
+    peers = [
+        (_profile(name, {"find_notes"}), frozenset({"find_notes"}))
+        for name in ("evidence", "safety")
+    ]
 
     tools = handoff_tools(peers, menu_tools=3, max_handoffs=2, current="somebody-else")
 

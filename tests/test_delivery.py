@@ -11,6 +11,7 @@ one channel's failure is not everyone's, and nothing reads *from* a channel.
 """
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -962,6 +963,58 @@ def test_an_attachment_is_redacted_like_a_body(monkeypatch: pytest.MonkeyPatch) 
     scrubbed = message.redacted().attachments[0].content
 
     assert b"hunter2-abcdefghijklmnop" not in scrubbed
+
+
+def test_a_message_carries_no_credential_a_driver_quoted_back_as_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    r"""The structural half of the outbound scrub, in the spelling a driver actually produces.
+
+    The tests above hold the *value* inventory — a credential this deployment configured, matched by
+    exact string. This holds the shapes `redact_secrets` recognises by **pattern**, which is the
+    only half that can reach a credential belonging to somebody else: a warehouse driver quoting its
+    own
+    `key=value` binding back in an error, which a tool result carries into a subject, a body and a
+    report attachment.
+
+    **Measured leaking, and the escaping was the reason.** A driver's message routinely carries a
+    JSON document *inside* a JSON string, so the text reaches the rules as
+    `{\"password\": \"...\"}` — and every key-anchored rule framed its separator `["']?\s*[=:]`,
+    which a literal backslash defeats. This is the exit path where that matters most after the
+    committed note (`tests/test_note.py`): `Message.redacted()`'s own docstring says this is "the
+    half of the redaction that leaves the cluster", and a driver writes it to a share or POSTs it.
+
+    Two credentials, from the two different rules, so a regression in either is visible here rather
+    than only in `tests/test_logging.py`: `password` is the libpq rule's, `api_key` the compound
+    key-name rule's.
+    """
+    monkeypatch.setattr(
+        "chemclaw.deliver.message._connector_secret_envs",
+        lambda: (),  # nothing in the value inventory, so only the structural rules can catch these
+    )
+    quoted = json.dumps(json.dumps({"password": "W4rehousePw1", "api_key": "sk_live_9f3a2b1c8d7"}))
+    text = f"The warehouse refused the binding. Its error was: {quoted}"
+    message = Message(
+        recipient="u-1",
+        subject=f"run failed: {quoted}",
+        body=text,
+        attachments=[Attachment(filename="report.md", content=text.encode("utf-8"))],
+    )
+
+    scrubbed = message.redacted()
+    delivered = "".join(
+        [
+            scrubbed.recipient,
+            scrubbed.subject,
+            scrubbed.body,
+            scrubbed.attachments[0].content.decode("utf-8"),
+        ]
+    )
+
+    for credential in ("W4rehousePw1", "sk_live_9f3a2b1c8d7"):
+        assert credential not in delivered, (
+            f"{credential} left the cluster in a message: {delivered}"
+        )
 
 
 def test_a_binary_attachment_survives_the_redaction_rather_than_failing_the_delivery() -> None:

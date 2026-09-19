@@ -933,6 +933,42 @@ _PEM_SEPARATOR = r"(?:\\[nrt]|[\s\\]|" + _PEM_RFC1421 + r")"
 # `{6,255}` / `{8,255}` tails already say so.
 _HAS_DIGIT = r"(?=" + _OPAQUE + r"{0,255}\d)"
 
+# The framing between a key name and its value: an optional quote, the separator, an optional quote.
+# **Each quote may itself be backslash-escaped, and without that every key-anchored rule below was
+# blind to the one spelling this module's own redaction path produces.** `_redacted_field` renders a
+# non-string `extra=` value with `json.dumps(value, default=str)` and scrubs the *rendered* text, so
+# a credential nested one level inside a dict, a list, a tuple, an exception or a `bytes` arrives at
+# these patterns as `{\"password\": \"...\"}`. With the quote written `["']?` the key is followed by
+# a literal backslash, the optional quote matches nothing, `[=:]` meets `\` and the rule never
+# fires. Measured before this constant existed, one `json.dumps` level applied to each shape:
+# `password`, `PGPASSWORD`, `api_key`, `client_secret`, `token`, `secret`, `private_key`, `passwd`,
+# `pwd` and `AWS_SECRET_ACCESS_KEY` all reached the stream verbatim, while the single-quoted
+# `{'password': '...'}` spelling was caught — which is why this looked covered in review.
+#
+# The escaping is not only the redactor's own: `redact_secrets` is also what `kg/record.py` runs a
+# note's rendered body through before **committing it to Git**, what `deliver/message.py` runs a
+# recipient, subject, body and attachment through before **sending it**, and what `core/tracing.py`
+# runs a span description through — all on text a model or a driver authored, which routinely
+# carries a JSON document quoted inside a JSON string.
+#
+# Four backslashes, because escaping *doubles*: one `json.dumps` level spells a quote `\"` and two
+# spell it `\\\"`, so `{0,4}` covers text that was already encoded once before this process saw it.
+#
+# **Possessive (`{0,4}+`), and the quantifiers around it too — but that is a margin here rather than
+# the control, and saying so is the point.** Every other bound in this module was made possessive
+# after a measured denial of service, so a reader is entitled to assume the same of this one. It is
+# not: both runs are bounded by a constant and *nothing repeats around them*, which is what made
+# `_PEM_RFC1421` exponential (an enclosing `{0,64}`) and `_HAS_DIGIT` quadratic (an unbounded tail
+# behind a lookahead). Measured on 10 KB / 80 KB / 640 KB of adversarial `password\":\"`,
+# backslash-run, quote-run and plain `password=` input, both spellings scale at ~8x per 8x — linear
+# — with the non-possessive form ~10% slower and nothing worse. So the possessive spelling buys a
+# constant factor and the guarantee that a future reader cannot make it ambiguous by widening a
+# class; `tests/test_logging.py::test_the_escaped_quote_framing_is_not_quadratic` is what measures
+# the cost, and it **passes** with the possessiveness removed, which is the honest bound of what
+# that test holds. The language matched is identical either way, and the whole framing stays within
+# ~1.3x of the blind spelling it replaces.
+_KEY_FRAMING = r"(?:\\{0,4}+[\"'])?\s*+[=:]\s*+(?:\\{0,4}+[\"'])?"
+
 _STRUCTURAL_SECRETS: tuple["re.Pattern[str]", ...] = (
     # GitHub tokens: `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` (classic, 36 chars) and the fine-grained
     # `github_pat_` form. Both are vendor-assigned prefixes that occur in nothing else, so these
@@ -955,7 +991,7 @@ _STRUCTURAL_SECRETS: tuple["re.Pattern[str]", ...] = (
     # libpq key/value connection strings and the environment spelling: `password=`, `PGPASSWORD=`,
     # and the `repr` of a config dict (`'password': '...'`). The URL form is `_URL_USERINFO`'s.
     re.compile(
-        r"(?P<keep>\b(?:PG)?PASSWORD[\"']?\s*[=:]\s*[\"']?)" + _HAS_DIGIT + _OPAQUE + r"{6,255}",
+        r"(?P<keep>\b(?:PG)?PASSWORD" + _KEY_FRAMING + r")" + _HAS_DIGIT + _OPAQUE + r"{6,255}",
         re.IGNORECASE,
     ),
     # A credential in a query string, a header, or a rendered dict. Anchored on the key name so the
@@ -969,16 +1005,26 @@ _STRUCTURAL_SECRETS: tuple["re.Pattern[str]", ...] = (
     # "token" and "secret" in prose from matching.
     re.compile(
         r"(?P<keep>\b\w*?(?:access_token|refresh_token|api[_-]?key|client_secret|token|secret"
-        r"|private_key|passwd|pwd)"
-        r"[\"']?\s*[=:]\s*[\"']?)" + _HAS_DIGIT + _OPAQUE + r"{8,255}",
+        r"|private_key|passwd|pwd)" + _KEY_FRAMING + r")" + _HAS_DIGIT + _OPAQUE + r"{8,255}",
         re.IGNORECASE,
     ),
     # `Authorization: Basic <base64>`. The scheme was left out when the `Bearer|Token` rule was
     # written, on the argument that "Basic" is an ordinary English word — true of the word, false
-    # of `Authorization:\s*Basic\s+`, which is unambiguous. Base64 of `user:password` need not
-    # contain a digit, so this rule deliberately does not require one; the header anchor carries
-    # the whole specificity.
-    re.compile(r"(?P<keep>\bAuthorization:\s*Basic\s+)[A-Za-z0-9+/=]{8,4096}", re.IGNORECASE),
+    # of `Authorization` + `_KEY_FRAMING` + `Basic\s+`, which is unambiguous. Base64 of
+    # `user:password` need not contain a digit, so this rule deliberately does not require one; the
+    # header anchor carries the whole specificity.
+    #
+    # **The separator is `_KEY_FRAMING` rather than a bare `:`, because a header logged as a header
+    # is the easier half.** This rule spelled it `Authorization:\s*`, which requires the colon to
+    # touch the name — so the *rendered dict* spelling a `headers` mapping actually reaches a log
+    # line as, `{"Authorization": "Basic ..."}`, put a quote between the two and walked past it.
+    # Measured: leaked in the dict spelling, plain and escaped alike, while the bare-header spelling
+    # was caught. The sibling `Bearer|Token` rule never had this gap because it anchors on the
+    # scheme inside the value and never looks at the key at all.
+    re.compile(
+        r"(?P<keep>\bAuthorization" + _KEY_FRAMING + r"Basic\s+)[A-Za-z0-9+/=]{8,4096}",
+        re.IGNORECASE,
+    ),
     # The environment-variable spelling, which the key-name rule above structurally cannot reach:
     # `_` is a word character, so `\bsecret` does not match inside `AWS_SECRET_ACCESS_KEY`, and the
     # credential word is rarely the last segment (`..._ACCESS_KEY`, `..._TOKEN_ENV`). Measured: the
@@ -1021,7 +1067,7 @@ _STRUCTURAL_SECRETS: tuple["re.Pattern[str]", ...] = (
     re.compile(
         r"(?<![A-Za-z0-9_])"
         r"(?=[A-Z0-9_]{0,128}?(?:SECRET|TOKEN|PASSWORD|PASSWD|APIKEY|CREDENTIAL))"
-        r"(?P<keep>[A-Z][A-Z0-9_]*[\"']?\s*[=:]\s*[\"']?)"
+        r"(?P<keep>[A-Z][A-Z0-9_]*" + _KEY_FRAMING + r")"
         r"(?![0-9]{1,255}(?![A-Za-z0-9_\-]))"
         r"(?!(?<=_ENV=)[A-Z][A-Z0-9_]*(?![A-Za-z0-9_\-]))" + _OPAQUE + r"{8,255}"
     ),
@@ -1540,13 +1586,25 @@ class ContextFilter(logging.Filter):
 
 
 def _redacted_field(value: object, swept: bool) -> object:
-    """One `extra=` value, scrubbed in whatever form it will actually be written in.
+    r"""One `extra=` value, scrubbed in whatever form it will actually be written in.
 
     A string the filter has already swept is passed through — that is what `swept` buys, and the
     ~27 us per record it saves is why the sentinel exists. Anything else is *rendered first* and
     scrubbed after, because a credential inside a dict, a list or an exception is not reachable by
     a string check and is very much reachable by `json.dumps(default=str)`: measured, all three
     forms reached the stream intact while this module's comment said the formatter covered them.
+
+    **Rendering first is also what made those three forms leak for as long as this function has
+    existed, and the fix is in the patterns rather than here.** `json.dumps` escapes the quotes in
+    every string one level down, so a JSON document nested inside a dict, a list, a tuple, an
+    exception message or a `bytes` reached `redact_secrets` as `{\"password\": \"...\"}` — and
+    every key-anchored rule framed its separator as `["']?\s*[=:]`, which a literal backslash
+    defeats. Measured through this function: a dict holding a JSON string, a `bytes` holding one, a
+    list holding one and a three-deep dict all returned the credential verbatim, while the same
+    credential in a *top-level* string was redacted correctly — so the sentence above was true
+    about reachability and false about the result. `_KEY_FRAMING` is what closes it, and the
+    `bytes` case needs nothing of its own: `default=str` renders it as a `repr`, whose quote
+    escaping is the same shape.
 
     Rendering here rather than walking the structure in the filter is deliberate. A walk has to
     decide how deep to go and what to do about cycles, keys, tuples and objects with a hostile

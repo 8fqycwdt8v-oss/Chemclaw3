@@ -24,7 +24,11 @@ from chemclaw.agent.authz import (
     require_actor,
 )
 from chemclaw.core.config import settings
-from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.core.identity_context import (
+    get_current_actor,
+    reset_current_identity,
+    set_current_identity,
+)
 from tests.surface import surface
 
 
@@ -109,6 +113,71 @@ def test_require_actor_rejects_absent_user(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(settings, "entra_required", True)
     with pytest.raises(AuthorizationError):
         require_actor()
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t", "\n", " \t "])
+def test_a_blank_actor_is_no_actor_and_not_a_new_person(
+    monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    r"""Every spelling of nothing is refused, not just the one `or None` happened to catch.
+
+    `get_current_actor` returned `_current_actor.get() or None`, and its docstring calls that *the*
+    fail-closed point — "here, in the one reader every gate shares, rather than at each of the five
+    producers separately". It caught `""` and let `"   "` through as an authenticated user.
+
+    **The harm is attribution and erasure rather than access.** `agent/scratchpad.py` adds the
+    durable `/memories/` route `if store is not None and actor`, so a truthy blank got its own
+    `memory_namespace` prefix — which `scratchpad.py`'s own docstring names as the thing it avoids:
+    "a memory written under an 'anonymous' prefix would be a memory nobody can erase". Measured
+    before the fix: `"   "` and `"\t"` each minted a distinct namespace, neither equal to the empty
+    actor's and neither equal to a real one, and `require_actor()` returned the blank string under
+    `entra_required=True`.
+
+    Not an authentication bypass: both producers are `Field(min_length=1)`
+    (`api.auth.Principal.oid`, `durable.template_activities.StepIdentity.actor`), which `" "` passes
+    but which nothing untrusted fills in. Parametrized over five spellings because the defect was
+    precisely that one spelling was covered.
+    """
+    monkeypatch.setattr(settings, "entra_required", True)
+    token = set_current_identity(blank, frozenset({"compute"}))
+    try:
+        assert get_current_actor() is None, (
+            f"{blank!r} was returned as an authenticated actor, so every gate that asks "
+            "`is not None` sees a person and every namespace keyed on it is unattributable"
+        )
+        with pytest.raises(AuthorizationError, match="requires an authenticated user"):
+            require_actor()
+    finally:
+        reset_current_identity(token)
+
+
+def test_one_actor_with_stray_whitespace_is_one_memory_namespace() -> None:
+    r"""The second half: `" oid "` and `"oid"` are one person and must not be two prefixes.
+
+    The same erasure argument as above, one spelling further along. `memory_namespace` digests
+    whatever it is handed, so a padded actor hashes to a namespace an erasure request for that
+    person never names — measured, `" oid-alice "` and `"oid-alice"` produced different prefixes.
+    Normalising in the shared reader is what makes the two one, and asserting it through
+    `get_current_actor` rather than by calling `strip` here is deliberate: the reachable path is
+    `scratchpad.durable_backend` reading the ambient, and a test that stripped the value itself
+    would pass with the reader unchanged.
+    """
+    from chemclaw.agent.scratchpad import memory_namespace
+
+    namespaces = set()
+    for spelling in (" oid-alice ", "oid-alice", "\toid-alice\n"):
+        token = set_current_identity(spelling, frozenset())
+        try:
+            actor = get_current_actor()
+            assert actor is not None
+            namespaces.add(memory_namespace(actor))
+        finally:
+            reset_current_identity(token)
+
+    assert len(namespaces) == 1, (
+        f"one actor spelled three ways owns {len(namespaces)} memory namespaces; an erasure "
+        "request names the person and can only reach one of them"
+    )
 
 
 # --- `expensive: true` is the gate's source, not a comment ---------------------------------------

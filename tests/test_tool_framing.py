@@ -23,6 +23,7 @@ import json
 import re
 import threading
 import warnings
+from collections.abc import Callable
 from contextlib import AsyncExitStack
 from enum import StrEnum
 from types import SimpleNamespace
@@ -353,7 +354,7 @@ def test_the_framer_sits_inside_the_converters_and_outside_the_trail() -> None:
 #: in `bounded_content` is the identity. The expanding shape is the one `_defanged`'s and
 #: `_framed`'s own docstrings say the re-bound exists for — a disguised delimiter tag turns on
 #: `framing._defang`'s second pass, which escapes every `<` in the content at four characters each.
-_PAYLOAD_SHAPES = {
+_PAYLOAD_SHAPES: dict[str, Callable[[int], str]] = {
     "inert": lambda n: "Z" * n,
     "expanding": lambda n: (
         f"{envelope_delimiters('probe')[0][0]}\u00ad{envelope_delimiters('probe')[0][1:]}"
@@ -1035,6 +1036,7 @@ def _poisoned(model: type[BaseModel], mark: str) -> BaseModel:
 async def _pending_rows(mark: str, monkeypatch: pytest.MonkeyPatch) -> Any:
     """`check_pending_requests`' projection of one poisoned `PendingRequest`."""
     from chemclaw.agent import pending_tools
+    from chemclaw.durable import pending_store
     from chemclaw.durable.pending_store import PendingRequest
 
     row = _poisoned(PendingRequest, mark)
@@ -1043,7 +1045,7 @@ async def _pending_rows(mark: str, monkeypatch: pytest.MonkeyPatch) -> Any:
     async def _open(**_kwargs: Any) -> Any:
         return page
 
-    monkeypatch.setattr(pending_tools.pending_store, "open_requests", _open)
+    monkeypatch.setattr(pending_store, "open_requests", _open)
     overview = await pending_tools.check_pending_requests(asked_of="", limit=10)
     return overview.requests
 

@@ -17,6 +17,16 @@ that a swarm loses the central routing node where "every delegation decision is 
 trace". It is answered rather than dismissed: the decision is a tool call, tool calls are the
 trace, and `reason` below is the deciding agent's own account of why — recorded in the same row.
 
+**Three of those four claims were free and the dry-run refusal was not**, and this sentence made it
+for a year before it was true. `tool_authz.dry_run_refusal` asks `authz.side_effecting_call`, which
+is a set membership plus a `file_path` test — and `transfer_to_<peer>` is minted *here*, per peer,
+so it was in neither half. Measured with `set_dry_run(True)`: refused nothing. That is not cosmetic,
+because `active_agent` is a **checkpointed** channel: a turn the chemist marked "do nothing" moved
+every later turn onto a different agent, while the refusal text on that same turn said "Nothing was
+started". `is_handoff_tool_name` below is what that predicate asks now, and
+`tests/test_turn_graph.py` drives a whole dry-run turn against a saver rather than asserting the
+predicate, because the durable half is the harm.
+
 **The `Command(goto=…, graph=Command.PARENT)` mechanism, and why it forces an outer graph.**
 `create_deep_agent` compiles one agent: a model node and a tool node, with no second agent to move
 to. `Command.PARENT` navigates in the graph *enclosing* the one the tool ran in, so a handoff needs
@@ -153,6 +163,26 @@ def handoff_tool_name(peer: str) -> str:
         The tool name, e.g. `transfer_to_property_lookup` for the `property-lookup` profile.
     """
     return f"{HANDOFF_PREFIX}{_TOOL_NAME_CHARS.sub('_', peer)}"
+
+
+def is_handoff_tool_name(name: str) -> bool:
+    """Whether `name` is one of these tools, by the shape `handoff_tool_name` mints.
+
+    **A shape rather than a set, because the set is not knowable where it is asked.**
+    `authz.side_effecting_call` is what must recognise a handoff — a handoff writes the
+    checkpointed `active_agent`, so it changes something that outlives the turn — and it is called
+    per tool call from inside the middleware chain, with no peer roster in hand. The alternative
+    was for `side_effecting_tools()` to enumerate `handoff_tool_name(p)` over the configured peers,
+    and that set is `@cache`d for the process's life while `agent_peer_roster` is a setting a test
+    and a deployment both rewrite — so it would answer for the roster that happened to be loaded
+    first.
+
+    Nothing else in this tree is named `transfer_to_…`: the registry is asserted to be a partition
+    of read-only and state-changing names (`tests/test_authz.py`), and `handoff_tools` is the only
+    factory that mints this prefix. A model-invented name carrying it reaches the same refusal,
+    which is the correct answer to a name that does not exist either.
+    """
+    return name.startswith(HANDOFF_PREFIX)
 
 
 def describe_peer(profile: AgentProfile, bound: Iterable[str], menu_tools: int) -> str:

@@ -27,6 +27,7 @@ from chemclaw.core.logging import (
     SecretRedactingFilter,
     _configured_by,
     _handlers_that_reach_an_output_stream,
+    _redacted_field,
     configure_logging,
     configure_telemetry,
     redact_secrets,
@@ -973,6 +974,239 @@ def test_a_variable_name_survives_the_line_that_tells_an_operator_to_set_it() ->
             assert redacted.endswith("***"), redacted
         else:
             assert redacted == expected
+
+
+#: Every key-anchored spelling, with a value whose shape the rules require (opaque, containing a
+#: digit). Applied at three escape depths by the test below, because depth is the axis the rules
+#: were blind on and `0` is the only one anything had ever measured.
+_KEY_ANCHORED_SPELLINGS = {
+    "password": ('{"password": "W4rehousePw"}', "W4rehousePw"),
+    "pgpassword": ('{"PGPASSWORD": "W4rehousePw"}', "W4rehousePw"),
+    "api_key": ('{"api_key": "sk_live_9f3a2b1c8d7e6f"}', "sk_live_9f3a2b1c8d7e6f"),
+    "access_token": ('{"access_token": "abc123def456ghi789"}', "abc123def456ghi789"),
+    "client_secret": ('{"client_secret": "Zx8~Q9abcdef123"}', "Zx8~Q9abcdef123"),
+    "token": ('{"token": "abc123def456ghi789"}', "abc123def456ghi789"),
+    "secret": ('{"secret": "abc123def456ghi789"}', "abc123def456ghi789"),
+    "private_key": ('{"private_key": "abc123def456ghi789"}', "abc123def456ghi789"),
+    "passwd": ('{"passwd": "W4rehousePw"}', "W4rehousePw"),
+    "pwd": ('{"pwd": "W4rehousePw"}', "W4rehousePw"),
+    "screaming env var": (
+        '{"AWS_SECRET_ACCESS_KEY": "wJalrXUtnFEMI0K7MDENGbPxRfiCYEXAMPLEKEY"}',
+        "wJalrXUtnFEMI0K7MDENGbPxRfiCYEXAMPLEKEY",
+    ),
+    "authorization basic": (
+        '{"Authorization": "Basic dXNlcjpwYXNzd29yZDEy"}',
+        "dXNlcjpwYXNzd29yZDEy",
+    ),
+}
+
+
+@pytest.mark.parametrize("depth", [0, 1, 2])
+@pytest.mark.parametrize(
+    ("sample", "credential"),
+    _KEY_ANCHORED_SPELLINGS.values(),
+    ids=_KEY_ANCHORED_SPELLINGS.keys(),
+)
+def test_a_key_anchored_credential_survives_no_depth_of_json_escaping(
+    sample: str, credential: str, depth: int
+) -> None:
+    r"""Every key-anchored rule, at the escape depth this module's own redactor creates.
+
+    **The gap this holds closed was in the framing, not in the key names, and it was reached by the
+    redactor rendering the value itself.** `_redacted_field` writes a non-string `extra=` with
+    `json.dumps(value, default=str)` and scrubs the *rendered* text, so a credential one level down
+    arrives as `{\"password\": \"...\"}` — and the rules framed their separator `["']?\s*[=:]`,
+    which a literal backslash defeats: the optional quote matches nothing and `[=:]` meets `\`.
+    Measured at depth 1 before `_KEY_FRAMING`, on exactly this table: ten of the twelve spellings
+    reached the stream verbatim, and the two that did not were the bare-header `Authorization:`
+    spelling and — the reason nobody saw it — the *single*-quoted `{'password': '...'}` form, which
+    `json.dumps` does not escape.
+
+    Depth 2 is here because escaping doubles: text already encoded once before this process saw it
+    spells a quote `\\\"`, which is what a driver quoting a JSON payload back at us produces after
+    one more render. Depth 0 is the spelling that always worked and is kept so a fix that only
+    handles the escaped form cannot pass.
+
+    This is not only log hygiene, which is why it is parametrized rather than asserted once:
+    `redact_secrets` is what `kg/record.py` runs a note's rendered body through before **committing
+    it to Git**, what `deliver/message.py` runs a recipient, subject, body and attachment through
+    before **sending them off-cluster**, and what `core/tracing.py` runs a span description
+    through. All three take model- or driver-authored text, and all three were measured leaking.
+    """
+    text = sample
+    for _ in range(depth):
+        text = json.dumps(text)
+
+    assert credential not in redact_secrets(text), (
+        f"a key-anchored credential at escape depth {depth} reached the stream verbatim: {text!r}"
+    )
+
+
+def test_every_rule_that_anchors_on_a_key_name_allows_an_escaped_quote() -> None:
+    r"""The structural half: no rule may frame its separator with a quote that cannot be escaped.
+
+    The behavioural test above passes on a table somebody wrote; this one fails on a *rule*, which
+    is what makes a reword visible. A pattern that reaches its value through `[=:]` is anchored on
+    a key name, and every such pattern must take its framing from `_KEY_FRAMING` — reverting one of
+    them to the bare `["']?\s*[=:]\s*["']?` spelling, or writing a new rule that way, is the whole
+    defect and it is invisible in a table of samples that nobody extended to cover it.
+
+    Read off the compiled patterns rather than a list in this file, because a hand-maintained list
+    of "the rules that anchor on a key" is what
+    `test_every_structural_rule_has_a_pathological_unit` exists to record going stale.
+    """
+    from chemclaw.core import logging as chemclaw_logging
+
+    framing = chemclaw_logging._KEY_FRAMING
+    blind = [
+        pattern.pattern
+        for pattern in chemclaw_logging._STRUCTURAL_SECRETS
+        if "[=:]" in pattern.pattern and framing not in pattern.pattern
+    ]
+    assert not blind, (
+        "these rules reach their value through a separator they frame themselves, so a "
+        f"backslash-escaped quote defeats them: {blind}"
+    )
+
+
+#: The adversarial repeating unit per rule that frames a key with `_KEY_FRAMING`, in the *escaped*
+#: spelling. A separate table from `_QUADRATIC_UNITS` because it grows a different axis: those units
+#: repeat the bare key name and measure the tail, these repeat the escape run and measure the
+#: framing itself, which is where a quantifier that can backtrack into a run of backslashes would
+#: show up. Held against the rule table by the test below, exactly as that one is.
+_ESCAPED_FRAMING_UNITS = {
+    "escaped-password": 'password\\":\\"',
+    "escaped-api-key": 'api_key\\":\\"',
+    "escaped-screaming": 'AWS_SECRET_KEY\\":\\"',
+    "escaped-basic": 'Authorization\\": \\"Basic ',
+    "backslash-run": "password" + "\\" * 12,
+    "quote-run": "password" + '"' * 12,
+}
+
+
+def test_every_rule_that_frames_a_key_has_an_escaped_pathological_unit() -> None:
+    """A rule that adopts `_KEY_FRAMING` owes this table a unit, or its escaped cost is unmeasured.
+
+    The same check `test_every_structural_rule_has_a_pathological_unit` makes, on the other axis:
+    four rules frame a key today, and the two extra units are the degenerate runs — a backslash run
+    and a quote run that never reach a separator — which are the inputs a non-possessive framing
+    would have backtracked through. Counting is the weakest check that still fails on the next rule
+    to adopt the framing.
+    """
+    from chemclaw.core import logging as chemclaw_logging
+
+    framing_rules = [
+        pattern
+        for pattern in chemclaw_logging._STRUCTURAL_SECRETS
+        if chemclaw_logging._KEY_FRAMING in pattern.pattern
+    ]
+    assert len(framing_rules) + 2 == len(_ESCAPED_FRAMING_UNITS), (
+        f"{len(framing_rules)} rules frame a key with _KEY_FRAMING but "
+        f"{len(_ESCAPED_FRAMING_UNITS)} escaped units (the two degenerate runs included). A new "
+        "one needs a unit here, or its cost on an 80 KB adversarial log line is unmeasured."
+    )
+
+
+@pytest.mark.parametrize("unit", _ESCAPED_FRAMING_UNITS.values(), ids=_ESCAPED_FRAMING_UNITS.keys())
+def test_the_escaped_quote_framing_is_not_quadratic(unit: str) -> None:
+    r"""`_KEY_FRAMING` widened every key-anchored rule, so its own cost is measured here.
+
+    The rule this module records twice over is that a redaction rule's blow-up is a denial of
+    service on every thread's logging: this filter runs inside `Handler.handle`, holding the stdlib
+    logging lock, and on the front door inside the single event loop. `_KEY_FRAMING` adds a
+    quantified run (`\\{0,4}`) in front of a quote that may not be there — which is exactly the
+    shape that made `_PEM_RFC1421` exponential and `_HAS_DIGIT` quadratic before they were bounded
+    and made possessive. It is possessive for that reason, and this is what says so.
+
+    Measured on the shipped form, growing 8x and again 8x (10 KB / 80 KB / 640 KB): linear on all
+    six units, within ~1.3x of the blind spelling it replaced. The bound is generous rather than
+    tight — the claim is that the cost is not quadratic, not that it is fast on a loaded box.
+
+    **What this test does not hold, measured: removing the possessiveness leaves it green.** Both
+    spellings are linear, because the framing's two runs are bounded by a constant and nothing
+    repeats around them — the missing ingredient of both blow-ups this module records. The
+    possessive form is ~10% cheaper and is what ships; this guard is here for the next rule that
+    widens the framing into something ambiguous, not as evidence that the current one had to be
+    possessive. `_KEY_FRAMING`'s own comment says the same thing, so the two cannot drift.
+    """
+    import time
+
+    small = unit * (10_240 // len(unit))
+    large = unit * (81_920 // len(unit))  # 8x
+
+    start = time.monotonic()
+    redact_secrets(small)
+    small_seconds = time.monotonic() - start
+    start = time.monotonic()
+    redact_secrets(large)
+    large_seconds = time.monotonic() - start
+
+    assert large_seconds < 2.0, f"80 KB of adversarial {unit!r} took {large_seconds:.2f}s"
+    assert large_seconds / max(small_seconds, 1e-4) < 24, (
+        f"scaling looks quadratic for {unit!r}: {small_seconds:.4f}s for 10 KB, "
+        f"{large_seconds:.4f}s for 80 KB"
+    )
+
+
+#: The four shapes a credential reaches `_redacted_field` in, each measured leaking before
+#: `_KEY_FRAMING`. The point of the table is that none of them is a string: a string `extra=` was
+#: already swept by the filter, and everything else is rendered — with `json.dumps` escaping the
+#: quotes of any string one level down — and scrubbed afterwards.
+_NESTED_EXTRAS: dict[str, object] = {
+    "json text inside a dict": {"resp": {"body": '{"password": "W4rehousePw"}'}},
+    "json text inside a list": ['{"api_key": "sk_live_9f3a2b1c8d7e6f"}'],
+    "json text three dicts deep": {"a": {"b": {"c": '{"client_secret": "Zx8Q9abcdef123"}'}}},
+    "json text inside bytes": b'{"password": "W4rehousePw"}',
+}
+
+
+@pytest.mark.parametrize("value", _NESTED_EXTRAS.values(), ids=_NESTED_EXTRAS.keys())
+def test_a_nested_credential_is_scrubbed_in_the_form_the_stream_receives(value: object) -> None:
+    """`_redacted_field`'s own docstring, held: rendered first, and *then* actually scrubbed.
+
+    That docstring argues the render-then-scrub order is what makes a credential inside a dict, a
+    list or an exception reachable at all — and the rendering step was itself what hid these four:
+    `json.dumps` escapes the quotes of every string one level down, and the key-anchored rules could
+    not see through that. Measured before `_KEY_FRAMING`: all four returned the credential verbatim
+    while the same credential in a top-level string was redacted correctly, so the claim was true
+    about reachability and false about the result.
+
+    `bytes` is in the table because `default=str` renders it as a `repr`, whose quote escaping is
+    the same shape — so it needs no branch of its own, and this is what says so.
+    """
+    scrubbed = _redacted_field(value, swept=True)
+    rendered = scrubbed if isinstance(scrubbed, str) else json.dumps(scrubbed, default=str)
+
+    for credential in ("W4rehousePw", "sk_live_9f3a2b1c8d7e6f", "Zx8Q9abcdef123"):
+        assert credential not in rendered, rendered
+
+
+def test_a_nested_credential_does_not_reach_the_json_line(_secrets: None) -> None:
+    """End to end, because the unit above scrubs a value and a leak is what gets *written*.
+
+    The whole stack a record goes through: `SecretRedactingFilter` (which deliberately sweeps only
+    string `extra=` values) and then `JsonFormatter`, which is where a non-string is rendered. Three
+    of the shapes the filter cannot see — a JSON document nested in a dict, the same in `bytes`, and
+    an exception whose message holds one — measured leaking into the emitted line.
+    """
+    formatter = JsonFormatter()
+    redaction = SecretRedactingFilter()
+    # Both key-anchored rules in every shape, so a regression in either one is visible here: the
+    # libpq `password` rule and the compound `api_key` rule are separate patterns, and a guard
+    # carrying only the first passes while the second is blind.
+    blob = '{"password": "W4rehousePw", "api_key": "sk_live_9f3a2b1c8d7"}'
+    for field, value in (
+        ("resp", {"body": blob}),
+        ("payload", blob.encode("utf-8")),
+        ("err", RuntimeError(f"driver said: {blob}")),
+    ):
+        record = logging.LogRecord("x", logging.ERROR, "f.py", 1, "call failed", None, None)
+        setattr(record, field, value)
+        redaction.filter(record)
+        line = formatter.format(record)
+        for credential in ("W4rehousePw", "sk_live_9f3a2b1c8d7"):
+            assert credential not in line, line
+        assert json.loads(line)["fields"], line
 
 
 # One pathological repeating unit per structural rule. A unit is the shortest string that makes the
