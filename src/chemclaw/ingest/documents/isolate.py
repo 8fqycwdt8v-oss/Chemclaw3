@@ -202,7 +202,7 @@ def _at_ceiling(ceiling: int | None) -> bool:
     return now is not None and now >= ceiling - _CEILING_HEADROOM_BYTES
 
 
-def _bound_allocations(budget: int) -> int | None:
+def _bound_allocations(budget: int) -> tuple[int | None, int | None]:
     """Cap what this parse may allocate, so an unbounded document is a refusal not an OOMKill.
 
     **This is the only bound in the unit that kills the pod.** Every ceiling upstream of here is a
@@ -227,8 +227,27 @@ def _bound_allocations(budget: int) -> int | None:
     way the caller is told the document could not be read, which is more than an OOM-killed pod
     tells anybody, and every other turn on the replica is still being served.
 
+    **This baseline is read after `raw` is unpickled, so the document is in it and the ceiling is
+    `document + budget`.** Measured: `VmData` 230.4 MiB before a 50 MiB document and 280.5 MiB
+    after, the whole 50 MiB of it. That is deliberate rather than overlooked, and the alternative
+    was built and reverted: subtracting the document out — so the budget bounds `document + work` —
+    refuses a **40 MiB** plain-text file where the share binding's own `max_file_bytes` permits 50,
+    because a text parse holds the bytes, the decoded `str` and the pickle at once. The budget is
+    therefore what a parse may allocate **beyond** the document it was handed, which is the
+    quantity that leaves the shipped set working.
+
+    What that costs is a second term nothing used to declare, and
+    `D-2026-09-19-a-coefficient-measured-at-one-cap-is-a-claim-about-that-cap` closes it at the
+    other end: `binding.max_file_bytes` may not exceed what
+    `tests/test_deploy_chart.py::PARSE_MIB_PER_PARSE_BUDGET_MIB` was measured against, because a
+    site raising it moves the real per-parse charge and moves no inequality at all.
+
     Args:
         budget: Bytes this process may allocate beyond what it already holds.
+
+    Returns:
+        The ceiling actually set and the hard limit it was set under, or `(None, None)` when no
+        bound could be applied. The hard limit is what `_release_allocations` restores to.
     """
     base = _anonymous_bytes()
     if base is None:
@@ -237,7 +256,7 @@ def _bound_allocations(budget: int) -> int | None:
         logger.warning(
             "no /proc/self/status to size a parse budget against; this parse is not memory-bounded"
         )
-        return None
+        return None, None
     ceiling = base + budget
     # **The inherited hard limit wins, and it used to be an exception.** `setrlimit` refuses to
     # raise a maximum, so a process tree carrying any hard `RLIMIT_DATA` below `base + budget` — a
@@ -245,7 +264,7 @@ def _bound_allocations(budget: int) -> int | None:
     # broad arm below and made **every document of every format** unreadable, with the cause only
     # in a log line. Driven at `base + 8 MiB`. A lower ambient ceiling is a smaller budget, which is
     # the outcome this knob is for; it is not a reason to refuse everything.
-    hard = resource.getrlimit(resource.RLIMIT_DATA)[1]
+    hard: int = resource.getrlimit(resource.RLIMIT_DATA)[1]
     if hard != resource.RLIM_INFINITY and hard < ceiling:
         logger.warning(
             "an ambient hard RLIMIT_DATA of %d bytes is below this parse's budget of %d; parsing "
@@ -260,8 +279,33 @@ def _bound_allocations(budget: int) -> int | None:
         resource.setrlimit(resource.RLIMIT_DATA, (ceiling, hard))
     except (OSError, ValueError):
         logger.exception("could not bound this parse's allocations; it runs unbounded")
-        return None
-    return ceiling
+        return None, None
+    return ceiling, hard
+
+
+def _release_allocations(hard: int | None) -> None:
+    """Give the ceiling back, once the parse it was bounding has finished failing.
+
+    **A refusal is not the thing this bound exists to stop.** The budget is there so a parse cannot
+    take the pod; by the time a handler runs, the parse is over and the child is about to exit —
+    and pickling a 250-character refusal onto the pipe still allocates. At the ceiling that
+    allocation can fail, and a `MemoryError` raised *inside* an `except` clause reaches no later
+    clause: Python does not route it to the `except MemoryError` arm below, so the caller would get
+    an EOF it can only report as "stopped without answering", which is the one failure in this
+    module whose cause is knowable arriving nameless.
+
+    Restoring the soft limit to the hard one is the smallest thing that removes that: the reply
+    gets the room the parse was denied, and nothing else runs in this process afterwards.
+
+    Args:
+        hard: The hard limit `_bound_allocations` set the soft one under, or None if it set none.
+    """
+    if hard is None:
+        return
+    try:
+        resource.setrlimit(resource.RLIMIT_DATA, (hard, hard))
+    except (OSError, ValueError):  # pragma: no cover - the ceiling was set under this same limit
+        logger.exception("could not release this parse's allocation ceiling before replying")
 
 
 def _parse_into(
@@ -285,6 +329,7 @@ def _parse_into(
         declared: The client-declared content type, or None.
     """
     ceiling: int | None = None
+    hard: int | None = None
     try:
         # **Lead a new process group, so a kill reaches whatever this parse starts.**
         # `Process.kill()` signals one pid: a parser that shells out leaves the grandchild running
@@ -303,7 +348,7 @@ def _parse_into(
             logger.debug("parse child could not lead its own process group; kills stay per-pid")
         # Before a byte is read, and in this process rather than in the parent: a limit set on the
         # front door would bound the front door, which is the thing being protected.
-        ceiling = _bound_allocations(settings.document_parse_memory_bytes)
+        ceiling, hard = _bound_allocations(settings.document_parse_memory_bytes)
         connection.send(("parsed", parse_document(name, raw, declared)))
     # **A parse that stopped at its ceiling is renamed here, whatever it called itself.** lxml
     # reports its own allocation failure rather than letting CPython raise, so a markup-heavy but
@@ -313,18 +358,26 @@ def _parse_into(
     # unbounded in 19.4 s, and is refused here in 2.2 s. `_at_ceiling` is what separates it from a
     # document that really is broken, and the two populations do not overlap.
     except DocumentParseError as exc:
-        connection.send(("refused", too_large_to_read(name) if _at_ceiling(ceiling) else exc))
+        # Read before the release, and the release before the send: `_at_ceiling` is a statement
+        # about the parse that just failed, and the reply that says so must not be bounded by the
+        # ceiling that stopped it. `_release_allocations` says why.
+        stopped = _at_ceiling(ceiling)
+        _release_allocations(hard)
+        connection.send(("refused", too_large_to_read(name) if stopped else exc))
     # Outside `parse_document`'s own arm on purpose: this one is the *pickling* of a document that
     # parsed, which is a second full copy of the text and is deliberately inside the same budget.
     # Driven, a 7.2 M-character `.docx` extracted fine and then exhausted the ceiling on the pipe,
     # and before this arm existed the caller was told only that the reader "stopped without
     # answering" — the one refusal in this module whose cause is knowable, arriving nameless.
     except MemoryError:
+        _release_allocations(hard)
         connection.send(("refused", too_large_to_read(name)))
     # Broad on purpose: this is the child's last act, and an exception that escapes here dies with
     # it, leaving the parent an EOF it can only report as "stopped without answering".
     except BaseException as exc:
-        if _at_ceiling(ceiling):
+        stopped = _at_ceiling(ceiling)
+        _release_allocations(hard)
+        if stopped:
             connection.send(("refused", too_large_to_read(name)))
         else:
             connection.send(("failed", f"{type(exc).__name__}: {exc}"))

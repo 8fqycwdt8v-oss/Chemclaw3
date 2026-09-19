@@ -5785,7 +5785,52 @@ FORKSERVER_RSS_CEILING_MIB = 112
 #:
 #: Above 1.0 because the parent unpickles a second copy of the text the child sent; below 2.0
 #: because the child's own transient intermediates are inside its ceiling rather than beside it.
+#:
+#: **It is a measurement at a basis, and the basis has two terms rather than one**
+#: (`D-2026-09-19-a-coefficient-measured-at-one-cap-is-a-claim-about-that-cap`). The budget bounds
+#: what a parse allocates *beyond* the document it was handed — `_bound_allocations` reads its
+#: baseline after `raw` is unpickled, driven at `VmData` 230.4 MiB before a 50 MiB document and
+#: 280.5 MiB after — so the pod's real charge is a function of the cap too, and the sentence above
+#: that names "the shipped cap" was the only place that said so. `binding.max_file_bytes` now
+#: carries an `le` tied to `PARSE_COEFFICIENT_BASIS_BYTES`, and the test below asserts the two
+#: agree, so a site cannot raise the cap past what this number was measured against without the
+#: gate saying the coefficient needs re-measuring.
 PARSE_MIB_PER_PARSE_BUDGET_MIB = 1.4
+
+
+def test_the_parse_coefficient_still_describes_the_largest_document_a_binding_may_declare() -> None:
+    """The coefficient's second term, which nothing used to declare.
+
+    `PARSE_MIB_PER_PARSE_BUDGET_MIB` multiplies `document_parse_memory_bytes`, and that budget is
+    what a parse may allocate **beyond** its document. So the pod's real per-parse charge depends
+    on the largest document a binding will hand it, and that field is set per `datasource.yaml`.
+    It had `ge=1024` and no upper bound: a site binding at 200 MiB moved the real charge to
+    ~360 MiB and moved `test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares` not
+    at all.
+
+    Asserted as the *agreement* between the two constants rather than as either figure, because
+    what must not drift is that the coefficient was measured at the cap the bindings can reach —
+    406.7 MiB of pod for two concurrent 50 MiB plain-text documents. Raising the cap is legitimate
+    and costs a re-measurement; this is what makes that cost visible instead of silent.
+    """
+    from chemclaw.ingest.documents.binding import (
+        PARSE_COEFFICIENT_BASIS_BYTES,
+        DocumentShareBinding,
+    )
+
+    field = DocumentShareBinding.model_fields["max_file_bytes"]
+    ceiling = next(
+        (getattr(item, "le", None) for item in field.metadata if getattr(item, "le", None)),
+        None,
+    )
+    assert ceiling == PARSE_COEFFICIENT_BASIS_BYTES, (
+        f"`max_file_bytes` is bounded at {ceiling} and the parse coefficient was measured against "
+        f"{PARSE_COEFFICIENT_BASIS_BYTES}; a binding may hand the pod a document larger than "
+        "anything `PARSE_MIB_PER_PARSE_BUDGET_MIB` has ever seen, and no inequality here moves"
+    )
+    assert field.default <= PARSE_COEFFICIENT_BASIS_BYTES, (
+        "the shipped default is already above the basis the coefficient was measured at"
+    )
 
 
 def _declared_mib(resources: dict[str, Any], kind: str) -> int:

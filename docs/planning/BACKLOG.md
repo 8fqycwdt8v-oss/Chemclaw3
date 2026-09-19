@@ -147,47 +147,6 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
-- [ ] **The parse budget is what a parse may allocate *on top of the document*, and only one of
-  those two terms is declared anywhere** — [M], opened 2026-09-19 by
-  `D-2026-09-19-a-refusal-that-blames-the-document-is-worse-than-one-that-says-nothing`.
-  `isolate._bound_allocations` reads its baseline from `/proc/self/status` **after** `raw` has been
-  unpickled into the child, so the document is inside the baseline and the ceiling it sets is
-  `document + document_parse_memory_bytes`. Driven: `VmData` 230.4 MiB before a 50 MiB document,
-  280.5 MiB after — the whole 50 MiB, exactly. `tests/test_deploy_chart.py`'s
-  `PARSE_MIB_PER_PARSE_BUDGET_MIB` multiplies **only** the budget, and its comment names two
-  reasons for the coefficient (the parent's unpickled copy; the child's intermediates being inside
-  the ceiling) — the document is not one of them.
-  It holds today and is unbounded tomorrow: the coefficient was measured at the shipped 50 MiB
-  (1.27x for two concurrent parses), and `binding.max_file_bytes` is
-  `Field(default=52_428_800, ge=1024)` — **no upper bound**, set per `datasource.yaml`. A site
-  binding at 200 MiB moves the real per-parse charge to ~360 MiB while the chart inequality does
-  not move at all, which is `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse`'s
-  own "a coefficient of the quantity it is declared against" argument failing on its second
-  quantity.
-  The row is the decision, not the number. Three candidates, each with a cost: charge
-  `max_file_bytes` in the chart inequality (right, and it couples the chart to a per-site manifest
-  field); give `max_file_bytes` an `le=` tied to `document_parse_memory_bytes` (a startup refusal
-  in the shape `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob` already uses, and a
-  behavioural change for a site nobody has yet); or read the baseline **before** the unpickle, so
-  the budget means what its name says (cleanest, and it needs the child to size itself before it
-  is handed its work, which the current `forkserver` entry point does not allow). Not taken here
-  because `tests/test_deploy_chart.py` is being rewritten on another branch and a constant changed
-  in two places at once is how the two disagree.
-  **Anchors:** `src/chemclaw/ingest/documents/isolate.py::_bound_allocations`,
-  `src/chemclaw/ingest/documents/binding.py:156`,
-  `tests/test_deploy_chart.py::PARSE_MIB_PER_PARSE_BUDGET_MIB`.
-
-- [ ] **`.pptx` under the parse memory ceiling is unverified** — [S], opened 2026-09-19 by
-  `D-2026-09-19-a-refusal-that-blames-the-document-is-worse-than-one-that-says-nothing`. That
-  review drove `.docx`, `.xlsx`, `.csv` and plain text against `document_parse_memory_bytes` and
-  found the `.docx` case refused with a message blaming the document; `_parse_pptx` goes through
-  the same lxml layer and was **not** driven, so whether a markup-heavy deck earns the named
-  refusal, the wrong one, or no refusal at all is unknown. The remedy is one fixture beside
-  `_markup_heavy_docx` in `tests/test_parse_isolation.py` and one assertion; it is a row rather
-  than a fix because a deck fixture is a different XML part layout and guessing it is how a test
-  passes without touching the code path. Not a pod risk either way — the `RLIMIT_DATA` is absolute,
-  so the worst case is a wrong sentence, which is exactly what that review found for `.docx`.
-
 - [ ] **The substructure deadline test asserts a timing ratio where it means a record count** —
       [S], `tests/test_molfp.py::test_a_scan_past_its_deadline_stops_instead_of_matching_the_rest_of_the_corpus`.
       Its own docstring states the property as *"went on matching every remaining record"*, which is

@@ -114,6 +114,28 @@ class RootBinding(BaseModel):
 _CHUNK_TEXT_VERSION = "ctv2"
 
 
+#: The largest document `tests/test_deploy_chart.py::PARSE_MIB_PER_PARSE_BUDGET_MIB` was measured
+#: against, and therefore the largest a binding may declare.
+#:
+#: **The parse budget bounds what a parse allocates *beyond* the document it was handed**, because
+#: `ingest/documents/isolate._bound_allocations` reads its baseline after `raw` is unpickled —
+#: driven, `VmData` 230.4 MiB before a 50 MiB document and 280.5 MiB after. So a pod's real
+#: per-parse charge has two terms, and the chart's coefficient multiplies only the budget. That was
+#: sound while nothing could move the other term and unsound the moment anything could: this field
+#: is set per `datasource.yaml`, it had `ge=1024` and no upper bound, and a site binding at 200 MiB
+#: moved the real charge to ~360 MiB while
+#: `test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares` did not move at all
+#: (`D-2026-09-19-a-coefficient-measured-at-one-cap-is-a-claim-about-that-cap`).
+#:
+#: Refusing at load rather than charging both terms in the chart, because the coefficient is a
+#: *measurement* at a basis — 406.7 MiB of pod for two concurrent 50 MiB plain-text documents — and
+#: a site that wants larger documents needs it re-measured, not re-arithmetic'd. The refusal says
+#: so. The alternative of folding the document into the budget was built and reverted: it refuses a
+#: 40 MiB text file at the shipped 160 MiB budget, because a text parse holds the bytes, the
+#: decoded `str` and the pickle at once.
+PARSE_COEFFICIENT_BASIS_BYTES = 52_428_800
+
+
 class DocumentShareBinding(BaseModel):
     """Everything about one mounted share: where it is, what to read, and who may read it."""
 
@@ -153,7 +175,10 @@ class DocumentShareBinding(BaseModel):
     extensions: list[str] = Field(default_factory=lambda: sorted(SUPPORTED_EXTENSIONS))
     # A share holds files no document reader should be handed: a 2 GB scanned archive, a database
     # export named `.csv`. 50 MB covers real reports with room to spare.
-    max_file_bytes: int = Field(default=52_428_800, ge=1024)
+    #
+    # **`le` as well as `ge`, because this field is the second term of the pod's memory sizing and
+    # for a while it was the undeclared one** — see `PARSE_COEFFICIENT_BASIS_BYTES` below.
+    max_file_bytes: int = Field(default=52_428_800, ge=1024, le=PARSE_COEFFICIENT_BASIS_BYTES)
 
     # Chunking. Big enough that a chunk carries an argument rather than a sentence, small enough
     # that a citation points somewhere a reader can check.

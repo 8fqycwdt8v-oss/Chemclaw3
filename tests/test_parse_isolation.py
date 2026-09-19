@@ -568,8 +568,8 @@ def test_an_ambient_hard_limit_below_the_budget_is_a_smaller_budget_not_a_dead_p
         base = _anonymous_bytes()
         tight = base + 8 * 1024 * 1024
         resource.setrlimit(resource.RLIMIT_DATA, (tight, tight))
-        ceiling = _bound_allocations(160 * 1024 * 1024)
-        print("CLAMPED" if ceiling == tight else f"UNEXPECTED:{ceiling}")
+        ceiling, hard = _bound_allocations(160 * 1024 * 1024)
+        print("CLAMPED" if ceiling == tight and hard == tight else f"UNEXPECTED:{ceiling},{hard}")
         """
     )
     result = subprocess.run(
@@ -582,4 +582,112 @@ def test_an_ambient_hard_limit_below_the_budget_is_a_smaller_budget_not_a_dead_p
     assert "CLAMPED" in result.stdout, (
         "the ambient ceiling did not become the budget; a lower platform limit is a smaller "
         f"budget, which is what this knob is for: {result.stdout!r}"
+    )
+
+
+def _markup_heavy_pptx(slides: int, runs: int) -> bytes:
+    """A legal deck whose cost is its markup, the `.pptx` twin of `_markup_heavy_docx`.
+
+    Every word its own styled run, which is what a deck becomes after a template change or a
+    round-trip through another tool. `python-pptx` builds the same lxml DOM `python-docx` does, so
+    the cost is in the elements rather than in the characters.
+    """
+    from pptx import Presentation
+    from pptx.util import Inches, Pt
+
+    deck = Presentation()
+    blank = deck.slide_layouts[6]
+    for _ in range(slides):
+        slide = deck.slides.add_slide(blank)
+        frame = slide.shapes.add_textbox(Inches(0.2), Inches(0.2), Inches(9), Inches(6)).text_frame
+        paragraph = frame.paragraphs[0]
+        for index in range(runs):
+            run = paragraph.add_run()
+            run.text = f"word{index} "
+            run.font.bold = True
+            run.font.size = Pt(11)
+    buffer = io.BytesIO()
+    deck.save(buffer)
+    return buffer.getvalue()
+
+
+def test_a_deck_stopped_by_the_budget_earns_the_same_named_refusal_a_document_does() -> None:
+    """`.pptx` goes through the same lxml layer, and nothing had driven it.
+
+    `D-2026-09-19-a-refusal-that-blames-the-document-is-worse-than-one-that-says-nothing` fixed the
+    `.docx` case — lxml reports its own allocation failure, so the arms that name this ceiling
+    never fired and a legal report was refused as malformed at line 0 — and left the deck path
+    unverified, with a `BACKLOG.md` row saying so rather than a guess.
+
+    Driven: a 1,552,596-byte deck of 600 slides x 600 styled runs holds 2,821,690 characters,
+    parses unbounded in 4.4 s, and is refused here in 0.5 s **with the memory refusal**, so
+    `_at_ceiling` already covered it. This is what keeps that true rather than incidental.
+
+    Both arms, as for `.docx`: a deck that is really unreadable must keep its own message, or every
+    refusal would pass the first assertion.
+    """
+    raw = _markup_heavy_pptx(600, 600)
+    assert len(raw) < settings.attachment_max_bytes, "the fixture stopped being a legal upload"
+
+    with pytest.raises(DocumentParseError) as refusal:
+        parse_document_isolated("deck.pptx", raw, None, 120.0)
+    assert "memory" in str(refusal.value), (
+        f"a deck the budget stopped was refused as {str(refusal.value)!r}, which names neither the "
+        "ceiling nor the knob that moves it"
+    )
+
+    broken = io.BytesIO()
+    with zipfile.ZipFile(broken, "w") as archive:
+        archive.writestr("ppt/presentation.xml", "<p:presentation><not closed")
+    with pytest.raises(DocumentParseError) as unreadable:
+        parse_document_isolated("broken.pptx", broken.getvalue(), None, 120.0)
+    assert "memory" not in str(unreadable.value), (
+        "a genuinely unreadable deck was blamed on the memory budget, so the assertion above "
+        "proves nothing"
+    )
+
+
+def test_a_refusal_is_not_bounded_by_the_ceiling_that_caused_it() -> None:
+    """The reply is released before it is sent, because a `MemoryError` in a handler reaches no arm.
+
+    Python does not route an exception raised inside one `except` clause to a later one, so a
+    `MemoryError` while pickling the refusal onto the pipe escapes `_parse_into` entirely and the
+    caller gets an EOF it can only report as "stopped without answering" — the one failure in that
+    module whose cause is knowable, arriving nameless. The refusal is ~250 characters, so it is
+    unlikely rather than impossible, and "unlikely" is an argument rather than a measurement.
+
+    `_release_allocations` removes the question instead of estimating it: by the time a handler
+    runs the parse is over, the budget's job is done, and the reply gets the room the parse was
+    denied. Asserted on the mechanism — the ceiling is gone once the arm has run — because
+    provoking a real allocation failure inside a handler is not something a test can stage
+    honestly.
+    """
+    probe = textwrap.dedent(
+        """
+        import resource
+        from chemclaw.ingest.documents.isolate import _bound_allocations, _release_allocations
+
+        before = resource.getrlimit(resource.RLIMIT_DATA)
+        ceiling, hard = _bound_allocations(64 * 1024 * 1024)
+        bounded = resource.getrlimit(resource.RLIMIT_DATA)[0]
+        _release_allocations(hard)
+        after = resource.getrlimit(resource.RLIMIT_DATA)[0]
+        print("BOUNDED" if bounded == ceiling else f"NOT-BOUNDED:{bounded}")
+        print("RELEASED" if after == hard and after != bounded else f"STILL-BOUND:{after}")
+        same = resource.getrlimit(resource.RLIMIT_DATA)[1] == before[1]
+        print("UNCHANGED-HARD" if same else "HARD-MOVED")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert result.returncode == 0, f"the probe did not run: {result.stderr[-400:]}"
+    assert "BOUNDED" in result.stdout, f"the parse was never bounded: {result.stdout!r}"
+    assert "RELEASED" in result.stdout, (
+        "the ceiling still stood after the failure arm released it, so a refusal is pickled under "
+        f"the budget that stopped the parse: {result.stdout!r}"
+    )
+    assert "UNCHANGED-HARD" in result.stdout, (
+        "releasing moved the hard limit, which is irreversible for the process and is not what "
+        f"this is for: {result.stdout!r}"
     )
