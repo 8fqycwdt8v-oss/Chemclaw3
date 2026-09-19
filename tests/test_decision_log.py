@@ -399,7 +399,7 @@ def test_the_arrears_of_unfiled_adrs_only_shrink() -> None:
     nothing about the ones already there. Audited, 231 of 680 were cited by no row — so for a third
     of the record nothing tells a reader whether the decision is current, while every one of them
     carries `**Status:** accepted`. That is the shape a reader of a superseded ADR gets no warning
-    from, and it is why `tests/test_dead_vocabulary.py` exists for the three vocabularies where the
+    from, and it is why `tests/test_dead_vocabulary.py` exists for the vocabularies where the
     premise died outright.
 
     This test does not ask anybody to file them. It asks that the number never go up: filing one is
