@@ -132,7 +132,38 @@ from chemclaw.core.ids import stable_hash
 # being compared
 # against `std8` rows built under the corrected notion of sameness; re-indexing is what brings them
 # back. This is the same reason `std6` -> `std7` was owed, one notion of sameness later.
-STANDARDIZATION_VERSION = "std8"
+#
+# `std8` -> `std9` because the exemption that fixed the amine salts read the **net** charge of the
+# whole string, and `standardize` keeps every fragment once two of them are organic — so for any
+# `.`-separated string with two or more organic fragments and a net positive charge, the cation arm
+# exempted the hydride check for the *anion* in the same string. Measured:
+# `[BH4-].CC[NH+](CC)CC.CC[NH+](CC)CC` standardized to **borane** and triacetoxyborohydride against
+# two triethylammonium ions to triacetoxyborane, which is the reducing-agent-as-Lewis-acid defect
+# the guard exists for, reintroduced by the fix for something else. Every `std8` row for that shape
+# is keyed under the wrong identity.
+#
+# **The bump was argued rather than assumed, because it is not free.** `durable/retention.py`
+# records that a bump is a *permanent* doubling of `molecule_fingerprints` and
+# `reaction_fingerprints` — `app_privileges.sql` grants those tables INSERT and UPDATE only, so
+# nothing reclaims the superseded generation — and the only recovery is the runbook's: delete the
+# corpus's `corpus_cursors` row and re-run the ELN sync. Measured against that: **zero** of the 68
+# distinct structures in the shipped reagent table and zero of the 15 multi-fragment charged SMILES
+# anywhere in `data/` or `knowledge/` match the affected shape, so in *this* repository's corpus the
+# bump retires everything to reclaim nothing.
+#
+# It is taken anyway, for three reasons. The corpus measured above is the seed data and not the
+# population at risk: the reachable writers are an ELN component, `memory/chains.py`,
+# `ingest/labels/record.py` and a model-authored `compound_smiles`, nothing validates charge balance
+# on ingest, and a charge-unbalanced multi-fragment string is exactly what a transcription of
+# "NaBH(OAc)3 / Et3N·HCl" produces. Whether a deployment has ingested one is not a question this
+# repository can answer, and "nobody ran `std8`" is precisely the kind of claim about production
+# state the tree refuses elsewhere. Second, the asymmetry: not bumping leaves a wrong row and a
+# corrected row *both current* under one definition, ranked against each other — worse than the
+# ordinary stale-row case, because neither is filtered out — while bumping costs disk and a
+# documented re-sync. Third, the cost is at its minimum today: `std8` shipped hours ago in the
+# commit this fixes, so the generation being retired is the smallest one that will ever exist, and
+# it grows every day the decision is deferred.
+STANDARDIZATION_VERSION = "std9"
 
 # The d- and f-block by atomic number — Sc→Zn, Y→Cd, La→Hg (lanthanides included) and Ac onward.
 # A block rather than a hand-picked element list, because the property being asserted is a block
@@ -335,13 +366,35 @@ def _neutralization_is_protonation(before: Chem.Mol, after: Chem.Mol) -> bool:
     Tanimoto between the ionised and neutral spellings of one reaction fell from 0.9444 to 0.6957.
 
     So the charge decides which question to ask, and it is the charge of the species *before*
-    neutralisation because that is what names the side of the pair. `NaBH(OAc)3` — the case this
-    guard exists for — is an **anion**, so it still reaches the hydrogen-count test and is still
-    kept as written. A cation that cannot be neutralised at all, a quaternary ammonium, is
-    unaffected
-    either way: `Uncharger` leaves it alone, so the two molecules are the same one.
+    neutralisation because that is what names the side of the pair. A cation that cannot be
+    neutralised at all, a quaternary ammonium, is unaffected either way: `Uncharger` leaves it
+    alone, so the two molecules are the same one.
+
+    **`Chem.GetFormalCharge` is the *net* charge of everything in the string, and asking the
+    exemption of that number reintroduced the defect this guard exists for.** `standardize` runs
+    `FragmentParent` only when exactly one fragment is organic, so a string with two or more
+    organic fragments keeps every one of them — and then one net number decides a question about
+    each. Measured: `[BH4-].CC[NH+](CC)CC.CC[NH+](CC)CC` is net +1, so the cation arm exempted it
+    and borohydride came back as **borane**; so did triacetoxyborohydride against two
+    triethylammonium ions. That is the reducing agent sharing a `compound_id` with a Lewis acid
+    that reduces nothing, arriving through the exemption written to fix something else. So the arm
+    is conditioned on there being no anionic fragment in the string at all: a lone cation, or a
+    cation beside neutral fragments and metal counterions, is the only shape whose net positive
+    charge is a statement about the species being neutralised.
+
+    **The narrowness that leaves, stated rather than implied**: a string carrying *both* an anion
+    and a cation falls to the hydrogen count, which is a net quantity over a mixture and therefore
+    the wrong question for either species — measured, acetate against two ethylammonium ions
+    (net +1, charge-unbalanced) is kept charged where a per-fragment count would neutralise both.
+    It is the only difference the two forms have over 40 salts, hydrides, zwitterions and
+    ion-pair spellings, and it is on the side this module already chose: keeping a species as
+    written costs a cache miss, and D-2026-08-01 weighed that against writing a false record. A
+    per-fragment form would have to pair the fragments of `before` with those of `after` by index,
+    and a mispairing fails in the *other* direction — a wrong molecule, silently.
     """
-    if Chem.GetFormalCharge(before) > 0:
+    if Chem.GetFormalCharge(before) > 0 and not any(
+        Chem.GetFormalCharge(f) < 0 for f in Chem.GetMolFrags(before, asMols=True)
+    ):
         return True
     return _hydrogen_count(after) >= _hydrogen_count(before)
 

@@ -18,7 +18,7 @@ import pytest
 from rdkit import Chem, RDConfig
 
 from chemclaw.core.bounded import BoundedLru
-from chemclaw.core.chem import substructure_pattern
+from chemclaw.core.chem import STANDARDIZATION_VERSION, substructure_pattern
 from chemclaw.core.config import settings
 from chemclaw.science.fingerprints.molfp import search, substructure_index
 from chemclaw.science.fingerprints.molfp.fingerprint import ecfp_bitstring, molecule_definition
@@ -980,9 +980,15 @@ def test_the_startup_report_never_takes_the_connector_down() -> None:
 
 
 def _superseded(record: FingerprintRecord) -> FingerprintRecord:
-    """The same record as the previous fingerprint definition stored it."""
+    """The same record as the previous fingerprint definition stored it.
+
+    The version is substituted out by *name* rather than by its literal: written
+    `replace("std7", "std6")`, this became a no-op the moment the constant moved to `std8`, and the
+    fixture only still differed from a current row because of the `-old` suffix beside it — so what
+    it exercised was a definition with a suffix, not a definition at an older standardization.
+    """
     return record.model_copy(
-        update={"definition": record.definition.replace("std7", "std6") + "-old"}
+        update={"definition": record.definition.replace(STANDARDIZATION_VERSION, "std-superseded")}
     )
 
 

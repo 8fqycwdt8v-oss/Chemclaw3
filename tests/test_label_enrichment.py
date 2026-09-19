@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+from chemclaw.core.chem import STANDARDIZATION_VERSION
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.ingest.labels.enrich import label_stale
@@ -35,9 +36,16 @@ from chemclaw.ingest.labels.merge import merge
 from chemclaw.science.labels.policy import LabelPolicy
 from chemclaw.science.labels.records import ReactionLabel, SpeciesLabel
 from chemclaw.science.labels.store import InMemoryLabelIndex
-from chemclaw.science.labels.vocabulary import LabelGroup, SpeciesRole
+from chemclaw.science.labels.vocabulary import VOCABULARY_VERSION, LabelGroup, SpeciesRole
 
 _VERSION = "rxnlabel@1:std5:roles1"
+#: The stamp a *current* labeller mints, in the shape `labeller_version` composes —
+#: `f"{remote}:{STANDARDIZATION_VERSION}:{VOCABULARY_VERSION}"`. Derived rather than written out,
+#: because the literal it replaced named `std7` and the labeller had moved to `std8`: the staleness
+#: assertion still passed (any version unequal to `_VERSION` is stale) while the string claimed to
+#: be a stamp nothing mints. This is the third place `STANDARDIZATION_VERSION` reaches, and
+#: `tests/test_compound_identity.py` pins the other two.
+_NEXT_VERSION = f"rxnlabel@2:{STANDARDIZATION_VERSION}:{VOCABULARY_VERSION}"
 
 # A Buchwald-Hartwig, because it is the reaction three of the six precedent questions name and the
 # only one where every role in the vocabulary is actually distinguishable.
@@ -598,7 +606,7 @@ async def test_an_underived_row_leaves_the_stale_set_and_returns_at_the_next_ver
     await label_stale(index, _FakeLabeller(refuse={"r0"}), {}, _VERSION, limit=10)
 
     assert await index.stale(_VERSION, limit=10) == []
-    assert [r.reaction_id for r in await index.stale("rxnlabel@2:std7:roles1", 10)] == ["r0"]
+    assert [r.reaction_id for r in await index.stale(_NEXT_VERSION, 10)] == ["r0"]
 
 
 async def test_a_degraded_pass_does_not_advance_the_version_every_tool_reads() -> None:

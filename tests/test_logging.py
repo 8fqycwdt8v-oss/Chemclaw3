@@ -20,6 +20,7 @@ from pydantic import SecretStr
 
 from chemclaw.core.config import Settings, settings
 from chemclaw.core.logging import (
+    _PEM_RFC1421_HEADERS,
     _SECRET_ENV_SETTINGS,
     _SECRET_SETTINGS,
     ContextFilter,
@@ -1247,36 +1248,49 @@ _QUADRATIC_UNITS = {
 }
 
 
-@pytest.mark.parametrize("groups", [4, 6, 8])
-def test_the_pem_separator_is_not_exponential_in_its_header_count(groups: int) -> None:
+@pytest.mark.parametrize("groups", [4, 5])
+@pytest.mark.parametrize("header", [name for name, _ in _PEM_RFC1421_HEADERS])
+def test_the_pem_preamble_is_not_exponential_in_its_header_count(header: str, groups: int) -> None:
     r"""The axis the quadratic guard above cannot grow, and the one that was exponential.
 
     **That test grows the line LENGTH, and this rule's blow-up is in the number of alternations
     after a single `-----BEGIN`.** Its `pem` unit pins the header lines at two per repetition, so
     `unit * N` multiplies the *start positions* — linear, and it passed throughout. The exponential
-    axis is one
-    header followed by whitespace the separator's sibling `[\s\\]` branch can *also* consume: with
-    *k* spaces there are *k+1* ways to split them between the header's tail and the enclosing
-    `{0,64}` repetition, and a lookahead that must fail enumerates the product.
+    axis is one header followed by whitespace the gap branch `[\s\\]` can *also* consume: with *k*
+    spaces there are *k+1* ways to split them between the header's tail and the enclosing `{0,64}`
+    repetition, and a lookahead that must fail enumerates the product once per group.
 
-    Measured before the tails were made possessive, growing groups rather than length:
+    **The header name is a parameter derived from `_PEM_RFC1421_HEADERS` rather than written here,
+    and that is the defect this test is the second version of.** The first hard-coded `Proc-Type:`,
+    which is the *narrower* tail of the two — so leaving `DEK-Info:[^\r\n\\]{0,96}` greedy passed
+    all 120 tests in this file, including this one, at 117 s on 553 bytes with the logging lock
+    held. `test_every_structural_rule_has_a_pathological_unit` counts units against rules and
+    cannot see a second axis *inside* one rule; only deriving the axes from the declaration can, so
+    a third header line added to that tuple brings its own case with it.
 
-    | payload | time |
-    | --- | --- |
-    | 128 B | 2.1 ms |
-    | 178 B | 56 ms |
-    | 228 B | 1.05 s |
-    | 278 B | **14.4 s** |
+    Measured on this box through `redact_secrets` itself, with the header line as a branch inside
+    the `{0,64}` window (the shape this replaces), growing groups rather than length:
 
-    ~26x per group, so 328 bytes is minutes and 378 is hours — from **model-authored text**, on a
-    filter that holds the stdlib logging lock and, on the front door, the single event loop.
+    | groups | payload | `Proc-Type:` | `DEK-Info:` |
+    | --- | --- | --- | --- |
+    | 2 | 128 B / 126 B | 2.2 ms | 6.3 ms |
+    | 4 | 228 B / 224 B | **1.22 s** | **2.30 s** |
+    | 5 | 278 B / 273 B | **14.9 s** | **25.8 s** |
+    | 6 | 328 B / 322 B | **192 s** | **258 s** |
 
-    The bound is generous and the shape is what it asserts: 8 groups is 328 bytes, which took ~6
-    minutes before and is microseconds now, so any threshold in this range separates the two by
-    orders of magnitude rather than by a margin somebody tuned. Parametrized over three sizes so the
-    *scaling* is visible — an exponential rule fails the largest first and cannot pass all three.
+    ~12x per group, from **model-authored text**, on a filter that holds the stdlib logging lock
+    and, on the front door, the single event loop.
+
+    **Every case here fails by its own assertion, which the sizes are chosen for.** The payload is
+    `28 + 50 * groups` bytes, so 4 and 5 groups are 228 B and 278 B; both are already seconds under
+    the old shape and both still *return*, where 6 groups (328 B, three minutes) would be killed by
+    the suite's wall-clock cap instead — and `tests/conftest.py`'s own epilogue disclaims a
+    wall-clock kill as evidence about the code under test. pytest runs parameters in declaration
+    order, so the cheapest case of each axis runs first and the most expensive is last; that is the
+    opposite of "fails the largest first", which is what this docstring used to claim. The 0.5 s
+    bound separates the two regimes by three orders of magnitude rather than by a tuned margin.
     """
-    payload = "-----BEGIN PRIVATE KEY-----" + ("Proc-Type:" + " " * 40) * groups + "!"
+    payload = "-----BEGIN PRIVATE KEY-----" + (header + " " * 40) * groups + "!"
 
     start = time.perf_counter()
     redact_secrets(payload)
@@ -1284,7 +1298,7 @@ def test_the_pem_separator_is_not_exponential_in_its_header_count(groups: int) -
 
     assert elapsed < 0.5, (
         f"{len(payload)} bytes of model-authored text took {elapsed:.3f} s to redact at {groups} "
-        "header groups. The separator's branches are ambiguous over whitespace again, and this "
+        f"{header} groups. The preamble's branches are ambiguous over whitespace again, and this "
         "filter runs holding the logging lock"
     )
 
@@ -1876,11 +1890,12 @@ def test_every_vendor_shape_the_inventory_claims_is_actually_redacted(sample: st
 #: One line of PEM body, reused by every shape below so one substring check covers all four.
 _PEM_BODY_LINE = "MIIEpAIBAAKCAQEA0123abcdefghijklmnopqrstuvwxyzABCDEF"
 
-#: The four shapes that walked past the first version of the PEM rule, each named by the number
-#: that let it. Kept as a table rather than folded into `_VENDOR_SHAPES` because three of them need
-#: an assertion that table cannot make: a sample repeated across many lines is *not* in the output
-#: verbatim even when most of it survived, which is exactly how the 8192-character run bound hid a
-#: leak of 85 body lines behind a `***` that looked like a redaction.
+#: The shapes that walked past a version of the PEM rule, each named by the number — or, for the
+#: last two, the *quantifier* — that let it. Kept as a table rather than folded into
+#: `_VENDOR_SHAPES` because three of them need an assertion that table cannot make: a sample
+#: repeated across many lines is *not* in the output verbatim even when most of it survived, which
+#: is exactly how the 8192-character run bound hid a leak of 85 body lines behind a `***` that
+#: looked like a redaction.
 _PEM_SHAPES_THAT_WALKED_PAST = {
     # `openssl genrsa -aes256` / `openssl rsa -aes256` / `ssh-keygen -m PEM -N <pass>`: two RFC 1421
     # header lines and a blank line stand between the header and the body, and the separator window
@@ -1914,6 +1929,32 @@ _PEM_SHAPES_THAT_WALKED_PAST = {
         + "\n".join([_PEM_BODY_LINE] * 240)
         + "\n-----END PRIVATE KEY-----\n"
     ),
+    # The two the *possessive* tails let past, which is a narrowing rather than a number. A
+    # possessive `[^\r\n\\]{0,40}+` stops only at `\r`, `\n` or `\\`, so where the RFC 1421 header
+    # lines are separated by anything else — a PEM rendered onto one line, which is what any
+    # `.replace("\n", " ")` or a single-line formatter produces — the tail swallows the next header
+    # and the body with it, and the enclosing window cannot give the characters back. Measured at
+    # the commit that introduced them: `redacted=False`, the whole key body through verbatim. The
+    # ten shapes that commit drove had a real newline or a JSON `\n` in every one, so its corpus
+    # could not see it.
+    #
+    # **The IV is sixteen hex characters because thirty-two hides the leak, and that is a property
+    # of the pattern rather than a fixture detail.** The possessive tail stops after exactly 40
+    # characters, which lands five characters inside the IV either way. What decides the outcome is
+    # the unbroken base64 run left after it: with `openssl -aes-128-cbc`'s 16-hex IV that run is 11
+    # characters, short of the 20 the discriminator needs, so the lookahead fails and the body goes
+    # out verbatim — while `-aes-256-cbc`'s 32-hex IV leaves 27, so the lookahead succeeds at a
+    # *mid-token* position and the block is redacted by accident. Written first with the 32-hex
+    # spelling, this fixture passed with the possessive tails in place, which is the whole defect
+    # wearing the shape of a green test.
+    "encrypted rfc 1421 on one line, tab-separated (aes-128-cbc iv)": (
+        "-----BEGIN RSA PRIVATE KEY-----\tProc-Type: 4,ENCRYPTED\t"
+        "DEK-Info: AES-128-CBC,0123456789ABCDEF\t\t" + _PEM_BODY_LINE
+    ),
+    "encrypted rfc 1421 on one line, space-separated (aes-128-cbc iv)": (
+        "-----BEGIN RSA PRIVATE KEY----- Proc-Type: 4,ENCRYPTED "
+        "DEK-Info: AES-128-CBC,0123456789ABCDEF  " + _PEM_BODY_LINE
+    ),
 }
 
 
@@ -1921,7 +1962,7 @@ _PEM_SHAPES_THAT_WALKED_PAST = {
     "block", _PEM_SHAPES_THAT_WALKED_PAST.values(), ids=_PEM_SHAPES_THAT_WALKED_PAST.keys()
 )
 def test_a_pem_body_is_redacted_whatever_shape_the_key_arrives_in(block: str) -> None:
-    """A private key is the highest-value secret this filter sees, and four spellings walked past.
+    r"""A private key is the highest-value secret this filter sees, and six spellings walked past.
 
     The substring asserted is one *prefix* of a body line rather than the whole block, because the
     block-level check `_VENDOR_SHAPES` makes is the one that could not see the fourth shape: a body
@@ -1929,10 +1970,17 @@ def test_a_pem_body_is_redacted_whatever_shape_the_key_arrives_in(block: str) ->
     of it did. Sixteen characters of base64 is short enough to survive any wrap in the table and
     long enough that it appears nowhere else.
 
-    All four are one rule and one fix, and the reason they are one fix is that they are the same
-    mistake: each number in the pattern — an eight-character gap, a thirty-two-character run, an
-    8192-character body — was a guess about a shape rather than a property of the format, and each
-    was true of the unencrypted 64-column PEM somebody had in front of them.
+    The first four are one rule and one fix, and the reason they are one fix is that they are the
+    same mistake: each number in the pattern — an eight-character gap, a thirty-two-character run,
+    an 8192-character body — was a guess about a shape rather than a property of the format, and
+    each was true of the unencrypted 64-column PEM somebody had in front of them. **The last two
+    are the same mistake made without a number**: a possessive quantifier, adopted to close a
+    denial of service, on the argument that it "removes the ambiguity rather than narrowing the
+    class, so the language matched is unchanged". It narrows it — the tail is bounded by `\r`, `\n`
+    and `\\` and by nothing else, so a header separated by a tab or a space is a header the tail
+    eats. The cost was paid the other way round from the four above: those looked unredacted, this
+    one shipped a control whose stated invariant was false, which is what the next author reaches
+    for.
     """
     redacted = redact_secrets(f"driver rejected the key:\n{block}\nat 09:31")
     assert _PEM_BODY_LINE[:16] not in redacted, f"a PEM body reached the stream: {redacted[:200]!r}"

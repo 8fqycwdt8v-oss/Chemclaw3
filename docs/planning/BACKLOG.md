@@ -161,6 +161,55 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
+- [ ] **A `STANDARDIZATION_VERSION` bump retires the fingerprint rows and re-keys nothing, so the
+      graph keeps a note per superseded spelling forever** — [L],
+      `src/chemclaw/core/chem.py::compound_id`, `src/chemclaw/ingest/eln/compound.py:85-92`.
+      Driven against the live Postgres at `std7` -> `std8`: the fingerprint half works exactly as
+      designed — `CC[NH3+].[Br-]` keys to `compound-b3ba1c117ed7` under `ecfp:…:std7` and
+      `compound-bb572bdd9031` under `…:std8`, and a std8 similarity search returns only the
+      corrected row. `compound_id` carries no version, so the std7-era `compound_note` keeps its own
+      id in the knowledge graph with no cleanup path, which is the **first** consequence the fix
+      commit named ("two `compound_id`s and two `compound_note`s for one substance") and the half a
+      definition bump does not reach.
+
+      Secondary and driven: `compound_dependencies` re-derives `compound_id(note.compound_smiles)`
+      and returns `[]` when it no longer matches the note's own wikilink — so a std7-era note
+      re-submitted under std8 silently loses its compound dependency rather than failing.
+
+      Not fixed here because the two candidate fixes are both decisions rather than defect fixes:
+      folding the version into `compound_id` invalidates every stored id at every future bump and
+      breaks every citation to one, and rewriting the notes is a migration over layer 4 that
+      `kg/record.py` — append and supersede, never rewrite — has no verb for. The recovery that
+      *does* exist is `docs/guides/runbook.md:1866`: delete the corpus's `corpus_cursors` row and
+      re-run the ELN sync. Weigh it against `src/chemclaw/durable/retention.py:498`, which records
+      that a bump is "a permanent doubling" of `molecule_fingerprints`/`reaction_fingerprints`
+      because the runtime role holds no `DELETE`.
+
+- [ ] **A bare guanidinium salt never reaches the neutralisation branch, so it does not collapse
+      onto its free base** — [M], `src/chemclaw/core/chem.py::_is_organic`. `standardize` reaches
+      `Uncharger` only when some fragment is `_is_organic`, which requires a carbon bonded to
+      hydrogen or to another carbon, and guanidinium's carbon has three nitrogen neighbours.
+      Measured: guanidine hydrochloride has `organic == 0`, returns before both the strip and the
+      neutralisation, and does not collapse — before the `std7`/`std8` work and after it. Metformin
+      and acetamidine are covered only because their substituents happen to make them organic by
+      that test, which is why the class-scope claim in
+      `tests/test_compound_identity.py::test_an_amine_salt_drawn_as_an_ion_pair_is_its_free_base`
+      has been narrowed to the shipped corpus. Nothing in `data/` contains a guanidine today, so
+      this is latent; widening `_is_organic` is the fix to weigh, and it moves every fragment-count
+      branch at once, so it needs the `standardize` behaviour table in
+      `test_the_standardization_version_is_pinned_to_the_behaviour_it_names` re-measured and almost
+      certainly a version bump.
+
+- [ ] **Four first-party refusal gates are outside the weekly mutation backstop** — [S],
+      `pyproject.toml` `[tool.mutmut].source_paths`. `agent/authz.py` is covered and
+      `agent/plan_gate.py`, `agent/skill_backend.py`, `agent/spend_cap.py` and `agent/loop_cap.py`
+      are not, although each is a control of the same kind — a refusal whose surviving mutant is a
+      tool call that should not have happened. `core/chem.py` and `core/logging.py` were added on
+      2026-09-19 for exactly that argument, after three mutations of theirs passed a full subset.
+      Not added in the same change because the list is short on purpose — the comment above it
+      records that the run is hours long — so each addition needs its runtime measured rather than
+      assumed. Measure `make mutants` with one of them added before adding the rest.
+
 - [ ] **The substructure deadline test asserts a timing ratio where it means a record count** —
       [S], `tests/test_molfp.py::test_a_scan_past_its_deadline_stops_instead_of_matching_the_rest_of_the_corpus`.
       Its own docstring states the property as *"went on matching every remaining record"*, which is
