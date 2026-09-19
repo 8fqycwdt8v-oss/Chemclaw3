@@ -80,16 +80,24 @@ test must drive `parse_document` directly, which is where that behaviour belongs
 import logging
 import multiprocessing as mp
 import os
+import resource
 import signal
 import threading
 import time
 from multiprocessing.connection import Connection
 from multiprocessing.context import ForkServerContext
 from multiprocessing.process import BaseProcess
+from pathlib import Path
 from typing import cast
 
+from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
-from chemclaw.ingest.documents.parse import DocumentParseError, ParsedDocument, parse_document
+from chemclaw.ingest.documents.parse import (
+    DocumentParseError,
+    ParsedDocument,
+    parse_document,
+    too_large_to_read,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +150,120 @@ class ParseWorkerLost(DocumentParseError):
     """
 
 
+def _anonymous_bytes() -> int | None:
+    """This process's private anonymous memory, which is what `RLIMIT_DATA` counts.
+
+    Returns:
+        `VmData` in bytes, or None where there is no `/proc` to read it from.
+    """
+    try:
+        status = Path("/proc/self/status").read_text()
+    except OSError:
+        return None
+    for line in status.splitlines():
+        if line.startswith("VmData:"):
+            return int(line.split()[1]) * 1024
+    return None
+
+
+#: How close to its ceiling a failed parse has to have been for the ceiling to be the explanation.
+#: Not a `Settings` field, for the reason `_REAP_SECONDS` below is not one: it is the resolution of
+#: a measurement, not a posture a deployment states. Measured on this parser set — a document that
+#: exhausts the budget fails with **0.1 MiB** of headroom left, and every genuinely unreadable one
+#: (truncated XML, not a zip at all, empty, wrong extension) fails with the **whole 160 MiB**
+#: unspent. Anything in between is a parser this repository has not seen, and the conservative
+#: reading of it is "not the budget", which is why this is small rather than generous.
+_CEILING_HEADROOM_BYTES = 8 * 1024 * 1024
+
+
+def _at_ceiling(ceiling: int | None) -> bool:
+    """Had this parse spent its whole allowance at the moment it failed?
+
+    **The one thing that distinguishes an oversized document from a broken one**, and without it
+    they are the same sentence. A C parser that reports its own allocation failure never lets
+    CPython raise `MemoryError`, so lxml's arrives as an ordinary parse error — and the message a
+    chemist gets is that their perfectly good report is malformed at line 0, which is worse than
+    the generic wording `too_large_to_read` exists to replace rather than equal to it.
+
+    `VmData` rather than a flag set by the failing allocation, because there is no such flag to
+    set: the failure happens inside libxml2 and surfaces as a value, not as a signal. What is
+    checkable afterwards is how much of the budget the process was holding, and the two populations
+    do not overlap — see `_CEILING_HEADROOM_BYTES`.
+
+    Args:
+        ceiling: The `RLIMIT_DATA` value `_bound_allocations` actually set, or None if it set none.
+
+    Returns:
+        True when the budget is the likeliest explanation for the failure.
+    """
+    if ceiling is None:
+        return False
+    now = _anonymous_bytes()
+    return now is not None and now >= ceiling - _CEILING_HEADROOM_BYTES
+
+
+def _bound_allocations(budget: int) -> int | None:
+    """Cap what this parse may allocate, so an unbounded document is a refusal not an OOMKill.
+
+    **This is the only bound in the unit that kills the pod.** Every ceiling upstream of here is a
+    number read out of the archive — the bytes on the wire, a binding's `max_file_bytes`, the
+    declared expansion `_refuse_a_bomb` sums. Measured over a real memory cgroup, three independent
+    reasons none of them predicts the cost: one wide code point anywhere widens a whole
+    document-wide join by 2× or 4×, a shared string is stored once and read N times, and
+    `python-docx` builds an lxml DOM out of the markup rather than out of the text. A kernel ceiling
+    on the process that does the allocating needs a model of none of that, and it covers a parser
+    added after this was written —
+    `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse` has the tables.
+
+    `RLIMIT_DATA` rather than `RLIMIT_AS`: since Linux 4.7 it covers the heap *and* private
+    anonymous mappings, which is what a parse spends, and it leaves the file-backed mappings this
+    child inherited — libpython, libxml2, the parsers — out of the sum. The baseline is read rather
+    than assumed, because a `forkserver` child starts with the whole preload list already resident
+    and a budget charged against zero would refuse the first document it saw.
+
+    What an exhausted budget looks like from outside is a refusal, by one of two routes: CPython
+    raises `MemoryError`, which `parse_document` names; or a C parser reports its own allocation
+    failure, which arrives as the same broad `DocumentParseError` an unreadable file does. Either
+    way the caller is told the document could not be read, which is more than an OOM-killed pod
+    tells anybody, and every other turn on the replica is still being served.
+
+    Args:
+        budget: Bytes this process may allocate beyond what it already holds.
+    """
+    base = _anonymous_bytes()
+    if base is None:
+        # Not Linux, so there is no `/proc/self/status` to read a baseline from and no shipped
+        # deployment either. Said out loud rather than passed over: the parse runs unbounded here.
+        logger.warning(
+            "no /proc/self/status to size a parse budget against; this parse is not memory-bounded"
+        )
+        return None
+    ceiling = base + budget
+    # **The inherited hard limit wins, and it used to be an exception.** `setrlimit` refuses to
+    # raise a maximum, so a process tree carrying any hard `RLIMIT_DATA` below `base + budget` — a
+    # systemd `LimitDATA=`, a container security profile — raised `ValueError` here, landed in the
+    # broad arm below and made **every document of every format** unreadable, with the cause only
+    # in a log line. Driven at `base + 8 MiB`. A lower ambient ceiling is a smaller budget, which is
+    # the outcome this knob is for; it is not a reason to refuse everything.
+    hard = resource.getrlimit(resource.RLIMIT_DATA)[1]
+    if hard != resource.RLIM_INFINITY and hard < ceiling:
+        logger.warning(
+            "an ambient hard RLIMIT_DATA of %d bytes is below this parse's budget of %d; parsing "
+            "against the ambient ceiling instead",
+            hard,
+            ceiling - base,
+        )
+        ceiling = hard
+    try:
+        # The hard limit is passed through unchanged rather than lowered to the soft one: lowering
+        # it is irreversible for the process, and this child has no reason to take that from itself.
+        resource.setrlimit(resource.RLIMIT_DATA, (ceiling, hard))
+    except (OSError, ValueError):
+        logger.exception("could not bound this parse's allocations; it runs unbounded")
+        return None
+    return ceiling
+
+
 def _parse_into(
     connection: "Connection[object]", name: str, raw: bytes, declared: str | None
 ) -> None:
@@ -162,6 +284,7 @@ def _parse_into(
         raw: The document's bytes.
         declared: The client-declared content type, or None.
     """
+    ceiling: int | None = None
     try:
         # **Lead a new process group, so a kill reaches whatever this parse starts.**
         # `Process.kill()` signals one pid: a parser that shells out leaves the grandchild running
@@ -178,13 +301,33 @@ def _parse_into(
             os.setsid()
         except OSError:  # pragma: no cover - only reachable if the child already leads a group
             logger.debug("parse child could not lead its own process group; kills stay per-pid")
+        # Before a byte is read, and in this process rather than in the parent: a limit set on the
+        # front door would bound the front door, which is the thing being protected.
+        ceiling = _bound_allocations(settings.document_parse_memory_bytes)
         connection.send(("parsed", parse_document(name, raw, declared)))
+    # **A parse that stopped at its ceiling is renamed here, whatever it called itself.** lxml
+    # reports its own allocation failure rather than letting CPython raise, so a markup-heavy but
+    # entirely legal `.docx` arrived as `unknown error (<string>, line 0)` — a sentence that tells
+    # a chemist their report is malformed at line 0 and an operator nothing at all. Measured: a
+    # 485 kB Word report of 2,000 paragraphs x 200 styled runs holds 2,979,999 characters, parses
+    # unbounded in 19.4 s, and is refused here in 2.2 s. `_at_ceiling` is what separates it from a
+    # document that really is broken, and the two populations do not overlap.
     except DocumentParseError as exc:
-        connection.send(("refused", exc))
+        connection.send(("refused", too_large_to_read(name) if _at_ceiling(ceiling) else exc))
+    # Outside `parse_document`'s own arm on purpose: this one is the *pickling* of a document that
+    # parsed, which is a second full copy of the text and is deliberately inside the same budget.
+    # Driven, a 7.2 M-character `.docx` extracted fine and then exhausted the ceiling on the pipe,
+    # and before this arm existed the caller was told only that the reader "stopped without
+    # answering" — the one refusal in this module whose cause is knowable, arriving nameless.
+    except MemoryError:
+        connection.send(("refused", too_large_to_read(name)))
     # Broad on purpose: this is the child's last act, and an exception that escapes here dies with
     # it, leaving the parent an EOF it can only report as "stopped without answering".
     except BaseException as exc:
-        connection.send(("failed", f"{type(exc).__name__}: {exc}"))
+        if _at_ceiling(ceiling):
+            connection.send(("refused", too_large_to_read(name)))
+        else:
+            connection.send(("failed", f"{type(exc).__name__}: {exc}"))
     finally:
         connection.close()
 

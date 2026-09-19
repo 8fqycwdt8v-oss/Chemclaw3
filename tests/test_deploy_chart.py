@@ -5688,13 +5688,26 @@ def test_no_alert_reads_a_series_this_prometheus_cannot_see() -> None:
         )
 
 
-#: What the front door holds before it parses anything, in MiB of *unique* pages.
+#: What the front door holds before it parses anything, in MiB.
 #:
 #: Measured on the real serving object — `uvicorn chemclaw.api.app:create_app --factory` against the
 #: dev Postgres, lifespan run, `/healthz` served — at 445,204 kB resident and 442,270 kB of `Pss`,
-#: which is 431.9 MiB. `Pss` rather than `VmRSS` throughout this budget because a cgroup is charged
-#: for unique physical pages once, and the parent, the forkserver and every parse child map the same
-#: interpreter and the same shared objects: summing `VmRSS` counts libpython three times.
+#: which is 431.9 MiB.
+#:
+#: **`Pss` is not "unique pages", and the sentence here that said so was wrong**
+#: (`D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse`). A memory cgroup charges
+#: a page in full to whichever cgroup first touched it, once; `Pss` divides a shared page by the
+#: number of processes mapping it *system-wide*, which is a different quantity and one that moves
+#: with what else is running on the node. So `Pss` understates this pod's charge whenever a page it
+#: brought in is also mapped outside it. **Driven here rather than argued**: one unchanged process
+#: with the parsers imported reads 53,118 kB of `Pss` alone, 47,653 kB while six unrelated siblings
+#: map the same shared objects, and 53,130 kB again when they exit — 10.3% of the reading belonged
+#: to what else was running, where `Rss` moved 12 kB (0.016%) across the same three samples. It is
+#: kept as the number this constant was derived
+#: from because re-deriving the front door's resident set is not what that ADR set out to do, and
+#: because every use of it here is a *floor* argument ("the pod already holds at least this"); the
+#: quantity a later derivation should use is the cgroup's own `memory.max_usage_in_bytes`, which is
+#: what the parse measurements below now use.
 #:
 #: A floor rather than a ceiling, and deliberately so: that process had compiled no agent graph,
 #: opened no connector session and served no turn. What it does not include is the subject of a
@@ -5708,11 +5721,12 @@ WORKER_RESIDENT_MIB = 279
 
 #: What warming the parse forkserver costs the pod, in MiB.
 #:
-#: The forkserver's own `Pss`, which is a rigorous *upper* bound on the pod's marginal charge: the
-#: parent's `Pss` can only fall when a second process starts sharing its file-backed pages, so the
-#: pod's delta is this number minus that giveback. Measured, the delta is 76.1 MiB under pytest,
-#: 79.1 MiB under the worker and 83.5 MiB under the front door, against a forkserver `Pss` of
-#: 90.0–91.0 MiB across five parents and two virtualenvs.
+#: The forkserver's own `Pss`. Measured, the pod-level delta is 76.1 MiB under pytest, 79.1 MiB
+#: under the worker and 83.5 MiB under the front door, against a forkserver `Pss` of
+#: 90.0–91.0 MiB across five parents and two virtualenvs — so this number is above every delta
+#: measured for it, which is the property the budget uses. The reason given for that ordering used
+#: to be an argument about `Pss` being unique pages; see `FRONT_DOOR_RESIDENT_MIB` for why that
+#: argument does not hold and why the ordering is carried as a measurement instead.
 #:
 #: **It is not the 109 MiB `docs/planning/BACKLOG.md` carried**, which was `VmRSS`. The process
 #: really is a second full resident copy of pypdf, python-docx, openpyxl and python-pptx —
@@ -5762,18 +5776,40 @@ FORKSERVER_POD_COST_MIB = 91
 #: on the closure both of them are measured from.
 FORKSERVER_RSS_CEILING_MIB = 112
 
-#: What one parse in flight costs the pod, per MiB of the document's *expanded* size.
+#: What one parse in flight costs the pod, per MiB of the budget the *parse* declares.
 #:
-#: The child is forked from the forkserver, so the parsers themselves are copy-on-write and what it
-#: adds is the text: measured as the pod's peak `Pss` over its warm-idle baseline, sampled at 3 ms
-#: across the whole parse. Two concurrent 29.7 MB-expanded workbooks (the largest a legal 2 MB
-#: upload reaches, 1.69 MB on the wire, 12.6 M characters each) peaked 169,532 kB above idle in the
-#: front door and 178,054 kB in a bare parent — 82.8 and 86.9 MiB each. One 59.9 MB-expanded
-#: workbook, the share path's shape, peaked 166,966 kB — 163.1 MiB, for 2.01× the expansion.
+#: **The quantity this is a coefficient of used to be the document's expanded size, and the parse
+#: is not a function of that** — see
+#: `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse`.
+#: Re-measured over a real memory cgroup — `memory.max_usage_in_bytes`, reset immediately
+#: before each parse, over a process tree holding the parent, the forkserver and every parse child,
+#: which is what a container is — one legal document at 99% of `document_max_expanded_bytes`
+#: charged the pod:
 #:
-#: So it is linear in the expanded size, which is what makes it a coefficient rather than a table:
-#: 3.07 and 2.86 MiB per expanded MiB. The larger, rounded up.
-PARSE_MIB_PER_EXPANDED_MIB = 3.1
+#: | shape | ASCII | one `°` (Latin-1) | one `—` (BMP) | one U+1F9EA (astral) |
+#: | --- | --- | --- | --- | --- |
+#: | 63.4 MiB-expanded workbook, 52.2 M chars | 236 MiB | 287 | 337 | 500 |
+#: | 61.0 MiB-expanded `.docx`, 57.8 M chars | 369 MiB | 424 | 480 | 589 |
+#:
+#: — 1.8 to 9.7 MiB per expanded MiB against a constant of 3.1, because CPython stores a `str` at
+#: the width of its widest code point and `_parse_xlsx` builds one document-wide join. Two further
+#: measurements say the expanded size is not merely a noisy predictor but the wrong one: a workbook
+#: whose 5.9 MiB of expanded XML references one shared string 200,000 times yields 96.3 M
+#: characters and charged 321 MiB, and a markup-heavy `.docx` at 79% of the ceiling, holding
+#: 470,000 characters, charged 840 MiB of lxml DOM.
+#:
+#: So the bound moved to the one quantity a coefficient can honestly be taken against: what the
+#: parse is *allowed to allocate*, which `ingest/documents/isolate.py` sets as an `RLIMIT_DATA` on
+#: the child before it reads a byte. Measured against `document_parse_memory_bytes` over fourteen
+#: documents spanning both formats, all four width classes, the shared-string shape and the
+#: markup-heavy shape, at three different budgets, the pod's peak charge per parse ran 0.45–1.33×
+#: the declared budget at concurrency 1 and 0.65–1.32× at concurrency 2. The larger, rounded up. At
+#: the shipped budget and the shipped cap the worst case measured is two 50 MiB plain-text
+#: documents together: 406.7 MiB of pod, against the 448 MiB this constant allows them.
+#:
+#: Above 1.0 because the parent unpickles a second copy of the text the child sent; below 2.0
+#: because the child's own transient intermediates are inside its ceiling rather than beside it.
+PARSE_MIB_PER_PARSE_BUDGET_MIB = 1.4
 
 
 def _declared_mib(resources: dict[str, Any], kind: str) -> int:
@@ -5786,10 +5822,11 @@ def _declared_mib(resources: dict[str, Any], kind: str) -> int:
 
 
 def _parse_peak_mib(concurrent: int) -> float:
-    """What `concurrent` parses at the expansion ceiling peak at, in MiB."""
+    """What `concurrent` parses at their declared allocation ceiling peak at, in MiB."""
     from chemclaw.core.config import settings
 
-    return concurrent * PARSE_MIB_PER_EXPANDED_MIB * settings.document_max_expanded_bytes / 1024**2
+    budget_mib = settings.document_parse_memory_bytes / 1024**2
+    return concurrent * PARSE_MIB_PER_PARSE_BUDGET_MIB * budget_mib
 
 
 def test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares() -> None:
@@ -5805,9 +5842,21 @@ def test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares() -> N
     523 MiB against a 512Mi request, exceeded while the pod is idle — which is a node oversubscribed
     by the difference and a pod first in line for eviction, with nothing anywhere saying so.
 
-    The *limit* was never the problem and is unchanged: the worst legal pair of concurrent parses is
-    920 MiB of the 1024 MiB it allows. Raising `attachment_max_concurrent_parses` or
-    `document_max_expanded_bytes`, or lowering either declaration, fails here instead of in an
+    **The limit half of this was green on a case that OOM-killed the pod, and what was wrong was
+    the quantity rather than the number**, and
+    `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse` has the measurements. It
+    read `document_max_expanded_bytes` and multiplied it by a coefficient
+    measured on three ASCII samples; a parse is not a function of a document's expanded size, for
+    the three independent reasons `PARSE_MIB_PER_PARSE_BUDGET_MIB` sets out. Driven in a 1Gi memory
+    cgroup carrying the 523 MiB idle pair: two legal uploads — 1,089,493 bytes on the wire against
+    `attachment_max_bytes` of 2,000,000, 63.4 MiB expanded against a 64 MiB ceiling — with one
+    astral character each took the *parent* with `SIGKILL`, exit 137, while this assertion
+    read 920 against 1024 and passed.
+
+    So what is multiplied here is `document_parse_memory_bytes`, the ceiling the kernel enforces on
+    the process that does the allocating. That is a coefficient of the quantity it is declared
+    against: raising the budget, `attachment_max_concurrent_parses` or
+    `worker_max_concurrent_activities`, or lowering either declaration, fails here instead of in an
     OOMKill that takes every other connected turn with it.
     """
     from chemclaw.core.config import settings
@@ -5818,9 +5867,14 @@ def test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares() -> N
 
     for label, key, idle, concurrent in (
         ("front door", "service", front_door, settings.attachment_max_concurrent_parses),
-        # One, not a cap: `ingest/documents/sync.py` awaits each `_read_and_parse` in turn, so a
-        # crawl never has two children alive at once however many files the batch holds.
-        ("background worker", "worker", worker, 1),
+        # **The worker's count is its activity cap, and it used to be 1** — justified by
+        # `ingest/documents/sync.py` awaiting each `_read_and_parse` in turn, which bounds one
+        # *activity* while this pod runs `worker_max_concurrent_activities` of them. That the
+        # document-sync schedule is `ScheduleOverlapPolicy.SKIP` over a workflow whose activities
+        # are sequential does make 1 the number today, but it is a three-hop argument across two
+        # modules that a second share schedule or one manual run breaks, and the pod fits its cap
+        # outright — so the cap is what is asserted and the argument is not needed.
+        ("background worker", "worker", worker, settings.worker_max_concurrent_activities),
     ):
         request = _declared_mib(resources[key], "requests")
         limit = _declared_mib(resources[key], "limits")
@@ -5832,8 +5886,8 @@ def test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares() -> N
         )
         needed = idle + _parse_peak_mib(concurrent)
         assert needed <= limit, (
-            f"{concurrent} concurrent parse(s) at the {settings.document_max_expanded_bytes}-byte "
-            f"expansion ceiling need {needed:.0f} MiB in the {label} — the resident set and the "
+            f"{concurrent} concurrent parse(s) at the {settings.document_parse_memory_bytes}-byte "
+            f"allocation ceiling need {needed:.0f} MiB in the {label} — the resident set and the "
             f"warm forkserver included — against the {limit} MiB its container declares. That is "
             "an OOMKill of the whole pod, not a refused upload"
         )
