@@ -72,13 +72,18 @@ def _plan_steps(plan: PlanEvent) -> list[str]:
     return [step[4:] if step[:4] in ("[ ] ", "[x] ") else step for step in plan.todos]
 
 
-def _billed_tokens(turn: TurnCost) -> float:
+def billed_tokens(turn: TurnCost) -> float:
     """One turn's cost in input-token equivalents.
 
     Input and output are counted at face value and the two cache counters at their configured
     weights, because a cached read is charged at a fraction of an input token and a cache write at
     a premium. Collapsing four counters into one number is what lets the metric be a single float
     without pretending the four are interchangeable.
+
+    **Public because there is a second real caller**, which is the bar this repository sets for an
+    abstraction existing at all: `evals/delegation_run.billed_by_session` needs exactly this
+    arithmetic over `turn_costs` rows, and a second copy of it would be two answers to "what did a
+    turn cost" — one of which would not follow `eval_cache_read_weight` when a deployment moved it.
     """
     return (
         turn.input_tokens
@@ -289,7 +294,7 @@ def turn_cost_ratio(case: EvalCase) -> MetricResult:
     if isinstance(baseline, bool) or not isinstance(baseline, (int, float)) or baseline <= 0:
         raise MetricError("reference.baseline_tokens must be a positive number of billed tokens")
 
-    billed = sum(_billed_tokens(turn) for turn in turns)
+    billed = sum(billed_tokens(turn) for turn in turns)
     unfinished = sum(1 for turn in turns if not turn.completed)
     return MetricResult(
         metric="turn_cost_ratio",

@@ -103,7 +103,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-turn-cost live-benchmark live-template-args live-verifier-margin trajectory-census distill propose-profile live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats upstream-check share-estimate share-sync live-ab live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status
+.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-turn-cost live-benchmark live-template-args live-verifier-margin trajectory-census distill propose-profile live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats upstream-check share-estimate share-sync live-ab live-delegation live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -602,6 +602,21 @@ live-data:  ## Check the seeded corpus against the published factor tables, valu
 # the open row in `docs/planning/BACKLOG.md`.
 live-ab:  ## Ask the probe corpus against the prompt-swapping control arm and compare (real gateway).
 	uv run python -m chemclaw.cli.live_probes --suite ab $(ARGS)
+
+# The delegation experiment's run half (issue #359). Four arms over `data/evals/probes/delegation.
+# yaml`, `MINIMUM_REPEATS` repeats each, one report per arm against the `no-helper` baseline.
+#
+# **Two of the four arms need the front door started a particular way and no flag here can do it**:
+# `helper-routed` needs `CHEMCLAW_MODEL_ROUTES='{"helper": "<a smaller model>"}'` and `peer` needs
+# `CHEMCLAW_AGENT_PEER_ROSTER` naming another profile, because a helper's model route and a peer
+# roster are read by the process that builds the agent. The suite prints what each arm needs and
+# reports an arm that could not have complied as `undelegated` rather than as a pass.
+#
+# Against `chemclaw.cli.mock_llm --catalogue delegation` this proves the runner and nothing else:
+# the double supplies the decision to delegate, which is the one thing a credential-free lane cannot
+# get from a model. Answering "does delegation pay" needs a gateway.
+live-delegation:  ## The delegation experiment: drive every arm and compare (real gateway).
+	uv run python -m chemclaw.cli.live_probes --suite delegation $(ARGS)
 
 live-plan-gate:  ## M12: plan -> approve -> execute -> re-gate, live (needs harness_autonomy=plan_only).
 	uv run python -m chemclaw.cli.live_probes --suite plan-gate $(ARGS)
