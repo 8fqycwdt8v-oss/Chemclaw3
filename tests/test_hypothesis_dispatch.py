@@ -15,6 +15,7 @@ from chemclaw.hypotheses.dispatch import (
     STRUCTURE_ARGUMENT,
     Dispatch,
     Refusal,
+    Sweep,
     ToolContract,
     contract_of,
     defaulted_arguments,
@@ -97,10 +98,16 @@ def test_an_absent_tool_refuses_and_says_so() -> None:
     assert refusal.code == "tool-unavailable"
 
 
-def test_a_check_naming_no_tool_refuses() -> None:
-    refusal = refuse_unless_dispatchable("", _contract(required={"smiles"}))
+def test_a_tool_that_is_not_on_the_surface_refuses() -> None:
+    """A name nothing serves, which is also what an empty name reduces to.
+
+    There is no separate `no-tool-named` code any more: the one production caller returns `no-call`
+    before reaching here when the check named nothing, so a second code for the same condition was
+    a vocabulary entry nothing could ever emit.
+    """
+    refusal = refuse_unless_dispatchable("compute_moon_phase", None)
     assert refusal is not None
-    assert refusal.code == "no-tool-named"
+    assert refusal.code == "tool-unavailable"
 
 
 def test_a_tool_whose_default_is_wrong_for_the_molecule_refuses() -> None:
@@ -210,6 +217,17 @@ def _local_contract(signature: inspect.Signature) -> ToolContract:
     )
 
 
+#: Bundles whose servers this repository declares and does not hold, so no signature here can be
+#: introspected for them. **`_DISPATCHABLE` is therefore a pin on the locally-readable tools and
+#: not on the live surface** — `run_computable_check` assembles its surface from `open_connector_
+#: specs` and judges each tool from the schema its session advertises, which covers these too.
+#: Named rather than left implicit for `tests/test_context_floor.SERVED_ELSEWHERE_ALLOWANCE`'s
+#: reason: a ratchet whose blind spot is undeclared measures a smaller system than a turn runs and
+#: nothing says so. A *new* bundle joining this set turns the assertion below red, which is the
+#: moment to read its tools' defaults.
+_SERVED_ELSEWHERE = {"chem", "rxnpredict", "safety"}
+
+
 def test_the_dispatchable_set_is_exactly_what_is_pinned() -> None:
     """Derived from live signatures, so it tracks the tools rather than a maintained list."""
     found = {
@@ -222,6 +240,31 @@ def test_the_dispatchable_set_is_exactly_what_is_pinned() -> None:
         "gained a required argument correctly drops out — update the set. A tool that appeared "
         "needs its defaults read before it is added: arity does not catch a default that is wrong "
         "for the molecule (see `compute_thermochemistry`)."
+    )
+
+
+def test_the_tool_ratchets_blind_spot_is_declared() -> None:
+    """What `_DISPATCHABLE` is a pin on, asserted rather than assumed.
+
+    The set above is derived from `resolvable_signatures()`, which needs a *local*
+    `connectors.<name>.server.tools` module. Every other enabled bundle's endpoint tools are on the
+    live surface a check is dispatched against and invisible to that derivation — measured, three
+    bundles and 21 declared tools. Their defaults are read by nobody here, so a new one is a
+    decision rather than an accident.
+    """
+    from chemclaw.connectors.registry import enabled, server_tools_module
+
+    unreadable = {
+        manifest.name
+        for manifest in enabled()
+        if manifest.endpoint
+        and manifest.endpoint.tools
+        and server_tools_module(manifest.name) is None
+    }
+    assert unreadable == _SERVED_ELSEWHERE, (
+        "the set of bundles this repository declares and cannot introspect has changed. A bundle "
+        "that joined it has endpoint tools a hypothesis check can be dispatched onto with no "
+        "reviewer having read their defaults — read them, then add the name here."
     )
 
 
@@ -292,6 +335,17 @@ _DISPATCHABLE_JOBS = {
 _SWEEP_BUDGET = 6
 
 
+def _fields_of(connector: str, job: Any) -> dict[str, tuple[bool, Any]]:
+    """One job's declared params, reduced to what `ground_job_params` reads."""
+    from chemclaw.connectors.jobs import _params_model
+
+    model = _params_model(connector, job)
+    return {
+        name: (declared.is_required(), declared.default)
+        for name, declared in model.model_fields.items()
+    }
+
+
 def _try_ground(job_name: str) -> tuple[dict[str, Any] | None, Refusal | None]:
     from chemclaw.hypotheses.dispatch import (
         STRUCTURE_FIELDS,
@@ -352,7 +406,13 @@ def test_an_unclassified_field_fails_closed() -> None:
     """The property the curation rests on: omission makes a job undispatchable, never runnable."""
     from chemclaw.hypotheses.dispatch import ground_job_params
 
-    _, refusal = ground_job_params({"mystery": (True, None)}, {}, {}, None, _SWEEP_BUDGET)
+    _, refusal = ground_job_params(
+        {"smiles": (True, None), "mystery": (True, None)},
+        {"smiles": ["a"]},
+        {"a": "CCO"},
+        None,
+        _SWEEP_BUDGET,
+    )
     assert refusal is not None
     assert refusal.code == "field-cannot-be-grounded"
 
@@ -375,7 +435,13 @@ def test_a_swept_axis_must_have_a_vocabulary_behind_it() -> None:
 def test_a_sweep_over_no_values_refuses() -> None:
     from chemclaw.hypotheses.dispatch import Sweep, ground_job_params
 
-    _, refusal = ground_job_params({}, {}, {}, Sweep("solvents", ()), _SWEEP_BUDGET)
+    _, refusal = ground_job_params(
+        {"smiles": (True, None), "solvents": (True, None)},
+        {"smiles": ["a"]},
+        {"a": "CCO"},
+        Sweep("solvents", ()),
+        _SWEEP_BUDGET,
+    )
     assert refusal is not None
     assert refusal.code == "axis-empty"
 
@@ -472,3 +538,91 @@ def test_a_sweep_exactly_at_the_budget_is_allowed() -> None:
     assert refusal is None
     assert params is not None
     assert params["solvents"] == list(values)
+
+
+def test_a_job_naming_no_subject_refuses() -> None:
+    """The guard that keeps the set to calculations about a molecule in the record.
+
+    Measured before it existed: `republish_calculations` has no required field at all, so "every
+    required field is grounded" was vacuously true and a model naming that string would have had
+    the tournament start a corpus-wide push to an external result sink. That is not a check that
+    is narrowly wrong — it is a different kind of act, and no argument-level rule catches it.
+    """
+    from chemclaw.hypotheses.dispatch import ground_job_params
+
+    params, refusal = ground_job_params({"limit": (False, None)}, {}, {}, None, _SWEEP_BUDGET)
+    assert params is None
+    assert refusal is not None
+    assert refusal.code == "no-subject"
+
+
+def test_every_job_any_enabled_connector_declares_is_either_pinned_or_refused() -> None:
+    """The ratchet the per-bundle one is not: `find_job` searches every enabled connector.
+
+    `_DISPATCHABLE_JOBS` is derived from the `calc` bundle, while the production lookup is
+    repo-wide — so a job in any *other* bundle whose required fields all default became
+    tournament-launchable with nothing turning red. This asserts the repo-wide set equals the
+    pinned one.
+    """
+    from chemclaw.connectors.registry import enabled
+    from chemclaw.hypotheses.dispatch import STRUCTURE_FIELDS, SWEEPABLE_FIELDS, ground_job_params
+
+    groundable: set[str] = set()
+    for manifest in enabled():
+        for job in manifest.jobs:
+            fields = _fields_of(manifest.name, job)
+            required = [name for name, (req, _) in fields.items() if req]
+            subjects = {
+                name: (["a"] if STRUCTURE_FIELDS[name] == "one" else ["a", "b"])
+                for name in required
+                if name in STRUCTURE_FIELDS
+            }
+            axis = next((name for name in required if name in SWEEPABLE_FIELDS), "")
+            sweep = Sweep(parameter=axis, values=("thf",)) if axis else None
+            _params, refusal = ground_job_params(
+                fields, subjects, {"a": "CCO", "b": "CCN"}, sweep, _SWEEP_BUDGET
+            )
+            if refusal is None:
+                groundable.add(job.name)
+    assert groundable == _DISPATCHABLE_JOBS, (
+        "a durable job outside the `calc` bundle became launchable by a hypothesis check. "
+        "`find_job` searches every enabled connector, so this set — not the per-bundle one — is "
+        "what a tournament can actually start."
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "code"),
+    [
+        (
+            {"subjects": {"reactants": ["a"]}, "sweep": None},
+            "subject-field-not-declared",
+        ),
+        (
+            {"subjects": {"smiles": ["a"]}, "sweep": Sweep("solvents", ("thf",))},
+            "axis-not-declared",
+        ),
+    ],
+)
+def test_a_key_the_job_does_not_declare_refuses_rather_than_being_dropped(
+    kwargs: dict[str, Any], code: str
+) -> None:
+    """These params models do not set `extra="forbid"`, so an undeclared key vanishes silently.
+
+    Measured before this guard: a `solvents` axis handed to `sample_conformers` was dropped by
+    pydantic, the plain gas-phase search ran, and the grounded call still reported three solvents
+    compared. An argument the dispatcher discards is the same hidden assumption as one it invents,
+    and the discarded one is worse because the report keeps claiming it.
+    """
+    from chemclaw.hypotheses.dispatch import ground_job_params
+
+    params, refusal = ground_job_params(
+        {"smiles": (True, None), "effort": (False, "quick")},
+        kwargs["subjects"],
+        {"a": "CCO"},
+        kwargs["sweep"],
+        _SWEEP_BUDGET,
+    )
+    assert params is None
+    assert refusal is not None
+    assert refusal.code == code

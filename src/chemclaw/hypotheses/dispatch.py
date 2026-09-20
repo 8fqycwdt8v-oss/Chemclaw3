@@ -98,7 +98,6 @@ class ToolContract:
 
     required: frozenset[str] = frozenset()
     accepted: frozenset[str] = frozenset()
-    takes_any_key: bool = False
     structure_type: str = ""
     readable: bool = True
 
@@ -148,8 +147,6 @@ def refuse_unless_dispatchable(tool: str, contract: ToolContract | None) -> Refu
     that later gains a second required argument drops out on its own instead of a hand-written
     allowlist going quietly out of date.
     """
-    if not tool:
-        return Refusal("no-tool-named", "the check named no tool to run")
     if contract is None:
         return Refusal(
             "tool-unavailable", f"{tool!r} is not on this deployment's connector surface"
@@ -244,7 +241,6 @@ def contract_of(schema: Mapping[str, Any] | None, accepts: Any) -> ToolContract:
     return ToolContract(
         required=frozenset(accepts.required),
         accepted=frozenset(accepts.accepted),
-        takes_any_key=bool(accepts.takes_any_key),
         structure_type=declared,
     )
 
@@ -329,14 +325,38 @@ def ground_job_params(
     the whole failure this module exists to prevent. `scan_coordinate` and `profile_rotation` land
     here: both need *atom indices*, which a model will produce plausibly and wrongly, and neither
     becomes dispatchable until something grounds them.
+
+    **And every key it produces has to be one the job declares.** These models do not set
+    `extra="forbid"`, so pydantic's default drops an unknown key on validation — measured, a
+    `solvents` axis handed to `sample_conformers` vanished, the gas-phase search ran, and the
+    grounded call still *reported* three solvents compared. A name being sweepable in the abstract
+    says nothing about this job having that field, and the same held for a structure role the job
+    does not take. Checking against `fields` is what makes the reported call the launched one.
+
+    **A job with no subject at all is not a discriminating check.** Requiring one is what keeps the
+    set to calculations *about a molecule in the record*: `republish_calculations` has no required
+    field, so "every required field is grounded" was vacuously true for it and a model naming that
+    string would have started a corpus-wide push to an external sink. A check that names no subject
+    is not narrowly wrong — it is a different kind of act.
     """
     params: dict[str, Any] = {}
+    if not subjects:
+        return None, Refusal(
+            "no-subject",
+            "this job names no structure from the record, so it is not a check about a molecule",
+        )
     for name, ids in subjects.items():
         arity = STRUCTURE_FIELDS.get(name)
         if arity is None:
             return None, Refusal(
                 "subject-field-unknown",
                 f"{name!r} is not a field that carries a structure, so note ids cannot fill it",
+            )
+        if name not in fields:
+            return None, Refusal(
+                "subject-field-not-declared",
+                f"this job declares no {name!r} field, so the structures would be dropped on "
+                "validation while the answer still reported them",
             )
         resolved = [structures[note_id] for note_id in ids if note_id in structures]
         if len(resolved) != len(ids):
@@ -359,6 +379,12 @@ def ground_job_params(
             return None, Refusal(
                 "axis-not-sweepable",
                 f"{sweep.parameter!r} is not an axis with a vocabulary to check values against",
+            )
+        if sweep.parameter not in fields:
+            return None, Refusal(
+                "axis-not-declared",
+                f"this job declares no {sweep.parameter!r} field, so the axis would be dropped on "
+                "validation and the answer would report a comparison that never ran",
             )
         if not sweep.values:
             return None, Refusal("axis-empty", f"{sweep.parameter!r} was swept over no values")

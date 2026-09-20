@@ -25,13 +25,12 @@ worker is a different process, so this meters honestly rather than pretending to
 import asyncio
 import logging
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import AsyncExitStack, contextmanager
 from typing import Any
 
 from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.outputs import LLMResult
-from langchain_core.tools import tool as tool_decorator
 from pydantic import BaseModel, ConfigDict, Field
 from temporalio import activity
 
@@ -62,6 +61,7 @@ from chemclaw.core.identity_context import (
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
+from chemclaw.durable.governed_launch import audited_launch
 from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.registry import durable_activity
 
@@ -387,11 +387,12 @@ async def authorize_job_step(step: JobStepInput) -> ResolvedJob:
     """
     connector, job = find_job(step.job)
     with _acting_as(step.identity):
-        payload = await _audited(
-            step.identity,
+        payload = await audited_launch(
             job.name,
             step.arguments,
             lambda: prepare_job_launch(connector, job, step.arguments),
+            actor=step.identity.actor,
+            correlation_id=step.identity.correlation_id,
         )
     return ResolvedJob(
         connector=connector,
@@ -403,43 +404,6 @@ async def authorize_job_step(step: JobStepInput) -> ResolvedJob:
         awaits_answer=job.awaits_answer,
         payload=payload,
     )
-
-
-async def _audited(
-    identity: StepIdentity,
-    tool: str,
-    arguments: dict[str, Any],
-    action: Callable[[], dict[str, Any]],
-) -> dict[str, Any]:
-    """Run a job step's pre-flight through the governed chain, so the launch leaves an audit row.
-
-    Through the chain over a real tool rather than by emitting an `AuditEvent` directly: there is
-    exactly one place that decides what an audit record looks like, and a second emitter would
-    drift from it the first time that shape changed. The tool is named for the job, so the row
-    reads the same as the one a chat turn's launch of the same job writes — which is the point,
-    since the whole finding was that these two paths were governed differently.
-
-    The pre-flight is wrapped in a tool built on the spot rather than found on the surface, because
-    what is being audited is not a tool the model can call: it is the resolution and validation a
-    `job` step does before Temporal starts the workflow. Naming it after the job is what makes it
-    legible in the trail.
-
-    A refusal propagates after being recorded as an `error` outcome, exactly as a denied chat tool
-    call is.
-    """
-
-    @tool_decorator(name_or_callable=tool, description=f"launch the {tool!r} job")
-    async def _launch(**_kwargs: Any) -> dict[str, Any]:
-        return action()
-
-    payload: dict[str, Any] = await invoke_governed(
-        _launch,
-        arguments,
-        correlation_id=identity.correlation_id,
-        actor=identity.actor,
-        profile=get_profile(None),
-    )
-    return payload
 
 
 # **On the background queue, because until now it was on no queue at all.** `resolve_job_step` (as
