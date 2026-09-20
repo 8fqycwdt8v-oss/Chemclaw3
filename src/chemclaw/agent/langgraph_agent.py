@@ -274,11 +274,15 @@ def build_langgraph_agent(
     tools = _capability_tools(prof)
     # **A tool whose only outcome is unreachable is not a capability, so it is not bound.**
     # `propose_skill` writes a `behaviour_proposals` row for a person to accept through
-    # `POST /proposals/...`, and both the durable row and that route need the personal tier — which
-    # ships off (`agent_memory_enabled` defaults False and no Helm value sets it). Bound anyway, the
-    # model spent the schema on every request and told the chemist to go accept something the route
+    # `POST /proposals/...`, and both the durable row and that route need the personal tier. That
+    # tier is on by default since `D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius`,
+    # so this filter no longer fires on the shipped configuration — it fires on a deployment that
+    # sets `CHEMCLAW_AGENT_MEMORY_ENABLED=false`, or on an in-memory session store, and it is kept
+    # for exactly that case. When the predicate was false and this filter did not exist, the model
+    # spent the schema on every request and told the chemist to go accept something the route
     # answers 503 to. Filtered here rather than gated inside the tool because a refusal the model
-    # can only discover by calling is still paid for in the prefix, every call, forever.
+    # can only discover by calling is still paid for in the prefix, every call, forever — and
+    # `tests/test_context_floor.py` charges its 462 tokens now that it is bound.
     if not personal_skills_available():
         tools = [fn for fn in tools if fn.__name__ not in PERSONAL_TIER_TOOLS]
     # **The helper's narrowing is applied here rather than in `_subagents`, and both the position

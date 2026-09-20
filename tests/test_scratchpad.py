@@ -688,3 +688,54 @@ def test_a_plain_memory_substitution_is_not_refused_by_that_guard() -> None:
 
     assert not error, f"a plain substitution must still apply; got {error!r}"
     assert "2-MeTHF" in content and "toluene" not in content
+
+
+def test_the_migrate_role_creates_the_store_tables_it_is_about_to_grant_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`chemclaw.agent.store_setup` driven against a real database, not described.
+
+    The ordering is asserted in `tests/test_database_privileges.py`; this is the half that says the
+    step does anything. It matters because the whole point is a *fresh* install — the tables do not
+    exist, `infra/sql/grants/app_privileges.sql` skips its `IF to_regclass(...) IS NOT NULL` grants,
+    and the runtime role cannot write until the next release. A step that ran and created nothing
+    would leave that exactly as it was and look like a fix in the diff.
+
+    Driven three ways, because two of them are the ways it breaks: it creates the tables, a second
+    run applies nothing (it runs on *every* install and upgrade, beside migrations that are tracked
+    and applied once), and it does nothing at all where the deployment keeps no store — a site that
+    has not enabled durable memory must not be handed two tables and a grant it cannot use.
+    """
+    from chemclaw.agent.store_setup import create_store_tables
+
+    async def _run() -> tuple[bool, bool, bool, set[str]]:
+        await migrated_db_or_skip()
+        monkeypatch.setattr(settings, "agent_memory_enabled", True)
+        monkeypatch.setattr(settings, "session_store", "postgres")
+        first = await create_store_tables()
+        again = await create_store_tables()
+
+        import psycopg
+
+        from chemclaw.core.migrate import migration_dsn
+
+        async with await psycopg.AsyncConnection.connect(migration_dsn()) as conn:
+            rows = await (
+                await conn.execute(
+                    "SELECT tablename FROM pg_tables WHERE tablename = ANY(%s)",
+                    (list(scratchpad.STORE_TABLES),),
+                )
+            ).fetchall()
+
+        monkeypatch.setattr(settings, "agent_memory_enabled", False)
+        skipped = await create_store_tables()
+        return first, again, skipped, {str(row[0]) for row in rows}
+
+    created, idempotent, skipped, tables = asyncio.run(_run())
+
+    assert created and idempotent, "the step did not run, or a second run was not a no-op"
+    assert not skipped, "a deployment that keeps no store was given the tables anyway"
+    # `store_vectors` is not among them and must not be: `setup()` builds it only for a store
+    # constructed with an `index_config`, and none is passed. `STORE_TABLES` names both because
+    # erasure must reach both wherever a site does set one.
+    assert "store" in tables, f"the grants would find no `store` to grant on: {tables}"

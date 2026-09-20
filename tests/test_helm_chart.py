@@ -504,9 +504,10 @@ def _entrypoint_case(component: str) -> str:
 
 
 def test_the_pre_upgrade_hook_migrates_then_reconciles_grants() -> None:
-    """Two steps whose order is not optional, in one process so the shell enforces it.
+    """Three steps whose order is not optional, in one process so the shell enforces it.
 
-    The grants name tables the migrations create, so a grant applied before its table exists fails.
+    The grants name tables the earlier steps create, so a grant applied before its table exists
+    fails.
     One container rather than two hook Jobs, so the ordering is a shell sequence rather than two
     hook weights two documents apart — and so a failed migration is never followed by a grant run
     at all.
@@ -519,6 +520,14 @@ def test_the_pre_upgrade_hook_migrates_then_reconciles_grants() -> None:
 
     The stored-message conversion used to be the middle term and is deliberately not in either; the
     test below is what says where it went and why.
+
+    **The middle term is now `chemclaw.agent.store_setup`**
+    (`D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius`). `store`/`store_migrations` are
+    upstream's schema created at *runtime*, so the grants file guards them with
+    `IF to_regclass(...) IS NOT NULL` and on a fresh install found nothing — invisible while
+    durable memory shipped off, and the first-boot experience once it does not.
+    `tests/test_database_privileges.py` holds the ordering with the reason; this holds the exact
+    list, which is what catches a fourth step arriving without anybody deciding where it goes.
     """
     documents = _hook_documents()
     migrate = " ".join(documents["migrate"].split())
@@ -531,6 +540,7 @@ def test_the_pre_upgrade_hook_migrates_then_reconciles_grants() -> None:
     steps = [line for line in case.splitlines() if "python -m" in line]
     assert [step.split("python -m ")[1].strip() for step in steps] == [
         "chemclaw.core.migrate",
+        "chemclaw.agent.store_setup",
         "chemclaw.core.grants",
     ], case
     assert "chemclaw.agent.message_migration" not in case, (

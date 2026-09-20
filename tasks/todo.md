@@ -16,12 +16,12 @@ Full design: `/root/.claude/plans/atomic-zooming-hopper.md`.
 
 ## PR 2 — the flip (held for review)
 
-- [ ] B1. `_observed_prefix` builds under `session_store="postgres"`; re-measure `CEILINGS`
-- [ ] B2. migrate-job: store setup between migrate and grants
-- [ ] 5. `agent_memory_enabled = True`, `.env.example` parity, the two new caps
-- [ ] 6. `values.yaml` states the posture
-- [ ] 7b. Ratchet + config + chart tests
-- [ ] 8b. ADR 3 (a tier every prefix pays is still not a ceiling)
+- [x] B1. `_observed_prefix` builds under `session_store="postgres"`; re-measure `CEILINGS`
+- [x] B2. migrate-job: store setup between migrate and grants
+- [x] 5. `agent_memory_enabled = True`, `.env.example` parity, the two new caps
+- [x] 6. `values.yaml` states the posture
+- [x] 7b. Ratchet + config + chart tests
+- [x] 8b. ADR 3 (a tier every prefix pays is still not a ceiling)
 
 ## PR 3 — `Chemclaw3_ui`
 

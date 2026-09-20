@@ -243,10 +243,16 @@ def personal_skills_available() -> bool:
     **One function because three surfaces read it, and the third read it by not reading it.**
     `api/runner.turn_store` mounts `/mine` on these conditions and `api/routes/skills.py` refuses on
     them, but `propose_skill` was bound on every model call with no condition at all — so under the
-    shipped defaults (`agent_memory_enabled` is False, and no Helm value sets it) the model spent
-    the tool's schema on every request, wrote a row into a store that dies with the process, and
-    told the chemist to go accept something `POST /proposals/...` answers 503 to. A tool whose only
-    outcome is unreachable is not a capability, and this is the predicate that says so.
+    shipped defaults of the day (`agent_memory_enabled` was False) the model spent the tool's schema
+    on every request, wrote a row into a store that dies with the process, and told the chemist to
+    go accept something `POST /proposals/...` answers 503 to. A tool whose only outcome is
+    unreachable is not a capability, and this is the predicate that says so.
+
+    **Both halves are now True on the shipped configuration**
+    (`D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius` flipped the first; the chart has
+    always pinned the second), so what this predicate guards today is a deployment that turned
+    durable memory *off* — which loses the whole human gate on agent-proposed behaviour with it, and
+    is why the chart states the posture rather than inheriting it.
 
     Returns:
         True where a proposal has somewhere durable to land and a route that can accept it.

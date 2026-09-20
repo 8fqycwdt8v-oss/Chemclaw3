@@ -125,7 +125,7 @@ async def read_skill(name: str, principal: CurrentUser) -> LocalSkillOut:
     return LocalSkillOut(name=name, body=body)
 
 
-async def save_skill(payload: LocalSkillIn, principal: CurrentUser) -> LocalSkillOut:
+async def save_skill(body: LocalSkillIn, principal: CurrentUser) -> LocalSkillOut:
     """Keep one skill for this chemist, replacing any earlier version of that name.
 
     Replacing rather than versioning: a skill is judgment its owner is asserting *now*, and a tier
@@ -135,16 +135,16 @@ async def save_skill(payload: LocalSkillIn, principal: CurrentUser) -> LocalSkil
     """
     store = await _store_or_refuse()
     try:
-        name = validated_skill(payload.body)
+        name = validated_skill(body.body)
     except SkillRefused as refusal:
         raise _refused(refusal) from refusal
     # The cap is the writer's, not this route's: it has to be counted and spent under one lock, and
     # a check here would be the second copy that the acceptance door already proved goes stale.
     try:
-        await save_local_skill(store, principal.oid, name, payload.body)
+        await save_local_skill(store, principal.oid, name, body.body)
     except SkillRefused as refusal:
         raise _refused(refusal) from refusal
-    return LocalSkillOut(name=name, body=payload.body)
+    return LocalSkillOut(name=name, body=body.body)
 
 
 async def forget_skill(name: str, principal: CurrentUser) -> LocalSkillsOut:

@@ -150,11 +150,26 @@ case "${component}" in
     exec python -m chemclaw.cli.schedules
     ;;
   migrate)
-    # The pre-upgrade DDL hook Job: the migrations, then the runtime role's grants, in that order,
-    # because a grant names tables the migrations create and one applied before its table exists
-    # fails. The order was the chart's `sh -c "… && …"` and is this script's now, for the same
-    # reason as `schedules` above; under `set -e` the sequence means exactly what the `&&` meant.
+    # The pre-upgrade DDL hook Job: the migrations, then the store's own tables, then the runtime
+    # role's grants, in that order, because a grant names tables the earlier steps create and one
+    # applied before its table exists fails. The order was the chart's `sh -c "… && …"` and is this
+    # script's now, for the same reason as `schedules` above; under `set -e` the sequence means
+    # exactly what the `&&` meant.
+    #
+    # **The middle term is the one whose absence was invisible while durable memory shipped off.**
+    # `store` and `store_migrations` are upstream's schema, created at *runtime* by
+    # `AsyncPostgresStore.setup()` rather than by a numbered migration — deliberately, since
+    # transcribing somebody else's DDL into `infra/sql/` is a second definition that a bump walks
+    # away from. `infra/sql/grants/app_privileges.sql` therefore grants on them only
+    # `IF to_regclass(...) IS NOT NULL`, and this Job is a `pre-install` hook, so on a fresh install
+    # the tables did not exist when the grants ran: the runtime role got no INSERT/UPDATE/DELETE on
+    # `store` and every `/memories/`, `/mine/` and `/org/` write failed until the *next* release's
+    # grants pass. That grants file already describes it as "the one group whose grant lands on the
+    # second run — the same run that first needs it". Creating them here, as the migrator, is what
+    # breaks the cycle: the runtime role has no CREATE on the schema yet either, because granting
+    # it is what the step *after* this one does.
     python -m chemclaw.core.migrate
+    python -m chemclaw.agent.store_setup
     exec python -m chemclaw.core.grants
     ;;
   convert)

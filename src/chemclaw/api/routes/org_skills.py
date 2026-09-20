@@ -179,7 +179,7 @@ async def read_versions(name: str, principal: CurrentUser) -> OrgSkillVersionsOu
     )
 
 
-async def publish_skill(payload: OrgSkillIn, principal: CurrentUser) -> OrgSkillOut:
+async def publish_skill(body: OrgSkillIn, principal: CurrentUser) -> OrgSkillOut:
     """Publish one skill to everyone, holding the body it replaces as a revert target.
 
     Validated before the role is checked would leak whether a name is taken to a caller with no
@@ -190,20 +190,20 @@ async def publish_skill(payload: OrgSkillIn, principal: CurrentUser) -> OrgSkill
     _reviewer_or_refuse(principal, "<publish>", "publishing an organisation skill")
     store = await _store_or_refuse()
     try:
-        name = validated_skill(payload.body)
+        name = validated_skill(body.body)
     except SkillRefused as refusal:
         raise _refused(refusal) from refusal
     # The row cap rides on the writer, not on this route: it has to be counted and spent under one
     # lock, and a check here would be the second copy the personal tier's acceptance door already
     # proved goes stale.
     try:
-        await save_org_skill(store, name, payload.body, activated_by=principal.oid)
+        await save_org_skill(store, name, body.body, activated_by=principal.oid)
     except SkillRefused as refusal:
         raise _refused(refusal) from refusal
-    return OrgSkillOut(name=name, body=payload.body)
+    return OrgSkillOut(name=name, body=body.body)
 
 
-async def revert_skill(name: str, payload: OrgSkillRevertIn, principal: CurrentUser) -> OrgSkillOut:
+async def revert_skill(name: str, body: OrgSkillRevertIn, principal: CurrentUser) -> OrgSkillOut:
     """Make a body this tier already holds the active one again.
 
     404 on a hash the version namespace does not hold, which is the property that makes this a
@@ -213,7 +213,7 @@ async def revert_skill(name: str, payload: OrgSkillRevertIn, principal: CurrentU
     store = await _store_or_refuse()
     try:
         reverted = await activate_org_version(
-            store, name, payload.content_hash, activated_by=principal.oid
+            store, name, body.content_hash, activated_by=principal.oid
         )
     except SkillRefused as refusal:
         raise _refused(refusal) from refusal
@@ -223,8 +223,11 @@ async def revert_skill(name: str, payload: OrgSkillRevertIn, principal: CurrentU
             f"this organisation holds no version of {name!r} with that content hash — read "
             f"GET /skills/org/{name}/versions for the bodies it can be reverted to",
         )
-    body = await read_org_skill(store, name)
-    return OrgSkillOut(name=name, body=body or "")
+    # Read back rather than echoed from the version record, so what the caller is told is what the
+    # tier now serves — the two can only differ if something raced this call, and that is precisely
+    # the case where echoing would be a confident lie.
+    active = await read_org_skill(store, name)
+    return OrgSkillOut(name=name, body=active or "")
 
 
 async def forget_skill(name: str, principal: CurrentUser) -> OrgSkillsOut:

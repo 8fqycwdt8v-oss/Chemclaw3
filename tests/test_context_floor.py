@@ -74,7 +74,8 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Iterator
+from contextlib import contextmanager
 from functools import cache
 from pathlib import Path
 from typing import Any, cast
@@ -100,7 +101,7 @@ from chemclaw.agent.profiles import get_profile, registered_profile_names
 from chemclaw.agent.skill_manifest import MAX_SKILL_DESCRIPTION_CHARS
 from chemclaw.connectors.registry import enabled, server_tools_module
 from chemclaw.connectors.transport import _allowed
-from chemclaw.core.config import Settings
+from chemclaw.core.config import Settings, settings
 from tests.siblings import (
     SIBLING_SKIP,
     bundles_declared_here,
@@ -497,6 +498,21 @@ load_profiles()
 #: bound. What the turn buys for it is in the ADR; what it costs every deployment is 1,188 tokens
 #: of thread allowance, and `core/config/agent.py` derives both compaction defaults from
 #: `PREFIX_BOUND`, so they move with it.
+#:
+#: **Not raised by the durable-memory flip, and the headroom is where it went**
+#: (`D-2026-09-20-a-tier-every-prefix-pays-is-still-not-a-ceiling`). `agent_memory_enabled` going
+#: True binds `propose_skill` on every request, and this file could not see it: `_observed_prefix`
+#: built under the code default of `session_store="memory"` while the shipped chart pins
+#: `postgres`, so `personal_skills_available()` was False here and True in the fleet — the shape
+#: `D-2026-09-05-a-ratchet-that-binds-no-connectors-measures-a-smaller-system` names, one predicate
+#: over. `_as_a_deployment_runs` is the correction. Measured on this commit with the corrected
+#: basis: **69,872**, of which `propose_skill` is **462** — 728 of headroom left, so the number
+#: below does not move and neither do the two compaction defaults derived from it.
+#:
+#: The two *stored* skills tiers are deliberately still outside this, each with its own allowance:
+#: they are a deployment's bytes rather than this repository's, and folding a worst case nobody has
+#: into `PREFIX_BOUND` costs every deployment on earth the same thread allowance. See
+#: `LOCAL_SKILLS_ALLOWANCE` and `ORG_SKILLS_ALLOWANCE`.
 CEILINGS: dict[str, int] = {"__default__": 70_600}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
@@ -1024,6 +1040,30 @@ class _CapturingModel(GenericFakeChatModel):
         return super()._generate(messages, stop=stop, run_manager=run_manager, **kw)
 
 
+@contextmanager
+def _as_a_deployment_runs() -> Iterator[None]:
+    """Build under `session_store="postgres"`, which is what every real deployment sets.
+
+    **Without this the ratchet measures a system no deployment runs**, and it is the same defect
+    `D-2026-09-05-a-ratchet-that-binds-no-connectors-measures-a-smaller-system` names, one predicate
+    over. `tests/conftest.py` sets no `session_store`, so the suite runs at the code default of
+    `"memory"` — and `local_skills.personal_skills_available()` reads
+    `agent_memory_enabled and session_store == "postgres"`, so `build_langgraph_agent` strips
+    `propose_skill` from every graph this file compiles while the shipped chart
+    (`deploy/helm/chemclaw/values.yaml`) pins `CHEMCLAW_SESSION_STORE: "postgres"` and pays for it.
+    Measured: the tool's schema is ~462 tokens of prefix on every request, charged to nothing here.
+
+    It is a pure predicate — no database is opened by setting it, because the store only ever
+    arrives as an argument — so this costs nothing and buys the one thing this file exists for.
+    """
+    original = settings.session_store
+    settings.session_store = "postgres"
+    try:
+        yield
+    finally:
+        settings.session_store = original
+
+
 def _observed_prefix(profile: Any) -> tuple[SystemMessage, list[Any], list[Any]]:
     """One real model call: the system message as sent, the tools as bound, the node's own list.
 
@@ -1043,12 +1083,13 @@ def _observed_prefix(profile: Any) -> tuple[SystemMessage, list[Any], list[Any]]
         holds. The last two are the same surface seen from two places, and
         `test_the_ratchet_charges_at_least_what_the_model_is_sent` is what keeps them honest.
     """
-    graph = build_langgraph_agent(
-        model=_CapturingModel(messages=iter([AIMessage(content="")])),
-        profile=profile,
-        audit_sink=NullAuditSink(),
-        connectors=_connector_tools(profile),
-    )
+    with _as_a_deployment_runs():
+        graph = build_langgraph_agent(
+            model=_CapturingModel(messages=iter([AIMessage(content="")])),
+            profile=profile,
+            audit_sink=NullAuditSink(),
+            connectors=_connector_tools(profile),
+        )
     bound = _bound_tools(graph)
     _RECEIVED.clear()
     _BOUND.clear()
@@ -1658,14 +1699,15 @@ def sent_prefix(actor: str, correlation_id: str) -> str:
 
     _RECEIVED.clear()
     _BOUND.clear()
-    graph = build_langgraph_agent(
-        model=_CapturingModel(messages=iter([AIMessage(content="done")])),
-        profile="default",
-        actor=actor,
-        correlation_id=correlation_id,
-        audit_sink=NullAuditSink(),
-        connectors=_connector_tools(get_profile("default")),
-    )
+    with _as_a_deployment_runs():
+        graph = build_langgraph_agent(
+            model=_CapturingModel(messages=iter([AIMessage(content="done")])),
+            profile="default",
+            actor=actor,
+            correlation_id=correlation_id,
+            audit_sink=NullAuditSink(),
+            connectors=_connector_tools(get_profile("default")),
+        )
     asyncio.run(
         graph.ainvoke(
             {"messages": [HumanMessage(content="hello")]},
@@ -1722,6 +1764,7 @@ _CHILD = """
 import hashlib, json, sys
 sys.path.insert(0, "tests")
 from chemclaw.agent.framing import ENVELOPE_TAG, SYSTEM_SPEECH_MARK
+from chemclaw.core.config import settings
 from test_context_floor import sent_prefix
 prefix = sent_prefix("alice@example.com", "corr-a")
 prefix = prefix.replace(SYSTEM_SPEECH_MARK, "<MARK>").replace(ENVELOPE_TAG, "<TAG>")
@@ -1894,6 +1937,30 @@ def test_a_helpers_prefix_is_bounded_by_the_one_this_file_already_ratchets() -> 
 #: own context their own judgment may take.
 LOCAL_SKILLS_ALLOWANCE = 5_700
 
+#: What the organisation's skills may add to the prefix of every model call **every chemist** makes.
+#:
+#: A separate number from `LOCAL_SKILLS_ALLOWANCE` because it bounds a different population, not a
+#: different mechanism: a personal tier is one person's and usually empty, while whatever an
+#: administrator publishes is in everybody's prefix and in every helper a turn spawns — a
+#: four-helper fan-out sends it five times, since a helper is compiled through the same builder over
+#: the same backend.
+#:
+#: **Outside `CEILINGS` for `LOCAL_SKILLS_ALLOWANCE`'s reason, and the "every user pays it"
+#: difference does not flip it.** That difference makes the worst case uniform *within* a
+#: deployment, which is a reason to bound the tier tightly — `agent_org_skills_max` is 12 rather
+#: than the personal tier's 20 — and not a reason to charge every deployment on earth the same
+#: thread allowance for a tier most of them will never publish to. The runtime already charges the
+#: real thing: `agent/context_budget.prefix_tokens` reads the prefix of the call in flight.
+#:
+#: Derived, then measured on this tier's own mount rather than carried across from the neighbouring
+#: one — the mount path differs (`/org/` against `/mine/`), so the listing's scaffolding does too,
+#: and a number moved between two tiers is a claim about the wrong commit. The derivation said 3,345
+#: (12 rows at the ~278 tokens `LOCAL_SKILLS_ALLOWANCE` measures per maximal row, plus the empty
+#: mount); measured 2026-09-20 on a compiled graph with the connector surface bound, a maximal tier
+#: costs **3,330** over an empty one. The allowance is the measurement plus ~3.6%, which is the
+#: headroom `LOCAL_SKILLS_ALLOWANCE` leaves over its own.
+ORG_SKILLS_ALLOWANCE = 3_450
+
 
 def test_a_chemists_own_skills_cost_no_more_prefix_than_their_cap_allows() -> None:
     """The one part of the prefix a *person* writes, bounded and measured rather than assumed.
@@ -1966,4 +2033,73 @@ def test_a_chemists_own_skills_cost_no_more_prefix_than_their_cap_allows() -> No
     assert cost > 0, (
         "a full personal tier costs nothing, which means it is not reaching the system message at "
         "all — the feature is mounted and invisible to the model, so this asserts nothing"
+    )
+
+
+def test_the_organisations_skills_cost_no_more_prefix_than_the_cap_allows() -> None:
+    """The part of the prefix an *administrator* writes, bounded and measured rather than assumed.
+
+    The twin of `test_a_chemists_own_skills_cost_no_more_prefix_than_their_cap_allows`, and it needs
+    to exist separately for the reason `ORG_SKILLS_ALLOWANCE` gives: this tier is paid by everybody
+    rather than by its author, so its cap is the deployment's bill rather than one person's worst
+    case.
+
+    **This ratchet is blind to it by construction**, exactly as it was to the personal tier:
+    `_observed_prefix` passes no `store=`, so the graph it measures mounts no stored tier at all.
+    What would make this fail is a raised row cap, a longer permitted description, or a listing
+    format that grew — each a real change in what every chemist pays on every turn, and each
+    otherwise invisible.
+    """
+    import asyncio
+
+    from langgraph.store.memory import InMemoryStore
+
+    from chemclaw.agent.org_skills import save_org_skill
+
+    profile = get_profile("default")
+    connectors = _connector_tools(profile)
+
+    def prefix(store: Any) -> int:
+        # No ambient identity: the organisation's tier needs none, and measuring it without one is
+        # also what keeps this figure free of the personal tier, which needs an actor to mount.
+        with _as_a_deployment_runs():
+            graph = build_langgraph_agent(
+                model=_CapturingModel(messages=iter([AIMessage(content="")])),
+                profile=profile,
+                audit_sink=NullAuditSink(),
+                connectors=connectors,
+                store=store,
+            )
+        _RECEIVED.clear()
+        graph.invoke({"messages": [HumanMessage("what does this turn cost?")]})
+        system = [message for message in _RECEIVED if isinstance(message, SystemMessage)][0]
+        return _count(system.content if isinstance(system.content, str) else str(system.content))
+
+    # Maximal by the tier's own two bounds: every row the cap permits, each with the longest
+    # description deepagents will publish rather than truncate.
+    filled = InMemoryStore()
+    description = "x" * MAX_SKILL_DESCRIPTION_CHARS
+    for index in range(settings.agent_org_skills_max):
+        name = f"org-skill-{index:03d}"
+        asyncio.run(
+            save_org_skill(
+                filled,
+                name,
+                f"---\nname: {name}\ndescription: {description}\n---\n\nbody\n",
+                activated_by="an-admin",
+            )
+        )
+
+    empty, full = prefix(InMemoryStore()), prefix(filled)
+    cost = full - empty
+
+    assert cost <= ORG_SKILLS_ALLOWANCE, (
+        f"a full organisation skills tier adds {cost} tokens to every model call every chemist in "
+        f"this deployment makes, over the {ORG_SKILLS_ALLOWANCE} this file allows it. Either "
+        "`agent_org_skills_max` rose, the permitted description grew, or upstream's listing format "
+        "did — and this one is paid by everybody, and again by every helper a turn spawns"
+    )
+    assert cost > 0, (
+        "a full organisation tier costs nothing, which means it is not reaching the system message "
+        "at all — the tier is mounted and invisible to the model, so this asserts nothing"
     )

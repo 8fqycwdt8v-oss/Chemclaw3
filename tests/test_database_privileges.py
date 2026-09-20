@@ -600,3 +600,75 @@ def test_the_only_ddl_a_runtime_process_issues_is_upstreams_setup() -> None:
         "D-2026-09-07-the-app-is-its-own-migrator-for-the-tables-it-owns before adding it:\n  "
         + "\n  ".join(offenders)
     )
+
+
+def test_the_store_tables_are_created_before_the_grants_that_name_them() -> None:
+    """The middle term of the migrate role, and the ordering defect it closes.
+
+    `store` and `store_migrations` are upstream's schema, created at *runtime* by
+    `AsyncPostgresStore.setup()` rather than by a numbered migration —
+    `test_the_only_ddl_a_runtime_process_issues_is_upstreams_setup` above holds that deliberately.
+    `infra/sql/grants/app_privileges.sql` therefore grants on them only `IF to_regclass(...) IS NOT
+    NULL`, and the migrate Job is a `pre-install` hook that runs before any app pod exists — so on a
+    fresh install the tables did not exist when the grants ran, the runtime role got no
+    INSERT/UPDATE/DELETE on `store`, and every durable write failed until the *next* release.
+
+    That was invisible while `agent_memory_enabled` shipped off, because nothing wrote to `store`.
+    `D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius` turned it on, which makes it the
+    first-boot experience, so the ordering is asserted rather than described.
+
+    The sequence is the guarantee, so this reads the script rather than the module: a
+    `create_store_tables` that exists and is never called is exactly the failure this is about.
+    """
+    entrypoint = (_ROOT / "deploy" / "entrypoint.sh").read_text(encoding="utf-8")
+    case = entrypoint.split("migrate)", 1)[-1].split(";;", 1)[0]
+
+    assert "python -m chemclaw.agent.store_setup" in case, (
+        "the migrate component does not create the store's tables, so the grants that name them "
+        "find nothing and the runtime role cannot write to `store` until the next release"
+    )
+    assert (
+        case.index("chemclaw.core.migrate")
+        < case.index("chemclaw.agent.store_setup")
+        < case.index("chemclaw.core.grants")
+    ), (
+        "the three steps of the migrate role are out of order: migrations, then the store's own "
+        "tables, then the grants that name them — any other order grants on something absent"
+    )
+
+
+def test_the_store_setup_step_runs_as_the_migrator() -> None:
+    """Which credential creates the tables, because the obvious one cannot.
+
+    `agent/scratchpad.memory_store()` builds the store over the *checkpointer's* pool, which is the
+    runtime credential — and on a fresh install the runtime role has no `CREATE` on the schema yet,
+    because granting it is what the step *after* this one does. Reusing that function would have
+    been the natural thing to write and would deadlock the install on its own chicken-and-egg.
+
+    Asserted on the resolution rather than on a string: `migration_dsn()` is the one answer
+    `core/migrate.py` and `core/grants.py` already share, so the three steps of one Job cannot
+    disagree about which role owns the schema.
+    """
+    import inspect
+
+    from chemclaw.agent import store_setup
+
+    tree = ast.parse(inspect.getsource(store_setup))
+    called = {
+        node.func.id if isinstance(node.func, ast.Name) else node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name | ast.Attribute)
+    }
+
+    assert "migration_dsn" in called, (
+        "the store setup step does not resolve the migrator's credential, so it runs as whatever "
+        f"the runtime role is — which on a fresh install cannot CREATE in the schema. Calls: "
+        f"{sorted(called)}"
+    )
+    # An AST walk rather than a substring, because this module *names* `memory_store` in its
+    # docstring to say why it is not that function — and a grep would read the explanation as the
+    # defect it exists to explain.
+    assert "memory_store" not in called, (
+        "the store setup step reuses the process-wide store, which builds over the checkpointer's "
+        "pool: that is the runtime credential, and it has no CREATE until the grants run"
+    )
