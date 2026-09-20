@@ -845,6 +845,19 @@ config:
   # CHEMCLAW_VERIFIER_ENABLED: "true"
   # CHEMCLAW_VERIFIER_CONFIDENCE_THRESHOLD: "0.7"
   CHEMCLAW_SESSION_STORE: "postgres"
+  # Durable agent memory and the skills tiers that ride on it. Stated rather than inherited even
+  # though it now matches the code default, because this is the switch with the widest consequence
+  # in the file: it mounts `/memories/` for every authenticated turn — agent-authored files that
+  # outlive the session, bounded by CHEMCLAW_AGENT_MEMORY_MAX_FILES — and it is what makes
+  # `POST /skills/mine`, `POST /skills/org` and the proposal-acceptance route answer at all rather
+  # than 503. A release that does not want durable agent-authored data sets this "false" here and
+  # knowingly loses the human gate on agent-proposed behaviour with it, which is the coupling
+  # `api/routes/skills.py` states rather than switches.
+  #
+  # The three caps beside it are deliberately NOT stated: their code defaults are derived in
+  # `core/config/agent.py` from measurements this chart cannot re-take, so a number copied here is
+  # a second answer that goes stale on the commit that re-measures.
+  CHEMCLAW_AGENT_MEMORY_ENABLED: "true"
   # Stated rather than left to the code default (16), because the code default was chosen for one
   # pool and this chart runs a fleet of them — how many is `chemclaw.fleetPools`, derived
   # from the topology rather than counted here, because the count written here said seventeen while

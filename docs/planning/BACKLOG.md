@@ -82,19 +82,25 @@ topic).
   `datasource-validate` time. Decide which, because a fix that only shortens the input is a
   mitigation and should say so.
 
-- [ ] **The personal skills tier is narrowed in the prompt and not at the backend, so
-  `skill_names: []` still hands over the bodies** — [S]. `langgraph_agent.py`'s
-  `if LOCAL_SKILLS_ROOT in backend.routes and profile.skill_names != frozenset()` drops `/mine` from
-  `SkillsMiddleware`'s `sources`, while `scratchpad.py` mounts the `/mine/` route unconditionally and
-  `local_skills.ReadOnlyStoreBackend` carries no `permits` predicate at all. That is exactly the
-  half `agent/skill_backend.py`'s own header calls insufficient — "listing is therefore only half
-  the gate… so the narrowing moves to the backend" — and the shared tier *is* closed at the backend
-  by `NarrowedSkillsBackend`. Driven: with `skill_names: []`, one `ls("/mine/")` returns the skill
-  names and `read_file` returns the body, while the same profile's read of a shared skill is
-  refused. Not a cross-actor leak (the namespace still closes over one actor), but
-  `data/evals/profiles/skills-removed.yaml` is the A/B control arm whose whole value is being clean,
-  and every A/B it reports still carries personal judgment whenever the model opens `/mine`. Give
-  `ReadOnlyStoreBackend` the same `permits` predicate the shared tier has.
+- [ ] **A chemist has no in-product way to ask for a skill of theirs to be published** — [S].
+  `D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius` makes the promotion unit a
+  *document* rather than a queue entry, which is what keeps `api/routes/proposals.py` owner-scoped
+  by construction and keeps an administrator out of anybody's personal namespace. The accepted cost
+  is this: a chemist who thinks their skill should act on everyone reads it back from
+  `GET /skills/mine/{name}` and sends an admin the body out of band. A second queue is the shape
+  that ADR refuses on `D-2026-09-05`'s own measurement, so the cheap fix is a *flag* rather than a
+  queue — one boolean on the personal row and an admin listing that reads it — and it is worth
+  building only once somebody actually wants a promotion and cannot get one.
+
+- [ ] **`ToolScopedSkills` is applied to neither stored tier, so a skill about tools the turn cannot
+  reach is still offered** — [S]. Was the personal tier's row; the organisation's inherits it and
+  makes it worse, because an org skill naming a connector one profile lacks is offered to every
+  chemist on that profile rather than to the one person who wrote it. The narrowing reads
+  `declared_tools`, which parses frontmatter off a *directory*, and both stored tiers are stored
+  rather than filed — applying it as-is means parsing every body out of the store inside a
+  possibly-synchronous `ls`. The cheap shape is to parse on **write**, in the two publish routes,
+  and keep the declared tools beside the body; it fixes both tiers at once, which is why this is one
+  row rather than two.
 
 - [ ] **`max_concurrent_workflow_tasks` is set nowhere, so nothing this repository chose bounds
   workflow-task concurrency** — [M]. `durable/background_worker.py` sets `max_concurrent_activities`
@@ -245,30 +251,24 @@ topic).
       reached beside its labels — `ScanOutcome` already carries two caveats and would carry a third
       — after which the assertion is machine-independent and this row and the bar both go.
 
-- [ ] **A chemist's own skill is not scoped by the tools the turn can reach** — [S], opened by
-      `D-2026-09-18-a-skill-a-chemist-keeps-is-behaviour-they-approved`. `ToolScopedSkills` hides a
-      shared skill whose every declared tool is absent, because judgment about capability an agent
-      does not have is misleading rather than merely useless — and the per-actor tier applies it to
-      nothing. The other three narrowings are deliberately absent (they answer governance questions
-      about a *shared* corpus, and `EnabledSkills` would delete the tier outright); this one would
-      have carried.
-
-      It is absent for a structural reason rather than an oversight: the shared tree gets its
-      declared tools from `declared_tools` reading frontmatter off a **directory**, and this tier is
-      stored, so applying it means parsing every local skill's frontmatter out of the store —
-      synchronously, inside a backend whose reason for existing is that it is not a filesystem.
-      The cheap shape is to parse on *write*, in `api/routes/skills.py`, and keep the declared tool
-      names beside the body in the stored value: the route already validates the frontmatter, so it
-      has the manifest in hand and the turn-side read stays one `aget`.
-      The cost of leaving it is bounded and one-sided — a chemist is offered their own skill about a
-      tool this profile lacks, and the worst outcome is judgment they wrote being unhelpful to them.
-
-- [ ] **`Chemclaw3_ui` has no surface for the four `/skills/mine` routes** — [M], opened by
-      `D-2026-09-18-a-skill-a-chemist-keeps-is-behaviour-they-approved`. That ADR grants the
+- [ ] **`Chemclaw3_ui` has no surface for the four `/skills/mine` routes, the six `/skills/org`
+      ones, or the proposal queue** — [M], opened by
+      `D-2026-09-18-a-skill-a-chemist-keeps-is-behaviour-they-approved` and widened by
+      `D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius`. That ADR grants the
       personal tier its exemption from review *on the condition* that a chemist can see what is
       acting on their turns and remove it — and the only thing that can currently exercise the
       condition is `curl`. The routes are there, driven and tested
-      (`tests/test_api_local_skills.py`); what is missing is the half a chemist can reach.
+      (`tests/test_api_local_skills.py`, `tests/test_api_org_skills.py`,
+      `tests/test_api_proposals.py`); what is missing is the half a person can reach.
+
+      **The organisation's tier owes the condition more, not less**, because it is in the prompt of
+      every turn every chemist takes rather than one person's. Its reads are open to every
+      authenticated caller for exactly that reason, so the surface is two: a reader anybody gets
+      (the names, one body verbatim, and the version list that is the only place "what changed and
+      who" exists for a tier with no commit log) and an administrator's half behind the privileged
+      role (publish, revert to a listed hash, retire). The revert is the one worth designing rather
+      than generating: it is what somebody reaches for when a published skill is making every
+      answer worse, and it has to show the bodies it can put back.
 
       It is a row in this repository rather than only in the frontend's because the condition is
       this repository's claim: `SECURITY.md` and `ARCHITECTURE.md` now say a personal skill is
