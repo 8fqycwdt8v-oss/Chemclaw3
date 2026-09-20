@@ -460,8 +460,9 @@ _ALLOWED_LAZY_EDGES: dict[Edge, str] = {
         "`dispatch.structure_of` validates a subject's SMILES with `core.chem`, which imports "
         "RDKit. Lazy rather than module-scope because `hypotheses` is imported inside Temporal's "
         "workflow sandbox: that is exactly where `hypotheses.rating`'s module-scope numpy reached "
-        "`os.putenv` and was refused (`D-2026-09-20-a-ranking-is-evidence-a-critic-is-not-a-gate`), "
-        "and a second heavy C extension at import time is the same bet twice. The call sites are "
+        "`os.putenv` and was refused "
+        "(`D-2026-09-20-a-ranking-is-evidence-a-critic-is-not-a-gate`), and a second heavy C "
+        "extension at import time is the same bet twice. The call sites are "
         "all in activities, where the import is free"
     ),
     ("chemclaw.science", "chemclaw.publish"): (
