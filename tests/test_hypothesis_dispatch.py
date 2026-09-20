@@ -6,6 +6,7 @@ otherwise have reached a calculator with a value nobody checked.
 """
 
 import inspect
+from typing import Any
 
 import pytest
 
@@ -13,6 +14,7 @@ from chemclaw.agent.template_surface import ToolArguments, resolvable_signatures
 from chemclaw.hypotheses.dispatch import (
     STRUCTURE_ARGUMENT,
     Dispatch,
+    Refusal,
     ToolContract,
     contract_of,
     defaulted_arguments,
@@ -255,7 +257,7 @@ def test_every_dispatchable_tool_requires_only_the_structure(name: str) -> None:
 # ------------------------------------------------------------------ durable jobs
 
 
-def _job_fields(job_name: str) -> dict[str, tuple[bool, object]]:
+def _job_fields(job_name: str) -> dict[str, tuple[bool, Any]]:
     """One shipped calc job's declared params, reduced to what `ground_job_params` reads."""
     from chemclaw.connectors.jobs import _params_model
     from chemclaw.connectors.registry import discovered
@@ -285,7 +287,7 @@ _DISPATCHABLE_JOBS = {
 }
 
 
-def _try_ground(job_name: str) -> tuple[dict[str, object] | None, object]:
+def _try_ground(job_name: str) -> tuple[dict[str, Any] | None, Refusal | None]:
     from chemclaw.hypotheses.dispatch import (
         STRUCTURE_FIELDS,
         SWEEPABLE_FIELDS,
