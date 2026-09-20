@@ -55,6 +55,7 @@ _HAS_A_PATH = frozenset(
     {
         "dry_run",
         "local_skills_read_only",
+        "org_skills_read_only",
         "plan_not_approved",
         "plan_scope_excludes_tool",
         "skills_read_only",
@@ -152,6 +153,13 @@ def _every_routed_refusal(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     from chemclaw.agent.local_skills import _LOCAL_READ_ONLY
 
     refusals["local_skills_read_only"] = _LOCAL_READ_ONLY
+    # The organisation's tier, whose sanctioned path is the third of three and names an
+    # administrator rather than the reader: a turn that drafts an org skill cannot save it and
+    # neither can the chemist reading the answer, so a refusal pointing either of them at a route
+    # they cannot call would be worse than one naming no path at all.
+    from chemclaw.agent.org_skills import _ORG_READ_ONLY
+
+    refusals["org_skills_read_only"] = _ORG_READ_ONLY
     return refusals
 
 

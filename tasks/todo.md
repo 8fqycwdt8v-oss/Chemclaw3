@@ -10,9 +10,9 @@ Full design: `/root/.claude/plans/atomic-zooming-hopper.md`.
 - [x] 2. `agent/org_skills.py` — the tier, its two namespaces, its caps
 - [x] 3. Mount `/org/` (`scratchpad.py`) and advertise it (`langgraph_agent.py`)
 - [x] 4. `api/routes/org_skills.py` — six routes, three behind `_is_reviewer`
-- [ ] 7a. Tests for 1-4
-- [ ] 8a. ADR 1 (blast radius) + ADR 2 (revert is a pointer)
-- [ ] 9a. ARCHITECTURE/BACKLOG/README rows
+- [x] 7a. Tests for 1-4
+- [x] 8a. ADR 1 (blast radius) + ADR 2 (revert is a pointer)
+- [x] 9a. ARCHITECTURE/BACKLOG/SECURITY/README rows, `.env.example` parity
 
 ## PR 2 — the flip (held for review)
 
