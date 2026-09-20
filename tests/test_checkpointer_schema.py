@@ -369,7 +369,7 @@ def test_adding_a_per_turn_counter_does_not_move_the_stamp() -> None:
     stamped names were of that kind, so the stamp could not have pre-empted anything at all.
 
     Three mutations, not one, because a guard whose only failing mutation is the one it was written
-    for is a regression test for a fixed bug (`tasks/lessons.md`, 2026-09-18). The first is the
+    for is a regression test for a fixed bug (`tasks/lessons.md` rule 66). The first is the
     defect; the second is a *reword* of it — a different untracked shape, so a guard keyed on the
     class name rather than on the base would pass it; the third is the case that must still move the
     stamp, which is what stops the fix from being "never refuse anything".

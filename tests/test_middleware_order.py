@@ -25,7 +25,7 @@ The hazards this file exists for, all three still live:
 None of those turns a test red on its own. This file is what makes them reviewable: the order is
 asserted at construction, and the *effect* of the order is asserted by running a tool through the
 compiled graph. Both halves are needed. Order alone is the shape-without-effect failure
-`tasks/lessons.md` rule 27 names; effect alone would not notice a second skills middleware.
+`tasks/lessons.md` rule 10 names; effect alone would not notice a second skills middleware.
 """
 
 import asyncio

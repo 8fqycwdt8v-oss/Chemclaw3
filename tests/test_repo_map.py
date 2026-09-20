@@ -559,9 +559,14 @@ def _calc_bundle_pattern(name: str) -> re.Pattern[str]:
 #: reviewer asked about. A merged ADR is never edited (CLAUDE.md), `docs/archive/` is
 #: pre-implementation design, and `tasks/` is a dated account of an afternoon; each is *supposed*
 #: to hold the number that was true when it was written. `tasks/lessons.md` is exempt with the
-#: rest of that directory deliberately, not by oversight: CLAUDE.md does call it live, and it is
-#: read at session start, but it is append-only and every entry is dated, which is the merged-ADR
-#: argument rather than the runbook's.
+#: rest of that directory deliberately, not by oversight, and the reason changed under it without
+#: changing the answer. It used to be that the file was append-only and every entry dated, which
+#: is the merged-ADR argument. Since the 2026-09 restructure it is neither: it is a digest of
+#: rules corrected in place, and `tests/test_lessons_stay_a_digest.py` is what holds it to that.
+#: It stays exempt because its numbers are now *recurrence* counts — "recorded five times",
+#: "fourteen sections across the two archives" — which are the file's own argument that a
+#: repeated lesson means the rule is the problem. A count that is the finding cannot be replaced
+#: by the name of a producer.
 #:
 #: `docs/planning/BACKLOG.md` and `docs/guides/runbook.md` are deliberately *not* here, and a row
 #: in either that quotes the historical sentence beside "calc bundle" is *meant* to red. A queue
