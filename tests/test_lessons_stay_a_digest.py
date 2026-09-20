@@ -41,9 +41,10 @@ import pytest
 
 #: Derived from this file's own location rather than from an installed package, because the suite is
 #: run from linked worktrees whose `import chemclaw` resolves to the *main* checkout through an
-#: editable-install `.pth`. A test that walked the tree from the package would read a different tree
-#: from the one holding the `tasks/lessons.md` under review, and would pass while the worktree's copy
-#: was broken. This is `tasks/lessons.md` rule 5's "at the gate's own scope" one layer down.
+#: editable-install `.pth`. A test that walked the tree from the package would read a different
+#: tree from the one holding the `tasks/lessons.md` under review, and would pass while the
+#: worktree's copy was broken. This is `tasks/lessons.md` rule 5's "at the gate's own scope",
+#: one layer down.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 LESSONS = REPO_ROOT / "tasks" / "lessons.md"
@@ -65,8 +66,8 @@ _RULE_START = re.compile(r"^(?P<marker>(?P<number>\d+)\.\s)")
 _FOLD_INSTEAD = (
     "Fold the lesson into the rule it belongs under (sharpening that rule, and saying so when it "
     "recurred), and put the narrative in docs/archive/lessons-<YYYY>-<MM>.md. A dated section is "
-    "what tasks/lessons.md's own header forbids, twice over: it is how the 1,937-line file grew and "
-    "how the 3,212-line one that replaced it grew again."
+    "what tasks/lessons.md's own header forbids, twice over: it is how the 1,937-line file grew "
+    "and how the 3,212-line one that replaced it grew again."
 )
 
 
@@ -137,13 +138,13 @@ def test_every_line_under_a_theme_belongs_to_a_numbered_rule() -> None:
 
 
 def test_no_section_heading_names_an_incident() -> None:
-    """A `##` heading is a theme. The weaker, more legible half of the rule above.
+    r"""A `##` heading is a theme. The weaker, more legible half of the rule above.
 
-    Kept because the failure message a reader gets should name the defect in the vocabulary they
-    recognise — "this heading is dated" — and because it catches a *dated* heading whose body someone
-    has indented under a number. It is not the primary assertion: most of the 88 appended headings
-    carried their date in trailing parentheses, so the obvious `^## \d{4}-` form would have missed
-    them, and seven carried no date at all.
+    Kept because the failure message a reader gets should name the defect in the vocabulary a
+    reader recognises — "this heading is dated" — and because it catches a *dated* heading whose
+    body someone has indented under a number. It is not the primary assertion: most of the 88
+    appended headings carried their date in trailing parentheses, so the obvious `^## \d{4}-`
+    form would have missed them, and seven carried no date at all.
     """
     dated = [
         f"  '## {heading}' (line {line})"
@@ -200,8 +201,8 @@ def _citations() -> list[tuple[Path, str, str]]:
     """Every `rule N` / `cause (x)` written near a `tasks/lessons.md` mention in `src/` or `tests/`.
 
     Derived from the tree rather than listed here, so a new citation is covered the day it is
-    written — the same reason the middleware sweep keys on `scratchpad_tools()` rather than on a list
-    beside it.
+    written — the same reason the middleware sweep keys on `scratchpad_tools()` rather than on a
+    list beside it.
     """
     found: list[tuple[Path, str, str]] = []
     for directory in ("src", "tests"):
@@ -241,10 +242,11 @@ def test_the_tree_cites_this_file_by_rule_number_at_all() -> None:
 def test_every_rule_citation_in_the_tree_resolves(kind: str) -> None:
     """Folding a lesson must not silently invalidate a docstring that cites it.
 
-    `tests/test_tool_framing.py` cites rule 9, `tests/test_middleware_order.py` rule 10, and three
-    tests cite causes (e), (f) and (g) of the vacuous-guard diagnostic. None of those is reachable by
-    mypy, ruff or any other gate, so a renumbering is invisible until a reader follows the pointer to
-    the wrong paragraph — which is worse than a dangling one, because it reads as verified.
+    `tests/test_tool_framing.py` cites rule 9, `tests/test_middleware_order.py` rule 10, and
+    three tests cite causes (e), (f) and (g) of the vacuous-guard diagnostic. None of those is
+    reachable by mypy, ruff or any other gate, so a renumbering is invisible until a reader
+    follows the pointer to the wrong paragraph — which is worse than a dangling one, because it
+    reads as verified.
     """
     available = {"rule": {str(n) for n in _rule_numbers()}, "cause": _cause_letters()}[kind]
     broken = [
@@ -264,10 +266,11 @@ def test_the_digest_is_shorter_than_the_narrative_it_replaced() -> None:
     """The reading-cost bound, derived from the archives rather than typed here.
 
     The file's claim is that it can be read at session start *because* it is short, and the evidence
-    for what "too long" means is the narrative it was extracted from. So the ceiling is the shortest
-    archive on disk: the digest that has grown past the file it replaced has stopped being a digest.
-    Deliberately the weakest assertion in this module — a line count says nothing about why the file
-    grew, and both times it grew it grew by narrative, which the tests above are about.
+    for what "too long" means is the narrative it was extracted from. So the ceiling is the
+    shortest archive on disk: a digest that has grown past the file it replaced has stopped
+    being a digest. Deliberately the weakest assertion in this module — a line count says
+    nothing about why the file grew, and both times it grew it grew by narrative, which the
+    tests above are about.
     """
     archives = sorted(ARCHIVE_DIR.glob("lessons-*.md"))
     assert archives, f"no narrative archive under {ARCHIVE_DIR}; this bound has no basis"
@@ -277,8 +280,9 @@ def test_the_digest_is_shorter_than_the_narrative_it_replaced() -> None:
     print(f"digest {digest} lines; archives {lengths}")
     assert digest < ceiling, (
         f"tasks/lessons.md is {digest} lines, at or past the {ceiling} lines of the shortest "
-        f"narrative it replaced ({lengths}). It is not readable at session start any more, which is "
-        "the only reason it works. Fold repeats into one rule and move the incidents to the archive."
+        f"narrative it replaced ({lengths}). It is not readable at session start any more, "
+        "which is the only reason it works. Fold repeats into one rule and move the incidents "
+        "to the archive."
     )
 
 
@@ -293,6 +297,91 @@ def test_the_header_links_every_archive_on_disk() -> None:
         path.name for path in sorted(ARCHIVE_DIR.glob("lessons-*.md")) if path.name not in header
     ]
     assert not unlinked, (
-        f"tasks/lessons.md's header does not link {unlinked}. Link it beside the other archives, so "
-        "a reader whose paragraph is not enough can reach the incident behind it."
+        f"tasks/lessons.md's header does not link {unlinked}. Link it beside the other "
+        "archives, so a reader whose paragraph is not enough can reach the incident behind it."
+    )
+
+
+#: The destructive git verbs rule 1 is about. A path argument makes any of them take work that was
+#: never committed, which is the whole of that rule; the set is spelled here rather than derived
+#: because it is git's vocabulary, not this repository's, and it does not move.
+_DESTRUCTIVE_GIT_VERBS = re.compile(r"git (checkout|stash|restore|reset)", re.IGNORECASE)
+
+
+def _sections_recording_a_destructive_git_verb() -> dict[str, int]:
+    """How many `##` sections in each archive name one, which is rule 1's own recurrence count."""
+    counts: dict[str, int] = {}
+    for path in sorted(ARCHIVE_DIR.glob("lessons-*.md")):
+        heading: str | None = None
+        sections: set[str] = set()
+        for line in path.read_text(encoding="utf-8").split("\n"):
+            if line.startswith("## "):
+                heading = line[3:].strip()
+            elif heading and _DESTRUCTIVE_GIT_VERBS.search(line):
+                sections.add(heading)
+        counts[path.name] = len(sections)
+    return counts
+
+
+#: The count is matched in its sentence rather than looked for as a bare token anywhere in the file.
+#: Driven: a bare `"20" in text` passed against every spelling, because `2026-08-16` contains "20" —
+#: the mutation that found it is in this module's own commit message, and it is cause (a) of
+#: `tasks/lessons.md` rule 64, an assertion about an outcome the corpus cannot help but produce.
+_COUNT_CLAIM = re.compile(
+    r"(?P<count>\*{0,2}[A-Za-z0-9-]+\*{0,2}) sections across the two archives"
+)
+
+#: Only the spellings a count of this size can take in this file's prose style. Not a general
+#: number-to-words table: it exists so the assertion can name what the digest should say.
+_NUMBER_WORDS = {
+    12: "twelve",
+    13: "thirteen",
+    14: "fourteen",
+    15: "fifteen",
+    16: "sixteen",
+    17: "seventeen",
+    18: "eighteen",
+    19: "nineteen",
+    20: "twenty",
+    21: "twenty-one",
+    22: "twenty-two",
+    23: "twenty-three",
+    24: "twenty-four",
+}
+
+
+def test_rule_1_states_the_recurrence_count_the_archives_hold() -> None:
+    """The strongest claim in the file, made executable rather than recalled.
+
+    `tasks/lessons.md`'s argument for its own existence is that a lesson recorded many times means
+    the *rule* is the problem, so the count of recurrences is the finding rather than decoration —
+    and rule 71 says a number whose staleness no test would notice belongs in the test. This is that
+    test. It also puts the figure on the side that matters: the count can only grow, and a digest
+    understating it is understating the risk it exists to warn about, which is exactly the failure
+    `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` records.
+
+    Deliberately counts *sections naming the verb* rather than *incidents of work lost*: the
+    first is derivable from the archives and the second is a judgement the archives do not
+    label. So the number rule 1 carries is the derivable one, and the qualitative claim sits
+    beside it.
+    """
+    per_archive = _sections_recording_a_destructive_git_verb()
+    total = sum(per_archive.values())
+    print(f"sections naming a destructive git verb: {per_archive} (total {total})")
+
+    stated = [
+        match.group("count").lower().strip("*") for match in _COUNT_CLAIM.finditer(_lessons_text())
+    ]
+    assert stated, (
+        "the digest no longer states how many sections record this, and the archives hold "
+        f"{total} ({per_archive}). The count is the argument for rule 1, not decoration on it: "
+        'write it as "<count> sections across the two archives".'
+    )
+    expected = _NUMBER_WORDS.get(total, str(total))
+    wrong = [claim for claim in stated if claim not in {expected, str(total)}]
+    assert not wrong, (
+        f"the digest says {wrong} sections across the two archives; the archives hold {total} "
+        f"({per_archive}). Update the count in the same commit as the archive it grew from. It "
+        "can only grow, and a digest understating it understates the risk the rule exists to "
+        "warn about."
     )

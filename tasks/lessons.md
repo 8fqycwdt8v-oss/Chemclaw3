@@ -5,8 +5,11 @@ short on purpose. It has now been made short twice. The first time it was 1,937 
 sections, which is not readable at session start, so it was not read, so the rules did not fire.
 The digest that replaced it opened with the paragraph below forbidding dated sections — and then
 grew 88 of them, to 3,212 lines, **1.66× the length the restructure existed to escape**. Rule 1 is
-the proof of what that costs: the *same* `git checkout` mistake is recorded fourteen times across
-the two archives, and the sessions that destroyed work were reading the paragraph against it.
+the proof of what that costs: **twenty** sections across the two archives record the same
+destructive git verb eating uncommitted work, and the sessions that did it were reading the
+paragraph against it at session start. That figure is derived rather than recalled —
+`tests/test_lessons_stay_a_digest.py::test_rule_1_states_the_recurrence_count_the_archives_hold`
+counts it, so it cannot go stale in the direction that understates it.
 
 Every rule here is one paragraph. The incident behind it — the measurement, what was tried first,
 what it cost — is in [`docs/archive/lessons-2026-08.md`](../docs/archive/lessons-2026-08.md) (the
@@ -69,6 +72,30 @@ free number at the end of its section.
    that got quieter. What made this one survivable was that the edits had been applied by scripts
    still in the session transcript; that is luck, not a procedure.
 
+   **Twenty sections across the two archives record this, and it kept happening because the rule
+   was *filed under mutation testing*.** It is not about mutation testing. Eleven of those twenty
+   are in `lessons-2026-09.md` alone: a `git stash -u` run while three subagents held
+   two hundred untracked files; a `git checkout -- src/` that discarded every source fix of a
+   session while only the *baseline* went red; two in one frontend session, probing whether a
+   test bites; forty minutes of `plan_gate.py`, `routes/plan.py` and `cli/chat.py`; an hour of
+   unrelated feature work in `api/runner.py`; and one an hour after reading this paragraph at
+   session start. Three things those add that the record above does not:
+
+   - **A `|| true` makes it feel like a no-op.** `git checkout <path> 2>/dev/null || true`
+     reads as defensive. It is not the guard that is dangerous, it is the verb.
+   - **The size of the edit has nothing to do with the size of what the revert throws away.**
+     Four mutations were backed up with `cp` and the fifth was a one-line `sed` that felt too
+     small to bother with.
+   - **An empty `git diff --stat` is the *symptom* of the erasure, not evidence against it.**
+     The check that a revert restored rather than erased is a `grep` for something the file
+     should still contain. Had that file also carried a committed change the stat would have
+     been non-empty and I would have read it as fine.
+
+   So the rule is the verb, not the loop: **never type `git checkout`, `git restore`,
+   `git stash` or `git reset` on a path while any part of the working tree is uncommitted.**
+   Rule 67 is the version that removes the hazard instead of managing it — commit first, and
+   every revert verb is safe again.
+
 2. **`Write` to a path that already exists destroys it.** Calling `Write` on `tests/test_graph.py`
    deleted 23 tests for the NetworkX indexer, and the suite still passed — nothing referenced them.
    Check for the file first. A green suite does not notice tests that no longer exist.
@@ -111,6 +138,30 @@ free number at the end of its section.
    `set -euo pipefail` exits 141 from a command that succeeded, while `grep … | head -10` hid the
    very match that refuted a "this config is dead" claim. Before asserting "never read", grep the
    identifier alone with no pipeline.
+
+   **Ten more records since, and it is never the same command twice — which is why "run the
+   gate" keeps not firing.** Four disguises, each a real push: a narrower *file set*
+   (`mypy --strict src/chemclaw` is 490 files, `make type` is `mypy src examples tests` at 920,
+   and the gap is exactly where a moved signature's test call sites hide — this broke CI twice
+   in one session, in two repositories); a narrower *test set* (a 486-test scoped run missed
+   three settings undocumented in `.env.example`; "every touched area passed on targeted runs"
+   missed three more); a narrower *target* (`make test` is not `make cov`, which adds a
+   coverage floor *and* changes the timing profile of every performance-budget test — a
+   per-turn compile budget failed at 408 ms against 400); and a narrower *repository* (the
+   UI's check job is seven commands and its e2e job adds both directions of
+   `check:no-dev-auth` plus `test:e2e`, and I have pushed red on `format:check` and on an e2e
+   spec I had edited but never run). **The authority is `.github/workflows/`, not this file's
+   prose or mine**: `grep -n 'make ' .github/workflows/*.yml` costs one command and for this
+   repository the answer is `make ci`, whose `cov` and `deps-audit` the developer-loop prose
+   does not mention. Never hand-roll a gate step — a hand-written `mypy`/`pytest`/`ruff` line
+   is fine for an inner loop and is never the evidence that something is ready to push.
+
+   **And two cheap checks close most of the blast radius before the long run.** Map each
+   edited module to the test file named after it (`git diff --name-only | sed
+   's|src/chemclaw/|tests/test_|'`), and run the *structural* suite on every change —
+   `test_layering`, `test_repo_map`, `test_schema_inventory`, `test_database_privileges`,
+   `test_decision_log`, `test_prose_contract`, `test_docstring_paths` — because those fail on
+   the shape of a diff rather than on its behaviour and no per-feature selection covers them.
 
 32. **A lesson written down is not a lesson learned — #28 recurred, in the same session that could
     quote it.** Lesson 28 says `git add <explicit paths>` does not bound a commit, the index does.
@@ -437,6 +488,22 @@ free number at the end of its section.
     sites blind. "The sandbox cannot run it" is a claim to test, not a limit to accept. And check
     the negative case: `-p no:randomly` was a no-op, and a loop over an empty list asserts nothing.
 
+    **Recorded four more times, each one a green local line over a check that did not run.**
+    `tests/test_migrations_are_additive.py` skips on a shallow checkout ("this check would
+    compare files against themselves") and runs under CI's `fetch-depth: 0`, so an edited
+    migration `050` was green here and red there — and the defect had already announced itself
+    when `make db-migrate` refused with "was edited after being applied", which I reset by hand
+    and treated as an environment chore. `Chemclaw3-mcp`'s citation check does the same thing
+    for git history and has no epilogue to say so. Twelve chart assertions skip as "helm is not
+    installed", and five HIGH chart defects had survived every previous review because nobody
+    had rendered the chart. **So: read the skip *reasons*, not the count, and when a local run
+    is green and CI is red on the same commit, suspect a skip before the environment.** When a
+    skip names a property of the *checkout* rather than of the environment, fix the checkout —
+    `git fetch --unshallow` — and re-run before pushing; when it names a missing binary, rule 85
+    applies and you install it. A guard skipped locally leaves its subject **unchecked**, not
+    fine. And a local command that needs a manual workaround to proceed is evidence about the
+    change, not a chore: ask what the failure is telling you before undoing it.
+
 12. **A gate's red is a message, not a count.** I recorded two failures as "pre-existing, an
     environment difference" and briefed six agents to ignore them. Read the failure before
     classifying it.
@@ -567,7 +634,13 @@ free number at the end of its section.
     find a row, including the rows nothing owns. For a *check*, enumerate the input classes and name
     the one the check exists for: `canonical_smiles("CCO junk")` succeeds and returns a smaller
     molecule, which is the entire class the guard existed for and the case a both-directions test
-    written from one idea never reaches. **Three corollaries, each its own recurrence.** A test suite
+    written from one idea never reaches. **The mechanism, and it is the one that kept not firing:
+    the thing I did not think about is the thing with no test.** Before committing, list every
+    input the new code *branches on* and name the test for each branch — `tool_refusals` was a
+    term in an expression I wrote and never once considered, and `_empty_answer_event` shipped
+    with no test at all (`grep "reason to start from" tests/` returned only the source line), so
+    the one behaviour I had thought about folded in the one I had not and contradicted a merged
+    ADR. **Three corollaries, each its own recurrence.** A test suite
     that only exercises the failure path proves nothing about the success path — a new event fired on
     turns that *succeeded*, painting two red rows above a good answer, and
     `test_a_repair_that_works_announces_nothing_because_nothing_was_lost` is the test that should

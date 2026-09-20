@@ -13,10 +13,17 @@ append-only narrative, **1.66× the length the restructure existed to escape**. 
 narrative carried are folded into `tasks/lessons.md`; the incidents are here.
 
 The strongest single finding is visible only in the aggregate, which is the argument for keeping
-these files rather than deleting them: **fourteen separate sections across the two archives record
-the same `git checkout`/`git stash` destroying uncommitted work**, and the digest's own paragraph
-about it was being read by the sessions that then did it again. A rule that has to be recorded
-fourteen times is not a memory problem.
+these files rather than deleting them: **twenty separate sections across the two archives record a
+destructive git verb eating uncommitted work** — nine in `lessons-2026-08.md`, eleven here — and the
+digest's own paragraph about it was being read by the sessions that then did it again. A rule that
+has to be recorded twenty times is not a memory problem.
+
+(That sentence said "fourteen" when this file was extracted, written from a reading rather than a
+count. Measured over both archives it is twenty, and the figure is now derived by
+`tests/test_lessons_stay_a_digest.py::test_rule_1_states_the_recurrence_count_the_archives_hold`
+rather than restated here — which is `tasks/lessons.md` rule 71 applied to the file that records it.
+Thirteen of the twenty record work actually lost; the rest record the near-miss or the hazard, and
+that split is a judgement the archives do not label, so it is not what the test counts.)
 
 `tasks/lessons.md` is the digest: one short paragraph per distinct lesson, short enough to read in
 full. Come here when a rule's paragraph is not enough and you want the incident that produced it —
