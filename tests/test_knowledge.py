@@ -1407,7 +1407,8 @@ def test_the_refusal_names_the_file_the_graph_actually_serves_for_that_id(
         curated = work / "knowledge" / note_type / "shared-id.md"
         curated.parent.mkdir(parents=True, exist_ok=True)
         curated.write_text(
-            f"---\nid: shared-id\ntype: {note_type}\ncreated_by: human\n---\nPd(dppf)Cl2, {solvent}.\n",
+            f"---\nid: shared-id\ntype: {note_type}\ncreated_by: human\n---\n"
+            f"Pd(dppf)Cl2, {solvent}.\n",
             encoding="utf-8",
         )
     for command in (["add", "-A"], ["commit", "-qm", "curated"], ["push", "-q", "origin", "main"]):
