@@ -430,6 +430,20 @@ _COUNTERS: dict[str, str] = {
     # *job* and the wrong shape for the *knowledge* — with only a success counter, a total git
     # outage reads as "zero proposals", which is exactly what an idle system reads as. Two counters
     # make the difference visible and give the alert a ratio to fire on.
+    # **The hypothesis tournament degrades silently at every stage, by design.** Angle drafting,
+    # generation, critique, judging and check derivation all catch, log a warning and continue, so
+    # a run where every judge call failed still returns a ranked table — from the prior, honestly
+    # labelled "unrated (never compared)" — and nothing fleet-wide could tell it from a healthy
+    # run. That is the shape `chemclaw_notes_publish_failures_total` below exists for: a dead
+    # dependency producing output byte-for-byte indistinguishable from an idle deployment.
+    "chemclaw_hypothesis_tournaments_total": (
+        "Hypothesis tournaments that finished, by what they were able to produce."
+    ),
+    # A generator that stops producing usable refutation conditions after a model change is
+    # invisible without this: the screen is the only stage that deletes, and it deletes quietly.
+    "chemclaw_hypothesis_screen_rejections_total": (
+        "Hypotheses removed before the tournament, by which mechanical rule removed them."
+    ),
     "chemclaw_notes_publish_failures_total": (
         "Knowledge notes that could not be written into the graph; the knowledge was lost."
     ),
@@ -1056,6 +1070,16 @@ _CALL_BUCKETS: tuple[float, ...] = (
 )
 
 _HISTOGRAMS: dict[str, str] = {
+    # **The only in-run proxy for judge quality this feature has.** It is measured on every run and
+    # was, until this series existed, written into a note body and nowhere else. It matters because
+    # the ranking is only as good as the judge: the simulation in `evals/hypothesis_tournament.py`
+    # puts top-1 recovery under 40% at a 75%-accurate judge, so a gateway model swap that made the
+    # judge prefer whichever side it saw first would quietly turn the whole feature into noise
+    # while every other signal stayed green. 0.0 is no order effect; 1.0 is the order deciding
+    # every pair.
+    "chemclaw_hypothesis_position_bias": (
+        "How far a tournament's judge preferred whichever hypothesis it was shown first."
+    ),
     "chemclaw_turn_duration_seconds": "Wall-clock duration of one streamed agent turn.",
     "chemclaw_tool_duration_seconds": "Wall-clock duration of one tool invocation.",
     "chemclaw_http_request_duration_seconds": (
@@ -1095,7 +1119,13 @@ _HISTOGRAMS: dict[str, str] = {
 # Per-histogram bucket boundaries. A histogram's buckets are part of its Prometheus identity, so
 # this is a property of the declaration exactly as the HELP text is — see `_TURN_BUCKETS` above for
 # why one shared set was wrong.
+#: Position bias is a fraction on [0, 1], not a duration, so it gets its own linear buckets. The
+#: interesting region is the top: 0.0 is a judge that ignores order and 1.0 is one that is decided
+#: by it, and an operator wants to see the distribution creep upward rather than a mean move.
+_FRACTION_BUCKETS: tuple[float, ...] = (0.1, 0.25, 0.5, 0.75, 0.9, 1.0)
+
 _HISTOGRAM_BUCKETS: dict[str, tuple[float, ...]] = {
+    "chemclaw_hypothesis_position_bias": _FRACTION_BUCKETS,
     "chemclaw_turn_duration_seconds": _TURN_BUCKETS,
     "chemclaw_tool_duration_seconds": _TOOL_BUCKETS,
     "chemclaw_job_duration_seconds": _JOB_BUCKETS,
@@ -1156,6 +1186,13 @@ _HISTOGRAM_LABELS: dict[str, tuple[str, ...]] = {
 # systems to reconcile that this comment always warned about. What a *profile* costs is the gap this
 # registry fills, because nothing else has ever heard of one.
 _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
+    # `completed` (a ranked, separated field), `unseparated` (ranked but inside its own
+    # uncertainty — a real answer, and the common one), `unrated` (no comparison survived, so the
+    # ranking is the prior) and `empty` (nothing survived the screen). Four states rather than
+    # success/failure, because three of them are legitimate outcomes a chemist should see and only
+    # one of them means the judge never answered.
+    "chemclaw_hypothesis_tournaments_total": ("outcome",),
+    "chemclaw_hypothesis_screen_rejections_total": ("rule",),
     "chemclaw_tokens_total": ("profile",),
     "chemclaw_input_tokens_total": ("profile",),
     "chemclaw_output_tokens_total": ("profile",),

@@ -63,6 +63,10 @@ from chemclaw.core.temporal_client import connect
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_signals import record_job_started
 from chemclaw.durable.connector_job import envelope_from_result
+from chemclaw.durable.hypothesis_tournament import (
+    HypothesisTournamentWorkflow,
+    TournamentRequest,
+)
 from chemclaw.durable.job_record import JobRecordSearch, lookup_job_record, search_job_records
 
 # Importing the workflow *types* to launch them is deliberate and bounded
@@ -704,3 +708,77 @@ async def cancel_job(job_id: str) -> bool:
             ) from exc
         return False
     return True
+
+
+def _tournament_id(request: TournamentRequest) -> str:
+    """A deterministic workflow id, so re-asking the same question rejoins the run.
+
+    The actor and roles are in the key for the reason `_report_id` records: `job_status()` applies
+    no owner check, so two principals with different entitlements colliding on one id means one
+    collects the other's work. The question and context are model-authored text and go through
+    `canonical_text`; the entitlement half stays byte-exact.
+    """
+    payload = [
+        canonical_text(request.question),
+        canonical_text(request.context),
+        request.requested_by,
+        *sorted(request.requested_roles),
+    ]
+    return f"hypotheses-{stable_hash(payload)}"
+
+
+@tool
+async def rank_competing_hypotheses(question: str, context: str = "") -> str:
+    """Generate competing explanations, rank them, and say what experiment would settle them.
+
+    For a puzzling result with several possible causes — "the impurity appeared when I changed the
+    solvent", "the yield collapsed on scale-up" — where the useful answer is the *field* of
+    candidates with the evidence weighed across it. Generators propose hypotheses in parallel, each
+    is critiqued, then they are compared in pairs against retrieved evidence and rated on the Elo
+    scale.
+
+    Prefer `suggest_next_experiment` for an optimization over bounded numeric variables with runs
+    already done: a fitted surrogate is a stronger instrument than a judged comparison. Answer
+    directly when only one explanation is really in play — a tournament over a field of one tells
+    nobody anything.
+
+    Returns a job id rather than the ranking; poll `get_durable_job_status`. Re-asking the same
+    question rejoins the existing run.
+
+    **The rating orders the candidates this run generated. It is not a probability that any of them
+    is true.** Read `competing-hypotheses` before reporting one: it carries the rest, including
+    that an unseparated field is an answer rather than a failure.
+
+    Args:
+        question: The observation or puzzle to explain, in the chemist's own terms.
+        context: Optional extra detail — what was already tried, what was ruled out, constraints.
+
+    Returns:
+        The job id to poll. Its result carries the ranked field, every objection raised, the
+        discriminating check for each hypothesis, and the ids of any `experiment-proposal` notes
+        written for checks that need a laboratory.
+    """
+    authorize_trigger("rank_competing_hypotheses")
+    request = TournamentRequest(
+        question=question,
+        context=context,
+        requested_by=require_actor(),
+        requested_roles=sorted(get_current_roles()),
+        correlation_id=get_current_correlation_id() or "",
+    )
+    client = await connect()
+    workflow_id = _tournament_id(request)
+    try:
+        handle = await client.start_workflow(
+            HypothesisTournamentWorkflow.run,
+            request,
+            id=workflow_id,
+            task_queue=settings.background_task_queue,
+            id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+        )
+    except WorkflowAlreadyStartedError:
+        # Same question, same actor: hand back the run rather than paying for it twice. No
+        # `job_started` signal, matching `request_development_report` — nothing new began.
+        return workflow_id
+    record_job_started(handle.id, "hypotheses")
+    return handle.id

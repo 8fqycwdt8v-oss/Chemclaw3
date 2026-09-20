@@ -991,7 +991,8 @@ config:
   # ⚠ EMPTY ON PURPOSE, AND EMPTY MEANS CLOSED. Until an operator sets this to their own Entra app
   # role(s), **every job a connector manifest declares `expensive: true` is refused for everyone**:
   # `sample_conformers`, `compute_interaction_energy`, `refine_ensemble` and the rest of `calc`'s
-  # expensive set, plus `start_optimization_campaign`. The trigger gate fails closed on an empty
+  # expensive set, plus `start_optimization_campaign` and `rank_competing_hypotheses` (a
+  # hypothesis tournament is ~25 judged model calls). The trigger gate fails closed on an empty
   # role set rather than open (`agent/authz.authorize_trigger`), which is the safe direction and a
   # silent one — the pod boots, the probes pass, reads work, and a chemist asking for a conformer
   # search is told they lack a privileged role. Set it to a comma list of the Entra app roles your

@@ -85,6 +85,14 @@ CORE_EXPENSIVE_ACTIONS: frozenset[str] = frozenset(
         # stronger argument for the gate rather than a weaker one: a report nobody wanted costs
         # tokens, and four reactions nobody wanted costs four reactions.
         "request_external_input",
+        # A tournament is the most expensive single thing a turn can start: generation across
+        # several angles, a critique per hypothesis, `field/2 · ceil(log2(field))` judged
+        # comparisons and a check per survivor — roughly thirty structured model calls at the
+        # shipped field size, against a question a chemist may have asked idly. It is also the one
+        # job whose cost scales with a *setting* rather than with the request
+        # (`hypothesis_max_field`), so a deployment that widens the field widens this gate's
+        # subject without touching the tool.
+        "rank_competing_hypotheses",
     }
 )
 
@@ -181,6 +189,12 @@ STATE_CHANGING_TOOLS: frozenset[str] = (
             # proposing behaviour changes from a context the chemist cannot see is worse than one
             # that cannot propose at all.
             "propose_skill",  # writes behaviour_proposals
+            # Starts a durable tournament that ends by writing `experiment-proposal` and
+            # `hypothesis-field` notes into the graph, so it writes knowledge as well as spending a
+            # job's worth of model calls. Being here also subtracts it from every helper's surface,
+            # which is right for a second reason: a tournament spawned from inside a helper would
+            # be a fan-out inside a fan-out, priced against a budget its caller cannot see.
+            "rank_competing_hypotheses",  # starts a durable tournament that records notes
         }
     )
     | DEFAULT_WRITE_TOOL_GATES

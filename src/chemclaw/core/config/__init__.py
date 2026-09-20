@@ -62,6 +62,7 @@ from chemclaw.core.config.eln import ElnSettings
 from chemclaw.core.config.entra import EntraSettings
 from chemclaw.core.config.evals import EvalSettings
 from chemclaw.core.config.fingerprints import FingerprintSettings
+from chemclaw.core.config.hypotheses import HypothesisSettings
 from chemclaw.core.config.kg import KgSettings
 from chemclaw.core.config.labels import LabelSettings
 from chemclaw.core.config.llm import LlmSettings
@@ -346,6 +347,7 @@ class Settings(
     MemorySettings,
     RetrievalSettings,
     ReportSettings,
+    HypothesisSettings,
     DeliverySettings,
     PublishSettings,
 ):

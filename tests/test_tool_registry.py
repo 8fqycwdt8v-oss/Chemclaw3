@@ -83,6 +83,7 @@ _EXPECTED_INPROCESS_TOOLS = {
     # workflows with no caller at all — this is the trigger that replaced the clock, and a person
     # asking is now the only thing that starts one.
     "request_development_report",
+    "rank_competing_hypotheses",
     "synthesize_memory",
     "get_durable_job_status",
     # The retrospective half of that pair (D-157): the durable record of every finished run, which
