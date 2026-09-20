@@ -1220,6 +1220,28 @@ those belong in.
 
 ## A truncated argument document is completed by upstream and the tool runs on the guess
 
+- [ ] **Two timing bounds red the gate for machine load, and the ADR that documents one of them
+      says it passes serially** — [S], found 2026-09-20 when `check` went red on PR #421 with a diff
+      containing **zero files under `src/`**.
+      `tests/test_conflicts.py::test_a_disjoint_dated_corpus_scans_in_linear_time` took 1.84 s
+      against a bare `< 1.5` wall clock, and
+      `tests/test_context_budget.py::test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable`
+      measured 1.289x against a fixed `/ 1.3` margin — 0.9% short. Both pass 3-of-3 serially on an
+      unloaded machine; both failed inside a 46-minute run competing with three subagents.
+      **The documentation is the part worth fixing first.**
+      `D-2026-09-13-a-stable-failure-set-is-not-two-green-runs` tabulates the second test as failing
+      **2 of 5** parallel runs with the serial column reading an unqualified **"passes"**. It passes
+      serially *on an unloaded machine*: parallelism was never the mechanism, load is, and `-n 4` is
+      one way to produce it. A merged ADR is never edited, so a reader of that table today is told
+      the serial gate is safe from this and it is not.
+      **The patch.** Both assertions bound a ratio or a wall clock against a constant. Each should
+      compare against a control measured in the same process at the same moment — which the second
+      test already half does (it has the on-loop control) and then spends on a fixed 1.3x margin that
+      load eats. `tasks/lessons.md` already carries the rule this is an instance of: a timing bound
+      must separate the two *outcomes*, not the two speeds.
+      Anchors: `tests/test_conflicts.py`, `tests/test_context_budget.py`,
+      `docs/decisions/D-2026-09-13-a-stable-failure-set-is-not-two-green-runs.md`.
+
 - [ ] **A streamed tool call cut mid-document is completed by upstream and the tool runs on the guess** — [M].
       `D-2026-08-27-an-unparseable-tool-call-is-a-visible-failure` §3 recorded this as open and named the
       order to close it in: change the storm's document, **then** decide the `finish_reason` question.
