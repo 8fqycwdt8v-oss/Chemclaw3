@@ -232,8 +232,8 @@ def test_a_repeat_with_no_verdict_and_one_with_no_cost_are_different_named_holes
         treatments={"helper": "helper"},
     )
     assert result.ungraded == ["helper/dl-01#1"], (
-        "an ungraded repeat has to be named as a hole; `VERDICT_SCORES` has no entry for it, so the "
-        "alternative is a quality this harness invented"
+        "an ungraded repeat has to be named as a hole; `VERDICT_SCORES` has no entry for it, so "
+        "the alternative is a quality this harness invented"
     )
     assert result.unbilled == ["helper/dl-01#2"], (
         "a session the ledger holds no row for has to be named as a hole rather than read as zero: "

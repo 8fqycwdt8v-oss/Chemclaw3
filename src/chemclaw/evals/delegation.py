@@ -54,13 +54,13 @@ This module runs no model. It is a pure comparison over runs somebody else recor
 makes it testable without a gateway. **The run half is `evals/delegation_run.py` plus
 `cli/live_probes --suite delegation`, and it is now the missing credential that it once was not.**
 This paragraph twice said something weaker than the truth and once said something stronger: it read
-"the run half is what needs one" while no runner existed, and then that there was no runner while one
-was being written. What exists is four arms (`ARMS`), three profiles in `data/evals/profiles/` whose
-instruction bodies are identical and whose delegation asks are not, `delegated` observed off
-`audit_events` and `billed_tokens` off `turn_costs`. What the runner has never had is a model: driven
-against `cli.mock_llm` it exits non-zero on purpose, because a double supplies the *decision* to
-delegate and a run against one is evidence about the runner. `docs/planning/BACKLOG.md` carries what
-is left.
+"the run half is what needs one" while no runner existed, and then that there was no runner while
+one was being written. What exists is four arms (`ARMS`), three profiles in `data/evals/profiles/`
+whose instruction bodies are identical and whose delegation asks are not, `delegated` observed off
+`audit_events` and `billed_tokens` off `turn_costs`. What the runner has never had is a model:
+driven against `cli.mock_llm` it exits non-zero on purpose, because a double supplies the *decision*
+to delegate and a run against one is evidence about the runner. `docs/planning/BACKLOG.md` carries
+what is left.
 """
 
 from __future__ import annotations

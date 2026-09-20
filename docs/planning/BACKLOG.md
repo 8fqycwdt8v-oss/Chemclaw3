@@ -795,8 +795,8 @@ topic).
       **The run needs a gateway, and this environment's credential is a state rather than a fact.**
       Nothing in `src/` dials a vendor (`D-2026-09-04-a-gateway-is-the-only-provider`), so `API-KEY`
       is a credential *for* a gateway rather than one this stack can use: probed 2026-09-13 it
-      answered 200 against the vendor with no gateway configured, and a gateway probed for the
-      tool-utility A/B answered HTTP 400, "credit balance is too low"; probed again 2026-09-20 the
+      answered 200 against the vendor with no gateway configured, and a gateway probed for
+      `make live-ab` answered HTTP 400, "credit balance is too low"; probed again 2026-09-20 the
       variable was empty and no gateway was configured at all. So probe first —
       `printenv 'API-KEY'` plus one cheap call **through a gateway** — and then run the measurement
       in the same session, because tomorrow's state is not evidence about today's. Until the run
