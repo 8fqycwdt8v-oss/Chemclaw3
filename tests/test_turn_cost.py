@@ -300,6 +300,11 @@ def test_every_turn_cost_reader_has_the_surface_that_asks_it() -> None:
     - `cli/live_turn_cost.py` — `make live-turn-cost`, which drives a fixed workload and scores
       what the ledger says it cost. Its surface is the command itself, and it reads back only the
       session it just opened.
+    - `evals/delegation_run.py` — `make live-delegation`, which reads back only the sessions it just
+      drove, one arm-run at a time. `ArmRun.billed_tokens`' own comment is why it has to come from
+      here: the delegation experiment's cost claim is about what a turn *billed*, and an estimator
+      would measure the wrong thing through a ratio `agent/context_budget.py` has twice found to be
+      content-dependent.
 
     Note what the count never protected: `evidence_pack.py` has always read `audit_events`,
     `job_records`, `effects` and `plan_approvals` with its own SQL, so "operations/activity.py is
@@ -318,6 +323,7 @@ def test_every_turn_cost_reader_has_the_surface_that_asks_it() -> None:
         "cli/distill.py",
         "cli/explain.py",
         "cli/live_turn_cost.py",
+        "evals/delegation_run.py",
         "operations/activity.py",
         "operations/evidence_pack.py",
     ], (

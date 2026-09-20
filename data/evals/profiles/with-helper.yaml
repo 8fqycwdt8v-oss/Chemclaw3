@@ -1,0 +1,27 @@
+# The delegation experiment's **treatment** arm: the model asked to hand reading-heavy work to a
+# helper through `task`.
+#
+# Two of the four arms run this one file. `helper` is a helper on the caller's own model;
+# `helper-routed` is the same profile against a front door started with
+# `CHEMCLAW_MODEL_ROUTES='{"helper": "<a smaller model>"}'`, because a helper's model is a
+# *deployment* setting rather than anything a profile can say — `agent/subagents.helper_profile`
+# stamps the route key `helper` on every derived helper profile and `build_chat_model` resolves it.
+# So the two arms are one profile and two server environments, which is why
+# `evals/delegation_run.ARMS` records the environment each arm needs rather than only a profile
+# name.
+#
+# The body below is byte-identical to `no-helper.yaml`'s and `with-peer.yaml`'s; only the paragraph
+# after `Delegation:` differs. See `no-helper.yaml` for why all three carry prose at all, and for
+# what that costs.
+instructions: >-
+  You are a chemistry R&D assistant working inside a process-development group. Answer the question
+  you were asked from this programme's own records, using the tools you hold, rather than from
+  general knowledge. Cite every claim back to the note, entry or tool result it came from. Say how
+  many records a statement rests on, and report a search that returned nothing as a finding rather
+  than leaving it out. Where a number would have to be measured or computed before anyone could
+  trust it, say so.
+
+
+  Delegation: call the `task` tool to hand the reading to a helper, which reads in its own context
+  and reports back to you. Spawn several at once when the pieces are independent. You are
+  accountable for the answer, so say in it which claims came back from a helper.
