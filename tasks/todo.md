@@ -1,173 +1,77 @@
-# Peer-to-peer handoff (swarm topology) — plan
+# Finish the four points the ten-wave review left open — plan
 
-Decision taken by the user after a Step-1 report found no peer handoff and three merged
-decisions declining it. This supersedes the topology half of
-`D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor`; it does **not** supersede its
-four invariants, three of which are carried unchanged and one of which is restated.
+The ten-wave review (`tasks/review-2026-09-19-ten-waves.md`) closed with four things it had
+**not** done, stated rather than implied. This is the plan that closes them. Each is its own
+PR, merged when CI is green, in the order they became ready.
 
-## The design in one paragraph
+The previous occupant of this file was the peer-handoff plan. Its twelve items were all
+**unchecked and all shipped** — `agent/handoff.py`, `agent/turn_graph.py`, `active_agent`,
+`agent_peer_roster`/`agent_max_handoffs`, `HandoffEvent`, the ADR and the multi-hop test in
+`tests/test_turn_graph.py` all verified present before it was moved. A plan file whose boxes
+are empty over finished work reads as live state, which is the defect `D-154` records about
+`DEFERRED.md` rows describing shipped work, one register over. It is now
+`docs/archive/plans/peer-handoff-plan.md`.
 
-A turn compiles an outer `StateGraph` — the *turn graph* — whose nodes are compiled
-`build_langgraph_agent` graphs, one per peer. A peer hands control to another by calling a
-generated `transfer_to_<peer>` tool that returns
-`Command(goto=<node>, graph=Command.PARENT, update={...})`. The turn graph holds `active_agent`
-in a checkpointed channel, so the next turn on that thread resumes with whoever was last active
-— which is the swarm pattern's defining property and the reason an outer graph is required at
-all (`Command.PARENT` needs a parent).
+## OP4 — `helm-validate` end to end
 
-## The invariant that replaces "attenuation of its caller"
+- [x] 1. Install `kubeconform` and `promtool` (the runbook says how, and says so correctly) and
+      run the target. **It passes**: Valid 31 and 35 over the two arms, the external-connector
+      render OK, promtool parsing 219/220/220 rules over the three monitoring arms.
+- [x] 2. What the first real run found: `_EXPECTED_SKIPPED_RESOURCES = 1` was a count of
+      **resources** compared against `len(_UNVALIDATED_KINDS)`, a count of **kinds**, and the
+      union arm reports `Skipped: 3`. The second skipped kind sat in the set whose stated reason
+      was that it could not be skipped.
+- [x] 3. Derive the count from the render per arm; measure it against kubeconform's own summary
+      line; read the arms out of the `Makefile` rather than restating them.
+- [x] 4. Three mutations watched failing (one deletion, two rewords). `make lint`, `make type`
+      (919 files) green; 210 passed in `tests/test_deploy_chart.py` with the binaries present.
+- [x] 5. PR #420.
 
-`D-2026-08-10` invariant 1 reads: *a subagent's surface is an attenuation of its caller's, never
-a widening*, and *a handoff that would add a tool the caller does not hold is a build-time error*.
-Read literally that forbids peer handoff outright — a peer worth handing to holds something its
-counterpart does not.
+## OP3 — the 49 remaining `model_copy(update=…)` fixtures
 
-What replaces it, and what must be true by arithmetic rather than by review:
+Wave 10 proposed a *mechanism* rather than a verdict: flag the call in any test whose subject
+model declares `extra="ignore"` or `extra="forbid"`, because `model_copy` does not validate and
+so a fixture built that way can supply its own subject.
 
-> **Every peer's surface is an attenuation of the turn's ROOT surface.**
-> `peer_surface = root_surface ∩ peer_profile.tool_names`. No peer holds a name the root does
-> not. A handoff *redistributes* authority the chemist's turn already opened with; it cannot
-> extend it. The chain is therefore bounded by its first frame however long it gets, which is
-> the property "attenuation of the immediate caller" was reaching for and which a chain of
-> pairwise narrowings does not actually give you.
+- [ ] 1. Measure whether that heuristic actually separates the dangerous sites from the
+      harmless ones over all 140 call sites, and if it does not, find the property that does.
+- [ ] 2. Triage the flagged set; rebuild through the real constructor every fixture that
+      supplies its own subject, and re-prove each guard by mutating what it guards.
+- [ ] 3. Exemptions as an explicit allowlist with a reason at each entry, held in both
+      directions.
 
-Invariants 2 (`require_actor` reject-if-absent), 3 (the trail names the agent beside the human)
-and 4 (skills do not inherit) are carried unchanged. Invariant 3 gets a real producer here for
-the first time on a handoff path — `make_audit_middleware(agent=...)`, the build-time argument
-`D-2026-09-06` established, never a contextvar.
+## OP2 — `tasks/lessons.md` has regrown into the shape it was created to escape
 
-## Ships off by default
+Its own header: *"it was 1,937 lines across 80 sections, which is not readable at session
+start, so it was not read, so the rules did not fire"* — and *"do not append a dated section,
+that is how the old file grew"*. It is **3,212 lines**, and ~2,890 of them are dated sections.
 
-`CHEMCLAW_AGENT_PEER_ROSTER=""`. Three reasons and they are independent: `D-2026-08-10` requires
-a team to ship disabled until hand-off accuracy is measured; `evals/delegation.py` has still
-never run against a model; and an empty roster leaves `tests/test_context_floor.py`'s prefix
-untouched for every existing deployment, since the handoff tools are only bound when a roster
-names peers.
+- [ ] 1. Fold every dated entry's rule into the thematic sections; lossless in rules.
+- [ ] 2. Archive the narrative to `docs/archive/lessons-2026-09.md`, as the first eighty are
+      archived.
+- [ ] 3. Build the mechanism the header itself prescribes for a rule broken repeatedly — here,
+      the file's own prohibition on appending. Note that several existing headings carry their
+      date in trailing parentheses, so a prefix match would have caught only some of them.
+- [ ] 4. Check the citations: tests and modules quote this file by phrase and by rule number.
 
-## Steps
+## OP1 — the delegation experiment has a comparator and no runner
 
-- [ ] 1. Install deps, confirm the suite is green on `main` before any change (baseline).
-- [ ] 2. MEASURE the four things this design assumes, on a real compiled graph, before writing
-      the feature. Each is a separate probe under `tasks/probes/` and each has a recorded number:
-  - [ ] 2a. Does `Command(goto=..., graph=Command.PARENT)` returned from a tool inside a
-        `create_deep_agent` graph actually reach an outer `StateGraph` node? (The whole design
-        rests on this. If `create_agent`'s `ToolNode` swallows or rewrites the `Command`, the
-        topology changes.)
-  - [ ] 2b. What do the `UntrackedValue` channels (`model_calls`, `billed_tokens`) do across the
-        peer boundary? A per-turn cap that resets per peer is a cap that does not exist.
-  - [ ] 2c. What does the stream namespace look like with a wrapper frame, exactly?
-  - [ ] 2d. Does a peer compiled with `checkpointer=None` inherit the turn graph's saver, and is
-        `active_agent` restored on the next turn?
-- [ ] 3. `agent/handoff.py` — the handoff tool factory. One tool per reachable peer, schema kept
-      minimal because every token lands in `CEILINGS` directly.
-- [ ] 4. `agent/state.py` — `active_agent` (checkpointed, `LastValue`-shaped with a reducer that
-      survives two writers) and `handoffs` (`TurnTotal`, per-turn, bounds ping-pong).
-      Extend `tests/test_state_channels.py`'s `_PROBE_VALUE`/`kind` derivation for a `str` channel.
-- [ ] 5. `agent/turn_graph.py` — the outer graph builder. Peers compiled by
-      `build_langgraph_agent` (never a bare dict — `governed_roster`'s argument applies here
-      verbatim), root surface computed once, each peer intersected against it.
-- [ ] 6. `api/graph_stream.py` — root depth. Replace `bool(namespace)` with a depth test read off
-      the graph object, not passed by a call site. Without this the main agent streams as
-      `"subagent"`, the answer goes empty and the plan is suppressed.
-- [ ] 7. `api/events.py` — `HandoffEvent` back, **with its producer in the same commit**
-      (`tests/test_event_producers.py`), the contract fixture regenerated, `app.js` case restored.
-- [ ] 8. Config: `agent_peer_roster`, `agent_max_handoffs`. Off by default.
-- [ ] 9. Tests, including at least one **multi-hop** (A→B→C) scenario driven on a compiled graph,
-      plus the root-bound inequality asserted as arithmetic rather than a number.
-- [ ] 10. ADR superseding D-2026-08-10's topology half; `docs/decisions/README.md` row;
-      BACKLOG.md rows for what this does *not* settle (whether delegation pays — still unmeasured).
-- [ ] 11. `make lint type test` green, reporting what it skipped.
-- [ ] 12. Companion PR in `Chemclaw3_ui` — its `eventContract.test.ts` currently pins the
-      *absence* of `handoff`, so this repo's change breaks that repo until both land.
+`CLAUDE.md`: *"What is still open is whether delegation pays: `evals/delegation.py` has never
+run against a model."* The comparator, the corpus and the ADR all exist; nothing constructs an
+`ArmRun`, nothing records `delegated`, and there is no `no-helper` profile.
+
+- [ ] 1. A runner in the shape of `cli/live_probes.py`'s `--suite ab`, not a second harness.
+- [ ] 2. `delegated` observed off the turn's own record, never inferred from the arm's name —
+      the baseline arm is behavioural because `task` cannot be removed.
+- [ ] 3. Four arms: `no-helper`, `helper`, `helper-routed`, and the `peer` arm the BACKLOG row
+      added after `D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it`.
+- [ ] 4. Prove it end to end against `cli/mock_llm` on loopback, driving all four compliance
+      buckets — none of which any real run has ever exercised.
+- [ ] 5. **No number from the mock may be reported as evidence about delegation.** A mock
+      answer is evidence about the runner. This environment has no credential: `API-KEY` is
+      empty and no gateway is configured, so the question stays open and the runner is what
+      closes the gap to it.
 
 ## Review
 
-(filled in at the end)
-
-## Review
-
-Shipped. `CHEMCLAW_AGENT_PEER_ROSTER` is empty by default, so no deployment's behaviour changes
-until somebody opts in.
-
-### What the steps actually produced
-
-- `agent/handoff.py` — the `transfer_to_<peer>` tool factory, the per-peer menu text derived from
-  what that peer's graph binds, and the chain cap.
-- `agent/turn_graph.py` — the outer `StateGraph`, the root-bounded surface arithmetic, and
-  `build_turn_agent`, which is the single entry point the runner now takes.
-- `agent/state.py` — `active_agent` (checkpointed, `LastPeer`) and `handoffs` (`TurnTotal`).
-- `api/graph_stream.py` — `root_depth`, replacing a `bool(namespace)` attribution that inverts
-  under any wrapper graph.
-- `api/events.py` + `api/static/app.js` — `HandoffEvent` back, with its producer.
-- `tests/test_turn_graph.py` — 18 tests, including the multi-hop scenario.
-- `Chemclaw3_ui` — the mirror, on its own branch and PR.
-
-### Where the plan was wrong
-
-**The probes were the most valuable step and the plan under-sold them as step 2 of 12.** Four of
-the five design assumptions were wrong or incomplete, and every one would have shipped silently:
-
-1. `Command(graph=PARENT)` works — but it terminates the inner agent *without merging its state*,
-   so the obvious implementation leaves an orphan `ToolMessage` and the *next* request is rejected.
-2. `checkpointer=False`/`None` are identical here, so the plan's "measure it" was right and the
-   worry behind it was not.
-3. The stream attribution inverts under a wrapper — this was step 6 on the plan and it was the
-   difference between a working feature and one that answers every turn empty.
-4. **The fix for (3) was itself wrong first.** Deriving "is this a mesh?" from an `active_agent`
-   channel is true of *every* compiled agent in this tree, so a single agent measured depth 1 —
-   which breaks every existing deployment rather than the new feature. Caught by measuring, not by
-   review.
-
-Two more were caught by the tests rather than the probes, which is the argument for writing the
-multi-hop test before believing the mechanism: the chain counter wrote a delta into a channel
-defined against absolute totals (two hops counted 1, so the cap was unreachable), and
-`HandoffEvent`'s `from`/`to` could not serialise as named because `sse_frame` omits `by_alias`.
-
-### What was dropped from the plan
-
-The probe scripts. `tasks/` holds no Python anywhere in this repo's history, and every finding is
-now either asserted in `tests/test_turn_graph.py` or written into the ADR with its numbers — a
-script whose finding is asserted is a second copy of the assertion.
-
-Three functions written and deleted before commit for the same reason: `is_handoff`,
-`peers_reachable_from` and `peer_instructions` each had no caller in `src/`, and a function kept
-alive by a test that calls it directly is the shape this repo deletes on sight.
-
-### What this does not settle
-
-Whether handing over pays. `evals/delegation.py` has still never run against a model; the new
-`BACKLOG.md` row is a fourth arm on that comparison, not a substitute for it.
-
----
-
-# Wave 1b — closing the post-merge mutation audit of `27fe89c2`
-
-Eleven mutations of that commit's ten fixes stayed green over a live false statement. This is the
-review section for closing them; the per-finding measurements are in the branch's commit messages and
-in the docstrings of the guards themselves, which is where CLAUDE.md says a defect fix's record
-belongs.
-
-## Review
-
-- **Every fix was reproduced before it was touched and re-measured after.** The numbers that moved:
-  a fan-out carry 2 → 5 against a channel holding 5; a durable-memory gate answering `False` on four
-  spellings → `True` on all of them; a connector peer binding `similar_reactions` → binding nothing
-  its profile does not name; 8 and 3 unescaped fields in `pending_tools`/`memory_tools` → 0; a notice
-  reading `179,900 of 239,554` for a 59,900-character result → `44,984 of 59,900`, on both branches;
-  a truncation counter advancing 2.0 for one cut → 1.0; a Postgres session refused with
-  `CheckpointSchemaMismatch` → resumed.
-- **One finding did not survive re-measurement as stated.** The `commitment_tools` defang cost was
-  audited at 19.3x and 18.9 ms per max page; re-measured here it is 5.7x and 7.8 ms. The concern
-  stands at a smaller magnitude and is a `BACKLOG.md` row rather than a fix, with the reason the
-  cheap fix is the wrong one.
-- **One mutation turned out to be equivalent rather than a defect** — filtering `_declared_tools` on
-  `name.strip()` changes nothing, because the name on that path is already the directory. It was
-  replaced with a real fail-open (dropping the sentinel entries) rather than guarded against.
-- **Two false statements in `tasks/review-2026-09-19-ten-waves.md` are corrected in place**: the
-  claim that every fix shipped with its mutation watched failing (false for five of ten), and the
-  claim that the notice-arithmetic defect needs the `SERVED_BY` stamp (it reproduces identically on
-  the non-connector path; the original reproduction had hit a payload the escape does not expand).
-- **Three guards needed widening after a mutation survived them**, which is the whole point of the
-  rule: the authz gate's unresolvable-argument arm, the notice's understatement direction (a
-  `len(delivered)` bound is loose by exactly the expansion factor, so a paired inert control replaced
-  it), and two class-form spellings of an untracked channel.
+(Filled in when the four are merged.)
