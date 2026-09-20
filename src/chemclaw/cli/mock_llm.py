@@ -805,19 +805,54 @@ def build_app(mock: MockLlm) -> FastAPI:
     return app
 
 
+def catalogue(name: str) -> list[Behaviour]:
+    """The named behaviour set this process serves.
+
+    Two catalogues, and they may not be served together. `MockLlm.select` falls back to the *first*
+    entry of whatever it was given when a request carries no marker, so a union would silently hand
+    one lane's default to the other — and a marker collision between two independently edited files
+    would be invisible until a report read wrong. One lane, one catalogue, named on the command
+    line.
+
+    Imported here rather than at module scope because each catalogue validates itself against the
+    live tool surface, which builds the connector registry: a process that serves one must not pay
+    for the other.
+
+    Raises:
+        KeyError: No catalogue is called that, named rather than falling back to the storm's — a
+            typo would otherwise serve a measurement the wrong script and report it as a result.
+    """
+    from chemclaw.cli.delegation_behaviours import DELEGATION_BEHAVIOURS
+    from chemclaw.cli.storm_behaviours import BEHAVIOURS
+
+    catalogues = {"storm": BEHAVIOURS, "delegation": DELEGATION_BEHAVIOURS}
+    if name not in catalogues:
+        raise KeyError(f"no behaviour catalogue called {name!r}; known: {sorted(catalogues)}")
+    return catalogues[name]
+
+
 def main(argv: list[str] | None = None) -> int:
-    """Serve the storm's behaviour set until killed."""
+    """Serve one behaviour catalogue until killed."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--port", type=int, default=MOCK_PORT)
+    parser.add_argument(
+        "--catalogue",
+        default="storm",
+        choices=["storm", "delegation"],
+        help="which behaviour set to serve (default: the storm's)",
+    )
     args = parser.parse_args(argv)
 
-    from chemclaw.cli.storm_behaviours import BEHAVIOURS
+    behaviours = catalogue(args.catalogue)
 
     # The configured logging path rather than a bare `basicConfig`, so this process is swept by
     # the same redaction filter as every other entrypoint (`tests/test_logging.py` pins it).
     configure_logging()
-    mock = MockLlm(BEHAVIOURS)
-    print(f"mock LLM serving {len(BEHAVIOURS)} behaviour(s) on http://{MOCK_HOST}:{args.port}/v1")
+    mock = MockLlm(behaviours)
+    print(
+        f"mock LLM serving {len(behaviours)} {args.catalogue} behaviour(s) on "
+        f"http://{MOCK_HOST}:{args.port}/v1"
+    )
     uvicorn.run(build_app(mock), host=MOCK_HOST, port=args.port, log_level="warning")
     return 0
 

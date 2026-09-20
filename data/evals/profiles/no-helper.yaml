@@ -1,0 +1,45 @@
+# The delegation experiment's **baseline** arm: the model asked not to call `task`.
+#
+# `chemclaw.evals.delegation.BASELINE_ARM` is this file's name, and the arm is **behavioural rather
+# than structural** — `task` cannot be taken away. `SubAgentMiddleware` is in `create_deep_agent`'s
+# `_REQUIRED_MIDDLEWARE`, `_apply_excluded_middleware` raises rather than let a profile strip it,
+# and an empty roster makes upstream re-insert its own ungoverned `general-purpose` helper. So this
+# arm is an *ask*, whether it complied is an observation per run
+# (`evals/delegation_run.observe_delegation` reads it off `audit_events`), and a run that delegated
+# anyway is reported as `contaminated` rather than averaged in.
+#
+# **Why three files whose bodies are identical, when the BACKLOG row asked for one.** The row
+# assumed the delegating arms would run `default`, and that is the instrument
+# `D-2026-09-14-tools-were-never-the-variable` was written about: a profile's `instructions:`
+# *replace* the deployment's domain prose wholesale (`chemclaw_agent.instructions_for`), so a
+# baseline that supplies its own prose against a `default` treatment arm varies the delegation ask
+# and ~14,000 characters of system prompt together — and on the cost axis this measurement is
+# mostly about, the prose difference is the larger of the two by an order of magnitude. Every arm
+# therefore supplies prose, the body below is byte-identical across all three files, and the only
+# thing that differs is the paragraph after `Delegation:`.
+# `tests/test_delegation_run.py::test_the_three_arm_profiles_differ_only_in_their_delegation_ask`
+# is what holds that, in both directions — identical bodies, and three different asks.
+#
+# **What it costs, stated because a control arm that overstates itself is worse than none.** These
+# arms do not carry the deployment's own domain guidance, so the comparison is internally valid and
+# is *not* a measurement of the shipped prompt: it says what delegation does to a task under this
+# instrument's prose. `_SAFETY_BLOCKS` is appended to every profile whatever its `instructions:`,
+# so the envelope rule, the `Refused:` semantics and the knowledge-write rule are present here as
+# everywhere. `tool_names` and `skill_names` are unset on purpose — the whole tool surface and the
+# whole skills tree are held in every arm, because the treatment is delegation and nothing else.
+#
+# Kept out of `data/profiles/` for the reason every control here is: a measurement instrument is not
+# a capability a session may pick by name. `infra/live/processes.sh` puts this directory on
+# `CHEMCLAW_PROFILES_DIR`, and `cli/live_probes --suite delegation` refuses to start unless the
+# front door registered every arm profile it is about to spend model calls on.
+instructions: >-
+  You are a chemistry R&D assistant working inside a process-development group. Answer the question
+  you were asked from this programme's own records, using the tools you hold, rather than from
+  general knowledge. Cite every claim back to the note, entry or tool result it came from. Say how
+  many records a statement rests on, and report a search that returned nothing as a finding rather
+  than leaving it out. Where a number would have to be measured or computed before anyone could
+  trust it, say so.
+
+
+  Delegation: do not call the `task` tool on this turn. Read whatever you need yourself, in this
+  context, and answer directly.

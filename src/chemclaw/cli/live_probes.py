@@ -28,7 +28,7 @@ import contextlib
 import json
 import logging
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeVar
@@ -40,7 +40,14 @@ from chemclaw.connectors.registry import job_names
 from chemclaw.core.config import settings
 from chemclaw.core.logging import configure_logging
 from chemclaw.core.markdown import render_table
+from chemclaw.evals import delegation_run
 from chemclaw.evals.ab import ABSummary, TaskScores
+from chemclaw.evals.delegation import (
+    BASELINE_ARM,
+    MINIMUM_REPEATS,
+    ArmRun,
+    DelegationReport,
+)
 from chemclaw.evals.live import (
     Finding,
     PlanGateRun,
@@ -626,31 +633,37 @@ async def _grade_all(probes: list[Probe], outcomes: list[ProbeOutcome]) -> dict[
     return {judgement.probe_id: judgement for judgement in graded}
 
 
-async def _assert_baseline_profile(base_url: str | None) -> None:
-    """Refuse to start unless the front door actually knows the toolless profile.
+async def _assert_profiles(base_url: str | None, profiles: Sequence[str]) -> None:
+    """Refuse to start unless the front door actually knows every arm profile this run will ask for.
 
     Checked before a single model call, because the failure it prevents is the expensive one: a
     front door started without `data/evals/profiles` on `CHEMCLAW_PROFILES_DIR` would either reject
     every baseline turn — after the augmented arm had already been paid for — or, worse for a
-    reader, leave a run whose two arms are the same agent. `get_profile` raises on an unknown name,
-    so one session open is the whole probe.
+    reader, leave a run whose arms are the same agent. `get_profile` raises on an unknown name, so
+    one session open per profile is the whole probe.
+
+    **A sequence rather than the one name it was written for**, because the delegation suite has
+    four arms over three profile files and the same failure costs four times as much there. Named
+    profiles only — the default agent is not asked about, since a front door that cannot serve its
+    own default cannot serve anything.
     """
     async with _client(base_url) as client:
-        try:
-            session_id = await open_session(client, profile=_AB_BASELINE_PROFILE)
-        except httpx.HTTPStatusError as exc:
-            raise SystemExit(
-                f"the front door does not accept profile {_AB_BASELINE_PROFILE!r} ({exc}). "
-                "Start it with CHEMCLAW_PROFILES_DIR=data/profiles:data/evals/profiles — "
-                "the control arm is a profile, and without it the two arms would be one agent."
-            ) from exc
-        # The probe session is not a probe result: nothing is ever asked in it, and on a durable
-        # deployment it would otherwise leave one `session_owners` row per A/B run for a
-        # conversation that never had a turn. Best-effort, because a front door that cannot
-        # delete a session it just created is not a reason to refuse a measurement it just
-        # proved it can run.
-        with contextlib.suppress(httpx.HTTPError):
-            (await client.delete(f"/sessions/{session_id}")).raise_for_status()
+        for profile in dict.fromkeys(profiles):
+            try:
+                session_id = await open_session(client, profile=profile)
+            except httpx.HTTPStatusError as exc:
+                raise SystemExit(
+                    f"the front door does not accept profile {profile!r} ({exc}). "
+                    "Start it with CHEMCLAW_PROFILES_DIR=data/profiles:data/evals/profiles — "
+                    "every arm here is a profile, and without it the arms would be one agent."
+                ) from exc
+            # The probe session is not a probe result: nothing is ever asked in it, and on a
+            # durable deployment it would otherwise leave one `session_owners` row per run for a
+            # conversation that never had a turn. Best-effort, because a front door that cannot
+            # delete a session it just created is not a reason to refuse a measurement it just
+            # proved it can run.
+            with contextlib.suppress(httpx.HTTPError):
+                (await client.delete(f"/sessions/{session_id}")).raise_for_status()
 
 
 def _systematic_sample(probes: list[_T], count: int) -> list[_T]:
@@ -694,7 +707,7 @@ async def _run_ab(args: argparse.Namespace) -> int:
         logger.error("--buckets/--only/--limit/--sample selected no probes")
         return 2
 
-    await _assert_baseline_profile(args.base_url)
+    await _assert_profiles(args.base_url, [_AB_BASELINE_PROFILE])
     directory = _suite_dir(args.transcript_dir, "ab")
     logger.info("A/B over %d probes: augmented arm first", len(probes))
     augmented_outcomes = await run_probes(
@@ -731,9 +744,244 @@ async def _run_ab(args: argparse.Namespace) -> int:
     return 0
 
 
+def _marked(probe: Probe, behaviour: str) -> Probe:
+    """`probe` with the mock's behaviour selector on its question — the scripted double only.
+
+    A copy rather than a mutation, because the corpus object is shared across every arm and every
+    repeat. The marker goes on `question` rather than on the message alone so that it reaches the
+    *judge* too: `evals/live_judge._prompt` quotes `probe.question`, and the judge's own call is a
+    model call against the same gateway, so a double that could not be selected for it would answer
+    every grading request as the catalogue's default. Against a real gateway nothing is marked at
+    all — see `evals/delegation_run`'s module docstring.
+    """
+    return probe.model_copy(update={"question": f"[[{behaviour}]] {probe.question}"})
+
+
+def _mock_behaviour_overrides(raw: Sequence[str], mock: bool) -> dict[str, str]:
+    """`--mock-behaviour arm=behaviour`, refused unless the gateway *is* the scripted double.
+
+    It exists so this runner can be driven through compliance states a deterministic double cannot
+    otherwise produce — a baseline that delegates (`contaminated`), a treatment arm that does not
+    (`undelegated`) — which is the only way the comparator's buckets get exercised before a real
+    gateway exists. That is scripting the double, which is what a double is for; scripting it
+    against a real model would be scripting the *result*, so it is refused there rather than
+    ignored.
+
+    Raises:
+        SystemExit: An override was given against a real gateway, or is not `arm=behaviour`.
+    """
+    overrides: dict[str, str] = {}
+    for item in raw:
+        arm, _, behaviour = item.partition("=")
+        if not arm or not behaviour:
+            raise SystemExit(f"--mock-behaviour wants arm=behaviour, got {item!r}")
+        overrides[arm] = behaviour
+    if overrides and not mock:
+        raise SystemExit(
+            f"--mock-behaviour only applies to the scripted mock; this run resolved "
+            f"{settings.llm_base_url} as its gateway. Overriding a real model's behaviour is not "
+            "something a flag can do, and pretending to would script the result rather than the "
+            "double."
+        )
+    return overrides
+
+
+async def _drive_delegation_arm(
+    spec: delegation_run.ArmSpec,
+    probes: list[Probe],
+    args: argparse.Namespace,
+    directory: Path,
+    behaviour: str,
+    mock: bool,
+) -> list[delegation_run.ArmRepeat]:
+    """Ask every probe `--repeats` times on one arm, grading as each pass lands.
+
+    One ordinary `run_probes` per repeat, into its own transcript directory, for the reason
+    `_run_ab` gives about its two arms: a stored campaign is then a set of ordinary probe runs a
+    reader can inspect with every tool that already reads a transcript, plus one report that
+    relates them.
+    """
+    records: list[delegation_run.ArmRepeat] = []
+    asked = [_marked(probe, behaviour) if mock else probe for probe in probes]
+    for repeat in range(1, args.repeats + 1):
+        logger.info("delegation arm %s, repeat %d/%d", spec.arm, repeat, args.repeats)
+        outcomes = await run_probes(
+            asked,
+            base_url=args.base_url,
+            transcript_dir=str(directory / spec.arm / f"repeat-{repeat}"),
+            profile=spec.profile,
+        )
+        graded = await _grade_all(asked, outcomes)
+        records.extend(
+            delegation_run.ArmRepeat(
+                arm=spec.arm,
+                repeat=repeat,
+                outcome=outcome,
+                judgement=graded[outcome.probe_id],
+            )
+            for outcome in outcomes
+        )
+    return records
+
+
+def _delegation_provenance(
+    specs: Sequence[delegation_run.ArmSpec], overrides: Mapping[str, str], mock: bool
+) -> list[str]:
+    """The lines a reader needs before any figure below them means anything.
+
+    The first of them is the one that matters most: a run against the scripted double says so, in
+    those words, because every number it produced is evidence about this runner and none of it is
+    evidence about delegation. `cli/live_probes._summary` learned this the hard way — it carried no
+    provenance line at all, so a mock run and a gateway run produced files nobody could tell apart.
+    """
+    lines = [_gateway_line(), f"judge: `{judge_model()}`"]
+    if mock:
+        lines.append(
+            "**this run is against the scripted double, so every figure below is evidence about "
+            "the runner and none of it is evidence about whether delegation pays**"
+        )
+    for spec in specs:
+        behaviour = overrides.get(spec.arm, spec.mock_behaviour)
+        lines.append(
+            f"arm `{spec.arm}`: profile `{spec.profile}`, treatment `{spec.treatment}`, "
+            f"front door needs {spec.posture}"
+            + (f", scripted double behaviour `{behaviour}`" if mock else "")
+        )
+    return lines
+
+
+def _write_delegation(
+    directory: Path,
+    runs: Sequence[ArmRun],
+    run_set: delegation_run.ArmRunSet,
+    reports: Mapping[str, DelegationReport],
+    refused: Mapping[str, str],
+    report: str,
+) -> None:
+    """Write the runs, the report and the raw evidence beside the transcripts that produced them.
+
+    `runs.json` is written whether or not any arm carried a comparison, and it is written *first*.
+    It is the expensive part of the run — one `ArmRun` per (task, arm, repeat), each a real turn —
+    and it is what `--compare-runs` reads back, so a campaign whose comparison refused must not
+    also lose the observations it paid for.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "runs.json").write_text(
+        json.dumps([run.model_dump() for run in runs], indent=2), encoding="utf-8"
+    )
+    _write_suite(
+        directory,
+        report,
+        {
+            "runs": [run.model_dump() for run in runs],
+            "ungraded": run_set.ungraded,
+            "unbilled": run_set.unbilled,
+            "reports": {arm: report.model_dump() for arm, report in reports.items()},
+            "not_reported": dict(refused),
+        },
+    )
+
+
+async def _run_delegation(args: argparse.Namespace) -> int:
+    """Suite D — the delegation experiment's run half: drive every arm, record what each turn did.
+
+    Exits 3 when nothing reached the front door, 2 when no arm carried a comparison, 0 otherwise.
+    There is no pass/fail: this is a measurement, and `D-2026-08-29-a-helper-is-cheaper-and-narrower
+    -than-its-caller` is explicit that a negative result closes the question as legitimately as a
+    positive one.
+    """
+    from chemclaw.cli.mock_llm import MOCK_BASE_URL
+
+    probes = delegation_run.load_delegation_probes(args.probe_dir)
+    if args.only:
+        wanted = set(args.only.split(","))
+        probes = [probe for probe in probes if probe.id in wanted]
+    if args.limit:
+        probes = probes[: args.limit]
+    if not probes:
+        logger.error("--only/--limit selected no probes from the delegation corpus")
+        return 2
+
+    directory = _suite_dir(args.transcript_dir, "delegation")
+    mock = settings.llm_base_url == MOCK_BASE_URL
+
+    if args.compare_runs:
+        # Aggregate recorded observations without asking anything — `--regrade`'s discipline, one
+        # axis over, and the only way a `(task, arm)` pair whose repeats differ in whether they
+        # delegated can be assembled at all.
+        runs = delegation_run.load_recorded_runs(
+            [Path(item) for item in args.compare_runs.split(",")]
+        )
+        run_set = delegation_run.ArmRunSet(runs=list(runs))
+        arms = sorted({run.arm for run in runs})
+        provenance = [
+            f"**aggregated** from {len(runs)} recorded run(s) in `{args.compare_runs}` — "
+            "nothing was asked of any gateway by this invocation",
+            f"arms present: {', '.join(arms)}",
+        ]
+    else:
+        specs = [delegation_run.arm_by_name(name) for name in args.arms.split(",")]
+        if not any(spec.arm == BASELINE_ARM for spec in specs):
+            logger.error(
+                "--arms must include the baseline %r; every report is against it", BASELINE_ARM
+            )
+            return 2
+        overrides = _mock_behaviour_overrides(args.mock_behaviour, mock)
+        await _assert_profiles(args.base_url, [spec.profile for spec in specs])
+        records: list[delegation_run.ArmRepeat] = []
+        for spec in specs:
+            records.extend(
+                await _drive_delegation_arm(
+                    spec,
+                    probes,
+                    args,
+                    directory,
+                    overrides.get(spec.arm, spec.mock_behaviour),
+                    mock,
+                )
+            )
+        if all(record.outcome.transport_error for record in records):
+            logger.error(
+                "not one of the %d turn(s) reached %s — this run measured nothing",
+                len(records),
+                args.base_url or settings.live_probe_base_url,
+            )
+            return 3
+        sessions = [record.outcome.session_id for record in records if record.outcome.session_id]
+        ran = await delegation_run.tools_that_ran(sessions)
+        billed = await delegation_run.billed_by_session_when_booked(sessions)
+        run_set = delegation_run.assemble_runs(
+            records, ran, billed, {spec.arm: spec.treatment for spec in specs}
+        )
+        runs = run_set.runs
+        arms = [spec.arm for spec in specs]
+        provenance = _delegation_provenance(specs, overrides, mock)
+
+    # `MINIMUM_REPEATS` rather than `--repeats`, and deliberately not a flag: the floor is the
+    # comparator's argument about when a median is a median, and a command line that could lower it
+    # would be a command line that can manufacture a report.
+    reports, refused = delegation_run.compare_every_arm(runs, arms, MINIMUM_REPEATS)
+    report = delegation_run.render_report(reports, runs, run_set, provenance)
+    for arm, why in refused.items():
+        report += f"\n**no report for `{arm}`**: {why}\n"
+    print(report)
+    _write_delegation(directory, runs, run_set, reports, refused, report)
+    logger.info("%d run(s), %d report(s) written to %s", len(runs), len(reports), directory)
+    if not reports:
+        logger.error(
+            "no arm carried a comparison — %d run(s) recorded. A report over an empty set would "
+            "read as 'no effect anywhere'.",
+            len(runs),
+        )
+        return 2
+    return 0
+
+
 async def _main(args: argparse.Namespace) -> int:
     if args.suite == "ab":
         return await _run_ab(args)
+    if args.suite == "delegation":
+        return await _run_delegation(args)
     if args.suite in _M12_SUITES:
         runner = {
             "plan-gate": _run_plan_gate,
@@ -873,11 +1121,51 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--suite",
         default="corpus",
-        choices=["corpus", "ab", *sorted(_M12_SUITES)],
+        choices=["corpus", "ab", "delegation", *sorted(_M12_SUITES)],
         help=(
             "corpus (the default single-arm run), ab (the same probes in both arms, the baseline "
-            "one being a profile that swaps the prompt as well as the tools), or one M12 "
-            "re-validation suite"
+            "one being a profile that swaps the prompt as well as the tools), delegation (the "
+            "delegation experiment's arms over the delegation corpus), or one M12 re-validation "
+            "suite"
+        ),
+    )
+    parser.add_argument(
+        "--arms",
+        default=",".join(spec.arm for spec in delegation_run.ARMS),
+        help=(
+            "--suite delegation only: which arms to drive, comma-separated. Must include "
+            f"{BASELINE_ARM!r}, because every report is against it."
+        ),
+    )
+    parser.add_argument(
+        "--repeats",
+        type=_positive,
+        default=MINIMUM_REPEATS,
+        help=(
+            "--suite delegation only: repeats per (task, arm). Defaults to "
+            "`evals.delegation.MINIMUM_REPEATS`, which is where the floor is argued; the "
+            "comparator's own floor is not lowered by this flag."
+        ),
+    )
+    parser.add_argument(
+        "--mock-behaviour",
+        action="append",
+        default=[],
+        metavar="ARM=BEHAVIOUR",
+        help=(
+            "--suite delegation only, and only against `cli.mock_llm`: drive one arm through a "
+            "different scripted behaviour, so a compliance state a deterministic double cannot "
+            "otherwise reach (a baseline that delegates, a treatment arm that does not) can be "
+            "driven. Refused against a real gateway."
+        ),
+    )
+    parser.add_argument(
+        "--compare-runs",
+        default=None,
+        metavar="PATH[,PATH]",
+        help=(
+            "--suite delegation only: aggregate recorded `runs.json` files and report, asking "
+            "nothing of any gateway"
         ),
     )
     parser.add_argument(

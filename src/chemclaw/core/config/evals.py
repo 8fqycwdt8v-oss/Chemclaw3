@@ -113,6 +113,21 @@ class EvalSettings(BaseSettings):
     # conversations and routing keys scored by their own suites, and folding them into the
     # 190-question corpus would change what that run measures without changing what it reports.
     live_m12_probe_dir: str = "data/evals/probes/m12"
+    # How long the delegation runner waits for a turn's `turn_costs` row before calling it a hole.
+    #
+    # It exists because that write is deliberately **off** the turn's hot path:
+    # `agent/turn_cost.record_turn_cost` is synchronous by contract and runs the insert as its own
+    # task, so the row is eventually consistent with the stream having closed. A single read after
+    # the answer therefore races the flush — and the delegation experiment's whole subject is cost,
+    # so recording a booked turn as unbilled would drop a repeat for a reason that has nothing to do
+    # with delegation. `evals/delegation_run.billed_by_session_when_booked` polls ten times inside
+    # this bound and derives its interval from it, so this is the one number and there is no second
+    # one beside it.
+    #
+    # Ten seconds because the write is one INSERT on a connection the pool already holds; a row
+    # still absent after that is genuinely absent, and the honest answer is then a named hole rather
+    # than a longer wait.
+    eval_delegation_ledger_wait_seconds: float = Field(default=10.0, ge=0)
     # The vendored external benchmark `make live-benchmark` scores. A directory rather than a file
     # so `dataset.json` — the licence, the checksum and where a human obtained it — sits beside the
     # questions, the discipline the sibling fleet holds every corpus to.
