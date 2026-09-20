@@ -287,6 +287,11 @@ _DISPATCHABLE_JOBS = {
 }
 
 
+#: The sweep-width budget these tests ground against. A literal rather than the live setting: the
+#: refusal is what is under test, not what a deployment happens to allow today.
+_SWEEP_BUDGET = 6
+
+
 def _try_ground(job_name: str) -> tuple[dict[str, Any] | None, Refusal | None]:
     from chemclaw.hypotheses.dispatch import (
         STRUCTURE_FIELDS,
@@ -304,7 +309,7 @@ def _try_ground(job_name: str) -> tuple[dict[str, Any] | None, Refusal | None]:
     }
     axis = next((name for name in required if name in SWEEPABLE_FIELDS), "")
     sweep = Sweep(parameter=axis, values=("thf",)) if axis else None
-    return ground_job_params(fields, subjects, {"a": "CCO", "b": "CCN"}, sweep)
+    return ground_job_params(fields, subjects, {"a": "CCO", "b": "CCN"}, sweep, _SWEEP_BUDGET)
 
 
 def test_the_dispatchable_job_set_is_exactly_what_is_pinned() -> None:
@@ -347,7 +352,7 @@ def test_an_unclassified_field_fails_closed() -> None:
     """The property the curation rests on: omission makes a job undispatchable, never runnable."""
     from chemclaw.hypotheses.dispatch import ground_job_params
 
-    _, refusal = ground_job_params({"mystery": (True, None)}, {}, {}, None)
+    _, refusal = ground_job_params({"mystery": (True, None)}, {}, {}, None, _SWEEP_BUDGET)
     assert refusal is not None
     assert refusal.code == "field-cannot-be-grounded"
 
@@ -357,7 +362,11 @@ def test_a_swept_axis_must_have_a_vocabulary_behind_it() -> None:
     from chemclaw.hypotheses.dispatch import Sweep, ground_job_params
 
     _, refusal = ground_job_params(
-        {"smiles": (True, None)}, {"smiles": ["a"]}, {"a": "CCO"}, Sweep("temperature_k", ("300",))
+        {"smiles": (True, None)},
+        {"smiles": ["a"]},
+        {"a": "CCO"},
+        Sweep("temperature_k", ("300",)),
+        _SWEEP_BUDGET,
     )
     assert refusal is not None
     assert refusal.code == "axis-not-sweepable"
@@ -366,7 +375,7 @@ def test_a_swept_axis_must_have_a_vocabulary_behind_it() -> None:
 def test_a_sweep_over_no_values_refuses() -> None:
     from chemclaw.hypotheses.dispatch import Sweep, ground_job_params
 
-    _, refusal = ground_job_params({}, {}, {}, Sweep("solvents", ()))
+    _, refusal = ground_job_params({}, {}, {}, Sweep("solvents", ()), _SWEEP_BUDGET)
     assert refusal is not None
     assert refusal.code == "axis-empty"
 
@@ -376,7 +385,11 @@ def test_a_subject_that_did_not_resolve_refuses_rather_than_dropping() -> None:
     from chemclaw.hypotheses.dispatch import ground_job_params
 
     _, refusal = ground_job_params(
-        {"reactants": (True, None)}, {"reactants": ["a", "ghost"]}, {"a": "CCO"}, None
+        {"reactants": (True, None)},
+        {"reactants": ["a", "ghost"]},
+        {"a": "CCO"},
+        None,
+        _SWEEP_BUDGET,
     )
     assert refusal is not None
     assert refusal.code == "subject-not-found"
@@ -387,7 +400,11 @@ def test_a_scalar_structure_field_refuses_several_subjects() -> None:
     from chemclaw.hypotheses.dispatch import ground_job_params
 
     _, refusal = ground_job_params(
-        {"smiles": (True, None)}, {"smiles": ["a", "b"]}, {"a": "CCO", "b": "CCN"}, None
+        {"smiles": (True, None)},
+        {"smiles": ["a", "b"]},
+        {"a": "CCO", "b": "CCN"},
+        None,
+        _SWEEP_BUDGET,
     )
     assert refusal is not None
     assert refusal.code == "subject-arity"
@@ -404,6 +421,7 @@ def test_the_solvent_screen_grounds_into_a_call_the_job_accepts() -> None:
         {"reactants": ["a"], "products": ["b"]},
         {"a": "CCO", "b": "CC=O"},
         Sweep("solvents", ("thf", "dmf", "toluene")),
+        _SWEEP_BUDGET,
     )
     assert refusal is None
     assert params is not None
@@ -413,3 +431,44 @@ def test_the_solvent_screen_grounds_into_a_call_the_job_accepts() -> None:
     job = next(spec for spec in manifest.jobs if spec.name == "compare_solvents")
     # The declared params model is the authority, exactly as `prepare_job_launch` uses it.
     _params_model("calc", job).model_validate(params)
+
+
+def test_a_sweep_wider_than_the_budget_refuses_rather_than_trimming() -> None:
+    """The check cap counts checks; this is what stops one check spending the whole budget.
+
+    Refusing rather than trimming is the load-bearing half: `_job_line` reports the swept values
+    beside the answer, so a silently shortened axis would make the report of what ran untrue —
+    the exact failure the grounding rules exist to prevent, arriving through the one argument the
+    model is allowed to choose.
+    """
+    from chemclaw.hypotheses.dispatch import Sweep, ground_job_params
+
+    values = tuple(f"solvent{index}" for index in range(_SWEEP_BUDGET + 1))
+    params, refusal = ground_job_params(
+        {"smiles": (True, None), "solvents": (True, None)},
+        {"smiles": ["a"]},
+        {"a": "CCO"},
+        Sweep("solvents", values),
+        _SWEEP_BUDGET,
+    )
+    assert params is None
+    assert refusal is not None
+    assert refusal.code == "axis-too-wide"
+    assert str(len(values)) in refusal.detail
+
+
+def test_a_sweep_exactly_at_the_budget_is_allowed() -> None:
+    """The bound is inclusive, so the budget is a number a check can actually spend."""
+    from chemclaw.hypotheses.dispatch import Sweep, ground_job_params
+
+    values = tuple(f"solvent{index}" for index in range(_SWEEP_BUDGET))
+    params, refusal = ground_job_params(
+        {"smiles": (True, None), "solvents": (True, None)},
+        {"smiles": ["a"]},
+        {"a": "CCO"},
+        Sweep("solvents", values),
+        _SWEEP_BUDGET,
+    )
+    assert refusal is None
+    assert params is not None
+    assert params["solvents"] == list(values)

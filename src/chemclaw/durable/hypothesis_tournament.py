@@ -513,7 +513,9 @@ async def derive_check(request: _CritiqueRequest) -> DiscriminatingCheck:
             "`smiles_b`; `sample_conformers`, `refine_ensemble` and `predict_pka_ensemble` take "
             "`smiles`. To compare one reaction across solvents use `compare_solvents` with "
             "`sweep_parameter='solvents'` and `sweep_values` naming them — a value the calculator "
-            "cannot model is refused, so name real solvents.\n\n"
+            "cannot model is refused, so name real solvents. At most "
+            f"{settings.hypothesis_max_sweep_values} values: each one is a full conformer "
+            "search, and a wider axis is refused rather than trimmed.\n\n"
             "Vary something only when the comparison *is* the check: a ranking across solvents "
             "answers a question a single number cannot. Do not vary a parameter to explore.\n\n"
             "You supply tool-or-job, the notes, and at most the swept values. Every other argument "
@@ -674,7 +676,11 @@ async def run_computable_check(
                     detail += f" ({len(unreachable)} connector(s) unreachable: {down})"
                 return _refused(check, refused.code, detail)
 
-            assert contract is not None and target is not None  # narrowed by the refusal above
+            if contract is None or target is None:  # pragma: no cover - refused above
+                # Unreachable while `refuse_unless_dispatchable` refuses on a missing
+                # contract, and written as a refusal rather than an `assert` because `-O`
+                # deletes an assert and this branch would then dispatch onto `None`.
+                return _refused(check, "unreadable-contract", "the tool's surface is unknown")
             plan = Dispatch(
                 tool=call.tool,
                 smiles=smiles,
@@ -789,7 +795,13 @@ async def ground_check_job(
             if call.sweep_parameter
             else None
         )
-        params, refusal = ground_job_params(fields, call.subjects, structures, sweep)
+        params, refusal = ground_job_params(
+            fields,
+            call.subjects,
+            structures,
+            sweep,
+            settings.hypothesis_max_sweep_values,
+        )
         if refusal is not None or params is None:
             code = refusal.code if refusal else "field-cannot-be-grounded"
             detail = refusal.detail if refusal else "the call could not be grounded"

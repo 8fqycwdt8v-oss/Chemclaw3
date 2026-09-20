@@ -1114,31 +1114,33 @@ re-proposal a future session can settle in an afternoon and a fabricated number 
       component list, which `agent.condense` deliberately does not have because a share document has none.
       Wants its own ADR and a measurement of what the extra column costs on a real corpus.
 
-## A `computable` discriminating check is derived and then not run
+## No deterministic enumerator, so a check that would rank candidates has to name them
 
-`durable/hypothesis_tournament.py::run_computable_check` returns `not-run` with its reason. The
-tournament identifies which of its checks this system's own tools could settle — a GFN2-xTB energy,
-a pKa, a solubility, a site-reactivity index — and then hands every one of them to the chemist
-anyway, which is the half of the original ask ("if it can be done with tools available, it should
-simply happen") that did not ship.
+`D-2026-09-20-a-swept-axis-is-a-choice-an-invented-argument-is-a-lie` dispatches a discriminating
+check onto 9 of the 12 shipped calc jobs and refuses the other three on one ground:
+`scan_coordinate` needs `atoms`, `profile_rotation` a `torsion`, `survey_bond_strengths`
+`cleavages`, and **nothing in the number those jobs return says which atoms were driven** — a scan
+over the wrong pair reads exactly like a scan over the right one.
 
-**It is deliberate, and the reason is the one that makes it hard.** A check arrives as free text
-("compare the barrier for the two pathways"), and running it means producing tool arguments — which
-molecule, which conformer, which solvent, which charge. Every one of those is a field a model
-fills in when asked to fill a schema, and a fabricated argument produces a real number that a
-chemist reads as computed. That is strictly worse than not running it: a missing verdict is
-visible, a confidently wrong one is not.
+The same gap is what stops the second half of the chemist's ask. "Which molecule will be generated"
+and "what do the substitution patterns do to the energy" are ranking questions over a *candidate
+set*, and `rank_species` can already rank one — it just has no source for the set except notes that
+already exist, so a substitution product nobody has written down cannot be ranked.
 
-**What closes it** is a structured check type whose arguments are validated against the target
-tool's own signature *offline*, the way a warehouse `connection:` block already is — so a check
-that cannot be grounded in the record is refused at the schema rather than guessed at. That work is
-the same shape as `agent/protocol_design_tools.py::structure_experiment_request`, which already
-refuses a `stated` slot without a verbatim quote from the chemist, and it is worth reading first.
+**What closes it** is a deterministic enumerator: rotatable torsions, breakable bonds, substitution
+products at a named position. Each is an RDKit traversal with no judgement in it, which is what
+makes its output groundable — the check then ranks an *enumeration* rather than naming an index,
+and this repository's own doctrine that enumeration and calculation are separate tools and the
+order is not optional is what it inherits. Where it belongs is a question this repo's boundary rule
+answers: an enumerator is a primitive whose identity is derivable from its inputs, so it is a
+server in `Chemclaw3-mcp`, and the ranking stays here.
 
-Anchors: `durable/hypothesis_tournament.py::run_computable_check`,
-`hypotheses/models.py::DiscriminatingCheck`, `ingest/eln/warehouse/binding.py` (the offline
-signature check to copy). The file that shows this has fired is `run_computable_check` losing its
-early return. Decision: `D-2026-09-20-a-ranking-is-evidence-a-critic-is-not-a-gate`.
+Anchors: `hypotheses/dispatch.py::STRUCTURE_FIELDS`,
+`tests/test_hypothesis_dispatch.py::test_a_job_needing_a_value_only_a_model_could_supply_refuses`.
+The file that shows this has fired is
+`tests/test_hypothesis_dispatch.py::test_the_dispatchable_job_set_is_exactly_what_is_pinned`, whose
+pinned set would have to grow. Decision:
+`D-2026-09-20-a-swept-axis-is-a-choice-an-invented-argument-is-a-lie`.
 
 ## Everything else
 

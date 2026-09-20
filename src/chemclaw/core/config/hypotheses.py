@@ -71,3 +71,9 @@ class HypothesisSettings(BaseSettings):
     # check past the cap is reported as not run *for budget* rather than dropped, so a thin result
     # never reads as a complete one. Raising it is a deployment's call about its own cluster.
     hypothesis_max_calculations: int = Field(default=2, ge=0)
+    # How wide a swept axis may be. **`max_calculations` does not bound this and cannot** — it
+    # counts checks, and one check that sweeps twelve solvents is twelve conformer searches inside
+    # a single child workflow, which is the budget escaping through the one argument the model is
+    # allowed to choose. An over-wide axis is refused rather than truncated: the swept values are
+    # reported beside the answer, so silently dropping some would make that report wrong.
+    hypothesis_max_sweep_values: int = Field(default=6, ge=1)

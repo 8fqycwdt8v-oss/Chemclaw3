@@ -313,13 +313,16 @@ def ground_job_params(
     subjects: Mapping[str, list[str]],
     structures: Mapping[str, str],
     sweep: Sweep | None,
+    max_sweep_values: int,
 ) -> tuple[dict[str, Any], None] | tuple[None, Refusal]:
     """Assemble a job's params from resolved structures and a swept axis, or refuse.
 
     `fields` is the job's declared params model reduced to `name -> (required, default)`; the
     caller builds it from `model_fields` so this module imports no connector code. `structures`
     maps an already-resolved note id to its SMILES — resolution and its refusals are
-    `structure_of`'s, done before this is called.
+    `structure_of`'s, done before this is called. `max_sweep_values` is passed in rather than read
+    here because this module holds no settings import; it is the caller's budget, and refusing a
+    wider axis is what keeps a sweep inside it.
 
     **Fail closed on anything it cannot account for.** A required field that is not a structure,
     not the swept axis and has no default is a value only a model could supply, and supplying it is
@@ -359,6 +362,13 @@ def ground_job_params(
             )
         if not sweep.values:
             return None, Refusal("axis-empty", f"{sweep.parameter!r} was swept over no values")
+        if len(sweep.values) > max_sweep_values:
+            return None, Refusal(
+                "axis-too-wide",
+                f"{sweep.parameter!r} was swept over {len(sweep.values)} values and the budget is "
+                f"{max_sweep_values}; a narrower axis is a choice this check has to make, because "
+                "dropping values here would make the axis reported beside the answer wrong",
+            )
         params[sweep.parameter] = list(sweep.values)
 
     ungrounded = sorted(
