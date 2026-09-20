@@ -22,7 +22,7 @@ from chemclaw.durable.hypothesis_tournament import (
     TournamentRequest,
 )
 from chemclaw.durable.job_record import JobRecord
-from chemclaw.hypotheses.models import DiscriminatingCheck, Hypothesis
+from chemclaw.hypotheses.models import CheckCall, CheckOutcome, DiscriminatingCheck, Hypothesis
 from tests.temporal_env import pydantic_client, start_env_or_skip
 
 # The real background queue, not a test-local one. `publish_note_best_effort` pins its activity
@@ -49,6 +49,8 @@ def _stubs(
     critique_fails: bool = False,
     compare_fails: bool = False,
     check_kind: str = "physical",
+    check_call: object = None,
+    max_calculations: int = 2,
     double_judge: bool = False,
     always_prefers_left: bool = False,
 ) -> list[Any]:
@@ -69,6 +71,7 @@ def _stubs(
             per_angle=len(field),
             max_hypotheses=10,
             double_judge_first_round=double_judge,
+            max_calculations=max_calculations,
         )
 
     @activity.defn(name="draft_angles")
@@ -129,6 +132,7 @@ def _stubs(
             hypothesis_id=request.hypothesis.id,
             question=f"run the control for {request.hypothesis.id}",
             kind=check_kind,  # type: ignore[arg-type]
+            call=check_call,  # type: ignore[arg-type]
             expectation="the effect disappears if the hypothesis holds",
         )
 
@@ -416,3 +420,123 @@ async def test_an_empty_field_is_still_recorded() -> None:
 
     assert len(recorded) == 1
     assert recorded[0].result["ranked"] == []
+
+
+# ------------------------------------------------------------------ durable calculations
+
+
+def _grounded(**kwargs: Any) -> ht._GroundedJob:
+    return ht._GroundedJob(**kwargs)
+
+
+async def _run_with(extra: list[Any], stubs: list[Any], request: TournamentRequest) -> Any:
+    """Drive the workflow with extra activity stubs replacing the defaults of the same name."""
+    names = {a.__temporal_activity_definition.name for a in extra}
+    kept = [a for a in stubs if a.__temporal_activity_definition.name not in names]
+    async with await start_env_or_skip() as env:
+        client: Client = pydantic_client(env)
+        async with Worker(
+            client,
+            task_queue=_QUEUE,
+            workflows=[HypothesisTournamentWorkflow],
+            activities=[*kept, *extra],
+        ):
+            return await client.execute_workflow(
+                HypothesisTournamentWorkflow.run,
+                request,
+                id=f"hyp-job-{abs(hash(request.question)) % 10**8}",
+                task_queue=_QUEUE,
+            )
+
+
+async def test_a_job_check_that_cannot_be_grounded_is_reported_not_dropped() -> None:
+    """A refusal is an outcome, with its code, so a reader sees the check did not run and why."""
+    calls: list[str] = []
+
+    @activity.defn(name="ground_check_job")
+    async def ground(
+        check: DiscriminatingCheck, requested_by: str = "", correlation_id: str = ""
+    ) -> ht._GroundedJob:
+        calls.append(check.hypothesis_id)
+        return _grounded(
+            refusal_code="subject-not-found",
+            refusal_detail="'compound-invented' is not a note in this deployment's corpus",
+        )
+
+    field = [_hypothesis("a", "the first explanation")]
+    call = CheckCall(job="compare_solvents", subjects={"reactants": ["compound-invented"]})
+    result = await _run_with(
+        [ground],
+        _stubs(field=field, check_kind="computable", check_call=call),
+        _request("q-ungrounded"),
+    )
+
+    assert calls, "the grounding activity was never reached"
+    row = result.data["ranked"][0]
+    assert row["outcome"]["verdict"] == "not-run"
+    assert row["outcome"]["refusal_code"] == "subject-not-found"
+    assert "not a note" in result.summary
+
+
+async def test_the_calculation_budget_bounds_how_many_jobs_one_tournament_starts() -> None:
+    """These jobs are `expensive: true`; a tournament must not spend a budget nobody agreed to.
+
+    The checks past the cap are reported as not run *for budget* rather than dropped — a reader
+    who cannot see that the budget bound the answer would read a thin result as a complete one.
+    """
+    grounded_for: list[str] = []
+
+    @activity.defn(name="ground_check_job")
+    async def ground(
+        check: DiscriminatingCheck, requested_by: str = "", correlation_id: str = ""
+    ) -> ht._GroundedJob:
+        grounded_for.append(check.hypothesis_id)
+        return _grounded(refusal_code="job-unavailable", refusal_detail="not served here")
+
+    field = [_hypothesis(f"h{i}", f"explanation {i}") for i in range(4)]
+    call = CheckCall(job="compare_solvents", subjects={"reactants": ["compound-x"]})
+    result = await _run_with(
+        [ground],
+        _stubs(field=field, check_kind="computable", check_call=call, max_calculations=1),
+        _request("q-budget"),
+    )
+
+    assert len(grounded_for) == 1, "more checks were grounded than the budget allows"
+    codes = {row["outcome"]["refusal_code"] for row in result.data["ranked"]}
+    assert "over-budget" in codes
+    assert "this tournament had already started 1 calculation(s)" in result.summary
+
+
+async def test_a_tool_check_and_a_job_check_are_settled_in_one_run() -> None:
+    """Both halves reach the same outcome map, so a field can mix cheap and expensive checks."""
+    seen: list[str] = []
+
+    @activity.defn(name="ground_check_job")
+    async def ground(
+        check: DiscriminatingCheck, requested_by: str = "", correlation_id: str = ""
+    ) -> ht._GroundedJob:
+        seen.append("job")
+        return _grounded(refusal_code="job-unavailable", refusal_detail="not served here")
+
+    @activity.defn(name="run_computable_check")
+    async def run_check(
+        check: DiscriminatingCheck, requested_by: str = "", correlation_id: str = ""
+    ) -> CheckOutcome:
+        seen.append("tool")
+        return CheckOutcome(
+            hypothesis_id=check.hypothesis_id, verdict="not-run", refusal_code="tool-unavailable"
+        )
+
+    field = [_hypothesis("a", "the first explanation")]
+    result = await _run_with(
+        [ground, run_check],
+        _stubs(
+            field=field,
+            check_kind="computable",
+            check_call=CheckCall(tool="predict_pka", subject_note_id="compound-x"),
+        ),
+        _request("q-tool-only"),
+    )
+
+    assert seen == ["tool"], "a tool check must not reach the job path"
+    assert result.data["ranked"][0]["outcome"]["refusal_code"] == "tool-unavailable"

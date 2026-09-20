@@ -84,8 +84,26 @@ class CheckCall(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    # An endpoint-tool call: one tool, one compound. The cheap, cached half.
     tool: str = Field(default="")
     subject_note_id: str = Field(default="")
+
+    # A durable-job call: the expensive half, and the one that can *vary* something.
+    # `subjects` maps a params field of the job's declared model — `reactants`, `products`,
+    # `smiles` — to the note ids that fill it. The model still writes no structure: each id is
+    # resolved against the corpus and the SMILES comes off the note.
+    job: str = Field(default="")
+    subjects: dict[str, list[str]] = Field(default_factory=dict)
+    # The axis this check varies, and the values it varies over — a solvent screen is
+    # `sweep_parameter="solvents"`. Flat rather than a nested model because it crosses the Temporal
+    # wire and rides in a structured-output schema, and two scalars are a smaller surface than a
+    # sub-object for a model to fill wrongly.
+    #
+    # **A swept axis is not an invented argument**, which is the distinction the whole dispatcher
+    # turns on: it is reported beside every result it produced rather than assumed behind one, and
+    # its values are checked against the job's own declared `precondition` before anything runs.
+    sweep_parameter: str = Field(default="")
+    sweep_values: list[str] = Field(default_factory=list)
 
 
 class DiscriminatingCheck(BaseModel):

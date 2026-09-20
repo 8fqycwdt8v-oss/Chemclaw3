@@ -64,3 +64,10 @@ class HypothesisSettings(BaseSettings):
     # run that filed one note per hypothesis would bury the corpus under proposals nobody asked for,
     # and the ranking is precisely what says which are worth writing down.
     hypothesis_max_proposals: int = Field(default=3, ge=0)
+    # Durable calculations one tournament may start on its own. **Two, deliberately low.** These
+    # are the jobs a manifest marks `expensive: true`: a solvent screen is one conformer search per
+    # solvent per species, so a single check can be minutes of compute and a tournament that ran
+    # one per hypothesis would spend a chemist's budget on a question they asked in passing. A
+    # check past the cap is reported as not run *for budget* rather than dropped, so a thin result
+    # never reads as a complete one. Raising it is a deployment's call about its own cluster.
+    hypothesis_max_calculations: int = Field(default=2, ge=0)

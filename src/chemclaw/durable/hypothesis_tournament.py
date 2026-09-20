@@ -57,7 +57,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.identity_context import reset_current_identity, set_current_identity
     from chemclaw.core.ids import stable_hash
     from chemclaw.core.metrics_bridge import record_metric
-    from chemclaw.durable.connector_job import ConnectorJobResult
+    from chemclaw.durable.connector_job import ConnectorJobInput, ConnectorJobResult
     from chemclaw.durable.job_record import JobRecord, record_job
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.hypotheses.dispatch import Dispatch
@@ -114,6 +114,13 @@ class TournamentRequest(BaseModel):
     requested_by: str = Field(min_length=1)
     requested_roles: list[str] = Field(default_factory=list)
     correlation_id: str = ""
+    # The chat this was asked in, carried because a calculation this tournament launches is a
+    # `ConnectorJobWorkflow` — and that workflow's `_notify_failure` short-circuits on
+    # `if not job.session_id: return`. `template_job` records what dropping it costs: a connector
+    # job that failed inside a template told the launching chat nothing, wrote no row and moved no
+    # metric. Optional for the same reason the correlation id is: a caller outside a turn has none,
+    # and inventing one would make an unjoined run look joined.
+    session_id: str = ""
 
 
 class _AngleSet(BaseModel):
@@ -238,6 +245,10 @@ class _FieldLimits(BaseModel):
     # replay. The module docstring claims no ambient config read decides the command stream; this
     # field is what makes that true of the proposal loop as well as the tournament.
     max_proposals: int = 3
+    # How many durable calculations one tournament may start. Here rather than read at the call
+    # site for the reason `max_proposals` is: it bounds how many child workflows are launched,
+    # which is a command count, and a live settings read would break replay the day it changed.
+    max_calculations: int = 2
 
 
 def _route() -> Any:
@@ -303,6 +314,7 @@ async def resolve_field_limits() -> _FieldLimits:
         max_hypotheses=settings.hypothesis_max_field,
         double_judge_first_round=settings.hypothesis_double_judge_first_round,
         max_proposals=settings.hypothesis_max_proposals,
+        max_calculations=settings.hypothesis_max_calculations,
     )
 
 
@@ -485,14 +497,29 @@ async def derive_check(request: _CritiqueRequest) -> DiscriminatingCheck:
             "solubility, a logD, a site-reactivity index. Anything needing a laboratory, a "
             "measurement, or a method this system has no tool for is `physical`. There is no DFT "
             "and no cluster here: if it needs one, it is `physical`.\n\n"
-            "For a `computable` check fill `call` with the tool name and **the id of the compound "
-            "note it runs on, chosen from this list and from nowhere else**:\n"
+            "A `computable` check is filled in one of two ways, and in both of them you name "
+            "**compound notes, never structures**. The notes you may name are these and no "
+            "others:\n"
             f"  {subjects}\n"
-            "Those are the notes this question's evidence sweep actually returned. An id written "
-            "from memory will not resolve and the check will not run. You supply the tool and the "
-            "note and nothing else: the structure is read from the note, and every other argument "
-            "stays at the tool's own default. If no listed note is the right subject, the check is "
-            "`physical`.\n\n"
+            "They are what this question's evidence sweep returned. An id written from memory will "
+            "not resolve and the check will not run.\n\n"
+            "1. **One property of one compound** — set `call.tool` and `call.subject_note_id`. For "
+            "a pKa, a solubility, a logD, a developability profile, a site-reactivity index, an "
+            "xTB energy.\n"
+            "2. **A calculation over several compounds, optionally varying one thing** — set "
+            "`call.job`, and `call.subjects` mapping the job's own fields to note ids: "
+            "`compute_reaction_energy` and `compare_solvents` take `reactants` and `products`; "
+            "`rank_species` takes `species`; `compute_interaction_energy` takes `smiles_a` and "
+            "`smiles_b`; `sample_conformers`, `refine_ensemble` and `predict_pka_ensemble` take "
+            "`smiles`. To compare one reaction across solvents use `compare_solvents` with "
+            "`sweep_parameter='solvents'` and `sweep_values` naming them — a value the calculator "
+            "cannot model is refused, so name real solvents.\n\n"
+            "Vary something only when the comparison *is* the check: a ranking across solvents "
+            "answers a question a single number cannot. Do not vary a parameter to explore.\n\n"
+            "You supply tool-or-job, the notes, and at most the swept values. Every other argument "
+            "stays at the calculator's own default — you cannot set a temperature, a charge or an "
+            "atom index, and a check that would need one is `physical`. If no listed note is the "
+            "right subject, the check is `physical`.\n\n"
             "`question` is the check itself. `expectation` says what result would support the "
             "hypothesis and what would refute it."
         )
@@ -675,6 +702,140 @@ async def run_computable_check(
         reset_current_identity(token)
 
 
+class _GroundedJob(BaseModel):
+    """A durable job whose every argument came from the record, ready to launch.
+
+    Built in an activity because grounding reads the corpus and runs the job's declared
+    `precondition`; launched from workflow code because a child workflow is a workflow's to start.
+    Splitting it that way is also what puts the *validated* payload in history rather than the
+    model's proposal, which is `template_job`'s rule: never the raw arguments.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    connector: str = ""
+    job: str = ""
+    job_workflow: str = ""
+    task_queue: str = ""
+    payload: dict[str, Any] = Field(default_factory=dict)
+    ran: str = ""
+    refusal_code: str = ""
+    refusal_detail: str = ""
+
+    @property
+    def refused(self) -> bool:
+        """Whether grounding refused, in which case nothing is launched."""
+        return bool(self.refusal_code)
+
+
+@durable_activity("background")
+@activity.defn
+async def ground_check_job(
+    check: DiscriminatingCheck, requested_by: str = "", correlation_id: str = ""
+) -> _GroundedJob:
+    """Turn a job check into a launch payload every argument of which came from the record.
+
+    Three gates, and a refusal at any of them is a reported outcome rather than an error:
+
+    1. **Every subject resolves** to a `compound` note in this deployment's corpus whose structure
+       parses. The model names ids; the SMILES are read off the notes.
+    2. **Every required field is accounted for** — a structure, the swept axis, or a default.
+       `hypotheses/dispatch.ground_job_params` fails closed on anything else, which is what keeps
+       `scan_coordinate`'s atom indices out.
+    3. **`prepare_job_launch` runs**, which validates against the job's own declared params model,
+       authorizes the expensive trigger, and runs the job's `precondition` — the gate that refuses
+       a solvent the method cannot model. That is why a model-proposed solvent list is a selection
+       from a validated vocabulary rather than an invention.
+    """
+    from chemclaw.connectors.jobs import prepare_job_launch
+    from chemclaw.connectors.queues import bundle_queue
+    from chemclaw.connectors.registry import ConnectorError, find_job
+    from chemclaw.hypotheses.dispatch import Sweep, ground_job_params, structure_of
+    from chemclaw.kg.graph import build_graph, note_in
+
+    call = check.call
+    if call is None or not call.job:
+        return _GroundedJob(refusal_code="no-call", refusal_detail="the check named no job")
+
+    token = set_current_identity(requested_by, frozenset())
+    try:
+        try:
+            connector, spec = find_job(call.job)
+        except ConnectorError as exc:
+            # Raises rather than returning `None`, and names the declared jobs in its message —
+            # which is exactly what a chemist reading "the check could not be run" wants.
+            return _GroundedJob(refusal_code="job-unavailable", refusal_detail=str(exc))
+
+        graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
+        structures: dict[str, str] = {}
+        for ids in call.subjects.values():
+            for note_id in ids:
+                if note_id in structures:
+                    continue
+                smiles, refusal = structure_of(note_in(graph, note_id), note_id)
+                if refusal is not None or smiles is None:
+                    code = refusal.code if refusal else "subject-not-found"
+                    detail = refusal.detail if refusal else note_id
+                    return _GroundedJob(refusal_code=code, refusal_detail=detail)
+                structures[note_id] = smiles
+
+        model = _job_params_model(connector, spec)
+        fields = {
+            name: (declared.is_required(), declared.default)
+            for name, declared in model.model_fields.items()
+        }
+        sweep = (
+            Sweep(parameter=call.sweep_parameter, values=tuple(call.sweep_values))
+            if call.sweep_parameter
+            else None
+        )
+        params, refusal = ground_job_params(fields, call.subjects, structures, sweep)
+        if refusal is not None or params is None:
+            code = refusal.code if refusal else "field-cannot-be-grounded"
+            detail = refusal.detail if refusal else "the call could not be grounded"
+            return _GroundedJob(refusal_code=code, refusal_detail=detail)
+
+        # Validates, authorizes and runs the job's own precondition. A refusal here is the
+        # deployment's answer — an unsupported solvent, an unfunded ceiling — and is reported.
+        payload = prepare_job_launch(connector, spec, params)
+        return _GroundedJob(
+            connector=connector,
+            job=spec.name,
+            job_workflow=spec.workflow,
+            task_queue=bundle_queue(connector),
+            payload=payload,
+            ran=_job_line(spec.name, call, structures),
+        )
+    except Exception as exc:
+        activity.logger.warning(
+            "job check could not be grounded for %s: %s", check.hypothesis_id, exc
+        )
+        return _GroundedJob(refusal_code="job-refused", refusal_detail=str(exc))
+    finally:
+        reset_current_identity(token)
+
+
+def _job_params_model(connector: str, spec: Any) -> Any:
+    """The job's declared params model — the authority `prepare_job_launch` validates against."""
+    from chemclaw.connectors.jobs import _params_model
+
+    return _params_model(connector, spec)
+
+
+def _job_line(job: str, call: Any, structures: dict[str, str]) -> str:
+    """What was launched and over what, for the outcome to disclose.
+
+    The swept axis is named here because that is the point of allowing one: a reader who cannot
+    see which solvents were compared cannot read the ranking.
+    """
+    subjects = "; ".join(
+        f"{role}=" + ", ".join(f"[[{note_id}]]" for note_id in ids)
+        for role, ids in sorted(call.subjects.items())
+    )
+    axis = f" over {call.sweep_parameter}={list(call.sweep_values)}" if call.sweep_parameter else ""
+    return f"{job}({subjects}){axis}"
+
+
 def _refused(check: DiscriminatingCheck, code: str, detail: str) -> CheckOutcome:
     """A check that was not run, carrying the reason in both a countable and a readable form."""
     return CheckOutcome(
@@ -855,7 +1016,7 @@ class HypothesisTournamentWorkflow:
             retry_policy=BAD_DATA_RETRY,
         )
         checks = await self._checks(request, field, evidence)
-        outcomes = await self._settle(request, checks)
+        outcomes = await self._settle(request, checks, limits)
 
         by_id = {h.id: h for h in field}
         ranked = [
@@ -1212,7 +1373,10 @@ class HypothesisTournamentWorkflow:
         return out
 
     async def _settle(
-        self, request: TournamentRequest, checks: dict[str, DiscriminatingCheck]
+        self,
+        request: TournamentRequest,
+        checks: dict[str, DiscriminatingCheck],
+        limits: _FieldLimits,
     ) -> dict[str, CheckOutcome]:
         """Run every `computable` check, which today means recording why each one did not run.
 
@@ -1229,6 +1393,8 @@ class HypothesisTournamentWorkflow:
         computable = [check for check in checks.values() if check.kind == "computable"]
         if not computable:
             return {}
+        jobs = [check for check in computable if check.call is not None and check.call.job]
+        computable = [check for check in computable if check not in jobs]
         settled = await asyncio.gather(
             *(
                 workflow.execute_activity(
@@ -1250,6 +1416,11 @@ class HypothesisTournamentWorkflow:
             if isinstance(outcome, BaseException):
                 workflow.logger.warning("computable check failed for %s", check.hypothesis_id)
                 continue
+            out[check.hypothesis_id] = outcome
+            if outcome.verdict != "not-run":
+                ran.append((check, outcome))
+
+        for check, outcome in await self._settle_jobs(request, jobs, limits):
             out[check.hypothesis_id] = outcome
             if outcome.verdict != "not-run":
                 ran.append((check, outcome))
@@ -1288,6 +1459,123 @@ class HypothesisTournamentWorkflow:
                 }
             )
         return out
+
+    async def _settle_jobs(
+        self,
+        request: TournamentRequest,
+        checks: list[DiscriminatingCheck],
+        limits: _FieldLimits,
+    ) -> list[tuple[DiscriminatingCheck, CheckOutcome]]:
+        """Ground and launch the checks that need a durable calculation.
+
+        **Bounded, and the bound is the honest part.** These are the jobs a manifest marks
+        `expensive: true`: a solvent screen is one conformer search per solvent per species, and a
+        tournament that launched one per hypothesis would spend a chemist's compute budget on a
+        question they asked in passing. `hypothesis_max_calculations` caps how many one tournament
+        starts, and a check past the cap is reported as *not run for budget* rather than dropped —
+        a reader who cannot see that the budget bound the answer would read a thin result as a
+        complete one.
+
+        Grounding happens per check in an activity; launching happens here, because a child
+        workflow is a workflow's to start. What reaches the child is the payload
+        `prepare_job_launch` validated, never the model's proposal — `template_job` records what it
+        costs to get that backwards.
+        """
+        results: list[tuple[DiscriminatingCheck, CheckOutcome]] = []
+        if not checks:
+            return results
+
+        allowed = checks[: limits.max_calculations]
+        for check in checks[limits.max_calculations :]:
+            results.append(
+                (
+                    check,
+                    _refused(
+                        check,
+                        "over-budget",
+                        f"this tournament had already started {limits.max_calculations} "
+                        "calculation(s), which is its budget; this check was not run",
+                    ),
+                )
+            )
+
+        grounded = await asyncio.gather(
+            *(
+                workflow.execute_activity(
+                    ground_check_job,
+                    args=[check, request.requested_by, request.correlation_id],
+                    start_to_close_timeout=timedelta(
+                        seconds=settings.hypothesis_evidence_timeout_seconds
+                    ),
+                    schedule_to_start_timeout=queue_wait_timeout(),
+                    retry_policy=BAD_DATA_RETRY,
+                )
+                for check in allowed
+            ),
+            return_exceptions=True,
+        )
+
+        launches: list[tuple[DiscriminatingCheck, _GroundedJob]] = []
+        for check, plan in zip(allowed, grounded, strict=True):
+            if isinstance(plan, BaseException):
+                results.append((check, _refused(check, "job-refused", str(plan))))
+                continue
+            if plan.refused:
+                results.append((check, _refused(check, plan.refusal_code, plan.refusal_detail)))
+                continue
+            launches.append((check, plan))
+
+        if not launches:
+            return results
+
+        settled = await asyncio.gather(
+            *(
+                workflow.execute_child_workflow(
+                    "ConnectorJobWorkflow",
+                    ConnectorJobInput(
+                        connector=plan.connector,
+                        job=plan.job,
+                        workflow=plan.job_workflow,
+                        task_queue=plan.task_queue,
+                        payload=plan.payload,
+                        rationale=(
+                            f"discriminating check for hypothesis {check.hypothesis_id!r}: "
+                            f"{check.question}"
+                        )[:500],
+                        requested_by=request.requested_by,
+                        session_id=request.session_id,
+                        correlation_id=request.correlation_id,
+                    ),
+                    id=f"{workflow.info().workflow_id}-calc-{check.hypothesis_id}",
+                    task_queue=plan.task_queue,
+                    retry_policy=BAD_DATA_RETRY,
+                    result_type=ConnectorJobResult,
+                )
+                for check, plan in launches
+            ),
+            return_exceptions=True,
+        )
+
+        for (check, plan), result in zip(launches, settled, strict=True):
+            if isinstance(result, BaseException):
+                workflow.logger.warning("calculation failed for %s", check.hypothesis_id)
+                results.append(
+                    (check, _refused(check, "calculation-failed", f"{plan.job} failed: {result}"))
+                )
+                continue
+            results.append(
+                (
+                    check,
+                    CheckOutcome(
+                        hypothesis_id=check.hypothesis_id,
+                        verdict="inconclusive",
+                        detail=result.summary[: settings.hypothesis_result_max_chars],
+                        calc_refs=list(result.calc_refs),
+                        ran=plan.ran,
+                    ),
+                )
+            )
+        return results
 
     async def _propose(
         self, request: TournamentRequest, outcome: TournamentOutcome, limits: _FieldLimits
