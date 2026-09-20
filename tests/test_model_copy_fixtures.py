@@ -40,6 +40,12 @@ Flagged sites are argued in `_ARGUED`, held in both directions so an entry that 
 fails too — the same shape as `tests/test_claude_md_figures.py`. A flag is not a verdict: most of
 these are fine, and the entry says why.
 
+**The scope is `tests/` only, and that is a decision rather than an oversight.** `src/` holds 76
+`model_copy(update=…)` calls of its own; there the call is production deliberately deriving one
+model from another, and whether that should go through validation is a question about the code, not
+about a fixture owning its subject. Nothing here would separate the two, so this file does not
+claim to.
+
 **The admissibility arm carries no allowlist**, because an object the model would refuse cannot be
 argued for. It is empty today and that is the measurement above, not an absence of checking:
 `test_the_rule_can_fail` drives both arms over a model defined here.
@@ -94,7 +100,7 @@ _ARGUED: dict[str, str] = {
     "tests/test_eln.py::test_a_multi_product_reaction_names_no_principal_compound"
     "::OrdReaction.outcomes": (
         "two `Role.PRODUCT` outcomes satisfy `_roles_are_consistent` in full. The subject is "
-        "`record_from_ord_reaction`'s refusal to name a principal compound, downstream of the model."
+        "`record_from_ord_reaction`'s refusal to name a principal compound, below the model."
     ),
     "tests/test_eln.py::_charged::OrdReaction.inputs": (
         "a fixture helper that re-charges the esterification with explicit amounts. Every "
@@ -239,6 +245,10 @@ def _innermost_name(annotation: ast.expr | None) -> str | None:
     return None
 
 
+#: The node kinds that introduce a scope, in the only three shapes this suite writes.
+_Scope = ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+
+
 class _Module:
     """One test module, indexed for the three questions this file asks of it."""
 
@@ -259,9 +269,9 @@ class _Module:
                 for alias in node.names:
                     self.imported[alias.asname or alias.name] = node.module
 
-    def scopes(self, node: ast.AST) -> list[ast.AST]:
+    def scopes(self, node: ast.AST) -> list[_Scope]:
         """Enclosing scopes of `node`, innermost first."""
-        out: list[ast.AST] = []
+        out: list[_Scope] = []
         current: ast.AST | None = self.parent.get(id(node))
         while current is not None:
             if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -332,7 +342,7 @@ class _Module:
 class Site:
     """One `model_copy(update=…)` call in a test, with what the live model says about it."""
 
-    def __init__(
+    def __init__(  # noqa: D107 - the class docstring above states the whole contract
         self,
         module: _Module,
         node: ast.Call,
@@ -468,7 +478,14 @@ def _inadmissible(sites: list[Site]) -> list[str]:
                 adapter: pydantic.TypeAdapter[Any] = pydantic.TypeAdapter(
                     declared.rebuild_annotation()
                 )
-            except Exception:  # noqa: BLE001 - an unbuildable annotation is not a finding
+            except (
+                NameError,
+                TypeError,
+                pydantic.PydanticSchemaGenerationError,
+                pydantic.PydanticUserError,
+            ):
+                # An annotation this cannot rebuild is a gap in the arm, not a finding about the
+                # fixture; `test_the_rule_can_fail` is what keeps the arm from being all gap.
                 continue
             try:
                 adapter.validate_python(literal)
@@ -547,7 +564,7 @@ def test_the_rule_can_fail() -> None:
         label: str = ""
 
         @pydantic.model_validator(mode="after")
-        def _checked(self) -> "_Subject":
+        def _checked(self) -> _Subject:
             if self.count > 10:
                 raise ValueError("count is capped at 10")
             return self

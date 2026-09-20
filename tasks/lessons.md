@@ -3059,6 +3059,22 @@ by a new route: for anything whose subject is a *boundary* (`extra="ignore"`, a 
 the fixture has to cross that boundary the way production crosses it, or the test is about the
 constructor instead.
 
+**The mechanism exists now, and building it refuted the rule's obvious form.** The proposal was to
+flag every `model_copy(update=…)` in a test whose subject model declares `extra="ignore"` or
+`"forbid"`. Instrumented — `BaseModel.model_copy` patched for a run, every copy re-validated and
+compared — that separates nothing: of the 149 sites the suite executes, **none injects an undeclared
+key, none builds an object `model_validate` refuses**, and `extra="ignore"` is *pydantic's default*,
+so the 80 sites declaring nothing behave exactly like the 6 declaring it. The danger is not a
+property of the object at all; it is the relation between the fixture and the assertion, and that is
+not readable from the call site. What is readable is what makes the relation possible, and
+`tests/test_model_copy_fixtures.py` derives it from the live tree: the subject model's own
+`model_validator` bodies (a check the constructor runs and the copy skips) and `src/`'s own
+`Model.model_validate(` calls (a boundary production really crosses). 27 fields over 22 of 151
+sites; triaged, **two were weak and one of those was green over the deletion its name implies**. The
+transferable half is the arithmetic: before building a flagging rule, instrument the thing and count
+how many of the sites it would flag are actually broken. A proxy that fires on four fifths of the
+tree is a proxy.
+
 ## An absent keyword argument is a behaviour, and a test that reads the source can assert its opposite
 
 **2026-09-18.** Asked to look at context and workspace management, I went at the top `BACKLOG.md`
