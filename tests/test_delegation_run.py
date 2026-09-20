@@ -1,10 +1,10 @@
 """The delegation experiment's run half, held to what the comparator cannot see for itself.
 
-`tests/test_delegation.py` covers `compare_arms`: given `ArmRun`s, the arithmetic. Nothing covered
-where an `ArmRun` comes from, because until now nothing produced one. What is asserted here is
-therefore the *observation* rather than the comparison — whether `delegated` is read off the record
-that knows, whether an arm's own name or prompt could have leaked into it, and whether the three arm
-profiles vary one thing or two.
+`tests/test_delegation_eval.py` covers `compare_arms`: given `ArmRun`s, the arithmetic. Nothing
+covered where an `ArmRun` comes from, because until now nothing produced one. What is asserted here
+is therefore the *observation* rather than the comparison — whether `delegated` is read off the
+record that knows, whether an arm's own name or prompt could have leaked into it, and whether the
+three arm profiles vary one thing or two.
 
 The one property with no test here is the one only a run can have: that the pieces compose against a
 front door. `make live-delegation` is that, it has been driven against `cli.mock_llm --catalogue
