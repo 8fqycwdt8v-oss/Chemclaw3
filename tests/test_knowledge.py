@@ -1387,6 +1387,65 @@ def test_a_failed_push_tells_the_caller_the_note_is_already_readable_here(tmp_pa
     assert "re-record nothing" in message, message
 
 
+def test_the_refusal_names_the_file_the_graph_actually_serves_for_that_id(
+    tmp_path: Path,
+) -> None:
+    """Two human claimants, so the *ordering* half of the refusal is load-bearing.
+
+    `_persons_notes_claiming`'s docstring says ties go to the **first in path order**, "which is the
+    file the graph serves" — and its sibling test above cannot check that: with one human claimant
+    there is nothing to order, so `candidate.stem in found` (the short-circuit that keeps the first)
+    can be deleted and every assertion still passes. Driven: deleting it is green over 121 tests,
+    and the refusal then names the *last* claimant in path order — a file that is on disk but is not
+    what any query answers with, so the chemist is sent to the wrong note.
+
+    `campaign` sorts before `playbook`, which is why the graph serves the campaign file, and why the
+    refusal must name that one.
+    """
+    _, work = _make_remote_and_clone(tmp_path)
+    for note_type, solvent in (("campaign", "2-MeTHF"), ("playbook", "toluene")):
+        curated = work / "knowledge" / note_type / "shared-id.md"
+        curated.parent.mkdir(parents=True, exist_ok=True)
+        curated.write_text(
+            f"---\nid: shared-id\ntype: {note_type}\ncreated_by: human\n---\n"
+            f"Pd(dppf)Cl2, {solvent}.\n",
+            encoding="utf-8",
+        )
+    for command in (["add", "-A"], ["commit", "-qm", "curated"], ["push", "-q", "origin", "main"]):
+        subprocess.run(["git", "-C", str(work), *command], check=True)
+
+    invalidate_cache()
+    served = load_notes(work / "knowledge")
+    assert [note.type for note in served] == ["campaign"], (
+        "this test's own premise: the graph resolves the tie by keeping the first in path order"
+    )
+
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    with pytest.raises(GitWriteError, match="authored by a human") as raised:
+        asyncio.run(
+            writer.write(
+                NoteWrite(
+                    files=[
+                        NoteFile(
+                            path="knowledge/optimization/shared-id.md",
+                            content="---\nid: shared-id\ntype: optimization\n"
+                            "created_by: agent\n---\nPdCl2, DMF.\n",
+                        )
+                    ],
+                    message="Add optimization note: shared-id",
+                )
+            )
+        )
+    assert "knowledge/campaign/shared-id.md" in str(raised.value), (
+        "the refusal must name the file the graph serves for that id, which is the first in path "
+        f"order — naming the other claimant sends a chemist to a note no query answers with: "
+        f"{raised.value}"
+    )
+    assert "knowledge/playbook/shared-id.md" not in str(raised.value), (
+        "and it must name that one only: two paths in one refusal is a reader guessing which"
+    )
+
+
 def test_an_agent_write_may_not_take_the_id_of_a_human_note_filed_under_another_type(
     tmp_path: Path,
 ) -> None:

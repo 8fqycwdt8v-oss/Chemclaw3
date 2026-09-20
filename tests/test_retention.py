@@ -2814,7 +2814,11 @@ def test_a_sweep_that_stops_firing_raises_an_alert(tmp_path: Path) -> None:
     fresh install, before the first pass has run.
     """
     if not shutil.which("helm") or not shutil.which("promtool"):  # pragma: no cover - env
-        pytest.skip("helm and promtool are needed to evaluate a rendered alert rule")
+        # The counted literal, as above.
+        pytest.skip(
+            "helm is not installed (or promtool is): both are needed to evaluate a "
+            "rendered alert rule"
+        )
     rule = _rendered_retention_rule()
     expression = " ".join(str(rule["expr"]).split())
     window = int(re.search(r"\[(\d+)m\]", expression).group(1))  # type: ignore[union-attr]

@@ -197,7 +197,7 @@ topic).
       folding the version into `compound_id` invalidates every stored id at every future bump and
       breaks every citation to one, and rewriting the notes is a migration over layer 4 that
       `kg/record.py` — append and supersede, never rewrite — has no verb for. The recovery that
-      *does* exist is `docs/guides/runbook.md:1866`: delete the corpus's `corpus_cursors` row and
+      *does* exist is `docs/guides/runbook.md:1996`: delete the corpus's `corpus_cursors` row and
       re-run the ELN sync. Weigh it against `src/chemclaw/durable/retention.py:498`, which records
       that a bump is "a permanent doubling" of `molecule_fingerprints`/`reaction_fingerprints`
       because the runtime role holds no `DELETE`.

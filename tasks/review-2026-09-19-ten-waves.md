@@ -430,3 +430,154 @@ resolve in `src/`, every `make` target and every named table exists, and every r
 runbook entry. The live lane came up on 11 processes with **no credential of any kind** and ran 337
 probes green. And a sweep of all 19 numeric settings defaulting to `0` found no second instance of
 the `document_parse_memory_bytes` unhandled-sentinel shape.
+
+## Waves 1b through 9b — the fixes audited, and what the audits found
+
+Each of the first nine waves was followed by a post-merge mutation audit of what it had
+merged. **The audits found more, and worse, than the reviews had.** The per-wave commit
+messages carry the detail; what belongs here is the pattern.
+
+### The fixes were the least-audited code in the tree
+
+- **Wave 1 shipped ten fixes and its log claimed the mutation rule for all ten. It had been
+  applied to five.** The audit found **eleven mutations green over a live false statement**,
+  ten of them real: `_carry_forward` was a *measured no-op* whose docstring's premise was
+  false for this LangGraph version; `authz.writes_durable_memory` — an authorization gate —
+  reverted invisibly to 231 tests; `_is_untracked` missed the shape `state.py` itself quotes
+  as its origin, reproducing the fleet-wide session refusal live against Postgres.
+- **Wave 2's two fixes both regressed the property they were written to protect.** The
+  cation exemption read *net* charge, so borohydride with two ammonium counterions
+  standardised to borane — the exact substitution the guard exists for, which `std7` got
+  right. And the possessive PEM tails *narrowed* the language matched: five one-line
+  encrypted shapes leaked the key body and had been redacted before the change. The
+  `DEK-Info` axis had never been tested at all, so leaving it greedy passed the whole suite
+  at 25.8 s on 273 bytes with the stdlib logging lock held.
+- **Across waves 6b through 9b, fourteen more mutations came back green on a first pass**,
+  every one a hole in the *guard* rather than the fix — a fixture built with
+  `model_copy(update=…)` that assigned past the validation boundary it was testing, a bound
+  loose by exactly the expansion factor the defect was about, an encrypted-PEM fixture whose
+  32-hex IV made it pass *with the bug present*, and a Helm backup file left in `templates/`
+  which Helm rendered as a template and then used to satisfy its own guard.
+
+### Three failures only the whole suite could see
+
+A chart guard firing on the one render in the tree that had ever set its switch; a
+cross-repo citation the docstring gate correctly resolved locally; and a test nonce that
+was in the reason but not the query, so a natural-language question's ordinary words
+matched a thirteenth row from another module. None reproduced from any subset.
+
+### What was decided rather than defaulted
+
+`std8` → `std9`, taken *against* a measurement that the bump reclaims nothing in this
+repository's corpus — because seed data is not the population at risk, and not bumping
+leaves a wrong row and a corrected row both current under one definition, neither filtered.
+The `safety-screening` collision fixed by union rather than refusal, because a refusal makes
+a genuine replacement unstartable with no override. The plan gate's behaviour left alone
+after driving each path showed a template `agent` step never reaches the early return at
+all — so the defect was the claim. And `D-2026-09-09`'s readiness branch **superseded rather
+than quietly narrowed**: that ADR names both shapes and records an experiment flipping
+exactly the one being changed, so the decision was taken, not overlooked — and what splits
+them is its own premise, which makes an unreadable ledger a privilege fact and an absent one
+evidence this runner never migrated here.
+
+### Two things I got wrong, corrected by measurement
+
+I diagnosed the forkserver ratchet as a grown closure with under-requesting Helm memory
+requests. Both halves were false: `git archive` of the commit that derived the original
+figure measures the same as this tree to 0.1 MiB, every *arm* reproduces its recorded delta
+while only the base differs, and the pod cost re-measures unchanged and *under* its
+constant. The experiment that settles it is now in the failure message, so the next reader
+does not repeat it.
+
+And I briefed an auditor to mutate the shared working tree. It left a revert of a merged
+authorization fix behind, indistinguishable from my own work in `git status`. Every later
+reviewer got a worktree of its own.
+
+Three rules landed in `tasks/lessons.md` from this: a mutation loop must never run
+backgrounded, because the restore is the half that gets killed; `mypy --strict src` is not
+`make type` (490 files against 919, which broke CI twice here, in two repositories); and a
+fixture built past validation supplies its own subject.
+
+## Wave 10 — the audit of the nine, and the verdict
+
+The final wave audited the other nine and the fixes they shipped, on the working hypothesis
+that those fixes were the least-audited code in the tree. The hypothesis held.
+
+### The real numbers, at last
+
+All three suites, with the infrastructure up, on a quiet machine:
+
+| | |
+| --- | --- |
+| Chemclaw3 | **9,989 passed, 95 skipped**, 42m44s, coverage 90.61% against an 84% floor |
+| Chemclaw3-mcp | `make check` green — 2,701 cov lane, 2,698 offline lane, `pip-audit` clean |
+| Chemclaw3_ui | **1,313 passed**, zero skips |
+
+The 95 skips decompose as 73 helm-caused, 16 cross-repo-caused and 6 genuine environment
+facts. Closing both families by hand — helm on PATH, `CHEMCLAW_MCP_REPO` set — takes this
+tree to **~10,350 passing**, and the only things unrun anywhere in the sandbox are
+`promtool` rule evaluation and `kubeconform` schema validation.
+
+### Three findings
+
+- **The `mark_delivered` lease fence had no guard.** Its own site says "**Matched on the
+  lease, not on the id, and guarded on `pending`.** Both were missing and each is its own
+  defect" — and only the state guard was tested. Dropping the fence was **green over 222
+  tests**, and driven against real Postgres a superseded pass then moved a live pass's row
+  to `delivered`: the queue books a publication that never happened, and the live pass's
+  real outcome is dropped by its own `pending` guard. Strictly worse than the `mark_failed`
+  case it mirrors, because a wrongly released row is re-delivered and a wrongly delivered
+  one is never looked at again.
+- **Sixteen cross-repo tests had never run in CI.** No sibling checkout in `ci.yml`, so
+  every run skipped all of `tests/test_sibling_manifest_agreement.py` — whose subject is
+  `D-2026-09-07-a-claim-about-another-repository-is-checked-by-reading-it`, and which Wave
+  6b had just rewritten to *be* the cross-repo gate — plus the `test_context_floor.py` arms
+  behind both compaction defaults. They skip honestly rather than fail, which is why nothing
+  was ever red.
+- **The two halves of the plan-scope fix did not meet.** Core shipped `PlanEvent.scope`; the
+  UI declared it nowhere and kept fetching. The field had no consumer, the race `plan_hash`
+  exists to catch was still being run once per plan card, and the comment beside the fetch
+  said the event did not carry the scope — false on the day core merged it.
+
+### The pattern worth keeping
+
+**The guards written in these two weeks are strong; the sentences written beside them are
+the weakest thing in the tree.** Four checks had documented gaps —
+`test_claude_md_figures.py`'s four-digit floor, `test_declines_carry_a_trigger.py` checking
+that a trigger *exists* rather than resolves, `test_docstring_paths.py` excluding
+`docs/decisions/`, and `BACKLOG.md` anchors unenforced here while the sibling repo enforces
+them — and a live false claim was found in **each of the four**.
+
+Among them: `CLAUDE.md` claiming "680 ADRs" *inside* the paragraph headed "**No figure
+appears in this section**" (683 the day it was written, 691 now); "Six places read one"
+against a file holding sixty-one such assertions, whose own header says the count is its
+length and not a sentence; a `Revisit when:` naming `core/config/database.py`, which exists
+nowhere; a `BACKLOG.md` anchor 130 lines off; and a skip epilogue under-counting 71/14 where
+the run's own lines tally 73/16 — including the one whose text says every D-011 assertion in
+the suite is unchecked, which is the most load-bearing skip in the set.
+
+All four gaps are narrowed: the figure floor is three digits with a decimal lookbehind and
+the two historical figures argued, the four uncounted skips carry their marker, the false
+sentences are their symbols, and the contract axis that *printed* `plan.scope` for a whole
+wave now asserts against an empty, both-directions exemption map.
+
+### And two more corrections to my own work
+
+The forkserver diagnosis, already recorded above, was confirmed wrong by a second
+independent measurement. And I shipped an `E501` because I ran `make lint` green, then added
+a test, then committed — "the gate is green" was a statement about the tree two edits
+earlier. That is the same family as `mypy --strict src` not being `make type`: one is
+running the wrong command, the other is running the right one too early, and both produce a
+commit message claiming a gate it did not have.
+
+### Verdict
+
+Nothing in the three repositories is now known-wrong and unrecorded. What Wave 10 could not
+check is stated rather than implied: `helm-validate` end to end (no `kubeconform` or
+`promtool` in the sandbox — the render and both chart refusals were driven directly
+instead), anything needing a model credential, and the 49 remaining `model_copy(update=…)`
+fixtures one by one, for which it proposes a mechanism rather than a verdict — flag the call
+in any test whose subject model declares `extra="ignore"` or `extra="forbid"`.
+
+Whether delegation pays is still open. `evals/delegation.py` has still never run against a
+model, exactly as `CLAUDE.md` says.

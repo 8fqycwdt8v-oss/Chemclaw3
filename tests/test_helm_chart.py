@@ -39,7 +39,7 @@ import pytest
 import yaml
 
 from chemclaw.core.config import Settings
-from tests.siblings import sibling_root
+from tests.siblings import SIBLING_SKIP, sibling_root
 
 _CHART = Path(__file__).resolve().parents[1] / "deploy" / "helm" / "chemclaw"
 _VALUES: dict[str, Any] = yaml.safe_load((_CHART / "values.yaml").read_text(encoding="utf-8"))
@@ -1055,7 +1055,10 @@ def test_every_fleet_address_names_a_service_the_sibling_actually_creates() -> N
     checkout, reason = sibling_root("CHEMCLAW_MCP_REPO", "Chemclaw3-mcp")
     if checkout is None:
         listed = ", ".join(f"{path}={host}:{port}" for path, (_, host, port) in addresses.items())
-        pytest.skip(f"{reason}; NOT checked against the fleet's own Services: {listed}")
+        # `SIBLING_SKIP` so the epilogue counts it — `reason` alone does not carry the marker.
+        pytest.skip(
+            f"{SIBLING_SKIP} {reason}; NOT checked against the fleet's own Services: {listed}"
+        )
 
     services = _fleet_services(checkout)
     assert services, f"{checkout} declares no servers/*/deploy/service.yaml to compare against"

@@ -300,6 +300,56 @@ def test_a_superseded_pass_cannot_release_the_lease_the_live_pass_holds() -> Non
     assert reclaimed == 0, "so no second drain could take the row while it was still leased"
 
 
+def test_a_superseded_pass_cannot_mark_delivered_what_the_live_pass_still_holds() -> None:
+    """The `mark_failed` twin of the fence, on the mark where booking it wrong is worse.
+
+    `_MARK_DELIVERED` carries two guards and the site says so — "**Matched on the lease, not on the
+    id, and guarded on `pending`.** Both were missing and each is its own defect." The state guard
+    has `test_a_stale_mark_delivered_cannot_walk_a_dead_lettered_row_back`; **the fence had
+    nothing**, and dropping `AND p.attempts = lease.attempt` from that one statement was green over
+    222 tests across eleven publish modules — found by mutating it, not by reading it.
+
+    What the state guard cannot cover: a `pending` row is exactly the shape a live pass holds, so
+    `state = 'pending'` is satisfied by the victim. Driven against real Postgres with the fence
+    dropped, a superseded pass reporting a delivery it made under an expired lease moved the row to
+    `('delivered', 1, released)` — the row leaves the queue, `chemclaw_results_published_total`
+    counts a transition that did not happen, and the live pass's real outcome is then dropped by
+    its own `state='pending'` guard, so the true result is lost in both directions at once.
+
+    That is strictly worse than the `mark_failed` case this mirrors: a wrongly released row is
+    re-claimed and re-delivered, while a wrongly *delivered* row is never looked at again.
+    """
+    asyncio.run(migrated_db_or_skip())
+    before = _counter("chemclaw_results_published_total")
+
+    async def run() -> tuple[tuple[str, int, bool], int]:
+        row_id = await _row("review-fence-delivered")
+        claimed = await outbox.claim("review-fence-delivered", 10)
+        assert [row.lease.row_id for row in claimed] == [row_id]
+        held = claimed[0].lease
+
+        # A superseded pass claiming it delivered, under a lease it no longer holds.
+        await outbox.mark_delivered([outbox.Lease(row_id, held.attempt - 1)])
+        after_stale = await _row_state(row_id)
+        # And the pass that does hold it can still record what really happened.
+        await outbox.mark_delivered([held])
+        return after_stale, len(await outbox.claim("review-fence-delivered", 10))
+
+    after_stale, reclaimed = asyncio.run(run())
+
+    state, attempts, released = after_stale
+    assert (state, attempts) == ("pending", 1), (
+        f"a stale mark_delivered moved the row to {state!r}: the queue now reports a publication "
+        "that never happened, and the live pass's own outcome will be dropped by its pending guard"
+    )
+    assert released is False, "and it released the live pass's lease on the way"
+    assert _counter("chemclaw_results_published_total") == before + 1.0, (
+        "exactly one transition was published — the live pass's. `RETURNING id` is what makes that "
+        "counter a count of transitions rather than of call arguments"
+    )
+    assert reclaimed == 0
+
+
 def test_a_stale_mark_delivered_cannot_walk_a_dead_lettered_row_back() -> None:
     """`_MARK_DELIVERED` had no state guard at all, where `_MARK_FAILED` had argued for one.
 
