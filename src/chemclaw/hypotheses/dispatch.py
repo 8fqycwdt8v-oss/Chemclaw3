@@ -252,3 +252,122 @@ def contract_of(schema: Mapping[str, Any] | None, accepts: Any) -> ToolContract:
 def defaulted_arguments(contract: ToolContract) -> tuple[str, ...]:
     """Every argument the tool accepts and does not require, so the caller can disclose them."""
     return tuple(sorted(contract.accepted - contract.required))
+
+
+# ---------------------------------------------------------------------------------------- jobs
+#
+# A durable job is a *better* grounded target than an endpoint tool, which is the opposite of what
+# it looks like. A tool advertises a schema only while its server is up; a job declares a
+# `params_model` and a `precondition` in its manifest, so both the shape of the call and the
+# vocabulary of its values are checkable before anything runs. `compare_solvents` is the case worth
+# holding in mind: `require_supported_solvents` refuses a solvent the method cannot model *before
+# the job starts*, so a model-proposed solvent list is a selection from a validated vocabulary
+# rather than an invention.
+#
+# **That is why a sweep is allowed here when a silent default is not.** The harm in an invented
+# argument is that the assumption is invisible — a pKa computed in an unstated solvent reads as
+# "the pKa". A swept axis is the opposite: it is the most visible part of the answer, every value
+# is reported beside the result it produced, and nothing is claimed beyond `f(x)` for stated `x`.
+# So the rule is not "never vary a parameter", it is **"vary nothing you cannot name in the
+# output, and draw the values from a vocabulary something else validates"**.
+
+#: Params fields that carry a structure, and how many. Semantic rather than derivable: `solvents`
+#: and `reactants` are both `list[str]` and only one of them is a molecule, so the schema cannot
+#: say which. Curated, but **fail-closed** — a required field that is not here, not the sweep and
+#: not defaulted makes its job undispatchable, so a new job does not become automatically runnable
+#: by omission. `tests/test_hypothesis_dispatch.py` holds every required field of every shipped
+#: calc job to a classification.
+STRUCTURE_FIELDS: Mapping[str, str] = {
+    "smiles": "one",
+    "smiles_a": "one",
+    "smiles_b": "one",
+    "reactants": "many",
+    "products": "many",
+    "species": "many",
+}
+
+#: Params fields that may be swept, mapped to the vocabulary that validates them. The value here is
+#: only the *name* of the validating authority: the validation itself is the job's own declared
+#: `precondition`, which runs at launch and is the thing that actually refuses. Naming it here is
+#: what lets a refusal say which vocabulary a value failed, rather than "the job rejected it".
+SWEEPABLE_FIELDS: Mapping[str, str] = {
+    "solvents": "the solvents this calculator supports",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class Sweep:
+    """An axis a check varies, and the values it varies over.
+
+    Reported with the result rather than assumed behind it — see the block comment above. `values`
+    is what the model proposed; whether each one is legal is the job's `precondition`'s answer, not
+    this type's.
+    """
+
+    parameter: str = ""
+    values: tuple[str, ...] = field(default_factory=tuple)
+
+
+def ground_job_params(
+    fields: Mapping[str, tuple[bool, Any]],
+    subjects: Mapping[str, list[str]],
+    structures: Mapping[str, str],
+    sweep: Sweep | None,
+) -> tuple[dict[str, Any], None] | tuple[None, Refusal]:
+    """Assemble a job's params from resolved structures and a swept axis, or refuse.
+
+    `fields` is the job's declared params model reduced to `name -> (required, default)`; the
+    caller builds it from `model_fields` so this module imports no connector code. `structures`
+    maps an already-resolved note id to its SMILES — resolution and its refusals are
+    `structure_of`'s, done before this is called.
+
+    **Fail closed on anything it cannot account for.** A required field that is not a structure,
+    not the swept axis and has no default is a value only a model could supply, and supplying it is
+    the whole failure this module exists to prevent. `scan_coordinate` and `profile_rotation` land
+    here: both need *atom indices*, which a model will produce plausibly and wrongly, and neither
+    becomes dispatchable until something grounds them.
+    """
+    params: dict[str, Any] = {}
+    for name, ids in subjects.items():
+        arity = STRUCTURE_FIELDS.get(name)
+        if arity is None:
+            return None, Refusal(
+                "subject-field-unknown",
+                f"{name!r} is not a field that carries a structure, so note ids cannot fill it",
+            )
+        resolved = [structures[note_id] for note_id in ids if note_id in structures]
+        if len(resolved) != len(ids):
+            missing = sorted(set(ids) - set(structures))
+            return None, Refusal("subject-not-found", f"unresolved subject(s): {missing}")
+        if arity == "one":
+            if len(resolved) != 1:
+                return None, Refusal(
+                    "subject-arity",
+                    f"{name!r} takes one structure, {len(resolved)} given",
+                )
+            params[name] = resolved[0]
+        else:
+            if not resolved:
+                return None, Refusal("subject-arity", f"{name!r} needs at least one structure")
+            params[name] = resolved
+
+    if sweep is not None and sweep.parameter:
+        if sweep.parameter not in SWEEPABLE_FIELDS:
+            return None, Refusal(
+                "axis-not-sweepable",
+                f"{sweep.parameter!r} is not an axis with a vocabulary to check values against",
+            )
+        if not sweep.values:
+            return None, Refusal("axis-empty", f"{sweep.parameter!r} was swept over no values")
+        params[sweep.parameter] = list(sweep.values)
+
+    ungrounded = sorted(
+        name for name, (required, _default) in fields.items() if required and name not in params
+    )
+    if ungrounded:
+        return None, Refusal(
+            "field-cannot-be-grounded",
+            f"this job also requires {ungrounded}, and nothing in the record supplies them — "
+            "a model filling them in would be inventing them",
+        )
+    return params, None

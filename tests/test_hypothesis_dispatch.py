@@ -250,3 +250,164 @@ def test_every_dispatchable_tool_requires_only_the_structure(name: str) -> None:
     """Stated per tool so a failure names the one that changed."""
     signature = resolvable_signatures()[name]
     assert ToolArguments.of_signature(signature).required == frozenset({STRUCTURE_ARGUMENT})
+
+
+# ------------------------------------------------------------------ durable jobs
+
+
+def _job_fields(job_name: str) -> dict[str, tuple[bool, object]]:
+    """One shipped calc job's declared params, reduced to what `ground_job_params` reads."""
+    from chemclaw.connectors.jobs import _params_model
+    from chemclaw.connectors.registry import discovered
+
+    _bundle, manifest = discovered()["calc"]
+    job = next(spec for spec in manifest.jobs if spec.name == job_name)
+    model = _params_model("calc", job)
+    return {name: (f.is_required(), f.default) for name, f in model.model_fields.items()}
+
+
+#: Jobs a tournament may launch on its own, derived from each job's declared params model. The
+#: three that are absent are absent for one reason, and it is the reason this module exists:
+#: `scan_coordinate` and `profile_rotation` need **atom indices**, `survey_bond_strengths` a
+#: cleavage list, and a model asked for any of those produces them plausibly and wrongly. They
+#: become dispatchable when something *enumerates* them — which is the repo's standing rule that
+#: enumeration and calculation are separate tools and the order is not optional.
+_DISPATCHABLE_JOBS = {
+    "compare_solvents",
+    "compute_ensemble_property",
+    "compute_interaction_energy",
+    "compute_reaction_energy",
+    "predict_pka_ensemble",
+    "rank_species",
+    "rank_species_across_solvents",
+    "refine_ensemble",
+    "sample_conformers",
+}
+
+
+def _try_ground(job_name: str) -> tuple[dict[str, object] | None, object]:
+    from chemclaw.hypotheses.dispatch import (
+        STRUCTURE_FIELDS,
+        SWEEPABLE_FIELDS,
+        Sweep,
+        ground_job_params,
+    )
+
+    fields = _job_fields(job_name)
+    required = [name for name, (req, _) in fields.items() if req]
+    subjects = {
+        name: (["a"] if STRUCTURE_FIELDS[name] == "one" else ["a", "b"])
+        for name in required
+        if name in STRUCTURE_FIELDS
+    }
+    axis = next((name for name in required if name in SWEEPABLE_FIELDS), "")
+    sweep = Sweep(parameter=axis, values=("thf",)) if axis else None
+    return ground_job_params(fields, subjects, {"a": "CCO", "b": "CCN"}, sweep)
+
+
+def test_the_dispatchable_job_set_is_exactly_what_is_pinned() -> None:
+    """Derived from the manifests' own params models, so it tracks the jobs."""
+    from chemclaw.connectors.registry import discovered
+
+    _bundle, manifest = discovered()["calc"]
+    found = {job.name for job in manifest.jobs if _try_ground(job.name)[1] is None}
+    assert found == _DISPATCHABLE_JOBS, (
+        "the set of durable jobs a hypothesis check may launch has changed. A job that gained a "
+        "field nothing in the record can supply correctly drops out. A job that appeared needs "
+        "its required fields classified in `STRUCTURE_FIELDS`/`SWEEPABLE_FIELDS` before it is "
+        "added — an unclassified field fails closed, which is the intent."
+    )
+
+
+@pytest.mark.parametrize(
+    ("job_name", "invented"),
+    [
+        ("scan_coordinate", "atoms"),
+        ("profile_rotation", "torsion"),
+        ("survey_bond_strengths", "cleavages"),
+    ],
+)
+def test_a_job_needing_a_value_only_a_model_could_supply_refuses(
+    job_name: str, invented: str
+) -> None:
+    """Atom indices are the sharpest case: a model produces them fluently and they are wrong.
+
+    Nothing in the resulting number says which atoms were driven, so a scan over the wrong pair
+    reads exactly like a scan over the right one.
+    """
+    _, refusal = _try_ground(job_name)
+    assert refusal is not None
+    assert refusal.code == "field-cannot-be-grounded"
+    assert invented in refusal.detail
+
+
+def test_an_unclassified_field_fails_closed() -> None:
+    """The property the curation rests on: omission makes a job undispatchable, never runnable."""
+    from chemclaw.hypotheses.dispatch import ground_job_params
+
+    _, refusal = ground_job_params({"mystery": (True, None)}, {}, {}, None)
+    assert refusal is not None
+    assert refusal.code == "field-cannot-be-grounded"
+
+
+def test_a_swept_axis_must_have_a_vocabulary_behind_it() -> None:
+    """Varying is allowed; varying over values nothing validates is not."""
+    from chemclaw.hypotheses.dispatch import Sweep, ground_job_params
+
+    _, refusal = ground_job_params(
+        {"smiles": (True, None)}, {"smiles": ["a"]}, {"a": "CCO"}, Sweep("temperature_k", ("300",))
+    )
+    assert refusal is not None
+    assert refusal.code == "axis-not-sweepable"
+
+
+def test_a_sweep_over_no_values_refuses() -> None:
+    from chemclaw.hypotheses.dispatch import Sweep, ground_job_params
+
+    _, refusal = ground_job_params({}, {}, {}, Sweep("solvents", ()))
+    assert refusal is not None
+    assert refusal.code == "axis-empty"
+
+
+def test_a_subject_that_did_not_resolve_refuses_rather_than_dropping() -> None:
+    """Silently shortening a reactant list would change the reaction being computed."""
+    from chemclaw.hypotheses.dispatch import ground_job_params
+
+    _, refusal = ground_job_params(
+        {"reactants": (True, None)}, {"reactants": ["a", "ghost"]}, {"a": "CCO"}, None
+    )
+    assert refusal is not None
+    assert refusal.code == "subject-not-found"
+    assert "ghost" in refusal.detail
+
+
+def test_a_scalar_structure_field_refuses_several_subjects() -> None:
+    from chemclaw.hypotheses.dispatch import ground_job_params
+
+    _, refusal = ground_job_params(
+        {"smiles": (True, None)}, {"smiles": ["a", "b"]}, {"a": "CCO", "b": "CCN"}, None
+    )
+    assert refusal is not None
+    assert refusal.code == "subject-arity"
+
+
+def test_the_solvent_screen_grounds_into_a_call_the_job_accepts() -> None:
+    """The scenario this whole extension is for, checked against the job's real params model."""
+    from chemclaw.connectors.jobs import _params_model
+    from chemclaw.connectors.registry import discovered
+    from chemclaw.hypotheses.dispatch import Sweep, ground_job_params
+
+    params, refusal = ground_job_params(
+        _job_fields("compare_solvents"),
+        {"reactants": ["a"], "products": ["b"]},
+        {"a": "CCO", "b": "CC=O"},
+        Sweep("solvents", ("thf", "dmf", "toluene")),
+    )
+    assert refusal is None
+    assert params is not None
+    assert params["solvents"] == ["thf", "dmf", "toluene"]
+
+    _bundle, manifest = discovered()["calc"]
+    job = next(spec for spec in manifest.jobs if spec.name == "compare_solvents")
+    # The declared params model is the authority, exactly as `prepare_job_launch` uses it.
+    _params_model("calc", job).model_validate(params)
