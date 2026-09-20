@@ -920,7 +920,13 @@ async def _run_delegation(args: argparse.Namespace) -> int:
             f"arms present: {', '.join(arms)}",
         ]
     else:
-        specs = [delegation_run.arm_by_name(name) for name in args.arms.split(",")]
+        try:
+            specs = [delegation_run.arm_by_name(name) for name in args.arms.split(",")]
+        except KeyError as exc:
+            # Reported rather than raised: a typo in `--arms` is a misinvocation, and a traceback
+            # for one reads like a defect in the runner.
+            logger.error("%s", exc)
+            return 2
         if not any(spec.arm == BASELINE_ARM for spec in specs):
             logger.error(
                 "--arms must include the baseline %r; every report is against it", BASELINE_ARM
@@ -972,6 +978,21 @@ async def _run_delegation(args: argparse.Namespace) -> int:
             "no arm carried a comparison — %d run(s) recorded. A report over an empty set would "
             "read as 'no effect anywhere'.",
             len(runs),
+        )
+        return 2
+    if mock and not args.compare_runs:
+        # **A run against the scripted double exits non-zero even when every arm reported**, which
+        # is this lane's standing rule: "a measurement that did not happen is not a measurement that
+        # passed" (see this module's docstring, and `_grading_status` for the corpus suite's form of
+        # it). The double supplies the *decision* to delegate, so what such a run proves is that
+        # this runner observes a delegation correctly — and nothing whatever about whether
+        # delegation pays. Everything is written first: the observations are the expensive part and
+        # they are evidence about the runner.
+        logger.error(
+            "this run's gateway was the scripted mock, so its %d report(s) are evidence about this "
+            "runner and not about delegation. Point CHEMCLAW_LLM_BASE_URL at a gateway to measure "
+            "the question.",
+            len(reports),
         )
         return 2
     return 0
