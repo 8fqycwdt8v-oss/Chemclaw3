@@ -44,7 +44,11 @@ def _read(store: Any, actor: str, path: str) -> Any:
     try:
         from chemclaw.agent.langgraph_agent import skills_backend
 
-        backend = scratchpad_backend(skills_backend(AgentProfile(name="default"), []), store)
+        backend = scratchpad_backend(
+            skills_backend(AgentProfile(name="default"), []),
+            store,
+            permits=lambda _name: True,
+        )
         return backend.read(path)
     finally:
         reset_current_identity(tokens)

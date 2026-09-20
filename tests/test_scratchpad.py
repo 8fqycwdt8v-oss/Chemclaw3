@@ -43,6 +43,17 @@ from tests.pg import migrated_db_or_skip
 _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
 
 
+def _ALL(_name: str) -> bool:
+    """A narrowing that narrows nothing — what these tests assert *around*.
+
+    `scratchpad_backend` takes the predicate as a required keyword so a mount cannot silently get
+    none (`agent/skill_store.py` records the tier that shipped with exactly that gap). These tests
+    are about which *routes* exist, so they state the permissive answer explicitly rather than
+    inheriting it from a default that would not exist in production.
+    """
+    return True
+
+
 @pytest.fixture
 def skills() -> CompositeBackend:
     """A stand-in skills backend with one route, so routing changes are visible."""
@@ -56,13 +67,15 @@ def test_memories_need_both_a_store_and_an_actor(skills: CompositeBackend) -> No
     namespace that could be erased, so a memory written anyway would be one nobody can delete and
     everybody shares — which is worse than not having the capability.
     """
-    assert MEMORY_ROOT not in scratchpad_backend(skills).routes
-    assert MEMORY_ROOT not in scratchpad_backend(skills, store=object()).routes
+    assert MEMORY_ROOT not in scratchpad_backend(skills, permits=_ALL).routes
+    assert MEMORY_ROOT not in scratchpad_backend(skills, store=object(), permits=_ALL).routes
 
     token = set_current_identity("alice-oid", frozenset())
     try:
-        assert MEMORY_ROOT not in scratchpad_backend(skills).routes, "an actor alone is not enough"
-        assert MEMORY_ROOT in scratchpad_backend(skills, store=object()).routes
+        assert MEMORY_ROOT not in scratchpad_backend(skills, permits=_ALL).routes, (
+            "an actor alone is not enough"
+        )
+        assert MEMORY_ROOT in scratchpad_backend(skills, store=object(), permits=_ALL).routes
     finally:
         reset_current_identity(token)
 
@@ -74,7 +87,7 @@ def test_the_skills_routes_survive_being_wrapped(skills: CompositeBackend) -> No
     rebuilt the routes instead of carrying them would leave the role gate applying to the listing
     and not to the read.
     """
-    assert "/skills/" in scratchpad_backend(skills).routes
+    assert "/skills/" in scratchpad_backend(skills, permits=_ALL).routes
 
 
 def test_two_spellings_of_one_person_get_two_prefixes() -> None:
@@ -538,7 +551,7 @@ def test_the_memories_route_the_wiring_installs_is_the_bounded_one(
     """
     token = set_current_identity("wiring-probe", frozenset())
     try:
-        route = scratchpad_backend(skills, store=object()).routes[MEMORY_ROOT]
+        route = scratchpad_backend(skills, store=object(), permits=_ALL).routes[MEMORY_ROOT]
     finally:
         reset_current_identity(token)
     assert isinstance(route, scratchpad.BoundedStoreBackend), (

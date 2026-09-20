@@ -500,6 +500,37 @@ class AgentSettings(BaseSettings):
     # the work produced, while a skill is judgment somebody sat down and wrote.
     agent_local_skill_max_chars: int = Field(default=16_000, ge=1)
     agent_local_skills_max: int = Field(default=20, ge=1)
+    # **What bounds the organisation's tier, and why it is not the personal tier's number.**
+    # `agent_local_skills_max` bounds one person's prefix and is usually spent on nobody: most
+    # chemists keep none, so the worst case is a worst case. This tier is the opposite — whatever an
+    # administrator publishes is in the prompt of *every* turn *every* chemist takes, so the cap is
+    # not a ceiling on an unusual case, it is the bill.
+    #
+    # And it is paid more than once per turn. The org tier is mounted on the turn's backend, and a
+    # helper is compiled through the same builder over the same backend, so a four-helper fan-out
+    # sends it five times. At the personal tier's 20 rows that is ~27,900 tokens of prefix across
+    # one turn's graphs; at 12 it is ~16,700. The measured basis is one maximal row at ~278 tokens
+    # (deepagents' 1,024-character description limit plus the listing's own scaffolding), which
+    # `tests/test_context_floor.py` derives and re-measures on this tier's own mount.
+    #
+    # 12 rather than the shipped tree's 28 because the reviewed tree is narrowed by all four
+    # predicates and most profiles reach a fraction of it, while this tier applies fewer: every org
+    # row is in every prefix. Refused at the route rather than evicted, the personal tier's reason
+    # exactly — judgment a person authored may not vanish because somebody added one more.
+    agent_org_skills_max: int = Field(default=12, ge=1)
+    # How many previously-activated bodies of one organisation skill stay revertible.
+    #
+    # **Evicted rather than refused, which is the opposite of the cap above, and the asymmetry is
+    # the decision.** Refusing here would mean an administrator cannot publish a fix because the
+    # skill has been edited too often — a bound on exactly the wrong thing. Evicting the least
+    # recently activated is `scratchpad.BoundedStoreBackend`'s tiebreak taken for its reason: it is
+    # the only ordering the store carries, and the version anybody reverts to is a recent one.
+    #
+    # This is the one place the stored tier is weaker than the git tree it stands beside: `skills/`
+    # can be reverted to any commit and this to the last 20 activations
+    # (`D-2026-09-20-a-revert-is-a-pointer-when-there-is-no-commit-to-revert`). 20 because a skill
+    # with 20 distinct bodies behind it has a process problem rather than a history problem.
+    agent_org_skill_versions_max: int = Field(default=20, ge=1)
     # What `recall_preferences` may hand back, and the second half of the same finding.
     # `user_preferences` is the other agent-writable table with no bound: `remember_preference`
     # takes a **model-chosen** key, so the row count is not one-per-known-name, and the `SELECT …

@@ -1372,7 +1372,7 @@ def test_a_helper_has_no_durable_memory_route_and_no_store_is_passed_to_one() ->
 
     # The mechanism: with no store there is no durable route, so `/memories/…` falls to the
     # `StateBackend` default and dies with the helper's own graph state.
-    backend = scratchpad_backend(_Skills(), None)  # type: ignore[arg-type]
+    backend = scratchpad_backend(_Skills(), None, permits=lambda _name: True)  # type: ignore[arg-type]
     assert MEMORY_ROOT not in backend.routes, (
         f"a store-less backend routes {MEMORY_ROOT}, so a helper's write would outlive it and the "
         "plan gate is the only thing that would have refused it — which `helper_profile` removed"
