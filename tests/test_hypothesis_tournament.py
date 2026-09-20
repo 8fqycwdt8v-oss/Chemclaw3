@@ -772,3 +772,32 @@ async def test_a_template_check_that_cannot_be_grounded_is_reported_not_dropped(
     row = result.data["ranked"][0]
     assert row["outcome"]["verdict"] == "not-run"
     assert row["outcome"]["refusal_code"] == "template-unrunnable-here"
+
+
+async def test_a_template_a_deployment_turned_off_is_not_reachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deployment's own switch has to reach this path too, and once it did not.
+
+    `discovered()` is every YAML on disk; `enabled()` is the set `templates_enabled` allows, and it
+    is what the `run_<template>` launchers and therefore `authz.side_effecting_tools()` are built
+    from. Grounding against the wider one let a tournament start a procedure whose launcher is on
+    no agent surface, in no `tool_role_gates` entry an operator wrote and behind no plan gate.
+    """
+    monkeypatch.setattr(settings, "templates_enabled", "hazard-briefing")
+    plan = await ht.ground_check_template(
+        DiscriminatingCheck(
+            hypothesis_id="a",
+            question="which tautomer dominates?",
+            kind="computable",
+            expectation="the 1H form",
+            call=CheckCall(template="tautomer-resolution", subject_note_id="compound-x"),
+        ),
+        "chemist@example.com",
+        [],
+        "corr",
+    )
+
+    assert plan.refused
+    assert plan.refusal_code == "template-unavailable"
+    assert "tautomer-resolution" in plan.refusal_detail

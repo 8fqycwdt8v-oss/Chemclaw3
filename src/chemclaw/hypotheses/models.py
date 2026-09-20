@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 #: How a discriminating check gets answered: by this system's own tools, or by somebody in a lab.
 CheckKind = Literal["computable", "physical"]
@@ -114,23 +114,22 @@ class CheckCall(BaseModel):
     # template's own measured defaults apply.
     template: str = Field(default="")
 
-    @model_validator(mode="after")
-    def _names_one_target(self) -> CheckCall:
-        """Exactly one of tool / job / template, or none at all.
+    @property
+    def named_targets(self) -> list[str]:
+        """The targets this call names — one for a well-formed call, none for a `physical` check.
 
-        **Refused rather than resolved by precedence.** A call naming two targets is a model that
-        did not decide, and picking one for it is a silent choice about which calculation runs —
-        the same class of hidden assumption the whole dispatcher exists to refuse, made by this
-        system rather than by the model. Empty is allowed: a `physical` check names no target.
+        **A property rather than a validator that raises, which was the first attempt and was
+        wrong.** These calls arrive as a model's structured output, and the JSON schema declares
+        `tool`, `job` and `template` as three independent defaulted strings — mutual exclusion is
+        not expressible there, so the only thing between the model and an ambiguous call is one
+        sentence of prompt. Raising made `derive_check` fail with a `ValidationError`, which is
+        non-retryable bad data, so the hypothesis lost its check *entirely*: no outcome, no
+        refusal code, no row — indistinguishable from the model never having answered.
+
+        The dispatcher refuses it instead, with a code, which is the rule every other grounding
+        failure here follows: reported, never raised.
         """
-        named = [name for name in (self.tool, self.job, self.template) if name]
-        if len(named) > 1:
-            raise ValueError(
-                f"a check names one target, not {len(named)}: {sorted(named)}. A tool, a job and "
-                "a template are three different calculations and choosing between them is the "
-                "check's decision, not the dispatcher's."
-            )
-        return self
+        return [name for name in (self.tool, self.job, self.template) if name]
 
 
 class DiscriminatingCheck(BaseModel):

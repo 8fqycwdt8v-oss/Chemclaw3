@@ -496,6 +496,44 @@ async def compare_hypotheses(request: _ComparisonRequest) -> _ComparisonVerdict:
         reset_current_identity(token)
 
 
+def _dispatchable_templates() -> str:
+    """The templates a check may name, read off this deployment rather than written down.
+
+    A hardcoded list in the prompt is a second declaration of the dispatchable set: it does not
+    track `templates_enabled`, so a deployment that turned one off still had the model told about
+    it, and a new template file was invisible until somebody edited this string. Derived here from
+    the same `enabled()` the grounding activity resolves against, with the same two guards applied,
+    so what the model is offered and what it may run are one answer.
+    """
+    from chemclaw.agent.authz import STATE_CHANGING_TOOLS
+    from chemclaw.templates.registry import enabled as enabled_templates
+
+    names = sorted(
+        template.name
+        for template in enabled_templates()
+        if any(getattr(step, "kind", "") == "job" for step in template.steps)
+        and not any(
+            getattr(step, "write_tools", None)
+            or getattr(step, "tool", None) in STATE_CHANGING_TOOLS
+            for step in template.steps
+        )
+    )
+    return ", ".join(f"`{name}` ({_TEMPLATE_HINTS.get(name, 'see its summary')})" for name in names)
+
+
+#: One clause per template saying what question it answers, for the prompt. Names only; a template
+#: absent from this map still appears, with a fallback — the map shapes the prose, never the set.
+_TEMPLATE_HINTS: Mapping[str, str] = {
+    "bond-strength-survey": "which bond breaks first",
+    "conformer-refinement": "the populated conformers and their thermochemistry",
+    "ensemble-free-energy": "free-energy-weighted populations",
+    "microspecies-profile": "which protonation state dominates",
+    "regioselectivity-in-conformer": "which site reacts, averaged over conformers",
+    "stereoisomer-ranking": "which stereoisomer is favoured",
+    "tautomer-resolution": "which tautomer dominates",
+}
+
+
 @durable_activity("background")
 @activity.defn
 async def derive_check(request: _CritiqueRequest) -> DiscriminatingCheck:
@@ -543,13 +581,9 @@ async def derive_check(request: _CritiqueRequest) -> DiscriminatingCheck:
             "3. **A reviewed procedure over a molecule's *derived* forms** — set `call.template` "
             "and `call.subject_note_id`. This is the only shape that can ask about structures "
             "nobody wrote down, because the procedure enumerates them first and calculates over "
-            "what it found: `tautomer-resolution` (which tautomer dominates), "
-            "`microspecies-profile` (which protonation state), `stereoisomer-ranking`, "
-            "`bond-strength-survey` (which bond breaks first), `degradant-triage`, "
-            "`conformer-refinement`, `ensemble-free-energy`, `regioselectivity-in-conformer`, "
-            "`hazard-briefing`. **Prefer one of these where it fits the question**: each carries "
-            "settings that were measured rather than chosen, and a check assembling the same "
-            "steps itself would not have them.\n\n"
+            f"what it found. This deployment runs: {_dispatchable_templates()}. **Prefer one "
+            "where it fits the question**: each carries settings that were measured rather than "
+            "chosen, and a check assembling the same steps itself would not have them.\n\n"
             "Name exactly one of tool, job or template. A call naming two is refused.\n\n"
             "Vary something only when the comparison *is* the check: a ranking across solvents "
             "answers a question a single number cannot. Do not vary a parameter to explore.\n\n"
@@ -787,6 +821,10 @@ class _GroundedTemplate(BaseModel):
     # model `TemplateRunInput` expects rather than as a bare dict.
     template: Template | None = None
     inputs: dict[str, Any] = Field(default_factory=dict)
+    # Resolved in the activity rather than read at the launch site, which is workflow code — the
+    # rule `_GroundedJob.task_queue` already follows and this module's docstring states.
+    task_queue: str = ""
+    run_timeout_seconds: float = 0.0
     ran: str = ""
     refusal_code: str = ""
     refusal_detail: str = ""
@@ -823,10 +861,12 @@ async def ground_check_template(
     git-committed and reviewed — "the pre-approved plan", as `AgentStep` puts it — so what this
     adds is only the rule that the model supplies a pointer and nothing else.
     """
+    from chemclaw.agent.authz import STATE_CHANGING_TOOLS
     from chemclaw.hypotheses.dispatch import defaulted_inputs, ground_template_inputs, structure_of
     from chemclaw.kg.graph import build_graph, note_in
     from chemclaw.templates.registry import _params_model as template_params_model
-    from chemclaw.templates.registry import discovered, unrunnable_reason
+    from chemclaw.templates.registry import enabled as enabled_templates
+    from chemclaw.templates.registry import unrunnable_reason
 
     call = check.call
     if call is None or not call.template:
@@ -836,13 +876,21 @@ async def ground_check_template(
 
     token = set_current_identity(requested_by, frozenset(requested_roles or ()))
     try:
-        template = discovered().get(call.template)
+        # **`enabled()`, not `discovered()`** — the difference is a deployment's own switch.
+        # `discovered()` is every YAML on disk; `enabled()` applies `templates_enabled`, and it is
+        # what `registry.py` builds the `run_<template>` launchers from and what
+        # `authz.side_effecting_tools()` therefore covers. Reading the wider set let a tournament
+        # start a procedure whose launcher is on no agent surface, in no `tool_role_gates` entry an
+        # operator wrote and behind no plan gate: the deployment's off switch reached every path
+        # but this one.
+        by_name = {template.name: template for template in enabled_templates()}
+        template = by_name.get(call.template)
         if template is None:
             return _GroundedTemplate(
                 refusal_code="template-unavailable",
                 refusal_detail=(
-                    f"{call.template!r} is not a template this deployment carries; it has "
-                    f"{sorted(discovered())}"
+                    f"{call.template!r} is not a template this deployment runs; it has "
+                    f"{sorted(by_name)}"
                 ),
             )
         if blocked := unrunnable_reason(template):
@@ -860,8 +908,18 @@ async def ground_check_template(
             return _GroundedTemplate(refusal_code=code, refusal_detail=detail)
 
         declared = {item.name: item.required for item in template.inputs}
-        writes = any(getattr(step, "write_tools", None) for step in template.steps)
-        inputs, input_refusal = ground_template_inputs(declared, smiles, writes)
+        # **Every step kind, not just the agent one.** `write_tools` is `AgentStep`'s field, so a
+        # guard reading only it saw nothing for a `tool` step naming `record_knowledge_note`, which
+        # is the kind a template most often uses. `STATE_CHANGING_TOOLS` is the in-process write
+        # set rather than `side_effecting_tools()`, which counts every declared job as durable work
+        # and would refuse the four chaining templates this feature exists to reach.
+        writes = any(
+            getattr(step, "write_tools", None)
+            or getattr(step, "tool", None) in STATE_CHANGING_TOOLS
+            for step in template.steps
+        )
+        computes = any(getattr(step, "kind", "") == "job" for step in template.steps)
+        inputs, input_refusal = ground_template_inputs(declared, smiles, writes, computes)
         if input_refusal is not None or inputs is None:
             code = input_refusal.code if input_refusal else "template-cannot-be-grounded"
             detail = input_refusal.detail if input_refusal else "the call could not be grounded"
@@ -878,6 +936,8 @@ async def ground_check_template(
         return _GroundedTemplate(
             template=template,
             inputs=resolved,
+            task_queue=settings.background_task_queue,
+            run_timeout_seconds=settings.template_run_timeout_seconds,
             ran=f"{template.name}(smiles=[[{call.subject_note_id}]])"
             + (f" — defaults: {defaulted}" if defaulted else ""),
         )
@@ -1137,10 +1197,17 @@ async def read_check_result(
 ) -> _CheckVerdict:
     """Read a computed value against what the check said would support or refute the hypothesis.
 
-    **This is a model judging a real number, which is a different act from a model inventing an
-    argument.** The number came off a calculator that was handed a structure read out of the
-    corpus; nothing here can change what was computed. What is being asked is the reading, and the
-    raw value travels beside it so a chemist can check the reading rather than take it.
+    **This is a model judging a real result, which is a different act from a model inventing an
+    argument.** What is being read came off a calculator that was handed a structure read out of
+    the corpus; nothing here can change what was computed. What is being asked is the reading, and
+    the raw value travels beside it so a chemist can check the reading rather than take it.
+
+    **For a template check the input is one step further removed, and saying so is the point.**
+    Every shipped template ends in an `agent` step, so what arrives is that step's report over its
+    own steps' real results rather than a calculator's output directly. The judgement is still
+    about something computed — a template with no `job` step is refused precisely so this stays
+    true — but the reading is now a reading of a reading, and `defang` is applied to it here for
+    the same reason it is applied to every other span this system did not produce itself.
 
     `inconclusive` is the expected answer more often than not and the prompt says so. `CLAUDE.md`
     is explicit that a decision turning on a difference inside GFN2-xTB's error bar has to say so
@@ -1670,6 +1737,27 @@ class HypothesisTournamentWorkflow:
             return {}
 
         out: dict[str, CheckOutcome] = {}
+        # **A call naming two targets is refused before the budget sees it.** Reported rather than
+        # resolved by precedence: a model that named both a tool and a template did not decide, and
+        # picking one for it is this system making a silent choice about which calculation runs.
+        # Reported rather than *raised*, too — a validator that rejected the model's structured
+        # output lost the whole check, leaving a hypothesis with no outcome and no reason.
+        ambiguous = [
+            check
+            for check in computable
+            if check.call is not None and len(check.call.named_targets) > 1
+        ]
+        for check in ambiguous:
+            targets = sorted(check.call.named_targets) if check.call else []
+            out[check.hypothesis_id] = _refused(
+                check,
+                "names-two-targets",
+                f"this check named {len(targets)} targets ({targets}); a tool, a job and a "
+                "template are three different calculations and choosing between them is the "
+                "check's decision, not the dispatcher's",
+            )
+        computable = [check for check in computable if check not in ambiguous]
+
         affordable = computable[: limits.max_calculations]
         for check in computable[limits.max_calculations :]:
             out[check.hypothesis_id] = _refused(
@@ -1751,9 +1839,12 @@ class HypothesisTournamentWorkflow:
             out[check.hypothesis_id] = outcome.model_copy(
                 update={
                     "verdict": reading.verdict,
-                    # **Celled, because this is the one place model prose enters a note body.**
-                    # `reading.reason` is free text from a model and `outcome.detail` is a tool's
-                    # own output; `field_body` embeds this whole summary in the `hypothesis-field`
+                    # **Celled, because this is where model prose enters a note body.**
+                    # `reading.reason` is free text from a model, and since the template half
+                    # shipped `outcome.detail` can be too: every shipped template ends in an
+                    # `agent` step, so a template check's `detail` is that step's report over the
+                    # steps' real results rather than a calculator's own output. `field_body`
+                    # embeds this whole summary in the `hypothesis-field`
                     # note that `record_note` commits, so an unstripped `[[...]]` here would mint a
                     # real graph edge on the note being written. `proposal_body` has celled every
                     # model-authored span since it was written; before this branch shipped, `detail`
@@ -1957,8 +2048,18 @@ class HypothesisTournamentWorkflow:
                         max_parallel_steps=limits.max_parallel_steps,
                     ),
                     id=f"{workflow.info().workflow_id}-template-{check.hypothesis_id}",
-                    task_queue=settings.background_task_queue,
-                    retry_policy=BAD_DATA_RETRY,
+                    task_queue=plan.task_queue,
+                    # **The bound `start_template_run` passes, and the bound this run was gated
+                    # on.** `run_ceiling_problems` refuses a template whose waves outrun
+                    # `template_run_timeout_seconds` and runs here inside `unrunnable_reason` — so
+                    # launching without the ceiling gated the run on a limit nothing then applied.
+                    # It is also the only bound on the fan-out: an enumeration's size is a property
+                    # of the molecule, so the number of conformer searches inside one check is
+                    # chosen by nobody and wall clock is what caps it.
+                    execution_timeout=timedelta(seconds=plan.run_timeout_seconds),
+                    # No retry policy, matching `start_template_run`. `BAD_DATA_RETRY` would re-run
+                    # the *whole* procedure up to five times on a transient in any step, and a
+                    # template's steps include a metered model turn, which nothing caches.
                     result_type=TemplateRunResult,
                 )
                 for check, plan, definition in launches

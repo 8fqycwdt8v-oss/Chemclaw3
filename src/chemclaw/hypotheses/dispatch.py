@@ -417,11 +417,15 @@ def ground_job_params(
 # a note in the corpus — and a model listing them would be inventing structures, which is the
 # failure this module exists to prevent, in its worst form.
 #
-# A `Template` closes that, and it already existed. Five of the shipped ones are exactly an
-# enumerator feeding a calculation (`enumerate_tautomers` -> `rank_species`,
-# `enumerate_bond_cleavages` -> `survey_bond_strengths`, and three more), with the enumeration
-# passed **by value** into the next step. The sibling fleet's own `SpeciesSet.smiles` says so:
-# "the field Chemclaw3's templates pass straight into `rank_species`, by value".
+# A `Template` closes that, and it already existed. Four of the shipped ones are an enumerator
+# feeding a calculation — `enumerate_tautomers`, `enumerate_protonation_states` and
+# `enumerate_stereoisomers` into `rank_species`, and `enumerate_bond_cleavages` into
+# `survey_bond_strengths` — with the enumeration passed **by value** into the next step. The
+# sibling fleet's own `SpeciesSet.smiles` says so: "the field Chemclaw3's templates pass straight
+# into `rank_species`, by value". A count is written here rather than derived because it is an
+# argument about what already exists rather than a live figure; it was *four* when this was
+# measured, and the first draft said five by counting `conformer-refinement`, whose upstream is a
+# calculation, and `degradant-triage`, which chains nothing at all.
 #
 # **So this is a third target, not a second chaining mechanism**, and the difference is not
 # tidiness. A template carries defaults that were measured rather than chosen —
@@ -443,6 +447,7 @@ def ground_template_inputs(
     declared: Mapping[str, bool],
     structure: str,
     writes: bool,
+    computes: bool,
 ) -> tuple[dict[str, Any], None] | tuple[None, Refusal]:
     """The inputs for a template run, or a `Refusal` naming what it would have needed invented.
 
@@ -456,12 +461,20 @@ def ground_template_inputs(
     gas phase rather than failing — that is the behaviour this relies on and it is deliberate
     there.
 
-    **Fail closed twice.** A required input that is not the structure is refused, because nothing
-    in the record supplies it. And a template whose agent step holds a write tool is refused
-    outright: a discriminating check computes a number, and a procedure that also *acts* is not
-    something a tournament may start on its own. No shipped template declares one today, and that
-    is exactly why the guard belongs here — omission must not make the next one runnable.
+    **Fail closed three times.** A required input that is not the structure is refused, because
+    nothing in the record supplies it. A template that *acts* is refused outright — a check is an
+    observation, and no shipped template holds a write tool today, which is exactly why the guard
+    belongs here: omission must not make the next one runnable. And a template that runs no
+    durable job is refused, because what a check owes its reader is a computed observation: a
+    procedure whose steps are a lookup and a narration returns model prose, which the verdict stage
+    would then read as though a calculator had produced it.
     """
+    if not computes:
+        return None, Refusal(
+            "template-computes-nothing",
+            "this template runs no calculation, so it would answer the check with prose rather "
+            "than a number",
+        )
     if writes:
         return None, Refusal(
             "template-writes",

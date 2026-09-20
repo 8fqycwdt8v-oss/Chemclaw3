@@ -83,11 +83,14 @@ Each hypothesis gets a discriminating check, and the check's `kind` decides what
   `symmetry_numbers=None` on the line means a reaction reported no free energy at all, or that a
   species ranking was computed at sigma=1 — neither of which is visible in the number.
 - A computable check may also name a **reviewed procedure** — `tautomer-resolution`,
-  `microspecies-profile`, `stereoisomer-ranking`, `bond-strength-survey` and the rest. That is the
-  only shape that answers a question about structures *nobody wrote down*: the procedure enumerates
-  a molecule's tautomers, protonation states or breakable bonds and calculates over what it found.
-  Its settings were measured rather than chosen, so where one fits the question it beats assembling
-  the same steps by hand — and the `ran:` line names which inputs stayed at their defaults.
+  `microspecies-profile`, `stereoisomer-ranking`, `bond-strength-survey` and the others this
+  deployment enables. That is the only shape that answers a question about structures *nobody
+  wrote down*: the procedure enumerates a molecule's tautomers, protonation states or breakable
+  bonds and calculates over what it found. Its settings were measured rather than chosen, so where
+  one fits the question it beats assembling the same steps by hand — and the `ran:` line names
+  which inputs stayed at their defaults. Every such procedure ends by writing its own report, so
+  the `detail` you read is a report **over** real results rather than a calculator's output
+  directly; a procedure that runs no calculation at all is refused for exactly that reason.
 - A computable check that could **not** be grounded is reported as not run, and the outcome
   carries a `refusal_code` naming which grounding rule failed — the subject was not a compound
   note, or had no structure, or the tool needs an argument nothing in the record supplies, or the

@@ -1123,15 +1123,17 @@ runs rather than an experiment it proposes.
 
 What that does **not** cover is a substitution series: "which regiochemistry will this reaction
 give", "what does moving the methyl do to the barrier". `rank_species` ranks a candidate set and
-five enumerators produce one, but none of them enumerates *substitution products* — the six in
-`connectors/chem/connector.yaml` are tautomers, protonation states, stereoisomers, bond cleavages,
-torsions and degradants. So the candidate set for a substitution question exists nowhere, and the
+three of the enumerators produce one it can rank, but none enumerates *substitution products* —
+the six in `connectors/chem/connector.yaml` are tautomers, protonation states, stereoisomers, bond
+cleavages, torsions and degradants, of which cleavages feed `survey_bond_strengths`, torsions feed
+`profile_rotation`, and `degradant-triage.yaml` argues at length that ranking degradants by free
+energy is the wrong question. So the candidate set for a substitution question exists nowhere, and the
 check has to fall back to whatever compounds happen to be written down.
 
 **Where it belongs is the sibling fleet**, by this repo's own boundary rule: an enumerator is a
 primitive whose identity is derivable from its inputs, a pure RDKit traversal with no judgement in
 it, so it is a server in `Chemclaw3-mcp` — and the ranking, the cache and the template that chains
-them stay here. The template to add beside it is the sixth of the same shape
+them stay here. The template to add beside it is a fifth of the same shape
 (`enumerate_substitutions` → `rank_species`), which is a data file rather than a decision.
 
 Anchors: `data/templates/tautomer-resolution.yaml` (the shape to copy),

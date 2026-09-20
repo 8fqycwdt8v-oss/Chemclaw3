@@ -27,13 +27,12 @@ this exact pattern:
 | `microspecies-profile` | `enumerate_protonation_states` → `rank_species` |
 | `stereoisomer-ranking` | `enumerate_stereoisomers` → `rank_species` |
 | `bond-strength-survey` | `enumerate_bond_cleavages` → **`survey_bond_strengths`** |
-| `degradant-triage` | `enumerate_degradants` → `screen_hazards` |
 
 `bond-strength-survey` is one of the three jobs the ADR refused, already wired to the enumerator
 whose entries its spec is documented as copying. The sibling repo's `SpeciesSet.smiles` says so in
 as many words: *"the field Chemclaw3's templates pass straight into `rank_species`, by value."*
 
-**So the fix is not a new chaining mechanism. It is a third thing a check may name.** Building a
+**So the fix is not a new chaining mechanism. It is a third thing a check may name.** (The table above said five when this plan was written; measured, it is four — `degradant-triage` chains nothing, which its own step `purpose` states.) Building a
 second enumerate-then-rank path would duplicate a reviewed seam and lose what that seam already
 carries — `tautomer-resolution` pins `level: thorough` on a *measured* finding (acetylacetone ranks
 99.9% keto from one embedding per tautomer and is ~80% enol in reality, because the enol's
@@ -114,6 +113,24 @@ as `Any` with `arbitrary_types_allowed`, which crossed the Temporal wire as a ba
 at the child launch. Typing it `Template | None` round-trips it as the model `TemplateRunInput`
 expects, and `mypy --strict` then forced the `None` to be handled at the launch site rather than
 assumed away — which is a real refusal path, not a formality.
+
+**A third review round found eight defects, and the two worst were my own prose.** "Five of the
+nine templates chain an enumerator into a calculation" is **four** — `degradant-triage` chains
+nothing and says so in its own step `purpose`, and `conformer-refinement`'s upstream is a
+calculation. "Two of the nine end in an `agent` step" is **all nine**, which understated this
+ADR's own cost disclosure by more than four times. Both claims had propagated into four files
+each. The rule CLAUDE.md opens with is that prose is evidence about what its author believed; both
+of these were one script away from being checked, and I wrote them from reading rather than
+measuring.
+
+The code findings were the same class as the last round — a rule applied to a narrower scope than
+it was written for. The dispatchable set read `discovered()` instead of `enabled()`, so a
+deployment's own template switch was the one gate this path did not pass. The write guard read
+`AgentStep.write_tools` alone, so a `tool` step naming `record_knowledge_note` was invisible to
+it. The child launched with no `execution_timeout`, having just been gated by
+`run_ceiling_problems` *against* that timeout. And the `model_validator` refusing an ambiguous call
+raised on the model's own structured output, which is non-retryable bad data — so the check it was
+protecting vanished entirely rather than being reported.
 
 **Verification.** `make lint` and `make type` (944 files) green; `skill-validate` and
 `prose-validate` pass; 199 tests across the dispatch, tournament, hypotheses and templates suites,
