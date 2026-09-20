@@ -1920,7 +1920,13 @@ promtool     # https://github.com/prometheus/prometheus/releases  (bundled in th
 ```
 
 Drop each on `PATH` and `make helm-validate` renders the chart, checks 31 and 35 manifests against
-the Kubernetes schemas, and runs `promtool check rules` over both monitoring arms. This is the same
+the Kubernetes schemas, and runs `promtool check rules` over both monitoring arms. It also reports
+`Skipped: 1` and `Skipped: 3` — the kinds kubeconform has no schema for, which
+`tests/test_deploy_chart.py::test_every_resource_kubeconform_skips_is_one_this_file_declared` now
+takes off the tool's own summary line per arm and matches against what that file declares. Read the
+count there rather than here: the first time this target was actually run, the file's pinned figure
+turned out to be a number of *kinds* compared against a number of *resources*, and the second
+skipped kind sat in a set whose stated reason was that it could not be skipped. This is the same
 lesson the "sandbox is not offline" note in `CLAUDE.md` records about Docker: a tool that is merely
 *absent* reads exactly like a tool that is unavailable, and believing the second costs coverage in
 silence. The chart half of this repository's gate is the half a unit test cannot reach.

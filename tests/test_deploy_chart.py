@@ -17,6 +17,7 @@ silently rather than loudly, which is why they earn a test of their own.
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -785,29 +786,23 @@ def test_a_comment_never_swallows_the_line_after_it() -> None:
 # along. The exemption had never been checked against what kubeconform actually did.
 _CATALOG_VALIDATED_KINDS = frozenset({"ServiceMonitor", "PodMonitor", "PrometheusRule"})
 
-# The one kind kubeconform genuinely has no schema for, so `make helm-validate` runs with
-# `-ignore-missing-schemas` and *skips* it rather than failing. Keeping the set explicit is what
+# The kinds kubeconform genuinely has no schema for, so `make helm-validate` runs with
+# `-ignore-missing-schemas` and *skips* them rather than failing. Keeping the set explicit is what
 # stops that flag from being a hole: a skipped kind is a deliberate entry here, not a silent pass.
-_UNVALIDATED_KINDS = frozenset({"Route"})
-
-# Kinds the chart *can* render but does not on the shipped values, so they never reach kubeconform
-# in the validation render and cannot appear in its `Skipped` count.
 #
-# `AlertmanagerConfig` is gated on `monitoring.alertmanager.enabled`, which is off because the chart
-# cannot invent a receiver — a Slack webhook or a PagerDuty key is a deployment fact. It would be
-# skipped rather than validated if it did render (the datreeio catalog carries a `v1alpha1` schema
-# for it and no `v1beta1`), which is why it is recorded here rather than quietly left out: the point
-# of these three sets is that every kind in the template text is accounted for by *someone*.
-_UNRENDERED_BY_DEFAULT_KINDS = frozenset({"AlertmanagerConfig"})
-
-# What the CI gate reports for the chart as it stands: every rendered resource validated except the
-# OpenShift `Route`. Pinned as a number because the two sets above are claims about kubeconform's
-# behaviour, and a claim about someone else's tool is worth stating in a form that can be compared
-# against its actual output rather than believed.
-_EXPECTED_SKIPPED_RESOURCES = 1
+# `Route` is the OpenShift one, absent from both kubeconform's defaults and the datreeio catalog.
+# `AlertmanagerConfig` is the second and it was **not listed here until the gate was first run**: it
+# sat in a set called `_UNRENDERED_BY_DEFAULT_KINDS`, whose stated reason was that it "never reaches
+# kubeconform in the validation render and cannot appear in its `Skipped` count". That is false —
+# `make helm-validate`'s union arm sets `monitoring.alertmanager.enabled=true`, so it renders, it
+# reaches kubeconform, and it is skipped (the catalog carries a `v1alpha1` schema for it and no
+# `v1beta1`). A kind is exempt because of what kubeconform can do with it, which is a property of
+# the kind; whether a given arm renders it is a property of the arm, and conflating the two put the
+# second skipped kind in the set defined as the one that cannot be skipped.
+_UNVALIDATED_KINDS = frozenset({"Route", "AlertmanagerConfig"})
 
 
-def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
+def test_only_the_known_crds_are_unvalidated_by_kubeconform() -> None:
     """Pin which kinds the chart renders, so `-ignore-missing-schemas` cannot hide a new one.
 
     `make helm-validate` must pass `-ignore-missing-schemas` because the chart renders an OpenShift
@@ -818,7 +813,10 @@ def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
 
     The cost of the flag is that an unknown kind is skipped instead of rejected. This test buys that
     back offline: every kind the chart renders is a core Kubernetes kind, a CRD the catalog covers,
-    or the one genuinely unvalidated kind named above.
+    or one of the genuinely unvalidated kinds named above. It is a claim about the *kinds*; how many
+    **resources** of them each render arm emits is
+    `test_every_resource_kubeconform_skips_is_one_this_file_declared`, which is a different question
+    and used to be answered by comparing the two.
     """
     core_kinds = {
         "ConfigMap",
@@ -832,27 +830,118 @@ def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
         "ServiceAccount",
     }
     rendered = set(re.findall(r"^kind:\s*([A-Za-z]+)", _all_templates(), flags=re.MULTILINE))
-    unexpected = (
-        rendered
-        - core_kinds
-        - _CATALOG_VALIDATED_KINDS
-        - _UNVALIDATED_KINDS
-        - _UNRENDERED_BY_DEFAULT_KINDS
-    )
+    unexpected = rendered - core_kinds - _CATALOG_VALIDATED_KINDS - _UNVALIDATED_KINDS
     assert not unexpected, (
         f"the chart renders kind(s) {sorted(unexpected)} that kubeconform may silently skip — "
         "add a schema location, or add them to _UNVALIDATED_KINDS with the reason"
     )
     # Both exemptions must stay earned: a kind the chart stopped rendering is stale bookkeeping,
     # and — the failure this test itself had — an exemption nobody ever checked against the tool.
-    stale = (
-        _UNVALIDATED_KINDS | _CATALOG_VALIDATED_KINDS | _UNRENDERED_BY_DEFAULT_KINDS
-    ) - rendered
+    stale = (_UNVALIDATED_KINDS | _CATALOG_VALIDATED_KINDS) - rendered
     assert not stale, f"exempted kind(s) the chart no longer renders: {sorted(stale)}"
-    assert len(_UNVALIDATED_KINDS) == _EXPECTED_SKIPPED_RESOURCES, (
-        "the count CI reports as `Skipped` must match what this file claims is unvalidated; "
-        "if they diverge, one of them is wrong about kubeconform rather than about the chart"
+
+
+def _kubeconform_arms() -> list[list[str]]:
+    """The flag sets `make helm-validate` actually pipes through kubeconform.
+
+    Read out of the `Makefile`'s own `for flags in …` loop rather than restated here, for the reason
+    `test_the_union_render_covers_every_switch_this_chart_ships_off` gives about that same literal:
+    a copy of the list is a second answer to the question, and it stays green while the gate's
+    render narrows underneath it. Split on whitespace rather than with a second `shlex` pass,
+    because the `--set-json` values carry the quotes helm needs and a posix split strips them.
+    """
+    makefile = (DEPLOY.parent / "Makefile").read_text()
+    loop = next(line for line in makefile.splitlines() if line.lstrip().startswith("for flags in"))
+    body = loop.split("for flags in", 1)[1].rsplit("; do", 1)[0]
+    return [arm.split() for arm in shlex.split(body)]
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None or shutil.which("kubeconform") is None,
+    # "helm is not installed" verbatim, because that literal is what `tests/conftest.py`'s epilogue
+    # counts; worded freshly, this skip was invisible to the count.
+    reason="helm is not installed (or kubeconform is): both render and validate the chart",
+)
+def test_every_resource_kubeconform_skips_is_one_this_file_declared() -> None:
+    """Take the skipped count off the tool, for every arm the gate validates.
+
+    `_UNVALIDATED_KINDS` is a claim about what kubeconform does, and this file used to check it by
+    comparing `len(_UNVALIDATED_KINDS)` against a literal `_EXPECTED_SKIPPED_RESOURCES = 1` sitting
+    six lines below it. Both halves were wrong in a way only running the tool could show, and it had
+    never been run here — `kubeconform` and `promtool` are absent from the sandbox, so `make
+    helm-validate` exits before its first render and the whole target had been taken on trust.
+
+    Run: the default arm reports `Skipped: 1` and the **union arm reports `Skipped: 3`** — two
+    `Route`s (the release's own and `chemclaw-mcp-face`'s) plus the `AlertmanagerConfig` that a set
+    named `_UNRENDERED_BY_DEFAULT_KINDS` claimed could never appear in this count. So the comparison
+    was between a number of *kinds* and a number of *resources*, which are different quantities
+    (`tasks/lessons.md`: two numbers on different bases do not compare, however carefully each was
+    measured); it held at `1 == 1` only because the default arm happens to render exactly one Route.
+
+    The deeper defect is what the comment claimed for itself: the literal was pinned, in its own
+    words, "in a form that can be compared against its actual output rather than believed" — and
+    nothing compared it. Its only reader was an assertion against the `len()` of a set in the same
+    file. So the count is now *derived* from the render per arm and *measured* against kubeconform's
+    own summary line, which is the only thing that can settle a claim about somebody else's tool.
+    """
+    arms = _kubeconform_arms()
+    assert len(arms) >= 2, (
+        "`make helm-validate` no longer renders more than one arm through kubeconform, so the "
+        "off-by-default templates reach it for the first time in an operator's cluster"
     )
+    for arm in arms:
+        render = _render(*arm).stdout
+        declared = [
+            f"{document.get('metadata', {}).get('name')} {document['kind']}"
+            for document in yaml.safe_load_all(render)
+            if document and document.get("kind") in _UNVALIDATED_KINDS
+        ]
+        result = subprocess.run(
+            [
+                "kubeconform",
+                "-strict",
+                "-summary",
+                "-ignore-missing-schemas",
+                "-kubernetes-version",
+                _kube_version(),
+                "-schema-location",
+                "default",
+                "-schema-location",
+                "https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/"
+                "{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json",
+            ],
+            input=render,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, (
+            f"kubeconform rejects the render for arm {arm or '(shipped defaults)'}:\n"
+            f"{result.stdout}{result.stderr}"
+        )
+        reported = re.search(r"Skipped:\s*(\d+)", result.stdout)
+        assert reported is not None, (
+            f"kubeconform printed no `Skipped` count for arm {arm or '(shipped defaults)'}, so "
+            f"this test cannot see what the flag hid:\n{result.stdout}"
+        )
+        assert int(reported.group(1)) == len(declared), (
+            f"kubeconform skipped {reported.group(1)} resource(s) on arm "
+            f"{arm or '(shipped defaults)'} and this file accounts for {len(declared)} "
+            f"({sorted(declared)}). `-ignore-missing-schemas` is hiding a kind — name it in "
+            "_UNVALIDATED_KINDS with the reason, or give kubeconform a schema location for it"
+        )
+
+
+def _kube_version() -> str:
+    """The Kubernetes version the gate validates against, off the `Makefile`'s own default.
+
+    Restating `1.29.0` here would be the defect this whole test exists to correct, one variable
+    over: a second declaration of a number, checked by nothing against the first.
+    """
+    makefile = (DEPLOY.parent / "Makefile").read_text()
+    match = re.search(r"^KUBE_VERSION \?= (\S+)$", makefile, flags=re.MULTILINE)
+    assert match is not None, "the Makefile no longer declares KUBE_VERSION"
+    return match.group(1)
 
 
 def test_something_actually_scrapes_the_metrics_endpoint() -> None:
