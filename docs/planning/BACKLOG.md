@@ -1114,6 +1114,32 @@ re-proposal a future session can settle in an afternoon and a fabricated number 
       component list, which `agent.condense` deliberately does not have because a share document has none.
       Wants its own ADR and a measurement of what the extra column costs on a real corpus.
 
+## A `computable` discriminating check is derived and then not run
+
+`durable/hypothesis_tournament.py::run_computable_check` returns `not-run` with its reason. The
+tournament identifies which of its checks this system's own tools could settle — a GFN2-xTB energy,
+a pKa, a solubility, a site-reactivity index — and then hands every one of them to the chemist
+anyway, which is the half of the original ask ("if it can be done with tools available, it should
+simply happen") that did not ship.
+
+**It is deliberate, and the reason is the one that makes it hard.** A check arrives as free text
+("compare the barrier for the two pathways"), and running it means producing tool arguments — which
+molecule, which conformer, which solvent, which charge. Every one of those is a field a model
+fills in when asked to fill a schema, and a fabricated argument produces a real number that a
+chemist reads as computed. That is strictly worse than not running it: a missing verdict is
+visible, a confidently wrong one is not.
+
+**What closes it** is a structured check type whose arguments are validated against the target
+tool's own signature *offline*, the way a warehouse `connection:` block already is — so a check
+that cannot be grounded in the record is refused at the schema rather than guessed at. That work is
+the same shape as `agent/protocol_design_tools.py::structure_experiment_request`, which already
+refuses a `stated` slot without a verbatim quote from the chemist, and it is worth reading first.
+
+Anchors: `durable/hypothesis_tournament.py::run_computable_check`,
+`hypotheses/models.py::DiscriminatingCheck`, `ingest/eln/warehouse/binding.py` (the offline
+signature check to copy). The file that shows this has fired is `run_computable_check` losing its
+early return. Decision: `D-2026-09-20-a-ranking-is-evidence-a-critic-is-not-a-gate`.
+
 ## Everything else
 
 The long-form findings live in [`docs/archive/findings-2026-08.md`](../archive/findings-2026-08.md),

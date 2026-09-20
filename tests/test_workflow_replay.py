@@ -52,6 +52,11 @@ UNCOVERED_BACKGROUND_WORKFLOWS = frozenset(
         # that same code wrote". It earns a fixture at its first change, not at its first commit.
         "CheckInWorkflow",
         "CommitmentSyncWorkflow",
+        # New in this change, and uncovered for `CheckInWorkflow`'s reason rather than a weaker
+        # one: it has never shipped, so there is no older command sequence a fixture could prove
+        # compatibility with, and a history recorded from it now would be the self-certifying shape
+        # `recorded_workflow_histories.py` rejects. It earns a fixture at its first change.
+        "HypothesisTournamentWorkflow",
         "ConnectorJobWorkflow",
         "DevelopmentReportWorkflow",
         "DigestWorkflow",

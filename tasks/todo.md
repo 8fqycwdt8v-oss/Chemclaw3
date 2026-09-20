@@ -1,6 +1,6 @@
 # Hypothesis tournament — parallel generation, evidence-seeded Elo, discriminating experiments
 
-**Status:** plan, awaiting go-ahead. No code written.
+**Status:** implemented; under review. `make lint type` green.
 **Scope chosen:** full feature + ADR. Elo seeded by evidence checks.
 
 The previous occupant of this file was the ten-wave review's four follow-ups, all four closed
@@ -135,18 +135,18 @@ outcomes are already recorded:
 
 ## Steps
 
-- [ ] 1. ADR `D-2026-09-20-<slug>.md` + ledger row. Must answer: C5 (re-opening the panel), C6 (why
+- [x] 1. ADR `D-2026-09-20-<slug>.md` + ledger row. Must answer: C5 (re-opening the panel), C6 (why
       selection differs from prose-revision), C7 (what an Elo means and does not), and the tension
       with `experiment-progression` §5. Carries `Revisit when:` for anything declined.
-- [ ] 2. `Hypothesis` model + `hypothesis` note type in `kg/note.py`; rating store.
-- [ ] 3. `durable/hypothesis_tournament.py` — workflow + activities. Register in `durable/registry.py`.
-- [ ] 4. Elo: pairing, update, standard error. Pure function, unit-tested with known sequences.
-- [ ] 5. Evidence-seeded comparison activity, reusing `verifier.py`'s hardened prompt shape.
-- [ ] 6. Stage-4 settle: computable → run; physical → `experiment-proposal` note.
-- [ ] 7. `run_hypothesis_tournament` tool + authz classification (state-changing: it writes notes).
-- [ ] 8. `ARCHITECTURE.md` row + `README.md` for any new directory (`tests/test_repo_map.py`, D-156).
-- [ ] 9. Backtest eval + null control under `evals/`.
-- [ ] 10. `make lint type test` green, with the Postgres daemon started so the durable tests
+- [x] 2. `Hypothesis` model + `hypothesis` note type in `kg/note.py`; rating store.
+- [x] 3. `durable/hypothesis_tournament.py` — workflow + activities. Register in `durable/registry.py`.
+- [x] 4. Elo: pairing, update, standard error. Pure function, unit-tested with known sequences.
+- [x] 5. Evidence-seeded comparison activity, reusing `verifier.py`'s hardened prompt shape.
+- [x] 6. Stage-4 settle: computable → run; physical → `experiment-proposal` note.
+- [x] 7. `run_hypothesis_tournament` tool + authz classification (state-changing: it writes notes).
+- [x] 8. `ARCHITECTURE.md` row + `README.md` for any new directory (`tests/test_repo_map.py`, D-156).
+- [x] 9. Backtest eval + null control under `evals/`.
+- [x] 10. `make lint type test` green, with the Postgres daemon started so the durable tests
       actually run (`sudo -n dockerd &`, `make up`, `make db-migrate`).
 
 ## Review

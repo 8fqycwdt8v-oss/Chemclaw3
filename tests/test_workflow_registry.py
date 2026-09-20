@@ -242,6 +242,10 @@ _MUST_FAIL = frozenset(
         "OptimizationCampaignWorkflow",
         "ObservationPromotionWorkflow",
         "DevelopmentReportWorkflow",
+        # Started by `rank_competing_hypotheses` for a named chemist and polled through
+        # `get_durable_job_status`, so it is on the job path: a parked tournament is a job the
+        # chemist is waiting on that never answers and never fails.
+        "HypothesisTournamentWorkflow",
         # The durable wait (D-2026-08-29). Somebody is holding a question open and somebody else is
         # waiting on the answer, so a bug in it must surface as a failed wait rather than park: a
         # parked wait is a request that stays in an inbox forever with nothing listening, which is

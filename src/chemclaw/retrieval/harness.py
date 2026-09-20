@@ -18,7 +18,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from chemclaw.core.ids import stable_hash
-from chemclaw.kg.note import Note, require_note_slug, split_link, strip_links
+from chemclaw.kg.note import Note, as_cell, require_note_slug, split_link
 from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
 from chemclaw.retrieval.fanout import sweep_sources
 
@@ -372,8 +372,11 @@ def _as_evidence(content: str) -> str:
 
     The text is preserved rather than truncated or dropped: a reader still sees what the source
     said, on one line, followed by the provenance that is actually its own.
+
+    The two rules now live in `kg.note.as_cell`, because model-authored text needs them for the same
+    reason retrieved text does and a third copy would be the drift this docstring warns about.
     """
-    return " ".join(strip_links(content).split())
+    return as_cell(content)
 
 
 def _citation(source_note_id: str) -> str:
