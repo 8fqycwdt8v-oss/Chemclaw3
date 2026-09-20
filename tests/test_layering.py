@@ -456,6 +456,15 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
 # exception_and_the_dict_says_which` is the same claim in a form that fails when it stops being
 # true.
 _ALLOWED_LAZY_EDGES: dict[Edge, str] = {
+    ("chemclaw.hypotheses", "chemclaw.core"): (
+        "`dispatch.structure_of` validates a subject's SMILES with `core.chem`, which imports "
+        "RDKit. Lazy rather than module-scope because `hypotheses` is imported inside Temporal's "
+        "workflow sandbox: that is exactly where `hypotheses.rating`'s module-scope numpy reached "
+        "`os.putenv` and was refused "
+        "(`D-2026-09-20-a-ranking-is-evidence-a-critic-is-not-a-gate`), and a second heavy C "
+        "extension at import time is the same bet twice. The call sites are "
+        "all in activities, where the import is free"
+    ),
     ("chemclaw.science", "chemclaw.publish"): (
         "cached_compute offers a freshly computed primitive to the external results store. Lazy "
         "for two reasons that both matter: `science` is the pure-computation layer and must not "

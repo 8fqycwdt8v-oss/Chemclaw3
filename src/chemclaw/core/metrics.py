@@ -444,6 +444,13 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_hypothesis_screen_rejections_total": (
         "Hypotheses removed before the tournament, by which mechanical rule removed them."
     ),
+    # A deployment whose checks never run looks identical from outside to one whose questions all
+    # need a laboratory. The code says which: a corpus whose compounds carry no structures, an
+    # actor with no role for an expensive trigger and a model naming a field the job does not
+    # declare are three different repairs.
+    "chemclaw_hypothesis_check_refusals_total": (
+        "Discriminating checks that were not run, by the grounding rule that refused them."
+    ),
     "chemclaw_notes_publish_failures_total": (
         "Knowledge notes that could not be written into the graph; the knowledge was lost."
     ),
@@ -1193,6 +1200,7 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # one of them means the judge never answered.
     "chemclaw_hypothesis_tournaments_total": ("outcome",),
     "chemclaw_hypothesis_screen_rejections_total": ("rule",),
+    "chemclaw_hypothesis_check_refusals_total": ("code",),
     "chemclaw_tokens_total": ("profile",),
     "chemclaw_input_tokens_total": ("profile",),
     "chemclaw_output_tokens_total": ("profile",),

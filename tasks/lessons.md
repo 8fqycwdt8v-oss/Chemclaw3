@@ -1436,3 +1436,18 @@ free number at the end of its section.
     unreviewed skill may touch its own author's turns — and I wrote a whole ADR section on the wrong
     one. When a short instruction turns on a quantifier and I can state the distinguishing property in
     a single sentence, I can ask instead.
+
+94. **A rule I have already written down is not a rule I am following — the fix is to change the
+    command I type, not to re-read the lesson.** Lesson 29 says never put a gate on the left of a
+    pipe when its exit code is load-bearing. This session I did it three times anyway
+    (`make type 2>&1 | tail -3 && …`, then `make lint 2>&1 | tail -2 && …`, twice), and the second
+    one **committed over a red `make lint`** — the same failure mode, the same shape, one commit
+    after I had written "the pipe masked it again" in my own working notes. Re-reading the lesson
+    did not stop the third.
+
+    What stops it is a command that cannot express the failure: run the gate on its own line, read
+    the exit code (`echo EXIT=$?`, or `${PIPESTATUS[0]}` if a pipe is genuinely wanted for the
+    output), and never join it to the next step with `&&`. A gate and the action it gates belong in
+    two separate calls, because then there is no pipeline for a status to get lost in. **The
+    general shape: when I break a written rule twice, the remedy is a mechanical one that removes
+    the opportunity, not a stronger intention.**

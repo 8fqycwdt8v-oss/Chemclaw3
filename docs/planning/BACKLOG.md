@@ -1114,31 +1114,40 @@ re-proposal a future session can settle in an afternoon and a fabricated number 
       component list, which `agent.condense` deliberately does not have because a share document has none.
       Wants its own ADR and a measurement of what the extra column costs on a real corpus.
 
-## A `computable` discriminating check is derived and then not run
+## A discriminating check can name a note, and cannot name a tool's output
 
-`durable/hypothesis_tournament.py::run_computable_check` returns `not-run` with its reason. The
-tournament identifies which of its checks this system's own tools could settle — a GFN2-xTB energy,
-a pKa, a solubility, a site-reactivity index — and then hands every one of them to the chemist
-anyway, which is the half of the original ask ("if it can be done with tools available, it should
-simply happen") that did not ship.
+`D-2026-09-20-a-swept-axis-is-a-choice-an-invented-argument-is-a-lie` dispatches a check onto 9 of
+the 12 shipped calc jobs and refuses the other three on one ground: `scan_coordinate` needs
+`atoms`, `profile_rotation` a `torsion`, `survey_bond_strengths` `cleavages`, and **nothing in the
+number those jobs return says which atoms were driven** — a scan over the wrong pair reads exactly
+like a scan over the right one.
 
-**It is deliberate, and the reason is the one that makes it hard.** A check arrives as free text
-("compare the barrier for the two pathways"), and running it means producing tool arguments — which
-molecule, which conformer, which solvent, which charge. Every one of those is a field a model
-fills in when asked to fill a schema, and a fabricated argument produces a real number that a
-chemist reads as computed. That is strictly worse than not running it: a missing verdict is
-visible, a confidently wrong one is not.
+**The enumerators that would ground them already exist**, which is the part worth writing down
+because the ADR's first draft got it wrong. `connectors/chem/connector.yaml` declares
+`enumerate_bond_cleavages`, `enumerate_torsions`, `enumerate_tautomers`,
+`enumerate_protonation_states`, `enumerate_stereoisomers` and `enumerate_degradants`, served from
+`Chemclaw3-mcp`; `BondCleavageSpec` is documented as "one bond to break, **as `chem`'s
+`enumerate_bond_cleavages` reports it**". The two halves were built to fit each other and nothing
+joins them.
 
-**What closes it** is a structured check type whose arguments are validated against the target
-tool's own signature *offline*, the way a warehouse `connection:` block already is — so a check
-that cannot be grounded in the record is refused at the schema rather than guessed at. That work is
-the same shape as `agent/protocol_design_tools.py::structure_experiment_request`, which already
-refuses a `stated` slot without a verbatim quote from the chemist, and it is worth reading first.
+What is missing is the joint. `CheckCall.subjects` carries note ids and nothing else, so a check
+cannot say "enumerate this compound's cleavages, then compute their bond strengths": the
+enumeration's output is a set of structures that exist in no note. Closing it means **a second
+grounded source beside the corpus** — a deterministic tool whose output *is* the candidate set,
+under the same rule (the model selects the enumerator and its subject; it writes no member of the
+result).
 
-Anchors: `durable/hypothesis_tournament.py::run_computable_check`,
-`hypotheses/models.py::DiscriminatingCheck`, `ingest/eln/warehouse/binding.py` (the offline
-signature check to copy). The file that shows this has fired is `run_computable_check` losing its
-early return. Decision: `D-2026-09-20-a-ranking-is-evidence-a-critic-is-not-a-gate`.
+That is also what the chemist's "which molecule will be generated" question needs.
+`rank_species` can already rank a candidate set, but only one every member of which is already a
+written-down note, so a substitution product nobody has recorded cannot be ranked — and a
+substitution-product enumerator is the one shape the six above do not cover, so it is two pieces
+rather than one.
+
+Anchors: `hypotheses/models.py::CheckCall`, `hypotheses/dispatch.py::STRUCTURE_FIELDS`,
+`connectors/calc/specs.py::BondCleavageSpec`. The file that shows this has fired is
+`tests/test_hypothesis_dispatch.py::test_the_dispatchable_job_set_is_exactly_what_is_pinned`, whose
+pinned set of 9 would have to grow. Decision:
+`D-2026-09-20-a-swept-axis-is-a-choice-an-invented-argument-is-a-lie`.
 
 ## Everything else
 

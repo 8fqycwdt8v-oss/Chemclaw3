@@ -73,10 +73,31 @@ Each hypothesis gets a discriminating check, and the check's `kind` decides what
 
 - **`physical`** — it needs a laboratory. The tournament writes an `experiment-proposal` note for
   the top few and returns their ids. It is a proposal: a human decides whether to run it.
-- **`computable`** — this system holds tools that could answer it, **and it was not run**.
-  Automatic dispatch is not built, because turning a free-text check into tool arguments means
-  inventing which molecule, conformer and solvent. Never report such a check as computed. If it
-  matters, call the calculator yourself with arguments you can justify from the record.
+- **`computable`** — this system's own tools can answer it, and the tournament runs it when every
+  argument is *grounded*. Grounded means each molecule comes from a `compound` note in this
+  deployment's corpus, resolved to a SMILES already in the record, and every other argument is
+  either the target's own default or a value the job itself validates. The result carries a `ran:`
+  line naming the exact call — the swept axis where there was one, and the job's own **unstated
+  defaults**. Read it before reading the verdict. A number computed in the default solvent answers
+  a different question from one computed in the solvent the hypothesis is about, and
+  `symmetry_numbers=None` on the line means a reaction reported no free energy at all, or that a
+  species ranking was computed at sigma=1 — neither of which is visible in the number.
+- A computable check that could **not** be grounded is reported as not run, and the outcome
+  carries a `refusal_code` naming which grounding rule failed — the subject was not a compound
+  note, or had no structure, or the tool needs an argument nothing in the record supplies, or the
+  swept axis is not one the job validates. Report the reason; do not work around it. A tool taking
+  atom indices, a torsion or a bond to cleave is refused because choosing them is choosing the
+  answer — enumerate the candidates with a deterministic tool first, then calculate over the
+  enumeration.
+- Only the top few checks run, bounded by `hypothesis_max_calculations`, and a swept axis is
+  bounded separately by `hypothesis_max_sweep_values` — one check sweeping a dozen solvents is a
+  dozen conformer searches, which the check cap does not see. The ranking decides which checks are
+  worth the compute, so one below the cut is reported as not run *for budget* rather than queued;
+  an over-wide axis is refused rather than trimmed, because the values are reported beside the
+  answer and dropping some would make that report wrong.
+
+Never report a check as computed because its `kind` says `computable`. The verdict and the `ran:`
+line are what say it happened.
 
 ## 5. Then name one experiment
 

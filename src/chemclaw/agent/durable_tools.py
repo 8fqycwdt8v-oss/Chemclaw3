@@ -59,6 +59,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.identity_context import get_current_correlation_id, get_current_roles
 from chemclaw.core.ids import canonical_text, stable_hash
+from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.temporal_client import connect
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_signals import record_job_started
@@ -765,6 +766,7 @@ async def rank_competing_hypotheses(question: str, context: str = "") -> str:
         requested_by=require_actor(),
         requested_roles=sorted(get_current_roles()),
         correlation_id=get_current_correlation_id() or "",
+        session_id=get_current_session_id() or "",
     )
     client = await connect()
     workflow_id = _tournament_id(request)
