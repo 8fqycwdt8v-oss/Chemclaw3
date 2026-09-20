@@ -28,10 +28,15 @@ Skills hold judgment; connectors hold capability (deterministic tools). Anything
 generates enters the graph **directly**, labelled `created_by: agent`, and is corrected rather than
 pre-approved (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). What the agent cannot touch
 at all is its own behaviour: no path writes a `SKILL.md` (`agent/skill_backend.py`'s
-`SkillsReadOnlyRefusal`), so the shared tree changes only through a reviewed commit to `skills/` in
-git — and a chemist's own skills, which act on their turns alone, only through `POST /skills/mine`,
-a route a person calls (`D-2026-09-18-a-skill-a-chemist-keeps-is-behaviour-they-approved`). A turn
-may read both and write neither.
+`SkillsReadOnlyRefusal`), on any tier. **Which route changes a tier follows its blast radius**
+(`D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius`): `skills/` acts on every
+deployment and changes only through a reviewed commit in git; the organisation's tier acts on every
+turn here and changes through `POST /skills/org`, which takes the privileged role; a chemist's own
+skills act on their turns alone and change through `POST /skills/mine`, a route they call
+(`D-2026-09-18-a-skill-a-chemist-keeps-is-behaviour-they-approved`). A turn may read all three and
+write none. The two stored tiers hold their versions rather than their history in git, so a bad
+organisation-wide skill is reverted by naming a body the store already holds
+(`D-2026-09-20-a-revert-is-a-pointer-when-there-is-no-commit-to-revert`).
 
 ## The code: `src/chemclaw/`
 

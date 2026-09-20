@@ -109,9 +109,9 @@ def test_the_tier_needs_a_store_and_not_an_actor(store: InMemoryStore) -> None:
     assert MEMORY_ROOT not in anonymous.routes
 
     skills = skills_backend(AgentProfile(name="default"), [])
-    assert ORG_SKILLS_ROOT not in scratchpad_backend(
-        skills, None, permits=lambda _name: True
-    ).routes, "with no store there is nowhere to keep one"
+    assert (
+        ORG_SKILLS_ROOT not in scratchpad_backend(skills, None, permits=lambda _name: True).routes
+    ), "with no store there is nowhere to keep one"
 
 
 def test_no_turn_may_write_the_organisations_tier(store: InMemoryStore) -> None:
@@ -170,11 +170,9 @@ def test_every_method_this_tier_exposes_is_either_a_read_or_a_refusal(
         "grep": lambda: backend.grep("Do it"),
         "agrep": lambda: asyncio.run(backend.agrep("Do it")),
         "download_files": lambda: backend.download_files(["/house-workup/SKILL.md"]),
-        "adownload_files": lambda: asyncio.run(
-            backend.adownload_files(["/house-workup/SKILL.md"])
-        ),
+        "adownload_files": lambda: asyncio.run(backend.adownload_files(["/house-workup/SKILL.md"])),
     }
-    refusals = {
+    refusals: dict[str, Any] = {
         "write": lambda: backend.write("/x/SKILL.md", "b"),
         "awrite": lambda: asyncio.run(backend.awrite("/x/SKILL.md", "b")),
         "edit": lambda: backend.edit("/x/SKILL.md", "a", "b"),
@@ -212,10 +210,11 @@ def test_every_method_this_tier_exposes_is_either_a_read_or_a_refusal(
 def test_a_profile_that_narrows_to_nothing_reaches_no_body(store: InMemoryStore) -> None:
     """The gate is at the backend, not only in the prompt — the hole this tier shipped without.
 
-    `docs/planning/BACKLOG.md` recorded the personal tier narrowed in the prompt alone: `ls` returned
-    the names and `read_file` returned the bodies to a profile that advertised none. A tier acting on
-    *everyone* with the same gap would make the `skills-removed.yaml` control arm meaningless for
-    every deployment that published one, so this drives the predicate rather than the listing.
+    `docs/planning/BACKLOG.md` recorded the personal tier narrowed in the prompt alone: `ls`
+    returned the names and `read_file` returned the bodies to a profile that advertised none. A
+    tier acting on *everyone* with the same gap would make the `skills-removed.yaml` control arm
+    meaningless for every deployment that published one, so this drives the predicate rather than
+    the listing.
     """
     asyncio.run(save_org_skill(store, "house-workup", _BODY, activated_by="admin-oid"))
     backend = org_skills_backend(store, lambda _name: False)
@@ -298,7 +297,7 @@ def test_a_bad_org_skill_is_one_call_away_from_the_bytes_that_stood_before(
 
 
 def test_a_revert_cannot_name_a_document_that_was_never_active(store: InMemoryStore) -> None:
-    """The pointer can only point at history — which is the whole difference from an ordinary write."""
+    """The pointer can only point at history, which is the difference from an ordinary write."""
     asyncio.run(save_org_skill(store, "house-workup", _BODY, activated_by="admin-oid"))
 
     assert not asyncio.run(
@@ -332,7 +331,8 @@ def test_the_version_history_is_evicted_rather_than_refused(store: InMemoryStore
     """A cap on history must never stop a fix being published — the opposite of the row cap.
 
     Oldest-activated goes, which is `scratchpad.BoundedStoreBackend`'s tiebreak taken for its
-    reason: it is the only ordering the store carries, and a revert target anybody reaches is recent.
+    reason: it is the only ordering the store carries, and the version anybody reverts to is a
+    recent one.
     """
     original = settings.agent_org_skill_versions_max
     settings.agent_org_skill_versions_max = 2
