@@ -141,6 +141,26 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The sibling fleet, because sixteen tests in this suite read it and had **never run in CI**:
+      # all of `tests/test_sibling_manifest_agreement.py` — whose subject is
+      # `D-2026-09-07-a-claim-about-another-repository-is-checked-by-reading-it` — plus the
+      # `test_context_floor.py` arms that check `SERVED_ELSEWHERE_ALLOWANCE` and `PREFIX_BOUND`,
+      # which is the derivation both compaction defaults come from, plus the `calc` and `rxnlabel`
+      # key-contract arms. They skip honestly rather than passing, which is why nothing was red —
+      # and a guard that is green because it is absent is the defect class this repository cites
+      # most. Found by a wave-10 audit; given a checkout they all pass (103 tests).
+      #
+      # `main`, deliberately: this checks agreement with what that repository *ships*, so a
+      # cross-repo change lands there first and this gate then holds the pair. No token — the
+      # sibling is public, and `persist-credentials: false` keeps this checkout from carrying
+      # write access into a test run.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: 8fqycwdt8v-oss/Chemclaw3-mcp
+          ref: main
+          path: .sibling/Chemclaw3-mcp
+          persist-credentials: false
+
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
@@ -175,8 +195,14 @@ jobs:
       # Lint and type used to ride along on this line and now run in `static` above, in parallel.
       # They are still gates and still block a merge; what changed is that they no longer report
       # their answer eleven minutes after they knew it.
+      # `CHEMCLAW_MCP_REPO` is what the sixteen cross-repo tests read; without it they skip, and
+      # `tests/conftest.py`'s epilogue then names what the run is not evidence about. With the
+      # checkout above they run, so that epilogue block should be absent from a CI log — its
+      # presence means this variable stopped reaching them.
       - name: Test with the coverage floor
         run: make cov
+        env:
+          CHEMCLAW_MCP_REPO: ${{ github.workspace }}/.sibling/Chemclaw3-mcp
 
       - name: Validate knowledge graph
         run: make kg-validate

@@ -67,7 +67,8 @@ and the reasoning there applies unchanged.
 
 **Revisit when:** a session store that this repository's migrator does not own is added — that is,
 when `session_store_dsn` may legitimately point at a database with no `schema_migrations` table. The
-file that would show it is `core/config/database.py`; the test that would red is
+file that would show it is `core/config/service.py`, where `session_store_dsn` is declared; the
+test that would red is
 `tests/test_service.py::test_a_database_with_no_migration_ledger_takes_the_pod_out_of_the_route`.
 
 ## What keeps it true

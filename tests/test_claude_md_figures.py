@@ -29,13 +29,37 @@ _CLAUDE_MD = Path(__file__).resolve().parents[1] / "CLAUDE.md"
 #: Identifiers that contain digits but assert nothing about a commit.
 _NOT_A_FIGURE = re.compile(r"D-\d{4}-\d{2}-\d{2}|D-\d{3}\b|\b\d{4}-\d{2}-\d{2}\b|\b20\d{2}\b")
 
-#: A figure: four digits or more, written plainly or with thousands separators.
-_FIGURE = re.compile(r"\b\d{1,3}(?:,\d{3})+\b|\b\d{4,}\b")
+#: A figure: **three** digits or more, written plainly or with thousands separators, and not the
+#: fractional part of a decimal (`0.007 s` is one number, not a `007`).
+#:
+#: **The floor was four digits, and the flagship figure of the section this guard was written for
+#: sat under it.** `CLAUDE.md` opened by saying the decision record held "680 ADRs" — inside the
+#: paragraph that explains why load-bearing figures were removed from that section — and it was
+#: wrong the day it was written (683 on disk then, 691 now). A wave-10 audit found it by counting;
+#: this guard could not, because `680` is three digits. Measured before lowering the floor: three
+#: digits flags exactly the two argued figures below plus the decimal this pattern now excludes,
+#: while two digits flags eighteen and would make the allowlist the document.
+#:
+#: What no digit pattern can reach is a figure **spelled as a word** — the same audit found "Six
+#: places read one" against a file holding sixty-one such assertions, and "two of them asserting an
+#: absence" against at least eight. That is a review matter, and saying so here is better than
+#: implying this check covers it.
+_FIGURE = re.compile(r"\b\d{1,3}(?:,\d{3})+\b|(?<![\d.])\d{3,}\b")
 
 #: Figures `CLAUDE.md` may state, each with the reason it cannot go stale. A figure that names a
 #: measurement does not belong here — name its symbol in the prose instead. This map may not
 #: outlive its figures: `test_no_allowance_is_stale` fails on an entry the file no longer contains.
-_ALLOWED: dict[str, str] = {}
+_ALLOWED: dict[str, str] = {
+    "157": (
+        "a figure quoted *as wrong*: the skip count prose claimed while the suite skipped 216. "
+        "Its staleness is the point being made, so it cannot go stale — and the sentence names "
+        "`tests/conftest.py`'s epilogue as what holds the live number."
+    ),
+    "216": (
+        "the true skip count when the figure above was measured wrong, quoted for the same "
+        "reason and in the same sentence. Neither is a claim about today."
+    ),
+}
 
 
 def _figures(text: str) -> list[str]:
@@ -81,6 +105,13 @@ def test_the_rule_can_fail() -> None:
     mutates the file it guards leaves the tree dirty when it fails.
     """
     assert _figures("the ceiling went to 44,500 and the trigger to 74,500") == ["44,500", "74,500"]
-    assert _figures("it binds 113 tools costing 33310 tokens") == ["33310"]
+    # Both, at the three-digit floor. This line asserted `== ["33310"]` while the floor was four
+    # digits, so it pinned the gap: a tool count is exactly the figure this guard exists for, and
+    # `680 ADRs` sat in the same blind spot until a wave-10 audit counted the directory by hand.
+    assert _figures("it binds 113 tools costing 33310 tokens") == ["113", "33310"]
+    # A decimal is one number. Without the `(?<![\d.])` guard, lowering the floor read the
+    # fractional part of `0.007 s` — a real figure in CLAUDE.md — as a `007`.
+    assert _figures("a 0.007 s repeat and a 0.955 recall") == []
     assert _figures("see D-2026-09-05, written 2026-09-05, which narrows D-005") == []
+    # Still not figures: a small count a reader can check at a glance, and a section marker.
     assert _figures("four layers, three predicates, §4, 25 iterations") == []

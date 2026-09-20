@@ -5,9 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this system is, today
 
 **This section states what is true. It does not say how it got that way** — that is
-`docs/decisions/`, 680 ADRs with an index, and it used to be 444 lines here, 56% of this file. That
-changelog was 44% of the words and carried most of the falsifiable surface: audited, its load-bearing
-figures were *mostly wrong*, including a spend cap it called "ships at 0" after two raises, a tool
+`docs/decisions/`, one file per ADR with a ledger row each in `docs/decisions/README.md`, and it used
+to be a changelog in this file taking up over half of it. That changelog carried most of this file's
+falsifiable surface: audited, its load-bearing figures were *mostly wrong*, including a spend cap it called "ships at 0" after two raises, a tool
 count whose base had moved under the subtraction it was making, and a bolded headline saying no
 specialist team ships 68 lines above a bolded headline saying one does
 (`D-2026-09-19-a-refusal-that-cannot-expire-is-not-a-decision`). **No figure appears in this section.** Where a
@@ -153,9 +153,10 @@ and a turn runs Python through it. Propose a *local* exec path and it is refused
 sandboxed one and it is an ordinary connector question. There is no `WebSearch`/`WebFetch`, and that
 one is the no-egress posture, which holds.
 
-**Shapes upstream never promised.** Six places read one; `tests/test_upstream_surface.py` asserts
-every one in a single file, each naming the module that would break, two of them asserting an
-*absence* so upstream fixing something turns the workaround red. `session_store.message_from_row` is
+**Shapes upstream never promised.** `tests/test_upstream_surface.py` asserts every one of them in a
+single file, each naming the module that would break, and some asserting an *absence* so upstream
+fixing something turns the workaround red. **How many there are is that file's own length** — its
+header says so, and this sentence used to state a count the file explicitly refuses to state. `session_store.message_from_row` is
 the one function allowed to turn a `session_messages` row back into a message, and the shape stamp
 has exactly one definition (`agent/message_migration.py`).
 

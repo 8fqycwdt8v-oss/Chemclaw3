@@ -1792,7 +1792,9 @@ _DISARMED_ALERTS = ("ChemclawEgressGuardDisarmed", "ChemclawEgressPreloadDisarme
 
 @pytest.mark.skipif(
     shutil.which("helm") is None or shutil.which("promtool") is None,
-    reason="helm and promtool are what render and evaluate the rule",
+    # "helm is not installed" verbatim, because that literal is what `tests/conftest.py`'s
+    # epilogue counts; worded freshly, this skip was invisible to the count.
+    reason="helm is not installed (or promtool is): both render and evaluate the rule",
 )
 def test_a_single_disarmed_pod_is_what_these_alerts_are_for() -> None:
     """`max(...) < 1` over a per-pod gauge cannot fire while any one pod is armed.

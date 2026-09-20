@@ -517,6 +517,10 @@ source_paths = [
     "src/chemclaw/kg/note.py",
     "src/chemclaw/kg/record.py",
     "src/chemclaw/kg/git_writer.py",
+    # Added by the wave-10 audit, which found the `_MARK_DELIVERED` lease fence revertable
+    # green over 222 tests. Every statement here is a lease or state transition whose wrong
+    # answer is a publication booked that never happened.
+    "src/chemclaw/publish/outbox.py",
     "src/chemclaw/science/calc/store.py",
     "src/chemclaw/templates/resolve.py",
 ]
