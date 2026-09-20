@@ -289,18 +289,31 @@ def test_recorded_runs_aggregate_across_passes_and_an_empty_file_is_refused(
     """
     first = tmp_path / "a.json"
     second = tmp_path / "b.json"
-    run = ArmRun(
-        task_id="dl-01",
-        arm="helper",
-        quality=1.0,
-        billed_tokens=1,
-        wall_clock_seconds=1.0,
-        delegated=True,
+
+    def recorded(*, delegated: bool) -> ArmRun:
+        """Built through the constructor, because `load_recorded_runs` validates what it reads.
+
+        The second pass used to be `run.model_copy(update={"delegated": False})`, and
+        `tests/test_model_copy_fixtures.py` flagged it on the day this file was written: `src/`
+        obtains an `ArmRun` through `model_validate`, so a fixture that assigns the observation
+        this whole module exists to record is not crossing the boundary production crosses. It is
+        also the one field whose value is the finding, which makes it the worst one to assign past
+        a check.
+        """
+        return ArmRun(
+            task_id="dl-01",
+            arm="helper",
+            quality=1.0,
+            billed_tokens=1,
+            wall_clock_seconds=1.0,
+            delegated=delegated,
+        )
+
+    delegating = recorded(delegated=True)
+    first.write_text(
+        json.dumps([delegating.model_dump(), delegating.model_dump()]), encoding="utf-8"
     )
-    first.write_text(json.dumps([run.model_dump(), run.model_dump()]), encoding="utf-8")
-    second.write_text(
-        json.dumps([run.model_copy(update={"delegated": False}).model_dump()]), encoding="utf-8"
-    )
+    second.write_text(json.dumps([recorded(delegated=False).model_dump()]), encoding="utf-8")
     loaded = delegation_run.load_recorded_runs([first, second])
     assert [item.delegated for item in loaded] == [True, True, False]
 

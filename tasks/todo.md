@@ -80,6 +80,16 @@ mock cannot script a handoff: `available_tool_names()` does not carry the handof
 its docstring claims all six, so the peer arm lands in `undelegated` — honest ITT, left as a BACKLOG
 paragraph because three validators read that function.
 
+**One of these four points caught another, on the day it landed.** OP3's guard
+(`test_every_model_copy_fixture_that_skips_a_check_its_model_applies_is_argued`, merged in #421)
+failed CI on #422 against OP1's brand-new `tests/test_delegation_run.py`: a fixture built the second
+recorded pass with `ArmRun.model_copy(update={"delegated": False})`, and `src/` obtains an `ArmRun`
+through `model_validate`, so the fixture was not crossing the boundary production crosses. It was
+also the single field whose value is the entire finding of that module, which makes it the worst one
+to assign past a check. Rebuilt through the constructor; reverting the fixture reds the guard again.
+That is the mechanism doing what the review kept saying mechanisms are for — the instance would have
+gone unnoticed, and OP1 had run neither that guard nor `test_docstring_paths.py`.
+
 **A CI failure that was not the PR's, established rather than asserted.** `check` went red on #421
 with two *timing* tests. The PR changed **zero files under `src/`** and neither test imports anything
 it did change; both pass 3-of-3 serially on an unloaded machine. One of the two is tabulated in
