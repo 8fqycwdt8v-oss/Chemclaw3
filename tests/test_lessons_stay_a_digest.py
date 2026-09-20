@@ -385,3 +385,27 @@ def test_rule_1_states_the_recurrence_count_the_archives_hold() -> None:
         "can only grow, and a digest understating it understates the risk the rule exists to "
         "warn about."
     )
+
+
+def test_every_cross_reference_inside_the_file_resolves() -> None:
+    """The file cites its own rules by number, and folding is when those break.
+
+    Rule 42 points at rule 38 for the timing half, rule 1 at rule 67 for the version that removes
+    the hazard instead of managing it, rule 11 at rule 85. Those pointers are the only thing that
+    keeps a rule from restating its neighbour, so a dangling one is a rule that has quietly
+    become a duplicate. Cheap, derived, and the counterpart to the citations in `src/` and
+    `tests/`: a renumbering breaks both and nothing else in the gate reads either.
+    """
+    text = _lessons_text()
+    numbers = _rule_numbers()
+    referenced = {
+        int(match)
+        for pattern in (r"[Rr]ule (\d+)", r"[Ll]esson (\d+)", r"#(\d+)\b")
+        for match in re.findall(pattern, text)
+    }
+    print(f"{len(referenced)} rule numbers referenced from inside the file")
+    dangling = sorted(referenced - numbers)
+    assert not dangling, (
+        f"tasks/lessons.md points at rule(s) {dangling}, which it does not define. A rule keeps "
+        "its number wherever it moves; repair the pointer in the same commit as the fold."
+    )
