@@ -82,13 +82,19 @@ Each hypothesis gets a discriminating check, and the check's `kind` decides what
   a different question from one computed in the solvent the hypothesis is about, and
   `symmetry_numbers=None` on the line means a reaction reported no free energy at all, or that a
   species ranking was computed at sigma=1 — neither of which is visible in the number.
+- A computable check may also name a **reviewed procedure** — `tautomer-resolution`,
+  `microspecies-profile`, `stereoisomer-ranking`, `bond-strength-survey` and the rest. That is the
+  only shape that answers a question about structures *nobody wrote down*: the procedure enumerates
+  a molecule's tautomers, protonation states or breakable bonds and calculates over what it found.
+  Its settings were measured rather than chosen, so where one fits the question it beats assembling
+  the same steps by hand — and the `ran:` line names which inputs stayed at their defaults.
 - A computable check that could **not** be grounded is reported as not run, and the outcome
   carries a `refusal_code` naming which grounding rule failed — the subject was not a compound
   note, or had no structure, or the tool needs an argument nothing in the record supplies, or the
-  swept axis is not one the job validates. Report the reason; do not work around it. A tool taking
+  swept axis is not one the job validates. Report the reason; do not work around it. A job taking
   atom indices, a torsion or a bond to cleave is refused because choosing them is choosing the
-  answer — enumerate the candidates with a deterministic tool first, then calculate over the
-  enumeration.
+  answer — where a procedure enumerates those candidates first, name it instead
+  (`bond-strength-survey` is exactly this), and where none does, the check is `physical`.
 - Only the top few checks run, bounded by `hypothesis_max_calculations`, and a swept axis is
   bounded separately by `hypothesis_max_sweep_values` — one check sweeping a dozen solvents is a
   dozen conformer searches, which the check cap does not see. The ranking decides which checks are

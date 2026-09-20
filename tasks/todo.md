@@ -58,26 +58,26 @@ authorization gap the last round found on the job half cannot reappear here.
 
 ## Steps
 
-- [ ] 1. `hypotheses/dispatch.py` — the template half, pure: `ground_template_inputs(declared,
+- [x] 1. `hypotheses/dispatch.py` — the template half, pure: `ground_template_inputs(declared,
       structure)` returning the inputs mapping or a `Refusal`. Fail closed on a required input that
       is not the structure.
-- [ ] 2. `CheckCall` gains `template: str`. A call naming more than one of tool/job/template is
+- [x] 2. `CheckCall` gains `template: str`. A call naming more than one of tool/job/template is
       refused rather than resolved by precedence — precedence is a silent choice.
-- [ ] 3. `ground_check_template` activity: resolve the subject, run the template's own pre-flight,
+- [x] 3. `ground_check_template` activity: resolve the subject, run the template's own pre-flight,
       return a `_GroundedTemplate` carrying the **resolved** template pinned into it (the same
       rule `TemplateRunInput.template` states: an edit afterwards cannot change a live run).
-- [ ] 4. `_settle_templates`: launch `TemplateWorkflow` as a child under the shared budget. A
+- [x] 4. `_settle_templates`: launch `TemplateWorkflow` as a child under the shared budget. A
       template runs a job inside it, so it costs one calculation.
-- [ ] 5. `report.py` / `_template_line`: the `ran:` line names the template, the subject note and
+- [x] 5. `report.py` / `_template_line`: the `ran:` line names the template, the subject note and
       the inputs left at their defaults — same disclosure rule as the other two halves.
-- [ ] 6. `derive_check` prompt: teach the third shape, and that a template is **preferred** where
+- [x] 6. `derive_check` prompt: teach the third shape, and that a template is **preferred** where
       one fits, because it carries defaults a check cannot supply.
-- [ ] 7. Tests: a ratchet deriving the dispatchable template set from the shipped catalogue; a
+- [x] 7. Tests: a ratchet deriving the dispatchable template set from the shipped catalogue; a
       refusal for a template needing a non-structure input; a refusal for a call naming two
       targets; end-to-end through a stubbed child workflow; the budget covering templates.
-- [ ] 8. ADR superseding nothing and closing the trigger, `BACKLOG.md` row deleted in the same
+- [x] 8. ADR superseding nothing and closing the trigger, `BACKLOG.md` row deleted in the same
       commit, `SKILL.md` updated.
-- [ ] 9. `make lint type test` green with the daemon up, then PR and merge.
+- [x] 9. `make lint type test` green with the daemon up, then PR and merge.
 
 ## What this will still not do
 
@@ -90,4 +90,33 @@ enumerator, which is a `Chemclaw3-mcp` question rather than this repo's.
 
 ## Review
 
-(to fill in on completion)
+**The plan survived contact, which is unusual here and is worth saying why.** The design work was
+done before any code: reading the sibling repo's enumerators to see what they actually return, and
+then finding that `data/templates/` already held five chains of exactly the needed shape. The
+implementation after that was mechanical, because the decision — *a third target, not a second
+mechanism* — had already been made against the evidence.
+
+**What the reading changed.** My first sketch was `CheckCall.enumeration`: name an enumerator, call
+it in the grounding activity, parse its output into the job's field. That would have worked and
+would have been wrong. It rebuilds `TemplateWorkflow`'s substitution and per-step audit, and it
+leaves the check choosing `level` and `ranking` — the two arguments whose correct values *are* the
+reviewed finding. `tautomer-resolution`'s own comment is the evidence: acetylacetone ranks 99.9%
+keto from one embedding per tautomer and is ~80% enol in reality. A dispatcher-side chain gets the
+textbook case backwards and looks entirely reasonable.
+
+**Two guards exist because of what is absent, not what is present.** No shipped template declares
+`write_tools`, and no shipped template requires a second input. Both are refused anyway, because a
+set that is safe today and dispatchable *by omission* is the shape the last review round found four
+times in one diff.
+
+**One thing the plan got wrong and the type checker caught**: `_GroundedTemplate.template` started
+as `Any` with `arbitrary_types_allowed`, which crossed the Temporal wire as a bare dict and failed
+at the child launch. Typing it `Template | None` round-trips it as the model `TemplateRunInput`
+expects, and `mypy --strict` then forced the `None` to be handled at the launch site rather than
+assumed away — which is a real refusal path, not a formality.
+
+**Verification.** `make lint` and `make type` (944 files) green; `skill-validate` and
+`prose-validate` pass; 199 tests across the dispatch, tournament, hypotheses and templates suites,
+including an end-to-end launch of a stand-in `TemplateWorkflow` child — the previous job-half tests
+all refused at grounding, so nothing had ever driven a real child launch before. Full `make test`
+runs against Postgres and Temporal started locally so the Postgres-backed set is not skipped.
