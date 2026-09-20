@@ -42,9 +42,11 @@ came from the record or from the tool.** Three sources and no fourth.
    that carries one.
 2. **Everything else stays at the tool's own default.** A required argument that is neither a
    structure nor the swept axis and has no default is refused, because supplying it is the failure
-   this module exists to prevent. Two tools whose *defaults* are wrong for an arbitrary molecule
-   (`compute_thermochemistry`, `symmetry_number`) are refused by name, since arity does not catch
-   a default that is silently inappropriate.
+   this module exists to prevent. One tool is refused *by name* — `compute_thermochemistry`, whose
+   `symmetry_number` defaults to 1, "no rotational symmetry", which is false for most molecules and
+   silently wrong in the free energy it produces. Arity does not catch a default that is
+   inappropriate rather than absent, which is why the list exists at all and why it is one entry
+   and not a policy.
 3. **One axis may be varied, and only where a vocabulary validates the values** (`solvents`
    today). This is the self-proposed solvent list, and it is allowed for a reason that does not
    generalise: **the harm in invention is a hidden assumption, and a swept axis is the most
@@ -53,16 +55,47 @@ came from the record or from the tool.** Three sources and no fourth.
    by the job's own `precondition` (`require_supported_solvents`) before anything runs. An axis the
    model chose that nothing validates is refused (`axis-not-sweepable`).
 
-**The two halves are separate mechanisms because the surfaces are.** An in-process tool is checked
-against `agent/template_surface.ToolArguments` — the single existing authority for "what does this
-tool accept", used offline via `of_signature` — and a durable job against its manifest's declared
-`params_model`, which is the same authority `prepare_job_launch` validates against, so what reaches
-the child workflow is the payload the job accepted and never the model's proposal.
+**The two halves are separate mechanisms because the surfaces are.** A tool is a connector
+endpoint — measured, every dispatchable one is; none is in-process — so its contract is read from
+the JSON schema its live session advertises, reduced by `agent/template_surface.ToolArguments`, the
+single existing authority for "what does this tool accept". `of_schema` is that reduction and was
+extracted here, because this was the *third* place reading a live tool's schema and the module's
+own header says a third reading is the drift the type was created to prevent. A durable job is
+checked against its manifest's declared `params_model`, which is the same authority
+`prepare_job_launch` validates against, so what reaches the child workflow is the payload the job
+accepted and never the model's proposal.
+
+**And every key the grounding produces has to be one the target declares.** These params models do
+not set `extra="forbid"`, so pydantic's default *drops* an unknown key rather than rejecting it —
+measured, a `solvents` axis handed to `sample_conformers` vanished on validation, the plain
+gas-phase conformer search ran, and the grounded call still reported three solvents compared, one
+of them a name no vocabulary had ever seen. The same held for a structure role the job does not
+take, and on the tool half a swept axis was read by nothing at all. **An argument the dispatcher
+silently discards is the same hidden assumption as one it invents, and worse, because the report
+goes on claiming it.** All three refuse now, and the reported call is built from the *validated
+payload* so that it does not depend on those refusals holding.
+
+**A job that names no subject is not a discriminating check.** Nothing about argument-level
+grounding catches this: `republish_calculations` declares no required field, so "every required
+field is grounded" was vacuously true, and a model naming that string would have had the tournament
+start a corpus-wide push of calculation records to an external result store. Requiring a structure
+from the record is what keeps the set to calculations *about a molecule* — and the ratchet that
+looked like the guard here could not see it either, because `find_job` searches every enabled
+connector while the pin was derived from one bundle.
 
 **Refusal is the default and omission fails closed.** A field this module has not classified makes
 a job undispatchable; it never makes one runnable. Two ratchets pin what that currently admits —
-**12 tools** and **9 of the 12 shipped calc jobs** — and each fails loudly when the set moves, in
-either direction.
+**12 tools** and **9 of the 12 shipped calc jobs**, the job one derived over *every enabled
+connector* rather than one bundle — and each fails loudly when the set moves, in either direction.
+
+The tool pin is narrower than it looks and the ADR says so rather than leaving it to be found: it
+is derived from `resolvable_signatures()`, which needs a local `server/tools.py`, so it covers the
+tools this tree holds and not the **21** an enabled bundle declares and serves from
+`Chemclaw3-mcp`. Those are on the surface a check is dispatched against and are judged there by the
+same live-schema rule; what no reviewer has read is their *defaults*. The blind spot is asserted —
+three bundles, named — for `tests/test_context_floor.SERVED_ELSEWHERE_ALLOWANCE`'s reason: a
+ratchet measuring a smaller system than a turn runs, with nothing saying so, is how a pin becomes
+false while staying green.
 
 **The three refused jobs are refused on the same ground and are the sharpest case for it.**
 `scan_coordinate` needs `atoms`, `profile_rotation` a `torsion`, `survey_bond_strengths`
@@ -80,12 +113,40 @@ choose. `hypothesis_max_sweep_values` (6) is what bounds that. An over-wide axis
 not trimmed**: the swept values are reported beside the answer, so dropping some would make that
 report untrue, which is the failure this whole ADR is about, arriving by the back door.
 
+**One budget over both halves, spent down the ranking.** A tool check is a real semiempirical
+calculation on a cache miss exactly as a job check is, so bounding only the jobs left the
+cheaper-*looking* half free to start one per hypothesis. And the budget is spent in the order the
+fit produced, not the order the generators emitted: taking the first two could refuse the
+**leader's** check for budget while running one that placed last, which inverts the only thing the
+ranking is used for. `_propose` has always taken its own budget off `outcome.ranked`; this is the
+same rule for the more expensive resource. A check past the cut says it placed below the cut —
+never that a calculation "had already started", which is a claim about the allowed checks that
+nothing verified, since the affordable one can itself refuse at grounding and start nothing.
+
 **A check that did not run says why, in a form that counts.** `CheckOutcome.refusal_code` is a
-stable token (`subject-not-a-compound`, `subject-has-no-structure`, `field-cannot-be-grounded`,
-`axis-too-wide`, `over-budget`, …) beside the readable detail, and `CheckOutcome.ran` carries the
-call as it was made, swept axis included. The report's verb comes from `ran`, never from
-`check.kind` — reading it off the kind is how the shipped version printed "(ran; …)" for a check
-nothing had run.
+stable token (`no-subject`, `subject-has-no-structure`, `field-cannot-be-grounded`,
+`axis-not-declared`, `axis-too-wide`, `over-budget`, …) beside the readable detail, and
+`chemclaw_hypothesis_check_refusals_total{code}` counts them — a deployment whose corpus carries no
+structures looks identical from outside to one whose questions all need a laboratory, and the code
+is what separates them. `CheckOutcome.ran` carries the call as it was made, swept axis and the
+job's own unstated defaults included; the report's verb comes from `CheckOutcome.verdict`, never
+from `check.kind` — reading it off the kind is how the shipped version printed "(ran; …)" for a
+check nothing had run.
+
+**The defaults are disclosed because on the job half the degradation is otherwise invisible.** A
+job warns loudly about an unstated `symmetry_numbers` — a reaction reports no ΔG at all, a species
+ranking is computed at sigma=1 and says so — but those warnings live in the structured result and
+the one-line `summary` is what a check reads. Derived from the params model rather than curated, so
+a job that gains an optional field discloses it without anyone remembering to.
+
+**The launch is governed like a chemist's own.** `audited_launch` puts `prepare_job_launch` through
+the same chain a chat turn's launch goes through, so an expensive job a tournament chose leaves an
+audit row that reads like one a person asked for, and the child carries the manifest's
+`publish_to_graph`, `timeout_seconds` and `awaits_answer` — "a field the template path does not
+carry is a field that silently means something else on that path", which was written about exactly
+this mistake one path over. The requester's **roles** ride to both activities: every calc job is
+`expensive: true`, so binding an empty set made `authorize_trigger` decide against an actor holding
+nothing and killed the durable half wherever Entra runs, as an ordinary-looking grounding refusal.
 
 ## Alternatives considered
 
@@ -121,11 +182,28 @@ Verified against the shipped manifests rather than fixtures: the ratchets derive
 `connectors.registry.discovered()` and the jobs' own `model_fields`, so a manifest change that
 widens or narrows what is dispatchable reds the suite.
 
-**Revisit when:** a deterministic enumerator ships that produces the candidate set a refused job
-needs — bond cleavages, rotatable torsions, substitution products — so the check can rank an
-*enumeration* instead of naming indices. That is this repository's existing doctrine that
-enumeration and calculation are separate tools and the order is not optional, and it is the thing
-that would make `scan_coordinate`, `profile_rotation` and `survey_bond_strengths` groundable
-without a model choosing an index. The file that shows it has fired is
+**Revisit when:** a check can name a *tool result* as a subject, rather than only a note id.
+
+The trigger this was first written with — "when a deterministic enumerator ships" — was **already
+met on the day it was written**, and checking rather than assuming is the only reason it did not go
+into the record wrong. `connectors/chem/connector.yaml` declares `enumerate_bond_cleavages`,
+`enumerate_torsions`, `enumerate_tautomers`, `enumerate_protonation_states`,
+`enumerate_stereoisomers` and `enumerate_degradants`, served from `Chemclaw3-mcp`, and
+`BondCleavageSpec`'s own docstring says it is "one bond to break, **as `chem`'s
+`enumerate_bond_cleavages` reports it**" — the two halves were built to fit and nothing joins them.
+That is `D-092`'s failure exactly, the one `CLAUDE.md` names: a condition met in the sibling
+repository that no reader of the ADR was watching.
+
+So the missing piece is not an enumerator. It is that `CheckCall.subjects` carries **note ids and
+nothing else**, so there is no way to express "enumerate the cleavages of this compound, then
+compute their bond strengths" — the enumeration's output is a set of structures that exist in no
+note. Closing it means a second grounded source beside the corpus: a *deterministic* tool whose
+output is the candidate set, with the same rule applied to it (the model selects the enumerator and
+the subject; it writes no member of the result). That also unlocks the scenario this ADR cannot
+serve today — ranking substitution products nobody has written down — and would need a
+substitution-product enumerator, which is the one shape the six above do not cover.
+
+The file that shows it has fired is
 `tests/test_hypothesis_dispatch.py::test_the_dispatchable_job_set_is_exactly_what_is_pinned`, whose
-pinned set would have to grow.
+pinned set of 9 would have to grow: `scan_coordinate`, `profile_rotation` and
+`survey_bond_strengths` are exactly the three whose required field an enumerator produces.

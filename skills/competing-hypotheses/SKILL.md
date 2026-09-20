@@ -74,12 +74,14 @@ Each hypothesis gets a discriminating check, and the check's `kind` decides what
 - **`physical`** — it needs a laboratory. The tournament writes an `experiment-proposal` note for
   the top few and returns their ids. It is a proposal: a human decides whether to run it.
 - **`computable`** — this system's own tools can answer it, and the tournament runs it when every
-  argument is *grounded*. Grounded means each molecule comes from a note in the field's own
-  evidence, resolved to a SMILES that is already in the record, and every other argument is either
-  the tool's own default or a value the job itself validates. The result carries a `ran:` line
-  naming the exact call, including the swept axis where there was one — read it before reading the
-  verdict, because a number computed in the default solvent answers a different question from one
-  computed in the solvent the hypothesis is about.
+  argument is *grounded*. Grounded means each molecule comes from a `compound` note in this
+  deployment's corpus, resolved to a SMILES already in the record, and every other argument is
+  either the target's own default or a value the job itself validates. The result carries a `ran:`
+  line naming the exact call — the swept axis where there was one, and the job's own **unstated
+  defaults**. Read it before reading the verdict. A number computed in the default solvent answers
+  a different question from one computed in the solvent the hypothesis is about, and
+  `symmetry_numbers=None` on the line means a reaction reported no free energy at all, or that a
+  species ranking was computed at sigma=1 — neither of which is visible in the number.
 - A computable check that could **not** be grounded is reported as not run, and the outcome
   carries a `refusal_code` naming which grounding rule failed — the subject was not a compound
   note, or had no structure, or the tool needs an argument nothing in the record supplies, or the

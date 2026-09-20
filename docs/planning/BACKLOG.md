@@ -1114,32 +1114,39 @@ re-proposal a future session can settle in an afternoon and a fabricated number 
       component list, which `agent.condense` deliberately does not have because a share document has none.
       Wants its own ADR and a measurement of what the extra column costs on a real corpus.
 
-## No deterministic enumerator, so a check that would rank candidates has to name them
+## A discriminating check can name a note, and cannot name a tool's output
 
-`D-2026-09-20-a-swept-axis-is-a-choice-an-invented-argument-is-a-lie` dispatches a discriminating
-check onto 9 of the 12 shipped calc jobs and refuses the other three on one ground:
-`scan_coordinate` needs `atoms`, `profile_rotation` a `torsion`, `survey_bond_strengths`
-`cleavages`, and **nothing in the number those jobs return says which atoms were driven** — a scan
-over the wrong pair reads exactly like a scan over the right one.
+`D-2026-09-20-a-swept-axis-is-a-choice-an-invented-argument-is-a-lie` dispatches a check onto 9 of
+the 12 shipped calc jobs and refuses the other three on one ground: `scan_coordinate` needs
+`atoms`, `profile_rotation` a `torsion`, `survey_bond_strengths` `cleavages`, and **nothing in the
+number those jobs return says which atoms were driven** — a scan over the wrong pair reads exactly
+like a scan over the right one.
 
-The same gap is what stops the second half of the chemist's ask. "Which molecule will be generated"
-and "what do the substitution patterns do to the energy" are ranking questions over a *candidate
-set*, and `rank_species` can already rank one — it just has no source for the set except notes that
-already exist, so a substitution product nobody has written down cannot be ranked.
+**The enumerators that would ground them already exist**, which is the part worth writing down
+because the ADR's first draft got it wrong. `connectors/chem/connector.yaml` declares
+`enumerate_bond_cleavages`, `enumerate_torsions`, `enumerate_tautomers`,
+`enumerate_protonation_states`, `enumerate_stereoisomers` and `enumerate_degradants`, served from
+`Chemclaw3-mcp`; `BondCleavageSpec` is documented as "one bond to break, **as `chem`'s
+`enumerate_bond_cleavages` reports it**". The two halves were built to fit each other and nothing
+joins them.
 
-**What closes it** is a deterministic enumerator: rotatable torsions, breakable bonds, substitution
-products at a named position. Each is an RDKit traversal with no judgement in it, which is what
-makes its output groundable — the check then ranks an *enumeration* rather than naming an index,
-and this repository's own doctrine that enumeration and calculation are separate tools and the
-order is not optional is what it inherits. Where it belongs is a question this repo's boundary rule
-answers: an enumerator is a primitive whose identity is derivable from its inputs, so it is a
-server in `Chemclaw3-mcp`, and the ranking stays here.
+What is missing is the joint. `CheckCall.subjects` carries note ids and nothing else, so a check
+cannot say "enumerate this compound's cleavages, then compute their bond strengths": the
+enumeration's output is a set of structures that exist in no note. Closing it means **a second
+grounded source beside the corpus** — a deterministic tool whose output *is* the candidate set,
+under the same rule (the model selects the enumerator and its subject; it writes no member of the
+result).
 
-Anchors: `hypotheses/dispatch.py::STRUCTURE_FIELDS`,
-`tests/test_hypothesis_dispatch.py::test_a_job_needing_a_value_only_a_model_could_supply_refuses`.
-The file that shows this has fired is
+That is also what the chemist's "which molecule will be generated" question needs.
+`rank_species` can already rank a candidate set, but only one every member of which is already a
+written-down note, so a substitution product nobody has recorded cannot be ranked — and a
+substitution-product enumerator is the one shape the six above do not cover, so it is two pieces
+rather than one.
+
+Anchors: `hypotheses/models.py::CheckCall`, `hypotheses/dispatch.py::STRUCTURE_FIELDS`,
+`connectors/calc/specs.py::BondCleavageSpec`. The file that shows this has fired is
 `tests/test_hypothesis_dispatch.py::test_the_dispatchable_job_set_is_exactly_what_is_pinned`, whose
-pinned set would have to grow. Decision:
+pinned set of 9 would have to grow. Decision:
 `D-2026-09-20-a-swept-axis-is-a-choice-an-invented-argument-is-a-lie`.
 
 ## Everything else
