@@ -407,3 +407,89 @@ def ground_job_params(
             "a model filling them in would be inventing them",
         )
     return params, None
+
+
+# ----------------------------------------------------------------------------------- templates
+#
+# **The third thing a check may name, and the one that answers a question about structures nobody
+# wrote down.** A tool takes one note's molecule; a job takes several. Neither can ask about a
+# molecule's *tautomers*, its protonation states or its breakable bonds, because none of those is
+# a note in the corpus — and a model listing them would be inventing structures, which is the
+# failure this module exists to prevent, in its worst form.
+#
+# A `Template` closes that, and it already existed. Five of the shipped ones are exactly an
+# enumerator feeding a calculation (`enumerate_tautomers` -> `rank_species`,
+# `enumerate_bond_cleavages` -> `survey_bond_strengths`, and three more), with the enumeration
+# passed **by value** into the next step. The sibling fleet's own `SpeciesSet.smiles` says so:
+# "the field Chemclaw3's templates pass straight into `rank_species`, by value".
+#
+# **So this is a third target, not a second chaining mechanism**, and the difference is not
+# tidiness. A template carries defaults that were measured rather than chosen —
+# `tautomer-resolution` pins `level: thorough` because acetylacetone ranks 99.9% keto from one
+# embedding per tautomer and is ~80% *enol* in reality, the enol being stabilised by a hydrogen
+# bond that exists in one planar conformer. A chain hand-rolled here would miss that and look
+# entirely reasonable, which is this module's definition of the worst kind of wrong.
+#
+# What the model supplies is unchanged: a name, and a subject note. Everything else is the
+# template's.
+
+#: The one declared input a dispatchable template may require — the same name and for the same
+#: reason as `STRUCTURE_ARGUMENT`. Every shipped template takes `smiles` plus optional extras, so a
+#: template requiring anything else is one whose remaining input a model would have to invent.
+TEMPLATE_STRUCTURE_INPUT = STRUCTURE_ARGUMENT
+
+
+def ground_template_inputs(
+    declared: Mapping[str, bool],
+    structure: str,
+    writes: bool,
+) -> tuple[dict[str, Any], None] | tuple[None, Refusal]:
+    """The inputs for a template run, or a `Refusal` naming what it would have needed invented.
+
+    `declared` is the template's own `inputs` reduced to `name -> required`, built by the caller so
+    this module imports no template code — the same arrangement the job half uses for
+    `params_model`. `writes` says whether any of its `agent` steps declares `write_tools`.
+
+    **Only the structure is supplied, and every optional input is left unset**, which is what makes
+    the template's reviewed defaults the ones that apply. `template_job.TemplateWorkflow` seeds
+    every declared name with `None` before substituting, so an omitted optional input resolves to
+    gas phase rather than failing — that is the behaviour this relies on and it is deliberate
+    there.
+
+    **Fail closed twice.** A required input that is not the structure is refused, because nothing
+    in the record supplies it. And a template whose agent step holds a write tool is refused
+    outright: a discriminating check computes a number, and a procedure that also *acts* is not
+    something a tournament may start on its own. No shipped template declares one today, and that
+    is exactly why the guard belongs here — omission must not make the next one runnable.
+    """
+    if writes:
+        return None, Refusal(
+            "template-writes",
+            "this template has a step holding a side-effecting tool, and a check may compute but "
+            "may not act",
+        )
+    if TEMPLATE_STRUCTURE_INPUT not in declared:
+        return None, Refusal(
+            "template-takes-no-structure",
+            f"this template declares no {TEMPLATE_STRUCTURE_INPUT!r} input, so a subject note has "
+            "nothing to fill",
+        )
+    invented = sorted(
+        name for name, required in declared.items() if required and name != TEMPLATE_STRUCTURE_INPUT
+    )
+    if invented:
+        return None, Refusal(
+            "template-needs-more-than-a-structure",
+            f"this template also requires {invented}, and nothing in the record supplies them — "
+            "a model filling them in would be inventing them",
+        )
+    return {TEMPLATE_STRUCTURE_INPUT: structure}, None
+
+
+def defaulted_inputs(declared: Mapping[str, bool]) -> tuple[str, ...]:
+    """Every declared input left unset, so the run can disclose what defaulted.
+
+    The template half's `defaulted_arguments`. A `solvent` left out is a gas-phase answer, which is
+    a different question from the same calculation in water and is not visible in the number.
+    """
+    return tuple(sorted(name for name in declared if name != TEMPLATE_STRUCTURE_INPUT))

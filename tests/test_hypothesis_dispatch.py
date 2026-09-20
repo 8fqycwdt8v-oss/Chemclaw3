@@ -626,3 +626,98 @@ def test_a_key_the_job_does_not_declare_refuses_rather_than_being_dropped(
     assert params is None
     assert refusal is not None
     assert refusal.code == code
+
+
+#: Every shipped template, since all nine declare `smiles` and nothing else as required. Pinned so
+#: a template that gains a second required input, or an agent step holding a write tool, drops out
+#: loudly rather than by nobody noticing.
+_DISPATCHABLE_TEMPLATES = {
+    "bond-strength-survey",
+    "conformer-refinement",
+    "degradant-triage",
+    "ensemble-free-energy",
+    "hazard-briefing",
+    "microspecies-profile",
+    "regioselectivity-in-conformer",
+    "stereoisomer-ranking",
+    "tautomer-resolution",
+}
+
+
+def test_the_dispatchable_template_set_is_exactly_what_is_pinned() -> None:
+    """Derived from the shipped catalogue, so it tracks the templates rather than a list.
+
+    This is the set that answers a question about structures *nobody wrote down* — five of these
+    chain an enumerator into a calculation, which is the one thing neither the tool half nor the
+    job half can express.
+    """
+    from chemclaw.hypotheses.dispatch import ground_template_inputs
+    from chemclaw.templates.registry import discovered
+
+    found = set()
+    for name, template in discovered().items():
+        declared = {item.name: item.required for item in template.inputs}
+        writes = any(getattr(step, "write_tools", None) for step in template.steps)
+        _inputs, refusal = ground_template_inputs(declared, "CCO", writes)
+        if refusal is None:
+            found.add(name)
+    assert found == _DISPATCHABLE_TEMPLATES, (
+        "the set of templates a hypothesis check may run has changed. One that gained a second "
+        "required input correctly drops out — nothing in the record supplies it. One that appeared "
+        "is runnable unattended by a tournament: read its steps before adding it here."
+    )
+
+
+def test_a_template_requiring_more_than_a_structure_refuses() -> None:
+    """The job half's rule on the template half: a second required input would be invented."""
+    from chemclaw.hypotheses.dispatch import ground_template_inputs
+
+    inputs, refusal = ground_template_inputs({"smiles": True, "target_ph": True}, "CCO", False)
+    assert inputs is None
+    assert refusal is not None
+    assert refusal.code == "template-needs-more-than-a-structure"
+    assert "target_ph" in refusal.detail
+
+
+def test_a_template_whose_step_can_act_refuses() -> None:
+    """A check computes a number; a procedure that also acts is not a tournament's to start.
+
+    No shipped template declares `write_tools` today, which is exactly why the guard is here: a
+    template is otherwise dispatchable by omission, and `AgentStep` says in as many words that a
+    template is not plan-gated because it *is* the pre-approved plan — approved for a person to
+    run, which is not the same as approved for a tournament to start unattended.
+    """
+    from chemclaw.hypotheses.dispatch import ground_template_inputs
+
+    inputs, refusal = ground_template_inputs({"smiles": True}, "CCO", True)
+    assert inputs is None
+    assert refusal is not None
+    assert refusal.code == "template-writes"
+
+
+def test_only_the_structure_is_supplied_and_the_rest_is_disclosed() -> None:
+    """Every optional input stays unset, so the template's own measured defaults apply.
+
+    `tautomer-resolution` pins `level: thorough` on a measured finding — acetylacetone ranks 99.9%
+    keto from one embedding per tautomer and is ~80% enol in reality. Supplying inputs here would
+    be the check overriding a default it has no basis to change; the unset ones are named in the
+    outcome instead, because a gas-phase answer is a different question from the same calculation
+    in water and neither is visible in the number.
+    """
+    from chemclaw.hypotheses.dispatch import defaulted_inputs, ground_template_inputs
+
+    declared = {"smiles": True, "solvent": False}
+    inputs, refusal = ground_template_inputs(declared, "CCO", False)
+    assert refusal is None
+    assert inputs == {"smiles": "CCO"}
+    assert defaulted_inputs(declared) == ("solvent",)
+
+
+def test_a_call_naming_two_targets_is_refused_rather_than_resolved() -> None:
+    """Precedence would be this system silently choosing which calculation runs."""
+    from pydantic import ValidationError
+
+    from chemclaw.hypotheses.models import CheckCall
+
+    with pytest.raises(ValidationError, match="names one target"):
+        CheckCall(tool="predict_pka", template="tautomer-resolution", subject_note_id="compound-x")

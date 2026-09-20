@@ -62,6 +62,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.governed_launch import audited_launch
     from chemclaw.durable.job_record import JobRecord, record_job
     from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.durable.template_job import TemplateRunInput, TemplateRunResult
     from chemclaw.hypotheses.dispatch import SWEEPABLE_FIELDS, Dispatch
     from chemclaw.hypotheses.models import (
         CheckOutcome,
@@ -77,6 +78,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.kg.git_writer import default_writer
     from chemclaw.kg.note import Note, as_cell
     from chemclaw.kg.record import record_note
+    from chemclaw.templates.manifest import Template
 
 from chemclaw.durable.publish import (
     BAD_DATA_RETRY,
@@ -256,6 +258,10 @@ class _FieldLimits(BaseModel):
     # hoisted here with that argument written out. A third one left behind is how the claim stops
     # being true.
     result_max_chars: int = 2000
+    # Pinned here for `TemplateRunInput.max_parallel_steps`' own reason: the bound a template run
+    # enforces has to be the bound it was sized against, and a live settings read inside workflow
+    # code is neither — it is nondeterministic on replay and is not what the ceiling saw.
+    max_parallel_steps: int = 0
 
 
 def _route() -> Any:
@@ -329,6 +335,7 @@ async def resolve_field_limits() -> _FieldLimits:
         max_proposals=settings.hypothesis_max_proposals,
         max_calculations=settings.hypothesis_max_calculations,
         result_max_chars=settings.hypothesis_result_max_chars,
+        max_parallel_steps=settings.orchestrator_max_parallel_children,
     )
 
 
@@ -533,9 +540,20 @@ async def derive_check(request: _CritiqueRequest) -> DiscriminatingCheck:
             "At most "
             f"{settings.hypothesis_max_sweep_values} values: each one is a full conformer "
             "search, and a wider axis is refused rather than trimmed.\n\n"
+            "3. **A reviewed procedure over a molecule's *derived* forms** — set `call.template` "
+            "and `call.subject_note_id`. This is the only shape that can ask about structures "
+            "nobody wrote down, because the procedure enumerates them first and calculates over "
+            "what it found: `tautomer-resolution` (which tautomer dominates), "
+            "`microspecies-profile` (which protonation state), `stereoisomer-ranking`, "
+            "`bond-strength-survey` (which bond breaks first), `degradant-triage`, "
+            "`conformer-refinement`, `ensemble-free-energy`, `regioselectivity-in-conformer`, "
+            "`hazard-briefing`. **Prefer one of these where it fits the question**: each carries "
+            "settings that were measured rather than chosen, and a check assembling the same "
+            "steps itself would not have them.\n\n"
+            "Name exactly one of tool, job or template. A call naming two is refused.\n\n"
             "Vary something only when the comparison *is* the check: a ranking across solvents "
             "answers a question a single number cannot. Do not vary a parameter to explore.\n\n"
-            "You supply tool-or-job, the notes, and at most the swept values. Every other argument "
+            "You supply the target, the notes, and at most the swept values. Every other argument "
             "stays at the calculator's own default — you cannot set a temperature, a charge or an "
             "atom index, and a check that would need one is `physical`. If no listed note is the "
             "right subject, the check is `physical`.\n\n"
@@ -749,6 +767,125 @@ async def run_computable_check(
     except Exception as exc:
         activity.logger.warning("computable check failed for %s: %s", check.hypothesis_id, exc)
         return _refused(check, "tool-failed", f"{call.tool!r} failed: {exc}")
+    finally:
+        reset_current_identity(token)
+
+
+class _GroundedTemplate(BaseModel):
+    """A reviewed procedure whose structure input came from the record, ready to launch.
+
+    Carries the **resolved** template rather than its name, which is `TemplateRunInput.template`'s
+    own rule: pinning the definition into the run is what stops an edit changing something already
+    executing, and what makes a replay deterministic. Grounding happens in an activity because it
+    reads the corpus and runs the template's own pre-flight; the child workflow is started from
+    workflow code, as every child is.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # The resolved definition, not its name — typed so it round-trips the Temporal wire as the
+    # model `TemplateRunInput` expects rather than as a bare dict.
+    template: Template | None = None
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    ran: str = ""
+    refusal_code: str = ""
+    refusal_detail: str = ""
+
+    @property
+    def refused(self) -> bool:
+        """Whether grounding refused, in which case nothing is launched."""
+        return bool(self.refusal_code)
+
+
+@durable_activity("background")
+@activity.defn
+async def ground_check_template(
+    check: DiscriminatingCheck,
+    requested_by: str = "",
+    requested_roles: list[str] | None = None,
+    correlation_id: str = "",
+) -> _GroundedTemplate:
+    """Resolve a template check's subject and run the template's own pre-flight, or refuse.
+
+    Three gates, and the last two are the template path's existing ones rather than new ones:
+
+    1. **The subject resolves** to a `compound` note whose structure parses — `structure_of`, the
+       same gate both other halves use.
+    2. **`ground_template_inputs`** refuses a template that requires anything beyond the structure,
+       or whose agent step holds a write tool.
+    3. **`unrunnable_reason` and the template's own params model** — the pair
+       `templates/registry.start_template_run` runs before any launch. The first says this
+       deployment's connector set can actually execute the steps, which is the runtime half of
+       `make template-validate`; the second validates the inputs against what the template
+       declares.
+
+    Deliberately *not* a fourth gate written here. A template is already human-authored,
+    git-committed and reviewed — "the pre-approved plan", as `AgentStep` puts it — so what this
+    adds is only the rule that the model supplies a pointer and nothing else.
+    """
+    from chemclaw.hypotheses.dispatch import defaulted_inputs, ground_template_inputs, structure_of
+    from chemclaw.kg.graph import build_graph, note_in
+    from chemclaw.templates.registry import _params_model as template_params_model
+    from chemclaw.templates.registry import discovered, unrunnable_reason
+
+    call = check.call
+    if call is None or not call.template:
+        return _GroundedTemplate(
+            refusal_code="no-call", refusal_detail="the check named no template"
+        )
+
+    token = set_current_identity(requested_by, frozenset(requested_roles or ()))
+    try:
+        template = discovered().get(call.template)
+        if template is None:
+            return _GroundedTemplate(
+                refusal_code="template-unavailable",
+                refusal_detail=(
+                    f"{call.template!r} is not a template this deployment carries; it has "
+                    f"{sorted(discovered())}"
+                ),
+            )
+        if blocked := unrunnable_reason(template):
+            # The deployment's own answer, not a bad check: this connector set cannot run the
+            # steps. Reported rather than raised, like every other grounding refusal.
+            return _GroundedTemplate(
+                refusal_code="template-unrunnable-here", refusal_detail=blocked
+            )
+
+        graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
+        smiles, refusal = structure_of(note_in(graph, call.subject_note_id), call.subject_note_id)
+        if refusal is not None or smiles is None:
+            code = refusal.code if refusal else "subject-not-found"
+            detail = refusal.detail if refusal else call.subject_note_id
+            return _GroundedTemplate(refusal_code=code, refusal_detail=detail)
+
+        declared = {item.name: item.required for item in template.inputs}
+        writes = any(getattr(step, "write_tools", None) for step in template.steps)
+        inputs, input_refusal = ground_template_inputs(declared, smiles, writes)
+        if input_refusal is not None or inputs is None:
+            code = input_refusal.code if input_refusal else "template-cannot-be-grounded"
+            detail = input_refusal.detail if input_refusal else "the call could not be grounded"
+            return _GroundedTemplate(refusal_code=code, refusal_detail=detail)
+
+        # The template's own input validation — the same call `start_template_run` makes, so a
+        # tournament run and a chat run are checked by one authority rather than two.
+        resolved = (
+            template_params_model(template)
+            .model_validate(inputs)
+            .model_dump(mode="json", exclude_none=True)
+        )
+        defaulted = ", ".join(defaulted_inputs(declared))
+        return _GroundedTemplate(
+            template=template,
+            inputs=resolved,
+            ran=f"{template.name}(smiles=[[{call.subject_note_id}]])"
+            + (f" — defaults: {defaulted}" if defaulted else ""),
+        )
+    except Exception as exc:
+        activity.logger.warning(
+            "template check could not be grounded for %s: %s", check.hypothesis_id, exc
+        )
+        return _GroundedTemplate(refusal_code="template-refused", refusal_detail=str(exc))
     finally:
         reset_current_identity(token)
 
@@ -1543,7 +1680,10 @@ class HypothesisTournamentWorkflow:
             )
 
         jobs = [check for check in affordable if check.call is not None and check.call.job]
-        computable = [check for check in affordable if check not in jobs]
+        templates = [
+            check for check in affordable if check.call is not None and check.call.template
+        ]
+        computable = [check for check in affordable if check not in jobs and check not in templates]
         settled = await asyncio.gather(
             *(
                 workflow.execute_activity(
@@ -1574,6 +1714,11 @@ class HypothesisTournamentWorkflow:
                 ran.append((check, outcome))
 
         for check, outcome in await self._settle_jobs(request, jobs, limits):
+            out[check.hypothesis_id] = outcome
+            if outcome.verdict != "not-run":
+                ran.append((check, outcome))
+
+        for check, outcome in await self._settle_templates(request, templates, limits):
             out[check.hypothesis_id] = outcome
             if outcome.verdict != "not-run":
                 ran.append((check, outcome))
@@ -1735,6 +1880,118 @@ class HypothesisTournamentWorkflow:
                         verdict="inconclusive",
                         detail=result.summary[: limits.result_max_chars],
                         calc_refs=list(result.calc_refs),
+                        ran=plan.ran,
+                    ),
+                )
+            )
+        return results
+
+    async def _settle_templates(
+        self,
+        request: TournamentRequest,
+        checks: list[DiscriminatingCheck],
+        limits: _FieldLimits,
+    ) -> list[tuple[DiscriminatingCheck, CheckOutcome]]:
+        """Ground and launch the checks that name a reviewed procedure.
+
+        **A `TemplateWorkflow` child rather than a reimplementation of what it does.** The steps a
+        template chains — an enumerator into a ranking — are exactly what a check about a
+        molecule's *derived* forms needs, and the chaining, the substitution, the per-step audit
+        and the measured defaults all already live there. Starting the same workflow a chat turn
+        starts is what keeps the two paths one procedure.
+
+        `max_parallel_steps` is pinned at launch for `TemplateRunInput`'s own stated reason: the
+        bound a run enforces and the bound it was checked against have to be one number, and a
+        settings read inside workflow code would be neither.
+        """
+        results: list[tuple[DiscriminatingCheck, CheckOutcome]] = []
+        if not checks:
+            return results
+
+        grounded = await asyncio.gather(
+            *(
+                workflow.execute_activity(
+                    ground_check_template,
+                    args=[
+                        check,
+                        request.requested_by,
+                        list(request.requested_roles),
+                        request.correlation_id,
+                    ],
+                    start_to_close_timeout=timedelta(
+                        seconds=settings.hypothesis_evidence_timeout_seconds
+                    ),
+                    schedule_to_start_timeout=queue_wait_timeout(),
+                    retry_policy=BAD_DATA_RETRY,
+                )
+                for check in checks
+            ),
+            return_exceptions=True,
+        )
+
+        launches: list[tuple[DiscriminatingCheck, _GroundedTemplate, Template]] = []
+        for check, plan in zip(checks, grounded, strict=True):
+            if isinstance(plan, BaseException):
+                results.append((check, _refused(check, "template-refused", str(plan))))
+                continue
+            if plan.refused or plan.template is None:
+                code = plan.refusal_code or "template-cannot-be-grounded"
+                detail = plan.refusal_detail or "grounding returned no template to run"
+                results.append((check, _refused(check, code, detail)))
+                continue
+            launches.append((check, plan, plan.template))
+
+        if not launches:
+            return results
+
+        settled = await asyncio.gather(
+            *(
+                workflow.execute_child_workflow(
+                    "TemplateWorkflow",
+                    TemplateRunInput(
+                        template=definition,
+                        inputs=plan.inputs,
+                        requested_by=request.requested_by,
+                        roles=list(request.requested_roles),
+                        session_id=request.session_id,
+                        max_parallel_steps=limits.max_parallel_steps,
+                    ),
+                    id=f"{workflow.info().workflow_id}-template-{check.hypothesis_id}",
+                    task_queue=settings.background_task_queue,
+                    retry_policy=BAD_DATA_RETRY,
+                    result_type=TemplateRunResult,
+                )
+                for check, plan, definition in launches
+            ),
+            return_exceptions=True,
+        )
+
+        for (check, plan, _definition), result in zip(launches, settled, strict=True):
+            if isinstance(result, BaseException):
+                workflow.logger.warning("template run failed for %s", check.hypothesis_id)
+                results.append(
+                    (
+                        check,
+                        CheckOutcome(
+                            hypothesis_id=check.hypothesis_id,
+                            verdict="inconclusive",
+                            detail=f"{plan.ran} failed: {result}",
+                            refusal_code="template-failed",
+                            ran=plan.ran,
+                        ),
+                    )
+                )
+                continue
+            results.append(
+                (
+                    check,
+                    CheckOutcome(
+                        hypothesis_id=check.hypothesis_id,
+                        verdict="inconclusive",
+                        # The last step's answer, which is what the template declares as its
+                        # result. Every step is kept in `steps` and rides out in the job envelope;
+                        # what a check needs to read is the procedure's conclusion.
+                        detail=str(result.result)[: limits.result_max_chars],
                         ran=plan.ran,
                     ),
                 )

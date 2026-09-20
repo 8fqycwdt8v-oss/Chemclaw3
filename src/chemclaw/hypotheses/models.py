@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 #: How a discriminating check gets answered: by this system's own tools, or by somebody in a lab.
 CheckKind = Literal["computable", "physical"]
@@ -69,10 +69,11 @@ class Objection(BaseModel):
 
 
 class CheckCall(BaseModel):
-    """A `computable` check as a *call* rather than a sentence: which tool, on which subject.
+    """A `computable` check as a *call* rather than a sentence: which target, on which subject.
 
-    **Two names and nothing else, which is the point.** The model selects a tool and points at a
-    note; it writes neither the structure nor any other argument. The structure is read off the
+    **Two names and nothing else, which is the point.** The model selects a target — a tool, a
+    job or a template — and points at a note; it writes neither the structure nor any other
+    argument. The structure is read off the
     resolved note and every remaining argument stays at the tool's own default
     (`hypotheses/dispatch.py` says why at length). A richer call type would be a richer surface for
     inventing values on.
@@ -104,6 +105,32 @@ class CheckCall(BaseModel):
     # its values are checked against the job's own declared `precondition` before anything runs.
     sweep_parameter: str = Field(default="")
     sweep_values: list[str] = Field(default_factory=list)
+
+    # A template call: a reviewed, git-committed procedure that chains an enumerator into a
+    # calculation. This is the only shape that can ask about structures **nobody wrote down** — a
+    # molecule's tautomers, its protonation states, its breakable bonds — because the enumeration
+    # produces them and the template passes them on by value. The subject is `subject_note_id`,
+    # the same pointer the tool half uses, and every other declared input stays unset so the
+    # template's own measured defaults apply.
+    template: str = Field(default="")
+
+    @model_validator(mode="after")
+    def _names_one_target(self) -> CheckCall:
+        """Exactly one of tool / job / template, or none at all.
+
+        **Refused rather than resolved by precedence.** A call naming two targets is a model that
+        did not decide, and picking one for it is a silent choice about which calculation runs —
+        the same class of hidden assumption the whole dispatcher exists to refuse, made by this
+        system rather than by the model. Empty is allowed: a `physical` check names no target.
+        """
+        named = [name for name in (self.tool, self.job, self.template) if name]
+        if len(named) > 1:
+            raise ValueError(
+                f"a check names one target, not {len(named)}: {sorted(named)}. A tool, a job and "
+                "a template are three different calculations and choosing between them is the "
+                "check's decision, not the dispatcher's."
+            )
+        return self
 
 
 class DiscriminatingCheck(BaseModel):
