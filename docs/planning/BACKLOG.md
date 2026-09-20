@@ -733,35 +733,40 @@ topic).
       injected evidence actually propagates the instruction into its report. That needs a live
       model, so it belongs with the delegation row below rather than ahead of it.
 
-- [ ] **The delegation experiment: build the runner, then run it against a gateway** — [L]
+- [ ] **The delegation experiment: run it against a gateway** — [M]
       (issue #359), opened by `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller` and
       the gate on Wave 3's roster. **It is one row because it was four**, and four statements of a
       single blocked experiment made the queue read four times more blocked than it is: "the
       delegation A/B has a comparator and no runner", "measure whether delegation pays", "run the
       comparison against a real gateway", and the first step of the helper-provenance row above.
 
-      **What exists.** `chemclaw.evals.delegation.compare_arms` is the comparator — genuinely new
-      rather than a use of `evals/ab.py`, which is pairwise and dimensionless where this comparison
-      is three-armed with two cost axes, so quality goes through `ab.py`'s own noise floor while
-      billed tokens and wall clock are reported beside it rather than folded in ("cheaper but
-      worse" and "better but slower" are different answers that one number hides).
-      `data/evals/probes/delegation.yaml` is the corpus: eight reading-heavy multi-source tasks,
-      chosen so that context isolation has a mechanism by which it could appear at all.
+      **What is left is a credential and a gateway URL, and nothing else.** `make live-delegation`
+      is the runner: four arms over `data/evals/probes/delegation.yaml`, `MINIMUM_REPEATS` repeats
+      per (task, arm), `delegated` observed per repeat off `audit_events` and `billed_tokens` off
+      `turn_costs`, one `DelegationReport` per arm against the `no-helper` baseline. It has been
+      driven end to end against `cli.mock_llm --catalogue delegation`, which exercised every
+      compliance bucket the comparator carries, and such a run **exits non-zero on purpose**: a
+      double supplies the *decision* to delegate, so what it proves is the runner.
 
-      **What does not, and is buildable offline.** Nothing constructs an `ArmRun` —
-      `grep -rn "ArmRun" src/ tests/ data/ Makefile` finds the module and its own test, nothing
-      records `delegated`, and `data/evals/profiles/` holds `no-tools.yaml`, `skills-removed.yaml`
-      and `tools-removed.yaml` with no `no-helper` among them. What it owes: a `no-helper` profile
-      whose system prompt asks the model not to call `task`, a runner that records `delegated` per
-      repeat off the turn's own trace, and `MINIMUM_REPEATS` repeats per (task, arm). The
-      `no-helper` arm is **behavioural**, because `task` cannot be removed — `SubAgentMiddleware`
-      is required and an empty roster makes upstream re-insert its own — so compliance is observed
-      per run and a baseline that delegated anyway is reported as contaminated rather than averaged
-      in. Until the runner exists the comparator's guards (`MINIMUM_REPEATS`,
-      `partially_delegated`, `NoComparableTask`) are tested and unexercised. **`MINIMUM_COMPARED_SHARE`
-      stood here until 2026-09-19 and no longer exists in the module** — the surviving-share bound
-      was removed, leaving the per-task floor and the compliance buckets; a row citing a deleted
-      symbol reads as a guard somebody could go and look at.
+      **Two of the four arms need the front door started a particular way, and no flag can do it
+      from the client side.** A helper's model is `model_routes["helper"]` and a peer roster is
+      `agent_peer_roster`; both are read by the process that builds the agent. `helper-routed`
+      therefore needs `CHEMCLAW_MODEL_ROUTES='{"helper": "<a smaller model>"}'` and `peer` needs
+      `CHEMCLAW_AGENT_PEER_ROSTER` naming another profile. The suite prints what each arm needs and
+      reports an arm that could not have complied as `undelegated`, which is the honest
+      intention-to-treat reading and not a pass — so a run that forgets either posture produces a
+      report saying so rather than a quiet zero.
+
+      **The handoff act itself has never been observed, and that is the one gap that is not a
+      credential.** `treatment_tools("handoff", …)` is unit-tested against a name
+      `agent/handoff.handoff_tool_name` mints, and no run has yet recorded a real
+      `transfer_to_<peer>` row, because a `transfer_to_…` tool is absent from
+      `available_tool_names()` — the six name spaces that function documents do not include the
+      handoff one — so `cli/mock_llm._validate` refuses a behaviour that calls one and the scripted
+      peer arm answers directly instead. Either widen that function (it is also what the skill,
+      template and prose validators read, and `agent_peer_roster` ships empty, so the addition is
+      inert by default) or drive the peer arm against a gateway with the roster set. The second is
+      the gateway run anyway.
 
       **What the instrument must not be.** The deleted corpus
       (`data/evals/probes/m12/routing.yaml`, removed with the specialist team) measured
@@ -771,37 +776,34 @@ topic).
       sevenfold (2/15 through the front door with connectors and history, 14/15 on the compiled
       agent with neither, one sample per probe) because they measured different systems, and two of
       the fifteen probes span two specialists, so the figure had an unpassable floor before any
-      model was involved. What replaces it is outcomes per **task** — probe pass or `score_answer`,
-      billed tokens from `turn_costs`, wall clock — through one harness, on one pinned model, with
-      at least three repeats. The denominator problem disappears the moment the unit is a task.
+      model was involved. What replaces it is outcomes per **task** — a judge verdict on
+      `VERDICT_SCORES`' four-point scale, billed tokens from `turn_costs`, wall clock — through one
+      harness, on one pinned model, with at least three repeats. The denominator problem disappears
+      the moment the unit is a task. **A negative result closes the question as legitimately as a
+      positive one** — written down because the retired specialist team was added to be ready and
+      stayed off, and a disappointing answer is not a reason to re-open a measurement.
 
-      **The arms**: no helper, helper on the caller's model, helper on its own via
-      `CHEMCLAW_MODEL_ROUTES='{"helper": "…"}'`, and — since
-      `D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it` — a **peer**
-      arm with `agent_peer_roster` set, which is a different act rather than a fourth flavour of
-      the same one: a helper reads and reports, a peer keeps the conversation. It belongs on this
-      row rather than on one of its own, because a row per arm is what this row was four of.
-      Nothing about peer handoff is evidence that it pays; it ships off for that reason, and
-      `chemclaw_tool_calls_total` already moves per `transfer_to_…` name while
-      `ChemclawState.handoffs` is the per-turn chain length, so the hop data needs no new code.
-      The failure mode worth instrumenting is a chain that bounces: two peers each deciding the
-      other should answer is three model calls to arrive where the turn started.
-      **A negative result closes the question as
-      legitimately as a positive one** — written down because the retired specialist team was added
-      to be ready and stayed off, and a disappointing answer is not a reason to re-open a
-      measurement.
+      **The arms measure this instrument's prose rather than the shipped prompt, and that is a
+      deliberate trade to state before anybody reads a number off it.** A profile's `instructions:`
+      replace the deployment's domain guidance wholesale, so the three arm profiles carry one shared
+      body and differ only in their `Delegation:` paragraph
+      (`D-2026-09-14-tools-were-never-the-variable` is what happens when they do not). The
+      comparison is therefore internally valid and is not a reading of the default agent. Closing
+      that gap needs a profile dimension that *appends* to the shipped prose instead of replacing
+      it, which is its own decision and is not on this row.
 
       **The run needs a gateway, and this environment's credential is a state rather than a fact.**
       Nothing in `src/` dials a vendor (`D-2026-09-04-a-gateway-is-the-only-provider`), so `API-KEY`
       is a credential *for* a gateway rather than one this stack can use: probed 2026-09-13 it
-      answered 200 against the vendor with no gateway configured, and a gateway probed for the
-      tool-utility A/B answered HTTP 400, "credit balance is too low". So probe first —
+      answered 200 against the vendor with no gateway configured, and a gateway probed for
+      `make live-ab` answered HTTP 400, "credit balance is too low"; probed again 2026-09-20 the
+      variable was empty and no gateway was configured at all. So probe first —
       `printenv 'API-KEY'` plus one cheap call **through a gateway** — and then run the measurement
       in the same session, because tomorrow's state is not evidence about today's. Until the run
       exists, no claim that helpers do or do not pay is evidence about this deployment.
-      Anchors: `src/chemclaw/evals/delegation.py`, `data/evals/probes/delegation.yaml`,
-      `data/evals/profiles/`, `infra/live/e2e-full-stack/up.sh`.
-
+      Anchors: `src/chemclaw/evals/delegation_run.py`, `src/chemclaw/cli/live_probes.py`
+      (`--suite delegation`), `data/evals/probes/delegation.yaml`, `data/evals/profiles/`,
+      `src/chemclaw/cli/delegation_behaviours.py`, `infra/live/e2e-full-stack/up.sh`.
 - [ ] **`tool_result_blobs` ships its retention window at zero, and nobody chose zero** — [S].
       `retention_tool_results_days` defaults to **0** (`core/config/memory.py:125`), which is the
       same value as every other window that means "off", so a deliberate uniformity is
@@ -1217,6 +1219,28 @@ those belong in.
       (`D-2026-09-12-two-producers-of-one-identity-are-not-redundant-when-they-disagree`).
 
 ## A truncated argument document is completed by upstream and the tool runs on the guess
+
+- [ ] **Two timing bounds red the gate for machine load, and the ADR that documents one of them
+      says it passes serially** — [S], found 2026-09-20 when `check` went red on PR #421 with a diff
+      containing **zero files under `src/`**.
+      `tests/test_conflicts.py::test_a_disjoint_dated_corpus_scans_in_linear_time` took 1.84 s
+      against a bare `< 1.5` wall clock, and
+      `tests/test_context_budget.py::test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable`
+      measured 1.289x against a fixed `/ 1.3` margin — 0.9% short. Both pass 3-of-3 serially on an
+      unloaded machine; both failed inside a 46-minute run competing with three subagents.
+      **The documentation is the part worth fixing first.**
+      `D-2026-09-13-a-stable-failure-set-is-not-two-green-runs` tabulates the second test as failing
+      **2 of 5** parallel runs with the serial column reading an unqualified **"passes"**. It passes
+      serially *on an unloaded machine*: parallelism was never the mechanism, load is, and `-n 4` is
+      one way to produce it. A merged ADR is never edited, so a reader of that table today is told
+      the serial gate is safe from this and it is not.
+      **The patch.** Both assertions bound a ratio or a wall clock against a constant. Each should
+      compare against a control measured in the same process at the same moment — which the second
+      test already half does (it has the on-loop control) and then spends on a fixed 1.3x margin that
+      load eats. `tasks/lessons.md` already carries the rule this is an instance of: a timing bound
+      must separate the two *outcomes*, not the two speeds.
+      Anchors: `tests/test_conflicts.py`, `tests/test_context_budget.py`,
+      `docs/decisions/D-2026-09-13-a-stable-failure-set-is-not-two-green-runs.md`.
 
 - [ ] **A streamed tool call cut mid-document is completed by upstream and the tool runs on the guess** — [M].
       `D-2026-08-27-an-unparseable-tool-call-is-a-visible-failure` §3 recorded this as open and named the
