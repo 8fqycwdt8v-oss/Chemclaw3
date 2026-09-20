@@ -55,6 +55,11 @@ class HypothesisSettings(BaseSettings):
     hypothesis_call_timeout_seconds: float = Field(default=120.0, gt=0)
     # One evidence sweep across every internal source, for one hypothesis.
     hypothesis_evidence_timeout_seconds: float = Field(default=180.0, gt=0)
+    # A computable check's result, as text, in the outcome a chemist reads. Bounded because it
+    # is a tool's own output landing in a note body and in the job envelope: a site-reactivity
+    # panel over a large molecule runs to thousands of characters, and the result payload is
+    # already shared with the ranked table.
+    hypothesis_result_max_chars: int = Field(default=2000, ge=200)
     # The most `experiment-proposal` notes one tournament writes, taken from the top of the table. A
     # run that filed one note per hypothesis would bury the corpus under proposals nobody asked for,
     # and the ranking is precisely what says which are worth writing down.

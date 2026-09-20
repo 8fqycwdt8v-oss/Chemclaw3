@@ -89,12 +89,17 @@ def summarise(outcome: TournamentOutcome) -> str:
             lines.append(f"   - objection: {objection.concern} — {objection.rationale}")
         if row.outcome is not None and row.outcome.verdict != "not-run":
             lines.append(f"   - check ran: **{row.outcome.verdict}** — {row.outcome.detail}")
+            if row.outcome.ran:
+                # The call as it was made, including what stayed at the tool's default. A number
+                # computed in the default solvent answers a different question from one computed
+                # in the solvent the hypothesis is about, and only this line can tell them apart.
+                lines.append(f"     ran: `{row.outcome.ran}`")
         elif row.check is not None and row.check.kind == "physical":
             lines.append(f"   - to settle in the lab: {row.check.question}")
         elif row.check is not None:
-            # A computable check that did not run. Saying so beats saying nothing: before this,
-            # a `computable` check fell through every branch and the chemist was shown a hypothesis
-            # with no check at all, while the reason it was not run sat in a Python docstring.
+            # A computable check that did not run, with the reason. Saying so beats saying nothing:
+            # a `computable` check used to fall through every branch, so the chemist saw a
+            # hypothesis with no check at all while the reason sat in a Python docstring.
             reason = row.outcome.detail if row.outcome is not None else ""
             lines.append(
                 f"   - answerable with this system's tools, not run: {row.check.question}"
