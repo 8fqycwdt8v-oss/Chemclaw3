@@ -6,6 +6,7 @@ designs before this one, and both of them passed a test written from the intent.
 """
 
 import math
+import random
 
 import pytest
 
@@ -393,3 +394,143 @@ def test_a_field_note_states_what_the_rating_is_not() -> None:
     )
     assert "not a probability" in body
     assert "[[p-1]]" in body
+
+
+# ------------------------------------------------------------------- fairness of the bracket
+
+
+def _null_judge_spread(field: int, runs: int, *, permute: bool, seed: int = 4) -> float:
+    """Mean rating spread across ids under a coin-flip judge — pure bracket artefact, no signal."""
+    rng = random.Random(seed)
+    totals: dict[str, float] = {}
+    for _ in range(runs):
+        ids = [f"h{i}" for i in range(field)]
+        entered = ids[:]
+        if permute:
+            rng.shuffle(entered)
+        scores: dict[str, float] = dict.fromkeys(ids, 0.0)
+        byes: dict[str, int] = {}
+        played: set[frozenset[str]] = set()
+        judgements: list[Judgement] = []
+        for _round in range(rounds_for(field)):
+            pairs, bye = pair_round(entered, scores=scores, played=frozenset(played), byes=byes)
+            if bye is not None:
+                byes[bye] = byes.get(bye, 0) + 1
+                scores[bye] += 0.5
+            for left, right in pairs:
+                played.add(frozenset({left, right}))
+                winner, loser = (left, right) if rng.random() < 0.5 else (right, left)
+                judgements.append(Judgement(winner=winner, loser=loser))
+                scores[winner] += 1.0
+        table = rate(ids, judgements)
+        for name in ids:
+            totals[name] = totals.get(name, 0.0) + table[name].rating
+    means = [total / runs for total in totals.values()]
+    return max(means) - min(means)
+
+
+def test_a_fixed_bracket_favours_whoever_enters_first_and_a_permuted_one_does_not() -> None:
+    """Where the fairness of the ranking actually comes from, measured in both directions.
+
+    A Swiss bracket seeded the same way every time advantages the positions it seeds first, and
+    because the fit is opponent-strength aware that turns *identical records* into different
+    ratings. Under a coin-flip judge — no hypothesis better than any other, so every point of
+    spread is an artefact — a fixed entry order produces well over a hundred Elo of monotone
+    spread. That is wider than the standard errors printed beside the ratings.
+
+    This used to be keyed on the **id**, so the bracket favoured lexically-early hypotheses and,
+    since production ids are hashes of the statement, rephrasing one moved it up the chemist's
+    table. The fix is not to make `pair_round` clever: a pairing that consulted a random source
+    could not replay, and Swiss must seed *somehow*. It is to make the seeding the caller's
+    choice — `durable/hypothesis_tournament.py` permutes the field by a hash of the question, so
+    the order is fixed for a given tournament and fair across them.
+
+    Both halves are asserted, because a test that only pinned the good case would pass just as
+    happily if someone made the tiebreak alphabetical again.
+    """
+    fixed = _null_judge_spread(10, 400, permute=False)
+    permuted = _null_judge_spread(10, 400, permute=True)
+    assert fixed > 100.0, f"expected the known bracket artefact, saw {fixed:.1f} Elo"
+    assert permuted < 45.0, f"permuting entry order should remove it, saw {permuted:.1f} Elo"
+
+
+def test_input_order_is_what_breaks_a_score_tie() -> None:
+    """The mechanism behind the test above, pinned directly.
+
+    The caller decides the bracket by the order it passes ids in, which is what lets the workflow
+    permute the field by a hash of the question instead of letting the alphabet decide.
+    """
+    forward, _ = pair_round(["a", "b", "c", "d"], scores={})
+    reversed_order, _ = pair_round(["d", "c", "b", "a"], scores={})
+    assert forward == [("a", "b"), ("c", "d")]
+    assert reversed_order == [("d", "c"), ("b", "a")]
+
+
+def test_pricing_a_run_includes_the_double_judged_round() -> None:
+    """The number exists to be right before the money is spent, and it under-priced every run.
+
+    Omitting the double-judged first round reported 20 comparisons for a field of ten that actually
+    makes 25 model calls — a quarter of the bill, on the one figure a deployment reads to decide
+    whether it can afford the feature.
+    """
+    assert comparisons_for(10) == 20
+    assert comparisons_for(10, double_judge_first_round=True) == 25
+
+
+def test_two_opposite_claims_are_not_merged_as_duplicates() -> None:
+    """The screen's most dangerous failure, and it needed word order to see it.
+
+    "The aldehyde reacts faster than the ketone" and "the ketone reacts faster than the aldehyde"
+    are the same words in a different order, so a bag-of-words comparison scores them 1.0 on both
+    fields and the merge rule deleted one. Two mutually exclusive explanations of one observation
+    are the single most valuable thing a tournament can hold.
+    """
+    result = screen(
+        [
+            Hypothesis(
+                id="aldehyde-first",
+                statement="the aldehyde reacts faster than the ketone",
+                refuted_if="the ketone is consumed before the aldehyde in a competition experiment",
+            ),
+            Hypothesis(
+                id="ketone-first",
+                statement="the ketone reacts faster than the aldehyde",
+                refuted_if="the aldehyde is consumed before the ketone in a competition experiment",
+            ),
+        ]
+    )
+    assert [h.id for h in result.kept] == ["aldehyde-first", "ketone-first"]
+    assert not result.merged
+
+
+def test_a_short_concrete_refutation_survives_the_screen() -> None:
+    """Rejection is the only destructive rule here, so it must not select against concreteness.
+
+    A character floor rejected exactly the best conditions — `"yield > 90%"` normalises to eight
+    characters — while vaguer, longer text passed. Counting words catches the placeholders without
+    that inversion.
+    """
+    for condition in ("yield > 90%", "pH drops", "no exotherm", "Rf unchanged"):
+        kept = screen([Hypothesis(id="h", statement="a claim", refuted_if=condition)]).kept
+        assert kept, f"rejected a usable refutation condition: {condition!r}"
+    for placeholder in ("unknown", "n/a", "N/A.", "none", "tbd", "not applicable"):
+        kept = screen([Hypothesis(id="h", statement="a claim", refuted_if=placeholder)]).kept
+        assert not kept, f"accepted a placeholder: {placeholder!r}"
+
+
+def test_a_double_judged_pair_counts_once_toward_the_evidence_shown() -> None:
+    """The displayed count must agree with the weight the fit used.
+
+    A pair judged in both presentation orders enters as two half-weight judgements. Counting rows
+    told a chemist "over 2 comparisons" for evidence the fit weighted as one, beside an interval
+    computed from the weight.
+    """
+    table = rate(
+        ["a", "b"],
+        [
+            Judgement(winner="a", loser="b", weight=0.5),
+            Judgement(winner="b", loser="a", weight=0.5),
+        ],
+    )
+    assert table["a"].comparisons == 1
+    assert table["b"].comparisons == 1

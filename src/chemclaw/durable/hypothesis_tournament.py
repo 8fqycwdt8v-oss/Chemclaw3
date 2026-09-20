@@ -53,7 +53,9 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.identity_context import reset_current_identity, set_current_identity
     from chemclaw.core.ids import stable_hash
+    from chemclaw.core.metrics_bridge import record_metric
     from chemclaw.durable.connector_job import ConnectorJobResult
+    from chemclaw.durable.job_record import JobRecord, record_job
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.hypotheses.models import (
         CheckOutcome,
@@ -67,14 +69,27 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.hypotheses.report import field_body, proposal_body, summarise
     from chemclaw.hypotheses.screen import screen
     from chemclaw.kg.git_writer import default_writer
-    from chemclaw.kg.note import Note
+    from chemclaw.kg.note import Note, as_cell
     from chemclaw.kg.record import record_note
 
-from chemclaw.durable.publish import BAD_DATA_RETRY, publish_note_best_effort, queue_wait_timeout
+from chemclaw.durable.publish import (
+    BAD_DATA_RETRY,
+    light_write_queue_wait_timeout,
+    publish_note,
+    publish_note_best_effort,
+    queue_wait_timeout,
+)
 
 # How many evidence chunks ride into one prompt. Small on purpose: a comparison prompt carries two
 # hypotheses' evidence, so this is doubled there, and the budget that matters is the endpoint's.
 _EVIDENCE_PER_HYPOTHESIS = 6
+
+# Decisive comparisons needed before a position-bias figure is reported at all. The estimator is
+# degenerate below a handful: at one comparison `|2p − 1|` is exactly 1.0 whichever side won, so a
+# two-hypothesis tournament would have announced "position bias measured at 100%" from a single
+# judgement. Eight keeps the standard error of `p` near 0.18, which is loose but no longer a
+# statement the data cannot make; under it the run reports `None` — absent, not zero.
+_MIN_BIAS_SAMPLE = 8
 
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
 
@@ -209,6 +224,12 @@ class _FieldLimits(BaseModel):
     per_angle: int = 3
     max_hypotheses: int = 10
     double_judge_first_round: bool = True
+    # Here rather than read at the call site, because it bounds how many
+    # `record_hypothesis_proposal` activities are scheduled — a *command count*, which
+    # `docs/guides/workflow-versioning.md` lists as the thing a live settings read breaks on
+    # replay. The module docstring claims no ambient config read decides the command stream; this
+    # field is what makes that true of the proposal loop as well as the tournament.
+    max_proposals: int = 3
 
 
 def _route() -> Any:
@@ -262,6 +283,7 @@ async def resolve_field_limits() -> _FieldLimits:
         per_angle=settings.hypothesis_per_angle,
         max_hypotheses=settings.hypothesis_max_field,
         double_judge_first_round=settings.hypothesis_double_judge_first_round,
+        max_proposals=settings.hypothesis_max_proposals,
     )
 
 
@@ -563,10 +585,11 @@ async def fit_ratings(hypothesis_ids: list[str], judgements: list[_WireJudgement
         ],
     )
     ranked = table.ranked()
+    # `len(ranked) > 1` or nothing: a lone hypothesis has no pair to separate from, and calling
+    # that decisive is a claim about a comparison that never ran.
     decisive = (
-        table.difference(ranked[0].hypothesis_id, ranked[1].hypothesis_id).decisive
-        if len(ranked) > 1
-        else bool(ranked)
+        len(ranked) > 1
+        and table.difference(ranked[0].hypothesis_id, ranked[1].hypothesis_id).decisive
     )
     return _RatingReport(
         rated=[
@@ -615,7 +638,10 @@ class HypothesisTournamentWorkflow:
                 rejected=result.rejected,
                 merged=result.merged,
             )
-            return self._envelope(outcome)
+            self._publish_metrics(outcome)
+            envelope = self._envelope(outcome)
+            await self._record_run(request, envelope, outcome)
+            return envelope
 
         evidence = await self._evidence_per_hypothesis(field, request)
         objections = await self._critique(request, field, evidence)
@@ -629,6 +655,7 @@ class HypothesisTournamentWorkflow:
             retry_policy=BAD_DATA_RETRY,
         )
         checks = await self._checks(request, field, evidence)
+        outcomes = await self._settle(request, checks)
 
         by_id = {h.id: h for h in field}
         ranked = [
@@ -639,11 +666,15 @@ class HypothesisTournamentWorkflow:
                 comparisons=entry.comparisons,
                 objections=objections.get(entry.hypothesis_id, []),
                 check=checks.get(entry.hypothesis_id),
+                outcome=outcomes.get(entry.hypothesis_id),
             )
             for entry in fit.rated
         ]
 
-        decisive = fit.leader_is_decisive
+        # A single survivor never beat anything, so "the field separates" would be a claim about a
+        # comparison that never happened — printed, before this, directly above a row reading
+        # "unrated (never compared)".
+        decisive = fit.leader_is_decisive and len(ranked) > 1
         outcome = TournamentOutcome(
             question=request.question,
             ranked=ranked,
@@ -653,10 +684,13 @@ class HypothesisTournamentWorkflow:
             position_bias=bias,
             leader_is_decisive=decisive,
         )
-        note_ids = await self._propose(request, outcome)
+        note_ids = await self._propose(request, outcome, limits)
         recorded = outcome.model_copy(update={"proposal_note_ids": note_ids})
         await self._record_field(request, recorded)
-        return self._envelope(recorded)
+        self._publish_metrics(recorded)
+        envelope = self._envelope(recorded)
+        await self._record_run(request, envelope, recorded)
+        return envelope
 
     async def _angles(self, request: TournamentRequest, limits: _FieldLimits) -> list[str]:
         try:
@@ -730,15 +764,24 @@ class HypothesisTournamentWorkflow:
         # Ids must be unique across angles, because two angles may reach the same statement
         # and the id is derived from it. The screen merges true duplicates; this only keeps
         # them addressable.
-        seen: dict[str, int] = {}
+        #
+        # **The suffix has to be checked against the names already taken, not just counted.**
+        # Renaming the second `x` to `x-1` collides with a natural `x-1` from another angle, and
+        # ids are model-authored — so the collision is reachable by accident and steerable by
+        # anything that influences a generator. Downstream it is not a loud failure: `by_id` is
+        # built by dict comprehension, so a colliding pair silently becomes one entry and a
+        # hypothesis disappears from the field before `pair_round` ever raises.
+        taken: set[str] = set()
         unique: list[Hypothesis] = []
         for hypothesis in produced:
-            count = seen.get(hypothesis.id, 0)
-            seen[hypothesis.id] = count + 1
+            name = hypothesis.id
+            suffix = 0
+            while name in taken:
+                suffix += 1
+                name = f"{hypothesis.id}-{suffix}"
+            taken.add(name)
             unique.append(
-                hypothesis
-                if count == 0
-                else hypothesis.model_copy(update={"id": f"{hypothesis.id}-{count}"})
+                hypothesis if name == hypothesis.id else hypothesis.model_copy(update={"id": name})
             )
         return unique
 
@@ -789,14 +832,20 @@ class HypothesisTournamentWorkflow:
         limits: _FieldLimits,
     ) -> tuple[list[_WireJudgement], int, float | None]:
         by_id = {h.id: h for h in field}
-        ids = [h.id for h in field]
+        # The pairing breaks a score tie by *input position*, so this order decides the bracket and
+        # must not favour any id. Sorting by a hash of (question, id) is deterministic — the same
+        # question re-run gives the same bracket, which replay and reproducibility both need — while
+        # being uncorrelated with the ids themselves, so a rephrased hypothesis no longer climbs the
+        # table by sorting earlier. See `pairing.py`'s docstring for the 143-Elo artefact
+        # this fixes.
+        ids = sorted((h.id for h in field), key=lambda name: stable_hash([request.question, name]))
         scores: dict[str, float] = dict.fromkeys(ids, 0.0)
         byes: dict[str, int] = {}
         played: set[frozenset[str]] = set()
         judgements: list[_WireJudgement] = []
         comparisons = 0
-        flips = 0
-        double_judged = 0
+        first_position_wins = 0
+        decisive_comparisons = 0
 
         for round_index in range(rounds_for(len(ids))):
             pairs, bye = pair_round(ids, scores=scores, played=frozenset(played), byes=byes)
@@ -810,9 +859,12 @@ class HypothesisTournamentWorkflow:
 
             both_orders = limits.double_judge_first_round and round_index == 0
             verdicts = await asyncio.gather(
-                *(self._judge(request, by_id, evidence, pair, flip=False) for pair in pairs),
                 *(
-                    self._judge(request, by_id, evidence, pair, flip=True)
+                    self._judge(request, by_id, evidence, pair, flip=False, round_index=round_index)
+                    for pair in pairs
+                ),
+                *(
+                    self._judge(request, by_id, evidence, pair, flip=True, round_index=round_index)
                     for pair in (pairs if both_orders else ())
                 ),
                 return_exceptions=True,
@@ -827,20 +879,11 @@ class HypothesisTournamentWorkflow:
                 if not usable:
                     workflow.logger.warning("comparison %s failed in every order; skipped", pair)
                     continue
-                if len(usable) == 2:
-                    # Position bias is a *reversal*: the same pair, judged both ways round, naming
-                    # a different winner each time. A tie in one order and a decision in the other
-                    # is a disagreement but not a reversal — the judge did not prefer whichever
-                    # side it saw first, it declined on one reading — and counting it here
-                    # overstated the rate. So both orders must be decisive to enter the
-                    # denominator, which is why `decided` gates the count rather than the tuples
-                    # being compared directly.
-                    decided = [verdict for verdict in usable if verdict[1] != 0.5]
-                    if len(decided) == 2:
-                        double_judged += 1
-                        if decided[0][0] != decided[1][0]:
-                            flips += 1
-                for winner_id, outcome in usable:
+                for verdict in usable:
+                    if verdict[1] != 0.5:
+                        decisive_comparisons += 1
+                        first_position_wins += verdict[2]
+                for winner_id, outcome, _first in usable:
                     comparisons += 1
                     left, right = pair
                     if outcome == 0.5:
@@ -860,7 +903,23 @@ class HypothesisTournamentWorkflow:
 
         # `None` rather than 0.0 when nothing was double-judged: absent is not the same claim as
         # "measured and found to be zero", and `report.summarise` omits the clause entirely for it.
-        bias = (flips / double_judged) if double_judged else None
+        # **Position bias is how often the side shown *first* wins, not how often two readings
+        # disagree.** A reversal rate cannot tell the two apart: a judge with no position
+        # preference but ordinary noise reverses about half the pairs it sees twice, and a
+        # perfectly consistent order-independent judge reverses none — so the same statistic reads
+        # 0.5 for noise and 0.0 for consistency while both have zero bias, and no rescaling fixes
+        # that because the two cases sit on opposite ends of it.
+        #
+        # First-position win rate is the identified quantity. It is 0.5 for any judge that ignores
+        # order, whether noisy or not, and 1.0 for one that always names whichever it saw first.
+        # Rescaled to `|2p − 1|` so 0.0 means no order effect, which is what `report.summarise`
+        # claims the number means. It also uses *every* decisive comparison rather than only the
+        # double-judged ones, so it is available on a run with double-judging off.
+        bias = (
+            abs(2.0 * (first_position_wins / decisive_comparisons) - 1.0)
+            if decisive_comparisons >= _MIN_BIAS_SAMPLE
+            else None
+        )
         return judgements, comparisons, bias
 
     async def _judge(
@@ -871,14 +930,24 @@ class HypothesisTournamentWorkflow:
         pair: tuple[str, str],
         *,
         flip: bool,
-    ) -> tuple[str, float]:
-        """One comparison. Returns the winning id and the outcome (1.0, or 0.5 for a tie).
+        round_index: int,
+    ) -> tuple[str, float, bool]:
+        """One comparison, and whether the winner was the hypothesis shown first.
+
+        Returns the winning id, the outcome (1.0, or 0.5 for a tie), and that flag — which is what
+        makes position bias measurable, and measurable from every comparison rather than only the
+        double-judged ones.
 
         Which hypothesis is presented first is a stable hash of the pair, not a coin flip: balanced
         across pairs, uncorrelated with rating, and identical on replay and on re-run.
         """
         first, second = pair
-        presented_left_first = int(stable_hash(sorted(pair))[:1], 16) % 2 == 0
+        # The round is mixed in so a Swiss *rematch* is presented the other way round. Without it
+        # the order is a function of the pair alone, so a repeat produced a byte-identical
+        # `_ComparisonRequest` — same question, same sides, same evidence — and `rate` counted one
+        # judge opinion twice at full weight while `pairing.py` justified the rematch as "an
+        # independent draw from the judge". Now it is one.
+        presented_left_first = int(stable_hash([sorted(pair), round_index])[:1], 16) % 2 == 0
         if presented_left_first == flip:
             first, second = second, first
 
@@ -900,8 +969,9 @@ class HypothesisTournamentWorkflow:
             retry_policy=BAD_DATA_RETRY,
         )
         if verdict.better == "tie":
-            return pair[0], 0.5
-        return (first if verdict.better == "left" else second), 1.0
+            return pair[0], 0.5, False
+        won_left = verdict.better == "left"
+        return (first if won_left else second), 1.0, won_left
 
     async def _checks(
         self,
@@ -940,28 +1010,84 @@ class HypothesisTournamentWorkflow:
             out[hypothesis.id] = check
         return out
 
-    async def _propose(self, request: TournamentRequest, outcome: TournamentOutcome) -> list[str]:
+    async def _settle(
+        self, request: TournamentRequest, checks: dict[str, DiscriminatingCheck]
+    ) -> dict[str, CheckOutcome]:
+        """Run every `computable` check, which today means recording why each one did not run.
+
+        **Called even though `run_computable_check` settles nothing.** The alternative — leaving
+        the activity uncalled — left `RankedHypothesis.outcome` unset for every row, so a
+        `computable` check fell through every branch of the report and the chemist saw a hypothesis
+        with no check at all, while the reason it had not been run sat in a Python docstring
+        nobody reads. Worse, it made "(ran; …)" the only thing `summarise` could say about such a
+        check, because there was no outcome to contradict it.
+
+        So the stage exists and the verdict is `not-run` with its reason attached. When a dispatcher
+        is built (`BACKLOG.md`), it changes what the activity returns and nothing here.
+        """
+        computable = [check for check in checks.values() if check.kind == "computable"]
+        if not computable:
+            return {}
+        settled = await asyncio.gather(
+            *(
+                workflow.execute_activity(
+                    run_computable_check,
+                    args=[check, request.requested_by, request.correlation_id],
+                    start_to_close_timeout=timedelta(
+                        seconds=settings.hypothesis_call_timeout_seconds
+                    ),
+                    schedule_to_start_timeout=queue_wait_timeout(),
+                    retry_policy=BAD_DATA_RETRY,
+                )
+                for check in computable
+            ),
+            return_exceptions=True,
+        )
+        out: dict[str, CheckOutcome] = {}
+        for check, outcome in zip(computable, settled, strict=True):
+            if isinstance(outcome, BaseException):
+                workflow.logger.warning("computable check failed for %s", check.hypothesis_id)
+                continue
+            out[check.hypothesis_id] = outcome
+        return out
+
+    async def _propose(
+        self, request: TournamentRequest, outcome: TournamentOutcome, limits: _FieldLimits
+    ) -> list[str]:
         """Write an `experiment-proposal` note for each physical check, best effort.
 
         Best effort because a failed note write must not lose the ranking: the answer is the table,
         and the notes are how tomorrow's session finds it again.
         """
         note_ids: list[str] = []
-        for row in outcome.ranked[: settings.hypothesis_max_proposals]:
+        for row in outcome.ranked[: limits.max_proposals]:
             if row.check is None or row.check.kind != "physical":
                 continue
             note_id = f"proposal-{stable_hash([request.question, row.hypothesis.statement])}"
-            await publish_note_best_effort(
-                record_hypothesis_proposal,
-                [
-                    proposal_body(row, question=request.question),
-                    note_id,
-                    ["hypothesis", "proposal"],
-                    request.requested_by,
-                    request.correlation_id,
-                ],
-                f"hypothesis proposal {note_id}",
-            )
+            try:
+                await publish_note(
+                    record_hypothesis_proposal,
+                    [
+                        proposal_body(row, question=request.question),
+                        note_id,
+                        ["hypothesis", "proposal"],
+                        request.requested_by,
+                        request.correlation_id,
+                    ],
+                )
+            except ActivityError:
+                # Best effort on the *job* — the ranking is the answer and a dead git remote must
+                # not lose it — but the id is only reported when the write landed.
+                # `publish_note_best_effort` swallows and returns `None`, so appending after it
+                # told the chemist three proposals existed when none did, and put `[[…]]` edges in
+                # the field note pointing at ids nothing defines. `record_note` logs a warning for
+                # an unresolved link and commits anyway, so those dangle permanently.
+                workflow.logger.warning(
+                    "hypothesis proposal %s failed to write; not reported", note_id
+                )
+                if not workflow.unsafe.is_replaying():
+                    record_metric(lambda m: m.increment("chemclaw_notes_publish_failures_total"))
+                continue
             note_ids.append(note_id)
         return note_ids
 
@@ -970,17 +1096,122 @@ class HypothesisTournamentWorkflow:
 
         The ranking is the answer and the note is the memory, so a failed write must not lose it.
         """
+        # The same payload `durable_tools._tournament_id` keys the workflow on. Keyed on the
+        # question alone, two tournaments the system deliberately keeps apart — a different actor,
+        # different context, different entitlements — collided on one note id, and `record_note`
+        # writes the subject with `overwrite=True`. The second run destroyed the first one's field,
+        # including the alternatives the note exists to preserve, and the survivor could be the
+        # less informed of the two.
+        field_note_id = "hypothesis-field-" + stable_hash(
+            [
+                request.question,
+                request.context,
+                request.requested_by,
+                *sorted(request.requested_roles),
+            ]
+        )
         await publish_note_best_effort(
             record_hypothesis_field,
             [
                 field_body(outcome),
-                f"hypothesis-field-{stable_hash([request.question])}",
+                field_note_id,
                 ["hypothesis"],
                 request.requested_by,
                 request.correlation_id,
             ],
             "hypothesis field note",
         )
+
+    async def _record_run(
+        self,
+        request: TournamentRequest,
+        envelope: ConnectorJobResult,
+        outcome: TournamentOutcome,
+    ) -> None:
+        """Persist the run so its id answers after Temporal forgets it.
+
+        **Not the exemption `D-157` granted `request_development_report`.** That one turns on the
+        report's artifact being a note "whose headings say what it is about", so the record adds
+        little. A tournament's artifact is the *envelope*: the ratings, their intervals, what lost
+        and why, and the measured position bias live nowhere else in a queryable form. Without this
+        row `get_durable_job_status` raises `no durable job with id …` once the broker's retention
+        passes — contradicting its own docstring, which promises it "answers for finished jobs
+        indefinitely" — and the run is invisible to `find_past_jobs` and to `operations/`.
+
+        Never fails the job: by the time this runs the ranking is already computed and returned, so
+        a database that cannot take the row must not send an expensive tournament back round the
+        retry loop. Same polarity and same reasoning as `publish_note_best_effort`.
+        """
+        record = JobRecord(
+            job_id=workflow.info().workflow_id,
+            connector="core",
+            job="rank_competing_hypotheses",
+            rationale=as_cell(request.question)[:500],
+            requested_by=request.requested_by,
+            correlation_id=request.correlation_id,
+            payload={"question": request.question, "context": request.context},
+            summary=envelope.summary,
+            result=envelope.data,
+            note_id=outcome.proposal_note_ids[0] if outcome.proposal_note_ids else "",
+            payload_kind="TournamentOutcome",
+            state="completed",
+        )
+        try:
+            await workflow.execute_activity(
+                record_job,
+                record,
+                # Named explicitly for `connector_job._record_run`'s reason: the activity is
+                # registered on the background queue alone, so a default would silently route the
+                # write to a queue nothing serves.
+                task_queue=settings.background_task_queue,
+                start_to_close_timeout=timedelta(seconds=settings.job_record_timeout_seconds),
+                schedule_to_start_timeout=light_write_queue_wait_timeout(),
+                retry_policy=BAD_DATA_RETRY,
+            )
+        except ActivityError:
+            workflow.logger.warning(
+                "hypothesis tournament record could not be written; the id will expire with "
+                "Temporal's retention"
+            )
+
+    def _publish_metrics(self, outcome: TournamentOutcome) -> None:
+        """Make a degraded run distinguishable from a healthy one from outside.
+
+        Every stage of this workflow catches and continues, so a run whose judge failed entirely
+        still returns a ranked table built from the prior. It is honestly labelled in the summary —
+        "unrated (never compared)" — but nothing fleet-wide could see the difference, which is the
+        exact shape `chemclaw_notes_publish_failures_total` was created for.
+
+        Guarded on `is_replaying` for the reason Temporal's own workflow logger is: a replayed
+        history would otherwise re-count every tournament the workflow has ever run.
+        """
+        if workflow.unsafe.is_replaying():
+            return
+        if not outcome.ranked:
+            state = "empty"
+        elif outcome.comparisons_run == 0:
+            state = "unrated"
+        elif outcome.leader_is_decisive:
+            state = "completed"
+        else:
+            state = "unseparated"
+        record_metric(
+            lambda m: m.increment(
+                "chemclaw_hypothesis_tournaments_total", labels={"outcome": state}
+            )
+        )
+        for rejection in outcome.rejected:
+            record_metric(
+                lambda m, rule=rejection.rule: m.increment(  # type: ignore[misc]
+                    "chemclaw_hypothesis_screen_rejections_total", labels={"rule": rule}
+                )
+            )
+        if outcome.position_bias is not None:
+            record_metric(
+                lambda m: m.observe(
+                    "chemclaw_hypothesis_position_bias", outcome.position_bias or 0.0
+                )
+            )
 
     def _envelope(self, outcome: TournamentOutcome) -> ConnectorJobResult:
         return ConnectorJobResult(

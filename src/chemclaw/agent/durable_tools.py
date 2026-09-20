@@ -729,7 +729,7 @@ def _tournament_id(request: TournamentRequest) -> str:
 
 @tool
 async def rank_competing_hypotheses(question: str, context: str = "") -> str:
-    """Generate competing explanations for an observation, rank them, and propose what settles them.
+    """Generate competing explanations, rank them, and say what experiment would settle them.
 
     Use this when a result is puzzling and several explanations are possible — "the impurity
     appeared when I changed the solvent", "the yield collapsed on scale-up" — and the useful answer

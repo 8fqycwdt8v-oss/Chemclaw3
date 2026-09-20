@@ -26,6 +26,18 @@ from __future__ import annotations
 from chemclaw.hypotheses.models import RankedHypothesis, TournamentOutcome
 from chemclaw.kg.note import as_cell
 
+#: Rows the prose summary renders in full. The rest of the field is still returned — in the result
+#: envelope's `data` and in the `hypothesis-field` note — but it is not re-rendered as prose.
+#:
+#: **This is a bound on the tool result, measured rather than guessed.** The summary and the
+#: structured outcome ride in the same `ToolMessage`, so they share `agent_max_tool_result_chars`
+#: (60,000). A ten-hypothesis field with verbose content serialises to 32,378 characters of `data`
+#: and the summary re-rendered every one of those rows for another 24,837 — 57,215 combined, a
+#: factor of 1.05 rather than the 2x an earlier comment claimed by counting `data` alone. Going
+#: over does not fail loudly: `agent/tool_result_size.py` cuts from the *middle*, which leaves the
+#: JSON unparseable and removes the centre of the ranking.
+_SUMMARY_ROWS = 5
+
 
 def _interval(row: RankedHypothesis) -> str:
     """A rating with its uncertainty and its evidence count, never a bare number."""
@@ -49,10 +61,13 @@ def summarise(outcome: TournamentOutcome) -> str:
     lines: list[str] = []
 
     if leader.check is not None:
-        verb = "Ran" if leader.check.kind == "computable" else "Proposed"
-        lines.append(
-            f"**Next: {leader.check.question}** ({verb.lower()}; {leader.check.expectation})"
-        )
+        # **The verb comes from what happened, never from what kind of check it is.** Reading it
+        # off `kind == "computable"` printed "(ran; …)" for every computable check — and nothing
+        # runs one, so the first line a chemist read announced a calculation that had not happened.
+        # That is precisely the failure the whole feature undertakes to avoid, inverted.
+        ran = leader.outcome is not None and leader.outcome.verdict != "not-run"
+        verb = "ran" if ran else "to run"
+        lines.append(f"**Next: {leader.check.question}** ({verb}; {leader.check.expectation})")
     lines.append("")
 
     if outcome.leader_is_decisive:
@@ -65,7 +80,7 @@ def summarise(outcome: TournamentOutcome) -> str:
         )
     lines.append("")
 
-    for position, row in enumerate(outcome.ranked, start=1):
+    for position, row in enumerate(outcome.ranked[:_SUMMARY_ROWS], start=1):
         lines.append(f"{position}. **{row.hypothesis.statement}** — {_interval(row)}")
         lines.append(f"   - refuted if: {row.hypothesis.refuted_if}")
         if row.hypothesis.mechanism:
@@ -76,6 +91,22 @@ def summarise(outcome: TournamentOutcome) -> str:
             lines.append(f"   - check ran: **{row.outcome.verdict}** — {row.outcome.detail}")
         elif row.check is not None and row.check.kind == "physical":
             lines.append(f"   - to settle in the lab: {row.check.question}")
+        elif row.check is not None:
+            # A computable check that did not run. Saying so beats saying nothing: before this,
+            # a `computable` check fell through every branch and the chemist was shown a hypothesis
+            # with no check at all, while the reason it was not run sat in a Python docstring.
+            reason = row.outcome.detail if row.outcome is not None else ""
+            lines.append(
+                f"   - answerable with this system's tools, not run: {row.check.question}"
+                + (f" — {reason}" if reason else "")
+            )
+
+    hidden = len(outcome.ranked) - _SUMMARY_ROWS
+    if hidden > 0:
+        lines.append(
+            f"\n_{hidden} further hypothesis(es) were ranked below these; the full field is in "
+            "this job's result and in its `hypothesis-field` note._"
+        )
 
     caveats: list[str] = []
     if outcome.rejected:

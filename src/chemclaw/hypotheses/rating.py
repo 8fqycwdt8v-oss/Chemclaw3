@@ -269,10 +269,16 @@ def rate(
         return RatingTable({}, np.zeros((0, 0), dtype=float), {})
 
     n = len(ids)
-    counts = [0] * n
+    # **Weight, not row count.** A pair judged in both presentation orders enters as two
+    # half-weight judgements, so counting rows told a chemist "over 5 comparisons" for a hypothesis
+    # the fit had given total weight 4 — a displayed evidence count that disagreed with the interval
+    # printed beside it. Rounding keeps it a whole number for the reader while tracking what the fit
+    # actually used.
+    weights = [0.0] * n
     for judgement in entries:
-        counts[index[judgement.winner]] += 1
-        counts[index[judgement.loser]] += 1
+        weights[index[judgement.winner]] += judgement.weight
+        weights[index[judgement.loser]] += judgement.weight
+    counts = [int(round(weight)) for weight in weights]
 
     offsets = np.zeros(n, dtype=float)  # offsets from ANCHOR; the prior is centred at 0 here
     precision = 1.0 / (prior_sd * prior_sd)

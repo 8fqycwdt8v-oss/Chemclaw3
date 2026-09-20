@@ -121,22 +121,41 @@ checkable, not a substitute for the answer.
 `evals/hypothesis_tournament.py` simulates the instrument against a constructed ordering, with a
 shuffled ordering as the null `D-2026-08-16` requires. Measured over 300 runs per cell:
 
-| field | judge accuracy | comparisons | top-1 | null top-1 | Spearman | null Spearman |
-|---:|---:|---:|---:|---:|---:|---:|
-| 10 | 0.55 | 20 | 0.20 | 0.07 | 0.32 | −0.05 |
-| 10 | 0.75 | 20 | 0.48 | 0.07 | 0.66 | −0.05 |
-| 10 | 0.90 | 20 | 0.84 | 0.07 | 0.87 | −0.05 |
-| 10 | 1.00 | 20 | 1.00 | 0.07 | 0.98 | −0.05 |
+Reproducible with `make hypothesis-recovery`, at 1,000 runs per cell:
 
-A perfect judge recovers the ordering exactly, so the pairing and the fit are sound. A judge barely
-better than chance still triples the odds of naming the best hypothesis, because twenty comparisons
-aggregate a weak signal.
+| judge accuracy | comparisons | top-1 | null top-1 | Spearman | null Spearman |
+|---:|---:|---:|---:|---:|---:|
+| 0.50 | 20 | 0.101 | 0.101 | +0.008 | −0.009 |
+| 0.55 | 20 | 0.145 | 0.101 | +0.132 | −0.009 |
+| 0.65 | 20 | 0.238 | 0.101 | +0.350 | −0.009 |
+| 0.75 | 20 | **0.392** | 0.101 | +0.563 | −0.009 |
+| 0.90 | 20 | 0.682 | 0.101 | +0.827 | −0.009 |
+| 1.00 | 20 | 1.000 | 0.101 | +0.961 | −0.009 |
 
-**And the row that matters most is the middle one.** At a plausible 75% judge accuracy the top-rated
-hypothesis is genuinely best **under half the time** — seven times the null, and nowhere near good
+A perfect judge recovers the ordering exactly, so the pairing and the fit are sound. A judge with
+*no* information sits exactly on the null, which is the control that matters and the one this eval
+failed until the labels were fixed (below).
+
+**The row that matters most is the 0.75 one.** At a plausible judge accuracy the top-rated
+hypothesis is genuinely best **under 40% of the time** — four times the null, and nowhere near good
 enough to present as an answer. That number is the empirical case for `leader_is_decisive` and for
 the report's refusal to name a leader it cannot separate, and it is pinned in
 `tests/test_hypothesis_eval.py` rather than left as a caveat somebody could drop.
+
+**An earlier draft of this ADR published 0.48 for that row, and it was inflated by a defect in the
+thing being measured.** `pair_round` broke a Swiss score tie by hypothesis *id*, so lexically-early
+hypotheses drew a systematically easier bracket; because a Bradley-Terry fit is opponent-strength
+aware, that turned identical records into different ratings. Measured with a coin-flip judge — zero
+information, so every point of spread is an artefact — a field of ten came out with a **143-Elo
+monotone spread ordered by id**, wider than the standard errors printed beside it. Production ids
+are hashes of the statement, so rephrasing a hypothesis moved it up the chemist's table.
+
+The eval could not see it, because its ground truth was `h0 > h1 > …` — the same order the bracket
+rewarded. A judge carrying literally zero information scored Spearman **+0.22** with
+`beats_null=True`. The null was shuffled and the *labels* were not, so the control did not control
+for the one artefact the instrument had. Both are fixed together: the tie breaks on input position
+and the workflow permutes the field by a hash of the question, and the eval re-assigns ids to truth
+ranks every run. The corrected numbers make the argument for `leader_is_decisive` stronger.
 
 **What this does not measure is whether a language model judging real chemistry is an accurate
 judge.** It cannot: the ground truth is constructed. `backtest_shape()` states the corpus backtest
@@ -144,6 +163,40 @@ that would settle it — truncate `optimization-campaign` series before the deci
 compare against the recorded cause with two nulls — and records that it has never run, for
 `evals/delegation.py`'s reason: no credential. Saying so is better than a number produced against a
 mock and reported as a measurement.
+
+## What review found, after the ADR first claimed green
+
+Two adversarial reviews ran against the merged branch and between them found twelve defects, five
+red gates and one false claim in this document. The ones worth carrying here:
+
+- **The bracket artefact and the eval aligned with it**, above. The largest, and the only pair that
+  had to be fixed together — changing the tiebreak without de-aligning the labels would have left
+  no way to see whether it worked.
+- **The screen merged two *opposite* hypotheses.** Similarity was Jaccard over word sets, which is
+  invariant under role reversal, so "the aldehyde reacts faster than the ketone" and "the ketone
+  reacts faster than the aldehyde" scored 1.0 on both fields and one was deleted as a duplicate.
+  Two mutually exclusive explanations of one observation are the single most valuable thing a
+  tournament can hold. Now compared on adjacent word pairs.
+- **The summary told the chemist a calculation had run.** The verb was read off `check.kind`, and
+  nothing runs a computable check, so the first line of every such result said "(ran; …)" — the
+  exact failure this ADR's own "refuses to pretend to settle" section undertakes to avoid,
+  inverted. The verb now comes from the outcome, and `run_computable_check` is actually called so
+  its stated reason reaches a reader instead of sitting in a docstring.
+- **A rejection rule that selected against concreteness.** A 12-character floor on `refuted_if`
+  rejected `"yield > 90%"` (8 characters normalised) and `"pH drops"` while vaguer, longer text
+  passed. Rejection is the only destructive rule here, so it counts words now.
+- **Position bias was a reversal rate, whose no-bias value is 50%.** A judge with no order
+  preference but ordinary noise reverses about half the pairs it sees twice, so the figure read
+  "54% bias" for a judge that had none. It is now the first-position win rate, which is 0.5 for any
+  order-independent judge, rescaled so 0.0 means no order effect — and suppressed entirely below
+  eight decisive comparisons, because at one the estimator is identically 1.0.
+- **A failed note write was reported as written**, putting `[[…]]` edges in the field note at ids
+  nothing defines. **And the field note's id ignored the actor and context** the workflow id keys
+  on, so two tournaments the system deliberately keeps apart overwrote each other's record.
+- **The payload figure in `core/config/hypotheses.py` was wrong in the reassuring direction**: it
+  counted `data` alone and claimed "roughly a factor of two in hand", while `summarise` re-rendered
+  the same table into `summary` in the same `ToolMessage` — 57,215 combined against a 60,000 cap,
+  a factor of 1.05. The prose table is bounded now and the comment states both halves.
 
 ## Two defects this change found in itself
 
@@ -169,5 +222,14 @@ model-authored span in a proposal body goes through it.
 - Ships **on**, unlike the panel this replaces. It is a tool the model may choose, not a stage
   imposed on every turn, so the failure mode `D-2026-08-15` deleted — a capability nothing reaches —
   and the one `D-2026-08-13` feared — a panel that over-flags — are both absent by construction.
-- `make lint type test` green. `tests/test_hypotheses.py` (34), `tests/test_hypothesis_tournament.py`
-  (7, driving the real compiled workflow), `tests/test_hypothesis_eval.py` (5).
+- Observability: `chemclaw_hypothesis_tournaments_total{outcome}`,
+  `chemclaw_hypothesis_screen_rejections_total{rule}` and `chemclaw_hypothesis_position_bias`.
+  Every stage of this workflow catches and continues, so without them a run whose judge failed
+  entirely — returning a ranked table built from the prior — was indistinguishable from a healthy
+  one outside the log.
+- `skills/competing-hypotheses/SKILL.md` carries the reading rules, and
+  `skills/experiment-progression` now routes to the tool: it is loaded for exactly this trigger and
+  did not know the tool existed.
+- `make hypothesis-recovery` reproduces the table above without a credential.
+- `make lint type test` green. `tests/test_hypotheses.py`, `tests/test_hypothesis_tournament.py`
+  (driving the real compiled workflow) and `tests/test_hypothesis_eval.py`.

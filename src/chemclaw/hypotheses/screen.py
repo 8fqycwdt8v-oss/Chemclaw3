@@ -36,28 +36,35 @@ from dataclasses import dataclass
 
 from chemclaw.hypotheses.models import Hypothesis, ScreenMerge, ScreenRejection
 
-#: Fields shorter than this, once normalised, cannot name an observation. Measured against the
-#: degenerate outputs this catches ("unknown", "n/a", "nothing", "tbd"), all of which are shorter.
-_MIN_REFUTATION_CHARS = 12
+#: A refutation condition needs at least this many words. Counted in *words* rather than characters,
+#: because a character floor rejects exactly the best conditions: measured at the 12-character floor
+#: this replaces, `"yield > 90%"` normalises to 8 characters and was rejected, as were `"pH drops"`
+#: and `"no exotherm"`, while vaguer and longer text passed. Rejection is the only destructive rule
+#: here, so it must not select against concreteness. Two words still catches every placeholder the
+#: denylist below was measured against, all of which are one.
+_MIN_REFUTATION_WORDS = 2
 
 #: Refutation conditions that are syntactically present and semantically empty. Matched on the
 #: whole normalised field, never as a substring, so "no change in yield below 40 C" survives while
 #: a bare "no" does not.
-_VACUOUS = frozenset(
-    {
-        "n/a",
-        "na",
-        "none",
-        "nothing",
-        "unknown",
-        "unclear",
-        "tbd",
-        "not applicable",
-        "not known",
-        "cannot be refuted",
-        "cannot be tested",
-        "no",
-    }
+#:
+#: **Normalised at definition, because the comparison is against normalised text.** Written as
+#: literals these silently stopped matching whenever punctuation carried the meaning: `"n/a"`
+#: normalises to `"n a"`, which is not the string `"n/a"` and is two words, so it passed both this
+#: check and the word floor.
+_VACUOUS_RAW = (
+    "n/a",
+    "na",
+    "none",
+    "nothing",
+    "unknown",
+    "unclear",
+    "tbd",
+    "not applicable",
+    "not known",
+    "cannot be refuted",
+    "cannot be tested",
+    "no",
 )
 
 #: Jaccard overlap at which two normalised fields are treated as the same text. High, because the
@@ -81,17 +88,41 @@ def _normalise(text: str) -> str:
     return " ".join(_WORD.findall(text.lower()))
 
 
-def _tokens(text: str) -> frozenset[str]:
-    return frozenset(_WORD.findall(text.lower()))
+#: `_VACUOUS_RAW` put through the same normalisation the field is, so the two are comparable.
+_VACUOUS = frozenset(_normalise(entry) for entry in _VACUOUS_RAW)
+
+
+def _tokens(text: str) -> list[str]:
+    return _WORD.findall(text.lower())
+
+
+def _shingles(text: str) -> frozenset[tuple[str, ...]]:
+    """Adjacent word *pairs*, so word order survives the comparison.
+
+    A bag of words cannot tell "the aldehyde reacts faster than the ketone" from "the ketone reacts
+    faster than the aldehyde" — same words, opposite claims, Jaccard 1.0. Those two are the single
+    most valuable thing a tournament can hold, and the screen was deleting one of them as a
+    duplicate. Bigrams separate them because `("aldehyde", "reacts")` appears in one and not the
+    other.
+
+    A one-word string has no pair, so it degrades to that single word rather than to nothing.
+    """
+    words = _tokens(text)
+    if len(words) < 2:
+        return frozenset((word,) for word in words)
+    return frozenset(zip(words, words[1:], strict=False))
 
 
 def similarity(left: str, right: str) -> float:
-    """Jaccard overlap of the word sets of two strings, 0.0 to 1.0.
+    """Order-sensitive Jaccard overlap of two strings, 0.0 to 1.0.
 
     Two empty strings are 1.0 (identically empty), which matters because `mechanism` is optional and
     two hypotheses both omitting it must not read as disagreeing about it.
+
+    Compares adjacent word pairs rather than words, because the merge it feeds is the only
+    destructive rule in the pipeline and a word-set comparison scores two *opposite* claims at 1.0.
     """
-    a, b = _tokens(left), _tokens(right)
+    a, b = _shingles(left), _shingles(right)
     if not a and not b:
         return 1.0
     if not a or not b:
@@ -106,7 +137,7 @@ def _refutation_is_usable(hypothesis: Hypothesis) -> tuple[bool, str]:
         return False, "refuted_if is blank once punctuation is removed"
     if normalised in _VACUOUS:
         return False, f"refuted_if is a placeholder: {hypothesis.refuted_if.strip()!r}"
-    if len(normalised) < _MIN_REFUTATION_CHARS:
+    if len(_tokens(normalised)) < _MIN_REFUTATION_WORDS:
         return False, f"refuted_if is too short to name an observation: {hypothesis.refuted_if!r}"
     if normalised == _normalise(hypothesis.statement):
         return False, "refuted_if restates the hypothesis rather than naming a contradicting result"

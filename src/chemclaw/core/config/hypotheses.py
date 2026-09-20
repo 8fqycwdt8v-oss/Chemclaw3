@@ -28,17 +28,24 @@ class HypothesisSettings(BaseSettings):
     # Candidates one angle may propose. The product with `hypothesis_angles` is what the screen
     # sees, and the screen usually removes some, so this is deliberately above the field cap.
     hypothesis_per_angle: int = Field(default=3, ge=1)
-    # The most hypotheses that reach the tournament after screening. At 10 the tournament is 20
-    # comparisons over 4 rounds; at 20 it is 50 over 5.
+    # The most hypotheses that reach the tournament after screening. At 10 that is 4 Swiss rounds
+    # of 5 pairings — 20 comparisons, plus 5 more for the double-judged first round below, so 25
+    # judged model calls at the shipped defaults. `hypotheses.pairing.comparisons_for` computes it,
+    # and takes `double_judge_first_round` precisely so this number is not quoted without it.
     #
-    # **It also bounds the result payload, which is the constraint that bites first.** The outcome
-    # is returned whole in `ConnectorJobResult.data` and read back through `get_durable_job_status`,
-    # where `agent_max_tool_result_chars` (60,000) applies. Measured at this default with
-    # deliberately verbose content — 200-character statements, three objections each — a full field
-    # serialises to **32,378 characters**, so there is roughly a factor of two in hand. A deployment
-    # doubling this should re-measure rather than assume: the growth is linear in the field, so 20
-    # lands around the cap and the loss would be silent truncation of the ranking a chemist is
-    # reading, not an error.
+    # **It also bounds the result payload, and that figure was wrong here once.** The outcome is
+    # returned whole in `ConnectorJobResult.data` and read back through `get_durable_job_status`,
+    # where `agent_max_tool_result_chars` (60,000) applies to the whole `ToolMessage`. Measured at
+    # this default with deliberately verbose content — 200-character statements, three objections
+    # each — `data` is 32,378 characters. An earlier version of this comment stopped there and
+    # claimed "roughly a factor of two in hand"; it had missed that `report.summarise` re-rendered
+    # the same table into `summary`, which rides in the same message: **57,215 combined, a factor
+    # of 1.05**. And the failure would not have been silent, as that comment also said —
+    # `agent/tool_result_size.py` cuts from the middle and says so, which leaves the `data` JSON
+    # unparseable and removes the centre of the ranking.
+    #
+    # `report._SUMMARY_ROWS` now bounds the prose at the top rows, so the summary no longer grows
+    # with the field. Re-measure both halves before raising this, not just `data`.
     hypothesis_max_field: int = Field(default=10, ge=2)
     # Judge the first round in both presentation orders, so position bias is measured on every run
     # rather than assumed absent. Costs `field/2` extra calls once. Turning this off makes

@@ -67,7 +67,7 @@ def _spearman(order: Sequence[str], truth: Sequence[str]) -> float:
     return 1.0 - (6.0 * d_squared) / (n * (n * n - 1))
 
 
-def _judge(stronger: int, weaker: int, accuracy: float, rng: random.Random) -> tuple[int, int]:
+def _judge(stronger: str, weaker: str, accuracy: float, rng: random.Random) -> tuple[str, str]:
     """A judge that names the genuinely better hypothesis with probability `accuracy`.
 
     A blunt model of a judge, deliberately: making the error rate depend on how close the pair is
@@ -91,34 +91,42 @@ def simulate(
     id's meaning — and makes the null trivially statable: a shuffled order.
     """
     rng = random.Random(seed)
-    truth = [f"h{i}" for i in range(field)]
     hits = nulls = 0
     spearman_total = null_spearman_total = 0.0
     comparisons_total = 0
 
     for _ in range(runs):
+        # **The ids are re-assigned to truth ranks every run, and that is load-bearing.** A fixed
+        # `truth = ["h0", "h1", ...]` makes the best hypothesis also the lexically-first one, so any
+        # ordering artefact in the pairing reads as recovery and the null cannot see it: measured
+        # against the shipped pairing before this, a judge with *literally zero information* scored
+        # Spearman +0.22 and `beats_null=True`. A null that controls for shuffling but not for the
+        # labels does not control for the one artefact the instrument can have.
+        truth = [f"h{i}" for i in range(field)]
+        rng.shuffle(truth)
+        entered = sorted(truth)
+        rank = {name: index for index, name in enumerate(truth)}
         scores: dict[str, float] = dict.fromkeys(truth, 0.0)
         byes: dict[str, int] = {}
         played: set[frozenset[str]] = set()
         judgements: list[Judgement] = []
 
         for _round in range(rounds if rounds is not None else rounds_for(field)):
-            pairs, bye = pair_round(truth, scores=scores, played=frozenset(played), byes=byes)
+            # `entered` rather than `truth`: the pairing breaks a score tie by input position, so
+            # handing it the true ranking would hand it the answer.
+            pairs, bye = pair_round(entered, scores=scores, played=frozenset(played), byes=byes)
             if bye is not None:
                 byes[bye] = byes.get(bye, 0) + 1
                 scores[bye] += 0.5
             for left, right in pairs:
                 played.add(frozenset({left, right}))
-                stronger, weaker = (
-                    (left, right) if truth.index(left) < truth.index(right) else (right, left)
-                )
-                won, lost = _judge(truth.index(stronger), truth.index(weaker), judge_accuracy, rng)
-                winner, loser = f"h{won}", f"h{lost}"
+                stronger, weaker = (left, right) if rank[left] < rank[right] else (right, left)
+                winner, loser = _judge(stronger, weaker, judge_accuracy, rng)
                 judgements.append(Judgement(winner=winner, loser=loser))
                 scores[winner] += 1.0
                 comparisons_total += 1
 
-        recovered = [row.hypothesis_id for row in rate(truth, judgements).ranked()]
+        recovered = [row.hypothesis_id for row in rate(entered, judgements).ranked()]
         hits += recovered[0] == truth[0]
         spearman_total += _spearman(recovered, truth)
 
