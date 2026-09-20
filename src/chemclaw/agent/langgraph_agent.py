@@ -117,6 +117,7 @@ from chemclaw.agent.local_skills import (
 )
 from chemclaw.agent.loop_cap import enforce_loop_cap
 from chemclaw.agent.model_calls import model_call_middleware, refuse_unparsed_arguments
+from chemclaw.agent.org_skills import ORG_SKILLS_LABEL, ORG_SKILLS_ROOT
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
 from chemclaw.agent.plan_link import stamp_plan_link
 from chemclaw.agent.plan_scope import ScopedTodoListMiddleware
@@ -273,11 +274,15 @@ def build_langgraph_agent(
     tools = _capability_tools(prof)
     # **A tool whose only outcome is unreachable is not a capability, so it is not bound.**
     # `propose_skill` writes a `behaviour_proposals` row for a person to accept through
-    # `POST /proposals/...`, and both the durable row and that route need the personal tier — which
-    # ships off (`agent_memory_enabled` defaults False and no Helm value sets it). Bound anyway, the
-    # model spent the schema on every request and told the chemist to go accept something the route
+    # `POST /proposals/...`, and both the durable row and that route need the personal tier. That
+    # tier is on by default since `D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius`,
+    # so this filter no longer fires on the shipped configuration — it fires on a deployment that
+    # sets `CHEMCLAW_AGENT_MEMORY_ENABLED=false`, or on an in-memory session store, and it is kept
+    # for exactly that case. When the predicate was false and this filter did not exist, the model
+    # spent the schema on every request and told the chemist to go accept something the route
     # answers 503 to. Filtered here rather than gated inside the tool because a refusal the model
-    # can only discover by calling is still paid for in the prefix, every call, forever.
+    # can only discover by calling is still paid for in the prefix, every call, forever — and
+    # `tests/test_context_floor.py` charges its 462 tokens now that it is bound.
     if not personal_skills_available():
         tools = [fn for fn in tools if fn.__name__ not in PERSONAL_TIER_TOOLS]
     # **The helper's narrowing is applied here rather than in `_subagents`, and both the position
@@ -375,11 +380,18 @@ def build_langgraph_agent(
     # The prose has been narrowed against `bound` since the blocks landed; this is the same
     # narrowing for the other half of what the model is told, from the same set, so the two cannot
     # disagree about what this turn can reach.
-    skills = skills_backend(prof, tools, labelled=labelled, available={t.name for t in bound})
+    #
+    # **Computed once and handed to both**, because three tiers are mounted on one backend and a
+    # narrowing that answered differently depending on which mount asked would not be a narrowing.
+    # The stored tiers used to have no predicate at all — see `skill_narrowing`.
+    permits = skill_narrowing(prof, tools, labelled, available={t.name for t in bound})
+    skills = skills_backend(
+        prof, tools, labelled=labelled, available={t.name for t in bound}, permits=permits
+    )
     # The scratchpad wraps the skills routes rather than replacing them: the skills middleware and
     # the filesystem tools must read the *same* backend object, or the role narrowing computed for
     # one would not apply to the other.
-    backend = scratchpad_backend(skills, store)
+    backend = scratchpad_backend(skills, store, permits=permits)
     shared: dict[str, Any] = {
         "model": chat_model,
         "tools": bound,
@@ -1199,15 +1211,19 @@ def _skills_middleware(
     # that resolves to the composite's default `StateBackend` would publish an empty tier to the
     # model on every turn a deployment has no store.
     #
-    # **The chemist's own tier goes first, and the order is a decision rather than an append.**
+    # **The order is ascending review depth, and it is a decision rather than an append.**
     # Upstream resolves a name collision last-source-wins, so whichever tree is last silently
-    # displaces the other. Reviewed judgment wins here: a personal skill taking a shipped skill's
-    # name is the tier escaping the bound `api/routes/skills.py` refuses at, and that route cannot
-    # refuse the collision that arrives the other way round — a skill added to `skills/` months
-    # after somebody saved theirs. Of the two silences this is the safer one, and the person can
-    # still see their own document through the route that lists it.
+    # displaces the others. One person, then an administrator, then a reviewed commit: a personal
+    # skill taking a shipped skill's name is the tier escaping the bound `api/routes/skills.py`
+    # refuses at, and that route cannot refuse the collision that arrives the other way round — a
+    # skill added to `skills/` months after somebody saved theirs. The organisation's tier sits
+    # between them for the same reason in both directions: an administrator publishing a name one
+    # chemist already uses privately must not be blocked by it (nobody can see that collision
+    # coming, and the whole deployment would be held up by one person's private vocabulary), and
+    # must not silently lose to it either. Of the two silences this is the safer one, and each
+    # person can still see their own document through the route that lists it.
     #
-    # **A profile that narrows to the empty set reaches neither tier, and `/mine` used to escape
+    # **A profile that narrows to the empty set reaches no tier at all, and `/mine` used to escape
     # it.** `profile.skill_names` is a governance narrowing over the *shared* corpus and
     # `local_skills.py` argues at length that it must not select among a person's own — which is
     # right for a named subset and wrong for `[]`, which is a profile author writing down that this
@@ -1216,8 +1232,11 @@ def _skills_middleware(
     # demands; measured before this, that arm listed a chemist's personal skill while listing none
     # of the 28 shared ones, so every A/B it reported still carried personal judgment.
     sources: list[tuple[str, str]] = []
-    if LOCAL_SKILLS_ROOT in backend.routes and profile.skill_names != frozenset():
-        sources.append((f"/{LOCAL_SKILLS_LABEL}", LOCAL_SKILLS_LABEL))
+    if profile.skill_names != frozenset():
+        if LOCAL_SKILLS_ROOT in backend.routes:
+            sources.append((f"/{LOCAL_SKILLS_LABEL}", LOCAL_SKILLS_LABEL))
+        if ORG_SKILLS_ROOT in backend.routes:
+            sources.append((f"/{ORG_SKILLS_LABEL}", ORG_SKILLS_LABEL))
     sources += [(f"/{label}", label) for label, _ in labelled]
     return ReloadingSkillsMiddleware(
         backend=backend,
@@ -1236,6 +1255,7 @@ def skills_backend(
     *,
     labelled: list[tuple[str, str]] | None = None,
     available: Collection[str] | None = None,
+    permits: Callable[[str], bool] | None = None,
 ) -> CompositeBackend:
     """The skills backend for one profile — a backend that can only reach what it may.
 
@@ -1275,10 +1295,55 @@ def skills_backend(
             manifests that way) and wrong for a turn, because a manifest does not move when a
             server is unreachable. The argument exists because that difference was measured
             offering two skills with no bound tool at all.
+        permits: The narrowing this turn already computed (`skill_narrowing`), so one build asks
+            the question once and every mount binds the same answer. Omitted, it is computed here,
+            which is what a test building a backend alone wants.
     """
     labelled = labelled if labelled is not None else _labelled(_skill_dirs())
-    dirs = [directory for _label, directory in labelled]
-    declared = declared_tools(dirs)
+    if permits is None:
+        permits = skill_narrowing(profile, tools, labelled, available=available)
+    return CompositeBackend(
+        default=StateBackend(),
+        routes={
+            f"/{label}/": NarrowedSkillsBackend(directory, permits) for label, directory in labelled
+        },
+    )
+
+
+def skill_narrowing(
+    profile: AgentProfile,
+    tools: list[Any],
+    labelled: list[tuple[str, str]],
+    *,
+    available: Collection[str] | None = None,
+) -> Callable[[str], bool]:
+    """Whether this turn may reach a skill, by name — **one predicate for every tier**.
+
+    Extracted from `skills_backend` when the stored tiers gained a gate. The reviewed tree, the
+    chemist's own tier and the organisation's are three mounts of one turn, and a narrowing that
+    answered differently depending on which mount asked would not be a narrowing: the model reads
+    all three through one composed backend and can name a path in any of them.
+
+    That is not a hypothetical. The personal tier shipped narrowed in the *prompt* and not at the
+    backend, so `skill_names: []` — the eval control arm whose whole job is removing skills —
+    advertised nothing and still served the bodies. Computing this once and handing it to every
+    mount is what makes a second such gap a build error rather than a measurement nobody takes.
+
+    It is computed here rather than per mount for the second reason too: `_log_narrowing` writes one
+    line per build saying what this profile was offered, and three mounts deriving their own
+    predicate would write it three times with nothing to say which was binding.
+
+    Args:
+        profile: The profile whose surface the capability predicate is scoped by.
+        tools: This profile's resolved in-process tools, used only when `available` is omitted.
+        labelled: The already-walked `(label, directory)` list, for the declared-tools map.
+        available: The tool names this turn actually binds, connectors included. See
+            `skills_backend` for why the fallback is the manifest answer and why that differs.
+
+    Returns:
+        The composed predicate, evaluated per reach because the role gate reads ambient identity.
+    """
+    declared = declared_tools([directory for _label, directory in labelled])
     permits = skill_permits(
         enabled=settings.skills_enabled_list,
         declared=declared,
@@ -1287,12 +1352,7 @@ def skills_backend(
         names=profile.skill_names,
     )
     _log_narrowing(profile, declared, permits)
-    return CompositeBackend(
-        default=StateBackend(),
-        routes={
-            f"/{label}/": NarrowedSkillsBackend(directory, permits) for label, directory in labelled
-        },
-    )
+    return permits
 
 
 def _log_narrowing(

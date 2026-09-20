@@ -9,9 +9,15 @@ remembered, the agent drafts the text into its answer, and the person posts it t
 
 **No agent path writes a skill, and that is unchanged rather than relaxed.** `SkillsReadOnlyRefusal`
 still refuses every write verb, here as on the shared tree — `_LOCAL_READ_ONLY` below is the same
-refusal worded for this root. The write is an HTTP route a person calls, which is the same shape
-`api/routes/plan.py` uses for exactly the same reason: a model must never be able to authorize its
-own behaviour change.
+refusal worded for this root, and `agent/skill_store.PermittedStoreBackend` is what raises it. The
+write is an HTTP route a person calls, which is the same shape `api/routes/plan.py` uses for exactly
+the same reason: a model must never be able to authorize its own behaviour change.
+
+**The read half moved out, and the tier gained the gate it was missing.** This module used to hold
+its own `ReadOnlyStoreBackend`, narrowed in the prompt and not at the backend — so the eval control
+arm that removes every skill still handed over the bodies. The backend is now shared with the
+organisation's tier and takes a `permits` predicate; `local_skills_backend` below is where this
+tier's half of it is decided.
 
 **The invariants this tier owes**, from that ADR, and where each one lives:
 
@@ -57,9 +63,8 @@ outcome is judgment they wrote being unhelpful to them. `docs/planning/BACKLOG.m
 """
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from pathlib import PurePosixPath
 from typing import Any
 
 import frontmatter
@@ -69,8 +74,8 @@ from pydantic import ValidationError
 from chemclaw.agent.audit import bounded_repr
 from chemclaw.agent.refusal_route import routed
 from chemclaw.agent.session_store import _session_connection, _session_dsn
-from chemclaw.agent.skill_backend import SkillsReadOnlyRefusal
 from chemclaw.agent.skill_manifest import SkillManifest
+from chemclaw.agent.skill_store import PermittedStoreBackend
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.ids import stable_hash
@@ -150,8 +155,15 @@ def validated_skill(body: str, *, expected_name: str | None = None) -> str:
     docstring that "a second door into one bound is a hole in it" and then closed one bound of four.
 
     So the admission rules live with the tier rather than with a surface, and a new way in gets them
-    by calling this. The four callers are the save route, the accept route, `propose_skill`, and the
-    distiller before it files.
+    by calling this. The callers are the save route, the accept route, `propose_skill`, the
+    distiller before it files, and — since the organisation's tier shipped — its publish and revert
+    routes too.
+
+    **It is deliberately not per tier.** `agent_local_skill_max_chars` reads as the personal tier's
+    number and bounds what a *skill* is — judgment rather than a transcript — which is as true of
+    one an administrator publishes as of one a chemist keeps. A second char cap for the second tier
+    would be the second door into one bound that this function exists to prevent, so the wording
+    above names no tier.
 
     Args:
         body: The whole `SKILL.md`, frontmatter included.
@@ -169,8 +181,8 @@ def validated_skill(body: str, *, expected_name: str | None = None) -> str:
     """
     if len(body) > settings.agent_local_skill_max_chars:
         raise SkillRefused(
-            f"a personal skill may be at most {settings.agent_local_skill_max_chars} characters "
-            f"and this one is {len(body)}. A skill is judgment, not a transcript."
+            f"a skill may be at most {settings.agent_local_skill_max_chars} characters and this "
+            f"one is {len(body)}. A skill is judgment, not a transcript."
         )
     try:
         parsed = frontmatter.loads(body)
@@ -231,10 +243,16 @@ def personal_skills_available() -> bool:
     **One function because three surfaces read it, and the third read it by not reading it.**
     `api/runner.turn_store` mounts `/mine` on these conditions and `api/routes/skills.py` refuses on
     them, but `propose_skill` was bound on every model call with no condition at all — so under the
-    shipped defaults (`agent_memory_enabled` is False, and no Helm value sets it) the model spent
-    the tool's schema on every request, wrote a row into a store that dies with the process, and
-    told the chemist to go accept something `POST /proposals/...` answers 503 to. A tool whose only
-    outcome is unreachable is not a capability, and this is the predicate that says so.
+    shipped defaults of the day (`agent_memory_enabled` was False) the model spent the tool's schema
+    on every request, wrote a row into a store that dies with the process, and told the chemist to
+    go accept something `POST /proposals/...` answers 503 to. A tool whose only outcome is
+    unreachable is not a capability, and this is the predicate that says so.
+
+    **Both halves are now True on the shipped configuration**
+    (`D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius` flipped the first; the chart has
+    always pinned the second), so what this predicate guards today is a deployment that turned
+    durable memory *off* — which loses the whole human gate on agent-proposed behaviour with it, and
+    is why the chart states the posture rather than inheriting it.
 
     Returns:
         True where a proposal has somewhere durable to land and a route that can accept it.
@@ -277,157 +295,45 @@ def local_skills_prefix(actor: str) -> str:
     return ".".join(local_skills_namespace(actor))
 
 
-class ReadOnlyStoreBackend(StoreBackend):
-    """A `StoreBackend` whose write half is refused, for the tier a turn may read and not change.
+def _count_a_local_load(name: str) -> None:
+    """Book one delivered personal-skill body, on the two channels this tier may use.
 
-    The shared tree gets this property from `NarrowedSkillsBackend`, which is a `FilesystemBackend`;
-    this tier is stored rather than filed, so the same refusal has to be stated against the other
-    base class. Both raise `SkillsReadOnlyRefusal`, which is what makes a refusal read to the model
-    as an access-control decision rather than a fault, and what lands it in the audit trail as a
-    refusal (`agent/skill_backend.py` carries the argument).
+    **A separate bare counter rather than the labelled one**, for the reason the metric's own HELP
+    gives: a local skill's name is a person's words, and a label would mint a series per private
+    project name in a shared exposition that no erasure reaches.
 
-    **Eight overrides, not four, and the reason is that the shared tree's argument does not
-    transfer.** `agent/skill_backend.py` states — correctly, for its own base class — that the async
-    twins need no override because `FilesystemBackend` implements them as
-    `asyncio.to_thread(self.write, …)` and so dispatches through the subclass. `StoreBackend` does
-    not: `awrite`, `aedit` and `adelete` are *natively* async against the store, so four sync
-    overrides left the async path open. Measured before this was fixed — `awrite`, `aedit` and
-    `adelete` all succeeded against a read-only tier, and that is the path an async agent actually
-    takes. `aupload_files` happened to refuse, which is worse than if none had: three holes beside
-    one working refusal is what a spot check passes.
-
-    **Derived rather than listed, because the write half grows.** deepagents 0.7 added `delete` to
-    the protocol and the shared tree inherited a working one until a test caught it. Here the same
-    risk is answered the same way, and it is what caught the three above:
-    `tests/test_local_skills.py` enumerates every public method on the protocol *and* on
-    `StoreBackend`, and requires each to be probed as a read or refused as a write — so a bump that
-    adds a ninth turns red rather than quietly handing a turn a way to rewrite its owner's
-    judgment.
+    `record_skill_loaded` carries the name in process only — the ledger digests it before it reaches
+    `turn_costs` (`agent/skill_fingerprint.py`), because that row is retained through erasure. It is
+    what `agent/distiller.py`'s self-confirmation guard reads, so a tier that did not call it would
+    let a trajectory this skill was already teaching count as evidence for proposing it.
     """
-
-    def write(self, *args: Any, **kwargs: Any) -> Any:
-        """Refuse: a turn may read its chemist's skills and may not change them."""
-        raise SkillsReadOnlyRefusal(_LOCAL_READ_ONLY)
-
-    def edit(self, *args: Any, **kwargs: Any) -> Any:
-        """Refuse, for the reason `write` gives."""
-        raise SkillsReadOnlyRefusal(_LOCAL_READ_ONLY)
-
-    def delete(self, *args: Any, **kwargs: Any) -> Any:
-        """Refuse, for the reason `write` gives.
-
-        Deleting is the verb a chemist most plausibly wants and least plausibly wants *a turn* to
-        have: the route is where they do it, and a turn that could would be one bad inference away
-        from removing judgment its owner still relies on.
-        """
-        raise SkillsReadOnlyRefusal(_LOCAL_READ_ONLY)
-
-    def upload_files(self, *args: Any, **kwargs: Any) -> Any:
-        """Refuse, for the reason `write` gives."""
-        raise SkillsReadOnlyRefusal(_LOCAL_READ_ONLY)
-
-    async def awrite(self, *args: Any, **kwargs: Any) -> Any:
-        """Refuse. Overridden because `StoreBackend.awrite` is native rather than a thread wrapper.
-
-        This is the one that mattered: an async agent takes the async path, so before this override
-        existed the refusal was true of a path nothing used and false of the path everything does.
-        """
-        raise SkillsReadOnlyRefusal(_LOCAL_READ_ONLY)
-
-    async def aedit(self, *args: Any, **kwargs: Any) -> Any:
-        """Refuse, for the reason `awrite` gives."""
-        raise SkillsReadOnlyRefusal(_LOCAL_READ_ONLY)
-
-    async def adelete(self, *args: Any, **kwargs: Any) -> Any:
-        """Refuse, for the reason `awrite` gives."""
-        raise SkillsReadOnlyRefusal(_LOCAL_READ_ONLY)
-
-    async def aupload_files(self, *args: Any, **kwargs: Any) -> Any:
-        """Refuse.
-
-        Stated rather than inherited even though the base class's own implementation already
-        refused by falling through to `upload_files`: relying on that is relying on one of the four
-        async verbs being a wrapper while the other three are not, which is the accident this class
-        was just caught by.
-        """
-        raise SkillsReadOnlyRefusal(_LOCAL_READ_ONLY)
-
-    def read(self, *args: Any, **kwargs: Any) -> Any:
-        """Read one of the owner's skills, and count it — the tier's only usage signal.
-
-        **`chemclaw_skill_loads_total` does not cover this tier, and this record's ADR said it
-        did.** That counter is `NarrowedSkillsBackend`'s, which is a `FilesystemBackend`; this is a
-        `StoreBackend`, so a local skill's body reached the model with nothing moving anywhere.
-        Measured: a shipped skill and a personal one read through the same mount in one process
-        left `chemclaw_skill_loads_total{skill="protocol-generation"}` at 1 and no series for the
-        other. The same base-class mistake as the async write verbs, one method over — which is why
-        the rule that paragraph left behind is written about *inheritance* rather than about
-        writes.
-
-        **A separate bare counter rather than the labelled one**, for the reason the metric's own
-        HELP gives: a local skill's name is a person's words, and a label would mint a series per
-        private project name in a shared exposition.
-        """
-        result = super().read(*args, **kwargs)
-        _count_a_load(result, _first_argument(args, kwargs))
-        return result
-
-    async def aread(self, *args: Any, **kwargs: Any) -> Any:
-        """The async twin, overridden rather than inherited — see `awrite` for why that matters.
-
-        `StoreBackend.aread` is native against the store rather than a `to_thread` wrapper, so a
-        counter placed on `read` alone would count the path nothing takes and miss the one an async
-        agent does: the exact shape this class was caught by on its write half.
-        """
-        result = await super().aread(*args, **kwargs)
-        _count_a_load(result, _first_argument(args, kwargs))
-        return result
+    record_metric(lambda m: m.increment("chemclaw_local_skill_loads_total"))
+    record_skill_loaded(name)
 
 
-def _first_argument(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
-    """The path a `read`/`aread` was given, whichever way upstream's caller spelled the call.
+def local_skills_backend(
+    store: Any, actor: str, permits: Callable[[str], bool]
+) -> PermittedStoreBackend:
+    """The mounted read half of one chemist's own tier.
 
-    Read off the arguments rather than re-declared as a signature, because this class forwards with
-    `*args, **kwargs` on purpose: `tests/test_local_skills.py` derives its coverage from
-    `BackendProtocol` *and* `StoreBackend`, so a signature written here would be a second copy of
-    upstream's that a bump could silently invalidate. `file_path` is upstream's own keyword
-    (`tests/test_upstream_surface.py` pins it for the write verbs).
+    A factory rather than a constructor call at the mount point, because three of the five arguments
+    are *this tier's* rather than the caller's — the namespace, the refusal wording and which
+    counter a load books against. `agent/scratchpad.py` composes routes; it should not also be the
+    place that knows a personal skill's name is private.
+
+    Args:
+        store: The process's store.
+        actor: Whose tier this is, in the turn's own actor spelling.
+        permits: `agent/skill_access.skill_permits`' composed narrowing, applied per reach.
     """
-    if args:
-        return str(args[0])
-    return str(kwargs.get("file_path", ""))
-
-
-def _name_of(path: str) -> str:
-    """The skill a mounted path belongs to, or empty for anything that is not a skill body.
-
-    The same predicate the shared tree applies with `_is_a_skill_body` plus `_skill_of`, stated
-    once here because this backend sees paths *relative to its mount* — `/my-workup/SKILL.md`
-    rather than `/mine/my-workup/SKILL.md` — so the shared tree's pair would read the first segment
-    of a different string.
-    """
-    parts = PurePosixPath(path.strip("/")).parts
-    return parts[0] if len(parts) > 1 else ""
-
-
-def _count_a_load(result: Any, path: str = "") -> None:
-    """Book one delivered local-skill body, or nothing.
-
-    Derived from the *result* rather than from the path, so the two conditions
-    `agent/skill_backend.py` had to learn the hard way are answered by the object that knows them:
-    a read that failed delivered nothing, and a read that asked for no lines delivered nothing
-    either while still resolving. A path-shaped predicate would book both.
-    """
-    if getattr(result, "error", None) is None and not getattr(result, "no_lines_requested", False):
-        record_metric(lambda m: m.increment("chemclaw_local_skill_loads_total"))
-        # The same load on the turn's own channel, carrying the name in process only: the ledger
-        # digests it before it reaches `turn_costs` (`agent/skill_fingerprint.py`), because that
-        # row is retained through erasure and a chemist's skill name is their own words. The
-        # counter beside it is bare for the neighbouring reason — a Prometheus label is a shared
-        # exposition no erasure reaches at all.
-        name = _name_of(path)
-        if name:
-            record_skill_loaded(name)
+    namespace = local_skills_namespace(actor)
+    return PermittedStoreBackend(
+        namespace=lambda _runtime: namespace,
+        store=store,
+        permits=permits,
+        refusal=_LOCAL_READ_ONLY,
+        on_load=_count_a_local_load,
+    )
 
 
 #: The document inside a skill directory that makes it a skill, mirroring the shared tree's shape so
@@ -449,7 +355,7 @@ def _writer(store: Any, actor: str) -> StoreBackend:
     """A writable backend over one person's own skills, for the route that saves them.
 
     **Plain `StoreBackend`, deliberately, and this is the only place one is built.** The turn's
-    backend is `ReadOnlyStoreBackend` over the same namespace; this is the other side of the same
+    backend is a `PermittedStoreBackend` over the same namespace; this is the other side of the same
     tier, reached from an HTTP route a person calls rather than from anything a model holds. Using
     upstream's writer rather than putting rows in directly is what keeps the stored shape — the
     key, the `content`/`encoding` pair, the two timestamps — with exactly one definition, so a
@@ -533,6 +439,22 @@ async def save_local_skill(store: Any, actor: str, name: str, body: str) -> None
                 f"you already keep {len(held)} personal skills, which is this deployment's limit "
                 f"of {settings.agent_local_skills_max}: every one of them is in the prompt of "
                 "every turn you take, so remove one before adding another",
+                conflict=True,
+            )
+        # **A name the organisation already publishes is refused here, and the reverse is not.**
+        # The two tiers mount side by side and a collision resolves by source order, so one of them
+        # loses silently; this makes the direction a decision instead of an accident. A person
+        # cannot take a name the whole deployment is using — they would be writing judgment that
+        # never acts, since `_skills_middleware` puts `/org` after `/mine`. An administrator *can*
+        # take a name somebody already uses privately, because the alternative is a deployment-wide
+        # publication blocked by one person's private vocabulary, which nobody could have seen
+        # coming and nobody can resolve without being told whose it is.
+        from chemclaw.agent.org_skills import list_org_skills
+
+        if name in await list_org_skills(store):
+            raise SkillRefused(
+                f"{name!r} is the name of a skill your organisation publishes to everyone, so a "
+                "personal one by that name would never act — give yours a different name",
                 conflict=True,
             )
         await _writer(store, actor).awrite(_key(name), body)

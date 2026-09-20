@@ -119,7 +119,7 @@ async def list_proposals(principal: CurrentUser, state: str = "open") -> Proposa
 
 
 async def decide_proposal(
-    kind: ProposalKind, name: str, payload: DecisionIn, principal: CurrentUser
+    kind: ProposalKind, name: str, body: DecisionIn, principal: CurrentUser
 ) -> ProposalOut:
     """Accept or decline one proposal, and — on an acceptance — write what it proposed.
 
@@ -129,7 +129,7 @@ async def decide_proposal(
     proposal stays open, which is recoverable; a recorded acceptance that failed to write is not.
     """
     store = default_proposal_store()
-    standing = await store.one(principal.oid, kind, name, payload.content_hash)
+    standing = await store.one(principal.oid, kind, name, body.content_hash)
     if standing is None:
         raise HTTPException(
             404,
@@ -150,16 +150,16 @@ async def decide_proposal(
             "a newer version of this proposal replaced it, so deciding this one would decide a "
             "document nothing would deliver. Read the open one instead",
         )
-    if payload.accepted:
+    if body.accepted:
         await _write_what_was_accepted(standing, principal.oid)
     decided = await store.decide(
         principal.oid,
         kind,
         name,
-        payload.content_hash,
-        accepted=payload.accepted,
+        body.content_hash,
+        accepted=body.accepted,
         decided_by=principal.oid,
-        reason=payload.reason,
+        reason=body.reason,
     )
     if decided is None:  # pragma: no cover - `one` above found it a moment ago
         raise HTTPException(404, f"the {kind} proposal {name!r} disappeared while being decided")

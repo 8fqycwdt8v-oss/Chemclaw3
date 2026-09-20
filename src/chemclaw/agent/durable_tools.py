@@ -731,27 +731,23 @@ def _tournament_id(request: TournamentRequest) -> str:
 async def rank_competing_hypotheses(question: str, context: str = "") -> str:
     """Generate competing explanations, rank them, and say what experiment would settle them.
 
-    Use this when a result is puzzling and several explanations are possible — "the impurity
-    appeared when I changed the solvent", "the yield collapsed on scale-up" — and the useful answer
-    is the *field* of candidate causes with the evidence weighed against each, rather than one
-    explanation argued in a single pass. Several independently-briefed generators propose
-    hypotheses in parallel; each is critiqued; then they are compared against each other in pairs,
-    seeded with retrieved evidence, and rated on the Elo scale.
+    For a puzzling result with several possible causes — "the impurity appeared when I changed the
+    solvent", "the yield collapsed on scale-up" — where the useful answer is the *field* of
+    candidates with the evidence weighed across it. Generators propose hypotheses in parallel, each
+    is critiqued, then they are compared in pairs against retrieved evidence and rated on the Elo
+    scale.
 
-    Prefer `suggest_next_experiment` instead when the question is an optimization over bounded
-    numeric variables with runs already done — that fits a surrogate model, which is a stronger
-    instrument than a judged comparison. Prefer answering directly when only one explanation is
-    really in play; a tournament over a field of one tells nobody anything.
+    Prefer `suggest_next_experiment` for an optimization over bounded numeric variables with runs
+    already done: a fitted surrogate is a stronger instrument than a judged comparison. Answer
+    directly when only one explanation is really in play — a tournament over a field of one tells
+    nobody anything.
 
-    Long-running and resumable, so this returns a job id rather than the ranking — poll it with
-    `get_durable_job_status`. Re-asking the same question rejoins the existing run rather than
-    starting a second one.
+    Returns a job id rather than the ranking; poll `get_durable_job_status`. Re-asking the same
+    question rejoins the existing run.
 
-    **What the rating is and is not.** It is a preference ordering over the hypotheses this run
-    generated, held with a stated uncertainty and a comparison count. It is not a probability that
-    a hypothesis is true, and it is not evidence about the chemistry. Where the leading pair sits
-    inside its own uncertainty the result says the field did not separate, and that is a real
-    answer rather than a failed one — report it as given rather than naming a leader anyway.
+    **The rating orders the candidates this run generated. It is not a probability that any of them
+    is true.** Read `competing-hypotheses` before reporting one: it carries the rest, including
+    that an unseparated field is an answer rather than a failure.
 
     Args:
         question: The observation or puzzle to explain, in the chemist's own terms.

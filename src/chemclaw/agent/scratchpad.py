@@ -69,6 +69,7 @@ nothing had been started. The fix is not a name added to that set: `write_file` 
 """
 
 import logging
+from collections.abc import Callable
 from functools import cache
 from typing import Any, cast
 
@@ -80,9 +81,9 @@ from langgraph.store.postgres.aio import AsyncPostgresStore
 
 from chemclaw.agent.local_skills import (
     LOCAL_SKILLS_ROOT,
-    ReadOnlyStoreBackend,
-    local_skills_namespace,
+    local_skills_backend,
 )
+from chemclaw.agent.org_skills import ORG_SKILLS_ROOT, org_skills_backend
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor
 from chemclaw.core.ids import stable_hash
@@ -438,7 +439,12 @@ class BoundedStoreBackend(StoreBackend):
 _EVICTION_PAGE = 64
 
 
-def scratchpad_backend(skills: CompositeBackend, store: Any | None = None) -> CompositeBackend:
+def scratchpad_backend(
+    skills: CompositeBackend,
+    store: Any | None = None,
+    *,
+    permits: Callable[[str], bool],
+) -> CompositeBackend:
     """Extend a turn's skills backend with a scratchpad and, when enabled, durable memories.
 
     Takes the skills backend rather than rebuilding it, because the caller already holds it — the
@@ -458,11 +464,17 @@ def scratchpad_backend(skills: CompositeBackend, store: Any | None = None) -> Co
     Args:
         skills: The narrowed skills backend for this profile (`langgraph_agent.skills_backend`).
         store: This process's `AsyncPostgresStore` from `memory_store()`, or `None` for a turn with
-            no durable memory — which is every turn under the default configuration.
+            no durable memory.
+        permits: The narrowing this turn computed (`langgraph_agent.skill_narrowing`), applied to
+            the stored skills tiers as well as to the filed ones. **Required rather than
+            defaulted**, because the personal tier shipped with no backend predicate at all — it was
+            narrowed in the prompt and served every body to anyone who guessed a path — and a
+            default here is how that reopens by omission.
 
     Returns:
-        A backend routing `/skills/…` as given, `/memories/…` and `/mine/…` to the store when both
-        conditions hold, and everything else — `/scratch/…` included — to graph state.
+        A backend routing `/skills/…` as given, `/org/…` to the store whenever there is one,
+        `/memories/…` and `/mine/…` to the store when there is also an actor, and everything else —
+        `/scratch/…` included — to graph state.
     """
     routes = dict(skills.routes)
     actor = get_current_actor()
@@ -472,13 +484,17 @@ def scratchpad_backend(skills: CompositeBackend, store: Any | None = None) -> Co
         # lambda takes the runtime upstream passes and ignores it, which is the whole point.
         routes[MEMORY_ROOT] = BoundedStoreBackend(namespace=lambda _runtime: namespace, store=store)
         # The chemist's own skills, on the same two conditions and for the same reason: a store to
-        # hold them and an actor to own them. A *different* first namespace component, so the two
-        # tiers are separately erasable and a bug in one cannot serve the other's rows — see
+        # hold them and an actor to own them. A *different* first namespace component, so the
+        # tiers are separately erasable and a bug in one cannot serve another's rows — see
         # `agent/local_skills.py`, which also says why this is stored rather than filed.
-        own = local_skills_namespace(actor)
-        routes[LOCAL_SKILLS_ROOT] = ReadOnlyStoreBackend(
-            namespace=lambda _runtime: own, store=store
-        )
+        routes[LOCAL_SKILLS_ROOT] = local_skills_backend(store, actor, permits)
+    # **The organisation's tier needs a store and no actor**, which is why it is mounted here rather
+    # than in the branch above. It is nobody's namespace: every turn resolves the same one, so an
+    # unauthenticated turn is still entitled to the deployment's own judgment — and there is no
+    # per-actor prefix to erase, which `agent/org_skills.py` states as a decision rather than
+    # leaving as an absence.
+    if store is not None:
+        routes[ORG_SKILLS_ROOT] = org_skills_backend(store, permits)
     return CompositeBackend(default=StateBackend(), routes=routes)
 
 

@@ -136,11 +136,18 @@ changes what the agent *does*: knowledge does not, so it lands in `knowledge/` c
 `created_by: agent`, readable beside its own citations. What makes that safe is provenance on every
 retrieved chunk, the citations a chemist checks at the point of use, and contradiction
 (`memory/failure.py`'s `contradicts`, `kg/conflicts.py`, `memory/supersede.py`, bi-temporal
-`valid_to`). **A skill is the opposite case** and is refused outright in both tiers: no agent path
-writes a `SKILL.md` (`agent/skill_backend.SkillsReadOnlyRefusal`). The shared tree changes only
-through a reviewed commit to `skills/`; a chemist keeps their own through `POST /skills/mine`, where
-what makes it safe is blast radius rather than review — the namespace closes over one actor. A turn
-reads either tier and writes neither. **No Temporal Schedule mines knowledge on a timer**: the
+`valid_to`). **A skill is the opposite case** and is refused outright in every tier: no agent path
+writes a `SKILL.md` (`agent/skill_backend.SkillsReadOnlyRefusal`,
+`agent/skill_store.PermittedStoreBackend`). **Which route changes a tier follows its blast radius**
+(`D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius`): `skills/` acts on every deployment
+and changes only through a reviewed commit; the organisation's tier acts on every turn here and
+changes through `POST /skills/org`, which takes the privileged role; a chemist keeps their own
+through `POST /skills/mine`, where what makes it safe is blast radius rather than review — the
+namespace closes over one actor. The agent's part is `propose_skill`, which writes a proposal and
+never a skill, and an administrator promotes a body rather than reaching into anybody's queue. A
+turn reads every tier and writes none. The stored tiers hold their own versions, so a bad
+organisation-wide skill is reverted by naming a body the store already holds rather than by
+re-authoring it. **No Temporal Schedule mines knowledge on a timer**: the
 campaign, playbook and optimization miners run on demand.
 
 **An ELN transcription is data, not a claim**, so it is readable the moment it is ingested:

@@ -16,9 +16,9 @@ from chemclaw.agent.langgraph_agent import skills_backend
 from chemclaw.agent.local_skills import (
     LOCAL_SKILLS_LABEL,
     LOCAL_SKILLS_ROOT,
-    ReadOnlyStoreBackend,
     delete_local_skill,
     list_local_skills,
+    local_skills_backend,
     local_skills_namespace,
     local_skills_prefix,
     read_local_skill,
@@ -27,6 +27,7 @@ from chemclaw.agent.local_skills import (
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.agent.scratchpad import memory_namespace, scratchpad_backend
 from chemclaw.agent.skill_backend import SkillsReadOnlyRefusal
+from chemclaw.agent.skill_store import PermittedStoreBackend
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 
@@ -39,11 +40,25 @@ def store() -> InMemoryStore:
     return InMemoryStore()
 
 
+def _backend(store: Any, actor: str = "alice-oid") -> PermittedStoreBackend:
+    """One chemist's tier as a backend, permitting every name.
+
+    The tests that use this are about the read/write split rather than about the narrowing, so the
+    predicate is stated permissive rather than defaulted — `permits` is required precisely because a
+    default is how the personal tier shipped with no backend gate at all.
+    """
+    return local_skills_backend(store, actor, lambda _name: True)
+
+
 def _mounted(store: Any, actor: str) -> Any:
     """The backend a turn for `actor` would be given, with the tier mounted as a turn mounts it."""
     tokens = set_current_identity(actor, frozenset())
     try:
-        return scratchpad_backend(skills_backend(AgentProfile(name="default"), []), store)
+        return scratchpad_backend(
+            skills_backend(AgentProfile(name="default"), []),
+            store,
+            permits=lambda _name: True,
+        )
     finally:
         reset_current_identity(tokens)
 
@@ -88,9 +103,7 @@ def test_no_turn_may_write_its_owners_skills(store: InMemoryStore) -> None:
     of one tier and false of the other — which is worse than false of both, because the prose says
     "no agent path writes a skill" without qualification.
     """
-    backend = ReadOnlyStoreBackend(
-        namespace=lambda _runtime: local_skills_namespace("alice-oid"), store=store
-    )
+    backend = _backend(store)
 
     for verb, args in (
         ("write", ("/x/SKILL.md", "body")),
@@ -111,15 +124,13 @@ def test_every_method_this_tier_exposes_is_either_a_read_or_a_refusal(store: InM
     upstream addition has to be triaged into one or the other before this file passes.
 
     `StoreBackend` as well as `BackendProtocol`: what a turn can reach is what
-    `ReadOnlyStoreBackend` *inherits*, and a method upstream adds to the concrete class alone would
+    `PermittedStoreBackend` *inherits*, and a method upstream adds to the concrete class alone would
     be invisible to a protocol-only derivation.
     """
     from deepagents.backends import StoreBackend
     from deepagents.backends.protocol import BackendProtocol
 
-    backend = ReadOnlyStoreBackend(
-        namespace=lambda _runtime: local_skills_namespace("alice-oid"), store=store
-    )
+    backend = _backend(store)
     asyncio.run(save_local_skill(store, "alice-oid", "my-workup", _BODY))
 
     reads: dict[str, Any] = {

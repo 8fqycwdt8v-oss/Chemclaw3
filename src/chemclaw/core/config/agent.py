@@ -411,18 +411,37 @@ class AgentSettings(BaseSettings):
     # `calc_find_max_result_chars` and the rest); it is the floor under all of them, applied at the
     # one place every tool result passes.
     agent_max_tool_result_chars: int = Field(default=60_000, ge=0)
-    # Durable working memory for the agent's scratchpad (`agent/scratchpad.py`). Off by default,
-    # and the default is about *data* rather than about the code being unproven: enabling it
-    # creates the `store`/`store_vectors` tables and starts writing files a turn authored to a
-    # place that outlives the session. A deployment should decide that, not inherit it.
+    # Durable working memory for the agent's scratchpad (`agent/scratchpad.py`), and the switch the
+    # whole personal/organisation skills stack rides on.
+    #
+    # **On by default since `D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius`, and the
+    # default it replaced was argued rather than careless.** `D-2026-08-15` shipped it off saying
+    # "the default is about *data* rather than about the code being unproven… a deployment should
+    # decide that, not inherit it", which was right while the only thing behind it was a scratchpad
+    # that outlives a session. It is no longer: `personal_skills_available()` reads this, so with it
+    # off `POST /skills/mine`, `POST /skills/org` and the whole proposal-acceptance path answer 503,
+    # `make distill --propose` refuses, and `propose_skill` is not even bound. A gate nobody can
+    # reach is not a gate, which is
+    # `D-2026-09-16-a-setting-that-ships-off-is-a-feature-nobody-has`'s whole point, and it is the
+    # reason `D-2026-09-18-a-skill-a-chemist-keeps…` declined to add a second flag beside this one.
+    #
+    # **What turning it on actually starts**, stated because the list is longer than "skills":
+    # `/memories/` is mounted for every authenticated turn, so `write_file`/`edit_file` under that
+    # root become durable and agent-authored, bounded only by `agent_memory_max_files` and evicted
+    # by `BoundedStoreBackend`; `propose_skill` joins every request's prefix at ~462 tokens; and
+    # `store`/`store_migrations` are created on first use — which is why `deploy/entrypoint.sh`'s
+    # `migrate` role now creates them between the migrations and the grants that name them.
     #
     # With it off, a turn still gets `/scratch/` — the graph-state scratchpad that makes a
     # multi-source research turn possible — and simply has no `/memories/` route. The two are
-    # separate capabilities and only the durable half needs a decision.
+    # separate capabilities and only the durable half needs a decision; a deployment that does not
+    # want one sets this False and loses the skills tiers with it, which is the coupling
+    # `api/routes/skills.py` states rather than switches.
     #
     # It is also inert without an actor: no ambient identity means no namespace, and a memory
     # written under a shared prefix would be one nobody can erase and everybody can read
-    # (`agent/scratchpad.memory_namespace`).
+    # (`agent/scratchpad.memory_namespace`). The organisation's tier is the one exception and needs
+    # no actor, because it is nobody's (`agent/org_skills.org_skills_namespace`).
     # **What a helper may write into its caller's checkpointed state**, which nothing bounded.
     # `task` returns a `Command` whose update carries every non-excluded key of the helper's final
     # state, `files` included — so a helper's scratch filesystem crosses into the caller's `files`
@@ -459,7 +478,7 @@ class AgentSettings(BaseSettings):
     # answers in the tree is the defect
     # `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` names.
     agent_subagent_files_max_chars: int = Field(default=200_000, ge=0)
-    agent_memory_enabled: bool = False
+    agent_memory_enabled: bool = True
     # **What bounds the `store` table, which nothing did.** `durable/retention.py`'s register said
     # of it "**nothing bounds it**", and it was right: `store` is agent-writable with no size cap,
     # no window and no clock. Driven, 2,000 files of 5 kB each landed as `(2000, '816 kB')` under
@@ -500,6 +519,37 @@ class AgentSettings(BaseSettings):
     # the work produced, while a skill is judgment somebody sat down and wrote.
     agent_local_skill_max_chars: int = Field(default=16_000, ge=1)
     agent_local_skills_max: int = Field(default=20, ge=1)
+    # **What bounds the organisation's tier, and why it is not the personal tier's number.**
+    # `agent_local_skills_max` bounds one person's prefix and is usually spent on nobody: most
+    # chemists keep none, so the worst case is a worst case. This tier is the opposite — whatever an
+    # administrator publishes is in the prompt of *every* turn *every* chemist takes, so the cap is
+    # not a ceiling on an unusual case, it is the bill.
+    #
+    # And it is paid more than once per turn. The org tier is mounted on the turn's backend, and a
+    # helper is compiled through the same builder over the same backend, so a four-helper fan-out
+    # sends it five times. At the personal tier's 20 rows that is ~27,900 tokens of prefix across
+    # one turn's graphs; at 12 it is ~16,700. The measured basis is one maximal row at ~278 tokens
+    # (deepagents' 1,024-character description limit plus the listing's own scaffolding), which
+    # `tests/test_context_floor.py` derives and re-measures on this tier's own mount.
+    #
+    # 12 rather than the shipped tree's 28 because the reviewed tree is narrowed by all four
+    # predicates and most profiles reach a fraction of it, while this tier applies fewer: every org
+    # row is in every prefix. Refused at the route rather than evicted, the personal tier's reason
+    # exactly — judgment a person authored may not vanish because somebody added one more.
+    agent_org_skills_max: int = Field(default=12, ge=1)
+    # How many previously-activated bodies of one organisation skill stay revertible.
+    #
+    # **Evicted rather than refused, which is the opposite of the cap above, and the asymmetry is
+    # the decision.** Refusing here would mean an administrator cannot publish a fix because the
+    # skill has been edited too often — a bound on exactly the wrong thing. Evicting the least
+    # recently activated is `scratchpad.BoundedStoreBackend`'s tiebreak taken for its reason: it is
+    # the only ordering the store carries, and the version anybody reverts to is a recent one.
+    #
+    # This is the one place the stored tier is weaker than the git tree it stands beside: `skills/`
+    # can be reverted to any commit and this to the last 20 activations
+    # (`D-2026-09-20-a-revert-is-a-pointer-when-there-is-no-commit-to-revert`). 20 because a skill
+    # with 20 distinct bodies behind it has a process problem rather than a history problem.
+    agent_org_skill_versions_max: int = Field(default=20, ge=1)
     # What `recall_preferences` may hand back, and the second half of the same finding.
     # `user_preferences` is the other agent-writable table with no bound: `remember_preference`
     # takes a **model-chosen** key, so the row count is not one-per-known-name, and the `SELECT …

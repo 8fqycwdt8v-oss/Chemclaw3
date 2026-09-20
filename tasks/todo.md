@@ -3,10 +3,13 @@
 **Status:** implemented; under review. `make lint type` green.
 **Scope chosen:** full feature + ADR. Elo seeded by evidence checks.
 
-The previous occupant of this file was the ten-wave review's four follow-ups, all four closed
-and merged (#420, #421, #422). It is moved to `docs/archive/plans/ten-wave-followups.md` rather
-than discarded, because its review section is the record of that work — the same reason the
-peer-handoff plan was archived before it.
+The previous occupants of this file are archived rather than discarded, because each one's review
+section is the record of that work — the convention the peer-handoff plan was moved under before
+either of them. The ten-wave review's four follow-ups, all closed and merged (#420, #421, #422),
+are in `docs/archive/plans/ten-wave-follow-ups-2026-09-19.md` (archived by `main` under that
+name while this branch was in review, so the copy this branch made was dropped as a duplicate); the agent-authored-skills plan (#423), which
+landed on `main` while this branch was in review, is in
+`docs/archive/plans/agent-authored-skills-under-a-human-gate.md`.
 
 ## The ask
 
