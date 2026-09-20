@@ -17,6 +17,7 @@ silently rather than loudly, which is why they earn a test of their own.
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -785,29 +786,23 @@ def test_a_comment_never_swallows_the_line_after_it() -> None:
 # along. The exemption had never been checked against what kubeconform actually did.
 _CATALOG_VALIDATED_KINDS = frozenset({"ServiceMonitor", "PodMonitor", "PrometheusRule"})
 
-# The one kind kubeconform genuinely has no schema for, so `make helm-validate` runs with
-# `-ignore-missing-schemas` and *skips* it rather than failing. Keeping the set explicit is what
+# The kinds kubeconform genuinely has no schema for, so `make helm-validate` runs with
+# `-ignore-missing-schemas` and *skips* them rather than failing. Keeping the set explicit is what
 # stops that flag from being a hole: a skipped kind is a deliberate entry here, not a silent pass.
-_UNVALIDATED_KINDS = frozenset({"Route"})
-
-# Kinds the chart *can* render but does not on the shipped values, so they never reach kubeconform
-# in the validation render and cannot appear in its `Skipped` count.
 #
-# `AlertmanagerConfig` is gated on `monitoring.alertmanager.enabled`, which is off because the chart
-# cannot invent a receiver — a Slack webhook or a PagerDuty key is a deployment fact. It would be
-# skipped rather than validated if it did render (the datreeio catalog carries a `v1alpha1` schema
-# for it and no `v1beta1`), which is why it is recorded here rather than quietly left out: the point
-# of these three sets is that every kind in the template text is accounted for by *someone*.
-_UNRENDERED_BY_DEFAULT_KINDS = frozenset({"AlertmanagerConfig"})
-
-# What the CI gate reports for the chart as it stands: every rendered resource validated except the
-# OpenShift `Route`. Pinned as a number because the two sets above are claims about kubeconform's
-# behaviour, and a claim about someone else's tool is worth stating in a form that can be compared
-# against its actual output rather than believed.
-_EXPECTED_SKIPPED_RESOURCES = 1
+# `Route` is the OpenShift one, absent from both kubeconform's defaults and the datreeio catalog.
+# `AlertmanagerConfig` is the second and it was **not listed here until the gate was first run**: it
+# sat in a set called `_UNRENDERED_BY_DEFAULT_KINDS`, whose stated reason was that it "never reaches
+# kubeconform in the validation render and cannot appear in its `Skipped` count". That is false —
+# `make helm-validate`'s union arm sets `monitoring.alertmanager.enabled=true`, so it renders, it
+# reaches kubeconform, and it is skipped (the catalog carries a `v1alpha1` schema for it and no
+# `v1beta1`). A kind is exempt because of what kubeconform can do with it, which is a property of
+# the kind; whether a given arm renders it is a property of the arm, and conflating the two put the
+# second skipped kind in the set defined as the one that cannot be skipped.
+_UNVALIDATED_KINDS = frozenset({"Route", "AlertmanagerConfig"})
 
 
-def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
+def test_only_the_known_crds_are_unvalidated_by_kubeconform() -> None:
     """Pin which kinds the chart renders, so `-ignore-missing-schemas` cannot hide a new one.
 
     `make helm-validate` must pass `-ignore-missing-schemas` because the chart renders an OpenShift
@@ -818,7 +813,10 @@ def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
 
     The cost of the flag is that an unknown kind is skipped instead of rejected. This test buys that
     back offline: every kind the chart renders is a core Kubernetes kind, a CRD the catalog covers,
-    or the one genuinely unvalidated kind named above.
+    or one of the genuinely unvalidated kinds named above. It is a claim about the *kinds*; how many
+    **resources** of them each render arm emits is
+    `test_every_resource_kubeconform_skips_is_one_this_file_declared`, which is a different question
+    and used to be answered by comparing the two.
     """
     core_kinds = {
         "ConfigMap",
@@ -832,27 +830,118 @@ def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
         "ServiceAccount",
     }
     rendered = set(re.findall(r"^kind:\s*([A-Za-z]+)", _all_templates(), flags=re.MULTILINE))
-    unexpected = (
-        rendered
-        - core_kinds
-        - _CATALOG_VALIDATED_KINDS
-        - _UNVALIDATED_KINDS
-        - _UNRENDERED_BY_DEFAULT_KINDS
-    )
+    unexpected = rendered - core_kinds - _CATALOG_VALIDATED_KINDS - _UNVALIDATED_KINDS
     assert not unexpected, (
         f"the chart renders kind(s) {sorted(unexpected)} that kubeconform may silently skip — "
         "add a schema location, or add them to _UNVALIDATED_KINDS with the reason"
     )
     # Both exemptions must stay earned: a kind the chart stopped rendering is stale bookkeeping,
     # and — the failure this test itself had — an exemption nobody ever checked against the tool.
-    stale = (
-        _UNVALIDATED_KINDS | _CATALOG_VALIDATED_KINDS | _UNRENDERED_BY_DEFAULT_KINDS
-    ) - rendered
+    stale = (_UNVALIDATED_KINDS | _CATALOG_VALIDATED_KINDS) - rendered
     assert not stale, f"exempted kind(s) the chart no longer renders: {sorted(stale)}"
-    assert len(_UNVALIDATED_KINDS) == _EXPECTED_SKIPPED_RESOURCES, (
-        "the count CI reports as `Skipped` must match what this file claims is unvalidated; "
-        "if they diverge, one of them is wrong about kubeconform rather than about the chart"
+
+
+def _kubeconform_arms() -> list[list[str]]:
+    """The flag sets `make helm-validate` actually pipes through kubeconform.
+
+    Read out of the `Makefile`'s own `for flags in …` loop rather than restated here, for the reason
+    `test_the_union_render_covers_every_switch_this_chart_ships_off` gives about that same literal:
+    a copy of the list is a second answer to the question, and it stays green while the gate's
+    render narrows underneath it. Split on whitespace rather than with a second `shlex` pass,
+    because the `--set-json` values carry the quotes helm needs and a posix split strips them.
+    """
+    makefile = (DEPLOY.parent / "Makefile").read_text()
+    loop = next(line for line in makefile.splitlines() if line.lstrip().startswith("for flags in"))
+    body = loop.split("for flags in", 1)[1].rsplit("; do", 1)[0]
+    return [arm.split() for arm in shlex.split(body)]
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None or shutil.which("kubeconform") is None,
+    # "helm is not installed" verbatim, because that literal is what `tests/conftest.py`'s epilogue
+    # counts; worded freshly, this skip was invisible to the count.
+    reason="helm is not installed (or kubeconform is): both render and validate the chart",
+)
+def test_every_resource_kubeconform_skips_is_one_this_file_declared() -> None:
+    """Take the skipped count off the tool, for every arm the gate validates.
+
+    `_UNVALIDATED_KINDS` is a claim about what kubeconform does, and this file used to check it by
+    comparing `len(_UNVALIDATED_KINDS)` against a literal `_EXPECTED_SKIPPED_RESOURCES = 1` sitting
+    six lines below it. Both halves were wrong in a way only running the tool could show, and it had
+    never been run here — `kubeconform` and `promtool` are absent from the sandbox, so `make
+    helm-validate` exits before its first render and the whole target had been taken on trust.
+
+    Run: the default arm reports `Skipped: 1` and the **union arm reports `Skipped: 3`** — two
+    `Route`s (the release's own and `chemclaw-mcp-face`'s) plus the `AlertmanagerConfig` that a set
+    named `_UNRENDERED_BY_DEFAULT_KINDS` claimed could never appear in this count. So the comparison
+    was between a number of *kinds* and a number of *resources*, which are different quantities
+    (`tasks/lessons.md`: two numbers on different bases do not compare, however carefully each was
+    measured); it held at `1 == 1` only because the default arm happens to render exactly one Route.
+
+    The deeper defect is what the comment claimed for itself: the literal was pinned, in its own
+    words, "in a form that can be compared against its actual output rather than believed" — and
+    nothing compared it. Its only reader was an assertion against the `len()` of a set in the same
+    file. So the count is now *derived* from the render per arm and *measured* against kubeconform's
+    own summary line, which is the only thing that can settle a claim about somebody else's tool.
+    """
+    arms = _kubeconform_arms()
+    assert len(arms) >= 2, (
+        "`make helm-validate` no longer renders more than one arm through kubeconform, so the "
+        "off-by-default templates reach it for the first time in an operator's cluster"
     )
+    for arm in arms:
+        render = _render(*arm).stdout
+        declared = [
+            f"{document.get('metadata', {}).get('name')} {document['kind']}"
+            for document in yaml.safe_load_all(render)
+            if document and document.get("kind") in _UNVALIDATED_KINDS
+        ]
+        result = subprocess.run(
+            [
+                "kubeconform",
+                "-strict",
+                "-summary",
+                "-ignore-missing-schemas",
+                "-kubernetes-version",
+                _kube_version(),
+                "-schema-location",
+                "default",
+                "-schema-location",
+                "https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/"
+                "{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json",
+            ],
+            input=render,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, (
+            f"kubeconform rejects the render for arm {arm or '(shipped defaults)'}:\n"
+            f"{result.stdout}{result.stderr}"
+        )
+        reported = re.search(r"Skipped:\s*(\d+)", result.stdout)
+        assert reported is not None, (
+            f"kubeconform printed no `Skipped` count for arm {arm or '(shipped defaults)'}, so "
+            f"this test cannot see what the flag hid:\n{result.stdout}"
+        )
+        assert int(reported.group(1)) == len(declared), (
+            f"kubeconform skipped {reported.group(1)} resource(s) on arm "
+            f"{arm or '(shipped defaults)'} and this file accounts for {len(declared)} "
+            f"({sorted(declared)}). `-ignore-missing-schemas` is hiding a kind — name it in "
+            "_UNVALIDATED_KINDS with the reason, or give kubeconform a schema location for it"
+        )
+
+
+def _kube_version() -> str:
+    """The Kubernetes version the gate validates against, off the `Makefile`'s own default.
+
+    Restating `1.29.0` here would be the defect this whole test exists to correct, one variable
+    over: a second declaration of a number, checked by nothing against the first.
+    """
+    makefile = (DEPLOY.parent / "Makefile").read_text()
+    match = re.search(r"^KUBE_VERSION \?= (\S+)$", makefile, flags=re.MULTILINE)
+    assert match is not None, "the Makefile no longer declares KUBE_VERSION"
+    return match.group(1)
 
 
 def test_something_actually_scrapes_the_metrics_endpoint() -> None:
@@ -2211,6 +2300,119 @@ def test_the_dependency_audit_gates_every_branch_push_and_the_local_gate() -> No
     assert "deps-audit" in ci_target, f"`make ci` does not depend on deps-audit: {ci_target}"
 
 
+#: Binaries a `shutil.which(...)` skip guard may rely on with no CI install step, because the
+#: runner image guarantees them. `bash`, `git` and `make` are what a GitHub Actions job *is* — a
+#: workflow that had to install `bash` would be describing a different problem — and `flock` is
+#: util-linux, present on every Ubuntu image. The point of the allowlist is that it is short and
+#: each entry is a claim about the image rather than about this repository.
+_RUNNER_IMAGE_BINARIES = frozenset({"bash", "flock", "git", "make"})
+
+
+def test_every_binary_the_suite_skips_on_is_installed_where_the_suite_runs() -> None:
+    """A `skipif(shutil.which(...))` is a promise that CI has the binary. Three of them did not.
+
+    Forty-eight places in this suite gate on seven binaries, and a missing one is a **skip**, which
+    reports green: driven with none of the three chart binaries on `PATH`, 75 tests skip across
+    `test_deploy_chart.py` and `test_retention.py` alone. (48 is the number of `shutil.which` calls,
+    not of tests — one decorator can cover a parametrised family, which is the whole gap between the
+    two figures and the reason both are stated as what they are.) So a skip guard is worth exactly
+    what the CI job running the suite installs, and nothing checked that. Measured when the
+    `kubeconform` test above was written and the obvious question was put to it: where does it
+    run?
+
+    Nowhere. `check` runs `make cov` and installed only `helm`; `chart` has `kubeconform` and
+    `promtool` and runs `make helm-validate` and no pytest. So the three tests gated on those two
+    binaries could not execute in either job —
+    `test_every_resource_kubeconform_skips_is_one_this_file_declared`,
+    `test_a_single_disarmed_pod_is_what_these_alerts_are_for`, and the `promtool` arm of
+    `tests/test_retention.py`. The latter two are the PromQL checks, and their whole subject is a
+    failure the cluster reports as `Valid` while the alerts silently never evaluate: written to
+    close that hole, and never once run by CI.
+
+    `check` installs all three binaries now. This test is the mechanism rather than the instance,
+    which is the distinction `test_every_gate_make_ci_runs_is_a_step_ci_yml_runs` below draws about
+    its own subject: the next binary-gated test added to this suite fails here on the day it is
+    written instead of skipping quietly for a month.
+
+    Both directions, because an allowlist nobody prunes is the other half of the same defect.
+    """
+    sources = "\n".join(
+        path.read_text() for path in sorted((DEPLOY.parent / "tests").rglob("*.py"))
+    )
+    gated = set(re.findall(r'shutil\.which\(\s*"([a-z0-9_-]+)"', sources))
+    assert "helm" in gated, f"the skip-guard scan did not parse: {sorted(gated)}"
+
+    jobs: dict[str, Any] = yaml.safe_load(
+        (DEPLOY.parent / ".github" / "workflows" / "ci.yml").read_text()
+    )["jobs"]
+    suite_jobs = [
+        name
+        for name, job in jobs.items()
+        if any(
+            target in {"cov", "test"}
+            for step in job.get("steps", [])
+            for command in re.findall(r"^make (.+)", str(step.get("run", "")), re.MULTILINE)
+            for target in command.split()
+        )
+    ]
+    assert len(suite_jobs) == 1, (
+        f"{suite_jobs} run the suite; this test assumes one job does, and two would mean a binary "
+        "installed in one of them still leaves the other's run skipping"
+    )
+    installed = "\n".join(
+        str(step)
+        for step in jobs[suite_jobs[0]]["steps"]
+        if str(step.get("name", "")).startswith("Install")
+    )
+
+    unprovided = sorted(
+        binary for binary in gated - _RUNNER_IMAGE_BINARIES if binary not in installed
+    )
+    assert not unprovided, (
+        f"tests skip on {unprovided} and the `{suite_jobs[0]}` job installs none of them, so those "
+        "tests report green in CI without ever running. Add an install step, or add the binary to "
+        "_RUNNER_IMAGE_BINARIES with the reason the runner image guarantees it"
+    )
+    stale = sorted(_RUNNER_IMAGE_BINARIES - gated)
+    assert not stale, (
+        f"_RUNNER_IMAGE_BINARIES exempts {stale}, which no test in this suite gates on any more"
+    )
+
+    # And the exemption has to be **earned**, or it is the hole rather than the guard. Driven: with
+    # only the two assertions above, moving `kubeconform` into the allowlist and deleting its
+    # install step passed — the escape hatch silenced exactly the defect this test was written for.
+    #
+    # An entry here claims the runner image guarantees the binary, which is a fact about somebody
+    # else's image and unverifiable from this tree. What *is* verifiable is the contrapositive: a
+    # binary this repository installs somewhere, or tells a human to install, is one it already
+    # knows is not guaranteed. So the two lists must be disjoint, and `kubeconform` cannot be
+    # exempted while `chart` installs it and the runbook names it under "install these".
+    install_steps = "\n".join(
+        str(step)
+        for job in jobs.values()
+        for step in job.get("steps", [])
+        if str(step.get("name", "")).startswith("Install")
+    )
+    # The binary each step *installs*, not every word it mentions: matched on the `install -m` that
+    # puts it on `PATH` and on the `setup-<tool>` action. A substring scan over the step text read
+    # `git` out of the `github.com` in a download URL — a guard that fires on its own plumbing.
+    installed_anywhere = set(re.findall(r"install -m \d+ \S*?/([a-z0-9_-]+)\b", install_steps))
+    installed_anywhere |= set(re.findall(r"uses: \S+/setup-([a-z0-9-]+)@", install_steps))
+    runbook = (DEPLOY.parent / "docs" / "guides" / "runbook.md").read_text()
+    runbook_block = runbook.split('says a binary is "not installed', 1)[1].split("```")[1]
+    told_to_install = {line.split()[0] for line in runbook_block.splitlines() if line.strip()}
+    assert {"helm", "kubeconform", "promtool"} <= installed_anywhere | told_to_install, (
+        "neither the workflow's install steps nor the runbook's install block parsed; this check "
+        f"saw {sorted(installed_anywhere)} and {sorted(told_to_install)}"
+    )
+    contradicted = sorted(_RUNNER_IMAGE_BINARIES & (installed_anywhere | told_to_install))
+    assert not contradicted, (
+        f"_RUNNER_IMAGE_BINARIES claims the runner image guarantees {contradicted}, and this "
+        "repository installs them or tells a human to — so it does not believe its own exemption. "
+        "Install the binary in the suite's job instead of exempting it"
+    )
+
+
 def test_every_gate_make_ci_runs_is_a_step_ci_yml_runs() -> None:
     """Two hand-maintained lists whose whole contract is that they agree, and nothing checked it.
 
@@ -2220,10 +2422,17 @@ def test_every_gate_make_ci_runs_is_a_step_ci_yml_runs() -> None:
     pinned; the *mechanism* was not, so the next gate to be added to one list and forgotten in the
     other fails nothing. This closes the class instead of the instance.
 
-    `helm-validate` is the one gate deliberately in a job of its own: it needs `helm` and
-    `kubeconform` and no Python, so it runs in `chart` in parallel rather than lengthening `check`.
-    The split is asserted rather than tolerated — a gate quietly moving between jobs is a change to
-    what blocks a merge.
+    `helm-validate` is the one gate deliberately in a job of its own, so it runs in `chart` in
+    parallel rather than lengthening `check`. The split is asserted rather than tolerated — a gate
+    quietly moving between jobs is a change to what blocks a merge.
+
+    The reason used to be stated as "it needs `helm` and `kubeconform` and no Python", and both
+    halves have since stopped being true. It needs `promtool` as well, and it needs Python: the
+    target unwraps its own render to feed the rule files to `promtool`, which is why `chart` grew a
+    `uv sync` step. And `check` now installs all three binaries too — not to run this gate, which
+    stays here, but because three tests in this suite gate on `kubeconform`/`promtool` and could
+    therefore run in neither job: they skipped in `check` for want of the binary, and `chart` runs
+    no pytest. The split is about which *gate* lives where, not about which binaries a job may have.
 
     **Both directions, and the second one is why this test was rewritten.** It used to slice the
     file in two on a literal newline-plus-`  chart:` and call the halves `check_job` and

@@ -62,8 +62,24 @@ concurrency:
 # real defect, and one value here, read by both `Install Helm` steps below, is what ends it.
 # (The step is still what makes the *sandbox* claim true: `helm` is absent there, and
 # `tests/conftest.py::_report_helm_skips` is what says so out loud when it is.)
+#
+# `kubeconform` and `promtool` are pinned here for the same reason and joined it later: they were
+# inline in `chart`'s own steps while `chart` was the only job that installed them, and `check` now
+# installs them too (see the step there). A digest in two jobs is a digest that drifts in one.
 env:
   HELM_VERSION: "v3.13.0"
+  # Checksummed, because a release asset is mutable in a way a git tag is not: the tag names a
+  # commit, the asset is a file the release owner can replace. These binaries then validate the
+  # chart that describes the deployment, so "whatever that URL served today" is a strange thing to
+  # trust in a pipeline that pins its Python closure with `--locked` and audits it. Both digests
+  # were verified against the release's own `CHECKSUMS`/`sha256sums.txt` rather than against one
+  # download.
+  KUBECONFORM_VERSION: "v0.6.7"
+  KUBECONFORM_SHA256: "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73"
+  # `promtool` ships only inside the full Prometheus tarball, which is why this pulls ~100 MB for
+  # one 40 MB binary; extracting the single path keeps the runner's disk out of it.
+  PROMETHEUS_VERSION: "v3.1.0"
+  PROMETHEUS_SHA256: "9a9d1e115d1745826b13aec3f1409780b9fcf1d4206746cb4faee46ca5add70c"
 
 jobs:
   # Lint and type, alone, ahead of everything that needs a database. Split out of `check` because
@@ -185,6 +201,40 @@ jobs:
         with:
           version: "${{ env.HELM_VERSION }}"
 
+      # The other two binaries the rendered-chart tests gate on, here for the same reason as `helm`
+      # above and **not** so this job can run `helm-validate` — that gate stays `chart`'s.
+      #
+      # Without them, three tests in this suite could never run anywhere in CI. They gate on
+      # `shutil.which("kubeconform")` or `shutil.which("promtool")`, so they skipped in this job for
+      # want of the binary, and `chart` — which has the binaries — runs `make helm-validate` and no
+      # pytest at all. Neither job could execute them, and a skip reports green:
+      # `test_deploy_chart.py::test_every_resource_kubeconform_skips_is_one_this_file_declared`,
+      # `test_deploy_chart.py::test_a_single_disarmed_pod_is_what_these_alerts_are_for`, and the
+      # promtool arm of `test_retention.py`. The last two are the PromQL checks, whose whole subject
+      # is a failure the cluster reports as `Valid`; they had been unrun since they were written.
+      # Found by writing the first of the three and asking where it would run.
+      #
+      # ~20 s of download against a twelve-minute job, which is the cost of this suite being able to
+      # execute its own chart tests rather than skipping a third of them by construction.
+      - name: Install kubeconform
+        run: |
+          set -euo pipefail
+          curl -sSLo /tmp/kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  /tmp/kubeconform.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/kubeconform.tar.gz -C /tmp kubeconform
+          sudo install -m 0755 /tmp/kubeconform /usr/local/bin/kubeconform
+
+      - name: Install promtool
+        run: |
+          set -euo pipefail
+          curl -sSLo /tmp/prometheus.tar.gz \
+            "https://github.com/prometheus/prometheus/releases/download/${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION#v}.linux-amd64.tar.gz"
+          echo "${PROMETHEUS_SHA256}  /tmp/prometheus.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/prometheus.tar.gz -C /tmp --strip-components=1 \
+            "prometheus-${PROMETHEUS_VERSION#v}.linux-amd64/promtool"
+          sudo install -m 0755 /tmp/promtool /usr/local/bin/promtool
+
       - name: Apply database migrations
         run: make db-migrate
 
@@ -303,15 +353,8 @@ jobs:
           version: "${{ env.HELM_VERSION }}"
 
       - name: Install kubeconform
-        # Checksummed, because a release asset is mutable in a way a git tag is not: the tag names
-        # a commit, the asset is a file the release owner can replace. This binary then validates
-        # the chart that describes the deployment, so "whatever that URL served today" is a
-        # strange thing to trust when the same pipeline pins its Python closure with `--locked`
-        # and audits it. The digest below was verified against the release's own `CHECKSUMS` file
-        # rather than taken from one download of the tarball.
-        env:
-          KUBECONFORM_VERSION: v0.6.7
-          KUBECONFORM_SHA256: 95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73
+        # Version and digest come from the workflow `env:` block, which explains the checksum; they
+        # were inline here until `check` needed the same binary.
         run: |
           set -euo pipefail
           curl -sSLo /tmp/kubeconform.tar.gz \
@@ -327,13 +370,8 @@ jobs:
         # with the object still reading as `Valid` in the cluster. `promtool check rules` is the
         # only thing that parses it, and it now covers the rendered dashboards' queries too.
         #
-        # Checksummed for the same reason as `kubeconform` above, and against the release's own
-        # `sha256sums.txt` rather than against one download. `promtool` ships only inside the full
-        # Prometheus tarball, which is why this pulls ~100 MB for one 40 MB binary; extracting the
-        # single path keeps the runner's disk out of it.
-        env:
-          PROMETHEUS_VERSION: v3.1.0
-          PROMETHEUS_SHA256: 9a9d1e115d1745826b13aec3f1409780b9fcf1d4206746cb4faee46ca5add70c
+        # Version and digest come from the workflow `env:` block, for the same reason as
+        # `kubeconform` above.
         run: |
           set -euo pipefail
           curl -sSLo /tmp/prometheus.tar.gz \
