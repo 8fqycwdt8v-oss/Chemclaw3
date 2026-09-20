@@ -40,6 +40,9 @@ resolved through an activity, timing comes from `workflow.now()`, and the pairin
 from __future__ import annotations
 
 import asyncio
+import json
+from collections.abc import Mapping
+from contextlib import AsyncExitStack
 from datetime import timedelta
 from typing import Any, TypeVar, cast
 
@@ -48,15 +51,18 @@ from temporalio import activity, workflow
 from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
+    from chemclaw.agent.authz import AuthorizationError
     from chemclaw.agent.framing import ENVELOPE_TAG, defang, frame_untrusted, safe_id
     from chemclaw.agent.llm_provider import build_chat_model
     from chemclaw.core.config import settings
     from chemclaw.core.identity_context import reset_current_identity, set_current_identity
     from chemclaw.core.ids import stable_hash
     from chemclaw.core.metrics_bridge import record_metric
-    from chemclaw.durable.connector_job import ConnectorJobResult
+    from chemclaw.durable.connector_job import ConnectorJobInput, ConnectorJobResult
+    from chemclaw.durable.governed_launch import audited_launch
     from chemclaw.durable.job_record import JobRecord, record_job
     from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.hypotheses.dispatch import SWEEPABLE_FIELDS, Dispatch
     from chemclaw.hypotheses.models import (
         CheckOutcome,
         DiscriminatingCheck,
@@ -110,6 +116,13 @@ class TournamentRequest(BaseModel):
     requested_by: str = Field(min_length=1)
     requested_roles: list[str] = Field(default_factory=list)
     correlation_id: str = ""
+    # The chat this was asked in, carried because a calculation this tournament launches is a
+    # `ConnectorJobWorkflow` — and that workflow's `_notify_failure` short-circuits on
+    # `if not job.session_id: return`. `template_job` records what dropping it costs: a connector
+    # job that failed inside a template told the launching chat nothing, wrote no row and moved no
+    # metric. Optional for the same reason the correlation id is: a caller outside a turn has none,
+    # and inventing one would make an unjoined run look joined.
+    session_id: str = ""
 
 
 class _AngleSet(BaseModel):
@@ -199,6 +212,10 @@ class _CritiqueRequest(BaseModel):
     question: str = ""
     hypothesis: Hypothesis
     evidence: list[str] = Field(default_factory=list)
+    # The note ids the sweep returned, for `derive_check` to choose a subject from. Passing the
+    # list is what makes the choice a *selection* rather than a recollection: an id written from
+    # memory does not resolve, and the check refuses instead of computing on the wrong molecule.
+    subject_note_ids: list[str] = Field(default_factory=list)
     requested_by: str = ""
     correlation_id: str = ""
 
@@ -230,6 +247,15 @@ class _FieldLimits(BaseModel):
     # replay. The module docstring claims no ambient config read decides the command stream; this
     # field is what makes that true of the proposal loop as well as the tournament.
     max_proposals: int = 3
+    # How many durable calculations one tournament may start. Here rather than read at the call
+    # site for the reason `max_proposals` is: it bounds how many child workflows are launched,
+    # which is a command count, and a live settings read would break replay the day it changed.
+    max_calculations: int = 2
+    # Not a command count, so Temporal would not flag a live read of it — but the module docstring
+    # claims no workflow-code settings read and `max_proposals` and `max_calculations` were both
+    # hoisted here with that argument written out. A third one left behind is how the claim stops
+    # being true.
+    result_max_chars: int = 2000
 
 
 def _route() -> Any:
@@ -259,6 +285,23 @@ def _framed_evidence(chunks: list[str]) -> str:
     return "\n".join(chunks) if chunks else "(no evidence was retrieved for this question)"
 
 
+def _subjects_for(hypothesis: Hypothesis, evidence: dict[str, _EvidencePack]) -> list[str]:
+    """The note ids a check for this hypothesis may name as its subject.
+
+    The union of what its own evidence sweep returned and what it cited. The first set is the
+    retriever's; the second is the model's own structured output and **is not filtered against
+    it**, so an id here can be one a model composed. That is deliberate rather than overlooked —
+    a hypothesis may legitimately cite a note the second sweep did not return — and it is safe
+    only because this list is a *prompt*, not an authority: every id a check names is re-resolved
+    through `note_in` and `structure_of` before anything is dispatched, and a fabricated one
+    refuses there.
+
+    Sorted so the prompt, and therefore the workflow's command stream, is the same on a replay.
+    """
+    pack = evidence.get(hypothesis.id)
+    return sorted({*(pack.note_ids if pack else []), *hypothesis.cited_note_ids})
+
+
 def _describe(hypothesis: Hypothesis) -> str:
     """A hypothesis rendered for a prompt, defanged so it cannot forge an evidence envelope.
 
@@ -284,6 +327,8 @@ async def resolve_field_limits() -> _FieldLimits:
         max_hypotheses=settings.hypothesis_max_field,
         double_judge_first_round=settings.hypothesis_double_judge_first_round,
         max_proposals=settings.hypothesis_max_proposals,
+        max_calculations=settings.hypothesis_max_calculations,
+        result_max_chars=settings.hypothesis_result_max_chars,
     )
 
 
@@ -455,17 +500,45 @@ async def derive_check(request: _CritiqueRequest) -> DiscriminatingCheck:
     """
     token = set_current_identity(request.requested_by, frozenset())
     try:
+        subjects = ", ".join(safe_id(note_id) for note_id in request.subject_note_ids) or "(none)"
         prompt = (
             "Name the single cheapest observation that would discriminate this hypothesis from "
             "competing explanations.\n\n"
             f"Question: {defang(request.question)}\n\n"
             f"Hypothesis:\n{_describe(request.hypothesis)}\n\n"
             "Set `kind` to `computable` ONLY if it can be settled by a semiempirical calculation "
-            "or a property lookup this system already holds — a GFN2-xTB energy or geometry, a "
-            "pKa, a solubility, a site-reactivity index, a hazard screen. Name that tool in "
-            "`tool`. Anything needing a laboratory, a measurement, or a method this system has no "
-            "tool for is `physical`. There is no DFT and no cluster here: if it needs one, it is "
-            "`physical`.\n"
+            "or a property lookup this system already holds — a GFN2-xTB energy, a pKa, a "
+            "solubility, a logD, a site-reactivity index. Anything needing a laboratory, a "
+            "measurement, or a method this system has no tool for is `physical`. There is no DFT "
+            "and no cluster here: if it needs one, it is `physical`.\n\n"
+            "A `computable` check is filled in one of two ways, and in both of them you name "
+            "**compound notes, never structures**. The notes you may name are these and no "
+            "others:\n"
+            f"  {subjects}\n"
+            "They are what this question's evidence sweep returned. An id written from memory will "
+            "not resolve and the check will not run.\n\n"
+            "1. **One property of one compound** — set `call.tool` and `call.subject_note_id`. For "
+            "a pKa, a solubility, a logD, a developability profile, a site-reactivity index, an "
+            "xTB energy.\n"
+            "2. **A calculation over several compounds, optionally varying one thing** — set "
+            "`call.job`, and `call.subjects` mapping the job's own fields to note ids: "
+            "`compute_reaction_energy` and `compare_solvents` take `reactants` and `products`; "
+            "`rank_species` and `rank_species_across_solvents` take `species`; "
+            "`compute_interaction_energy` takes `smiles_a` and `smiles_b`; `sample_conformers`, "
+            "`refine_ensemble`, `compute_ensemble_property` and `predict_pka_ensemble` take "
+            "`smiles`. To compare one reaction across solvents use `compare_solvents` with "
+            "`sweep_parameter='solvents'` and `sweep_values` naming them — a value the calculator "
+            "cannot model is refused, so name real solvents; to ask which *form* dominates "
+            "across them, `rank_species_across_solvents` sweeps the same axis over `species`. "
+            "At most "
+            f"{settings.hypothesis_max_sweep_values} values: each one is a full conformer "
+            "search, and a wider axis is refused rather than trimmed.\n\n"
+            "Vary something only when the comparison *is* the check: a ranking across solvents "
+            "answers a question a single number cannot. Do not vary a parameter to explore.\n\n"
+            "You supply tool-or-job, the notes, and at most the swept values. Every other argument "
+            "stays at the calculator's own default — you cannot set a temperature, a charge or an "
+            "atom index, and a check that would need one is `physical`. If no listed note is the "
+            "right subject, the check is `physical`.\n\n"
             "`question` is the check itself. `expectation` says what result would support the "
             "hypothesis and what would refute it."
         )
@@ -532,31 +605,440 @@ async def record_hypothesis_field(
 @durable_activity("background")
 @activity.defn
 async def run_computable_check(
-    check: DiscriminatingCheck, requested_by: str = "", correlation_id: str = ""
+    check: DiscriminatingCheck,
+    requested_by: str = "",
+    requested_roles: list[str] | None = None,
+    correlation_id: str = "",
 ) -> CheckOutcome:
-    """Settle a `computable` check with the tools this system holds.
+    """Settle a `computable` check with the tools this system holds, or say exactly why not.
 
-    **Not implemented, and returning `not-run` rather than pretending.** Dispatching a free-text
-    check onto a named calculator is a real piece of work — it means mapping a sentence to a tool
-    plus its arguments, and every argument (which molecule, which conformer, which solvent) is
-    exactly the sort of thing a model invents when it is asked to fill a schema. Shipping a
-    plausible-looking dispatcher would put fabricated calculation inputs behind a verdict a chemist
-    reads as computed, which is worse than the gap.
+    **Every argument is either read from the corpus or left at the tool's own default.** The check
+    names a tool and points at a note; the structure comes off the resolved note and nothing else
+    is supplied. `hypotheses/dispatch.py` argues the whole rule and holds the refusals; what
+    happens here is the three steps that need a live process: resolve the subject against this
+    deployment's knowledge tree, read the tool's advertised contract off an open session, and call
+    it through the same governed path a chat turn uses.
 
-    So the check is *derived*, reported, and left for the chemist, and the tournament says which
-    checks it could in principle have run. Closing this is `BACKLOG.md`'s row; the trigger is a
-    structured check type whose arguments are validated against the tool's own signature the way
-    `connection:` blocks already are, rather than a free-text question.
+    **The tool is reached by assembling the surface and finding it by name**, which is
+    `durable/template_activities.run_tool_step`'s shape and for its reason: a second lookup path is
+    how a template came to run tools with no audit row and no authorization. `invoke_governed`
+    composes the same middleware chain, so a calculation a tournament runs is audited and gated
+    exactly as one a chemist asks for is.
+
+    A refusal is a *result*, not an error: it returns a `not-run` outcome carrying its code, and
+    the run continues. Losing a tournament because one subject did not resolve would be the wrong
+    trade by a wide margin.
     """
-    return CheckOutcome(
-        hypothesis_id=check.hypothesis_id,
-        verdict="not-run",
-        detail=(
-            "This check is answerable with tools this system holds "
-            f"({check.tool or 'unnamed'}), but automatic dispatch is not built: a free-text check "
-            "cannot be turned into validated tool arguments without inventing them."
-        ),
+    from chemclaw.agent.chemclaw_agent import connector_specs
+    from chemclaw.agent.profiles import get_profile
+    from chemclaw.agent.template_surface import ToolArguments, normalise_tool_schema
+    from chemclaw.agent.tool_invocation import invoke_governed
+    from chemclaw.connectors.registry import open_connector_specs
+    from chemclaw.core.tool_registry import registered_tools
+    from chemclaw.hypotheses.dispatch import (
+        Dispatch,
+        contract_of,
+        defaulted_arguments,
+        refuse_unless_dispatchable,
+        structure_of,
     )
+    from chemclaw.kg.graph import build_graph, note_in
+
+    call = check.call
+    if call is None or not call.tool:
+        return _refused(
+            check,
+            "no-call",
+            "the check named no tool and subject to run, so nothing was dispatched",
+        )
+    # **A tool takes one structure and nothing else, so anything job-shaped on the call is a
+    # refusal rather than a field to ignore.** Dropped instead, a `sweep_parameter` here ran the
+    # plain single-molecule calculation while `_ran_line` said nothing about the axis the model had
+    # asked for — the chemist read a solvent comparison that never happened. An argument the
+    # dispatcher silently discards is the same hidden assumption as one it invents.
+    if call.sweep_parameter or call.sweep_values:
+        return _refused(
+            check,
+            "axis-not-sweepable",
+            f"{call.tool!r} is a single-structure tool and varies nothing; a swept axis needs a "
+            "job that declares it",
+        )
+    if call.subjects:
+        return _refused(
+            check,
+            "subject-field-unknown",
+            f"{call.tool!r} takes one subject through `subject_note_id`; roles belong to a job",
+        )
+
+    # **The requester's roles, not an empty set.** Every calc job is `expensive: true`, so an
+    # actor with no roles is refused by `authorize_trigger` in any deployment that runs Entra —
+    # the whole durable half of this feature, reported as an ordinary grounding refusal. The wire
+    # is trusted here for `durable/template_activities._acting_as`'s stated reason: a request on
+    # the broker was put there by this repository's own code, and broker write access is what
+    # restricts that under `entra_required`.
+    token = set_current_identity(requested_by, frozenset(requested_roles or ()))
+    try:
+        # `note_in` rather than `note_id in graph`: the graph mints bare nodes for cited-but-
+        # undefined link targets, so membership would resolve a fabricated id to an empty node —
+        # which is the one outcome this whole path exists to prevent.
+        graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
+        smiles, refusal = structure_of(note_in(graph, call.subject_note_id), call.subject_note_id)
+        if refusal is not None or smiles is None:
+            return (
+                _refused(check, refusal.code, refusal.detail)
+                if refusal
+                else _refused(check, "subject-not-found", "the subject did not resolve")
+            )
+
+        async with AsyncExitStack() as stack:
+            tools, unreachable = await open_connector_specs(stack, connector_specs())
+            surface = {
+                str(getattr(tool, "name", "")): tool for tool in [*registered_tools(), *tools]
+            }
+            target = surface.get(call.tool)
+            contract = None
+            if target is not None:
+                # One reading of "what does this tool advertise", shared with the template
+                # argument gate — `dispatch.py`'s header says a third would be the drift that
+                # gate was extracted to prevent, and this was the third.
+                schema = normalise_tool_schema(target)
+                contract = (
+                    contract_of(schema, ToolArguments.of_schema(schema))
+                    if schema is not None
+                    else contract_of(None, None)
+                )
+
+            if (refused := refuse_unless_dispatchable(call.tool, contract)) is not None:
+                detail = refused.detail
+                if refused.code == "tool-unavailable" and unreachable:
+                    down = ", ".join(unreachable)
+                    detail += f" ({len(unreachable)} connector(s) unreachable: {down})"
+                return _refused(check, refused.code, detail)
+
+            if contract is None or target is None:  # pragma: no cover - refused above
+                # Unreachable while `refuse_unless_dispatchable` refuses on a missing
+                # contract, and written as a refusal rather than an `assert` because `-O`
+                # deletes an assert and this branch would then dispatch onto `None`.
+                return _refused(check, "unreadable-contract", "the tool's surface is unknown")
+            plan = Dispatch(
+                tool=call.tool,
+                smiles=smiles,
+                subject_note_id=call.subject_note_id,
+                defaulted=defaulted_arguments(contract),
+            )
+            message = await invoke_governed(
+                cast(Any, target),
+                plan.arguments,
+                correlation_id=correlation_id,
+                actor=requested_by,
+                profile=get_profile(None),
+                want_message=True,
+            )
+            return CheckOutcome(
+                hypothesis_id=check.hypothesis_id,
+                verdict="inconclusive",
+                detail=_result_text(message),
+                ran=_ran_line(plan),
+            )
+    except AuthorizationError as exc:
+        # Counted apart from a broken calculator on purpose: the closed vocabulary exists so a
+        # deployment can see *why* its checks are not running, and "this actor may not" and "the
+        # calculator is down" are the two cases whose fixes differ most.
+        activity.logger.warning("computable check refused for %s: %s", check.hypothesis_id, exc)
+        return _refused(check, "tool-not-authorized", f"{call.tool!r} was refused: {exc}")
+    except Exception as exc:
+        activity.logger.warning("computable check failed for %s: %s", check.hypothesis_id, exc)
+        return _refused(check, "tool-failed", f"{call.tool!r} failed: {exc}")
+    finally:
+        reset_current_identity(token)
+
+
+class _GroundedJob(BaseModel):
+    """A durable job whose every argument came from the record, ready to launch.
+
+    Built in an activity because grounding reads the corpus and runs the job's declared
+    `precondition`; launched from workflow code because a child workflow is a workflow's to start.
+    Splitting it that way is also what puts the *validated* payload in history rather than the
+    model's proposal, which is `template_job`'s rule: never the raw arguments.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    connector: str = ""
+    job: str = ""
+    job_workflow: str = ""
+    task_queue: str = ""
+    # **Every manifest field the wrapper reads, for `template_activities.ResolvedJob`'s reason** —
+    # "a field the template path does not carry is a field that silently means something else on
+    # that path". Absent here, a tournament-launched job took `publish_to_graph=False`, no declared
+    # ceiling and `awaits_answer=False`, which is a different job from the one a chat turn starts
+    # by the same name.
+    publish_to_graph: bool = False
+    timeout_seconds: float | None = None
+    awaits_answer: bool = False
+    payload: dict[str, Any] = Field(default_factory=dict)
+    ran: str = ""
+    refusal_code: str = ""
+    refusal_detail: str = ""
+
+    @property
+    def refused(self) -> bool:
+        """Whether grounding refused, in which case nothing is launched."""
+        return bool(self.refusal_code)
+
+
+@durable_activity("background")
+@activity.defn
+async def ground_check_job(
+    check: DiscriminatingCheck,
+    requested_by: str = "",
+    requested_roles: list[str] | None = None,
+    correlation_id: str = "",
+) -> _GroundedJob:
+    """Turn a job check into a launch payload every argument of which came from the record.
+
+    Three gates, and a refusal at any of them is a reported outcome rather than an error:
+
+    1. **Every subject resolves** to a `compound` note in this deployment's corpus whose structure
+       parses. The model names ids; the SMILES are read off the notes.
+    2. **Every required field is accounted for** — a structure, the swept axis, or a default.
+       `hypotheses/dispatch.ground_job_params` fails closed on anything else, which is what keeps
+       `scan_coordinate`'s atom indices out.
+    3. **`prepare_job_launch` runs**, which validates against the job's own declared params model,
+       authorizes the expensive trigger, and runs the job's `precondition` — the gate that refuses
+       a solvent the method cannot model. That is why a model-proposed solvent list is a selection
+       from a validated vocabulary rather than an invention.
+    """
+    from chemclaw.connectors.jobs import prepare_job_launch
+    from chemclaw.connectors.queues import bundle_queue
+    from chemclaw.connectors.registry import ConnectorError, find_job
+    from chemclaw.hypotheses.dispatch import Sweep, ground_job_params, structure_of
+    from chemclaw.kg.graph import build_graph, note_in
+
+    call = check.call
+    if call is None or not call.job:
+        return _GroundedJob(refusal_code="no-call", refusal_detail="the check named no job")
+
+    # The requester's roles, for the reason `run_computable_check` states: every calc job is
+    # `expensive: true`, and an empty set is refused by `authorize_trigger` wherever Entra runs.
+    token = set_current_identity(requested_by, frozenset(requested_roles or ()))
+    try:
+        try:
+            connector, spec = find_job(call.job)
+        except ConnectorError as exc:
+            # Raises rather than returning `None`, and names the declared jobs in its message —
+            # which is exactly what a chemist reading "the check could not be run" wants.
+            return _GroundedJob(refusal_code="job-unavailable", refusal_detail=str(exc))
+
+        graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
+        structures: dict[str, str] = {}
+        for ids in call.subjects.values():
+            for note_id in ids:
+                if note_id in structures:
+                    continue
+                smiles, refusal = structure_of(note_in(graph, note_id), note_id)
+                if refusal is not None or smiles is None:
+                    code = refusal.code if refusal else "subject-not-found"
+                    detail = refusal.detail if refusal else note_id
+                    return _GroundedJob(refusal_code=code, refusal_detail=detail)
+                structures[note_id] = smiles
+
+        model = _job_params_model(connector, spec)
+        fields = {
+            name: (declared.is_required(), declared.default)
+            for name, declared in model.model_fields.items()
+        }
+        sweep = (
+            Sweep(parameter=call.sweep_parameter, values=tuple(call.sweep_values))
+            if call.sweep_parameter
+            else None
+        )
+        params, refusal = ground_job_params(
+            fields,
+            call.subjects,
+            structures,
+            sweep,
+            settings.hypothesis_max_sweep_values,
+        )
+        if refusal is not None or params is None:
+            code = refusal.code if refusal else "field-cannot-be-grounded"
+            detail = refusal.detail if refusal else "the call could not be grounded"
+            return _GroundedJob(refusal_code=code, refusal_detail=detail)
+
+        # Validates, authorizes and runs the job's own precondition. A refusal here is the
+        # deployment's answer — an unsupported solvent, an unfunded ceiling — and is reported.
+        #
+        # Through the governed chain rather than called directly, which is
+        # `template_activities._audited`'s shape and its reason: the launch of an expensive job
+        # leaves an audit row that reads the same whether a chemist asked for it or a tournament
+        # chose it, and there is one place that decides what such a row looks like.
+        payload = await audited_launch(
+            spec.name,
+            params,
+            lambda: prepare_job_launch(connector, spec, params),
+            actor=requested_by,
+            correlation_id=correlation_id,
+        )
+        return _GroundedJob(
+            connector=connector,
+            job=spec.name,
+            job_workflow=spec.workflow,
+            task_queue=bundle_queue(connector),
+            publish_to_graph=spec.publish_to_graph,
+            timeout_seconds=spec.timeout_seconds,
+            awaits_answer=spec.awaits_answer,
+            payload=payload,
+            # **Built from the payload the job accepted, never from the model's proposal.** These
+            # params models do not set `extra="forbid"`, so an undeclared key is dropped on
+            # validation; reading the report off `call` announced a solvent screen that the
+            # launched payload contained no trace of. `ground_job_params` now refuses such a key,
+            # and this makes the report independent of that refusal holding.
+            ran=_job_line(spec.name, payload, call.subjects, structures, fields),
+        )
+    except Exception as exc:
+        activity.logger.warning(
+            "job check could not be grounded for %s: %s", check.hypothesis_id, exc
+        )
+        return _GroundedJob(refusal_code="job-refused", refusal_detail=str(exc))
+    finally:
+        reset_current_identity(token)
+
+
+def _job_params_model(connector: str, spec: Any) -> Any:
+    """The job's declared params model — the authority `prepare_job_launch` validates against."""
+    from chemclaw.connectors.jobs import _params_model
+
+    return _params_model(connector, spec)
+
+
+def _job_line(
+    job: str,
+    payload: Mapping[str, Any],
+    subjects: Mapping[str, list[str]],
+    structures: Mapping[str, str],
+    fields: Mapping[str, tuple[bool, Any]],
+) -> str:
+    """What was launched, over what, and under which of the job's own defaults.
+
+    **Read off the validated `payload`, so it describes the job that ran.** The swept axis is named
+    because that is the point of allowing one — a reader who cannot see which solvents were
+    compared cannot read the ranking — and the note ids are named because a SMILES is not what a
+    chemist recognises.
+
+    **The defaults are named for the reason the tool half names them, and the job half needs it
+    more.** Left unstated, `symmetry_numbers` costs a reaction its ΔG entirely and costs a species
+    ranking its correctness with a warning that the job's one-line summary does not carry; `prop`
+    silently decides that a question about a HOMO-LUMO gap was answered with a dipole moment. None
+    of that is visible in the number. Derived from the params model rather than curated, so a job
+    that gains an optional field discloses it without anyone remembering to.
+    """
+    by_smiles = {smiles: note_id for note_id, smiles in structures.items()}
+
+    def _named(value: Any) -> str:
+        if isinstance(value, str) and value in by_smiles:
+            return f"[[{by_smiles[value]}]]"
+        if isinstance(value, list):
+            return "[" + ", ".join(_named(item) for item in value) + "]"
+        return repr(value)
+
+    stated = "; ".join(
+        f"{name}={_named(payload[name])}" for name in sorted(payload) if name in subjects
+    )
+    axes = "".join(
+        f" over {name}={payload[name]!r}"
+        for name in sorted(payload)
+        if name not in subjects and name in SWEEPABLE_FIELDS
+    )
+    defaulted = ", ".join(
+        f"{name}={default!r}"
+        for name, (required, default) in sorted(fields.items())
+        if not required and name not in payload
+    )
+    return f"{job}({stated}){axes}" + (f" — defaults: {defaulted}" if defaulted else "")
+
+
+def _refused(check: DiscriminatingCheck, code: str, detail: str) -> CheckOutcome:
+    """A check that was not run, carrying the reason in both a countable and a readable form."""
+    return CheckOutcome(
+        hypothesis_id=check.hypothesis_id, verdict="not-run", detail=detail, refusal_code=code
+    )
+
+
+def _ran_line(plan: Dispatch) -> str:
+    """What was asked, and what was left alone — the assumption disclosed rather than hidden."""
+    defaults = f"; {', '.join(plan.defaulted)} left at the tool's default" if plan.defaulted else ""
+    return f"{plan.tool}(smiles={plan.smiles!r}) from [[{plan.subject_note_id}]]{defaults}"
+
+
+def _result_text(message: Any) -> str:
+    """The tool's answer as text, preferring its structured content.
+
+    `structuredContent` is the shape a reader can check a claim against;
+    `durable/template_activities._structured` records that `ainvoke` discards it unless the
+    artifact is read, which is why this looks there first rather than at the rendered text.
+    """
+    artifact = getattr(message, "artifact", None)
+    if isinstance(artifact, dict):
+        structured = artifact.get("structured_content")
+        if isinstance(structured, dict):
+            return json.dumps(structured, sort_keys=True)[: settings.hypothesis_result_max_chars]
+    content = getattr(message, "content", message)
+    return str(content)[: settings.hypothesis_result_max_chars]
+
+
+class _CheckVerdict(BaseModel):
+    """A reading of a computed value against the check's stated expectation."""
+
+    verdict: str = "inconclusive"
+    reason: str = ""
+
+
+@durable_activity("background")
+@activity.defn
+async def read_check_result(
+    check: DiscriminatingCheck, result: str, requested_by: str = "", correlation_id: str = ""
+) -> _CheckVerdict:
+    """Read a computed value against what the check said would support or refute the hypothesis.
+
+    **This is a model judging a real number, which is a different act from a model inventing an
+    argument.** The number came off a calculator that was handed a structure read out of the
+    corpus; nothing here can change what was computed. What is being asked is the reading, and the
+    raw value travels beside it so a chemist can check the reading rather than take it.
+
+    `inconclusive` is the expected answer more often than not and the prompt says so. `CLAUDE.md`
+    is explicit that a decision turning on a difference inside GFN2-xTB's error bar has to say so
+    — there is no tier to escalate to — and a judge that felt obliged to pick a side would turn
+    that into a verdict.
+
+    The verdict does **not** move the rating. The ranking is a product of pairwise comparison, and
+    letting one tool call reorder the field would put a number a model interpreted on the same
+    footing as the comparisons the whole instrument was measured on.
+    """
+    token = set_current_identity(requested_by, frozenset())
+    try:
+        prompt = (
+            "A discriminating check was run and returned a value. Read it against what the check "
+            "said would support or refute the hypothesis.\n\n"
+            f"Hypothesis: {defang(check.hypothesis_id)} — {defang(check.expectation)}\n"
+            f"Check: {defang(check.question)}\n"
+            f"Computed result: {defang(result)}\n\n"
+            'Answer `verdict` with exactly "supported", "refuted" or "inconclusive", and give a '
+            "one-sentence `reason` quoting the number you read it from.\n"
+            '"inconclusive" is correct and expected whenever the result does not clearly meet or '
+            "miss the stated expectation — including when the difference is inside the method's "
+            "own error bar. These are semiempirical numbers: a few kJ/mol, or a pKa unit, is "
+            "often not a difference at all. Do not pick a side to be decisive."
+        )
+        answer = await _structured(_CheckVerdict, prompt)
+        choice = (answer.verdict or "inconclusive").strip().lower()
+        return _CheckVerdict(
+            verdict=choice
+            if choice in {"supported", "refuted", "inconclusive"}
+            else "inconclusive",
+            reason=answer.reason,
+        )
+    finally:
+        reset_current_identity(token)
 
 
 @durable_activity("background")
@@ -655,7 +1137,9 @@ class HypothesisTournamentWorkflow:
             retry_policy=BAD_DATA_RETRY,
         )
         checks = await self._checks(request, field, evidence)
-        outcomes = await self._settle(request, checks)
+        outcomes = await self._settle(
+            request, checks, limits, [entry.hypothesis_id for entry in fit.rated]
+        )
 
         by_id = {h.id: h for h in field}
         ranked = [
@@ -989,6 +1473,7 @@ class HypothesisTournamentWorkflow:
                         evidence=evidence[hypothesis.id].framed
                         if hypothesis.id in evidence
                         else [],
+                        subject_note_ids=_subjects_for(hypothesis, evidence),
                         requested_by=request.requested_by,
                         correlation_id=request.correlation_id,
                     ),
@@ -1011,28 +1496,64 @@ class HypothesisTournamentWorkflow:
         return out
 
     async def _settle(
-        self, request: TournamentRequest, checks: dict[str, DiscriminatingCheck]
+        self,
+        request: TournamentRequest,
+        checks: dict[str, DiscriminatingCheck],
+        limits: _FieldLimits,
+        order: list[str],
     ) -> dict[str, CheckOutcome]:
-        """Run every `computable` check, which today means recording why each one did not run.
+        """Run the `computable` checks the budget buys, best-placed first, and say why for the rest.
 
-        **Called even though `run_computable_check` settles nothing.** The alternative — leaving
-        the activity uncalled — left `RankedHypothesis.outcome` unset for every row, so a
-        `computable` check fell through every branch of the report and the chemist saw a hypothesis
-        with no check at all, while the reason it had not been run sat in a Python docstring
-        nobody reads. Worse, it made "(ran; …)" the only thing `summarise` could say about such a
-        check, because there was no outcome to contradict it.
+        **`order` is the fitted ranking, and the budget is spent down it.** Taking the checks in
+        generation order spent a tournament's whole compute allowance on whichever hypotheses the
+        first generator happened to emit, and could refuse the *leader's* check for budget while
+        running a candidate that placed last — which inverts the one thing the ranking is for.
+        `_propose` has always taken its own budget off `outcome.ranked`; this is the same rule for
+        the more expensive resource.
 
-        So the stage exists and the verdict is `not-run` with its reason attached. When a dispatcher
-        is built (`BACKLOG.md`), it changes what the activity returns and nothing here.
+        **One budget over both halves.** A tool check is a semiempirical calculation on a cache
+        miss exactly as a job check is, and bounding only the jobs left the cheaper-looking half
+        unbounded — a ten-hypothesis field could start ten of them, each opening every connector
+        session, while the two child workflows beside them were carefully counted.
         """
-        computable = [check for check in checks.values() if check.kind == "computable"]
+        computable = [
+            checks[hypothesis_id]
+            for hypothesis_id in order
+            if hypothesis_id in checks and checks[hypothesis_id].kind == "computable"
+        ]
+        # A check whose hypothesis the fit did not rate at all still exists and still deserves an
+        # outcome; it goes after the rated ones, since nothing places it.
+        rated = set(order)
+        computable += [
+            check
+            for check in checks.values()
+            if check.kind == "computable" and check.hypothesis_id not in rated
+        ]
         if not computable:
             return {}
+
+        out: dict[str, CheckOutcome] = {}
+        affordable = computable[: limits.max_calculations]
+        for check in computable[limits.max_calculations :]:
+            out[check.hypothesis_id] = _refused(
+                check,
+                "over-budget",
+                f"this tournament runs at most {limits.max_calculations} calculation(s) and spends "
+                "them on its best-placed checks; this one placed below the cut",
+            )
+
+        jobs = [check for check in affordable if check.call is not None and check.call.job]
+        computable = [check for check in affordable if check not in jobs]
         settled = await asyncio.gather(
             *(
                 workflow.execute_activity(
                     run_computable_check,
-                    args=[check, request.requested_by, request.correlation_id],
+                    args=[
+                        check,
+                        request.requested_by,
+                        list(request.requested_roles),
+                        request.correlation_id,
+                    ],
                     start_to_close_timeout=timedelta(
                         seconds=settings.hypothesis_call_timeout_seconds
                     ),
@@ -1043,13 +1564,182 @@ class HypothesisTournamentWorkflow:
             ),
             return_exceptions=True,
         )
-        out: dict[str, CheckOutcome] = {}
+        ran: list[tuple[DiscriminatingCheck, CheckOutcome]] = []
         for check, outcome in zip(computable, settled, strict=True):
             if isinstance(outcome, BaseException):
                 workflow.logger.warning("computable check failed for %s", check.hypothesis_id)
                 continue
             out[check.hypothesis_id] = outcome
+            if outcome.verdict != "not-run":
+                ran.append((check, outcome))
+
+        for check, outcome in await self._settle_jobs(request, jobs, limits):
+            out[check.hypothesis_id] = outcome
+            if outcome.verdict != "not-run":
+                ran.append((check, outcome))
+
+        # Only the checks that produced a value are read. A refusal has nothing to interpret, and
+        # asking a model to read one would invite it to narrate a result that does not exist.
+        if not ran:
+            return out
+        readings = await asyncio.gather(
+            *(
+                workflow.execute_activity(
+                    read_check_result,
+                    args=[check, outcome.detail, request.requested_by, request.correlation_id],
+                    start_to_close_timeout=timedelta(
+                        seconds=settings.hypothesis_call_timeout_seconds
+                    ),
+                    schedule_to_start_timeout=queue_wait_timeout(),
+                    retry_policy=BAD_DATA_RETRY,
+                )
+                for check, outcome in ran
+            ),
+            return_exceptions=True,
+        )
+        for (check, outcome), reading in zip(ran, readings, strict=True):
+            if isinstance(reading, BaseException):
+                workflow.logger.warning(
+                    "no reading for %s; value stands alone", check.hypothesis_id
+                )
+                continue
+            out[check.hypothesis_id] = outcome.model_copy(
+                update={
+                    "verdict": reading.verdict,
+                    # **Celled, because this is the one place model prose enters a note body.**
+                    # `reading.reason` is free text from a model and `outcome.detail` is a tool's
+                    # own output; `field_body` embeds this whole summary in the `hypothesis-field`
+                    # note that `record_note` commits, so an unstripped `[[...]]` here would mint a
+                    # real graph edge on the note being written. `proposal_body` has celled every
+                    # model-authored span since it was written; before this branch shipped, `detail`
+                    # only ever held a refusal string this module composed itself.
+                    "detail": as_cell(f"{reading.reason} Computed: {outcome.detail}")
+                    if reading.reason
+                    else as_cell(outcome.detail),
+                }
+            )
         return out
+
+    async def _settle_jobs(
+        self,
+        request: TournamentRequest,
+        checks: list[DiscriminatingCheck],
+        limits: _FieldLimits,
+    ) -> list[tuple[DiscriminatingCheck, CheckOutcome]]:
+        """Ground and launch the checks that need a durable calculation.
+
+        These are the jobs a manifest marks `expensive: true` — a solvent screen is one conformer
+        search per solvent per species — so the budget that decides how many of them start is
+        `_settle`'s, spent down the ranking before this is called.
+
+        Grounding happens per check in an activity; launching happens here, because a child
+        workflow is a workflow's to start. What reaches the child is the payload
+        `prepare_job_launch` validated, never the model's proposal — `template_job` records what it
+        costs to get that backwards.
+        """
+        results: list[tuple[DiscriminatingCheck, CheckOutcome]] = []
+        if not checks:
+            return results
+
+        allowed = checks
+        grounded = await asyncio.gather(
+            *(
+                workflow.execute_activity(
+                    ground_check_job,
+                    args=[
+                        check,
+                        request.requested_by,
+                        list(request.requested_roles),
+                        request.correlation_id,
+                    ],
+                    start_to_close_timeout=timedelta(
+                        seconds=settings.hypothesis_evidence_timeout_seconds
+                    ),
+                    schedule_to_start_timeout=queue_wait_timeout(),
+                    retry_policy=BAD_DATA_RETRY,
+                )
+                for check in allowed
+            ),
+            return_exceptions=True,
+        )
+
+        launches: list[tuple[DiscriminatingCheck, _GroundedJob]] = []
+        for check, plan in zip(allowed, grounded, strict=True):
+            if isinstance(plan, BaseException):
+                results.append((check, _refused(check, "job-refused", str(plan))))
+                continue
+            if plan.refused:
+                results.append((check, _refused(check, plan.refusal_code, plan.refusal_detail)))
+                continue
+            launches.append((check, plan))
+
+        if not launches:
+            return results
+
+        settled = await asyncio.gather(
+            *(
+                workflow.execute_child_workflow(
+                    "ConnectorJobWorkflow",
+                    ConnectorJobInput(
+                        connector=plan.connector,
+                        job=plan.job,
+                        workflow=plan.job_workflow,
+                        task_queue=plan.task_queue,
+                        payload=plan.payload,
+                        publish_to_graph=plan.publish_to_graph,
+                        timeout_seconds=plan.timeout_seconds,
+                        awaits_answer=plan.awaits_answer,
+                        rationale=(
+                            f"discriminating check for hypothesis {check.hypothesis_id!r}: "
+                            f"{check.question}"
+                        )[:500],
+                        requested_by=request.requested_by,
+                        session_id=request.session_id,
+                        correlation_id=request.correlation_id,
+                    ),
+                    id=f"{workflow.info().workflow_id}-calc-{check.hypothesis_id}",
+                    task_queue=plan.task_queue,
+                    retry_policy=BAD_DATA_RETRY,
+                    result_type=ConnectorJobResult,
+                )
+                for check, plan in launches
+            ),
+            return_exceptions=True,
+        )
+
+        for (check, plan), result in zip(launches, settled, strict=True):
+            if isinstance(result, BaseException):
+                workflow.logger.warning("calculation failed for %s", check.hypothesis_id)
+                # `inconclusive`, not `not-run`: the calculation started, spent the budget and
+                # failed. Reporting it as not run put it under the report's "answerable with this
+                # system's tools, not run" line, which is the same honesty axis this feature is
+                # built on, inverted.
+                results.append(
+                    (
+                        check,
+                        CheckOutcome(
+                            hypothesis_id=check.hypothesis_id,
+                            verdict="inconclusive",
+                            detail=f"{plan.job} failed: {result}",
+                            refusal_code="calculation-failed",
+                            ran=plan.ran,
+                        ),
+                    )
+                )
+                continue
+            results.append(
+                (
+                    check,
+                    CheckOutcome(
+                        hypothesis_id=check.hypothesis_id,
+                        verdict="inconclusive",
+                        detail=result.summary[: limits.result_max_chars],
+                        calc_refs=list(result.calc_refs),
+                        ran=plan.ran,
+                    ),
+                )
+            )
+        return results
 
     async def _propose(
         self, request: TournamentRequest, outcome: TournamentOutcome, limits: _FieldLimits
@@ -1206,6 +1896,18 @@ class HypothesisTournamentWorkflow:
                     "chemclaw_hypothesis_screen_rejections_total", labels={"rule": rule}
                 )
             )
+        # **Why a check did not run, counted.** `CheckOutcome.refusal_code` is a closed vocabulary
+        # so a deployment can see *which* rule is refusing its checks — a corpus whose compounds
+        # carry no structures looks nothing like a role that may not trigger an expensive job, and
+        # both look like "the tournament proposes experiments instead of running them" from
+        # outside. Without this the vocabulary was a shape nothing read.
+        for row in outcome.ranked:
+            if row.outcome is not None and row.outcome.refusal_code:
+                record_metric(
+                    lambda m, code=row.outcome.refusal_code: m.increment(  # type: ignore[misc]
+                        "chemclaw_hypothesis_check_refusals_total", labels={"code": code}
+                    )
+                )
         if outcome.position_bias is not None:
             record_metric(
                 lambda m: m.observe(

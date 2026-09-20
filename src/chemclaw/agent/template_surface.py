@@ -30,7 +30,10 @@ Read-only; touches nothing.
 
 import importlib
 import inspect
+from collections.abc import Mapping
 from typing import Any, NamedTuple
+
+from pydantic import BaseModel
 
 from chemclaw.agent.profiles import registered_profile_names
 from chemclaw.connectors.registry import discovered as discovered_connectors
@@ -120,6 +123,25 @@ class ToolArguments(NamedTuple):
     check is then vacuous and is skipped, while the missing-required check still applies."""
 
     @classmethod
+    def of_schema(cls, schema: Mapping[str, Any]) -> "ToolArguments":
+        """Read a *running* tool's advertised JSON schema — the live gate's authority.
+
+        Here rather than at each live caller because there are now three of them — the template
+        argument gate, and a hypothesis check's dispatcher on both halves of its surface — and the
+        module docstring's whole argument is that a second reading of "what does this tool accept"
+        drifts from the first. `normalise_tool_schema` is what produces the mapping.
+        """
+        return cls(
+            accepted=frozenset(schema.get("properties") or {}),
+            required=frozenset(schema.get("required") or []),
+            # An open schema absorbs any key, so the unknown-key half is vacuous — the same
+            # reduction `**kwargs` gets offline. Only a literal `True` counts: a schema saying
+            # nothing about it is closed, which is what an absent `additionalProperties` means for
+            # a tool declaration.
+            takes_any_key=schema.get("additionalProperties") is True,
+        )
+
+    @classmethod
     def of_signature(cls, signature: inspect.Signature) -> "ToolArguments":
         """Read a local implementation's parameters — this gate's authority."""
         named = [
@@ -134,6 +156,20 @@ class ToolArguments(NamedTuple):
                 p.kind is inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values()
             ),
         )
+
+
+def normalise_tool_schema(tool: Any) -> Mapping[str, Any] | None:
+    """The JSON schema a running tool advertises, or `None` where it advertises none readably.
+
+    `tool_call_schema` rather than `args_schema`, because it is the shape the model is offered:
+    injected arguments are already removed from it. MCP tools arrive with a plain JSON-schema dict
+    (`langchain_mcp_adapters` converts the server's declaration); an in-process `@tool` arrives as
+    a pydantic model. Both are handled, and both reduce to the same mapping.
+    """
+    schema: Any = getattr(tool, "tool_call_schema", None)
+    if isinstance(schema, type) and issubclass(schema, BaseModel):
+        schema = schema.model_json_schema()
+    return schema if isinstance(schema, Mapping) else None
 
 
 def argument_problems(template: Template, step: ToolStep, accepts: ToolArguments) -> list[str]:

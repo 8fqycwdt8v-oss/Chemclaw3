@@ -68,12 +68,55 @@ class Objection(BaseModel):
     cited_note_ids: list[str] = Field(default_factory=list)
 
 
+class CheckCall(BaseModel):
+    """A `computable` check as a *call* rather than a sentence: which tool, on which subject.
+
+    **Two names and nothing else, which is the point.** The model selects a tool and points at a
+    note; it writes neither the structure nor any other argument. The structure is read off the
+    resolved note and every remaining argument stays at the tool's own default
+    (`hypotheses/dispatch.py` says why at length). A richer call type would be a richer surface for
+    inventing values on.
+
+    `subject_note_id` is a pointer to be checked, never trusted: it has to resolve in this
+    deployment's corpus to a `compound` note whose structure parses, and it refuses on each miss
+    with its own reason.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # An endpoint-tool call: one tool, one compound. The cheap, cached half.
+    tool: str = Field(default="")
+    subject_note_id: str = Field(default="")
+
+    # A durable-job call: the expensive half, and the one that can *vary* something.
+    # `subjects` maps a params field of the job's declared model — `reactants`, `products`,
+    # `smiles` — to the note ids that fill it. The model still writes no structure: each id is
+    # resolved against the corpus and the SMILES comes off the note.
+    job: str = Field(default="")
+    subjects: dict[str, list[str]] = Field(default_factory=dict)
+    # The axis this check varies, and the values it varies over — a solvent screen is
+    # `sweep_parameter="solvents"`. Flat rather than a nested model because it crosses the Temporal
+    # wire and rides in a structured-output schema, and two scalars are a smaller surface than a
+    # sub-object for a model to fill wrongly.
+    #
+    # **A swept axis is not an invented argument**, which is the distinction the whole dispatcher
+    # turns on: it is reported beside every result it produced rather than assumed behind one, and
+    # its values are checked against the job's own declared `precondition` before anything runs.
+    sweep_parameter: str = Field(default="")
+    sweep_values: list[str] = Field(default_factory=list)
+
+
 class DiscriminatingCheck(BaseModel):
     """The cheapest observation that would separate this hypothesis from its rivals.
 
     `kind` decides what happens next and nothing else does: `computable` means this system holds a
-    tool that answers it and the tournament runs it; `physical` means somebody has to do it, and it
-    becomes an `experiment-proposal` note for a human to accept or decline.
+    tool that answers it, and the tournament tries to run it; `physical` means somebody has to do
+    it, and it becomes an `experiment-proposal` note for a human to accept or decline.
+
+    A `computable` check carries a `call` or it is not dispatched. That is deliberate rather than
+    defensive: a check the model can describe but not ground is exactly the case where running it
+    would mean inventing the arguments, and the refusal — with its reason — is what the chemist
+    sees instead of a number.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -82,6 +125,7 @@ class DiscriminatingCheck(BaseModel):
     question: str = Field(min_length=1)
     kind: CheckKind
     tool: str = Field(default="")
+    call: CheckCall | None = None
     expectation: str = Field(min_length=1)
 
 
@@ -100,6 +144,15 @@ class CheckOutcome(BaseModel):
     verdict: CheckVerdict = "not-run"
     detail: str = Field(default="")
     calc_refs: list[str] = Field(default_factory=list)
+    # The closed refusal vocabulary from `hypotheses/dispatch.Refusal`, empty when the check ran.
+    # Separate from `detail` so a deployment can count *why* checks are not running — a generator
+    # that stops grounding its subjects and one whose tools went unreachable look identical in
+    # prose and want different fixes.
+    refusal_code: str = Field(default="")
+    # What the tool was asked, as it was asked, and what was left at its default. A number computed
+    # in the default solvent answers a different question from one computed in DMF, and a reader
+    # who cannot see which knobs were untouched cannot tell the two apart.
+    ran: str = Field(default="")
 
 
 class ScreenRejection(BaseModel):

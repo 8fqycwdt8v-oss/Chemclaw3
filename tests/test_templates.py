@@ -1136,7 +1136,7 @@ def test_both_lanes_derive_the_same_arguments_from_the_same_tool() -> None:
     """
     import inspect
 
-    from chemclaw.cli.validate_template_args_live import _live_arguments
+    from chemclaw.agent.template_surface import normalise_tool_schema
     from chemclaw.cli.validate_templates import ToolArguments
 
     async def screen_hazards(smiles: list[str], top_k: int = 5) -> str:
@@ -1144,7 +1144,7 @@ def test_both_lanes_derive_the_same_arguments_from_the_same_tool() -> None:
         return "hazard: none found"
 
     offline = ToolArguments.of_signature(inspect.signature(screen_hazards))
-    live = _live_arguments(_live_tool("screen_hazards"))
+    live = ToolArguments.of_schema(normalise_tool_schema(_live_tool("screen_hazards")) or {})
     assert (
         offline
         == live

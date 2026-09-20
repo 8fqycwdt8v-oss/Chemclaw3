@@ -55,7 +55,25 @@ class HypothesisSettings(BaseSettings):
     hypothesis_call_timeout_seconds: float = Field(default=120.0, gt=0)
     # One evidence sweep across every internal source, for one hypothesis.
     hypothesis_evidence_timeout_seconds: float = Field(default=180.0, gt=0)
+    # A computable check's result, as text, in the outcome a chemist reads. Bounded because it
+    # is a tool's own output landing in a note body and in the job envelope: a site-reactivity
+    # panel over a large molecule runs to thousands of characters, and the result payload is
+    # already shared with the ranked table.
+    hypothesis_result_max_chars: int = Field(default=2000, ge=200)
     # The most `experiment-proposal` notes one tournament writes, taken from the top of the table. A
     # run that filed one note per hypothesis would bury the corpus under proposals nobody asked for,
     # and the ranking is precisely what says which are worth writing down.
     hypothesis_max_proposals: int = Field(default=3, ge=0)
+    # Durable calculations one tournament may start on its own. **Two, deliberately low.** These
+    # are the jobs a manifest marks `expensive: true`: a solvent screen is one conformer search per
+    # solvent per species, so a single check can be minutes of compute and a tournament that ran
+    # one per hypothesis would spend a chemist's budget on a question they asked in passing. A
+    # check past the cap is reported as not run *for budget* rather than dropped, so a thin result
+    # never reads as a complete one. Raising it is a deployment's call about its own cluster.
+    hypothesis_max_calculations: int = Field(default=2, ge=0)
+    # How wide a swept axis may be. **`max_calculations` does not bound this and cannot** — it
+    # counts checks, and one check that sweeps twelve solvents is twelve conformer searches inside
+    # a single child workflow, which is the budget escaping through the one argument the model is
+    # allowed to choose. An over-wide axis is refused rather than truncated: the swept values are
+    # reported beside the answer, so silently dropping some would make that report wrong.
+    hypothesis_max_sweep_values: int = Field(default=6, ge=1)

@@ -651,6 +651,57 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 16,
+      "type": "graph",
+      "title": "Discriminating checks that did not run, by reason",
+      "description": "A tournament that proposes experiments instead of running them looks the same from outside whether its questions genuinely need a laboratory or its dispatcher is refusing every one of them, and the reasons want different repairs. `subject-has-no-structure` and `subject-not-a-compound` are a corpus whose compounds carry no `compound_smiles`; `tool-not-authorized` is an actor whose roles do not cover an `expensive: true` trigger, which is a deployment-wide outage of the durable half; `field-cannot-be-grounded`, `axis-not-declared` and `subject-field-not-declared` are the model proposing calls the target does not take, which is a prompt problem; `over-budget` and `axis-too-wide` are the budget doing its job and are the one group that is not a fault.",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 44
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (code) (increase(chemclaw_hypothesis_check_refusals_total[1d]))",
+          "legendFormat": "{{code}} (1d)",
+          "refId": "A"
+        }
+      ]
     }
   ],
   "refresh": "30s",
