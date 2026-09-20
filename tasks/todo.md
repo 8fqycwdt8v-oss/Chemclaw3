@@ -151,4 +151,32 @@ outcomes are already recorded:
 
 ## Review
 
-(to fill in on completion)
+Shipped. Two adversarial reviews ran against the merged branch and found twelve defects, five red
+gates and one false claim in the ADR itself. What is worth carrying forward:
+
+**The measurement caught a defect in the thing it was measuring, and only because the null was
+wrong in a way somebody looked for.** The eval reported a coin-flip judge at Spearman +0.22 with
+`beats_null=True`. It had a null — a shuffled ordering — and the null was fine; the *labels* were
+aligned with the artefact, so the control controlled for everything except the one thing that could
+go wrong. A null control is not a property of having one, it is a property of what it varies.
+
+**Three separate defects were a statistic that looked right at one point and was wrong everywhere
+else.** The standard error was correct for the marginal and wrong for the question anybody asks.
+Position bias was a reversal rate, which reads 0.5 for noise and 0.0 for consistency while both
+mean no bias. `comparisons_for` was right for the arithmetic it did and under-priced every real
+run. In each case the code matched a sentence somebody could defend, and the sentence was about
+the wrong quantity. Driving the extremes — a judge with no information, a judge that always picks
+left, a perfectly consistent judge — is what separated them; asserting `> 0` would not have.
+
+**Two defects existed only because a stage was never called.** `run_computable_check` returned its
+honest "not-run" reason to nobody, which let `summarise` say "(ran;" unchallenged. Dead code is not
+neutral: it removes the thing that would have contradicted a lie elsewhere.
+
+**Failed once by writing prose ahead of the measurement.** The ADR said "`make lint type test`
+green" while five gates were red, and quoted 0.48 for a figure that was 0.392. Both were written
+from the last run rather than from a run of what shipped.
+
+Deliberately not done, with the reason recorded in `BACKLOG.md` and a trigger in the ADR:
+dispatching a `computable` check onto a real calculator. Free text to validated tool arguments
+means inventing the molecule, the conformer and the solvent, and a fabricated argument produces a
+real number a chemist reads as computed.
