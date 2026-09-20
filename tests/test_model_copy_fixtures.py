@@ -69,7 +69,152 @@ _SELF_FIELD = re.compile(r"self\.([a-z_][a-z0-9_]*)")
 
 #: Every flagged site, keyed `<file>::<test>::<Model>.<field>` so the entry survives an edit above
 #: it, with the reason the fixture may build its subject that way. Held in both directions.
-_ARGUED: dict[str, str] = {}
+#:
+#: The evidence common to all of them, and the reason none of these is a defect: every call site
+#: this suite executes was instrumented and its copy re-validated through `model_validate`. Each
+#: entry below came back **identical to the validated form**, so the object under test is one the
+#: system could have produced — the bypass is real and its effect here is nil. What each reason
+#: adds is the part no instrumentation can see: that the *assertion* is not about the check that
+#: was skipped.
+_ARGUED: dict[str, str] = {
+    # --- OrdReaction: `_roles_are_consistent` and `_steps_are_ordered` --------------------------
+    "tests/test_eln.py::test_unparseable_smiles_is_a_problem::OrdReaction.outcomes": (
+        "the refusal under test is `validate_ord`'s, not the model's. `OrdReaction` checks only "
+        "that outcomes carry `Role.PRODUCT` and that step indices run 1..n; an unparseable SMILES "
+        "passes both, which is exactly why a separate validator exists to report it."
+    ),
+    "tests/test_eln.py::test_mass_balance_violation_is_a_problem::OrdReaction.outcomes": (
+        "same seam: mass balance is `validate_ord`'s check and deliberately not the model's, "
+        "because a record that fails it is still a record the ELN exported."
+    ),
+    "tests/test_eln.py::test_ingest_rejects_invalid_without_side_effects::OrdReaction.outcomes": (
+        "the subject is `ingest_reaction`'s transactionality — that a refusal writes nothing to "
+        "three stores. The outcome is a well-formed product component; the model would accept it."
+    ),
+    "tests/test_eln.py::test_a_multi_product_reaction_names_no_principal_compound"
+    "::OrdReaction.outcomes": (
+        "two `Role.PRODUCT` outcomes satisfy `_roles_are_consistent` in full. The subject is "
+        "`record_from_ord_reaction`'s refusal to name a principal compound, downstream of the model."
+    ),
+    "tests/test_eln.py::_charged::OrdReaction.inputs": (
+        "a fixture helper that re-charges the esterification with explicit amounts. Every "
+        "component it is called with carries a non-product role, which is the whole of what "
+        "`_roles_are_consistent` asks of `inputs`."
+    ),
+    "tests/test_eln.py::test_the_label_row_keeps_the_agents_the_fingerprint_drops"
+    "::OrdReaction.inputs": (
+        "appends a `Role.SOLVENT` component to the ester's own inputs; the role check holds by "
+        "construction. The subject is which species the label row keeps that the fingerprint drops."
+    ),
+    "tests/test_eln.py::test_scale_survives_the_retrieval_excerpt_of_a_procedure_heavy_note"
+    "::OrdReaction.steps": (
+        "the twelve steps are built `for i in range(1, 13)`, so `_steps_are_ordered`'s contiguity "
+        "rule is satisfied by the comprehension that builds them. The subject is where the scale "
+        "figure lands relative to `note_excerpt_chars`."
+    ),
+    # --- ResultRecord: `_facts_address_real_members` couples `subject` to `properties` ----------
+    "tests/test_publish_dialect.py::test_an_unstated_electronic_state_is_absent_rather_than_neutral"
+    "::ResultRecord.subject": (
+        "the replacement `Subject` is built by its own constructor and its single member is "
+        "ordinal 0, which every fact on `_record()` addresses. The subject is the dialect's "
+        "refusal to fabricate a charge, two layers downstream."
+    ),
+    "tests/test_publish_dialect.py"
+    "::test_the_compound_row_carries_the_structure_its_own_id_was_derived_from"
+    "::ResultRecord.subject": (
+        "same shape and the same member ordinals; the subject is which SMILES `compound_id` is "
+        "hashed over in the projected row."
+    ),
+    "tests/test_publish_dialect.py::test_a_converted_fact_keeps_the_number_its_calculator_reported"
+    "::ResultRecord.properties": (
+        "the fact is built by `_fact`, carries no `member_ordinal`, and therefore cannot address "
+        "a member the subject lacks — which is the only thing `_facts_address_real_members` "
+        "checks. The subject is the reported/canonical pair in the written row."
+    ),
+    "tests/test_publish_dialect.py::test_a_fact_with_no_reported_value_still_records_one"
+    "::ResultRecord.properties": (
+        "a `PropertyFact` constructed directly, deliberately, because a projector constructs one "
+        "that way; it carries no `member_ordinal` either."
+    ),
+    "tests/test_publish_dialect.py::test_a_declared_publication_is_not_duplicated_by_the_fallback"
+    "::ResultRecord.publications": (
+        "`publications` is read by no validator; this entry is flagged only because `src/` obtains "
+        "a `ResultRecord` by validating one back off the outbox. The subject is the fallback's "
+        "arity."
+    ),
+    "tests/test_publish_outbox.py::test_one_unqueueable_record_costs_one_document_and_not_the_batch"
+    "::ResultRecord.contract_version": (
+        "deliberately out of range **for Postgres**, not for the model: `contract_version` is a "
+        "plain `int` and 2**40 is a valid one, which is what makes it a server-side poison and "
+        "the twin of the NUL that psycopg refuses client-side. The savepoint is the subject."
+    ),
+    "tests/test_publish_sink_schema_lag.py"
+    "::test_the_schema_lag_report_is_once_per_table_not_once_per_row::ResultRecord.calc_ref": (
+        "a distinct non-empty `calc_ref` per record, which is all its `MinLen` asks. The subject "
+        "is the report's cardinality."
+    ),
+    # --- ExperimentDesign ----------------------------------------------------------------------
+    "tests/test_protocol_render.py::test_a_diff_reads_in_the_documents_own_order"
+    "::ExperimentDesign.arms": (
+        "twelve arms with distinct ids, inside the model's `MaxLen`; the subject is the order the "
+        "diff emits paths in, which is why twelve is the count."
+    ),
+    "tests/test_protocol_render.py::test_a_diff_reads_in_the_documents_own_order"
+    "::ExperimentDesign.request": (
+        "an `ExperimentRequest` built by its own constructor, swapped in so the diff has a "
+        "`request.` path to sort before the arms."
+    ),
+    "tests/test_protocol_store.py::test_an_unpaired_surrogate_is_refused_rather_than_diverging"
+    "::ExperimentDesign.base": (
+        "the copy is the point: the test's own docstring records that pydantic refuses a lone "
+        "surrogate only on a *constrained* `str`, so an unconstrained one reaches the driver — "
+        "which is the state a Starlette request body genuinely produces and the reason "
+        "`require_storable` exists. Building it through the constructor would build the same "
+        "object."
+    ),
+    # --- Structure: `_normalize_and_validate` rounds, and checks the electron count -------------
+    "tests/test_structure.py::test_identity_is_the_chemical_content::Structure.positions": (
+        "the moved coordinates are already at `_GEOMETRY_DECIMALS`, so the rounding the copy "
+        "skips is the identity on them — and the assertion is that the id *differs*, which "
+        "rounding could only make more true, never less."
+    ),
+    "tests/test_structure.py::test_coordinates_are_normalized_below_chemical_significance"
+    "::Structure.positions": (
+        "the one site in the suite whose copy is *not* identical to the validated form, and it is "
+        "the deliberate half of the test: the copy carries the 1e-9 noise and the assertion runs "
+        "against `Structure(**noisy.model_dump())`, which re-crosses the boundary on purpose. "
+        "Rebuilding the fixture would delete the contrast the test is made of."
+    ),
+    "tests/test_structure.py::test_charge_and_multiplicity_are_part_of_identity"
+    "::Structure.multiplicity": (
+        "O2 at multiplicity 1 is sixteen electrons in a closed shell, which the validator accepts; "
+        "the copy is admissible and the subject is that the two ids differ."
+    ),
+    # --- the rest ------------------------------------------------------------------------------
+    "tests/test_bo_constraints.py::test_adding_a_constraint_makes_it_a_different_campaign"
+    "::OptimizationProblem.constraints": (
+        "an unconstrained problem is a valid one — the test directly above this builds one "
+        "through the constructor — so `constraints=[]` is not a state the validator refuses. The "
+        "subject is that `campaign_id_for` reads constraints at all."
+    ),
+    "tests/test_calc_thermo.py::test_an_empty_ensemble_is_refused_rather_than_weighted"
+    "::EnsemblePayload.members": (
+        "`members` carries no `min_length`, deliberately: an empty ensemble is what the CREST "
+        "server returns when a search finds nothing, so the payload has to be able to say so. The "
+        "refusal under test is `ensemble_from_members`', and it is reachable exactly because the "
+        "model does not refuse first."
+    ),
+    "tests/test_calc_thermo.py::test_an_empty_ensemble_is_refused_rather_than_weighted"
+    "::EnsemblePayload.total_found": (
+        "the count beside those members, kept consistent with them for the same reason."
+    ),
+    "tests/test_live_turn_cost.py::test_a_worsening_drift_is_a_nonzero_exit"
+    "::TurnCost.input_tokens": (
+        "scaled by 1.1 and by 0.5 off a recorded turn, so it stays a non-negative int and the "
+        "`Ge` the copy skips holds anyway. The double these feed is standing in for the recorded "
+        "baseline, and the subject is the drift band's sign, not the shape of a `TurnCost`."
+    ),
+}
 
 
 def _innermost_name(annotation: ast.expr | None) -> str | None:

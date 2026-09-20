@@ -122,11 +122,18 @@ def test_campaign_spec_rejects_insufficient_seed(n_initial: int) -> None:
 
 
 def test_campaign_spec_carries_per_campaign_seed() -> None:
-    """The spec is the per-campaign seed seam; unset means the config default."""
+    """The spec is the per-campaign seed seam; unset means the config default.
+
+    The replicate is *constructed* with the seed rather than copied onto with
+    `model_copy(update={"seed": 7})`. The claim is that a caller can hand `CampaignSpec` a seed —
+    a property of the constructor — and `model_copy` assigns past it, so the old form asserted
+    only that `model_copy` does what `model_copy` does: it would have held with `seed` refused by
+    the model, or absent from it.
+    """
     problem = build_problem(load_dataset())
     spec = CampaignSpec(problem=problem, objective_name="reizman_suzuki")
     assert spec.seed is None  # engine resolves None to settings.bo_seed
-    replicate = spec.model_copy(update={"seed": 7})
+    replicate = CampaignSpec(problem=problem, objective_name="reizman_suzuki", seed=7)
     assert replicate.seed == 7
 
 
