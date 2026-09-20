@@ -8,8 +8,10 @@ is a fixture that supplies the subject"), and the review that found it proposed 
 `model_copy(update=…)` in a test whose subject model declares `extra="ignore"` or `extra="forbid"`.
 
 **That heuristic was measured and it separates nothing, in both directions.** Every one of the 149
-call sites the suite actually executes was instrumented: the copy was re-validated through
-`model_validate` and compared with what `model_copy` produced. Not one site injects a key the model
+call sites the suite executed at the time was instrumented — `BaseModel.model_copy` patched for the
+run, the copy re-validated through `model_validate` and compared with what `model_copy` produced.
+The figures in this paragraph are that measurement, not a claim about the tree today; the live
+numbers are what the two assertions below print when they fail. Not one site injects a key the model
 does not declare, not one produces an object `model_validate` refuses, and exactly one produces an
 object that differs from the validated form (`test_structure.py`'s deliberate
 `Structure(**noisy.model_dump())`, which re-crosses the boundary on purpose). Meanwhile
@@ -40,8 +42,8 @@ Flagged sites are argued in `_ARGUED`, held in both directions so an entry that 
 fails too — the same shape as `tests/test_claude_md_figures.py`. A flag is not a verdict: most of
 these are fine, and the entry says why.
 
-**The scope is `tests/` only, and that is a decision rather than an oversight.** `src/` holds 76
-`model_copy(update=…)` calls of its own; there the call is production deliberately deriving one
+**The scope is `tests/` only, and that is a decision rather than an oversight.** `src/` holds dozens
+of `model_copy(update=…)` calls of its own; there the call is production deliberately deriving one
 model from another, and whether that should go through validation is a question about the code, not
 about a fixture owning its subject. Nothing here would separate the two, so this file does not
 claim to.
