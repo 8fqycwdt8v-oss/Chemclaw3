@@ -124,7 +124,8 @@ def pair_round(
         )
         # Everyone left has already met `first`, so a rematch is the only move. It is worth
         # something only because the caller presents a rematch the other way round — see
-        # `durable/hypothesis_tournament.py::_judge`, which mixes the round into the presentation
+        # `src/chemclaw/durable/hypothesis_tournament.py`'s `_judge`, which mixes the round
+        # into the presentation
         # order so a repeat is a genuinely new reading rather than a byte-identical prompt.
         pairs.append((first, unpaired.pop(0 if opponent_at is None else opponent_at)))
 

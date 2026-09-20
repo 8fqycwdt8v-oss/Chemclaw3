@@ -1028,7 +1028,15 @@ def test_the_prefix_is_charged_whether_or_not_a_window_is_declared(
     from tests.test_context_floor import _connector_tools, _tool_name
 
     budget = settings.agent_context_token_budget
-    thread: list[AnyMessage] = [HumanMessage(content="q" + "y" * 60_000) for _ in range(8)]
+    # **Sixteen smaller messages rather than eight large ones, and the size is the point.** The
+    # policy drops whole conversation groups, so the fixture's message size is the granularity the
+    # cut can move in. At 60,000 characters the thread allowance — `budget` less a prefix that grows
+    # every time a tool is added — reached the point where only one message fitted, and a *tighter*
+    # window then produced the identical cut: the last assertion below compared 15,005 against
+    # 15,005 and failed, reporting that the window had stopped binding when what had actually
+    # happened is that the thread could not be cut any finer. Same total size, half the step, so the
+    # control it exists to prove survives the next tool as well as this one.
+    thread: list[AnyMessage] = [HumanMessage(content="q" + "y" * 30_000) for _ in range(16)]
 
     open_prefix, open_sent, open_delta = _drive(0, thread)
 

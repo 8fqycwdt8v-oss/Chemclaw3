@@ -441,7 +441,7 @@
       "id": 12,
       "type": "graph",
       "title": "Work waiting on a person",
-      "description": "Check-ins delivered to requesters whose own questions are still unanswered past the quiet threshold. Not an alert condition — some work waits on people, and that is the system working. A sustained climb is: more is being asked of the lab than the lab is answering, and the requesters now know it. Flat at zero with CHECK_IN_ENABLED set means either nothing is blocked or the sweep is not reaching its mailbox — read chemclaw_deliveries_total beside it to tell those apart. The second series is the run's own shortfall: runs that stopped before reaching every blocked requester. Any sustained value there means the background queue is not being served fast enough for the sweep to finish inside its own interval, and some requesters are hearing nothing while the first series still looks healthy.",
+      "description": "Check-ins delivered to requesters whose own questions are still unanswered past the quiet threshold. Not an alert condition \u2014 some work waits on people, and that is the system working. A sustained climb is: more is being asked of the lab than the lab is answering, and the requesters now know it. Flat at zero with CHECK_IN_ENABLED set means either nothing is blocked or the sweep is not reaching its mailbox \u2014 read chemclaw_deliveries_total beside it to tell those apart. The second series is the run's own shortfall: runs that stopped before reaching every blocked requester. Any sustained value there means the background queue is not being served fast enough for the sweep to finish inside its own interval, and some requesters are hearing nothing while the first series still looks healthy.",
       "datasource": "prometheus",
       "gridPos": {
         "h": 8,
@@ -490,6 +490,165 @@
           "expr": "sum(increase(chemclaw_work_check_in_deferrals_total[1d]))",
           "legendFormat": "runs that stopped short (1d)",
           "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "graph",
+      "title": "Hypothesis tournaments, by what they produced",
+      "description": "Every stage of a tournament catches and continues, so a run whose judge failed entirely still returns a ranked table \u2014 built from the prior and honestly labelled 'unrated' \u2014 that is indistinguishable from a healthy run in the logs. That is what these four states are for. `unseparated` is a legitimate and common outcome, not a fault: the leading hypotheses sat inside their own uncertainty and the run said so. `unrated` is the one to watch \u2014 it means no comparison survived, so the ordering is the prior and nothing was judged. A rising `unrated` share with `completed` falling is the gateway or the judge route failing, and no other series moves when it happens. `empty` means the screen rejected or merged everything, which points at the generator rather than the judge.",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (increase(chemclaw_hypothesis_tournaments_total[1d]))",
+          "legendFormat": "{{outcome}} (1d)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "graph",
+      "title": "Judge position bias",
+      "description": "How far a tournament's judge preferred whichever hypothesis it happened to be shown first, 0.0 being no order effect and 1.0 the order deciding every pair. It is the only in-run proxy for judge quality this feature has, and the ranking is worth nothing without it: simulated against a constructed ordering, top-1 recovery is under 40% at a 75%-accurate judge (`make hypothesis-recovery`). A gateway model swap that made the judge prefer the first side would turn the feature into noise while every other signal stayed green \u2014 the ratings would still have intervals, the jobs would still complete, and the table a chemist reads would still look ordered. Suppressed below eight decisive comparisons, so a flat line with tournaments completing means the fields are too small to measure rather than unbiased.",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0,
+          "max": 1
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(chemclaw_hypothesis_position_bias_bucket[1d])))",
+          "legendFormat": "median",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.9, sum by (le) (rate(chemclaw_hypothesis_position_bias_bucket[1d])))",
+          "legendFormat": "p90",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "graph",
+      "title": "Hypotheses rejected before the tournament",
+      "description": "The screen is the only stage allowed to delete a candidate, and it deletes quietly. Both rules are mechanical: `no-refutation-condition` removes a hypothesis that names no observation which would contradict it. A step change here after a model or prompt change means the generator has stopped producing falsifiable hypotheses \u2014 the field a chemist sees gets smaller and better-looking at the same time, which is the least visible way this feature can degrade.",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 44
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (rule) (increase(chemclaw_hypothesis_screen_rejections_total[1d]))",
+          "legendFormat": "{{rule}} (1d)",
+          "refId": "A"
         }
       ]
     }
