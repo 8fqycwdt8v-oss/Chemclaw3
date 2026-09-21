@@ -80,8 +80,14 @@ async def propose_skill(name: str, body: str, rationale: str) -> str:
     # proposed something or repeated itself. The store knows — it books the distinction on
     # `chemclaw_behaviour_proposals_total` — but `propose` returns the standing row either way, so
     # the two are indistinguishable from the result alone.
+    #
+    # **The test is the standing row's *state*, not its hash.** `store.one` looks the row up *by*
+    # `digest`, so a hash comparison could only ever distinguish "absent" from "present" — which
+    # read a superseded row as a repeat and told the chemist's model its proposal was waiting for
+    # a decision that `GET /proposals?state=open` does not list. `propose` revives such a body, so
+    # the only arrival that is genuinely not a proposal is one that met an **open** row.
     before = await store.one(actor, "skill", declared, digest)
-    standing = before.content_hash if before is not None else ""
+    repeated = before is not None and before.state == "open"
     outcome = await store.propose(
         Proposal(
             kind="skill",
@@ -95,7 +101,7 @@ async def propose_skill(name: str, body: str, rationale: str) -> str:
             state="open",
         )
     )
-    return _what_became_of_it(declared, outcome, proposed_now=outcome.content_hash != standing)
+    return _what_became_of_it(declared, outcome, proposed_now=not repeated)
 
 
 def _validated(name: str, body: str) -> str:
@@ -164,6 +170,12 @@ def _what_became_of_it(name: str, outcome: Proposal, *, proposed_now: bool) -> s
     - *already open* — it is already waiting; repeating it adds nothing and the model should stop.
     - *already decided* — a person answered. Proposing the same text cannot reopen it, and the
       model is told the verdict and the reason so it can respond to the reason rather than retry.
+
+    **There is no fourth answer for a revived proposal, and that is the point.** A body that a
+    newer version had superseded is put back in the queue by `propose`, so it *is* waiting for a
+    chemist again and the first answer is the true one. Telling the model about the supersede in
+    between would describe queue mechanics it cannot act on, where "I proposed this and it is
+    waiting" is what its next sentence to the chemist needs.
     """
     if outcome.decided:
         return (

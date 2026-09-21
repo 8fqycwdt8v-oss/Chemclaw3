@@ -22,6 +22,19 @@ class ElnSettings(BaseSettings):
     # timeout bounds one batch of fetch+validate+index work.
     eln_export_dir: str = "data/eln-exports"
     eln_sync_timeout_seconds: float = Field(default=300.0, gt=0)
+    # How long one `regex` transform may spend on one warehouse cell
+    # (`D-2026-09-21-a-pattern-that-cannot-be-timed-out-is-run-by-an-engine-that-can`). A site
+    # writes the pattern in its `datasource.yaml` and this repository runs it over free-text cells
+    # whose length nobody here chose, so the work a match costs is unbounded in both factors and
+    # `re` has no timeout at any of them. This is the bound, and it is a bound on the *work*: a
+    # pattern that exceeds it fails the ingest naming itself, rather than being retried over the
+    # same page.
+    #
+    # 0.25 s because it is four orders of magnitude above what a real pattern costs. Measured on
+    # this box: a bounded pattern over a short cell is 1.2 us, and a full scan of a 1 MB cell with
+    # no match is 0.24 ms — so the ceiling is ~1,000x the worst honest case and the shortest
+    # catastrophic one tested reaches it in 0.25 s rather than never.
+    eln_regex_timeout_seconds: float = Field(default=0.25, gt=0)
     # The sync fetches from this far *behind* its high-water cursor, so an export file that
     # lands late with an older payload timestamp (an upstream export-job retry) is still picked
     # up instead of being silently dropped forever. Re-fetching the window is safe and cheap

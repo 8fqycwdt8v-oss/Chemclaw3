@@ -82,23 +82,6 @@ topic).
   `docs/archive/proposed-templates/scale-up-thermal-envelope.yaml` with its arguments verified;
   move it back when this closes.
 
-- [ ] **A site-supplied regex from a datasource manifest runs against warehouse cell text with no
-  timeout, so a catastrophic pattern hangs the ingest activity** — [M].
-  `ingest/eln/warehouse/expr.py:234` (`_regex`, `re.search` per row) and `:357`
-  (`_compiled_regex`, which validates the pattern and still returns a plain `re.Pattern`) take
-  `options["pattern"]` straight from the `datasource.yaml` binding. The pattern is checked for
-  *syntax* and never for backtracking behaviour, and Python's `re` has no timeout, so one
-  `(a+)+$`-shaped manifest pattern against a long free-text column pins a worker thread until the
-  activity's `start_to_close` expires — then the retry re-runs the identical pattern over the
-  identical page, which is the `_BAD_DATA_TYPES` argument in reverse. Operator-controlled input, so
-  it is not the untrusted-input case the rest of this section holds, and that is the whole reason it
-  is queued rather than fixed in the same commit as the sibling ReDoS in `core/logging.py`: the
-  remedies are different. Either bound the *input* (`as_text(value)[:n]` per cell, the cheapest
-  honest bound and the one this seam can take without a dependency), or move the match off-thread
-  with a wall clock, or reject a pattern whose shape is a known amplifier at
-  `datasource-validate` time. Decide which, because a fix that only shortens the input is a
-  mitigation and should say so.
-
 - [ ] **A chemist has no in-product way to ask for a skill of theirs to be published** — [S].
   `D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius` makes the promotion unit a
   *document* rather than a queue entry, which is what keeps `api/routes/proposals.py` owner-scoped
@@ -407,21 +390,6 @@ topic).
       to cut a leg, and that configuration finds three fewer gold notes.
 
 ## 3 — Work that is lost, dropped or invisible
-
-- [ ] **A re-proposal of a *superseded* body is answered as "already waiting to be decided" and can
-  never be proposed again** — [S]. **Moved here from "1 — Untrusted input reaching a privileged
-  surface", where it was misfiled**: nothing untrusted reaches anything, and no surface is
-  privileged — the defect is that a chemist's decision has nowhere to land and the model is told a
-  falsehood about its own proposal, which is this section's subject.
-  `behaviour_proposals.propose`'s
-  `ON CONFLICT (actor, kind, name, content_hash) DO NOTHING` then re-reads the row *in whatever
-  state it is in*, and `_arrival` branches only on `stored.decided` — `superseded` is deliberately
-  not a decision, so it books `outcome="already_open"`. Driven on both shipped backends: propose V1,
-  propose V2 (V1 superseded), re-propose V1 → the row stays `superseded`, `GET /proposals?state=open`
-  never shows it, `POST /proposals/skill/<name>` with V1's hash 409s, and the model tells the chemist
-  it is waiting for their decision. The module's own rule is that "an unchanged re-proposal cannot
-  reopen a **rejection**"; the idempotence is being applied one state too widely. Either revive a
-  superseded row to `open`, or give `_what_became_of_it` a fourth branch that says so.
 
 - [ ] **Three row-projecting tools defang a whole page on the event loop, and one of them is not in
   the offload test** — [M]. `commitment_tools.review_commitments`,
@@ -839,20 +807,6 @@ topic).
       Anchors: `src/chemclaw/evals/delegation_run.py`, `src/chemclaw/cli/live_probes.py`
       (`--suite delegation`), `data/evals/probes/delegation.yaml`, `data/evals/profiles/`,
       `src/chemclaw/cli/delegation_behaviours.py`, `infra/live/e2e-full-stack/up.sh`.
-- [ ] **`tool_result_blobs` ships its retention window at zero, and nobody chose zero** — [S].
-      `retention_tool_results_days` defaults to **0** (`core/config/memory.py:125`), which is the
-      same value as every other window that means "off", so a deliberate uniformity is
-      indistinguishable from an unconsidered default. Decide whether a tool-result blob has a
-      retention answer of its own, and if it does not, say so in `durable/retention.py`'s register
-      the way `predictions` does rather than by sharing a zero.
-
-      What this row used to carry — *"six tables still say `nothing bounds it`"* — is **false of
-      the current code**, re-checked 2026-09-15 before cutting it down: the phrase appears three
-      times in `durable/retention.py` and every one of them is a meta-comment *about* the
-      historical wording (`:287`, `:292`, `:447`), never a register entry. Each of those six tables
-      now states a decision of its own, so the ones this row was opened to collect have been taken.
-      **Anchors:** `src/chemclaw/core/config/memory.py`, `src/chemclaw/durable/retention.py`.
-
 ---
 
 ## 5 — Where the field moved past us
@@ -864,20 +818,6 @@ sections above: none of them names broken code. Each names a place where somethi
 repository now has a **measured** better answer to a problem this repository solved earlier and has
 not revisited. That is a different kind of debt and it needs its own section, because a queue that
 only holds defects can only ever restore the system to what it already intended to be.
-
-- [ ] **One sibling bundle that will not import takes the whole allowance bound with it** — [S].
-  `tests/test_context_floor.py::_sibling_tool_tokens` passes every name in `SERVED_ELSEWHERE` to
-  **one** subprocess and returns `{}` on any non-zero exit, so a single missing dependency in
-  `Chemclaw3-mcp`'s venv skips
-  `test_the_allowance_for_the_bundles_this_ratchet_cannot_serve_is_still_a_bound` for **all** of
-  them — and `PREFIX_BOUND`, which `core/config/agent.py` derives both compaction defaults from, is
-  that allowance plus the ceiling. Observed on 2026-09-16: the sibling's `.venv` lacked `molmass`,
-  which its own newest commit had just added to `servers/thermalsafety/pyproject.toml`, and the test
-  skipped. The skip is *counted* by `tests/conftest.py::_report_sibling_skips`, so it is honest — but
-  it is wider than it needs to be, and the file's own header argues that "a check that quietly
-  shrinks is worse than one that says what it did not look at". A per-bundle subprocess would skip
-  only the bundle that will not import and name it; the cost is one process spawn per bundle on a
-  test that already spawns one. Anchor: `_sibling_tool_tokens` in `tests/test_context_floor.py`.
 
 - [ ] **A tool schema is 72% description, and the rationale vein the old row named is already
       closed** — [M], re-measured 2026-09-14 on the bound surface
@@ -1282,28 +1222,6 @@ those belong in.
       (`D-2026-09-12-two-producers-of-one-identity-are-not-redundant-when-they-disagree`).
 
 ## A truncated argument document is completed by upstream and the tool runs on the guess
-
-- [ ] **Two timing bounds red the gate for machine load, and the ADR that documents one of them
-      says it passes serially** — [S], found 2026-09-20 when `check` went red on PR #421 with a diff
-      containing **zero files under `src/`**.
-      `tests/test_conflicts.py::test_a_disjoint_dated_corpus_scans_in_linear_time` took 1.84 s
-      against a bare `< 1.5` wall clock, and
-      `tests/test_context_budget.py::test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable`
-      measured 1.289x against a fixed `/ 1.3` margin — 0.9% short. Both pass 3-of-3 serially on an
-      unloaded machine; both failed inside a 46-minute run competing with three subagents.
-      **The documentation is the part worth fixing first.**
-      `D-2026-09-13-a-stable-failure-set-is-not-two-green-runs` tabulates the second test as failing
-      **2 of 5** parallel runs with the serial column reading an unqualified **"passes"**. It passes
-      serially *on an unloaded machine*: parallelism was never the mechanism, load is, and `-n 4` is
-      one way to produce it. A merged ADR is never edited, so a reader of that table today is told
-      the serial gate is safe from this and it is not.
-      **The patch.** Both assertions bound a ratio or a wall clock against a constant. Each should
-      compare against a control measured in the same process at the same moment — which the second
-      test already half does (it has the on-loop control) and then spends on a fixed 1.3x margin that
-      load eats. `tasks/lessons.md` already carries the rule this is an instance of: a timing bound
-      must separate the two *outcomes*, not the two speeds.
-      Anchors: `tests/test_conflicts.py`, `tests/test_context_budget.py`,
-      `docs/decisions/D-2026-09-13-a-stable-failure-set-is-not-two-green-runs.md`.
 
 - [ ] **A streamed tool call cut mid-document is completed by upstream and the tool runs on the guess** — [M].
       `D-2026-08-27-an-unparseable-tool-call-is-a-visible-failure` §3 recorded this as open and named the

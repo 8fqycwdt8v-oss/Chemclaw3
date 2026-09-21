@@ -1670,36 +1670,66 @@ def test_the_bundles_both_repositories_declare_are_the_ones_charged_to_the_allow
     )
 
 
-def _sibling_tool_tokens(names: Iterable[str]) -> tuple[dict[str, tuple[int, int]], str]:
-    """Per-bundle `(tools, tokens)` for `names`, or an empty mapping and the reason there is none.
+def _one_sibling_dump(interpreter: Path, name: str) -> tuple[list[dict[str, Any]] | None, str]:
+    """`tools/list` for one bundle, or `None` and the reason that bundle could not be measured.
 
-    Never raises for a missing or broken sibling: this file's job is to bound *this* repository's
-    prefix, and a checkout somebody has not built is a fact about their laptop rather than a
-    regression. It raises for nothing at all — a failure to run the dump is returned as the reason
-    string, so the caller decides between skipping and failing.
+    One subprocess per bundle, which is the whole shape of this function. `_SIBLING_DUMP` takes
+    `*names` and imports them inside one dict comprehension, so the first `ImportError` kills the
+    process before anything is printed — and the caller then had nothing for *any* bundle.
+    Observed 2026-09-16: the sibling's `.venv` lacked `molmass`, which its own newest commit had
+    just added to `servers/thermalsafety/pyproject.toml`, and the allowance bound went unchecked
+    for all three.
     """
     import subprocess
 
-    interpreter, reason = _sibling_python()
-    if interpreter is None:
-        return {}, reason
-    wanted = sorted(names)
     try:
         completed = subprocess.run(
-            [str(interpreter), "-c", _SIBLING_DUMP, *wanted],
+            [str(interpreter), "-c", _SIBLING_DUMP, name],
             capture_output=True,
             text=True,
             timeout=300,
             cwd=str(interpreter.parents[2]),
         )
     except (OSError, subprocess.SubprocessError) as error:  # pragma: no cover - environment
-        return {}, f"could not run the sibling's interpreter: {error}"
+        return None, f"could not run the sibling's interpreter: {error}"
     if completed.returncode != 0:
-        return {}, f"the sibling's tools/list dump failed: {completed.stderr.strip()[-400:]}"
+        return None, f"its tools/list dump failed: {completed.stderr.strip()[-400:]}"
     try:
         listed = json.loads(completed.stdout)
     except ValueError as error:  # pragma: no cover - environment
-        return {}, f"the sibling's dump was not JSON: {error}"
+        return None, f"its dump was not JSON: {error}"
+    tools = listed.get(name)
+    if not isinstance(tools, list):  # pragma: no cover - the program above prints one key
+        return None, f"the dump printed {sorted(listed)} rather than {name!r}"
+    return [dict(tool) for tool in tools], ""
+
+
+def _sibling_tool_tokens(
+    names: Iterable[str],
+) -> tuple[dict[str, tuple[int, int]], dict[str, str]]:
+    """Per-bundle `(tools, tokens)`, and per-bundle reasons for the ones that went unmeasured.
+
+    Never raises for a missing or broken sibling: this file's job is to bound *this* repository's
+    prefix, and a checkout somebody has not built is a fact about their laptop rather than a
+    regression. It raises for nothing at all — a failure to run a dump is returned as a reason
+    string, so the caller decides between skipping and failing.
+
+    **The partition is per bundle, and that is what changed.** This used to pass every name to one
+    subprocess and return `{}` on any non-zero exit, so one bundle that would not import took the
+    bound for all of them — and `SERVED_ELSEWHERE_ALLOWANCE`, and therefore `PREFIX_BOUND`, and
+    therefore both compaction defaults `core/config/agent.py` derives from it, went unchecked while
+    the run said only that there was a sibling problem. This file's own header argues the rule it
+    was breaking: a check that quietly shrinks is worse than one that says what it did not look at.
+
+    The cost is one process spawn per bundle where there was one per call. A spawn loads the
+    sibling's closure, so this is the expensive kind — but it is paid only on a checkout that has a
+    built `.venv`, and what it buys is that a bundle's schemas stop being unwatched because a
+    *different* bundle grew a dependency.
+    """
+    interpreter, reason = _sibling_python()
+    wanted = sorted(names)
+    if interpreter is None:
+        return {}, dict.fromkeys(wanted, reason)
 
     from langchain_core.tools import StructuredTool
 
@@ -1707,7 +1737,12 @@ def _sibling_tool_tokens(names: Iterable[str]) -> tuple[dict[str, tuple[int, int
         """A body these tools never get: only their published schema is measured."""
 
     measured: dict[str, tuple[int, int]] = {}
-    for name, tools in listed.items():
+    unmeasured: dict[str, str] = {}
+    for name in wanted:
+        tools, why = _one_sibling_dump(interpreter, name)
+        if tools is None:
+            unmeasured[name] = why
+            continue
         total = 0
         for tool in tools:
             built = StructuredTool(
@@ -1717,8 +1752,8 @@ def _sibling_tool_tokens(names: Iterable[str]) -> tuple[dict[str, tuple[int, int
                 func=_unused,
             )
             total += _count(_tool_schema(built))
-        measured[str(name)] = (len(tools), total)
-    return measured, ""
+        measured[name] = (len(tools), total)
+    return measured, unmeasured
 
 
 def test_the_allowance_for_the_bundles_this_ratchet_cannot_serve_is_still_a_bound() -> None:
@@ -1741,22 +1776,15 @@ def test_the_allowance_for_the_bundles_this_ratchet_cannot_serve_is_still_a_boun
     evidence about instead of implying it checked. That reporter is newer than this sentence,
     which asserted it for a day while `grep` for a sibling in `tests/conftest.py` found nothing.
     """
-    measured, reason = _sibling_tool_tokens(SERVED_ELSEWHERE)
-    if not measured:
-        pytest.skip(
-            f"{SIBLING_SKIP} the {len(SERVED_ELSEWHERE)} bundles served from Chemclaw3-mcp "
-            f"({', '.join(sorted(SERVED_ELSEWHERE))}) were NOT measured: {reason}. "
-            f"SERVED_ELSEWHERE_ALLOWANCE ({SERVED_ELSEWHERE_ALLOWANCE}) and therefore PREFIX_BOUND "
-            f"({PREFIX_BOUND}) are unchecked in this run, and both compaction defaults are derived "
-            "from them."
-        )
-    assert set(measured) == set(SERVED_ELSEWHERE), (
-        f"measured {sorted(measured)} where SERVED_ELSEWHERE names {sorted(SERVED_ELSEWHERE)}"
-    )
+    measured, unmeasured = _sibling_tool_tokens(SERVED_ELSEWHERE)
     total = sum(tokens for _tools, tokens in measured.values())
     breakdown = ", ".join(
         f"{name} {tokens} / {tools}" for name, (tools, tokens) in sorted(measured.items())
     )
+    # **Asserted before the skip, because what was measured is evidence whether or not the rest
+    # was.** A partial total is a *lower* bound on the real one, so a partial run can still fail
+    # this honestly — and a bundle whose schemas grew past the allowance on its own is exactly the
+    # case a sibling problem in a *different* bundle used to hide.
     assert total <= SERVED_ELSEWHERE_ALLOWANCE, (
         f"the bundles this ratchet cannot serve now cost {total} tokens ({breakdown}) against an "
         f"allowance of {SERVED_ELSEWHERE_ALLOWANCE}. That allowance is half of PREFIX_BOUND "
@@ -1764,6 +1792,52 @@ def test_the_allowance_for_the_bundles_this_ratchet_cannot_serve_is_still_a_boun
         "and `agent_context_token_budget` from — so raising it is a change to both defaults and to "
         "what every request may cost, not a bump. Raise all three together, or narrow a schema in "
         "Chemclaw3-mcp."
+    )
+    if unmeasured:
+        pytest.skip(
+            f"{SIBLING_SKIP} {len(unmeasured)} of the {len(SERVED_ELSEWHERE)} bundles served from "
+            "Chemclaw3-mcp were NOT measured — "
+            + "; ".join(f"{name}: {why}" for name, why in sorted(unmeasured.items()))
+            + f". The {len(measured)} that were cost {total} tokens ({breakdown or 'none'}), "
+            f"which is a lower bound. SERVED_ELSEWHERE_ALLOWANCE ({SERVED_ELSEWHERE_ALLOWANCE}) "
+            f"and therefore PREFIX_BOUND ({PREFIX_BOUND}) are unchecked in this run, and both "
+            "compaction defaults are derived from them."
+        )
+
+
+def test_one_unmeasurable_bundle_does_not_take_the_measurement_of_the_others() -> None:
+    """The partition the two tests above rest on, driven rather than read off the helper.
+
+    Observed 2026-09-16: the sibling's `.venv` lacked `molmass`, which its own newest commit had
+    just added to `servers/thermalsafety/pyproject.toml` — a bundle neither test names — and
+    `_sibling_tool_tokens` passed every name to one subprocess whose dict comprehension died on the
+    first `ImportError`. So the allowance bound, `PREFIX_BOUND` and both compaction defaults went
+    unchecked because a *different* bundle grew a dependency, and the run said only that there was
+    a sibling problem.
+
+    A name no module answers to reproduces that cause exactly — an import that raises inside the
+    dump — without depending on which dependency the sibling's tree happens to be missing today.
+    """
+    interpreter, reason = _sibling_python()
+    if interpreter is None:
+        pytest.skip(f"{SIBLING_SKIP} {reason}, so the partition cannot be driven")
+
+    measured, unmeasured = _sibling_tool_tokens([*SERVED_ELSEWHERE, "notabundle"])
+
+    assert set(unmeasured) == {"notabundle"}, (
+        f"a bundle that cannot be imported took {sorted(set(unmeasured) - {'notabundle'})} down "
+        "with it, which is the all-or-nothing behaviour this partition replaced"
+    )
+    assert set(measured) == set(SERVED_ELSEWHERE), (
+        f"measured {sorted(measured)} where SERVED_ELSEWHERE names {sorted(SERVED_ELSEWHERE)}"
+    )
+    assert all(tokens > 0 for _tools, tokens in measured.values()), (
+        "a bundle measured at zero tokens is a dump that returned nothing, which would satisfy "
+        "the allowance bound by measuring nothing at all"
+    )
+    assert "notabundle" in unmeasured["notabundle"], (
+        "the reason must name the bundle it is about, or a partial skip says less than the "
+        "all-or-nothing one it replaced"
     )
 
 
@@ -1783,13 +1857,9 @@ def test_the_whole_directory_the_e2e_lane_mounts_is_bounded_too() -> None:
     """
     root, reason = sibling_root("CHEMCLAW_MCP_REPO", "Chemclaw3-mcp")
     published = sorted(fleet_published_bundles(root)) if root is not None else []
-    measured, dump_reason = _sibling_tool_tokens(published) if published else ({}, reason)
-    if not measured:
-        pytest.skip(
-            f"{SIBLING_SKIP} the fleet's published bundles were NOT measured: {dump_reason}. "
-            f"FLEET_PUBLISHED_ALLOWANCE ({FLEET_PUBLISHED_ALLOWANCE}) is unchecked in this run, "
-            "so nothing here is evidence about what `infra/live/e2e-full-stack/up.sh` binds."
-        )
+    measured, unmeasured = (
+        _sibling_tool_tokens(published) if published else ({}, {"the fleet's bundles": reason})
+    )
     total = sum(tokens for _tools, tokens in measured.values())
     breakdown = ", ".join(
         f"{name} {tokens} / {tools}" for name, (tools, tokens) in sorted(measured.items())
@@ -1800,6 +1870,18 @@ def test_the_whole_directory_the_e2e_lane_mounts_is_bounded_too() -> None:
         "CHEMCLAW_CONNECTORS_DIR at that directory — `infra/live/e2e-full-stack/up.sh` does — pays "
         "this on every model call, on top of what this file's own ceiling bounds."
     )
+    # A partial total compared against the *whole* allowance is the second hazard of the old
+    # all-or-nothing helper, in the direction that reassures: the assertion above still holds
+    # honestly on a lower bound, and this is what stops the run reading it as a verdict.
+    if unmeasured:
+        pytest.skip(
+            f"{SIBLING_SKIP} {len(unmeasured)} of the fleet's published bundles were NOT "
+            "measured — "
+            + "; ".join(f"{name}: {why}" for name, why in sorted(unmeasured.items()))
+            + f". The {len(measured)} that were cost {total} tokens ({breakdown or 'none'}), so "
+            f"FLEET_PUBLISHED_ALLOWANCE ({FLEET_PUBLISHED_ALLOWANCE}) is unchecked in this run and "
+            "nothing here is evidence about what `infra/live/e2e-full-stack/up.sh` binds."
+        )
 
 
 # --------------------------------------------------------------------------------------------

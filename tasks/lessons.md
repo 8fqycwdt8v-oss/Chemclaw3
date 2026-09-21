@@ -1506,3 +1506,50 @@ free number at the end of its section.
     does not close, say so rather than writing the plausible split. The general form: a number I can
     assert and a number I merely computed a difference for should not appear in the same sentence
     without saying which is which.
+
+99. **A queued row is a claim about the code and I have to check it before working it — twice in
+    one wave the row was the thing that was wrong.** `BACKLOG.md` says this in its own header and I
+    nearly implemented both rows as written. *"`tool_result_blobs` ships its retention window at
+    zero, and nobody chose zero"* — the deliberation is recorded in **four** places, including a
+    post-mortem of a 30-day default that was tried and withdrawn on measurement, so implementing
+    the row would have re-litigated a settled decision. And the row's own two anchors had drifted:
+    `memory.py:125` is the last line of a preamble comment, not the field (`:145`), and
+    `retention.py:447` is an ordinary register entry rather than the meta-comment it was cited as.
+    The *useful* finding was one layer under the row and nobody had written it down: `_NOT_PRUNED`
+    states a reason per entry and `_PRUNABLE` has nowhere to put one, so a swept table's argument
+    lived only in a code comment and a seventh table could have joined the sweep in silence.
+    **When a row's premise does not survive contact with the tree, the contribution is the
+    corrected row, and the real work is usually the gap the wrong row was standing in front of.**
+
+100. **A guard that excludes one thing by name excludes exactly that thing, and my change was the
+    second.** `test_every_compiled_graph_in_this_tree_names_its_checkpointer` walks every `.compile`
+    call and skipped `re` with a comment saying "`re.compile` is the other `.compile` in this tree".
+    Adding `regex` for a site-supplied pattern's deadline made that sentence false and reddened a
+    guard with nothing to do with graphs. The fix that matters is not the second name, it is naming
+    the **class** (`_PATTERN_ENGINES`) so a third entry has to be a third engine rather than an
+    exception somebody added to get to green. **Before adding an import that looks like something a
+    guard already has an opinion about, grep the guards for the thing it looks like** — and when I
+    do trip one, ask whether its exclusion is a list or a category, because the two age completely
+    differently.
+
+101. **The measurement I skipped was the one that would have told me the fix.** The timing test that
+    reds under load had already been corrected once *to an in-process control* and still failed at
+    1.289x against 1.3. I could have widened the margin. Measuring instead showed why the margin
+    could not help: the control blocked the loop for 32 ms, which is inside the noise a loaded box
+    adds to **both** arms, and the offloaded arm's worst gap tracks the *concurrency* rather than
+    the total work. Four heavier turns instead of twelve light ones moved the separation from 2.8x
+    to 14-26x with the defect still at 1.00x — a bound with room, from the same test. **When a
+    margin keeps needing to be widened, the thing to measure is the size of the control, not the
+    size of the margin.** And the second half: the sync-path stand-in was replaceable by the driven
+    mutation (`asyncio.to_thread` neutered), which reads identically and is the defect, so the
+    denominator stopped being an analogy for one.
+
+102. **I ran `uv sync` in the middle of a full-suite baseline and then read the result as a
+    baseline.** Two failures came back; one was a shallow clone and one was my own in-flight edit.
+    Lesson 97 says do not start a second run while the first is running, and installing packages
+    under a running suite is the same mistake wearing different clothes — the interpreter the run
+    started with is not the one it finished with. **A baseline is only a baseline if the tree and
+    the environment hold still for it**; anything I want installed goes in before the run starts.
+    The shallow-clone half is worth its own note: `git log origin/main | wc -l` read **80**, and a
+    guard asserting reachability from `origin/main` fails on history nobody fetched. One
+    `git fetch --depth=2000` was the fix, and editing two merged ADRs would have been the damage.

@@ -18,7 +18,14 @@ and `_PRUNABLE`, and `tests/test_retention.py` fails the next migration that add
 saying what bounds it — because a list whose whole discipline is being exhaustive has to be checked
 to be exhaustive, not asserted to be.
 
-- `session_events` — a consumed push-back mailbox row is spent; it exists to wake one stream once.
+- `session_events` — a **consumed** push-back mailbox row is spent; it exists to wake one stream
+  once. The predicate is the argument, not an optimization: age alone was the whole rule at first,
+  so an undelivered `job_completed` older than the window was destroyed — a durable job that
+  outran the retention window, exactly what this channel exists for, lost its completion, the
+  session waited on it forever, and the harness "awaiting job" todo never flipped. It also
+  destroyed the `system-eval-drift` alert rows, which by construction are never consumed, so
+  retention silently deleted the evidence. An unconsumed row is the only record that something
+  finished; its age says nothing about whether it is spent.
 - `session_messages` — conversation history. Bounded by age, per the deployment's policy, **but an
   age cutoff alone cannot dispose of a conversation row** (D-145). A `tool_use` and the
   `tool_result` answering it are one indivisible unit: delete either half and the API rejects the
@@ -47,6 +54,20 @@ to be exhaustive, not asserted to be.
   which is exactly the case `test_retention_is_off_until_a_policy_is_stated` refuses. The cost is
   that the highest-volume table in this set is unbounded until an operator says otherwise, and
   `infra/sql/README.md` says so rather than implying a bound that does not exist.
+
+- `result_publications` — the outbox receipt for a result delivered to a sink this system does not
+  own. **Delivered rows only**, and the predicate is the whole point rather than an optimization: a
+  delivered publication is a receipt for something that now lives in two places, so keeping every
+  one forever would be a third copy of every result this deployment has computed. A `pending` or
+  `failed` row is the only record that something has *not* been published, and sweeping it on a
+  clock would turn a results-store outage into a silent gap — the exact failure the outbox exists
+  to prevent. Dated by `delivered_at`, not `enqueued_at`: a row that waited three weeks for a
+  destination to come back should be kept for its full window after it finally arrived, not
+  deleted on arrival.
+
+  It is in this list rather than only beside its entry because that is where every other swept
+  table's argument is, and an argument only a code comment holds is one
+  `tests/test_retention.py::test_every_prunable_table_is_argued_where_the_others_are` cannot see.
 
 - `checkpoints`, `checkpoint_blobs`, `checkpoint_writes` — the LangGraph turn state (D-2026-08-10
   §3). They belong on this list for the same reason everything above does and were missing for a
@@ -222,15 +243,9 @@ logger = logging.getLogger(__name__)
 # predicate that decides whether a row of that table is disposable at all. Explicit and closed: a
 # new table is a deliberate addition here, never something a wildcard sweeps up.
 #
-# `session_events` carries `consumed_at IS NOT NULL` because the module docstring's justification
-# for pruning it is that "a **consumed** push-back mailbox row is spent". Age alone was the whole
-# predicate, so an undelivered `job_completed` older than the window was destroyed: a durable job
-# that outran the retention window — a long conformer search, exactly what this channel exists
-# for — lost its
-# completion, the session waited on it forever, and the harness "awaiting job" todo never flipped.
-# It also destroyed the `system-audit-integrity` and `system-eval-drift` alerts, which by
-# construction are never consumed, so retention silently deleted the evidence. (The first channel
-# retired with the audit chain's verifier; the argument stands on the second.)
+# `session_events` carries `consumed_at IS NOT NULL` for the reason the module docstring gives —
+# a spent mailbox row, not an old one. (The `system-audit-integrity` half of that story's evidence
+# retired with the audit chain's verifier; the argument stands on `system-eval-drift`.)
 #
 # `tool_result_blobs` carries the bare `TRUE` because there is nothing to qualify: every row is a
 # trace blob and every trace blob past its window may go. Its link rows are not listed separately
@@ -245,14 +260,8 @@ _PRUNABLE: dict[str, tuple[str, str]] = {
     "session_events": ("created_at", "consumed_at IS NOT NULL"),
     "session_messages": ("created_at", "TRUE"),
     "tool_result_blobs": ("created_at", "TRUE"),
-    # **Delivered rows only**, and the predicate is the whole point rather than an optimization. A
-    # delivered publication is a receipt for something that now lives in two places, so keeping
-    # every one forever would be a third copy of every result this deployment has computed. A
-    # `pending` or `failed` row is the only record that something has *not* been published, and
-    # sweeping it on a clock would turn a results-store outage into a silent gap — which is the
-    # exact failure the outbox exists to prevent. Dated by `delivered_at`, not `enqueued_at`: a row
-    # that waited three weeks for a destination to come back should be kept for its full window
-    # after it finally arrived, not deleted on arrival.
+    # Delivered rows only, dated by `delivered_at` — the module docstring carries why, with every
+    # other swept table's argument.
     "result_publications": ("delivered_at", "state = 'delivered'"),
     "checkpoints": ("(checkpoint->>'ts')::timestamptz", "TRUE"),
     # **Last on purpose.** Like `session_messages` and `checkpoints` this is not pruned by the

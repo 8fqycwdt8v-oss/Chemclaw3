@@ -2161,6 +2161,13 @@ def test_every_compiled_graph_in_this_tree_names_its_checkpointer() -> None:
     import ast
     from pathlib import Path
 
+    # The regular-expression engines, whose `.compile` has nothing to do with graphs. Named as a
+    # class rather than accumulated one skip at a time: `regex` joined `re` when
+    # `D-2026-09-21-a-pattern-that-cannot-be-timed-out-is-run-by-an-engine-that-can` put a
+    # site-supplied pattern under a deadline, and a third entry here should be a third *engine*,
+    # not an exception somebody added to make this green.
+    _PATTERN_ENGINES = {"re", "regex"}
+
     root = Path(__file__).resolve().parent.parent / "src"
     bare: list[str] = []
     for path in root.rglob("*.py"):
@@ -2170,8 +2177,7 @@ def test_every_compiled_graph_in_this_tree_names_its_checkpointer() -> None:
                 continue
             if node.func.attr != "compile":
                 continue
-            # `re.compile` is the other `.compile` in this tree and has nothing to do with graphs.
-            if isinstance(node.func.value, ast.Name) and node.func.value.id == "re":
+            if isinstance(node.func.value, ast.Name) and node.func.value.id in _PATTERN_ENGINES:
                 continue
             if any(keyword.arg == "checkpointer" for keyword in node.keywords):
                 continue

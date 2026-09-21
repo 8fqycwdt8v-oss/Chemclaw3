@@ -219,6 +219,31 @@ def test_the_model_is_told_which_of_three_things_happened() -> None:
     assert "cannot reopen" in decided
 
 
+def test_a_re_proposed_superseded_body_is_reported_as_proposed_and_not_as_waiting() -> None:
+    """The falsehood this tool told, and the one-word difference it turned on.
+
+    `proposed_now` was `outcome.content_hash != standing`, where `standing` came from a `store.one`
+    keyed *on that same hash* — so it could only ever tell "absent" from "present", and a body a
+    newer version had superseded read as present and therefore as a repeat. The model was told the
+    proposal was "already waiting for this chemist to decide" about a document listed nowhere the
+    chemist looks. `propose` now revives it, so the first answer is the true one; the test is that
+    the tool says so rather than that the store did the work.
+    """
+    _call(name="cold-quench", body=_BODY, rationale="twice now")
+    _call(name="cold-quench", body=_BODY.replace("Quench cold.", "Quench warm."), rationale="or")
+
+    revived = _call(name="cold-quench", body=_BODY, rationale="twice now")
+
+    assert "proposed" in revived and "waiting" in revived, (
+        "a revived proposal read as a repeat, so the model is told to stop mentioning a document "
+        "the chemist is now being asked to decide"
+    )
+    assert "already waiting" not in revived, (
+        "the model was told this exact text was already waiting, which is the falsehood the row is "
+        "about: nothing was waiting, because a superseded row is listed nowhere"
+    )
+
+
 @pytest.mark.parametrize(
     ("kwargs", "because"),
     [

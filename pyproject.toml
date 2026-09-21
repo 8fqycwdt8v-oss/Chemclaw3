@@ -212,6 +212,19 @@ dependencies = [
     # `TIKTOKEN_CACHE_DIR`); the package must never fetch one at request time, which is what
     # `core/netguard.py` would refuse and what the no-egress posture forbids.
     "tiktoken>=0.13",
+    # Declared for the same reason as its neighbour above and resolved the same way — it is already
+    # in this repository's closure as a requirement of `tiktoken`, so the cost is this line
+    # (`D-2026-09-16-a-library-already-in-the-closure-is-a-declaration-not-a-dependency`), and the
+    # failure mode a transitive edge has is the one that argument names: a bump over there that
+    # drops it takes a *bound* with it rather than a feature.
+    #
+    # `ingest/eln/warehouse/expr.py` is its only importer and runs one thing through it: a
+    # site-supplied pattern from a `datasource.yaml`, against free-text warehouse cells, under
+    # `timeout=`. `re` has no timeout, and a catastrophic pattern there pinned an ingest worker
+    # until the activity's `start_to_close` and then did it again on the retry
+    # (`D-2026-09-21-a-pattern-that-cannot-be-timed-out-is-run-by-an-engine-that-can`). Everywhere
+    # else in this tree the pattern is first-party and `re` stays the engine.
+    "regex>=2026.7.19",
     "temporalio[pydantic]>=1.30.0",
     "uvicorn>=0.51.0",
 ]
@@ -231,6 +244,11 @@ dev = [
     "pytest-timeout>=2.3",
     "pre-commit>=3.8",
     "types-pyyaml>=6.0.12.20260518",
+    # Stubs rather than a `[[tool.mypy.overrides]]` entry, because the one thing this repository
+    # asks of `regex` is a keyword argument — `search(..., timeout=)`, the bound that
+    # `ingest/eln/warehouse/expr.py` exists to hold. Silencing the import would make `mypy --strict`
+    # accept a call to an engine that had dropped it.
+    "types-regex>=2026.7.19",
     "scipy-stubs>=1.17.1.5",
     "hypothesis>=6.100",
     "mutmut>=3.0",

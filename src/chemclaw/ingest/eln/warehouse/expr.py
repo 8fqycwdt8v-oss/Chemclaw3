@@ -29,8 +29,13 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from functools import lru_cache
 from typing import Any
 
+import regex
+
+from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.ingest.eln.adapter import ElnMappingError, parse_iso_utc
 
 # One path segment: a column or block name, optionally indexed. `$` is legal in a warehouse
@@ -54,6 +59,22 @@ class TransformError(ElnMappingError):
 
 class PathSyntaxError(ElnMappingError):
     """A binding declared a path that is not a path. Raised at validation time, not per row."""
+
+
+class PatternBudgetError(ChemclawError):
+    """A `regex` transform's pattern spent its whole budget on one cell.
+
+    **Deliberately not an `ElnMappingError`, which is the whole point of the class existing.** Its
+    two neighbours above are per-row faults and are caught per entry, so the sync rejects the row
+    and goes on — correct for a NULL timestamp and exactly wrong here, because the cost is a
+    property of the *pattern* rather than of the row. Skipping and continuing would re-run the same
+    unfinishable match against every remaining row of every remaining page, turning one stall into
+    `rows x budget` of them, each one counted as a data refusal. So this escapes the per-entry
+    handler and fails the ingest naming the pattern, the field and the ceiling.
+
+    Listed in `durable/publish._BAD_DATA_TYPES`, so the attempt is not retried: the pattern is the
+    same string in the manifest on the next attempt and the page is the same page.
+    """
 
 
 def validate_path(path: str) -> None:
@@ -227,17 +248,52 @@ def _iso_datetime(value: Any, options: Mapping[str, Any]) -> Any:
         raise TransformError(f"'iso_datetime' cannot read {value!r} as a timestamp") from exc
 
 
+@lru_cache(maxsize=256)
+def _compiled(pattern: str) -> regex.Pattern[str]:
+    """One site-supplied pattern, compiled once by the engine that will run it.
+
+    Cached because the binding hands its options down as the mapping YAML parsed, so the pattern
+    arrives as a string on every cell of every row and there is nowhere in that plumbing to keep a
+    compiled object. Measured on this box: `regex.search(pattern_string, ...)` is 4.6 us per call
+    against `re`'s 0.38 us, and going through this cache is **1.2 us** — so the cache is most of
+    what the engine swap costs. `maxsize` is generous against the handful of patterns a manifest
+    declares; the keys are manifest text, so the cache cannot be grown by a row.
+    """
+    return regex.compile(pattern)
+
+
 def _regex(value: Any, options: Mapping[str, Any]) -> Any:
-    """Pull one group out of a free-text column. No match is silence, not an error."""
+    """Pull one group out of a free-text column. No match is silence, not an error.
+
+    **Run under a wall clock, because this is the one transform whose cost is not a function of
+    anything this repository chose.** The pattern comes from a site's `datasource.yaml` and the
+    subject is a free-text warehouse column, so a `(a+)+$`-shaped pattern against a long cell is
+    unbounded work — and `re` has no timeout at any layer, which made the only real bound the
+    activity's `start_to_close`, after which the retry ran the identical pattern over the identical
+    page. `regex` checks a deadline inside its own matching loop, which is why it is the engine
+    here and `re` is still the engine everywhere else in this module
+    (`D-2026-09-21-a-pattern-that-cannot-be-timed-out-is-run-by-an-engine-that-can`).
+    """
     if value is None:
         return None
-    match = re.search(str(options["pattern"]), as_text(value))
+    text = as_text(value)
+    pattern = str(options["pattern"])
+    try:
+        match = _compiled(pattern).search(text, timeout=settings.eln_regex_timeout_seconds)
+    except TimeoutError as exc:
+        raise PatternBudgetError(
+            f"the 'regex' transform {pattern!r} did not finish within "
+            f"{settings.eln_regex_timeout_seconds}s on one {len(text)}-character cell, so it "
+            "cannot be run over this source at all. Rewrite the pattern — a nested unbounded "
+            "quantifier such as `(a+)+` is the usual cause — or raise "
+            "CHEMCLAW_ELN_REGEX_TIMEOUT_SECONDS if the pattern is genuinely this expensive"
+        ) from exc
     if match is None:
         return None
     group = int(options.get("group", 0))
     try:
         return match.group(group)
-    except (IndexError, re.error) as exc:
+    except (IndexError, regex.error) as exc:
         raise TransformError(f"'regex' has no group {group} in {options['pattern']!r}") from exc
 
 
@@ -350,12 +406,17 @@ def _check_pattern(options: Mapping[str, Any]) -> None:
     """Compile a `regex` transform's pattern at load, and check the group it asks for exists.
 
     Both failures are otherwise invisible until a row reaches them: an unbalanced bracket raises
-    `re.error` on the first row of the first sync, and a `group:` the pattern does not have raises
-    on the first row that *matches* — which may be days later and on a subset of the corpus.
+    on the first row of the first sync, and a `group:` the pattern does not have raises on the
+    first row that *matches* — which may be days later and on a subset of the corpus.
+
+    **Compiled by `_compiled`, so the engine that accepts a pattern here is the engine that runs
+    it.** Two compilers would mean a pattern this gate accepts failing on row 1 anyway, which is
+    the failure this function exists to have ended. It also warms the cache: a manifest's patterns
+    are compiled at load rather than on the first row.
     """
     try:
-        compiled = re.compile(str(options["pattern"]))
-    except re.error as exc:
+        compiled = _compiled(str(options["pattern"]))
+    except regex.error as exc:
         raise PathSyntaxError(f"transform 'regex' has an invalid pattern: {exc}") from exc
     group = int(options.get("group", 0))
     if group > compiled.groups:

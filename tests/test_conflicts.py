@@ -507,32 +507,105 @@ def test_a_run_note_and_a_retired_note_pair_when_their_windows_intersect() -> No
     assert find_conflicts([later, retired]) == []
 
 
-def test_a_disjoint_dated_corpus_scans_in_linear_time() -> None:
+#: How many times the sweep read the two fields it decides overlap on, across one `find_conflicts`.
+#:
+#: Module-level because `_CountingNote` cannot hold it: `Note` is a pydantic model and a class
+#: attribute on a subclass is a `ModelPrivateAttr`, not a counter.
+_FIELD_READS = [0]
+
+
+class _CountingNote(Note):
+    """A note that counts reads of `valid_from` and `valid_to`, which is the sweep's own work.
+
+    Counting rather than timing, for the reason `tests/test_compaction.py::_CountingEstimator`
+    gives about the same class of claim: a ratio of two wall clocks on a shared runner has no safe
+    place to sit, and a count does not move. These two fields are the right quantity because they
+    are what `_conditional_disagreements` reads per active note per event — the exact loop whose
+    complexity is the subject — so the count is the work rather than a proxy for it.
+    """
+
+    def __getattribute__(self, name: str) -> object:
+        if name in ("valid_to", "valid_from"):
+            _FIELD_READS[0] += 1
+        return object.__getattribute__(self, name)
+
+
+def _sweep_work(size: int, *, disjoint: bool) -> int:
+    """The field reads one `find_conflicts` costs over `size` dated notes."""
+    base = date(2020, 1, 1)
+    notes: list[Note] = []
+    for i in range(size):
+        start = base + timedelta(days=i)
+        notes.append(
+            _CountingNote(
+                id=f"d{i}",
+                type="reaction",
+                compound_smiles="CCO",
+                confidence=(i % 10) / 10,
+                valid_from=start,
+                # Disjoint: a one-day window per note, the structure `knowledge/README.md`
+                # advertises. Otherwise: every window spans every later one, so every pair is
+                # genuinely examined.
+                valid_to=start if disjoint else base + timedelta(days=size + i),
+            )
+        )
+    _FIELD_READS[0] = 0
+    find_conflicts(notes)
+    return _FIELD_READS[0]
+
+
+def test_a_disjoint_dated_corpus_does_a_linear_amount_of_work() -> None:
     """The regression the review measured: closed non-overlapping windows restored O(N²).
 
     The old walk's `_overlaps` rejection consumed a step without ending the walk, so a
     one-note-per-day corpus — the exact structure `knowledge/README.md` advertises — walked its
-    whole group per note: 714 ms at 2,000 notes, 3.1 s at 4,000, clean 4× per doubling, returning
-    zero conflicts for the work. The sweep never examines a disjoint pair, so this corpus now
-    scans in ~10 ms. The ceiling is two orders of magnitude above the fixed cost and one below
-    the quadratic one, so it discriminates without being flaky on a slow runner.
-    """
-    import time as _time
+    whole group per note: 714 ms at 2,000 notes, 3.1 s at 4,000, clean 4x per doubling, returning
+    zero conflicts for the work. The sweep never examines a disjoint pair.
 
-    base = date(2020, 1, 1)
-    notes = [
-        _note(
-            f"d{i}",
-            compound_smiles="CCO",
-            confidence=(i % 10) / 10,
-            valid_from=base + timedelta(days=i),
-            valid_to=base + timedelta(days=i),
-        )
-        for i in range(4000)
-    ]
-    start = _time.perf_counter()
-    assert find_conflicts(notes) == []
-    assert _time.perf_counter() - start < 1.5
+    **A count, not a wall clock, and that is a correction.** This asserted `perf_counter() < 1.5`
+    over one corpus size, and on 2026-09-20 it took **1.84 s** inside a 46-minute run competing
+    with three subagents and reddened `check` on a pull request containing zero files under
+    `src/` — a gate reddening for machine load, which teaches everybody to re-run. The property
+    was never a duration anyway: its own docstring states it as *"went on matching every remaining
+    record"*, which is a claim about work.
+
+    Measured: field reads are **9,998 / 19,998 / 39,998 / 79,998** at 1,000 / 2,000 / 4,000 /
+    8,000 notes — exactly 2.00x per doubling, byte-identical run to run. Eight times the corpus is
+    therefore 8x the work, and the quadratic arm this exists to catch is 64x. The bar sits at 16,
+    two-and-a-half orders clear of both ends and immune to whatever else the box is doing.
+    """
+    small = _sweep_work(1_000, disjoint=True)
+    large = _sweep_work(8_000, disjoint=True)
+    ratio = large / small
+
+    assert find_conflicts([]) == [], "the sweep should find nothing in nothing"
+    assert ratio < 16, (
+        f"eight times the corpus cost {large:,} field reads against {small:,} — {ratio:.1f}x, "
+        "where linear is 8 and quadratic is 64. The disjoint sweep is examining pairs whose "
+        "windows do not overlap again"
+    )
+
+
+def test_the_work_counter_can_see_the_quadratic_arm_it_is_bounding() -> None:
+    """The control, because a bound satisfied by measuring nothing is not a bound.
+
+    `_FIELD_READS` returning a small number for every corpus would pass the test above for the
+    wrong reason — the shape `D-2026-09-18-a-mutation-watched-failing-is-half-a-guard` is about.
+    So the same counter runs over a corpus where **every** window overlaps every later one, which
+    is the work the disjoint case is claimed not to do.
+
+    Measured, overlapping against disjoint at the same size: 81,200 / 1,998 at 200 notes,
+    322,400 / 3,998 at 400, 1,284,800 / 7,998 at 800 — 4.00x per doubling against 2.00x, which is
+    the difference the assertion above rests on being able to see.
+    """
+    disjoint = _sweep_work(400, disjoint=True)
+    overlapping = _sweep_work(400, disjoint=False)
+
+    assert overlapping > disjoint * 8, (
+        f"a corpus where every window overlaps cost {overlapping:,} field reads against the "
+        f"disjoint corpus's {disjoint:,}, so this counter cannot tell the two shapes apart and "
+        "the linearity assertion beside it is vacuous"
+    )
 
 
 def test_two_spellings_of_one_molecule_land_in_one_conflict_group() -> None:
