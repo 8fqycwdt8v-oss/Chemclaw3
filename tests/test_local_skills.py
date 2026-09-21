@@ -391,7 +391,22 @@ def test_a_reviewed_skill_wins_a_name_a_personal_one_also_claims(store: InMemory
     # And the outcome itself, because the order is only the mechanism. A personal skill claiming a
     # shipped name is saved past the route that would have refused it — which is the case with no
     # route to refuse at, a name that entered `skills/` after somebody saved theirs.
-    contested = sorted(shipped_skill_names())[0]
+    #
+    # **The contested name is taken from what the shared tier actually *serves*, not from
+    # `shipped_skill_names()`, and that is the difference between this test and a weaker one.**
+    # `shipped_skill_names` is the *discovered* set; the listing is that set after four narrowings.
+    # A name that is discovered and not listed has no reviewed copy left for the personal one to
+    # lose to, so asserting on it measures the narrowing rather than the precedence this test is
+    # named for. `sorted(shipped_skill_names())[0]` was such a name from the day
+    # `SkillManifest.requires` landed — `analytical-readiness` needs `system_suitability_report`,
+    # which a default deployment does not bind — and the assertion below failed for a reason that
+    # was nothing to do with source order. Nothing is saved yet, so every entry here is shared.
+    listed = middleware.before_agent({}, None, None)["skills_metadata"]
+    contested = sorted(skill["name"] for skill in listed)[0]
+    assert contested in shipped_skill_names(), (
+        f"{contested} is listed but is not a shipped skill, so the collision below would be "
+        "between two personal documents and would assert nothing"
+    )
     asyncio.run(
         save_local_skill(store, "alice-oid", contested, _BODY.replace("my-workup", contested))
     )

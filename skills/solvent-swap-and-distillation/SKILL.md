@@ -17,6 +17,9 @@ tools:
   - green_metrics
   - gather_evidence
   - ask_clarifying_question
+requires:
+  - solvent_swap_candidates
+  - shortcut_distillation
 ---
 
 # Swapping a solvent

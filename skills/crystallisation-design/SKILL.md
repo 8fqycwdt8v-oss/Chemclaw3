@@ -17,6 +17,8 @@ tools:
   - gather_evidence
   - recall_observations
   - ask_clarifying_question
+requires:
+  - crystallisation_yield
 ---
 
 # Designing a crystallisation

@@ -149,19 +149,42 @@ class ToolScopedSkills(_Narrowing):
             repository still ships should not stop being checked when a bundle is down.
     """
 
-    def __init__(self, declared: Mapping[str, frozenset[str]], available: Iterable[str]) -> None:
-        """Pre-normalize the declaration map and the available tool set."""
+    def __init__(
+        self,
+        declared: Mapping[str, frozenset[str]],
+        available: Iterable[str],
+        required: Mapping[str, frozenset[str]] | None = None,
+    ) -> None:
+        """Pre-normalize the two declaration maps and the available tool set."""
         self._declared = dict(declared)
+        self._required = dict(required or {})
         self._available: frozenset[str] = frozenset(available)
 
     def _narrows(self) -> bool:
         """Nothing declares a dependency ⇒ nothing to scope, whatever the tool surface is."""
-        return any(self._declared.values())
+        return any(self._declared.values()) or any(self._required.values())
 
     def _permits(self, name: str) -> bool:
-        """A skill survives if it declares no tools, or at least one of them is reachable."""
-        required = self._declared.get(name)
-        return not required or bool(required & self._available)
+        """A skill survives if its `requires:` are all reachable and any declared tool is.
+
+        Two rules, because one of them alone gets a measured case wrong.
+
+        The **declared** rule — survive if *any* declared tool is reachable — is the conservative
+        one this class shipped with, and the docstring above carries the measurement for why it is
+        not "all": a skill routinely names one tool outside a narrow agent's surface while staying
+        entirely useful for the rest.
+
+        The **required** rule is the case that misses. A skill whose *central* tools left with an
+        opt-in bundle keeps its peripheral ones, so it passes the declared rule and is listed in
+        every deployment's prefix as judgment about a path the turn cannot take. `requires:` names
+        that subset, and one absent entry is enough — because the point of declaring it is that
+        without it the skill is misleading rather than narrower.
+        """
+        needed = self._required.get(name)
+        if needed and not needed <= self._available:
+            return False
+        declared = self._declared.get(name)
+        return not declared or bool(declared & self._available)
 
 
 class ProfileScopedSkills(_Narrowing):
@@ -247,6 +270,7 @@ def skill_permits(
     declared: Mapping[str, frozenset[str]],
     available: Iterable[str],
     gates: Mapping[str, list[str]] | None,
+    required: Mapping[str, frozenset[str]] | None = None,
     names: Iterable[str] | None = None,
 ) -> Callable[[str], bool]:
     """The four narrowings as one predicate over a skill name — the engine-neutral form.
@@ -268,6 +292,9 @@ def skill_permits(
     Args:
         enabled: The deployment's enable-list; empty means every discovered skill.
         declared: `{skill name: declared tool names}` from `skill_manifest.declared_tools`.
+        required: `{skill name: required tool names}` from `skill_manifest.required_tools` —
+            the subset without which a skill is misleading rather than narrower. Optional and
+            almost always empty; `SkillManifest.requires` says why it is a second question.
         available: The tool names this agent advertises, both halves of the surface.
         gates: `{skill name: allowed roles}`; a skill absent from the map is ungated.
         names: The profile's `skill_names`; `None` narrows nothing, and an empty set narrows
@@ -282,7 +309,7 @@ def skill_permits(
     narrowings = (
         EnabledSkills(enabled),
         ProfileScopedSkills(names),
-        ToolScopedSkills(declared, available),
+        ToolScopedSkills(declared, available, required),
         RoleScopedSkills(gates),
     )
     return lambda name: all(narrowing.permits(name) for narrowing in narrowings)

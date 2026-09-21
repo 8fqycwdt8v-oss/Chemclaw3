@@ -18,6 +18,10 @@ Beyond that shape check, this gate closes the loop between a skill's *judgment* 
   skill would be hidden from an agent that can do exactly what it teaches. The body is read with
   `chemclaw.cli.validate_prose_contract.taught_tool_names`, which lives beside the prose gate's own
   extractor and shares its patterns, so the two cannot disagree about what a skill says.
+- **Required ⇒ declared.** Every name in `requires:` must also appear in `tools:`. `requires` is by
+  definition a subset of `tools`, and nothing else checks it: an entry outside the list is held by
+  neither direction above, while `ToolScopedSkills` still *hides* the skill wherever that name is
+  absent from the agent's surface.
 
 Two configured maps are checked the same way, because both name skills and neither fails loudly at
 run time:
@@ -111,6 +115,7 @@ def _problems_for(skill_file: Path) -> list[str]:
             f"does not match directory {directory_name!r}"
         )
     problems.extend(_dependency_problems(skill_file, manifest))
+    problems.extend(_requires_problems(skill_file, manifest))
     problems.extend(_undeclared_problems(skill_file, manifest, post.content))
     return problems
 
@@ -138,6 +143,30 @@ def _dependency_problems(skill_file: Path, manifest: SkillManifest) -> list[str]
     return [
         f"{skill_file}: declares unknown tool {tool!r}; available tools: {sorted(known_tools)}"
         for tool in sorted(set(manifest.tools) - known_tools)
+    ]
+
+
+def _requires_problems(skill_file: Path, manifest: SkillManifest) -> list[str]:
+    """Check that every `requires:` entry is also declared in `tools:` — the subset rule.
+
+    `requires` is defined as *the subset of `tools` the skill is centrally about*, and the subset is
+    load-bearing rather than tidy. The two keys are checked by different things: a `tools` entry is
+    held against the live surface by `_dependency_problems` above, so it cannot name a tool that no
+    longer exists, while a `requires` entry appearing nowhere in `tools` would be held by nothing —
+    and the run-time rule it feeds (`needed <= available` in `ToolScopedSkills._permits`) *hides*
+    the skill, so a typo there removes a skill from every deployment and reports it nowhere.
+
+    A subset check rather than a second existence check on purpose: `tools` already carries the
+    existence half, so re-deriving it here would turn one renamed tool into two CI failures — and a
+    `requires` entry outside `tools` is a defect even when the tool does exist, because the two
+    lists would then describe different capabilities under one skill's name.
+    """
+    undeclared = sorted(set(manifest.requires) - set(manifest.tools))
+    return [
+        f"{skill_file}: requires {tool!r} but does not declare it in `tools:` — `requires` is a "
+        "subset of `tools`, and an entry outside it is checked by nothing while still hiding the "
+        "skill wherever that tool is absent"
+        for tool in undeclared
     ]
 
 

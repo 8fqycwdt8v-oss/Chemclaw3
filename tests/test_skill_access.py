@@ -127,11 +127,14 @@ def _bundled_skill_names() -> set[str]:
 
 
 def _scoped_names(
-    declared: dict[str, frozenset[str]], available: set[str], enabled: list[str] | None = None
+    declared: dict[str, frozenset[str]],
+    available: set[str],
+    enabled: list[str] | None = None,
+    required: dict[str, frozenset[str]] | None = None,
 ) -> set[str]:
     """Names surviving capability scoping (optionally under an enable-list, to test composition)."""
     enablement = EnabledSkills(enabled)
-    scoping = ToolScopedSkills(declared, available)
+    scoping = ToolScopedSkills(declared, available, required)
     return {name for name in _discovered() if enablement.permits(name) and scoping.permits(name)}
 
 
@@ -164,6 +167,67 @@ def test_a_skill_with_no_reachable_tool_is_dropped() -> None:
     assert "deep-research" not in scoped
     # Only the orphaned skill goes; the undeclared ones are untouched.
     assert scoped == _skill_names({}) - {"deep-research"}
+
+
+def test_an_absent_required_tool_hides_a_skill_the_declared_rule_would_keep() -> None:
+    """The `requires:` rule, on exactly the input the `tools:` rule keeps — so it is non-vacuous.
+
+    Deliberately the *same* declaration and the *same* surface as
+    `test_one_reachable_tool_keeps_the_skill`: one of two declared tools is reachable, so the
+    all-absent rule leaves the skill visible, and that test pins that reading against drift. This
+    one adds `requires` naming the absent tool and asserts the opposite outcome from the same two
+    arguments, which is the only way to show the second rule decides anything.
+
+    Why the second rule exists is the measured case behind it: a skill whose *central* tools ship
+    with an opt-in bundle keeps peripheral ones, survives the all-absent test, and is listed in
+    every deployment's prefix as judgment about a path the turn cannot take.
+    """
+    declared = {"deep-research": frozenset({"gather_evidence", "sample_conformers"})}
+    available = {"gather_evidence"}
+
+    assert "deep-research" in _scoped_names(declared, available)
+    assert "deep-research" not in _scoped_names(
+        declared, available, required={"deep-research": frozenset({"sample_conformers"})}
+    )
+
+
+def test_every_required_tool_present_keeps_the_skill() -> None:
+    """`requires` is all-of, not any-of, and the satisfied case must still be visible.
+
+    The rule is `needed <= available`, so a skill naming two required tools is hidden until both
+    are there — the opposite quantifier from `tools:`, and the reason the two keys cannot be one.
+    Asserted in both directions off one declaration so the conjunction is pinned rather than
+    implied by a single passing case.
+    """
+    declared = {"deep-research": frozenset({"gather_evidence", "sample_conformers", "predict_pka"})}
+    required = {"deep-research": frozenset({"gather_evidence", "sample_conformers"})}
+
+    both = _scoped_names(
+        declared, available={"gather_evidence", "sample_conformers"}, required=required
+    )
+    one = _scoped_names(declared, available={"gather_evidence", "predict_pka"}, required=required)
+
+    assert "deep-research" in both
+    assert "deep-research" not in one
+
+
+def test_a_corpus_that_only_requires_still_narrows() -> None:
+    """The short-circuit reads both maps, because a `requires`-only corpus is still a narrowing.
+
+    `ToolScopedSkills` skips the whole filter when nothing declares a dependency, and that guard
+    used to ask about `declared` alone. A corpus reaching this class through `required` with every
+    `declared` entry empty would then be waved through — visible everywhere, with the rule that
+    should have hidden it never consulted. The validator makes `requires` a subset of `tools`, so
+    the shipped corpus cannot take this shape; the guard is what keeps that a convention of the
+    corpus rather than an assumption this class depends on.
+    """
+    scoped = _scoped_names(
+        {"deep-research": frozenset()},
+        available={"predict_pka"},
+        required={"deep-research": frozenset({"sample_conformers"})},
+    )
+
+    assert "deep-research" not in scoped
 
 
 def test_capability_scoping_is_a_no_op_when_nothing_declares_a_dependency() -> None:

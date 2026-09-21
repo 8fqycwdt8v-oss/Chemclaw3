@@ -93,9 +93,42 @@ class SkillManifest(BaseModel):
     # tool disappearing, not the bundle being renamed, and a coarser second field would be a second
     # way to say almost the same thing (it would also pass while the tool it teaches was gone).
     tools: list[str] = Field(default_factory=list)
+    # The subset of `tools` without which this skill's judgment is **misleading rather than merely
+    # narrower** — the tools it is centrally about. Empty for almost every skill, and that is the
+    # point: `ToolScopedSkills` hides a skill only when *every* declared tool is absent, and that
+    # rule was measured (hiding on *any* absent tool takes 20 of 28 skills off the shipped
+    # `property-lookup` profile, because a skill routinely names one tool outside a narrow agent's
+    # surface while staying useful for the rest).
+    #
+    # **This is the case that rule does not catch.** Three process-development skills lose their
+    # *central* tools when their bundle ships off while keeping peripheral ones, so they survive the
+    # "all absent" test and are listed in every deployment's prefix as judgment about a path the
+    # turn cannot take — measured at 242 tokens on every model call, for a capability most
+    # deployments do not enable. `solvent-swap-and-distillation` is the clearest: six of its twelve
+    # tools are the `props` chain plus `shortcut_distillation`, so a default deployment can execute
+    # one step of its five-step answer.
+    #
+    # Opt-in, so nothing changes for a skill that declares none, and `make skill-validate` refuses a
+    # `requires` entry that is not also in `tools` — a required tool the skill does not declare
+    # would be a dependency no validator checks.
+    requires: list[str] = Field(default_factory=list)
     # Free-form grouping (e.g. "retrieval", "optimization") — human-facing only; nothing dispatches
     # on a tag today, so it stays an unconstrained list rather than an invented enum.
     tags: list[str] = Field(default_factory=list)
+
+
+def required_tools(skills_dirs: Iterable[str]) -> dict[str, frozenset[str]]:
+    """Each discovered skill's *required* tools, by skill name — the `requires:` half.
+
+    Off the same cached walk as `declared_tools` below, so "which skills exist" has one answer:
+    two separate globs could disagree about a skill that appeared or vanished between them, and
+    `ToolScopedSkills` reads both maps for the same skill in the same call.
+
+    Almost always empty. `SkillManifest.requires` says what the key is for and why it is separate
+    from `tools:` — the short version is that "every declared tool is absent" is the right rule for
+    a narrow *profile* and misses a skill whose *central* tools went with an opt-in bundle.
+    """
+    return _declared_tools(tuple(skills_dirs))[1]
 
 
 def declared_tools(skills_dirs: Iterable[str]) -> dict[str, frozenset[str]]:
@@ -147,11 +180,13 @@ def declared_tools(skills_dirs: Iterable[str]) -> dict[str, frozenset[str]]:
         two directories keeps the first, matching the precedence `langgraph_agent._labelled` gives
         the routed trees.
     """
-    return _declared_tools(tuple(skills_dirs))
+    return _declared_tools(tuple(skills_dirs))[0]
 
 
 @cache
-def _declared_tools(skills_dirs: tuple[str, ...]) -> dict[str, frozenset[str]]:
+def _declared_tools(
+    skills_dirs: tuple[str, ...],
+) -> tuple[dict[str, frozenset[str]], dict[str, frozenset[str]]]:
     """`declared_tools` over a hashable key — the cached half; see it for the why.
 
     Split rather than decorating the public function because callers pass a list (and a `dict_keys`,
@@ -162,11 +197,15 @@ def _declared_tools(skills_dirs: tuple[str, ...]) -> dict[str, frozenset[str]]:
     one `connectors.registry.discovered` offers for the same reason.
     """
     declared: dict[str, frozenset[str]] = {}
+    required: dict[str, frozenset[str]] = {}
     for directory in skills_dirs:
         for path in sorted(Path(directory).glob(f"*/{SKILL_FILENAME}")):
-            name, tools = _declared_pair(path)
-            declared.setdefault(name, tools)
-    return declared
+            name, tools, requires = _declared_pair(path)
+            if name in declared:
+                continue
+            declared[name] = tools
+            required[name] = requires
+    return declared, required
 
 
 #: The `tools:` declaration given to a skill whose frontmatter could not be read.
@@ -177,8 +216,13 @@ def _declared_tools(skills_dirs: tuple[str, ...]) -> dict[str, frozenset[str]]:
 UNREADABLE_DECLARATION: frozenset[str] = frozenset({"\x00unreadable-skill-manifest"})
 
 
-def _declared_pair(path: Path) -> tuple[str, frozenset[str]]:
-    """One skill's `(name, declared tools)` — always a pair, scoped to nothing when unreadable.
+def _declared_pair(path: Path) -> tuple[str, frozenset[str], frozenset[str]]:
+    """One skill's `(name, declared tools, required tools)`, scoped to nothing when unreadable.
+
+    **The third element comes off this same read rather than a second walk**, so "which skills
+    exist" has one answer: a `requires:` map built by re-globbing could disagree with the `tools:`
+    map about a skill that appeared or vanished between them, and the two are read together on
+    every path that reads either.
 
     **Total, and it used to be able to return `None`.** The summary line here said "or None (logged)
     if the file cannot be read at all" and the caller guarded on it, long after the `except` arm was
@@ -227,7 +271,14 @@ def _declared_pair(path: Path) -> tuple[str, frozenset[str]]:
         # which reads as "declares nothing" and leaves the skill visible.
         if not name.strip():
             raise ValueError("a skill's `name` is empty")
-        return name.strip(), frozenset(str(tool) for tool in tools)
+        requires = metadata.get("requires") or []
+        if not isinstance(requires, list):
+            raise TypeError(f"requires must be a list, got {type(requires)}")
+        return (
+            name.strip(),
+            frozenset(str(tool) for tool in tools),
+            frozenset(str(tool) for tool in requires),
+        )
     except Exception as exc:
         # WARNING rather than the helper's ERROR default: `make skill-validate` is a CI gate over
         # exactly this, so an unreadable manifest is caught before it ships and a live occurrence
@@ -256,4 +307,4 @@ def _declared_pair(path: Path) -> tuple[str, frozenset[str]]:
         # (`cli/validate_skills.py`), so in any tree CI has walked this is the same string the
         # readable path would have produced — and in a tree it has not walked, a skill scoped to
         # nothing is the safe answer rather than a guess.
-        return path.parent.name, UNREADABLE_DECLARATION
+        return path.parent.name, UNREADABLE_DECLARATION, UNREADABLE_DECLARATION
