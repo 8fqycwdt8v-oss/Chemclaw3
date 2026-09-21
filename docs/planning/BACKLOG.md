@@ -65,6 +65,44 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
+- [ ] **A plate's results never reach the design that prescribed them, so the round trip
+  `hte-campaign-design` promises in its own closing section is handwork** — [L]. A design reaches
+  `DesignStatus.executed` and nothing attaches what came back. Results enter only through
+  `ingest/eln` as `reaction_records`, with no link to the `design_id` that asked for them, so the
+  plate -> observations -> `suggest_next_experiment` path a chemist is told to expect is somebody
+  retyping a table. It also starves two things that already exist: `campaign_progress` has to be
+  fed observations by hand, and the `DEFERRED.md` row on mining the agent-to-human protocol diff
+  ("the highest-quality supervision this system can collect about its own suggestions, and it is
+  currently written and never read") has no corpus because nothing joins a stored design to its
+  outcome. Wants its own ADR before any code: the open question is whether a result hangs off the
+  design, off `reaction_records` with a `design_id` column, or off a third table, and that decides
+  whether a plate run outside this system can ever be attached. Named in
+  `docs/archive/IDEATION-2026-09-20-process-development-hte-and-protocol-prediction.md` §3.3.
+
+- [ ] **A step template naming a fleet tool has no gate that checks its argument keys** — [M].
+  `make template-validate` name-checks a tool whose bundle is declared but not served and reports
+  `arguments unchecked`; `make live-template-args` is the only check that reads a running
+  connector, and no lane in CI runs one. So the process-development templates the ideation asks
+  for (§5: a thermal envelope, a solvent swap, a crystallisation first pass) would ship with
+  argument names verified against nothing, which is the fabricated-argument shape
+  `D-2026-09-20-a-ranking-is-evidence-a-critic-is-not-a-gate` refuses one layer over. Either read
+  the sibling's `tool-surface.json` at validation time the way
+  `tests/test_sibling_manifest_agreement.py` already reads its manifests, or decide these templates
+  wait for a lane that can run `live-template-args`. The first is the smaller change and the one
+  with a precedent.
+
+- [ ] **The optimization layer generates corners and nothing else** — [M]. `factorial_design` is
+  full or fractional factorial, so a chemist gets a screen or a BO campaign and nothing in between:
+  no response-surface design (central composite, Box-Behnken) for characterising a region, no
+  mixture design for solvent blends that must sum to one, and no blocking by plate, day or
+  operator. `science/bo/problem.py` can already *express* the constraints
+  (`LinearConstraint`); what is missing is a generator. Two `DEFERRED.md` rows are adjacent and
+  both have moved: the `DoEStrategy` D/A/E/G/I-optimality row's dependency objection was measured
+  false and deleted, leaving only a use-case objection that "design within a constrained continuous
+  space with a stated run budget" now supplies; and the `NChooseKConstraint`/blocking row's stated
+  premise is stale, since it says a tree-wide search finds no plate, well, day or operator concept
+  and `D-2026-08-28` shipped `protocols.layout.place` since.
+
 - [ ] **A site-supplied regex from a datasource manifest runs against warehouse cell text with no
   timeout, so a catastrophic pattern hangs the ingest activity** — [M].
   `ingest/eln/warehouse/expr.py:234` (`_regex`, `re.search` per row) and `:357`

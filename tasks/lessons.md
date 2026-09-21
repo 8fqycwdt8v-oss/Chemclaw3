@@ -1451,3 +1451,40 @@ free number at the end of its section.
     two separate calls, because then there is no pipeline for a status to get lost in. **The
     general shape: when I break a written rule twice, the remedy is a mechanical one that removes
     the opportunity, not a stronger intention.**
+
+95. **A capability that is built and unreachable looks exactly like a capability that is missing,
+    and the two have opposite fixes.** Asked to ideate process-development tooling, I was one
+    subagent away from proposing seven servers that already existed next door — `thermalsafety`,
+    `kinetics`, `unitops`, `props`, `suitability`, 33 tools, none reachable from any chart
+    deployment because this tree declared no manifest. **Before proposing a capability, check
+    whether the sibling already serves it and what stops this tree binding it**, because the answer
+    changes the work from "build a server" to "write a manifest and a skill". The reason it had
+    stayed unreachable was also not the one I would have guessed: not oversight, but *price* —
+    21,913 tokens of tool schema on every model call — and four separate entries in
+    `tests/test_context_floor.py` had already declined the trade in writing. **When something
+    obvious has not been done, the argument against it is usually already written down somewhere
+    that the grep for the feature name does not reach**; I found it by reading the ratchet's
+    comments, not by searching for the bundle names. And the fix followed from the cost rather than
+    from the feature: declaring and binding are separable, so `default_enabled` buys the reachable
+    manifest without the prefix. **A constraint that blocks the obvious implementation is usually
+    telling you the operation has two halves that should be priced separately.**
+
+96. **A warning that fires on correct input is a worse defect than a missing check, and it reads as
+    a working one.** `quantities_are_plausible` capped a charge at 1 kg as a unit-mistake
+    heuristic, so every real charge on a 20 kg campaign was reported as a suspected error — and
+    since it is a warning rather than a blocker, nothing failed and nobody noticed. I also
+    initially wrote that it *refused* the scale, which was wrong and more dramatic; checking the
+    severity is what corrected it. **Read a check's severity before describing its consequence**,
+    and when a bound is a proxy for something else (here: "nobody runs a kilo on the bench"), the
+    fix is to make it relative to the thing it was proxying rather than to widen it. Widening would
+    have deleted the catch at bench scale, which is where it works.
+
+97. **Run the suite serially before believing a parallel failure, and do not start a second one
+    while the first is running.** I had nine failures, triaged all nine, and five were scheduling
+    artifacts from a box at load 69 — I had started a second full run and a chart run on top of the
+    first. `D-2026-09-13-a-stable-failure-set-is-not-two-green-runs` says this in the Makefile I
+    had already read. **Two of the four real ones were only visible because the tooling was
+    installed**: 73 chart tests had been skipping for want of `helm`, on a branch whose whole
+    change was a chart change. A skip is not a pass, and the instruction to say what a run skipped
+    is worth acting on rather than reporting — installing three binaries took two minutes and moved
+    the chart evidence from nothing to 211 tests.

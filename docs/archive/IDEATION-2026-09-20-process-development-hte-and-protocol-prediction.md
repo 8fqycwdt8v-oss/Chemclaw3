@@ -59,8 +59,11 @@ right place for these five — and `data/profiles/` is the reason it need not be
 - `checks.quantities_are_plausible` caps a charge at `_MAX_MASS_MG = 1_000_000` (1 kg) and
   `_MAX_VOLUME_ML = 20_000` (20 L), as a unit-mistake heuristic.
 - So `data/evals/probes/process-chemistry.yaml`'s own opening probe — *20 kg in a 250 L jacketed
-  reactor* — trips the envelope's plausibility check as a suspected unit error. **The prescriptive
-  tier refuses the scale the second half of this ask is about.**
+  reactor* — trips the envelope's plausibility check as a suspected unit error. **Corrected while
+  implementing this: the tier does not *refuse* that scale, as this line first claimed.**
+  `quantities_are_plausible` is a warning rather than a blocker, so the protocol stores. What it
+  does is report every correct charge on a kilo-lab batch as a suspected unit error — which is the
+  one kind of warning that teaches a chemist to stop reading the two checks beside it.
 - There is no vessel, no working volume, no addition rate, no jacket setpoint, and no object for
   *a batch* — `DesignStatus` reaches `executed`, and N executions of one arm have nowhere to live.
 

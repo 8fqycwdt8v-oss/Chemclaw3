@@ -36,21 +36,24 @@ follows that order rather than the document's.
       `kinetics-and-reactor-choice`, `unit-operation-sizing`, `system-suitability`. `props` gets
       none: `skills/solvent-selection` already holds that judgment.
 - [x] **S5. ADR** `D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`.
-- [ ] **S6. Tests** for the split: opt-in bundles stay out of `enabled()` and out of the measured
+- [x] **S6. Tests** for the split: opt-in bundles stay out of `enabled()` and out of the measured
       prefix; an explicit list reaches them; a declared-but-unbound tool resolves for a validator
-      and not for the runtime verifier.
-- [ ] **S7. Chart**: five `connectors.<name>` entries at `enabled: false`, rendered config
-      unchanged for an existing release.
-- [ ] **S8. Context-floor prose**: the four "did not move for the Nth time" entries now have a
-      fifth reason, and it is a different one.
-- [ ] **S9. Unfreeze the envelope's quantities** — `ChargeLine` on `core/units.Measurement`,
-      plausibility bands relative to the declared scale, vessel/working volume, addition rate,
-      IPC-gated hold. Own ADR.
-- [ ] **S10. `rescale_protocol`** — deterministic charge scaling plus the structured list of what
-      did *not* scale.
-- [ ] **S11. `attach_plate_results`** — close the design → results loop.
-- [ ] **S12. Step templates** for the compositions the skills describe.
-- [ ] **S13. Design generators** — response-surface, mixture, D-optimal, blocking.
+      and not for the runtime verifier. Five tests in `tests/test_connector_registry.py`.
+- [x] **S7. Chart**: five `connectors.<name>` entries at `enabled: false`, plus the
+      `networkPolicy.egressPorts` entry each one needs *before* anybody enables it. Rendered config
+      unchanged for an existing release. helm/kubeconform/promtool installed, so the 73 chart tests
+      that had been skipping actually ran.
+- [x] **S8. Context-floor prose**: the allowance's membership rule is now two predicates —
+      declared in both trees *and* bound by silence — and `_ARGUED_DIVERGENCES` carries nine rows.
+- [x] **S9. Plausibility bands relative to the declared scale.** Scoped down from the plan's
+      "`ChargeLine` on `Measurement`" — see the review below for why, and what it costs.
+- [x] **S10. `rescale_protocol`** + `rescale_experiment_protocol` + the
+      `protocol-scale-translation` skill.
+- [x] **S4b. Six cross-capability skills** (not in the original list): crystallisation, solvent
+      swap, impurity fate, analytical readiness, readiness review, robustness.
+- [ ] **S11. `attach_plate_results`** — close the design → results loop. **Not built.**
+- [ ] **S12. Step templates** for the compositions the skills describe. **Not built.**
+- [ ] **S13. Design generators** — response-surface, mixture, D-optimal, blocking. **Not built.**
 
 ## Verification
 
@@ -61,4 +64,63 @@ prints green and proves nothing.
 
 ## Review
 
-(to be written at the end)
+### What shipped
+
+Four commits. The bundles and the declared/bound split; the scale-relative bands and the rescale
+path; the three declarations a new bundle lands in; six skills and the four a new tool lands in.
+
+**The finding that shaped everything**: the ideation expected to *add* capability and found the
+capability already built and unreachable — 33 tools across five fleet servers, with a manifest in
+this tree the only thing missing. The reason it had stayed missing was not oversight but price:
+declaring them the ordinary way costs 21,913 tokens of prefix on every model call, and four
+separate `test_context_floor.py` entries had already declined that trade on smaller numbers.
+`default_enabled` is the whole change — one field, read in one place — and it exists because
+*declaring* a capability and *binding* it are different decisions with different costs.
+
+### What I got wrong, and what corrected it
+
+- **The ideation said the prescriptive tier "refuses" a kilo-lab scale.** It does not;
+  `quantities_are_plausible` is a warning. Corrected in the archived document rather than left to
+  land, because the real defect is worse in a more interesting way: a warning that fires on correct
+  input is how a chemist learns to stop reading the two checks beside it.
+- **I raised `agent_context_token_budget` to hold the thread allowance whole.** The window pins
+  that number, not the prefix, and `tests/test_compaction.py` records a previous branch trying
+  exactly this and reverting it. The thread absorbs 1,400 tokens instead, and says so.
+- **I ran the suite in parallel against an already-loaded box** and got nine failures, five of
+  which were scheduling artifacts. `D-2026-09-13` documents that this happens and says to re-run
+  serially before believing a parallel failure. It cost a triage pass that a serial run would not
+  have needed.
+
+### Three things a reviewer should push back on
+
+1. **S9 is narrower than the plan.** `ChargeLine` still carries `mass_mg`/`volume_ml`/`amount_mmol`
+   as fixed-unit floats rather than `Measurement`. The band defect is fixed and the field shape is
+   not. Moving it touches stored JSONB revisions, `from_bo`, `render`, `export` and the
+   `charge_is_consistent` arithmetic, which is a migration rather than a change, and it was not
+   needed to close the defect. It stays the right long-term shape.
+2. **Two ceiling raises in one branch**, totalling 1,400 tokens of thread allowance taken from
+   every deployment — including every one that binds none of the five bundles. Both are argued in
+   the file; whether the second (six skills) is worth it is the judgement call most worth
+   challenging, and the cheaper alternative — bundling four of the six — was rejected because they
+   genuinely span bundles.
+3. **`SERVED_ELSEWHERE_ALLOWANCE` and `FLEET_PUBLISHED_ALLOWANCE` went unverified** in every run
+   here: both need a built `.venv` in the sibling checkout to measure schemas, and this one has
+   none. The token figures quoted throughout are that file's own recorded measurements, cited as
+   such, not measurements I took.
+
+### Not built, and why
+
+`attach_plate_results` (S11) is the loop-shaped gap the ideation calls out: a design reaches
+`executed` and nothing attaches what the plate produced, so the plate → observations →
+`suggest_next_experiment` round trip is handwork and the deferred mining of human protocol edits
+has no corpus. It needs a table, a migration and a decision about whether results hang off the
+design or off `reaction_records` — an ADR, not an afternoon, and a half-built version is worse than
+none.
+
+The step templates (S12) were started and stopped on a principle: a template's steps carry literal
+argument keys, `make live-template-args` is the only gate that checks them against a running
+connector, and this lane cannot run one. Writing argument names for five fleet servers I cannot
+introspect is the fabricated-argument failure `D-2026-09-20-a-ranking-is-evidence-a-critic-is-not-
+a-gate` refuses one layer over.
+
+The design generators (S13) are self-contained and simply not done.
