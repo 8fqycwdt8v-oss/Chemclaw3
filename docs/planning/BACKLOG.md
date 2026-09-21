@@ -251,24 +251,6 @@ topic).
       records that the run is hours long — so each addition needs its runtime measured rather than
       assumed. Measure `make mutants` with one of them added before adding the rest.
 
-- [ ] **The substructure deadline test asserts a timing ratio where it means a record count** —
-      [S], `tests/test_molfp.py::test_a_scan_past_its_deadline_stops_instead_of_matching_the_rest_of_the_corpus`.
-      Its own docstring states the property as *"went on matching every remaining record"*, which is
-      a claim about records; the assertion is `bounded < unbounded / 2` over two live wall-clock
-      measurements. That is a proxy, and it is the kind that fails on somebody else's machine: the
-      bar was a quarter until it failed `main` twice in one morning at 0.270 and 0.271 while
-      measuring 0.186-0.206 on an idle developer machine, for no reason but fixed setup the bounded
-      run carries and the unbounded run amortises.
-
-      The bar is now a half, with the spread and a deadline-mutation table in the docstring, so the
-      control is measured rather than assumed — it still fails a leak to half the corpus (0.554).
-      What is left open is replacing the proxy. Counting records is **not** a test-only change: on
-      this corpus the scan takes the indexed path, and `substructure_index.labels_matching` chunks
-      by *time slice* rather than per record, so there is no counting point without changing the
-      module under test. The cheap shape is for `labels_matching` to return how many records it
-      reached beside its labels — `ScanOutcome` already carries two caveats and would carry a third
-      — after which the assertion is machine-independent and this row and the bar both go.
-
 - [ ] **`Chemclaw3_ui` has no surface for the four `/skills/mine` routes, the six `/skills/org`
       ones, or the proposal queue** — [M], opened by
       `D-2026-09-18-a-skill-a-chemist-keeps-is-behaviour-they-approved` and widened by
@@ -547,32 +529,29 @@ topic).
       `deploy/helm/chemclaw/values.yaml` `resources.service`,
       `tests/test_deploy_chart.py::test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares`.
 
-- [ ] **One parse budget serves two pods with four times the difference in room** — [S], opened
-      2026-09-19 by `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse`.
-      `CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES` is derived from the front door — 1Gi limit, 523 MiB
-      idle, two parse slots — and the background worker reads the same value with a 4Gi limit and a
-      share binding whose `max_file_bytes` is 50 MiB. Measured, a 50 MiB delimited export needs more
-      than 512 MiB to render even after `_parse_csv` stopped materialising its reader, and a 24.5 M
-      character one needs more than 160 MiB: those files are now refused on a pod that could have
-      afforded them. It is counted (`skipped_unreadable`) and the refusal names the ceiling, so this
-      is a cost rather than a hole. The cheap shape is a per-Deployment override of the one env key
-      the chart already renders; the honest alternative is lowering the binding's `max_file_bytes`
-      to what one parse can hold, which is a site's declaration rather than this chart's. Wants a
-      real corpus before either. Anchors: `src/chemclaw/core/config/sources.py`
-      `document_parse_memory_bytes`, `src/chemclaw/ingest/documents/binding.py` `max_file_bytes`,
-      `tests/test_deploy_chart.py::test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares`.
+- [ ] **A parse reached outside the isolate child is bounded by nothing, so its broad arm has
+      nothing to name** — [S], what is left of "a parse refused by a C parser's own allocation
+      failure arrives unnamed" after that row was checked against `HEAD` and found **already
+      closed**, at a different site than it proposed.
+      `D-2026-09-19-a-refusal-that-blames-the-document-is-worse-than-one-that-says-nothing` put
+      `isolate._at_ceiling` in the child, where the ceiling is *known*, rather than in
+      `parse_document`'s broad arm, where it is not: it renames any failure that happened with the
+      budget spent, so all three arms reach `too_large_to_read` and a markup-heavy `.docx` that lxml
+      refused with "Unable to allocate output buffer" now says so.
+      `tests/test_parse_isolation.py::test_a_document_stopped_by_the_budget_says_so_even_when_a_c_parser_reported_it`
+      holds both populations. The row's anchors were the two it did not use.
 
-- [ ] **A parse refused by a C parser's own allocation failure arrives unnamed** — [S], opened
-      2026-09-19 by `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse`.
-      `parse.too_large_to_read` names the ceiling on both paths that raise `MemoryError` — extraction
-      and the pickling of the answer — but a library that handles its own allocation failure never
-      raises one: measured, `lxml` answers "Unable to allocate output buffer", so a markup-heavy
-      `.docx` reaches a chemist as the generic "could not be read". Both are refusals and neither
-      costs the pod; what is lost is the one sentence that tells a chemist to split the file. The
-      shape worth trying is reading `RLIMIT_DATA` back in the broad arm and saying so when the
-      process is at its ceiling, which is a state rather than an exception type. Anchors:
-      `src/chemclaw/ingest/documents/parse.py::parse_document`,
-      `src/chemclaw/ingest/documents/parse.py::too_large_to_read`.
+      **The residual is the path that does not go through `isolate` at all.**
+      `agent/attachments.py::parse_attachment` calls `parse_document` directly — the CLI's
+      `backfill_corpus` and the format tests reach it — and no `RLIMIT_DATA` is set on that process,
+      so `_at_ceiling` has no ceiling to read back and its broad arm cannot distinguish "out of
+      budget" from "malformed". It is the smaller case (an operator at a terminal rather than a
+      chemist in a turn) and the honest fix is a decision: either that path gets the forkserver too,
+      which costs a process per attachment on a path that parses one file at a time, or it states
+      that it is unbounded and says "could not be read" meaning it. Anchors:
+      `src/chemclaw/agent/attachments.py::parse_attachment`,
+      `src/chemclaw/ingest/documents/isolate.py::_at_ceiling`,
+      `src/chemclaw/ingest/documents/isolate.py::_bound_allocations`.
 
 - [ ] **Neither net sees one Postgres server that two DSNs spell differently** — [M], found
       2026-09-05 by a fresh-context review of `D-2026-09-05-a-pool-count-is-not-a-connection-count`,
@@ -710,17 +689,6 @@ topic).
   Guarded by `tests/test_connector_health.py::test_a_connector_healthy_on_healthz_and_broken_on_mcp_is_reported_by_the_turn`,
   which asserts the sweep's `healthy` verdict, so changing this decision turns that test red rather
   than leaving two documents disagreeing.
-
-- [ ] **The turn-wide model-call floor only binds where a loop watch is open, and two paths open
-  none** — [S]. `agent/loop_cap._LoopWatch.calls` is what makes a `task` fan-out share one iteration
-  allowance (it was `1 + W*(cap - 1)` calls before, measured at 25 against a cap of 4 over 8
-  helpers, and 193 against the shipped cap of 25 at width 8). `api/runner.py` opens the watch per
-  turn, so the front door is bound. `durable/template_activities.py` opens only
-  `begin_context_watch()`, and the CLI opens nothing — so on those two paths the cap still falls
-  back to the per-branch channel snapshot and a fan-out still multiplies it. The same gap exists for
-  the spend cap's ambient (`set_turn_usage`/`begin_spend_watch`), which those two paths also skip.
-  Either open both watches wherever a turn is driven, or move the pair into one `turn_ambient`
-  context manager every driver has to enter.
 
 - [ ] **A peer that is genuinely restorable still drains every live session on the deploy that adds
   it** — [M]. `agent/checkpointer._first_party_channels` no longer stamps `UntrackedValue` channels,

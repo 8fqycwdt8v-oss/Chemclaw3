@@ -44,6 +44,7 @@ from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.loop_cap import loop_capped
 from chemclaw.agent.spend_cap import spend_capped
 from chemclaw.agent.state import answer_text, turn_config, turn_input
+from chemclaw.agent.turn_ambient import turn_caps
 from chemclaw.connectors.registry import open_connector_specs
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
@@ -234,10 +235,19 @@ async def converse(
     # can see differs, and this one sees less.
     token = set_current_user_texts([*earlier, prompt])
     try:
-        result = await agent.ainvoke(
-            turn_input(prompt),
-            turn_config(session_id),
-        )
+        # **The cap ambients, which this path opened none of.** Both caps are attached by the
+        # harness middleware whatever the driver does, so a CLI turn was never uncapped — but
+        # without a watch the loop cap falls back to the per-branch channel snapshot, so a `task`
+        # fan-out here gave every branch the whole iteration allowance (measured at 193 model calls
+        # against a cap of 25 at width 8), and a model call made inside a tool body reached no
+        # `wrap_model_call` and was booked by nothing. The notice this function returns is read off
+        # the state `ainvoke` gave back, so it is unaffected either way; what changes is that the
+        # turn is bounded the way the front door's is (`agent/turn_ambient.py`).
+        with turn_caps(closing=f"CLI session {session_id}"):
+            result = await agent.ainvoke(
+                turn_input(prompt),
+                turn_config(session_id),
+            )
     finally:
         reset_current_user_texts(token)
     # Read off the state this call *returned*, which is the only place either cap's flag lives —

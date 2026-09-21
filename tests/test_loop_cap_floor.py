@@ -290,3 +290,103 @@ def test_a_fan_out_shares_one_iteration_budget_rather_than_getting_one_each(
         "floor is capping a turn that has no siblings"
     )
     assert ordinary.get("model_calls") == cap
+
+
+def test_every_driver_of_a_turn_binds_a_fan_out_and_not_only_the_front_door(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wiring, which the fan-out test above cannot see because it opens the watch itself.
+
+    `_drive` calls `begin_loop_watch()` by hand, so it measures the *mechanism* — that a watch makes
+    a fan-out share one allowance — and would stay green if every real driver stopped opening one.
+    Two of the three had: `api/runner.py` opened all four cap ambients,
+    `durable/template_activities.py` opened one, and `cli/chat.py` opened none. So the floor bound
+    the front door and nothing else, and a fan-out inside a CLI turn or a template step got the
+    per-branch fallback — one whole allowance per branch.
+
+    Driven through `cli.chat.converse` because it is the real driver and was the empty case, with
+    the same fake as above. The second arm is the defect: with `turn_caps` neutered the identical
+    turn exceeds the cap, so what this asserts is the wiring rather than the mechanism a second
+    time.
+    """
+    from contextlib import nullcontext
+
+    from chemclaw.cli import chat as cli_chat
+
+    cap = 4
+    helpers = 8
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", cap)
+    monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
+
+    class _FanOut(GenericFakeChatModel):
+        calls: int = 0
+
+        def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+            return self
+
+        def _generate(
+            self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any
+        ) -> ChatResult:
+            self.calls += 1
+            if self.calls == 1:
+                return ChatResult(
+                    generations=[
+                        ChatGeneration(
+                            message=AIMessage(
+                                content="",
+                                tool_calls=[
+                                    {
+                                        "name": "task",
+                                        "args": {
+                                            "description": f"branch {n}",
+                                            "subagent_type": "general-purpose",
+                                        },
+                                        "id": f"t{n}",
+                                        "type": "tool_call",
+                                    }
+                                    for n in range(helpers)
+                                ],
+                            )
+                        )
+                    ]
+                )
+            return ChatResult(
+                generations=[
+                    ChatGeneration(
+                        message=AIMessage(
+                            content="",
+                            tool_calls=[
+                                {
+                                    "name": "write_todos",
+                                    "args": {"todos": []},
+                                    "id": f"w{self.calls}",
+                                    "type": "tool_call",
+                                }
+                            ],
+                        )
+                    )
+                ]
+            )
+
+    def _cli_fan_out(model: Any, *, thread: str) -> None:
+        graph = build_langgraph_agent(
+            model=model, audit_sink=NullAuditSink(), profile=AgentProfile(name="default")
+        )
+        asyncio.run(cli_chat.converse(graph, "split this several ways", session_id=thread))
+
+    wired = _FanOut(messages=iter([]))
+    _cli_fan_out(wired, thread="cli-fan-out-wired")
+    assert wired.calls <= cap, (
+        f"a {helpers}-way fan-out through `cli.converse` made {wired.calls} model calls against a "
+        f"cap of {cap}: this driver opens no loop watch, so every branch spends the whole allowance"
+    )
+
+    unwired = _FanOut(messages=iter([]))
+    monkeypatch.setattr(cli_chat, "turn_caps", lambda *a, **k: nullcontext())
+    _cli_fan_out(unwired, thread="cli-fan-out-unwired")
+    assert unwired.calls > cap, (
+        f"with `turn_caps` neutered the same fan-out made {unwired.calls} calls, which is not over "
+        f"the cap of {cap} — so this test is not measuring the wiring and would pass with every "
+        "driver's watch removed, which is exactly the hole it was written to close"
+    )

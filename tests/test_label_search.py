@@ -30,6 +30,7 @@ from chemclaw.science.fingerprints.store import (
 from chemclaw.science.labels.molecules import (
     CORPUS_MOLECULES_TABLE,
     CorpusMolecules,
+    VerifyDeadlineExceeded,
     _verify_within,
 )
 from chemclaw.science.labels.pattern import compile_query
@@ -544,13 +545,21 @@ async def test_a_substructure_verify_that_runs_too_long_is_cut_off_rather_than_a
 def test_a_verify_past_its_deadline_stops_instead_of_matching_the_rest_of_the_candidates() -> None:
     """The bound above releases the caller; this is what makes it true of the worker thread.
 
-    `asyncio.wait_for` cannot stop a thread, so a verify that outran the bound went on matching
-    every remaining candidate — up to `substructure_scan_max_records` of them — while holding a
-    slot in the loop's *default* executor, which is also where `chemclaw.api.auth` validates every
-    bearer token. `_verify_within` reads the deadline between candidates instead.
+    `asyncio.wait_for` cannot stop a thread, so before this the verify went on matching every
+    remaining candidate — up to `substructure_scan_max_records` of them — against a pattern already
+    known to be pathological.
 
-    No Postgres and no clock constant: one match is measured here and the deadline is expressed in
-    matches, so a faster machine changes the numbers and not the property.
+    **A candidate count, not a ratio of two wall clocks.** This asserted
+    `bounded < unbounded / 4`, and its own docstring claimed machine independence on the grounds
+    that "the deadline is expressed in matches, so a faster machine changes the numbers and not the
+    property" — the same claim its sibling in `tests/test_molfp.py` had to retract after a quarter
+    failed `main` twice in one morning at 0.270 and 0.271. The count was already in hand here:
+    `_verify_within` reads the deadline between candidates, so `examined` is exactly the quantity,
+    and it was going into an exception message and nowhere else. `VerifyDeadlineExceeded` carries
+    it out.
+
+    Two integers that do not move with the machine: a bounded verify reaches a handful of the 300
+    candidates, and a deadline that does not reach the thread reaches all 300 while raising.
     """
     query = compile_query(_UNMATCHABLE)
     molecule = Chem.MolFromSmiles(_CHAIN_CORPUS[0])
@@ -558,17 +567,19 @@ def test_a_verify_past_its_deadline_stops_instead_of_matching_the_rest_of_the_ca
     molecule.HasSubstructMatch(query)
     per_candidate = time.perf_counter() - started
 
-    started = time.perf_counter()
-    with pytest.raises(TimeoutError):
+    with pytest.raises(VerifyDeadlineExceeded) as stopped:
         _verify_within(_CHAIN_CORPUS, query, time.monotonic() + per_candidate * 5)
-    bounded = time.perf_counter() - started
 
-    started = time.perf_counter()
-    assert _verify_within(_CHAIN_CORPUS, query, time.monotonic() + 3600) == []
-    unbounded = time.perf_counter() - started
-
-    assert bounded < unbounded / 4, (
-        f"the verify ran {bounded:.3f}s of an unbounded {unbounded:.3f}s past its deadline"
+    assert _verify_within(_CHAIN_CORPUS, query, time.monotonic() + 3600) == [], (
+        "unmatchable, so the unbounded verify really did examine every candidate"
+    )
+    assert stopped.value.total == len(_CHAIN_CORPUS), (
+        f"the refusal counts against {stopped.value.total} candidates where the corpus has "
+        f"{len(_CHAIN_CORPUS)}, so it is not describing this verify"
+    )
+    assert stopped.value.reached < len(_CHAIN_CORPUS) // 4, (
+        f"the verify reached {stopped.value.reached} of {len(_CHAIN_CORPUS)} candidates past its "
+        "deadline, which is the bound failing to reach the worker thread"
     )
 
 

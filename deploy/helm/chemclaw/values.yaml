@@ -204,6 +204,35 @@ workers:
     # second justification — one code version replays any unfinished history — is independent of
     # the replica count and still live.
     replicas: 1
+    # What one document parse may allocate **on this pod**, overriding the fleet-wide
+    # `CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES` the shared ConfigMap carries.
+    #
+    # **One number was serving two pods with twice the room between them.** The shipped default is
+    # derived downwards from the *front door* — a 1Gi limit, 523 MiB resident with a warm parse
+    # forkserver, two concurrent parse slots — which leaves 178.9 MiB a parse may spend and is
+    # rounded down to 160. This pod has a 4Gi limit and 370 MiB idle, and runs
+    # `CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES` (8) parses rather than 2, so solving the same
+    # inequality gives **332.7 MiB**. Rounded down to 320, which is 142 MiB of slack against the
+    # 4Gi rather than the 12.7 the exact figure would leave.
+    #
+    # **It is ~2x rather than the 4x the limits suggest, and that is the whole reason a number
+    # belongs here rather than a doubling being obvious**: the limit is 4x the front door's and the
+    # activity count is 4x too, so most of the extra room is already spent on concurrency.
+    # `tests/test_deploy_chart.py::test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares`
+    # holds the inequality per component against this value.
+    #
+    # What it buys, stated as the shapes rather than as a threshold: a 24.5 M-character delimited
+    # export needs more than 160 MiB to render and now parses here. A **50 MiB** one needs more than
+    # 512 MiB and still does not — affording that would need `370 + 8 x 1.4 x 512 = 6104` MiB, past
+    # this pod's limit, so it wants either fewer activity slots or a bigger limit, both of which are
+    # a site's declaration rather than this chart's. A refused parse is counted
+    # (`skipped_unreadable`) and names the ceiling.
+    #
+    # An explicit `env` entry beats the same key arriving through `envFrom`, which is how the
+    # ConfigMap's fleet-wide value reaches every other component — the same mechanism
+    # `deployment-connectors.yaml` uses for a bundle's own activity ceiling. Empty string or `null`
+    # leaves this pod on the fleet-wide value.
+    documentParseMemoryBytes: 335544320
 
 # A classical SMB/CIFS file share, mounted read-only on the background worker so its documents can
 # be crawled into the search index (D-2026-08-06-a-share-is-mounted-not-called). Mounted, never

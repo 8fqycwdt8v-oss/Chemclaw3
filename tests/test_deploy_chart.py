@@ -6179,11 +6179,25 @@ def _declared_mib(resources: dict[str, Any], kind: str) -> int:
     return int(declared[:-2]) * units[suffix]
 
 
-def _parse_peak_mib(concurrent: int) -> float:
-    """What `concurrent` parses at their declared allocation ceiling peak at, in MiB."""
+def _parse_budget_mib(override: Any) -> float:
+    """What one parse may allocate on a pod, in MiB — its own override or the fleet-wide default.
+
+    **Per component, because one number was serving two pods with twice the room between them.**
+    `document_parse_memory_bytes` is derived downwards from the *front door*, and the background
+    worker reads the same value with four times the limit and four times the parse slots. An
+    explicit `env` entry on a Deployment beats the same key arriving through `envFrom`, so this
+    resolves the same way the kubelet does: the override when the values file sets one, the setting
+    otherwise.
+    """
     from chemclaw.core.config import settings
 
-    budget_mib = settings.document_parse_memory_bytes / 1024**2
+    if override in (None, ""):
+        return float(settings.document_parse_memory_bytes) / 1024**2
+    return float(override) / 1024**2
+
+
+def _parse_peak_mib(concurrent: int, budget_mib: float) -> float:
+    """What `concurrent` parses at `budget_mib` each peak at, in MiB."""
     return concurrent * PARSE_MIB_PER_PARSE_BUDGET_MIB * budget_mib
 
 
@@ -6219,12 +6233,24 @@ def test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares() -> N
     """
     from chemclaw.core.config import settings
 
-    resources = _values()["resources"]
+    values = _values()
+    resources = values["resources"]
     front_door = FRONT_DOOR_RESIDENT_MIB + FORKSERVER_POD_COST_MIB
     worker = WORKER_RESIDENT_MIB + FORKSERVER_POD_COST_MIB
+    # The worker declares its own parse allowance, because the fleet-wide one is derived from the
+    # *front door* and this pod has four times the limit and four times the parse slots. Read out of
+    # the values file rather than restated, so the inequality below is asserted against the number
+    # the Deployment actually renders (`deployment-workers.yaml`).
+    worker_override = values["workers"]["background"].get("documentParseMemoryBytes")
 
-    for label, key, idle, concurrent in (
-        ("front door", "service", front_door, settings.attachment_max_concurrent_parses),
+    for label, key, idle, concurrent, budget_mib in (
+        (
+            "front door",
+            "service",
+            front_door,
+            settings.attachment_max_concurrent_parses,
+            _parse_budget_mib(None),
+        ),
         # **The worker's count is its activity cap, and it used to be 1** — justified by
         # `ingest/documents/sync.py` awaiting each `_read_and_parse` in turn, which bounds one
         # *activity* while this pod runs `worker_max_concurrent_activities` of them. That the
@@ -6232,7 +6258,13 @@ def test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares() -> N
         # are sequential does make 1 the number today, but it is a three-hop argument across two
         # modules that a second share schedule or one manual run breaks, and the pod fits its cap
         # outright — so the cap is what is asserted and the argument is not needed.
-        ("background worker", "worker", worker, settings.worker_max_concurrent_activities),
+        (
+            "background worker",
+            "worker",
+            worker,
+            settings.worker_max_concurrent_activities,
+            _parse_budget_mib(worker_override),
+        ),
     ):
         request = _declared_mib(resources[key], "requests")
         limit = _declared_mib(resources[key], "limits")
@@ -6242,10 +6274,10 @@ def test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares() -> N
             "scheduled onto a node that does not have the memory it uses, and is the first thing "
             "evicted when that node comes under pressure"
         )
-        needed = idle + _parse_peak_mib(concurrent)
+        needed = idle + _parse_peak_mib(concurrent, budget_mib)
         assert needed <= limit, (
-            f"{concurrent} concurrent parse(s) at the {settings.document_parse_memory_bytes}-byte "
-            f"allocation ceiling need {needed:.0f} MiB in the {label} — the resident set and the "
+            f"{concurrent} concurrent parse(s) at the {budget_mib:.0f} MiB allocation ceiling this "
+            f"component declares need {needed:.0f} MiB in the {label} — the resident set and the "
             f"warm forkserver included — against the {limit} MiB its container declares. That is "
             "an OOMKill of the whole pod, not a refused upload"
         )
@@ -6458,4 +6490,45 @@ def test_publishing_the_face_without_a_router_peer_refuses_to_render() -> None:
     # `Route` in the same output, so a text search finds one and says nothing about the face.
     assert ("Route", "chemclaw-mcp-face") not in names, (
         f"an unpublished face rendered a Route anyway: {sorted(names)}"
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_no_rendered_setting_reaches_a_pod_in_scientific_notation() -> None:
+    """Helm renders a nine-digit values entry as a float, and `Settings` cannot read one.
+
+    **Driven, on the change that added the first one.** `workers.background.
+    documentParseMemoryBytes: 335544320` reached the container as `"3.3554432e+08"`, because Helm
+    parses the values entry as a float and `| quote` renders a float the way Go prints one.
+    `CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES=3.3554432e+08` is a pydantic `int_parsing` error, so every
+    background worker would have crash-looped on start — a whole Deployment down, from a values file
+    that reads correctly and a chart that renders without complaint.
+
+    **The blind spot is why this is a general guard rather than a `%.0f` and a comment.** Every
+    other assertion in this file about that budget reads `values.yaml` through `yaml.safe_load`,
+    where the same entry is an ordinary `int` — so the arithmetic was checked against a number no
+    pod ever sees, and the render was the only place the defect existed. Any future numeric
+    override on any Deployment has the identical trap.
+
+    Scoped to `CHEMCLAW_*`, because those are the names `Settings` parses; a float in someone else's
+    variable is that consumer's business.
+    """
+    rendered = _render()
+    assert rendered.returncode == 0, rendered.stderr
+    offenders: list[str] = []
+    for doc in yaml.safe_load_all(rendered.stdout):
+        if not doc or doc.get("kind") not in {"Deployment", "Job", "StatefulSet", "CronJob"}:
+            continue
+        name = doc["metadata"]["name"]
+        spec = doc["spec"].get("template", doc["spec"]).get("spec", {})
+        for container in [*spec.get("containers", []), *spec.get("initContainers", [])]:
+            for entry in container.get("env") or []:
+                value = str(entry.get("value", ""))
+                if entry["name"].startswith("CHEMCLAW_") and ("e+" in value or "E+" in value):
+                    offenders.append(f"{name}/{container['name']} {entry['name']}={value}")
+
+    assert not offenders, (
+        "these rendered settings reach a pod in scientific notation, which pydantic refuses with "
+        f"`int_parsing`, so the container crash-loops on start: {offenders}. Render it with "
+        '`printf "%.0f"` rather than `| quote`, which prints a Helm float the way Go does'
     )

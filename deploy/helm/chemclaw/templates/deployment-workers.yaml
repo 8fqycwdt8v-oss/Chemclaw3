@@ -87,6 +87,26 @@ spec:
               value: "background-worker"
             {{- include "chemclaw.otelResourceEnv" (dict "component" "background-worker") | nindent 12 }}
             {{- include "chemclaw.workerMetricsEnv" . | nindent 12 }}
+            {{- /* This pod's own parse allowance, where the fleet-wide one is derived from the
+                   *front door* — 1Gi and two parse slots against this pod's 4Gi and eight, which
+                   is 178.9 MiB a parse may spend there against 332.7 here. Same shape and same
+                   argument as `maxConcurrentActivities` in `deployment-connectors.yaml`: an
+                   explicit `env` entry beats the same key arriving through `envFrom`, which is how
+                   the ConfigMap's value reaches every other component. `values.yaml` carries what
+                   it buys and what it still refuses. */}}
+            {{- with .Values.workers.background.documentParseMemoryBytes }}
+            - name: CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES
+              {{- /* `printf "%.0f"` and not `| quote`, because Helm parses a nine-digit values entry
+                     as a **float** and `quote` then renders it in scientific notation. Driven:
+                     `335544320` reached the container as `"3.3554432e+08"`, and
+                     `CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES=3.3554432e+08` is a pydantic
+                     `int_parsing` error — so every background worker would have crash-looped on
+                     start. The chart test did not see it because it reads `values.yaml` through
+                     `yaml.safe_load`, where the same entry is an `int`; the render is the only place
+                     the defect exists. `test_no_rendered_setting_reaches_a_pod_in_scientific_
+                     notation` is the guard over the whole class. */}}
+              value: {{ printf "%.0f" (float64 .) | quote }}
+            {{- end }}
             {{- include "chemclaw.env" . | nindent 12 }}
           envFrom:
             {{- include "chemclaw.envFrom" . | nindent 12 }}

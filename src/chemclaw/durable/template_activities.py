@@ -34,18 +34,14 @@ from langchain_core.outputs import LLMResult
 from pydantic import BaseModel, ConfigDict, Field
 from temporalio import activity
 
-from chemclaw.agent.context_budget import (
-    begin_context_watch,
-    current_context,
-    end_context_watch,
-)
+from chemclaw.agent.context_budget import current_context
 from chemclaw.agent.loop_cap import loop_capped
 from chemclaw.agent.profiles import AgentProfile, get_profile
-from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.spend_cap import spend_capped
 from chemclaw.agent.state import answer_text, turn_config, turn_input
 from chemclaw.agent.tool_invocation import invoke_governed
 from chemclaw.agent.tool_result_size import STEP_REMEDY, bounded_content
+from chemclaw.agent.turn_ambient import turn_caps
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_usage import TurnUsage, llm_result_usage
 from chemclaw.connectors.jobs import prepare_job_launch
@@ -806,11 +802,14 @@ async def run_agent_step(step: AgentStepInput) -> AgentStepResult | str:
     meters (the counters, and the durable row that outlives the process) and does not pretend to
     cap. A run-level cap on template spend needs a durable counter, which is a decision, not a call.
 
-    **The repeat guard is watched here too**, because it is per-turn ambient state that the middle-
-    ware reads and its caller owns the lifetime of (`agent/repeat_guard.py`). Without
-    `begin_call_watch` the guard is inert — its contextvar is `None`, so the counter it increments
-    is discarded — and a step's model could ask one tool the identical question indefinitely, which
-    is precisely the shape the guard was measured against (`find_past_jobs` ×8 in one turn).
+    **Every per-turn cap ambient is opened here**, through `agent.turn_ambient.turn_caps` rather
+    than by hand — this step used to open two of the four, so a `task` fan-out inside it was bounded
+    by the per-branch channel and a tool body's model call was booked by nothing. The repeat guard
+    is one of them, because it is per-turn ambient state the middleware reads and the caller owns
+    the lifetime of (`agent/repeat_guard.py`): without its watch the guard is inert — its contextvar
+    is `None`, so the counter it increments is discarded — and a step's model could ask one tool the
+    identical question indefinitely, the shape it was measured against (`find_past_jobs` ×8 in one
+    turn).
     """
     from chemclaw.agent.langgraph_agent import build_langgraph_agent
 
@@ -824,13 +823,16 @@ async def run_agent_step(step: AgentStepInput) -> AgentStepResult | str:
     # own end and produced nothing is the silent death, and every other ending overwrites this
     # before the `finally` books it.
     outcome = "empty_answer"
-    calls_token = begin_call_watch()
-    # Started for the same reason as the call watch above it: a step runs a real model turn, so the
-    # context policy's per-turn state has to exist here too or compaction reports one standing
-    # reduction once per model call and the step's cost row cannot say the policy fired
-    # (`agent/context_budget.py`).
-    context_token = begin_context_watch()
-    with _acting_as(step.identity):
+    # **Every cap ambient a turn runs under, not the two this step used to open.** A step runs a
+    # real model turn, so it needs the context record (or compaction reports one standing reduction
+    # once per model call and the cost row cannot say the policy fired) — and it needs the loop and
+    # spend watches for the reason `agent/turn_ambient.py` states: without them a `task` fan-out
+    # inside a step is bounded by the per-branch channel snapshot and each branch spends the whole
+    # allowance, and a model call a tool body makes is counted by nothing. `meter.usage` is passed
+    # rather than letting the manager build a ledger, so the caps are enforced against the same
+    # object `_book_step_spend` reads.
+    step_label = f"template {step.template or '?'} step {step.step_id or '?'}"
+    with turn_caps(meter.usage, closing=step_label), _acting_as(step.identity):
         try:
             async with AsyncExitStack() as stack:
                 # `unreachable` is kept, and discarding it was the defect `AgentStepResult`
@@ -935,11 +937,11 @@ async def run_agent_step(step: AgentStepInput) -> AgentStepResult | str:
             # that one in-flight call — the provider reported no usage for it, and there is nothing
             # to read. Every call that completed is booked. So the ledger can under-report by at
             # most one call, never by a whole turn.
-            end_call_watch(calls_token)
-            # Booked *before* the context watch is torn down, because the row reads it. The call
-            # watch above has no such reader, which is why the two ends are not adjacent.
+            # Booked inside `turn_caps`, because the row reads the context watch and the manager
+            # tears every watch down on the way out. That ordering used to be spelled as two
+            # `end_*` calls with the booking between them; it is now a property of where this line
+            # sits, which is one fewer thing to get right by hand.
             _book_step_spend(step, meter.usage, time.perf_counter() - started, answered, outcome)
-            end_context_watch(context_token)
 
 
 def _book_step_spend(

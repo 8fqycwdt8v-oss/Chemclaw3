@@ -28,6 +28,7 @@ from chemclaw.science.fingerprints.molfp.search import (
     find_substructure_matches,
     record_for,
 )
+from chemclaw.science.fingerprints.molfp.substructure_index import ScanDeadlineExceeded
 from chemclaw.science.fingerprints.store import (
     FingerprintError,
     FingerprintRecord,
@@ -384,7 +385,7 @@ def _sleeping_scan(seconds: float) -> Callable[..., ScanOutcome]:
 
     def _scan(*_args: object, **_kwargs: object) -> ScanOutcome:
         time.sleep(seconds)
-        return ScanOutcome([], False, 0)
+        return ScanOutcome([], False, 0, 0)
 
     return _scan
 
@@ -484,64 +485,46 @@ def test_a_scan_past_its_deadline_stops_instead_of_matching_the_rest_of_the_corp
     per-molecule cost measured above, ~10 minutes of one CPU per timed-out request, taken from the
     loop's default executor, which is also where `chemclaw.api.auth` validates every bearer token.
 
-    **The bar is a half rather than a quarter, and the spread is written down so the next person
-    does not rediscover it.** This assertion is a ratio of two live wall-clock measurements, and a
-    quarter was set against one machine's numbers. Driven eight times on an idle developer machine
-    the ratio measures **0.186-0.206**; on the GitHub runner it measures **0.260-0.271**, and it
-    failed `main` twice in one morning (runs 2838 and 2851, at 0.271 and 0.270) as well as the
-    branch that noticed. The gap is not the deadline leaking: it is fixed setup that the bounded run
-    carries and the unbounded run amortises over the whole corpus, so a slower machine tilts the
-    ratio without the bound doing anything different. At 0.27 the bounded scan is still ~3.7x faster
-    than the unbounded one.
+    **This is a record count now, and everything the ratio version needed nine paragraphs to defend
+    is gone with it.** The property was always a claim about records — "went on matching every
+    remaining record" — and it was held by `bounded < unbounded / 2` over two live wall clocks. That
+    proxy failed `main` twice in one morning (runs 2838 and 2851, at 0.271 and 0.270) against a bar
+    of a quarter while measuring 0.186-0.206 on an idle developer machine, and the bar it was raised
+    to sat 2-13% from the nearest real failure mode on an instrument with a ~46% machine-to-machine
+    spread. None of that was the deadline leaking; it was fixed setup the bounded run carries and
+    the unbounded run amortises.
 
-    What the bar has to separate is the bound *working* from the bound *gone*, and those are far
-    apart. Measured by mutating the deadline rather than reasoned about — the shipped bound against
-    two leaks, on one machine in one run:
+    What made the honest version look impossible was true and was not the whole picture: this corpus
+    takes the *indexed* path, which chunks by time slice rather than per record, so there is no
+    counting point in the test. But both scan paths were already computing the number and formatting
+    it into an exception message — `start` in `labels_matching`, `examined` in
+    `_match_record_by_record` — so the count existed and the message was the only place it could be
+    read from. `ScanDeadlineExceeded` carries it as `reached`, and `ScanOutcome` carries the
+    unbounded run's as `records_reached`.
 
-        shipped bound (~2 of 16)    ratio 0.187   passes
-        leaked to ~8 of 16          ratio 0.554   fails
-        leaked to ~14 of 16         ratio 0.931   fails
-
-    So a half passes every machine measured and still fails a deadline that leaked to *half* the
-    corpus.
-
-    **The sentence that stood here overstated that, in the reassuring direction, and it is the kind
-    of claim this repository is supposed to measure.** It read "that is the same headroom a quarter
-    gave over the one machine it was written on … nothing between 0.27 and 0.55 corresponds to a
-    behaviour this scan can have". Both halves are false. Re-running the mutation table above on a
-    second machine, three runs each, the 8-of-16 leak measures **0.511 / 0.566 / 0.562** — so the
-    interval declared empty contains a behaviour this scan really has, and the *margin* between the
-    bar and the nearest failure mode is 2-13% here rather than the 55% a quarter had. Three of three
-    still fail, so the control caught the leak every time; what is gone is the claim that it does so
-    with room to spare, on an instrument whose own documented machine-to-machine spread is ~46%
-    (0.186 to 0.271). Read a failure at 0.50-0.57 as "this may be the 8-of-16 leak" and re-run
-    the table rather than the test.
-
-    **A ratio is a proxy and the honest assertion would count records** — "went on matching every
-    remaining record" is a claim about records. That was tried and is not a test-only change: on
-    this corpus the scan takes the *indexed* path, which chunks by time slice rather than per
-    record (`substructure_index.labels_matching`), so there is no counting point without changing
-    the module under test. `docs/planning/BACKLOG.md` carries the row.
+    The two outcomes are now **integers that do not move with the machine**: a bounded scan reaches
+    a handful of the 16 records, an unbounded one reaches all 16, and a deadline that does not reach
+    the worker thread reaches all 16 *while raising*. The bar is a quarter of the corpus, which no
+    honest run approaches and no leak can stay under.
     """
     pattern = substructure_pattern(_UNMATCHABLE)
     per_record = _one_match_seconds()
     records = _dendrimer_records(16)
 
-    started = time.perf_counter()
-    with pytest.raises(TimeoutError):
+    with pytest.raises(ScanDeadlineExceeded) as stopped:
         search._scan_for_matches(records, pattern, time.monotonic() + per_record * 2)
-    bounded = time.perf_counter() - started
 
-    started = time.perf_counter()
     outcome = search._scan_for_matches(records, pattern, time.monotonic() + 3600)
-    unbounded = time.perf_counter() - started
 
-    assert outcome.hits == []  # unmatchable, so the unbounded run really did examine all 16
-    assert bounded < unbounded / 2, (
-        f"the scan ran {bounded:.3f}s of an unbounded {unbounded:.3f}s past its deadline "
-        f"(ratio {bounded / unbounded:.3f}); a leaked deadline reads ~0.93 and a deadline that "
-        "leaked to half the corpus reads ~0.51-0.57, so this is the bound failing to reach the "
-        "worker thread rather than a slow machine — see the docstring for the measured spread"
+    assert outcome.hits == [], "unmatchable, so the unbounded run really did examine all 16"
+    assert outcome.records_reached == len(records), (
+        f"the unbounded run reached {outcome.records_reached} of {len(records)} records, so it is "
+        "not the whole-corpus control this compares against"
+    )
+    assert stopped.value.reached < len(records) // 4, (
+        f"the scan reached {stopped.value.reached} of {len(records)} records past its deadline, "
+        "which is the bound failing to reach the worker thread — it releases the caller and cannot "
+        "stop a thread, so what is left running is a full scan nobody is waiting for"
     )
 
 

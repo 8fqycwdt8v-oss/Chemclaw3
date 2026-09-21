@@ -18,7 +18,10 @@ from rdkit import Chem
 from chemclaw.core.chem import InvalidSmilesError, compound_id, substructure_pattern
 from chemclaw.core.config import settings
 from chemclaw.science.fingerprints.molfp.fingerprint import ecfp_bitstring, molecule_definition
-from chemclaw.science.fingerprints.molfp.substructure_index import index_for
+from chemclaw.science.fingerprints.molfp.substructure_index import (
+    ScanDeadlineExceeded,
+    index_for,
+)
 from chemclaw.science.fingerprints.store import (
     FingerprintError,
     FingerprintRecord,
@@ -265,16 +268,25 @@ async def find_substructure_matches(
 
 
 class ScanOutcome(NamedTuple):
-    """What one substructure pass found, and the two ways it fell short of the whole corpus.
+    """What one substructure pass found, the two ways it fell short, and how far it actually got.
 
-    A tuple rather than three positional returns because the two caveats are read together and
-    each answers a different question: `hits_truncated` says the count is a floor,
-    `unreadable` says the *corpus* was not fully examined and so a miss is not a negative.
+    A tuple rather than positional returns because the caveats are read together and each answers a
+    different question: `hits_truncated` says the count is a floor, `unreadable` says the *corpus*
+    was not fully examined and so a miss is not a negative.
+
+    `records_reached` is not a caveat and is not read by anything in `src/` — it is the scan's own
+    unit, carried out so the deadline's property can be *asserted* as a record count. That property
+    is "it stopped instead of going on matching every remaining record", and it was held by
+    `bounded < unbounded / 2` over two wall clocks: a proxy that failed `main` twice in one morning
+    at 0.270 and 0.271 against a bar of a quarter while measuring 0.186-0.206 on an idle machine.
+    Both scan paths already computed the number and formatted it into an exception message, which is
+    the one place a test could not reach it from.
     """
 
     hits: list[MoleculeHit]
     hits_truncated: bool
     unreadable: int
+    records_reached: int
 
 
 def _scan_for_matches(
@@ -327,9 +339,11 @@ def _scan_for_matches(
     max_matches = settings.fingerprint_max_top_k
     index = index_for(records, deadline)
     if index is None:
-        found, unreadable = _match_record_by_record(records, pattern, max_matches + 1, deadline)
+        found, unreadable, reached = _match_record_by_record(
+            records, pattern, max_matches + 1, deadline
+        )
     else:
-        found = index.labels_matching(pattern, max_matches + 1, deadline)
+        found, reached = index.labels_matching(pattern, max_matches + 1, deadline)
         unreadable = index.unreadable
     hits_truncated = len(found) > max_matches
     if hits_truncated:
@@ -342,12 +356,13 @@ def _scan_for_matches(
         [MoleculeHit.for_molecule(label) for label in found[:max_matches]],
         hits_truncated,
         unreadable,
+        reached,
     )
 
 
 def _match_record_by_record(
     records: list[FingerprintRecord], pattern: Chem.Mol, limit: int, deadline: float
-) -> tuple[list[str], int]:
+) -> tuple[list[str], int, int]:
     """Match `pattern` by parsing each stored SMILES in turn — the scan with no index behind it.
 
     **This is the floor the index has to beat, and therefore also the floor it falls back to.** An
@@ -379,15 +394,19 @@ def _match_record_by_record(
         could not be parsed at all.
 
     Raises:
-        TimeoutError: The deadline passed before every record was examined.
+        ScanDeadlineExceeded: The deadline passed before every record was examined. Shared with the
+            indexed path so a caller — and a test — reads `reached` the same way whichever path ran;
+            the two used to raise the same *type* with two different messages and no attribute.
     """
     found: list[str] = []
     unreadable = 0
+    examined = 0
     for examined, record in enumerate(records):
         if time.monotonic() >= deadline:
-            raise TimeoutError(
-                f"substructure scan gave up after {examined} of {len(records)} molecule(s), "
-                "matching them one at a time because no index was available"
+            raise ScanDeadlineExceeded(
+                examined,
+                len(records),
+                "matching them one at a time because no index was available",
             )
         molecule = Chem.MolFromSmiles(record.label)
         if molecule is None:
@@ -395,4 +414,6 @@ def _match_record_by_record(
             continue
         if len(found) < limit and molecule.HasSubstructMatch(pattern):
             found.append(record.label)
-    return found, unreadable
+    # `enumerate` leaves `examined` at the *last index*, so the count of records reached is one more
+    # — and is 0 for an empty corpus, which the initialiser above is for.
+    return found, unreadable, (examined + 1 if records else 0)
