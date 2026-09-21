@@ -4,61 +4,48 @@ Working `docs/planning/BACKLOG.md` in waves. Each wave: implement, prove, fresh-
 review, PR, merge on green. A closed row is **deleted** from `BACKLOG.md` in the commit that closes
 it (the file's own rule).
 
-Rows are picked by *workability here*: a row whose close needs a live gateway, a real cluster, a
-credential with a balance, or a corpus this checkout does not have is not in a wave. Those stay
-queued and the reason they stay is already written on each row.
+## Wave 1 — merged as `b5c68498` (PR #429)
 
-## Wave 1 — five self-contained defects
+Five rows closed, one queued for what the change deliberately does not bound. Both reviews found
+real defects in the first draft, the worst being that `PatternBudgetError` was swallowed by a
+handler I had not checked, so the shipped behaviour was the `rows x budget` stall the class existed
+to prevent — under a green test asserting the wrong non-membership. Lessons 103-107.
 
-- [x] **R1 — warehouse regex has no bound** (§1). `regex` runs that one transform under
-  `timeout=`, because it checks its deadline inside its own matching loop; `re` stays the engine
-  everywhere else. Both alternatives the row named are refused with measurements, in
-  `D-2026-09-21-a-pattern-that-cannot-be-timed-out-is-run-by-an-engine-that-can`.
-  `PatternBudgetError` is deliberately not an `ElnMappingError` — the per-entry handler would skip
-  the row and re-run the same unfinishable match on the next one.
-- [x] **R2 — a superseded re-proposal is answered `already_open`** (§3). `_REVIVE` puts the body
-  back in the queue in both backends, the sweep that keeps one open row per name runs on a revive
-  as it does on an insert, `revived` is the counter's fourth arrival, and `propose_skill` tests the
-  standing row's *state* rather than its hash (which, being the lookup key, could only ever say
-  "present").
-- [x] **R3 — one unimportable sibling bundle skipped the allowance bound for all of them** (§5).
-  One subprocess per bundle; the helper returns per-bundle reasons; both callers assert on what
-  they measured (a partial total is a lower bound and can still fail honestly) and then skip naming
-  what they did not.
-- [x] **R4 — two timing bounds red the gate for machine load.** The conflicts scan is **counted**
-  now, not timed, with an overlapping-corpus control so the counter is shown able to see the
-  quadratic arm. The prefix burst keeps a ratio — there is no count there — but its control is the
-  driven mutation rather than a stand-in, and the margin went 1.3x to 4x by making the control
-  large next to machine noise.
-- [x] **R5 — `retention_tool_results_days` ships at 0.** The row's premise was **stale**: the
-  decision is recorded in four places and a 30-day default was tried and withdrawn on measurement.
-  What was actually missing is the guarantee — `_NOT_PRUNED` states a reason per entry and
-  `_PRUNABLE` had nowhere to put one, so a swept table's argument lived only in a comment. Derived
-  rather than restated: a swept table must appear in the module docstring's list, where five of the
-  six already were. The new test found the sixth *and* a seventh instance nobody had named.
+## Wave 2 — five rows
+
+**Two of the ten rows worked so far were stale**, so each of these is re-checked against `HEAD`
+before any code is written, which the backlog's own header asks for.
+
+- [ ] **R6 — `ToolScopedSkills` is applied to neither stored tier** (§1). Verified live: both
+  `agent/local_skills.py` and `agent/org_skills.py` admit the gap in their own module docstrings.
+  The seam is already there — `validated_skill()` parses the frontmatter on both publish routes and
+  discards `manifest.tools` / `manifest.requires`. Keep them beside the body; the `store` table is
+  upstream's, so a sibling key in the JSON value rather than a migration.
+- [ ] **R7 — a shared skill a narrowing hides leaves its name to the personal tier** (§1). Verified
+  live: `skills/deep-research/SKILL.md` carries no `requires:`, so one `skill_role_gates` entry is
+  enough. The write side uses the *discovered* basis (`shipped_skill_names()`); the invariant is
+  the read side agreeing with it.
+- [ ] **R8 — the turn-wide caps only bind where a watch is open, and two drivers open none** (§4).
+  `api/runner.py` opens four; `durable/template_activities.py` opens one; the CLI opens none. Note
+  the existing fan-out test opens the watch *itself*, so it measures the mechanism and not the
+  wiring — that hole is part of the fix.
+- [ ] **R9 — the substructure deadline test asserts a timing ratio where it means a record count**
+  (§2). Bigger than it reads: the bounded arm *raises*, so the count has to survive the
+  `TimeoutError`, and the two scan paths must agree. `tests/test_label_search.py` has the same
+  proxy at a bar that already failed `main` on the molfp side — test-only there, since
+  `_verify_within` already counts.
+- [ ] **R10 — one parse budget serves two pods** (§3). The row's "four times the difference in
+  room" is **~2x**, not 4x: solving the worker's own inequality gives 332.7 MiB against the shipped
+  160, because it runs 8 activity slots to the front door's 2. Correct the row while closing it.
+  The chart already has the precedent (`deployment-connectors.yaml` sets a per-Deployment `env:`
+  for exactly this reason).
 
 ## Verification
 
-- `make lint` — green (exit 0, read on its own line).
-- `make type` — green, 958 files.
-- `make test` — serial, with dockerd up, `make up` run and migrations applied, so the
-  Postgres-backed set is **not** skipped.
+`make lint` · `make type` · `make test`, each on its own line with its exit code read, and **the
+gate is the call immediately before the commit** (lesson 107 — a fix prompted by one gate is
+measured by another).
 
-Baseline before the wave: **2 failed, 10375 passed, 84 skipped**. Both were artefacts rather than
-findings and both are gone:
-
-- `test_no_adr_cites_a_commit_a_squash_will_strand` — a **shallow clone**. The two commits exist;
-  `origin/main` was 80 deep. `git fetch --depth=2000` turned it green, which is the honest fix
-  rather than an edit to two merged ADRs.
-- `test_every_compiled_graph_in_this_tree_names_its_checkpointer` — caused by this branch, and
-  worth recording as a finding about the guard: it skipped `re.compile` by name, so the second
-  pattern engine read as a bare graph compile. Now a named `_PATTERN_ENGINES` set, so a third entry
-  has to be a third *engine*.
-
-Also turned into evidence rather than left as a caveat: `Chemclaw3-mcp` is cloned beside this
-checkout with a built `.venv`, so `tests/test_context_floor.py`'s cross-repository measurements
-**ran** (23 passed, 0 skipped) instead of skipping. R3 cannot be reviewed without that.
-
-## Review
-
-- [ ] Wave 1 reviewed by fresh-context subagents before the PR is opened.
+Infrastructure this environment now has, so these run as evidence rather than skipping: dockerd +
+`make up` + migrations; `Chemclaw3-mcp` cloned with a built `.venv`; `helm`, `kubeconform`,
+`promtool`; a baked tiktoken merge table at `/opt/tiktoken`.

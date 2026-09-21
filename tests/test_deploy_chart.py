@@ -6179,11 +6179,35 @@ def _declared_mib(resources: dict[str, Any], kind: str) -> int:
     return int(declared[:-2]) * units[suffix]
 
 
-def _parse_peak_mib(concurrent: int) -> float:
-    """What `concurrent` parses at their declared allocation ceiling peak at, in MiB."""
+#: The env name both halves of the parse budget are spelled with.
+_PARSE_BUDGET_KEY = "CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES"
+
+
+def _parse_budget_mib(override: Any) -> float:
+    """What one parse may allocate on a pod, in MiB, resolved the way the kubelet resolves it.
+
+    **Per component, because one number was serving two pods with twice the room between them.**
+    `document_parse_memory_bytes` is derived downwards from the *front door* — a 1Gi limit and two
+    parse slots — and the background worker reads it with four times the limit and four times the
+    slots, so the same inequality allows 332.7 MiB there against 178.9 here.
+
+    Three sources, in the order a container actually sees them: an explicit `env` entry on the
+    Deployment, then the shared ConfigMap the release reaches through `envFrom`, then the code
+    default. **The middle one was missing and that repeated the defect this helper was written for,
+    one layer up**: the front-door arm resolved the budget from `settings` and never looked at
+    `.Values.config`, so a fleet-wide raise — the natural way to raise it — would move every pod's
+    real budget and move no inequality here. Driven: `config` at 512 MiB gives the front door
+    523 + 2 x 1.4 x 512 = 1957 MiB against a 1Gi limit, and this file stayed green.
+    """
     from chemclaw.core.config import settings
 
-    budget_mib = settings.document_parse_memory_bytes / 1024**2
+    if override in (None, ""):
+        return float(settings.document_parse_memory_bytes) / 1024**2
+    return float(override) / 1024**2
+
+
+def _parse_peak_mib(concurrent: int, budget_mib: float) -> float:
+    """What `concurrent` parses at `budget_mib` each peak at, in MiB."""
     return concurrent * PARSE_MIB_PER_PARSE_BUDGET_MIB * budget_mib
 
 
@@ -6219,12 +6243,29 @@ def test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares() -> N
     """
     from chemclaw.core.config import settings
 
-    resources = _values()["resources"]
+    values = _values()
+    resources = values["resources"]
     front_door = FRONT_DOOR_RESIDENT_MIB + FORKSERVER_POD_COST_MIB
     worker = WORKER_RESIDENT_MIB + FORKSERVER_POD_COST_MIB
+    # The worker declares its own parse allowance, because the fleet-wide one is derived from the
+    # *front door* and this pod has four times the limit and four times the parse slots. Read out of
+    # the values file rather than restated, so the inequality below is asserted against the number
+    # the Deployment actually renders (`deployment-workers.yaml`).
+    worker_override = values["workers"]["background"].get("documentParseMemoryBytes")
+    # The fleet-wide entry every component reads through `envFrom`, which is what a deployment
+    # raising this for the whole release would set. Absent from the shipped `config`, so today this
+    # resolves to the code default — but reading it is what stops that raise from moving a real
+    # budget while moving no inequality here.
+    fleet_wide = (values.get("config") or {}).get(_PARSE_BUDGET_KEY)
 
-    for label, key, idle, concurrent in (
-        ("front door", "service", front_door, settings.attachment_max_concurrent_parses),
+    for label, key, idle, concurrent, budget_mib in (
+        (
+            "front door",
+            "service",
+            front_door,
+            settings.attachment_max_concurrent_parses,
+            _parse_budget_mib(fleet_wide),
+        ),
         # **The worker's count is its activity cap, and it used to be 1** — justified by
         # `ingest/documents/sync.py` awaiting each `_read_and_parse` in turn, which bounds one
         # *activity* while this pod runs `worker_max_concurrent_activities` of them. That the
@@ -6232,7 +6273,13 @@ def test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares() -> N
         # are sequential does make 1 the number today, but it is a three-hop argument across two
         # modules that a second share schedule or one manual run breaks, and the pod fits its cap
         # outright — so the cap is what is asserted and the argument is not needed.
-        ("background worker", "worker", worker, settings.worker_max_concurrent_activities),
+        (
+            "background worker",
+            "worker",
+            worker,
+            settings.worker_max_concurrent_activities,
+            _parse_budget_mib(worker_override if worker_override is not None else fleet_wide),
+        ),
     ):
         request = _declared_mib(resources[key], "requests")
         limit = _declared_mib(resources[key], "limits")
@@ -6242,10 +6289,10 @@ def test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares() -> N
             "scheduled onto a node that does not have the memory it uses, and is the first thing "
             "evicted when that node comes under pressure"
         )
-        needed = idle + _parse_peak_mib(concurrent)
+        needed = idle + _parse_peak_mib(concurrent, budget_mib)
         assert needed <= limit, (
-            f"{concurrent} concurrent parse(s) at the {settings.document_parse_memory_bytes}-byte "
-            f"allocation ceiling need {needed:.0f} MiB in the {label} — the resident set and the "
+            f"{concurrent} concurrent parse(s) at the {budget_mib:.0f} MiB allocation ceiling this "
+            f"component declares need {needed:.0f} MiB in the {label} — the resident set and the "
             f"warm forkserver included — against the {limit} MiB its container declares. That is "
             "an OOMKill of the whole pod, not a refused upload"
         )
@@ -6458,4 +6505,72 @@ def test_publishing_the_face_without_a_router_peer_refuses_to_render() -> None:
     # `Route` in the same output, so a text search finds one and says nothing about the face.
     assert ("Route", "chemclaw-mcp-face") not in names, (
         f"an unpublished face rendered a Route anyway: {sorted(names)}"
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+@pytest.mark.parametrize("overrides", _OFF_BY_DEFAULT_RENDERS.values(), ids=_OFF_BY_DEFAULT_RENDERS)
+def test_no_rendered_setting_reaches_a_pod_in_scientific_notation(
+    overrides: tuple[str, ...],
+) -> None:
+    """Helm renders a large or fractional values entry as a float, and `Settings` cannot read one.
+
+    **Driven, on the change that added the first one.** `workers.background.
+    documentParseMemoryBytes: 335544320` reached the container as `"3.3554432e+08"`, because Helm
+    parses the values entry as a float and `| quote` renders a float the way Go prints one.
+    `CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES=3.3554432e+08` is a pydantic `int_parsing` error, so every
+    background worker would have crash-looped on start — a whole Deployment down, from a values file
+    that reads correctly and a chart that renders without complaint.
+
+    **The blind spot is why this is a general guard rather than a `%.0f` and a comment.** Every
+    other assertion in this file about that budget reads `values.yaml` through `yaml.safe_load`,
+    where the same entry is an ordinary `int` — so the arithmetic was checked against a number no
+    pod ever sees, and the render was the only place the defect existed. Any future numeric
+    override on any Deployment has the identical trap.
+
+    **And the ConfigMap is the bigger half, which the first version of this guard did not read.**
+    `config.yaml` renders `.Values.config`, `retention.windows` and `retention.artifactStore` with
+    `| quote` too, and those reach *every* pod through `envFrom: configMapRef` — so one float there
+    crash-loops the whole release rather than one Deployment. Driven through a values file (which is
+    where the trap lives; `--set` goes through Helm's strvals parser and keeps an int64):
+    `CHEMCLAW_ARTIFACT_STORE_MAX_BYTES: 10737418240` renders as `"1.073741824e+10"`. So this reads
+    container `env`, `envFrom` sources, and the `data` of every ConfigMap and Secret the chart
+    renders.
+
+    Parametrised over `_OFF_BY_DEFAULT_RENDERS` for the reason its two siblings are: a template
+    behind a switch is validated by nobody otherwise, and `CHEMCLAW_TEMPORAL_METRICS_PORT` exists
+    only under `monitoring.temporalSdkMetrics.enabled` and takes its value straight from the values
+    file through `| quote`.
+
+    Scoped to `CHEMCLAW_*`, because those are the names `Settings` parses; a float in someone
+    else's variable is that consumer's business.
+    """
+    rendered = _render(*overrides)
+    assert rendered.returncode == 0, rendered.stderr
+    offenders: list[str] = []
+
+    def _suspect(where: str, name: str, value: object) -> None:
+        text = str(value)
+        if name.startswith("CHEMCLAW_") and ("e+" in text or "E+" in text):
+            offenders.append(f"{where} {name}={text}")
+
+    for doc in yaml.safe_load_all(rendered.stdout):
+        if not doc:
+            continue
+        kind, name = doc.get("kind"), doc["metadata"]["name"]
+        if kind in {"ConfigMap", "Secret"}:
+            # Where a float does the most damage: one `envFrom: configMapRef` per pod, so the
+            # whole release crash-loops rather than one Deployment.
+            for key, value in (doc.get("data") or {}).items():
+                _suspect(f"{kind} {name}", key, value)
+            continue
+        for owner, spec in _pod_specs(yaml.safe_dump(doc)):
+            for container in [*spec.get("containers", []), *spec.get("initContainers", [])]:
+                for entry in container.get("env") or []:
+                    _suspect(f"{owner}/{container['name']}", entry["name"], entry.get("value", ""))
+
+    assert not offenders, (
+        "these rendered settings reach a pod in scientific notation, which pydantic refuses with "
+        f"`int_parsing`, so the container crash-loops on start: {offenders}. Render it with "
+        "`int64` rather than `| quote`, which prints a Helm float the way Go does"
     )

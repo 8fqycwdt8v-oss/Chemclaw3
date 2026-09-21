@@ -18,7 +18,10 @@ from rdkit import Chem
 from chemclaw.core.chem import InvalidSmilesError, compound_id, substructure_pattern
 from chemclaw.core.config import settings
 from chemclaw.science.fingerprints.molfp.fingerprint import ecfp_bitstring, molecule_definition
-from chemclaw.science.fingerprints.molfp.substructure_index import index_for
+from chemclaw.science.fingerprints.molfp.substructure_index import (
+    ScanDeadlineExceeded,
+    index_for,
+)
 from chemclaw.science.fingerprints.store import (
     FingerprintError,
     FingerprintRecord,
@@ -270,6 +273,17 @@ class ScanOutcome(NamedTuple):
     A tuple rather than three positional returns because the two caveats are read together and
     each answers a different question: `hits_truncated` says the count is a floor,
     `unreadable` says the *corpus* was not fully examined and so a miss is not a negative.
+
+    **A `records_reached` field was added here and removed again, and the reason is worth keeping.**
+    The deadline's property is a claim about records — "it stopped instead of going on matching
+    every remaining record" — so carrying the count out looked like the way to assert it. But the
+    two scan paths do not agree about what it *means*: the index excludes unreadable rows from
+    `self.labels` and stops its `while` on the hit `limit`, while `_match_record_by_record` iterates
+    to the end after the cap, so one corpus measured **341** against **3300**. A field two paths
+    disagree about is worse than no field, and it bought nothing: on an *unmatchable* pattern a scan
+    can only return no hits by examining everything, so `hits == []` already witnesses the
+    whole-corpus control. The count the property actually needs is the one on the **bounded** run,
+    and that is `ScanDeadlineExceeded.reached`, where a single path produces it.
     """
 
     hits: list[MoleculeHit]
@@ -321,8 +335,10 @@ def _scan_for_matches(
         be parsed into the index at all.
 
     Raises:
-        TimeoutError: The deadline passed before every record was examined. The caller turns it
-            into the same `FingerprintError` `asyncio.wait_for` produces.
+        ScanDeadlineExceeded: The deadline passed before every record was examined. A
+            `TimeoutError`, so the caller turns it into the same `FingerprintError`
+            `asyncio.wait_for` produces; it carries `reached`, which is the scan's own unit and the
+            one place the deadline's property can be asserted from.
     """
     max_matches = settings.fingerprint_max_top_k
     index = index_for(records, deadline)
@@ -379,15 +395,22 @@ def _match_record_by_record(
         could not be parsed at all.
 
     Raises:
-        TimeoutError: The deadline passed before every record was examined.
+        ScanDeadlineExceeded: The deadline passed before every candidate was examined. The same
+            class the indexed path raises, so an `except` upstream needs no second name — but the
+            *numbers* on it are this path's: `total` is every record, where the index counts only
+            the rows it
+            could parse. `because` keeps the two messages distinguishable, which they are on
+            purpose, since a corpus too large to index and one too slow to match have different
+            remedies.
     """
     found: list[str] = []
     unreadable = 0
     for examined, record in enumerate(records):
         if time.monotonic() >= deadline:
-            raise TimeoutError(
-                f"substructure scan gave up after {examined} of {len(records)} molecule(s), "
-                "matching them one at a time because no index was available"
+            raise ScanDeadlineExceeded(
+                examined,
+                len(records),
+                "matching them one at a time because no index was available",
             )
         molecule = Chem.MolFromSmiles(record.label)
         if molecule is None:

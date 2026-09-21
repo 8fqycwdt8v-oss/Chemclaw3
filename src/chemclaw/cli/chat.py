@@ -44,6 +44,8 @@ from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.loop_cap import loop_capped
 from chemclaw.agent.spend_cap import spend_capped
 from chemclaw.agent.state import answer_text, turn_config, turn_input
+from chemclaw.agent.turn_ambient import turn_caps
+from chemclaw.agent.turn_usage import TurnUsage
 from chemclaw.connectors.registry import open_connector_specs
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
@@ -234,10 +236,26 @@ async def converse(
     # can see differs, and this one sees less.
     token = set_current_user_texts([*earlier, prompt])
     try:
-        result = await agent.ainvoke(
-            turn_input(prompt),
-            turn_config(session_id),
-        )
+        # **The cap ambients, which this path opened none of.** Both caps are attached by the
+        # harness middleware whatever the driver does, so a CLI turn was never uncapped — but
+        # without a watch the loop cap falls back to the per-branch channel snapshot, so a `task`
+        # fan-out here gave every branch the whole iteration allowance (measured at 193 model calls
+        # against a cap of 25 at width 8). The notice this function returns is read off the state
+        # `ainvoke` gave back, so it is unaffected either way.
+        #
+        # **Two consequences worth naming rather than discovering.** The repeat guard is one of
+        # these ambients, so an identical tool call is now *refused* at this prompt as it is at the
+        # front door — driven, six identical `ls` calls in one turn produce four refusals where
+        # this path executed all six. That is the guard working, and it is a behaviour change on
+        # this surface. And the ledger is passed but nothing fills it here: `set_turn_usage` is
+        # written by `api/graph_stream.py` and by a template step's `_StepMeter`, neither of which
+        # is this path, so the spend cap still reads the channel alone and an off-stream call is
+        # still counted by nothing. The fan-out half is what this closes.
+        with turn_caps(TurnUsage(), closing=f"CLI session {session_id}"):
+            result = await agent.ainvoke(
+                turn_input(prompt),
+                turn_config(session_id),
+            )
     finally:
         reset_current_user_texts(token)
     # Read off the state this call *returned*, which is the only place either cap's flag lives —

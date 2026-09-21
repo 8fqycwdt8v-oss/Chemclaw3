@@ -196,6 +196,24 @@ class CorpusMolecules:
         return verified, truncated
 
 
+class VerifyDeadlineExceeded(TimeoutError):
+    """A screen-then-verify pass stopped on its deadline, carrying how many candidates it reached.
+
+    The sibling of `science/fingerprints/molfp.ScanDeadlineExceeded` and deliberately not shared
+    with it: these are two different packages with two different callers, and the thing they have in
+    common is one attribute name rather than any behaviour. `tests/test_layering.py` would have to
+    grow an edge to make them one class, which is a worse trade than two four-line exceptions.
+
+    A `TimeoutError` subclass so every `except TimeoutError` upstream keeps working unchanged.
+    """
+
+    def __init__(self, reached: int, total: int) -> None:
+        """Carry the cut-off point beside the message that used to be the only place it appeared."""
+        super().__init__(f"substructure verify gave up after {reached} of {total} molecule(s)")
+        self.reached = reached
+        self.total = total
+
+
 def _verify_within(structures: Sequence[str], query: Chem.Mol, deadline: float) -> list[str]:
     """`pattern.matching`, one candidate at a time, giving up at `deadline` (the CPU-bound half).
 
@@ -219,14 +237,15 @@ def _verify_within(structures: Sequence[str], query: Chem.Mol, deadline: float) 
         The structures that genuinely contain `query`, in the order given.
 
     Raises:
-        TimeoutError: The deadline passed before every candidate was verified. `containing` turns
-            it into the same `FingerprintError` `asyncio.wait_for` produces.
+        VerifyDeadlineExceeded: The deadline passed before every candidate was verified. A
+            `TimeoutError`, so `containing` turns it into the same `FingerprintError`
+            `asyncio.wait_for` produces; it carries `reached` because the property this bound exists
+            for is a claim about *candidates*, and holding that as a ratio of two wall clocks is the
+            proxy that reddened the gate on its sibling in `science/fingerprints/molfp`.
     """
     verified: list[str] = []
     for examined, structure in enumerate(structures):
         if time.monotonic() >= deadline:
-            raise TimeoutError(
-                f"substructure verify gave up after {examined} of {len(structures)} molecule(s)"
-            )
+            raise VerifyDeadlineExceeded(examined, len(structures))
         verified.extend(matching([structure], query))
     return verified
