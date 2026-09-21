@@ -10,7 +10,7 @@ only appear once Temporal is sequencing the activities.
 from typing import Any
 
 import pytest
-from temporalio import activity
+from temporalio import activity, workflow
 from temporalio.client import Client
 from temporalio.worker import Worker
 
@@ -22,7 +22,9 @@ from chemclaw.durable.hypothesis_tournament import (
     TournamentRequest,
 )
 from chemclaw.durable.job_record import JobRecord
+from chemclaw.durable.template_job import TemplateRunInput, TemplateRunResult
 from chemclaw.hypotheses.models import CheckCall, CheckOutcome, DiscriminatingCheck, Hypothesis
+from chemclaw.templates.registry import discovered
 from tests.temporal_env import pydantic_client, start_env_or_skip
 
 # The real background queue, not a test-local one. `publish_note_best_effort` pins its activity
@@ -429,8 +431,18 @@ def _grounded(**kwargs: Any) -> ht._GroundedJob:
     return ht._GroundedJob(**kwargs)
 
 
-async def _run_with(extra: list[Any], stubs: list[Any], request: TournamentRequest) -> Any:
-    """Drive the workflow with extra activity stubs replacing the defaults of the same name."""
+async def _run_with(
+    extra: list[Any],
+    stubs: list[Any],
+    request: TournamentRequest,
+    children: list[Any] | None = None,
+) -> Any:
+    """Drive the workflow with extra activity stubs replacing the defaults of the same name.
+
+    `children` registers stand-in child workflows on the same queue, which a check that actually
+    launches one needs — a child nothing registered never starts, so a test without this asserts
+    only that grounding refused.
+    """
     names = {a.__temporal_activity_definition.name for a in extra}
     kept = [a for a in stubs if a.__temporal_activity_definition.name not in names]
     async with await start_env_or_skip() as env:
@@ -438,7 +450,7 @@ async def _run_with(extra: list[Any], stubs: list[Any], request: TournamentReque
         async with Worker(
             client,
             task_queue=_QUEUE,
-            workflows=[HypothesisTournamentWorkflow],
+            workflows=[HypothesisTournamentWorkflow, *(children or [])],
             activities=[*kept, *extra],
         ):
             return await client.execute_workflow(
@@ -671,3 +683,121 @@ async def test_the_requesters_roles_reach_the_activities_that_authorize() -> Non
     )
 
     assert seen == [["Chem.Privileged"]]
+
+
+#: What the stand-in `TemplateWorkflow` was asked to run. Module level because Temporal refuses a
+#: workflow class defined inside a function ("Local classes unsupported"), so the assertion cannot
+#: close over a local list.
+_TEMPLATE_RUNS: list[TemplateRunInput] = []
+
+
+@workflow.defn(name="TemplateWorkflow", sandboxed=False)
+class _StubTemplateWorkflow:
+    """Stands in for the real template run, so the launch itself is what is under test."""
+
+    @workflow.run
+    async def run(self, run: TemplateRunInput) -> TemplateRunResult:
+        _TEMPLATE_RUNS.append(run)
+        return TemplateRunResult(
+            template="tautomer-resolution", steps={}, result="the 1H form dominates at 94%"
+        )
+
+
+async def test_a_template_check_runs_the_reviewed_procedure_and_reports_it() -> None:
+    """The shape that answers a question about structures nobody wrote down.
+
+    `tautomer-resolution` enumerates a molecule's tautomers and ranks them, so the subject of the
+    calculation is a set the corpus does not contain — which is exactly what neither the tool half
+    nor the job half can express. The check names the template and a note; everything else is the
+    template's own.
+    """
+    _TEMPLATE_RUNS.clear()
+
+    @activity.defn(name="ground_check_template")
+    async def ground(
+        check: DiscriminatingCheck,
+        requested_by: str = "",
+        requested_roles: list[str] | None = None,
+        correlation_id: str = "",
+    ) -> ht._GroundedTemplate:
+        return ht._GroundedTemplate(
+            template=discovered()["tautomer-resolution"],
+            inputs={"smiles": "CC(=O)CC(C)=O"},
+            ran="tautomer-resolution(smiles=[[compound-x]]) — defaults: solvent",
+        )
+
+    field = [_hypothesis("a", "the minor tautomer is what reacts")]
+    call = CheckCall(template="tautomer-resolution", subject_note_id="compound-x")
+    result = await _run_with(
+        [ground],
+        _stubs(field=field, check_kind="computable", check_call=call),
+        _request("q-template"),
+        children=[_StubTemplateWorkflow],
+    )
+
+    assert len(_TEMPLATE_RUNS) == 1, "the template child workflow was never started"
+    assert _TEMPLATE_RUNS[0].inputs == {"smiles": "CC(=O)CC(C)=O"}
+    assert _TEMPLATE_RUNS[0].requested_by == "chemist@example.com"
+    row = result.data["ranked"][0]
+    assert row["outcome"]["verdict"] != "not-run"
+    assert "the 1H form dominates at 94%" in row["outcome"]["detail"]
+    # The disclosure rule, on the third half: what ran, over which note, and what defaulted.
+    assert "tautomer-resolution(smiles=[[compound-x]])" in row["outcome"]["ran"]
+    assert "defaults: solvent" in row["outcome"]["ran"]
+
+
+async def test_a_template_check_that_cannot_be_grounded_is_reported_not_dropped() -> None:
+    """A refusal is an outcome carrying its code, the same as on the other two halves."""
+
+    @activity.defn(name="ground_check_template")
+    async def ground(
+        check: DiscriminatingCheck,
+        requested_by: str = "",
+        requested_roles: list[str] | None = None,
+        correlation_id: str = "",
+    ) -> ht._GroundedTemplate:
+        return ht._GroundedTemplate(
+            refusal_code="template-unrunnable-here",
+            refusal_detail="this deployment serves no `chem` connector",
+        )
+
+    field = [_hypothesis("a", "the minor tautomer is what reacts")]
+    call = CheckCall(template="tautomer-resolution", subject_note_id="compound-x")
+    result = await _run_with(
+        [ground],
+        _stubs(field=field, check_kind="computable", check_call=call),
+        _request("q-template-refused"),
+    )
+
+    row = result.data["ranked"][0]
+    assert row["outcome"]["verdict"] == "not-run"
+    assert row["outcome"]["refusal_code"] == "template-unrunnable-here"
+
+
+async def test_a_template_a_deployment_turned_off_is_not_reachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deployment's own switch has to reach this path too, and once it did not.
+
+    `discovered()` is every YAML on disk; `enabled()` is the set `templates_enabled` allows, and it
+    is what the `run_<template>` launchers and therefore `authz.side_effecting_tools()` are built
+    from. Grounding against the wider one let a tournament start a procedure whose launcher is on
+    no agent surface, in no `tool_role_gates` entry an operator wrote and behind no plan gate.
+    """
+    monkeypatch.setattr(settings, "templates_enabled", "hazard-briefing")
+    plan = await ht.ground_check_template(
+        DiscriminatingCheck(
+            hypothesis_id="a",
+            question="which tautomer dominates?",
+            kind="computable",
+            expectation="the 1H form",
+            call=CheckCall(template="tautomer-resolution", subject_note_id="compound-x"),
+        ),
+        "chemist@example.com",
+        [],
+        "corr",
+    )
+
+    assert plan.refused
+    assert plan.refusal_code == "template-unavailable"
+    assert "tautomer-resolution" in plan.refusal_detail

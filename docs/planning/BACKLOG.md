@@ -1131,40 +1131,33 @@ re-proposal a future session can settle in an afternoon and a fabricated number 
       component list, which `agent.condense` deliberately does not have because a share document has none.
       Wants its own ADR and a measurement of what the extra column costs on a real corpus.
 
-## A discriminating check can name a note, and cannot name a tool's output
+## No substitution-product enumerator, so one class of "which molecule" question stays a proposal
 
-`D-2026-09-20-a-swept-axis-is-a-choice-an-invented-argument-is-a-lie` dispatches a check onto 9 of
-the 12 shipped calc jobs and refuses the other three on one ground: `scan_coordinate` needs
-`atoms`, `profile_rotation` a `torsion`, `survey_bond_strengths` `cleavages`, and **nothing in the
-number those jobs return says which atoms were driven** — a scan over the wrong pair reads exactly
-like a scan over the right one.
+`D-2026-09-20-the-chain-already-existed-and-it-is-called-a-template` lets a discriminating check
+name a reviewed procedure, so a question about a molecule's *derived* forms — tautomers,
+protonation microstates, stereoisomers, breakable bonds, degradants — is now a check the tournament
+runs rather than an experiment it proposes.
 
-**The enumerators that would ground them already exist**, which is the part worth writing down
-because the ADR's first draft got it wrong. `connectors/chem/connector.yaml` declares
-`enumerate_bond_cleavages`, `enumerate_torsions`, `enumerate_tautomers`,
-`enumerate_protonation_states`, `enumerate_stereoisomers` and `enumerate_degradants`, served from
-`Chemclaw3-mcp`; `BondCleavageSpec` is documented as "one bond to break, **as `chem`'s
-`enumerate_bond_cleavages` reports it**". The two halves were built to fit each other and nothing
-joins them.
+What that does **not** cover is a substitution series: "which regiochemistry will this reaction
+give", "what does moving the methyl do to the barrier". `rank_species` ranks a candidate set and
+three of the enumerators produce one it can rank, but none enumerates *substitution products* —
+the six in `connectors/chem/connector.yaml` are tautomers, protonation states, stereoisomers, bond
+cleavages, torsions and degradants, of which cleavages feed `survey_bond_strengths`, torsions feed
+`profile_rotation`, and `degradant-triage.yaml` argues at length that ranking degradants by free
+energy is the wrong question. So the candidate set for a substitution question exists nowhere, and the
+check has to fall back to whatever compounds happen to be written down.
 
-What is missing is the joint. `CheckCall.subjects` carries note ids and nothing else, so a check
-cannot say "enumerate this compound's cleavages, then compute their bond strengths": the
-enumeration's output is a set of structures that exist in no note. Closing it means **a second
-grounded source beside the corpus** — a deterministic tool whose output *is* the candidate set,
-under the same rule (the model selects the enumerator and its subject; it writes no member of the
-result).
+**Where it belongs is the sibling fleet**, by this repo's own boundary rule: an enumerator is a
+primitive whose identity is derivable from its inputs, a pure RDKit traversal with no judgement in
+it, so it is a server in `Chemclaw3-mcp` — and the ranking, the cache and the template that chains
+them stay here. The template to add beside it is a fifth of the same shape
+(`enumerate_substitutions` → `rank_species`), which is a data file rather than a decision.
 
-That is also what the chemist's "which molecule will be generated" question needs.
-`rank_species` can already rank a candidate set, but only one every member of which is already a
-written-down note, so a substitution product nobody has recorded cannot be ranked — and a
-substitution-product enumerator is the one shape the six above do not cover, so it is two pieces
-rather than one.
-
-Anchors: `hypotheses/models.py::CheckCall`, `hypotheses/dispatch.py::STRUCTURE_FIELDS`,
-`connectors/calc/specs.py::BondCleavageSpec`. The file that shows this has fired is
-`tests/test_hypothesis_dispatch.py::test_the_dispatchable_job_set_is_exactly_what_is_pinned`, whose
-pinned set of 9 would have to grow. Decision:
-`D-2026-09-20-a-swept-axis-is-a-choice-an-invented-argument-is-a-lie`.
+Anchors: `data/templates/tautomer-resolution.yaml` (the shape to copy),
+`connectors/chem/connector.yaml` (what the fleet declares today). The file that shows this has
+fired is `tests/test_hypothesis_dispatch.py::test_the_dispatchable_template_set_is_exactly_what_is_pinned`,
+whose pinned set would grow. Decision:
+`D-2026-09-20-the-chain-already-existed-and-it-is-called-a-template`.
 
 ## Everything else
 

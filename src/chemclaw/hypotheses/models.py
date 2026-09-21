@@ -69,10 +69,11 @@ class Objection(BaseModel):
 
 
 class CheckCall(BaseModel):
-    """A `computable` check as a *call* rather than a sentence: which tool, on which subject.
+    """A `computable` check as a *call* rather than a sentence: which target, on which subject.
 
-    **Two names and nothing else, which is the point.** The model selects a tool and points at a
-    note; it writes neither the structure nor any other argument. The structure is read off the
+    **Two names and nothing else, which is the point.** The model selects a target — a tool, a
+    job or a template — and points at a note; it writes neither the structure nor any other
+    argument. The structure is read off the
     resolved note and every remaining argument stays at the tool's own default
     (`hypotheses/dispatch.py` says why at length). A richer call type would be a richer surface for
     inventing values on.
@@ -104,6 +105,31 @@ class CheckCall(BaseModel):
     # its values are checked against the job's own declared `precondition` before anything runs.
     sweep_parameter: str = Field(default="")
     sweep_values: list[str] = Field(default_factory=list)
+
+    # A template call: a reviewed, git-committed procedure that chains an enumerator into a
+    # calculation. This is the only shape that can ask about structures **nobody wrote down** — a
+    # molecule's tautomers, its protonation states, its breakable bonds — because the enumeration
+    # produces them and the template passes them on by value. The subject is `subject_note_id`,
+    # the same pointer the tool half uses, and every other declared input stays unset so the
+    # template's own measured defaults apply.
+    template: str = Field(default="")
+
+    @property
+    def named_targets(self) -> list[str]:
+        """The targets this call names — one for a well-formed call, none for a `physical` check.
+
+        **A property rather than a validator that raises, which was the first attempt and was
+        wrong.** These calls arrive as a model's structured output, and the JSON schema declares
+        `tool`, `job` and `template` as three independent defaulted strings — mutual exclusion is
+        not expressible there, so the only thing between the model and an ambiguous call is one
+        sentence of prompt. Raising made `derive_check` fail with a `ValidationError`, which is
+        non-retryable bad data, so the hypothesis lost its check *entirely*: no outcome, no
+        refusal code, no row — indistinguishable from the model never having answered.
+
+        The dispatcher refuses it instead, with a code, which is the rule every other grounding
+        failure here follows: reported, never raised.
+        """
+        return [name for name in (self.tool, self.job, self.template) if name]
 
 
 class DiscriminatingCheck(BaseModel):

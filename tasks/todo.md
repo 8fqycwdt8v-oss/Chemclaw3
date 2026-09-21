@@ -4,8 +4,10 @@
 `docs/archive/IDEATION-2026-09-20-process-development-hte-and-protocol-prediction.md`; this is the
 implementation of it.
 
-The previous occupant, the computable-discriminating-check plan (#425), is
-`docs/archive/plans/computable-discriminating-check.md`.
+The previous occupants are archived: the computable-discriminating-check plan (#425) at
+`docs/archive/plans/computable-discriminating-check.md`, and the plan for the check that names
+a template (#426, merged into `main` while this branch was in review) at
+`docs/archive/plans/discriminating-check-naming-a-template.md`.
 
 ## The ask
 
