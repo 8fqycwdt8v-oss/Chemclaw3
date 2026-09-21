@@ -578,28 +578,125 @@ def test_a_pattern_that_cannot_finish_stops_on_a_wall_clock_instead_of_on_the_ac
     )
 
 
-def test_a_pattern_that_cannot_finish_is_not_a_bad_row() -> None:
-    """Why `PatternBudgetError` is its own class, in the one assertion that makes it load-bearing.
+def test_no_handler_on_the_ingest_path_catches_a_pattern_that_cannot_finish() -> None:
+    """The assertion the first version of this fix needed and did not have.
 
-    `src/chemclaw/ingest/eln/warehouse/adapter.py` catches `ElnMappingError` per entry and skips
-    the row — right for a NULL
-    timestamp, and exactly wrong here: the cost belongs to the pattern, so skipping and continuing
-    re-runs the same unfinishable match on every remaining row. One stall would become `rows x
-    budget` of them, each one counted as a data refusal, and the ingest would still never finish.
+    `PatternBudgetError` descended from `ChemclawError` and its docstring claimed to escape the
+    per-entry handler because it was not an `ElnMappingError`. That claim was checked against the
+    `ElnMappingError` arm in `src/chemclaw/ingest/eln/warehouse/adapter.py` — the wrong handler. A transform runs under
+    `ingest/eln/sync.py`'s `except (ChemclawError, ValidationError)`, one layer further out, which
+    caught it by construction. Driven on the real `sync_entries` with a `(a+)+$` transform over ten
+    entries at a 0.05 s budget: nothing escaped, all ten were booked as data refusals, and the page
+    cost `rows x budget` — the exact outcome the class exists to prevent, shipped under a green
+    test that asserted the wrong non-membership.
 
-    The second half is the retry: `durable/publish._BAD_DATA_TYPES` matches by class *name*, so
-    inheriting from `ChemclawError` (which is listed) buys nothing at all.
+    **So this walks the handlers instead of naming one.** Every `except` clause under
+    `ingest/eln/` is resolved to the classes it actually catches, and none of them may be a base of
+    `PatternBudgetError`. A handler added or widened later reds this, which naming a single module
+    never could.
+    """
+    import ast
+    import importlib
+
+    package = Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "ingest" / "eln"
+    catchers: list[str] = []
+    for path in sorted(package.rglob("*.py")):
+        module_name = (
+            "chemclaw.ingest.eln"
+            + "."
+            + str(path.relative_to(package).with_suffix("")).replace("/", ".")
+        ).removesuffix(".__init__")
+        namespace = vars(importlib.import_module(module_name))
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.ExceptHandler) or node.type is None:
+                continue
+            named = node.type.elts if isinstance(node.type, ast.Tuple) else [node.type]
+            for element in named:
+                if not isinstance(element, ast.Name):
+                    continue
+                caught = namespace.get(element.id)
+                if isinstance(caught, type) and issubclass(PatternBudgetError, caught):
+                    catchers.append(f"{module_name}:{node.lineno} catches {element.id}")
+
+    assert not catchers, (
+        "a pattern that cannot finish is swallowed on the ingest path and the row it was reading "
+        f"is booked as a data refusal, so the same unfinishable match is re-run on every remaining "
+        f"row: {catchers}. The cost belongs to the pattern, not to the row"
+    )
+
+
+def test_a_pattern_that_cannot_finish_is_still_refused_once_rather_than_retried() -> None:
+    """The retry half, which leaving the error hierarchy does not cover on its own.
+
+    `durable/publish._BAD_DATA_TYPES` is what Temporal reads as `non_retryable_error_types`, and it
+    matches the outermost failure's class **name** — so a type's ancestry buys it nothing either
+    way. Listed although it is no longer a `ChemclawError`, because the pattern is the same string
+    in the manifest on the next attempt and the page is the same page: a retry is the stall again.
     """
     from chemclaw.durable.publish import _BAD_DATA_TYPES
-    from chemclaw.ingest.eln.adapter import ElnMappingError
 
-    assert not issubclass(PatternBudgetError, ElnMappingError), (
-        "a pattern that cannot finish would be skipped per row and then re-run on the next one"
-    )
     assert PatternBudgetError.__name__ in _BAD_DATA_TYPES, (
         "the pattern and the page are both the same on the next attempt, so a retry is the stall "
         "again"
     )
+
+
+def test_a_repeat_count_too_large_to_expand_is_refused_before_it_is_compiled() -> None:
+    """The cost the engine swap brought with it, which the first version of this change did not see.
+
+    `re.compile` is O(1) on a bounded repeat; `regex` **expands** one. Measured: `re.compile` is
+    ~0.1 ms flat for every count, while `regex.compile` is 2.9 ms at `a{10000}`, 34 ms at
+    `a{100000}`, **431 ms and 290 MB** at `a{1000000}`, and did not finish in two minutes at
+    `a{100000000}`. That runs at binding load, on manifest text nobody here wrote, outside
+    `eln_regex_timeout_seconds` (which bounds a *match*) and outside every Temporal deadline — so a
+    `datasource.yaml` could take an ingest worker down before a single row was read. Under `re`
+    that pattern was free, which is why this guard arrived with the second engine and not before.
+
+    The scan is the guard rather than a compile, because compiling is the thing being guarded.
+    """
+    binding = _ingest()
+    binding["ingest"]["reaction"]["reaction_id"]["transform"] = [
+        {"regex": {"pattern": "a{200000}"}}
+    ]
+
+    started = time.perf_counter()
+    with pytest.raises(BindingError, match="over the 10000 this engine will expand"):
+        load_binding(binding)
+    spent = time.perf_counter() - started
+
+    assert spent < 1.0, (
+        f"the refusal itself took {spent:.2f}s, which is the pattern being compiled before it was "
+        "refused — the guard has to run first or it is not a guard"
+    )
+
+
+@pytest.mark.parametrize(
+    ("pattern", "because"),
+    [
+        (r"\d{3,6}", "a field width, which is what a real binding writes"),
+        (r"[A-Z]{2,4}-\d+", "a bounded class repeat"),
+        (r"a{2,}", "unbounded: the other remedy's subject, and free to compile"),
+        (r"\{100000\}", "an escaped brace is a literal, not a quantifier"),
+        (r"[{]{1}", "a brace inside a character class, repeated once"),
+        (r"x{not a number}", "a brace group that is not a quantifier at all"),
+    ],
+)
+def test_the_expansion_guard_does_not_refuse_a_pattern_a_binding_would_write(
+    pattern: str, because: str
+) -> None:
+    """A guard that fires on correct input reads as a working one (`tasks/lessons.md` rule 96).
+
+    The two cases worth paying for are the two ways a `{` is not a quantifier — a backslash escape
+    and a character class — because a bare scan over the whole pattern refuses `[{]{1}` and an
+    escaped brace pair, both of which every engine reads as literals. The scan tracks exactly
+    those two and nothing else.
+    """
+    binding = _ingest()
+    binding["ingest"]["reaction"]["reaction_id"]["transform"] = [{"regex": {"pattern": pattern}}]
+
+    load_binding(binding)
+
+    assert because, "every row states why it is a pattern a binding would legitimately write"
 
 
 def test_an_ordinary_pattern_still_reads_its_group_under_the_bounded_engine() -> None:

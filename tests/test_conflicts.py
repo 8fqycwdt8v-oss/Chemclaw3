@@ -509,8 +509,10 @@ def test_a_run_note_and_a_retired_note_pair_when_their_windows_intersect() -> No
 
 #: How many times the sweep read the two fields it decides overlap on, across one `find_conflicts`.
 #:
-#: Module-level because `_CountingNote` cannot hold it: `Note` is a pydantic model and a class
-#: attribute on a subclass is a `ModelPrivateAttr`, not a counter.
+#: Module-level rather than a class attribute on `_CountingNote`. A `ClassVar[int]` would work;
+#: an underscore-prefixed one is a `ModelPrivateAttr` and silently is not a counter, which is how
+#: this started life as a module global. Kept there because the counter outlives any one instance
+#: and belongs to the measurement rather than to the note.
 _FIELD_READS = [0]
 
 
@@ -530,8 +532,15 @@ class _CountingNote(Note):
         return object.__getattribute__(self, name)
 
 
-def _sweep_work(size: int, *, disjoint: bool) -> int:
-    """The field reads one `find_conflicts` costs over `size` dated notes."""
+def _sweep_work(size: int, *, disjoint: bool) -> tuple[int, int]:
+    """The field reads one `find_conflicts` costs over `size` dated notes, and what it found.
+
+    **Both, because the count alone lost half the old test.** The wall-clock version this replaced
+    also asserted `find_conflicts(4000 disjoint notes) == []`, and the first draft of the counted
+    version dropped it — so a regression that started *reporting* conflicts on a one-note-per-day
+    corpus would have passed at every size above two. The conflicts are returned rather than
+    asserted here because the overlapping arm is supposed to find plenty.
+    """
     base = date(2020, 1, 1)
     notes: list[Note] = []
     for i in range(size):
@@ -550,8 +559,8 @@ def _sweep_work(size: int, *, disjoint: bool) -> int:
             )
         )
     _FIELD_READS[0] = 0
-    find_conflicts(notes)
-    return _FIELD_READS[0]
+    found = find_conflicts(notes)
+    return _FIELD_READS[0], len(found)
 
 
 def test_a_disjoint_dated_corpus_does_a_linear_amount_of_work() -> None:
@@ -571,17 +580,28 @@ def test_a_disjoint_dated_corpus_does_a_linear_amount_of_work() -> None:
 
     Measured: field reads are **9,998 / 19,998 / 39,998 / 79,998** at 1,000 / 2,000 / 4,000 /
     8,000 notes — exactly 2.00x per doubling, byte-identical run to run. Eight times the corpus is
-    therefore 8x the work, and the quadratic arm this exists to catch is 64x. The bar sits at 16,
-    two-and-a-half orders clear of both ends and immune to whatever else the box is doing.
+    therefore **8.0014x** the work, and the quadratic arm this exists to catch is 64x.
+
+    **The bar is 10, and the figure it replaces was wrong in the reassuring direction.** This said
+    16 and called it "two-and-a-half orders clear of both ends"; 16 is 2.0x above the linear end
+    and 4.0x below the quadratic one — 0.3 and 0.6 orders. Since the quantity is a deterministic
+    count rather than a duration, it needs none of the slack that sentence was claiming: 10 leaves
+    25% over the measured 8.0014 and, solving `(8 + 64f) / (1 + f)` for a quadratic confined to a
+    fraction `f` of the corpus, catches anything touching more than **0.05%** of it, where 16
+    caught only above 0.5%.
     """
-    small = _sweep_work(1_000, disjoint=True)
-    large = _sweep_work(8_000, disjoint=True)
+    small, small_found = _sweep_work(1_000, disjoint=True)
+    large, large_found = _sweep_work(8_000, disjoint=True)
     ratio = large / small
 
-    assert find_conflicts([]) == [], "the sweep should find nothing in nothing"
-    assert ratio < 16, (
-        f"eight times the corpus cost {large:,} field reads against {small:,} — {ratio:.1f}x, "
-        "where linear is 8 and quadratic is 64. The disjoint sweep is examining pairs whose "
+    assert (small_found, large_found) == (0, 0), (
+        f"a corpus of closed non-overlapping windows produced {small_found} and {large_found} "
+        "conflicts. The sweep never examines a disjoint pair, so every one of these is a pair "
+        "whose windows do not overlap being reported as a contradiction"
+    )
+    assert ratio < 10, (
+        f"eight times the corpus cost {large:,} field reads against {small:,} — {ratio:.4f}x, "
+        "where linear is 8.0014 and quadratic is 64. The disjoint sweep is examining pairs whose "
         "windows do not overlap again"
     )
 
@@ -598,9 +618,13 @@ def test_the_work_counter_can_see_the_quadratic_arm_it_is_bounding() -> None:
     322,400 / 3,998 at 400, 1,284,800 / 7,998 at 800 — 4.00x per doubling against 2.00x, which is
     the difference the assertion above rests on being able to see.
     """
-    disjoint = _sweep_work(400, disjoint=True)
-    overlapping = _sweep_work(400, disjoint=False)
+    disjoint, _ = _sweep_work(400, disjoint=True)
+    overlapping, overlapping_found = _sweep_work(400, disjoint=False)
 
+    assert overlapping_found > 0, (
+        "the overlapping arm found no conflicts, so it is not the populated corpus this control "
+        "needs to be one"
+    )
     assert overlapping > disjoint * 8, (
         f"a corpus where every window overlaps cost {overlapping:,} field reads against the "
         f"disjoint corpus's {disjoint:,}, so this counter cannot tell the two shapes apart and "

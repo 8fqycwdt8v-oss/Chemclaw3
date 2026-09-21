@@ -655,6 +655,24 @@ topic).
 
 ## 4 — Operating it
 
+- [ ] **A per-cell regex budget does not add up to a page bound** — [S], opened 2026-09-21 by
+  `D-2026-09-21-a-pattern-that-cannot-be-timed-out-is-run-by-an-engine-that-can`, which bounds the
+  catastrophic case and states this one as what it did not do. `eln_regex_timeout_seconds` bounds
+  one `search`, and `warehouse/adapter.py::_read` runs one per reaction field, per attribute, and
+  per component and impurity **row** — so a page is `eln_sync_batch_size x cells_per_entry`
+  matches. At the shipped 100-entry batch, a pattern spending most of its 0.25 s on each of twenty
+  cells per entry is 500 s: past `eln_sync_timeout_seconds` and past the heartbeat, because
+  `map_to_ord` is synchronous CPU work no asyncio timer can interrupt, after which the retry runs
+  the identical page.
+  **Pre-existing rather than introduced**, and that is why it is a row and not a defect: the same
+  pattern under `re` cost the same page about 3x faster, so the engine swap made it worse in degree
+  and not in kind. What closes it is a cumulative budget — per entry, or per activity — and that is
+  a decision rather than an edit, because it trades refusing an honest slow pattern against
+  bounding total work, and the per-entry form gives a binding with twenty regex cells 12 ms each.
+  Anchors: `ingest/eln/warehouse/expr.py::_regex`, `ingest/eln/warehouse/adapter.py::_read`,
+  `core/config/eln.py::eln_regex_timeout_seconds`.
+
+
 - [ ] **A worker whose broker is down never opens its probe port, so "Temporal is down" and "the
   image is broken" are the same picture to everything but the container log** — [M].
   `durable/background_worker.py:98` calls `connect()` before `Worker(...)` is built and therefore

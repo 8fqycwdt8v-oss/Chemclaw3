@@ -867,9 +867,12 @@ _COUNTERS: dict[str, str] = {
         "outcome rather than a person's, and the same text proposed again must not read as a fresh "
         "proposal either — `already_open` is the model repeating itself and `already_decided` "
         "is the "
-        "idempotent path. The outcomes are `proposed`, `already_open`, `already_decided`, "
-        "`superseded`, `accepted` and `rejected` — not counted here, because a count in prose "
-        "is a claim about its author's afternoon and this one was already wrong once."
+        "idempotent path. The outcomes are `proposed`, `revived`, `already_open`, "
+        "`already_decided`, `superseded`, `accepted` and `rejected` — not counted here, because a "
+        "count in prose is a claim about its author's afternoon and this one was already wrong "
+        "once. `revived` is a re-proposal of a *superseded* body, which is a genuine state change "
+        "and booked `already_open` until it had its own label: the queue read as being repeated "
+        "at while it was in fact being refilled."
     ),
     "chemclaw_local_skill_loads_total": (
         "Skill bodies a chemist's *own* tier delivered — the same question as the counter above, "

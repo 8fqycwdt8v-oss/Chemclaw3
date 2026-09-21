@@ -1553,3 +1553,47 @@ free number at the end of its section.
      The shallow-clone half is worth its own note: `git log origin/main | wc -l` read **80**, and a
      guard asserting reachability from `origin/main` fails on history nobody fetched. One
      `git fetch --depth=2000` was the fix, and editing two merged ADRs would have been the damage.
+
+103. **I checked my "this escapes the handler" claim against a handler, and it was the wrong one.**
+     `PatternBudgetError` was built not to be an `ElnMappingError` so a reject-and-continue arm
+     would not swallow it. I found that arm in `warehouse/adapter.py`, confirmed the class was
+     outside it, wrote the docstring, the ADR and a passing test asserting the non-membership — and
+     the handler a transform actually runs under is one layer further out, `sync.py`'s
+     `except (ChemclawError, ValidationError)`, which caught it by construction. Driven, the
+     shipped behaviour was `rows x budget`: the exact outcome the class existed to prevent, under a
+     green test. **A negative claim about reachability has to be checked against every handler on
+     the path, not against the one I happened to open** — and the way to make that true is to stop
+     naming one: the replacement resolves every `except` clause under `ingest/eln/` by AST and
+     asserts none of them is a base of the class, which immediately found a *second* handler
+     (the replay path) that no prose anywhere had mentioned. When a test asserts a non-membership,
+     ask what the membership set is derived from; if I wrote the set by hand, the test is a
+     restatement of my own belief.
+
+104. **Adopting a library for one property means owning the rest of its surface, including the
+     parts the old one did not have.** I swapped `re` for `regex` in one function to get a match
+     deadline, and measured the per-call cost carefully. What I did not measure was *compile*:
+     `regex` expands a bounded repeat where `re` does not, so `a{1000000}` is 431 ms and 290 MB and
+     `a{100000000}` never returns — at binding load, on site-supplied text, outside the very budget
+     I had just added. I also wrote that `regex` is a superset of `re`, which is false: `{name}` is
+     its fuzzy-match syntax, and `[[:alpha:]]` and `\s` change meaning *silently*. **The questions
+     to ask of a swap are what the new library does that the old one did not, on every entry point
+     I use, not only on the one I adopted it for.** A differential fuzz over both engines took
+     minutes and would have found all three before review did.
+
+105. **A timing bound whose denominator is a busy-wait is an absolute bound wearing a ratio's
+     clothes.** I replaced a fixed margin with an in-process control and thought that made it
+     load-robust. It did not: the control busy-waits to a `perf_counter` deadline, so its duration
+     is pinned by the wall clock and does not move with the machine, while the numerator does —
+     under 3x oversubscription the margin fell from 4x to 1.16x. The fix was to stop measuring a
+     duration at all and count *how many times the event loop was scheduled during the work*:
+     18-28 against 0-1 quiet, 13-26 against 1 under load. **Before calling a ratio load-robust,
+     ask whether both sides actually move with load** — and prefer the countable form of the
+     property, which is what lesson 59's "separate the outcomes, not the speeds" has been saying.
+
+106. **Moving prose from a comment into a docstring is an edit, and I added a claim while doing
+     it.** Relocating the `session_events` argument I wrote "an unconsumed row is the only record
+     that something finished" — which the same docstring refutes forty lines down, where
+     `job_records` is refused from pruning precisely because it is that record. The original said
+     something narrower and true. **When relocating an argument, diff it word by word and treat any
+     sentence I did not move as new prose that needs its own check**, because a generalisation
+     added in transit reads exactly like the thing that was already there.

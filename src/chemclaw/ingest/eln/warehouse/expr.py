@@ -35,7 +35,6 @@ from typing import Any
 import regex
 
 from chemclaw.core.config import settings
-from chemclaw.core.errors import ChemclawError
 from chemclaw.ingest.eln.adapter import ElnMappingError, parse_iso_utc
 
 # One path segment: a column or block name, optionally indexed. `$` is legal in a warehouse
@@ -61,19 +60,28 @@ class PathSyntaxError(ElnMappingError):
     """A binding declared a path that is not a path. Raised at validation time, not per row."""
 
 
-class PatternBudgetError(ChemclawError):
+class PatternBudgetError(Exception):
     """A `regex` transform's pattern spent its whole budget on one cell.
 
-    **Deliberately not an `ElnMappingError`, which is the whole point of the class existing.** Its
-    two neighbours above are per-row faults and are caught per entry, so the sync rejects the row
-    and goes on — correct for a NULL timestamp and exactly wrong here, because the cost is a
-    property of the *pattern* rather than of the row. Skipping and continuing would re-run the same
-    unfinishable match against every remaining row of every remaining page, turning one stall into
-    `rows x budget` of them, each one counted as a data refusal. So this escapes the per-entry
-    handler and fails the ingest naming the pattern, the field and the ceiling.
+    **Outside `ChemclawError` deliberately, and the first spelling of this class got that wrong in
+    a way that made it a rename of the failure rather than a fix.** It descended from
+    `ChemclawError` and its docstring claimed to escape the per-entry handler because it was not an
+    `ElnMappingError` — but the handler a transform actually runs under is
+    `ingest/eln/sync.py`'s `except (ChemclawError, ValidationError)`, one layer further out than
+    the `ElnMappingError` arm in `src/chemclaw/ingest/eln/warehouse/adapter.py` that the claim was checked against. Driven
+    on the real `sync_entries` with a `(a+)+$` transform over ten entries at a 0.05 s budget:
+    nothing escaped, all ten were booked as data refusals, and the page cost 0.503 s — `rows x
+    budget`, which is the exact outcome this class exists to prevent.
 
-    Listed in `durable/publish._BAD_DATA_TYPES`, so the attempt is not retried: the pattern is the
-    same string in the manifest on the next attempt and the page is the same page.
+    `SubsystemUnavailableError` is the precedent and the argument is the same one: this is not bad
+    *data*. The cost belongs to the **pattern**, so every remaining row of every remaining page
+    would pay it again, and a reject-and-continue handler is the wrong reader for it. Outside the
+    hierarchy it reaches the activity boundary, where one catastrophic pattern costs one budget and
+    one loud failure naming itself.
+
+    Listed in `durable/publish._BAD_DATA_TYPES` by **name** — Temporal matches the outermost
+    failure's class name, so leaving the hierarchy does not remove it from that list — because the
+    pattern is the same string in the manifest on the next attempt and the page is the same page.
     """
 
 
@@ -248,6 +256,75 @@ def _iso_datetime(value: Any, options: Mapping[str, Any]) -> Any:
         raise TransformError(f"'iso_datetime' cannot read {value!r} as a timestamp") from exc
 
 
+# A literal repeat count above this is refused before the pattern is compiled.
+#
+# **`regex` expands a bounded repeat where `re` does not, which is a cost the engine swap brought
+# with it and the first version of this change did not see.** Measured: `re.compile` is ~0.1 ms for
+# every count below, flat; `regex.compile` is 0.17 ms at `a{100}`, 2.9 ms at `a{10000}`, 34 ms at
+# `a{100000}`, and **431 ms and 290 MB** at `a{1000000}`, with `a{100000000}` not finishing in two
+# minutes. That runs in `_check_pattern`, at binding load, on manifest text nobody here wrote —
+# outside `eln_regex_timeout_seconds`, which bounds a match, and outside every Temporal deadline.
+# So an ingest worker could be taken down by a `datasource.yaml` before a single row was read.
+#
+# 10,000 because it is ~3 ms to compile and four orders of magnitude above what a binding writes: a
+# realistic pattern bounds a repeat at a field width (`\d{3,6}`, `[A-Z]{2,4}`). A site that needs
+# more can say so; what it cannot do is say a number that never finishes.
+_MAX_REPEAT_COUNT = 10_000
+
+# One `{n}` or `{n,m}` quantifier. Anchored on a `{` the scan below has already established is
+# neither escaped nor inside a character class, so this never has to decide that itself.
+_REPEAT_BOUND = re.compile(r"\{(\d*)(?:,(\d*))?\}")
+
+
+def _refuse_an_unbounded_expansion(pattern: str) -> None:
+    """Raise `PathSyntaxError` if `pattern` names a repeat `regex` would expand into the heap.
+
+    **Scanned rather than parsed, and rather than compiled.** Compiling is the thing being
+    guarded, so it cannot be the guard; and `re.compile` first — which is cheap and does not
+    expand — only establishes that the pattern is *valid*, not what it costs the other engine.
+    Walking the text is the one order that works.
+
+    The walk tracks exactly two things, because they are the two ways a `{` is not a quantifier: a
+    backslash escape, and a character class, where `{` is an ordinary member. Both are the cases a
+    bare `finditer` over the whole pattern would refuse a legal pattern for — `[{]{1}` is a literal
+    brace repeated once — which is the shape `tasks/lessons.md` rule 96 is about, so the scan pays
+    for them rather than the deployment.
+    """
+    index = 0
+    in_class = False
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\":
+            index += 2
+            continue
+        if in_class:
+            in_class = char != "]"
+            index += 1
+            continue
+        if char == "[":
+            in_class = True
+            index += 1
+            continue
+        if char == "{":
+            bound = _REPEAT_BOUND.match(pattern, index)
+            # A `{` that does not open a quantifier is a literal in both engines, and neither
+            # expands it. `{2,}` is unbounded, which is the *other* remedy's subject and costs
+            # nothing to compile.
+            if bound is not None:
+                counts = [int(part) for part in bound.groups() if part]
+                if counts and max(counts) > _MAX_REPEAT_COUNT:
+                    raise PathSyntaxError(
+                        f"transform 'regex' repeats up to {max(counts)} times in "
+                        f"{pattern!r}, over the {_MAX_REPEAT_COUNT} this engine will expand. A "
+                        "bounded repeat is expanded at compile time, so a count this size is "
+                        "memory rather than a pattern — write the repeat unbounded (`+`, `*`) or "
+                        "bound it at the width of the field being read"
+                    )
+                index = bound.end()
+                continue
+        index += 1
+
+
 @lru_cache(maxsize=256)
 def _compiled(pattern: str) -> regex.Pattern[str]:
     """One site-supplied pattern, compiled once by the engine that will run it.
@@ -258,7 +335,12 @@ def _compiled(pattern: str) -> regex.Pattern[str]:
     against `re`'s 0.38 us, and going through this cache is **1.2 us** — so the cache is most of
     what the engine swap costs. `maxsize` is generous against the handful of patterns a manifest
     declares; the keys are manifest text, so the cache cannot be grown by a row.
+
+    The expansion guard runs **inside** the cache rather than beside it, so every route to a
+    compiled pattern passes it — `_check_pattern` at load and `_regex` on a cell alike — and a
+    pattern that reaches this function from somewhere added later cannot skip it.
     """
+    _refuse_an_unbounded_expansion(pattern)
     return regex.compile(pattern)
 
 
@@ -418,6 +500,14 @@ def _check_pattern(options: Mapping[str, Any]) -> None:
         compiled = _compiled(str(options["pattern"]))
     except regex.error as exc:
         raise PathSyntaxError(f"transform 'regex' has an invalid pattern: {exc}") from exc
+    except RecursionError as exc:
+        # `regex` recurses where `re` iterates, so ~180 nested groups raise here on a pattern `re`
+        # compiles without complaint. Caught by name rather than folded into a bare `except`,
+        # because everything else this call can raise is a defect in *this* module and should not
+        # be reported to a site as a pattern they wrote wrongly.
+        raise PathSyntaxError(
+            f"transform 'regex' nests groups too deeply for this engine to compile: {exc}"
+        ) from exc
     group = int(options.get("group", 0))
     if group > compiled.groups:
         raise PathSyntaxError(

@@ -24,8 +24,11 @@ to be exhaustive, not asserted to be.
   outran the retention window, exactly what this channel exists for, lost its completion, the
   session waited on it forever, and the harness "awaiting job" todo never flipped. It also
   destroyed the `system-eval-drift` alert rows, which by construction are never consumed, so
-  retention silently deleted the evidence. An unconsumed row is the only record that something
-  finished; its age says nothing about whether it is spent.
+  retention silently deleted the evidence. An unconsumed row is the thing that will wake the stream
+  waiting on it, and its age says nothing about whether it has. (Not "the only record that
+  something finished", which an earlier wording claimed while moving this argument up from a code
+  comment: `job_records` is that record, and is refused from this sweep below for exactly that
+  reason.)
 - `session_messages` — conversation history. Bounded by age, per the deployment's policy, **but an
   age cutoff alone cannot dispose of a conversation row** (D-145). A `tool_use` and the
   `tool_result` answering it are one indivisible unit: delete either half and the API rejects the

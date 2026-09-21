@@ -862,31 +862,39 @@ def test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable() -> No
     async path must leave the loop schedulable by a clear factor against *that* measurement. Both
     numbers then come from this process, this core count and this load.
 
-    **In-process was not enough, and the second correction is the size of the control.** On
-    2026-09-20 this measured **1.289x** against a fixed `/ 1.3` margin — a 0.9% miss — inside a
-    46-minute run competing with three subagents, and reddened `check` on a pull request containing
-    zero files under `src/`. `D-2026-09-13-a-stable-failure-set-is-not-two-green-runs` tabulates it
-    as failing 2 of 5 parallel runs with the serial column reading an unqualified "passes"; it
-    passes serially *on an unloaded machine*, and a merged ADR is never edited, so that table still
-    tells a reader the serial gate is safe from this. It is not. **Parallelism was never the
-    mechanism — load is**, and `-n 4` is one way to produce it.
+    **In-process was not enough, and the fix is to stop measuring a duration.** On 2026-09-20 this
+    measured **1.289x** against a fixed `/ 1.3` margin — a 0.9% miss — inside a 46-minute run
+    competing with three subagents, and reddened `check` on a pull request containing zero files
+    under `src/`. `D-2026-09-13-a-stable-failure-set-is-not-two-green-runs` tabulates it as failing
+    2 of 5 parallel runs with the serial column reading an unqualified "passes"; it passes serially
+    *on an unloaded machine*, and a merged ADR is never edited, so that table still tells a reader
+    the serial gate is safe from this. It is not. **Parallelism was never the mechanism — load
+    is**, and `-n 4` is one way to produce it.
 
-    The cause was that the control was small. At `per_tool = 0.004` the whole burst was 384 ms of
-    nominal work and the offloaded arm's worst gap 146 ms, so the two outcomes sat 2.8x apart on a
-    quiet box — inside the tens of milliseconds a loaded one adds to both. Raising the per-tool
-    cost moves the control and leaves the offloaded arm where it is, because that arm's worst gap
-    tracks the **concurrency** (threads contending for the GIL) rather than the total work:
-    measured at 12 turns it is ~300 ms whatever `per_tool` is, and at 4 turns it is 54-90 ms.
+    Raising the control's size was tried first and is not enough either, for a reason worth writing
+    down: `_costly_conversion` busy-waits to a `perf_counter` deadline, so the control's duration is
+    pinned by the wall clock and does not move with the machine. A ratio against it is therefore an
+    *absolute* bound wearing a ratio's clothes — the numerator grows under load and the denominator
+    does not. Measured under six CPU spinners on four cores, that form fell to **1.16x** against a
+    bar of 4.
 
-    Measured over six runs at the shipped numbers: offloaded 54-90 ms against a control of
-    1,286-1,290 ms — **14.2x to 25.9x** — and the defect arm reads **1.00x** in all six, because a
-    coroutine that never awaits inside `_measured` holds the loop for the whole gather. So the bar
-    at 4 sits 3.5x below the slowest honest run and 4x above the block, where 1.3 sat 0.3x above
-    it.
+    **So the quantity is a count: how many times the loop was scheduled while the work ran.** That
+    is the property the test is named for, and it is what the two outcomes actually differ in — a
+    coroutine that never awaits inside `_measured` holds the loop for the whole gather, so the
+    un-offloaded arm is scheduled essentially never, however fast or slow the box is. Measured,
+    four runs quiet: **18-28 beats offloaded against 0-1**. Under six spinners on four cores:
+    **13-26 against 1**. The bar at 4 sits 3.2x below the worst honest run *under load* and 4x
+    above the block, where every duration-shaped form of this assertion has had the defect and the
+    passing case within 30% of each other on a busy machine.
+
+    `turns` is 4 rather than 12, which narrows the regime: the premise above is
+    `service_max_concurrent_turns` turns arriving together, and what is asserted is schedulability
+    at four of them. The trade buys a control large enough to be unambiguous, and the sibling test
+    below covers that the sweep runs once per process rather than once per turn at any width.
 
     **The defect *is* the control here**, which is why there is no third arm: neutering
     `asyncio.to_thread` is the mutation this test exists to fail, and running it as the basis makes
-    the denominator a driven defect rather than a stand-in for one
+    the comparison a driven defect rather than a stand-in for one
     (`D-2026-09-18-a-mutation-watched-failing-is-half-a-guard`).
     """
     _SCHEMA_TOKENS.clear()
@@ -915,26 +923,27 @@ def test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable() -> No
         """`asyncio.to_thread` with the thread taken out — the mutation, run as the control."""
         return call(*args, **kwargs)
 
-    async def heartbeat(stop: asyncio.Event, gaps: list[float]) -> None:
-        last = time.perf_counter()
+    async def heartbeat(stop: asyncio.Event, beats: list[float]) -> None:
         while not stop.is_set():
             await asyncio.sleep(0.001)
-            now = time.perf_counter()
-            gaps.append(now - last)
-            last = now
+            beats.append(time.perf_counter())
 
-    async def burst() -> tuple[float, float]:
+    async def burst() -> tuple[int, float]:
         """The same four measurements under the same heartbeat, offloaded or not.
 
         Which of the two it is depends on whether `asyncio.to_thread` is patched out around the
         call, so both arms go through the identical code path and differ by exactly the line under
         test.
+
+        Returns **how many times the loop was scheduled while the work ran**, not how long the
+        worst stall was. Beats after the gather returns are dropped, so the count is about the
+        burst rather than about the teardown.
         """
-        gaps: list[float] = []
+        beats: list[float] = []
         stop = asyncio.Event()
-        beat = asyncio.create_task(heartbeat(stop, gaps))
+        beat = asyncio.create_task(heartbeat(stop, beats))
         await asyncio.sleep(0.05)
-        gaps.clear()
+        beats.clear()
         started = time.perf_counter()
         await asyncio.gather(
             *(
@@ -945,39 +954,40 @@ def test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable() -> No
         wall = time.perf_counter() - started
         stop.set()
         await beat
-        return max(gaps), wall
+        return sum(1 for at in beats if at <= started + wall), wall
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(
             "langchain_core.utils.function_calling.convert_to_openai_tool",
             _costly_conversion(per_tool, converted),
         )
-        worst, wall = asyncio.run(burst())
+        beats, wall = asyncio.run(burst())
         _SCHEMA_TOKENS.clear()
         with pytest.MonkeyPatch.context() as mutated:
             # Patched on `asyncio` itself, which is what `context_budget` resolves the name
             # through, and undone by the context manager before anything else runs.
             mutated.setattr(asyncio, "to_thread", _inline)
-            on_loop_worst, on_loop_wall = asyncio.run(burst())
+            blocked_beats, blocked_wall = asyncio.run(burst())
 
     assert converted, "nothing was measured, so this run says nothing about the loop"
-    assert on_loop_worst > work / 3, (
-        f"the un-offloaded control only blocked the loop for {on_loop_worst * 1000:.0f} ms against "
-        f"{work * 1000:.0f} ms of nominal work, so it is not holding the loop and cannot serve as "
-        "the basis this assertion divides by — the control has stopped being a control"
+    assert blocked_wall > work / 3, (
+        f"the un-offloaded control ran in {blocked_wall * 1000:.0f} ms against "
+        f"{work * 1000:.0f} ms of nominal work, so it is not doing the work this assertion is "
+        "about — the control has stopped being a control"
     )
-    # **4x, and the figure is measured rather than chosen.** Six runs at these numbers: offloaded
-    # 54-90 ms against a control of 1,286-1,290 ms, so 14.2x-25.9x, and the control *is* the
-    # defect, which reads 1.00x in all six. The bar therefore sits 3.5x below the slowest honest
-    # run and 4x above the block, where the 1.3 it replaces sat 0.3x above it and lost a run to a
-    # loaded box. Widen it only against a fresh measurement, and read the docstring first: the
-    # margin comes from the control's *size*, so lowering `per_tool` takes it away again.
-    assert worst < on_loop_worst / 4, (
-        f"one uninterrupted {worst * 1000:.0f} ms gap on the event loop "
-        f"(wall {wall * 1000:.0f} ms) "
-        f"against {on_loop_worst * 1000:.0f} ms when the same measurement runs on the loop "
-        f"(wall {on_loop_wall * 1000:.0f} ms): the sweep is running on the loop that serves every "
+    # **A count, and the bar is measured rather than chosen.** Four runs on a quiet box: the
+    # offloaded arm was scheduled 18-28 times during its burst, the un-offloaded control 0-1. Under
+    # six CPU spinners on four cores, 13-26 against 1. So the bar at 4 sits 3.2x below the worst
+    # honest run *under load* and 4x above the block.
+    assert beats > 4, (
+        f"the event loop was scheduled {beats} time(s) during a {wall * 1000:.0f} ms burst, "
+        f"against {blocked_beats} when the same measurement runs on the loop "
+        f"(wall {blocked_wall * 1000:.0f} ms): the sweep is running on the loop that serves every "
         "other turn's stream and both kubelet probes"
+    )
+    assert blocked_beats < beats, (
+        f"the un-offloaded control was scheduled {blocked_beats} time(s) against the offloaded "
+        f"arm's {beats}, so this run cannot tell the two apart and the bar above is vacuous"
     )
 
 

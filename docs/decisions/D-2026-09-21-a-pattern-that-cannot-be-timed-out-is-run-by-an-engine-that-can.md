@@ -39,8 +39,11 @@ in the module and everywhere else in the tree.
 - `core/config/eln.py` gains `eln_regex_timeout_seconds`, default **0.25**.
 - `_compiled` is an `lru_cache`d `regex.compile`, and `_check_pattern` goes through it too, so the
   engine that accepts a pattern at load is the engine that runs it.
-- Exceeding the budget raises a new `PatternBudgetError`, which is **not** an `ElnMappingError`
-  and is listed in `durable/publish._BAD_DATA_TYPES`.
+- `_refuse_an_unbounded_expansion` runs **inside** `_compiled`, because `regex` expands a bounded
+  repeat and `re` does not — see the costs below.
+- Exceeding the budget raises a new `PatternBudgetError`, which descends from `Exception` rather
+  than from `ChemclawError` so that no reject-and-continue handler on the ingest path swallows it,
+  and is listed in `durable/publish._BAD_DATA_TYPES` by name.
 - `regex` is declared in `[project.dependencies]` and `types-regex` in the dev group.
 
 ### Why not the two alternatives the row named
@@ -90,11 +93,57 @@ swap costs about **0.8 µs per cell**, roughly 3x `re` and about 0.1 s on a 10,0
 three regex-bound fields — against a warehouse fetch, nothing. On the case that actually scans, a
 full 1 MB cell with no match, `regex` is **faster** (0.24 ms against 0.34 ms).
 
-**A behaviour change at load.** `regex` in its default version is a superset of `re`, so a pattern
-that compiles today compiles tomorrow — but the two libraries are not bit-identical about every
-malformed input, and `_check_pattern` now reports `regex`'s message. A site whose pattern `re`
-accepted and `regex` does not would newly fail at load, naming itself. That is the right direction
-(the alternative is failing on row 1) and it is a change, so it is written here.
+**`regex` is not a superset of `re`, and an earlier draft of this ADR said it was.** That sentence
+was wrong and the hedge on it ("not bit-identical about every malformed input") did not cover the
+real cases, which are not malformed. A differential fuzz over 400,000 patterns found **578** that
+`re.compile` accepts and `regex.compile` rejects, and they are all one shape — `{name}` is
+`regex`'s **fuzzy-matching** syntax:
+
+```
+r'{sample} (\S+)'   re=ok   regex=error: expected } at position 2
+r'{id}=(\d+)'       re=ok   regex=error: expected } at position 2
+r'\d+ {solvent}'    re=ok   regex=error: expected } at position 6
+```
+
+A `datasource.yaml` pulling a value out of placeholder-shaped free text is exactly that shape. The
+failure direction is the safe one — at load, naming itself, before a row is read — but a site with
+such a pattern has to rewrite it, and that is a migration cost rather than a footnote.
+
+Two changes are **silent**, which is worse, and are recorded here because no gate can catch them:
+
+| pattern | subject | `re` | `regex` |
+| --- | --- | --- | --- |
+| `[[:alpha:]]` | `"x"` | no match (a literal set) | **match** (a POSIX class) |
+| `[\s]` | `"\x1c"` | **match** (ASCII separators) | no match (Unicode whitespace) |
+
+Both are patterns both engines accept and read differently. `re` itself emits a `FutureWarning` on
+the first, so it is dubious under either engine; the second is a genuine narrowing of `\s`. A site
+whose binding depends on either gets a different extraction with no error anywhere.
+
+**A compile-time cost that is not bounded by the match budget.** `regex` **expands** a bounded
+repeat where `re` does not:
+
+| pattern | `re.compile` | `regex.compile` | peak RSS |
+| --- | --- | --- | --- |
+| `a{100}` | 0.058 ms | 0.172 ms | — |
+| `a{10000}` | 0.082 ms | 2.9 ms | — |
+| `a{100000}` | 0.102 ms | 34 ms | — |
+| `a{1000000}` | 0.110 ms | **431 ms** | **290 MB** |
+| `a{100000000}` | 0.110 ms | did not finish in 2 min | — |
+
+That runs in `_check_pattern`, at binding load, on manifest text nobody here wrote — outside
+`eln_regex_timeout_seconds`, which bounds a *match*, and outside every Temporal deadline. So the
+first version of this change let a `datasource.yaml` take an ingest worker down before a single row
+was read, on a pattern that was free under `re`. `_refuse_an_unbounded_expansion` is the answer: a
+text scan for literal repeat counts over `_MAX_REPEAT_COUNT` (10,000, about 3 ms to compile and
+four orders above what a binding writes), run **inside** `_compiled` so every route to a compiled
+pattern passes it. Scanned rather than compiled, because compiling is the thing being guarded; and
+the scan tracks backslash escapes and character classes, because `[{]{1}` and `\{100000\}` are
+literals every engine reads as such and a bare `finditer` would refuse them.
+
+`regex` also recurses where `re` iterates, so ~180 nested groups raise `RecursionError` on a
+pattern `re` compiles. Caught and reported as a `PathSyntaxError` rather than escaping as an
+interpreter error.
 
 **A dependency line.** `regex` was already in this repository's closure as a requirement of
 `tiktoken`, a runtime dependency, and is in `uv export --frozen --no-dev` — so the cost is the
@@ -104,17 +153,47 @@ its correction about what "in the closure" has to mean. Declared rather than lef
 the reason `tiktoken`'s own comment gives one line above: a bump over there that drops it would
 take a **bound** with it, silently.
 
-### Why the refusal is not a bad row
+### Why the refusal is not a bad row, and how the first version of this got it wrong
 
-`warehouse/adapter.py` catches `ElnMappingError` per entry and skips the row. That is right for a
-NULL timestamp and exactly wrong for this: the cost belongs to the *pattern*, so skipping and
-continuing would re-run the same unfinishable match against every remaining row of every remaining
+The cost belongs to the *pattern*, so a reject-and-continue handler is the wrong reader for it:
+skipping the row re-runs the same unfinishable match against every remaining row of every remaining
 page — one stall becoming `rows × budget` of them, each booked as a data refusal, with the ingest
-still never finishing. So `PatternBudgetError` descends from `ChemclawError` directly, escapes the
-per-entry handler, and fails the ingest naming the pattern, the cell length and the ceiling.
+still never finishing.
+
+**The first version of this change claimed to have prevented that and had not.** It made
+`PatternBudgetError` a `ChemclawError` and argued it escaped the per-entry handler because it was
+not an `ElnMappingError` — a claim checked against the `ElnMappingError` arm in
+`warehouse/adapter.py`, which is the wrong handler. A transform runs under
+`ingest/eln/sync.py`'s `except (ChemclawError, ValidationError)`, one layer further out. Driven on
+the real `sync_entries` with a `(a+)+$` transform over ten entries at a 0.05 s budget: nothing
+escaped, all ten were booked as data refusals, and the page cost **0.503 s** — `rows × budget`
+exactly, the outcome the class exists to prevent, shipped under a green test that asserted the
+wrong non-membership.
+
+So `PatternBudgetError` descends from `Exception`, not from `ChemclawError`, on
+`SubsystemUnavailableError`'s precedent and the same argument: this is not bad *data*. And the
+assertion is no longer a named non-membership. `test_no_handler_on_the_ingest_path_catches_a_
+pattern_that_cannot_finish` resolves every `except` clause under `ingest/eln/` to the classes it
+actually catches and requires that none of them is a base of this one — which found a **second**
+handler the prose had never mentioned, the replay path at `sync.py:362`.
 
 Listed in `_BAD_DATA_TYPES` by **name**, because Temporal matches the outermost failure's class
-name and inheriting from a listed class buys nothing.
+name; leaving the hierarchy does not remove it from that list, and ancestry never put it there.
+
+### What this does not bound
+
+A pattern that is slow on every cell but always finishes *inside* the budget is not refused, and
+the per-cell budget does not add up to a page bound: `_read` runs once per reaction field, per
+attribute, and per component and impurity **row**, so a page is `eln_sync_batch_size ×
+cells_per_entry` matches. At the shipped 100-entry batch, a pattern spending most of its 0.25 s on
+each of twenty cells per entry is 500 s — past `eln_sync_timeout_seconds` and past the heartbeat,
+because `map_to_ord` is synchronous CPU work that no asyncio timer can interrupt.
+
+That case is **pre-existing** rather than introduced here — the same pattern under `re` cost the
+same page, ~3x faster — and this change makes it ~3x worse per cell while removing the catastrophic
+case entirely. Bounding it properly means a cumulative per-entry or per-activity budget, which
+trades refusing an honest slow pattern against bounding total work and is a decision of its own
+rather than a line in this one. It is a `BACKLOG.md` row, not a claim made here.
 
 ## Consequences
 
@@ -123,8 +202,15 @@ name and inheriting from a listed class buys nothing.
 - Every regex transform costs about 0.8 µs more per cell.
 - `eln_regex_timeout_seconds` is the knob for a site whose pattern is genuinely expensive, and the
   refusal names it.
-- The static amplifier check stays unbuilt and is now optional rather than load-bearing.
+- A literal repeat count over 10,000 is refused at load, where under `re` it was free.
+- A site whose pattern uses `{name}`, `[[:alpha:]]` or relies on `\s` matching `\x1c`–`\x1f` gets a
+  different answer — the first as a refusal at load, the other two silently.
+- A slow-but-finishing pattern still costs the page, unchanged in kind and ~3x in degree.
+- The static amplifier check stays unbuilt for the *ambiguity* class and is now optional rather
+  than load-bearing; the one unambiguous amplifier (a literal repeat count) is checked, because the
+  second engine made it a hazard rather than because the first argument changed.
 
-**Revisit when:** a site reports a legitimate pattern refused by the budget — at which point the
-question is whether the default is too tight or whether the per-cell budget should be a per-page
-one — or `re` itself gains a deadline, which would make the second engine unnecessary.
+**Revisit when:** a site reports a legitimate pattern refused by the budget or by the repeat cap —
+at which point the question is whether the default is too tight or whether the per-cell budget
+should be a per-entry one — or `re` itself gains a deadline, which would make the second engine
+unnecessary and take all three of the costs above with it.

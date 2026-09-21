@@ -392,6 +392,23 @@ def test_every_prunable_table_is_argued_where_the_others_are() -> None:
         elif not line.strip():
             current = None
 
+    # **The list holds both registers' arguments, so presence alone is not the rule.** Every
+    # refusal is a bullet too, and `session_turns`' bullet says in as many words that it is *not*
+    # in `_PRUNABLE` — so moving a refused table into the sweep would have turned this green while
+    # the paragraph it points at argued against sweeping it. A swept table's argument may not be
+    # one of those.
+    refusals = sorted(
+        table
+        for table in _PRUNABLE
+        if "is **refused**" in argued.get(table, "")
+        or "**not** in `_PRUNABLE`" in argued.get(table, "")
+    )
+    assert not refusals, (
+        f"{refusals} are swept by this job and the paragraph arguing for them argues the "
+        "opposite — it is one of the refusals. A table cannot be moved into `_PRUNABLE` while "
+        "keeping the bullet that says it is not"
+    )
+
     missing = sorted(table for table in _PRUNABLE if table not in argued)
     assert not missing, (
         f"{missing} are swept by this job and argued nowhere a check can read. Add each to the "

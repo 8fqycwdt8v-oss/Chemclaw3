@@ -1687,7 +1687,10 @@ def _one_sibling_dump(interpreter: Path, name: str) -> tuple[list[dict[str, Any]
             [str(interpreter), "-c", _SIBLING_DUMP, name],
             capture_output=True,
             text=True,
-            timeout=300,
+            # Per bundle, where it used to bound the whole batch — so the helper's own worst case
+            # is now this times the bundle count. Inert rather than dangerous: pytest's global
+            # `timeout = 180` bites first, and a dump that takes even 30 s is a finding.
+            timeout=60,
             cwd=str(interpreter.parents[2]),
         )
     except (OSError, subprocess.SubprocessError) as error:  # pragma: no cover - environment
@@ -1721,10 +1724,12 @@ def _sibling_tool_tokens(
     the run said only that there was a sibling problem. This file's own header argues the rule it
     was breaking: a check that quietly shrinks is worse than one that says what it did not look at.
 
-    The cost is one process spawn per bundle where there was one per call. A spawn loads the
-    sibling's closure, so this is the expensive kind — but it is paid only on a checkout that has a
-    built `.venv`, and what it buys is that a bundle's schemas stop being unwatched because a
-    *different* bundle grew a dependency.
+    The cost is one process spawn per bundle where there was one per call, and it is measured
+    rather than called expensive: on the sibling's own `.venv`, three names in one process is
+    1.37 s against 2.61 s in three, and nine names is 1.27 s against 6.48 s — about **0.7 s a
+    spawn**. Over this file that is 3 subprocesses becoming 16 and roughly **+9.5 s** on a ~290 s
+    file. What it buys is that a bundle's schemas stop being unwatched because a *different*
+    bundle grew a dependency.
     """
     interpreter, reason = _sibling_python()
     wanted = sorted(names)
@@ -1822,16 +1827,25 @@ def test_one_unmeasurable_bundle_does_not_take_the_measurement_of_the_others() -
     if interpreter is None:
         pytest.skip(f"{SIBLING_SKIP} {reason}, so the partition cannot be driven")
 
-    measured, unmeasured = _sibling_tool_tokens([*SERVED_ELSEWHERE, "notabundle"])
+    alone, _ = _sibling_tool_tokens(SERVED_ELSEWHERE)
+    beside, unmeasured = _sibling_tool_tokens([*SERVED_ELSEWHERE, "notabundle"])
 
-    assert set(unmeasured) == {"notabundle"}, (
-        f"a bundle that cannot be imported took {sorted(set(unmeasured) - {'notabundle'})} down "
-        "with it, which is the all-or-nothing behaviour this partition replaced"
+    # **The property is "a broken name costs its own measurement and no other", and it is stated
+    # against what this checkout could measure rather than against `SERVED_ELSEWHERE`.** The first
+    # spelling asserted `set(unmeasured) == {"notabundle"}`, which reds whenever a *real* bundle is
+    # also unmeasurable — the 2026-09-16 case this whole change is about, had the missing
+    # dependency been in one of these three rather than in `thermalsafety` — and reds with the
+    # wrong diagnosis, saying the broken bundle took the other down when it failed on its own. It
+    # would also have been the one cross-repository check in this file that fails rather than
+    # skips, against the helper's own rule that somebody's unbuilt checkout is not a regression.
+    assert set(beside) == set(alone), (
+        f"measuring {sorted(SERVED_ELSEWHERE)} beside a bundle that cannot be imported returned "
+        f"{sorted(beside)} where measuring them without it returned {sorted(alone)}: the broken "
+        "name took another bundle down with it, which is the all-or-nothing behaviour this "
+        "partition replaced"
     )
-    assert set(measured) == set(SERVED_ELSEWHERE), (
-        f"measured {sorted(measured)} where SERVED_ELSEWHERE names {sorted(SERVED_ELSEWHERE)}"
-    )
-    assert all(tokens > 0 for _tools, tokens in measured.values()), (
+    assert "notabundle" in unmeasured, "the unimportable bundle was reported as measured"
+    assert all(tokens > 0 for _tools, tokens in beside.values()), (
         "a bundle measured at zero tokens is a dump that returned nothing, which would satisfy "
         "the allowance bound by measuring nothing at all"
     )
@@ -1858,7 +1872,20 @@ def test_the_whole_directory_the_e2e_lane_mounts_is_bounded_too() -> None:
     root, reason = sibling_root("CHEMCLAW_MCP_REPO", "Chemclaw3-mcp")
     published = sorted(fleet_published_bundles(root)) if root is not None else []
     measured, unmeasured = (
-        _sibling_tool_tokens(published) if published else ({}, {"the fleet's bundles": reason})
+        _sibling_tool_tokens(published)
+        if published
+        # `reason` is empty when the checkout resolved but publishes nothing this can read — a
+        # manifests-only clone whose symlinks do not resolve. Saying so beats printing a skip whose
+        # reason is a full stop, which is what naming `reason` unconditionally produced.
+        else ({}, {"the fleet's published bundles": reason or "the checkout publishes none"})
+    )
+    # A bundle whose dump returns an empty tool list lands in `measured` at zero tokens and raises
+    # no reason, so the allowance below would pass having measured nothing. The sibling test above
+    # asserts this for `SERVED_ELSEWHERE`; this is the same guard over the wider set.
+    hollow = sorted(name for name, (tools, _tokens) in measured.items() if not tools)
+    assert not hollow, (
+        f"{hollow} published no tools at all, so the allowance below would be satisfied by a dump "
+        "that returned nothing rather than by a bundle that is small"
     )
     total = sum(tokens for _tools, tokens in measured.values())
     breakdown = ", ".join(
