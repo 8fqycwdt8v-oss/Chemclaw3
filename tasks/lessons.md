@@ -1485,6 +1485,11 @@ free number at the end of its section.
     first. `D-2026-09-13-a-stable-failure-set-is-not-two-green-runs` says this in the Makefile I
     had already read. **Two of the four real ones were only visible because the tooling was
     installed**: 73 chart tests had been skipping for want of `helm`, on a branch whose whole
-    change was a chart change. A skip is not a pass, and the instruction to say what a run skipped
-    is worth acting on rather than reporting — installing three binaries took two minutes and moved
-    the chart evidence from nothing to 211 tests.
+    change was a chart change, and four cross-repository checks were skipping for want of a built
+    `.venv` in the sibling checkout — including the two that measure the very token figures this
+    branch's central argument rests on. **A skip is not a pass, and in both cases the cost of
+    turning it into evidence was one install.** I reported the second as a standing limitation
+    twice before acting on it, which is the part to change: when a run tells you what it is not
+    evidence about, treat that as a task rather than as a caveat to pass along. Skips went 7 to 3,
+    the chart evidence went from nothing to 211 tests, and the remaining three are a host without
+    IPv6 and two surfaces declared not to be deployment surfaces.

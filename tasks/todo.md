@@ -103,10 +103,19 @@ separate `test_context_floor.py` entries had already declined that trade on smal
    the file; whether the second (six skills) is worth it is the judgement call most worth
    challenging, and the cheaper alternative — bundling four of the six — was rejected because they
    genuinely span bundles.
-3. **`SERVED_ELSEWHERE_ALLOWANCE` and `FLEET_PUBLISHED_ALLOWANCE` went unverified** in every run
-   here: both need a built `.venv` in the sibling checkout to measure schemas, and this one has
-   none. The token figures quoted throughout are that file's own recorded measurements, cited as
-   such, not measurements I took.
+3. **~~`SERVED_ELSEWHERE_ALLOWANCE` and `FLEET_PUBLISHED_ALLOWANCE` went unverified~~ — closed,
+   and the way it closed is the point.** For most of this work both skipped, because measuring the
+   fleet's schemas needs a built `.venv` in the sibling checkout and this one had none; the token
+   figures were that file's own recorded measurements, cited as such. So the sibling was built
+   (`make install` there, one command), and the four cross-repository checks now **run**: the
+   allowances are measured against the real servers, `tests/conftest.py`'s "Cross-repository checks
+   did not run" epilogue is absent from the final run, and the skip count went 7 → 3. The three
+   left are an IPv6-less host and two surfaces declared not to be deployment surfaces.
+
+   This is the same lesson as the 73 chart tests that had been skipping for want of `helm`:
+   **a skip is not a pass, and in both cases the cost of turning it into evidence was one
+   install.** What remains unverified is nothing — which is a different sentence from the one this
+   row started as, and worth the two commands it took.
 
 ### Not built, and why
 
