@@ -394,6 +394,50 @@ connectors:
 # The port every connector container listens on (its own Service maps it 1:1). One value rather than
 # per-connector: they are separate Services, so there is no port to deconflict, and a single number
 # keeps the computed URL map and the probes trivially consistent.
+  # ---------------------------------------------------------------------------------------------
+  # The five process-development bundles, all **off**
+  # (`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`).
+  #
+  # Their manifests ship in the image and declare `default_enabled: false`, so they are discovered
+  # by every checkout — which is what lets `skill-validate`, `prose-validate` and
+  # `template-validate` resolve tool names like `mtsr` — and bound by no deployment that has not
+  # asked. `chemclaw.connectorsEnabled` renders only the `enabled: true` names, so leaving these
+  # false renders an existing release's config byte-for-byte unchanged.
+  #
+  # **Turning one on costs prefix on every model call, not only on the calls that use it.**
+  # Measured: `unitops` 7,353 tokens / 7 tools, `suitability` 4,471 / 7, `thermalsafety` 3,764 / 7,
+  # `kinetics` 3,389 / 6, `props` 2,936 / 6 — 21,913 for all five, against a `PREFIX_BOUND` that
+  # `core/config/agent.py` derives both compaction thresholds from. Enable the ones the site's
+  # chemists actually ask for rather than the set.
+  #
+  # Each carries the same two operator obligations as `chem` and `safety` above: a
+  # `networkPolicy.egressDestinations` entry for the host, and `CHEMCLAW_<NAME>_TOKEN`, because the
+  # served side enforces a bearer on `/mcp` and a missing credential is a refused call.
+  props:
+    # Solvent and pure-component properties (`Chemclaw3-mcp`'s `servers/props`, port 8850).
+    enabled: false
+    server: true
+    url: http://chemclaw-mcp-props:8850/mcp
+  thermalsafety:
+    # Runaway and thermal-hazard arithmetic from measured calorimetry (`Chemclaw3-mcp`'s `servers/thermalsafety`, port 8851).
+    enabled: false
+    server: true
+    url: http://chemclaw-mcp-thermalsafety:8851/mcp
+  kinetics:
+    # Isothermal rate and ideal-reactor arithmetic (`Chemclaw3-mcp`'s `servers/kinetics`, port 8852).
+    enabled: false
+    server: true
+    url: http://chemclaw-mcp-kinetics:8852/mcp
+  unitops:
+    # Scale-up and unit-operation sizing (`Chemclaw3-mcp`'s `servers/unitops`, port 8853).
+    enabled: false
+    server: true
+    url: http://chemclaw-mcp-unitops:8853/mcp
+  suitability:
+    # USP <621> chromatographic system suitability (`Chemclaw3-mcp`'s `servers/suitability`, port 8892).
+    enabled: false
+    server: true
+    url: http://chemclaw-mcp-suitability:8892/mcp
 connectorPort: 8080
 
 # Connector bundles this image does **not** ship — `Chemclaw3-mcp`'s `manifests/` and any private

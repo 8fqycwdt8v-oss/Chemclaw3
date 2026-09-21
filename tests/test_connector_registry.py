@@ -28,8 +28,10 @@ from chemclaw.connectors.manifest import HttpEndpoint, StdioEndpoint
 from chemclaw.connectors.registry import (
     ConnectorError,
     connector_tool_names,
+    declared_connector_tool_names,
     declared_note_types,
     declared_relations,
+    declared_skills_dirs,
     discovered,
     enabled,
     forget_discovered,
@@ -796,3 +798,89 @@ def test_a_stdio_manifest_does_not_launch_its_command_unless_the_deployment_allo
 
     monkeypatch.setattr("chemclaw.core.config.settings.connector_stdio_enabled", True)
     assert [spec.name for spec in connector_specs()] == ["local"]
+
+
+def test_an_opt_in_bundle_is_discovered_and_not_enabled_by_silence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`default_enabled: false` changes what an *empty* enable-list means, and nothing else.
+
+    The property the five process-development bundles rest on
+    (`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`): the manifest is
+    on disk, so every validator can resolve its tool names, and no turn pays for its schemas.
+    """
+    _bundle(tmp_path, "alpha", _http_manifest("alpha"))
+    _bundle(tmp_path, "optin", _http_manifest("optin", tools="mtsr") + "default_enabled: false\n")
+    _use(monkeypatch, tmp_path)
+    assert set(discovered()) == {"alpha", "optin"}
+    assert [manifest.name for manifest in enabled()] == ["alpha"]
+
+
+def test_an_explicit_enable_list_reaches_an_opt_in_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Naming it wins over the flag — otherwise no configuration could ever reach it.
+
+    The asymmetry is the decision rather than an oversight. Filtering the explicit list by
+    `default_enabled` too would leave an opt-in bundle unreachable by every deployment, which is
+    `reject_widening`'s shape: a control whose condition cannot occur. This is the test that would
+    red if somebody "fixed" the inconsistency.
+    """
+    _bundle(tmp_path, "alpha", _http_manifest("alpha"))
+    _bundle(tmp_path, "optin", _http_manifest("optin", tools="mtsr") + "default_enabled: false\n")
+    _use(monkeypatch, tmp_path, enabled_list="alpha:optin")
+    assert [manifest.name for manifest in enabled()] == ["alpha", "optin"]
+
+
+def test_a_validator_resolves_an_opt_in_tool_that_no_turn_binds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The declared/bound fork, in one assertion over the two functions that disagree.
+
+    `connector_tool_names` answers "what can this turn call" and is what the runtime verifier
+    reads; `declared_connector_tool_names` answers "what does this tree declare" and is what
+    `skill-validate`, `prose-validate` and `template-validate` read. Before the fork they were the
+    same function, and a skill naming an opt-in bundle's tool would have failed validation on every
+    checkout that had not turned the bundle on — which is every checkout by default.
+    """
+    _bundle(tmp_path, "alpha", _http_manifest("alpha"))
+    _bundle(tmp_path, "optin", _http_manifest("optin", tools="mtsr") + "default_enabled: false\n")
+    _use(monkeypatch, tmp_path)
+    assert "mtsr" in declared_connector_tool_names()
+    assert "mtsr" not in connector_tool_names()
+    assert "search" in connector_tool_names()
+
+
+def test_an_opt_in_bundles_own_skill_is_still_validated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bundled skill no validation run ever reads is a check whose condition never occurs.
+
+    So `declared_skills_dirs` reaches one step further than `skills_dirs`: the agent is not offered
+    judgment about tools it cannot call, and CI still reads that judgment. Without this the four
+    skills shipped beside the process-development bundles would be free to name a tool their own
+    manifest dropped three releases ago.
+    """
+    bundle = _bundle(
+        tmp_path, "optin", _http_manifest("optin", tools="mtsr") + "default_enabled: false\n"
+    )
+    (bundle / "skills" / "thermal").mkdir(parents=True)
+    (bundle / "skills" / "thermal" / "SKILL.md").write_text("---\nname: thermal\n---\n")
+    _use(monkeypatch, tmp_path)
+    assert skills_dirs() == []
+    assert declared_skills_dirs() == [str(bundle / "skills")]
+
+
+def test_the_five_shipped_process_bundles_are_declared_and_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shipped tree, not a fixture: these five are discovered and none is bound by silence.
+
+    Asserted over the real `connectors_dir` because the cost this arrangement exists to avoid is a
+    property of what ships, not of what a tmp_path can demonstrate. ~22,000 tokens of tool schema
+    rides ahead of the system message on every model call for whoever binds these, and
+    `tests/test_context_floor.py` only stays true while the default answer here is "off".
+    """
+    process_bundles = {"thermalsafety", "kinetics", "unitops", "props", "suitability"}
+    assert process_bundles <= set(discovered())
+    assert process_bundles.isdisjoint({manifest.name for manifest in enabled()})

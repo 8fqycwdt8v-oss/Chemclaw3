@@ -1,0 +1,65 @@
+# **Declared here, served by `Chemclaw3-mcp`, and OFF unless a deployment names it.**
+#
+# This file is a copy of the fleet's own `manifests/props/connector.yaml`, which stays
+# authoritative because it is what actually answers. What this copy buys is the thing a manifest
+# does even when no turn binds it: `chemclaw_agent.declared_tool_names` reads manifests out of
+# `connectors_dirs`, so `skill-validate`, `prose-validate` and `template-validate` can resolve
+# these tool names — and without it the judgment beside this file could not name the tools it is
+# judgment *about* (the D-117 defect, the same argument `connectors/safety/connector.yaml` makes).
+#
+# **`default_enabled: false` is the other half, and it is what makes declaring this affordable.**
+# Every bound tool's schema is serialised ahead of the system message on every model call. These
+# five process-development bundles are ~22,000 tokens together, against a `PREFIX_BOUND` that
+# `core/config/agent.py` derives both compaction thresholds from — so binding them everywhere would
+# take that much thread allowance from every deployment on earth, including the ones that never ask
+# a scale-up question. So silence means off: a release that wants this capability names it in
+# `CHEMCLAW_CONNECTORS_ENABLED` (the chart's `connectors.props.enabled`) and pays for it, and one
+# that does not is byte-for-byte unchanged.
+#
+name: props
+description: >-
+  Solvent and pure-component properties for process R&D, from a vendored, checksummed table of 44
+  process solvents: boiling and melting point, density, flash point, dielectric constant, Hansen
+  parameters, water miscibility, peroxide formation, ICH Q3C class and residual-solvent limit, and
+  the GHS hazard flags behind an indicative greenness band. Also computes vapour pressure at a
+  temperature, boiling point under vacuum, and a filtered, Hansen-ranked solvent-swap shortlist.
+  Pure and synchronous — no store, no durable state, and no network call at any point.
+
+endpoint:
+  transport: http
+  # A loopback dev default; the deployment moves it.
+  url: http://127.0.0.1:8850/mcp
+  health_url: http://127.0.0.1:8850/healthz
+  # Generous for what is a dictionary lookup and a bisection, because the bound exists to stop a
+  # mute connector hanging a turn, not to police a fast one.
+  request_timeout: 15
+  # Bearer even though the shipped URL is loopback. `HttpEndpoint` would accept `mode: none` here
+  # and refuse it the moment a deployment points this at a real host — and a manifest whose auth
+  # mode changes with its address is one whose serving side gets it wrong. The token env var is the
+  # same name on both sides: Chemclaw3 reads it to send, `app.py` reads it to verify.
+  auth:
+    mode: bearer
+    token_env: CHEMCLAW_PROPS_TOKEN
+  tools:
+    - list_solvents
+    - solvent_properties
+    - vapour_pressure
+    - boiling_point_at_pressure
+    - solvent_swap_candidates
+    - compare_solvent_properties
+  # Every tool is a pure function of its arguments and a read of a read-only table: nothing here
+  # spends compute worth gating, writes anything, or has an effect the plan gate should hold. So an
+  # agent may use all six while building the plan a human is asked to approve — which is the point,
+  # since "what is the flash point of the solvent you are proposing" is a question that has to be
+  # answerable *before* approval, not after.
+  read_only:
+    - list_solvents
+    - solvent_properties
+    - vapour_pressure
+    - boiling_point_at_pressure
+    - solvent_swap_candidates
+    - compare_solvent_properties
+
+# Silence means off for this bundle; an explicit `connectors_enabled` naming it wins over
+# this flag, which is how it is ever reachable (`connectors/registry.py::enabled`).
+default_enabled: false

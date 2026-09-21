@@ -99,7 +99,7 @@ from chemclaw.agent.langgraph_agent import (
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import get_profile, registered_profile_names
 from chemclaw.agent.skill_manifest import MAX_SKILL_DESCRIPTION_CHARS
-from chemclaw.connectors.registry import enabled, server_tools_module
+from chemclaw.connectors.registry import discovered, enabled, server_tools_module
 from chemclaw.connectors.transport import _allowed
 from chemclaw.core.config import Settings, settings
 from tests.siblings import (
@@ -746,6 +746,24 @@ def _tool_schema(tool: Any) -> str:
 #: Named rather than left implicit, and asserted below, for the reason
 #: `cli/validate_connectors.py::unverified_tool_surfaces` gives about the identical blind spot one
 #: layer over: a check that quietly shrinks is worse than one that says what it did not look at.
+#: **A fifth reason this set did not grow, and the first one that is not "we declare no bundle".**
+#: `D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions` declares five of the
+#: fleet's bundles here — `thermalsafety`, `kinetics`, `unitops`, `props`, `suitability` — so the
+#: four entries below that say "this tree declares no such bundle" have stopped being true, and
+#: the set they were protecting still must not move.
+#:
+#: What keeps it right is that the allowance was never really about *declaring*. It prices what a
+#: turn is **sent**, and a turn is sent what `enabled()` binds. All five declare
+#: `default_enabled: false`, so an empty `connectors_enabled` — a fresh checkout, `make test`, CI,
+#: and every chart release that has not asked — binds none of them and pays for none of them.
+#: Their 21,913 tokens are charged to whoever names them in `CHEMCLAW_CONNECTORS_ENABLED`, which
+#: is a line in a values file rather than a property of this repository.
+#:
+#: So the membership rule is now two predicates rather than one: declared in **both** trees *and*
+#: bound by silence. `test_the_bundles_both_repositories_declare_are_the_ones_charged_to_the_
+#: allowance` asserts exactly that pair, and it is what would red if somebody flipped one of those
+#: five to `default_enabled: true` without raising the allowance in the same commit — which is the
+#: whole point of the flag being in the manifest rather than in a deployment's head.
 SERVED_ELSEWHERE = frozenset({"chem", "rxnpredict", "safety"})
 
 #: What to allow for `SERVED_ELSEWHERE`'s schemas when a *bound* on the whole prefix is needed.
@@ -1511,9 +1529,10 @@ def test_the_bundles_both_repositories_declare_are_the_ones_charged_to_the_allow
 
     **What it does not do is widen the allowance to cover the fleet's own bundles**, and that is a
     decision rather than an omission (`D-2026-09-07-a-claim-about-another-repository-is-checked-by-
-    reading-it`). `props` and `pyexec` are declared only in `Chemclaw3-mcp`; no chart entry mounts
-    them and no `enabled()` here returns them, so charging them to `PREFIX_BOUND` would raise both
-    compaction defaults for every deployment on account of two bundles those deployments do not
+    reading-it`). `pyexec` is declared only in `Chemclaw3-mcp`, and the five process-development
+    bundles are declared here but `default_enabled: false`; no chart entry mounts the first and no
+    default `enabled()` returns any of them, so charging them to `PREFIX_BOUND` would raise both
+    compaction defaults for every deployment on account of bundles those deployments do not
     bind. What they cost is bounded by `FLEET_PUBLISHED_ALLOWANCE` below instead, which is where
     the configuration that *does* mount them — `infra/live/e2e-full-stack/up.sh` — is priced.
 
@@ -1528,13 +1547,18 @@ def test_the_bundles_both_repositories_declare_are_the_ones_charged_to_the_allow
             "repositories declare is unchecked in this run."
         )
     published = set(fleet_published_bundles(root))
-    assert published & set(bundles_declared_here()) == SERVED_ELSEWHERE, (
-        f"the fleet publishes {sorted(published)} and this repository declares "
-        f"{sorted(set(bundles_declared_here()))}; the names in both are "
-        f"{sorted(published & set(bundles_declared_here()))} where SERVED_ELSEWHERE says "
-        f"{sorted(SERVED_ELSEWHERE)}. A name in both trees is a bundle this repository declares "
-        "and does not serve, so its schemas are charged to SERVED_ELSEWHERE_ALLOWANCE and through "
-        "it to PREFIX_BOUND and both compaction defaults."
+    bound_by_silence = {m.name for _, m in discovered().values() if m.default_enabled}
+    charged = published & set(bundles_declared_here()) & bound_by_silence
+    assert charged == SERVED_ELSEWHERE, (
+        f"the fleet publishes {sorted(published)}, this repository declares "
+        f"{sorted(set(bundles_declared_here()))} and binds {sorted(bound_by_silence)} by silence; "
+        f"the names in all three are {sorted(charged)} where SERVED_ELSEWHERE says "
+        f"{sorted(SERVED_ELSEWHERE)}. A name in both trees that an empty `connectors_enabled` "
+        "still binds is a bundle this repository declares, does not serve, and pays for on every "
+        "model call — so its schemas are charged to SERVED_ELSEWHERE_ALLOWANCE and through it to "
+        "PREFIX_BOUND and both compaction defaults. A bundle declaring `default_enabled: false` "
+        "is declared and not charged; flipping one to true means raising the allowance in the "
+        "same commit."
     )
 
 

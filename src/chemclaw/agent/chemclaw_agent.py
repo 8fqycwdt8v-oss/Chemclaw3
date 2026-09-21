@@ -890,6 +890,26 @@ def available_tool_names() -> set[str]:
     }
 
 
+def declared_tool_names() -> set[str]:
+    """Every tool name this *tree* declares, whether or not this deployment binds it.
+
+    `available_tool_names` above answers "what can this turn call" and is the runtime answer.
+    This is the validator's answer, and the two diverged the moment a bundle could declare
+    `default_enabled: false` (`connectors/manifest.py`): an opt-in bundle's tools are absent from
+    `enabled()` on every checkout that has not turned it on, which is every checkout by default,
+    so checking a skill or a prompt clause against the runtime set would reject a correct reference
+    to a tool this repository ships a manifest for.
+
+    Only the connector half differs — the in-process registry, the template launchers, the skills,
+    the harness and the spawner are all bound unconditionally — so this is the union with
+    `declared_connector_tool_names` in place of `connector_tool_names`, and a deletion is still
+    caught because a tool no manifest declares is in neither.
+    """
+    from chemclaw.connectors.registry import declared_connector_tool_names
+
+    return available_tool_names() | set(declared_connector_tool_names())
+
+
 def capability_tool_names() -> set[str]:
     """The three name spaces that are a *capability* — a calculation, a lookup, a search.
 
