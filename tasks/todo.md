@@ -53,7 +53,10 @@ follows that order rather than the document's.
       swap, impurity fate, analytical readiness, readiness review, robustness.
 - [ ] **S11. `attach_plate_results`** — close the design → results loop. **Not built.**
 - [ ] **S12. Step templates** for the compositions the skills describe. **Not built.**
-- [ ] **S13. Design generators** — response-surface, mixture, D-optimal, blocking. **Not built.**
+- [x] **S13. Design generators** — BoFire's `DoEStrategy` behind a `criterion` argument, not a
+      second tool (`D-2026-09-21-a-design-is-a-criterion-not-a-second-tool`). Closes the
+      `DEFERRED.md` row and the `BACKLOG.md` row, both deleted. Blocking and `NChooseK` are
+      still open and still their own row.
 
 ## Verification
 

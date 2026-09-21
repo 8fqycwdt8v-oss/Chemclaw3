@@ -91,18 +91,6 @@ topic).
   wait for a lane that can run `live-template-args`. The first is the smaller change and the one
   with a precedent.
 
-- [ ] **The optimization layer generates corners and nothing else** — [M]. `factorial_design` is
-  full or fractional factorial, so a chemist gets a screen or a BO campaign and nothing in between:
-  no response-surface design (central composite, Box-Behnken) for characterising a region, no
-  mixture design for solvent blends that must sum to one, and no blocking by plate, day or
-  operator. `science/bo/problem.py` can already *express* the constraints
-  (`LinearConstraint`); what is missing is a generator. Two `DEFERRED.md` rows are adjacent and
-  both have moved: the `DoEStrategy` D/A/E/G/I-optimality row's dependency objection was measured
-  false and deleted, leaving only a use-case objection that "design within a constrained continuous
-  space with a stated run budget" now supplies; and the `NChooseKConstraint`/blocking row's stated
-  premise is stale, since it says a tree-wide search finds no plate, well, day or operator concept
-  and `D-2026-08-28` shipped `protocols.layout.place` since.
-
 - [ ] **A site-supplied regex from a datasource manifest runs against warehouse cell text with no
   timeout, so a catastrophic pattern hangs the ingest activity** — [M].
   `ingest/eln/warehouse/expr.py:234` (`_regex`, `re.search` per row) and `:357`

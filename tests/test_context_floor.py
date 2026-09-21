@@ -684,7 +684,21 @@ KNOWN_OVERSIZED: dict[str, int] = {
     # profile that runs the harness, so a narrowed surface pays this back on each of them.
     "write_todos": 1_372,
     "suggest_next_experiment": 2_951,
-    "generate_screening_design": 2_309,
+    # **2,309 -> 2,673 on 2026-09-21, and the +364 bought a design family rather than drifting.**
+    # `D-2026-09-21-a-design-is-a-criterion-not-a-second-tool` folded BoFire's `DoEStrategy` into
+    # this tool as a `criterion` argument instead of shipping a second one. The alternative was
+    # measured: a standalone `generate_optimal_design` cost **1,435**, of which **1,367 was a second
+    # copy of the `OptimizationProblem` schema this entry is already paying for** — so the fold is
+    # 364 against 1,435, and it needed no ceiling raise where the standalone needed 1,147.
+    #
+    # It stays on this list rather than joining it, which is the distinction the dict's own warning
+    # draws: growing debt already taken on, re-recorded in the commit that moved it, is the
+    # mechanism working. Narrowing is still unavailable for the reason the two entries above share —
+    # the cost is a nested union of parameter and constraint types, not prose, so **no tool taking
+    # an `OptimizationProblem` can clear the 900-token cap**. Two docstring trims on the standalone
+    # took
+    # it 1,733 -> 1,435 and could touch no more.
+    "generate_screening_design": 2_673,
     "predict_outcome": 2_201,
     "campaign_progress": 2_087,
     # **2,307 on `main`, 1,532 here, and the difference is this branch rather than drift.** That

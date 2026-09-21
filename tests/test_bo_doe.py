@@ -12,8 +12,11 @@ from chemclaw.science.bo.engine import factorial_design
 from chemclaw.science.bo.problem import (
     CategoricalParameter,
     ContinuousParameter,
+    LinearConstraint,
     Objective,
+    OptimalDesign,
     OptimizationProblem,
+    ScreeningDesign,
 )
 
 
@@ -454,3 +457,60 @@ def test_a_reduced_design_over_a_three_level_factor_reports_the_real_error() -> 
     )
     with pytest.raises(ValueError, match="two-level design"):
         factorial_design(problem, n_generators=3)
+
+
+# --- the criterion argument: the design a factorial cannot give ----------------------------------
+
+
+def test_a_criterion_other_than_factorial_honours_a_constraint_the_grid_refuses() -> None:
+    """The fold, from the tool's side: one problem schema, two design families.
+
+    A separate `generate_optimal_design` tool was built first and measured **1,435 tokens** against
+    a 900-token per-tool cap whose own message forbids adding to the debt list — and 1,367 of that
+    was a second copy of the `OptimizationProblem` schema this tool already pays for. Folding the
+    criterion in costs almost nothing, which is what decided it.
+    """
+    problem = OptimizationProblem(
+        parameters=[
+            ContinuousParameter(name="temp", lower=20.0, upper=80.0),
+            ContinuousParameter(name="base_equiv", lower=1.0, upper=3.0),
+        ],
+        objectives=[Objective(name="yield_pct", direction="maximize")],
+        constraints=[
+            LinearConstraint(parameters=["temp", "base_equiv"], coefficients=[1.0, 10.0], rhs=100.0)
+        ],
+    )
+    design = asyncio.run(
+        generate_screening_design(problem, criterion="d-optimal", n_experiments=8, formula="linear")
+    )
+    assert isinstance(design, OptimalDesign)
+    assert len(design.runs) == 8
+    assert all(
+        float(run["temp"]) + 10.0 * float(run["base_equiv"]) <= 100.0 + 1e-6 for run in design.runs
+    )
+
+
+def test_the_default_criterion_still_returns_a_factorial_screen() -> None:
+    """The fold must not move the behaviour anybody already depends on."""
+    problem = OptimizationProblem(
+        parameters=[CategoricalParameter(name="ligand", categories=["XPhos", "SPhos"])],
+        objectives=[Objective(name="yield_pct", direction="maximize")],
+    )
+    design = asyncio.run(generate_screening_design(problem))
+    assert isinstance(design, ScreeningDesign)
+    assert len(design.runs) == 2
+
+
+def test_a_budget_is_refused_by_the_factorial_rather_than_ignored() -> None:
+    """The rule this tool already applies to `n_center` and `n_repetitions`.
+
+    A factorial's run count is the product of its level counts, so a caller who passed a budget is
+    asking for something this criterion cannot give. Being handed 128 rows after asking for 24 is
+    the failure, and it is silent.
+    """
+    problem = OptimizationProblem(
+        parameters=[CategoricalParameter(name="ligand", categories=["XPhos", "SPhos"])],
+        objectives=[Objective(name="yield_pct", direction="maximize")],
+    )
+    with pytest.raises(ValueError, match="cannot be honoured here"):
+        asyncio.run(generate_screening_design(problem, n_experiments=24))
