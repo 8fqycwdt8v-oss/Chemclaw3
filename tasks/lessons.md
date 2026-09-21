@@ -1609,3 +1609,42 @@ free number at the end of its section.
      when a fix is prompted by one gate (a path checker), re-run the others, because the fix's
      side effect is exactly what the other gate measures. Lengthening a path to satisfy a path
      rule is a line-length change; the two rules pull against each other by construction.
+
+108. **I wrote a load-bearing count four times and got it wrong in all four, in the same change that
+     stated it correctly once.** Three prose sites said the template step "opened one" cap ambient
+     and the CLI "none"; the step opened **two** (`begin_call_watch` and `begin_context_watch`), which
+     `template_activities.py`'s own new comment said correctly in the same diff. A figure that
+     disagrees with itself inside one change is exactly what
+     `D-2026-09-19-a-refusal-that-cannot-expire-is-not-a-decision` and
+     `tests/test_claude_md_figures.py` exist about. **The mechanical remedy: when a change's prose
+     states a count about the code it is changing, derive it once from `git show origin/main:<file>`
+     and paste the same sentence everywhere it belongs** — I restated it from memory three times
+     after checking it once, and memory drifted from "two of the four" to "one".
+
+109. **I described an ambient as a control on a path where nothing fills it.** `turn_caps` opens the
+     spend *watch* and the token *ledger*; I wrote that this "counts an off-stream model call" on all
+     three drivers. The watch is fed only by `MeterTurnSpend` through `wrap_model_call` — precisely
+     the calls a tool body does *not* make — and the ledger is written only by `api/graph_stream.py`
+     and by a template step's `_StepMeter`. On the CLI it stays (0, 0, 0). So the sentence was true of
+     the fan-out half and false of the off-stream half on the one caller I had just added. **Before
+     claiming an ambient buys something, find its *writer*, not its opener** — an ambient that looks
+     like a control and books nothing is the shape CLAUDE.md names by hand, and I shipped the prose
+     for one.
+
+110. **A behavioural test per driver covers the driver it drives, and I named it "every driver".**
+     The new fan-out test goes through `cli.converse` and asserts the wiring there. Replacing
+     `template_activities.turn_caps` with `nullcontext` left 129 template tests green — the same
+     "would stay green if a driver stopped opening one" hole its own docstring exists to close, one
+     driver over. The fix is a *derived* assertion: a module that calls a graph builder, outside
+     `agent/`, must enter `turn_caps`. **When a test's name quantifies over a set, either enumerate
+     the set from the code or rename the test to what it actually drives** — and prefer the derived
+     form, because it covers the fourth driver nobody has written yet.
+
+111. **A guard I called "the guard over the whole class" read one of the two places the class
+     lives.** The scientific-notation check walked container `env` lists. `config.yaml` renders
+     `.Values.config`, `retention.windows` and `retention.artifactStore` through `| quote` into a
+     **ConfigMap**, which every pod reads through `envFrom` — so a float there crash-loops the whole
+     release rather than one Deployment, and my guard could not see it. Driven:
+     `CHEMCLAW_ARTIFACT_STORE_MAX_BYTES: 10737418240` renders as `"1.073741824e+10"`. **When I write
+     "the whole class", enumerate the places the class can occur before the sentence goes in** — here
+     it was two renderers and I checked the one I had just touched.

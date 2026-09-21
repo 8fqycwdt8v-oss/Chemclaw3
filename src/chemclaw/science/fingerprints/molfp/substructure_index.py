@@ -211,9 +211,7 @@ class CorpusIndex:
         """How many molecules the library holds — the unreadable rows are not among them."""
         return len(self.labels)
 
-    def labels_matching(
-        self, pattern: Chem.Mol, limit: int, deadline: float
-    ) -> tuple[list[str], int]:
+    def labels_matching(self, pattern: Chem.Mol, limit: int, deadline: float) -> list[str]:
         """Return up to `limit` stored labels containing `pattern`, in stored order.
 
         `limit` is the caller's result cap **plus one**, and it must stay that way: `maxResults=cap`
@@ -260,11 +258,7 @@ class CorpusIndex:
             deadline: `time.monotonic()` value past which the scan stops.
 
         Returns:
-            The matching labels in stored order, at most `limit` of them, and **how many records
-            the scan reached** — which is the whole corpus on an ordinary run and the cut-off point
-            on one that stopped early on its own `limit`. It was already computed and discarded;
-            `ScanOutcome` carries it out so the deadline's property can be asserted as a record
-            count rather than as a ratio of two wall clocks.
+            The matching labels in stored order, at most `limit` of them.
 
         Raises:
             ScanDeadlineExceeded: The deadline passed before the whole slice was scanned. A
@@ -297,7 +291,7 @@ class CorpusIndex:
             projected = total if per_record <= 0 else int(slice_seconds / per_record)
             chunk = max(1, min(projected, chunk * _CHUNK_GROWTH))
             start = end
-        return found, start
+        return found
 
 
 def _corpus_digest(labels: list[str]) -> bytes:

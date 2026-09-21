@@ -385,7 +385,7 @@ def _sleeping_scan(seconds: float) -> Callable[..., ScanOutcome]:
 
     def _scan(*_args: object, **_kwargs: object) -> ScanOutcome:
         time.sleep(seconds)
-        return ScanOutcome([], False, 0, 0)
+        return ScanOutcome([], False, 0)
 
     return _scan
 
@@ -502,29 +502,45 @@ def test_a_scan_past_its_deadline_stops_instead_of_matching_the_rest_of_the_corp
     read from. `ScanDeadlineExceeded` carries it as `reached`, and `ScanOutcome` carries the
     unbounded run's as `records_reached`.
 
-    The two outcomes are now **integers that do not move with the machine**: a bounded scan reaches
-    a handful of the 16 records, an unbounded one reaches all 16, and a deadline that does not reach
-    the worker thread reaches all 16 *while raising*. The bar is a quarter of the corpus, which no
-    honest run approaches and no leak can stay under.
+    **The bar is derived from the chunking rather than chosen, and a quarter of the corpus was
+    wrong in the direction that reassures.** `reached` is not machine-invariant: the first chunk is
+    `_FIRST_CHUNK` (1) and the next is sized from what that one cost, capped at `_CHUNK_GROWTH`
+    times it — so a *faster* machine reaches **more** records before the deadline, and the honest
+    ceiling is `_FIRST_CHUNK + _CHUNK_GROWTH`. Measured here at 139-142 ms per record it is 2;
+    emulating faster boxes it is 3 at ~90 ms, 4 at ~73 ms and 5 at ~14 ms, so a bar of
+    `len(records) // 4` (4) fails on a machine roughly 1.7x this one. The bar is that ceiling, which
+    cannot move, and the leak shapes the old ratio version tabulated — 8 of 16 and 14 of 16 — are
+    both far above it.
+
+    The unbounded arm needs no count: on an *unmatchable* pattern a scan can only return no hits by
+    examining every record, so `hits == []` is the whole-corpus control. A `records_reached` field
+    was added to `ScanOutcome` for this and removed again — see its docstring for the two paths that
+    disagreed about what it meant.
     """
     pattern = substructure_pattern(_UNMATCHABLE)
     per_record = _one_match_seconds()
     records = _dendrimer_records(16)
+    reachable = substructure_index._FIRST_CHUNK + substructure_index._CHUNK_GROWTH
 
     with pytest.raises(ScanDeadlineExceeded) as stopped:
         search._scan_for_matches(records, pattern, time.monotonic() + per_record * 2)
 
     outcome = search._scan_for_matches(records, pattern, time.monotonic() + 3600)
 
-    assert outcome.hits == [], "unmatchable, so the unbounded run really did examine all 16"
-    assert outcome.records_reached == len(records), (
-        f"the unbounded run reached {outcome.records_reached} of {len(records)} records, so it is "
-        "not the whole-corpus control this compares against"
+    assert outcome.hits == [], (
+        "unmatchable, so the unbounded run can only have returned nothing by examining all 16 — "
+        "which is what makes it the whole-corpus control"
     )
-    assert stopped.value.reached < len(records) // 4, (
+    assert stopped.value.reached <= reachable, (
         f"the scan reached {stopped.value.reached} of {len(records)} records past its deadline, "
-        "which is the bound failing to reach the worker thread — it releases the caller and cannot "
-        "stop a thread, so what is left running is a full scan nobody is waiting for"
+        f"where the chunking allows at most {reachable} — one record, then at most "
+        f"{substructure_index._CHUNK_GROWTH}x it. That is the bound failing to reach the worker "
+        "thread: it releases the caller and "
+        "cannot stop a thread, so what is left running is a full scan nobody is waiting for"
+    )
+    assert stopped.value.reached < len(records), (
+        f"the scan reached every one of {len(records)} records while still raising, which is the "
+        "deadline being checked after the work rather than before it"
     )
 
 

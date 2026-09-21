@@ -92,20 +92,47 @@ spec:
                    is 178.9 MiB a parse may spend there against 332.7 here. Same shape and same
                    argument as `maxConcurrentActivities` in `deployment-connectors.yaml`: an
                    explicit `env` entry beats the same key arriving through `envFrom`, which is how
-                   the ConfigMap's value reaches every other component. `values.yaml` carries what
-                   it buys and what it still refuses. */}}
+                   a *stated* fleet-wide value would reach every other component. The shipped
+                   `config` states none, so elsewhere the code default applies. `values.yaml`
+                   carries what this buys and what it still refuses. */}}
             {{- with .Values.workers.background.documentParseMemoryBytes }}
             - name: CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES
-              {{- /* `printf "%.0f"` and not `| quote`, because Helm parses a nine-digit values entry
-                     as a **float** and `quote` then renders it in scientific notation. Driven:
+              {{- /* `int64` and not `| quote`, because Helm parses a nine-digit values entry as a
+                     **float** and `quote` then renders it in scientific notation. Driven:
                      `335544320` reached the container as `"3.3554432e+08"`, and
                      `CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES=3.3554432e+08` is a pydantic
                      `int_parsing` error — so every background worker would have crash-looped on
                      start. The chart test did not see it because it reads `values.yaml` through
                      `yaml.safe_load`, where the same entry is an `int`; the render is the only place
                      the defect exists. `test_no_rendered_setting_reaches_a_pod_in_scientific_
-                     notation` is the guard over the whole class. */}}
-              value: {{ printf "%.0f" (float64 .) | quote }}
+                     notation` is the guard over that class.
+
+                     `int64` rather than `printf "%.0f"`, which was the first fix: a byte count is an
+                     integer, and `float64` cannot hold one past 2^53 — `9007199254740993` renders as
+                     `...992`. `int64` is exact for every value this key can legitimately take.
+
+                     The `fail` is for what `int64` does with the rest: it answers **0** for a
+                     non-numeric string, and `320Mi` is the spelling an operator reaches for here
+                     because it is the one `resources` takes two screens down. A budget of 0 makes
+                     `isolate._bound_allocations` set the ceiling to the resident set, so *every*
+                     document on this pod is refused — counted as `skipped_unreadable`, quieter than
+                     a crash-loop and harder to find. This key takes a plain byte count or nothing.
+                     */}}
+              {{- /* Normalised by *kind* before it is checked, because the two entry paths differ:
+                     a values file gives a `float64` (whose `toString` is the exponent form this
+                     whole comment is about) and `--set` gives an `int64` or a string (whose
+                     `toString` is the exact digits). `%.0f` is exact for every byte count a pod can
+                     hold; the string arm is exact for anything at all. */}}
+              {{- $digits := "" }}
+              {{- if kindIs "float64" . }}
+              {{- if eq (floor .) . }}{{ $digits = printf "%.0f" . }}{{ end }}
+              {{- else }}
+              {{- $digits = toString . }}
+              {{- end }}
+              {{- if not (regexMatch "^[1-9][0-9]*$" $digits) }}
+              {{- fail (printf "workers.background.documentParseMemoryBytes must be a positive whole byte count, got %v. `320Mi` and other resource suffixes are not accepted here — they become 0, and a budget of 0 makes this pod refuse every document rather than fall back. Remove the key to use the fleet-wide value" .) }}
+              {{- end }}
+              value: {{ $digits | quote }}
             {{- end }}
             {{- include "chemclaw.env" . | nindent 12 }}
           envFrom:

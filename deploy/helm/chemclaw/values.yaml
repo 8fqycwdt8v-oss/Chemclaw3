@@ -204,8 +204,15 @@ workers:
     # second justification — one code version replays any unfinished history — is independent of
     # the replica count and still live.
     replicas: 1
-    # What one document parse may allocate **on this pod**, overriding the fleet-wide
-    # `CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES` the shared ConfigMap carries.
+    # What one document parse may allocate **on this pod**, as an explicit
+    # `CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES` on this Deployment.
+    #
+    # It overrides whatever the pod would otherwise read, which today is the *code* default: the key
+    # is deliberately absent from `config` below, so nothing puts it in the shared ConfigMap. Set it
+    # there to move the whole release and this entry still wins here — an explicit `env` beats the
+    # same name arriving through `envFrom`, and
+    # `tests/test_deploy_chart.py::_parse_budget_mib` resolves the three sources in that order so a
+    # fleet-wide raise cannot move a real budget without moving the inequality.
     #
     # **One number was serving two pods with twice the room between them.** The shipped default is
     # derived downwards from the *front door* — a 1Gi limit, 523 MiB resident with a warm parse

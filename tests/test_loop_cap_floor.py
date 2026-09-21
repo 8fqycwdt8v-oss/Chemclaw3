@@ -117,8 +117,8 @@ def test_the_cap_itself_reads_the_floor_and_not_only_the_channel() -> None:
     the runtime is unused by it, which is why `None` is enough.
 
     **Both watch states, because the one this originally drove is the one production never has.**
-    `api/runner.py:1016` calls `begin_loop_watch()` on **every** turn, so a live turn always reaches
-    this hook with a watch open — and with no watch open the two per-branch floors are the only
+    every driver now enters `agent.turn_ambient.turn_caps`, so a live turn always reaches this hook
+    with a watch open — and with no watch open the two per-branch floors are the only
     terms in the comparison, which hides what the third term does to them. Driven: the mutation
     that has the watch *replace* the floors rather than join them (`turn = watch.calls if watch is
     not None else own`) leaves 104 tests green, and at a cap of 25 the no-watch arm still answers
@@ -300,7 +300,8 @@ def test_every_driver_of_a_turn_binds_a_fan_out_and_not_only_the_front_door(
     `_drive` calls `begin_loop_watch()` by hand, so it measures the *mechanism* — that a watch makes
     a fan-out share one allowance — and would stay green if every real driver stopped opening one.
     Two of the three had: `api/runner.py` opened all four cap ambients,
-    `durable/template_activities.py` opened one, and `cli/chat.py` opened none. So the floor bound
+    `durable/template_activities.py` opened two of them (the call watch and the context record,
+    neither of them a cap), and `cli/chat.py` opened none. So the floor bound
     the front door and nothing else, and a fan-out inside a CLI turn or a template step got the
     per-branch fallback — one whole allowance per branch.
 
@@ -389,4 +390,56 @@ def test_every_driver_of_a_turn_binds_a_fan_out_and_not_only_the_front_door(
         f"with `turn_caps` neutered the same fan-out made {unwired.calls} calls, which is not over "
         f"the cap of {cap} — so this test is not measuring the wiring and would pass with every "
         "driver's watch removed, which is exactly the hole it was written to close"
+    )
+
+
+def test_every_module_that_drives_a_turn_enters_the_shared_cap_manager() -> None:
+    """The other half of the wiring, because the behavioural test above reaches one driver.
+
+    It drives `cli.converse`, which was the empty case. The template step's half has no behavioural
+    cover at all: a session plugin replacing `template_activities.turn_caps` with `nullcontext` left
+    `tests/test_template_agent_step.py`, `test_template_job_record.py` and `test_templates.py` at
+    **129 passed** — so losing the shared fan-out allowance, the repeat guard, the context
+    record and
+    `compacted` on that step's cost row is invisible. That is the same hole the test above exists to
+    close, one driver over.
+
+    **Derived rather than listed, so a fourth driver is covered the day it is written.** A module
+    can only drive a turn if it has a graph to drive, and the two builders are
+    `build_langgraph_agent` and
+    `build_turn_agent` — so the rule is that a module which *calls* one of them, outside `agent/`
+    itself, enters `turn_caps`. `agent/` is excluded because `turn_graph.py` builds the peer graphs
+    *inside* a turn that is already stamped, and `langgraph_agent.py` builds its own; neither is a
+    driver. A behavioural test per driver would be better and is not available for the Temporal
+    activity without a broker, which is what makes this worth having.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
+    builders = {"build_langgraph_agent", "build_turn_agent"}
+    drivers: dict[str, bool] = {}
+    for path in sorted(root.rglob("*.py")):
+        if path.relative_to(root).parts[0] == "agent":
+            continue
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        builds = any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in builders
+            for node in ast.walk(tree)
+        )
+        if builds:
+            drivers[str(path.relative_to(root))] = "turn_caps(" in source
+
+    assert drivers, (
+        "no module outside `agent/` calls a graph builder, so this test is asserting nothing — the "
+        "builders have been renamed or the drivers have moved"
+    )
+    missing = sorted(name for name, enters in drivers.items() if not enters)
+    assert not missing, (
+        f"{missing} build a turn's graph and never enter `agent.turn_ambient.turn_caps`, so there "
+        "the loop cap falls back to the per-branch channel snapshot and a `task` fan-out gives "
+        "every branch the whole allowance. Two of the three drivers were in this state"
     )

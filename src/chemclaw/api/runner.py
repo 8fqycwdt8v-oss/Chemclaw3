@@ -955,7 +955,7 @@ def _turn_ambient(
     usage: TurnUsage,
     user_texts: Sequence[str],
 ) -> Iterator[None]:
-    """Stamp the six ambients a turn runs under, and unstamp every one on the way out.
+    """Stamp the ambients only a request can supply, and unstamp every one on the way out.
 
     **Synchronous on purpose, and that is the point of extracting it.** These resets used to sit at
     the bottom of `run_turn`'s `finally`, under a comment warning that nothing in that block may
@@ -965,7 +965,12 @@ def _turn_ambient(
     acquire an `await` between the last statement and the reset, so the rule is now structural
     rather than a comment somebody has to keep obeying.
 
-    Each of the five, and why it is ambient rather than an argument:
+    **The four cap watches and the token ledger are not here any more** — they are
+    `agent.turn_ambient.turn_caps`', entered below, because two other drivers of a turn need the
+    same five and were opening two and none of them. What stays is what only a *request* has an
+    argument for.
+
+    Each of the ones that stay, and why it is ambient rather than an argument:
 
     - the session, so a job-launching tool records push-back to the right session (F3-T3) — never a
       model-supplied argument;
@@ -974,17 +979,6 @@ def _turn_ambient(
       `build_langgraph_agent`: agents are cached per profile for the process's lifetime, so a
       build-time id was shared by every turn from every user on the pod, and the audit trail could
       not tell two conversations apart;
-    - the tool-call counter, so the identical question asked a third time is refused rather than
-      re-executed (`chemclaw.agent.repeat_guard`);
-    - the loop watch, so a turn stopped by the runaway cap can say so instead of looking exactly
-      like one that finished (`chemclaw.agent.loop_cap`). A no-op without the harness, which is what
-      attaches the cap;
-    - the token ledger, so a model call that rides no stream can still be booked against this turn.
-      Every call the graph makes is metered off its `messages` stream — including the ones a tool
-      body makes, which inherit the graph's callbacks — but the verifier's judge runs *after* that
-      stream is exhausted, so its tokens reached neither the budget guard nor the `turn_costs` row.
-      Ambient rather than threaded, because that call sits three frames below `build_answer_event`
-      inside a provider's own chain (`chemclaw.agent.turn_usage.off_stream_metering`).
 
     `dry_run` rides here too for the reason it is ambient at all: the model can neither set it nor
     clear it (IDEA-4). `user_texts` — the chemist's own words in this thread, this turn's message
@@ -996,9 +990,11 @@ def _turn_ambient(
     how far back it reaches is `core.turn_text`'s, and the read that fills it is the caller's,
     because nothing in this function may `await`.
 
-    Reset order is the reverse-ish order the original spelled out and is preserved exactly: the two
-    watches, the dry-run flag, then the three identity vars. `set_current_identity` is skipped
-    entirely when there is no actor, so the unauthenticated path stamps nothing to reset.
+    Reset order is unchanged by the extraction and was checked rather than assumed: the nested
+    `with` exits while the exception propagates out of the `yield`, so the five cap ambients still
+    tear down first and in their old order, then the dry-run flag, then the three identity vars.
+    `set_current_identity` is skipped entirely when there is no actor, so the unauthenticated path
+    stamps nothing to reset.
     """
     session_token = set_current_session_id(session_id)
     user_texts_token = set_current_user_texts(user_texts)
@@ -1008,7 +1004,8 @@ def _turn_ambient(
     try:
         # **The four cap ambients are `agent.turn_ambient.turn_caps`', not this function's, and
         # that is the whole of the change.** This front door opened all four; the Temporal
-        # template step opened one and the CLI opened none, so on those two paths a fan-out was
+        # template step opened two of them and the CLI opened none, so on those two paths a
+        # fan-out was
         # bounded by the per-branch channel snapshot rather than by the turn and an off-stream
         # model call was counted by nothing. Four zero-argument watches opened by hand in three
         # drivers is a thing three callers get wrong differently; a context manager is a thing a

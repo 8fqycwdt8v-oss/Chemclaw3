@@ -169,9 +169,29 @@
        The `data:` body is a `define` for the ordinary reason: two copies of it would be two
        configurations that only have to agree. `chemclaw.configChecksum` hashes this whole file, so
        every key still reaches the pod annotation that forces the rollout. */ -}}
+{{- /* One setting, rendered so a number reaches the pod as a number `Settings` can read.
+
+       **Helm parses every values-file number as a `float64`** — it goes through JSON — and `quote`
+       then prints a large one the way Go does: `CHEMCLAW_ARTIFACT_STORE_MAX_BYTES: 10737418240`
+       rendered as `"1.073741824e+10"`, which is a pydantic `int_parsing` error. Every pod reads this
+       ConfigMap through `envFrom`, so that is not one Deployment crash-looping, it is the release.
+       Driven; and nothing caught it, because `--set` goes through Helm's strvals parser and keeps an
+       int64, so only the values-file path — the one an operator edits — has the defect.
+
+       An integral float is printed with no exponent; a genuinely fractional setting
+       (`CHEMCLAW_ELN_REGEX_TIMEOUT_SECONDS: 0.25`) must keep its fraction, so it goes through
+       `quote` unchanged, where Go prints a number of that magnitude plainly. */ -}}
+{{- define "chemclaw.settingValue" -}}
+  {{- if and (kindIs "float64" .) (eq (floor .) .) -}}
+    {{ printf "%.0f" . | quote }}
+  {{- else -}}
+    {{ . | quote }}
+  {{- end -}}
+{{- end -}}
+
 {{- define "chemclaw.configData" -}}
   {{- range $key, $value := .Values.config }}
-  {{ $key }}: {{ $value | quote }}
+  {{ $key }}: {{ include "chemclaw.settingValue" $value }}
   {{- end }}
   {{- /* Derived from `retention.windows` rather than hand-written in `config`, so stating a
          window and forgetting the enable switch cannot happen — the switch exists only as a
@@ -179,7 +199,7 @@
   {{- if .Values.retention.windows }}
   CHEMCLAW_RETENTION_ENABLED: "true"
   {{- range $key, $value := .Values.retention.windows }}
-  {{ $key }}: {{ $value | quote }}
+  {{ $key }}: {{ include "chemclaw.settingValue" $value }}
   {{- end }}
   {{- end }}
   {{- /* The artifact-eviction bounds, from `retention.artifactStore` rather than `config`, so the
@@ -188,7 +208,7 @@
          creates the eviction Schedule when either bound is non-zero, so a stated bound *is* the
          switch and a second one could only disagree with it. */}}
   {{- range $key, $value := .Values.retention.artifactStore }}
-  {{ $key }}: {{ $value | quote }}
+  {{ $key }}: {{ include "chemclaw.settingValue" $value }}
   {{- end }}
   {{- /* Derived from the knowledge volume layout rather than hand-written in `config`, so the
          path the note writer writes to can never drift from the volume it is mounted on

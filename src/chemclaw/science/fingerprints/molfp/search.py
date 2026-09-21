@@ -268,25 +268,27 @@ async def find_substructure_matches(
 
 
 class ScanOutcome(NamedTuple):
-    """What one substructure pass found, the two ways it fell short, and how far it actually got.
+    """What one substructure pass found, and the two ways it fell short of the whole corpus.
 
-    A tuple rather than positional returns because the caveats are read together and each answers a
-    different question: `hits_truncated` says the count is a floor, `unreadable` says the *corpus*
-    was not fully examined and so a miss is not a negative.
+    A tuple rather than three positional returns because the two caveats are read together and
+    each answers a different question: `hits_truncated` says the count is a floor,
+    `unreadable` says the *corpus* was not fully examined and so a miss is not a negative.
 
-    `records_reached` is not a caveat and is not read by anything in `src/` — it is the scan's own
-    unit, carried out so the deadline's property can be *asserted* as a record count. That property
-    is "it stopped instead of going on matching every remaining record", and it was held by
-    `bounded < unbounded / 2` over two wall clocks: a proxy that failed `main` twice in one morning
-    at 0.270 and 0.271 against a bar of a quarter while measuring 0.186-0.206 on an idle machine.
-    Both scan paths already computed the number and formatted it into an exception message, which is
-    the one place a test could not reach it from.
+    **A `records_reached` field was added here and removed again, and the reason is worth keeping.**
+    The deadline's property is a claim about records — "it stopped instead of going on matching
+    every remaining record" — so carrying the count out looked like the way to assert it. But the
+    two scan paths do not agree about what it *means*: the index excludes unreadable rows from
+    `self.labels` and stops its `while` on the hit `limit`, while `_match_record_by_record` iterates
+    to the end after the cap, so one corpus measured **341** against **3300**. A field two paths
+    disagree about is worse than no field, and it bought nothing: on an *unmatchable* pattern a scan
+    can only return no hits by examining everything, so `hits == []` already witnesses the
+    whole-corpus control. The count the property actually needs is the one on the **bounded** run,
+    and that is `ScanDeadlineExceeded.reached`, where a single path produces it.
     """
 
     hits: list[MoleculeHit]
     hits_truncated: bool
     unreadable: int
-    records_reached: int
 
 
 def _scan_for_matches(
@@ -333,17 +335,17 @@ def _scan_for_matches(
         be parsed into the index at all.
 
     Raises:
-        TimeoutError: The deadline passed before every record was examined. The caller turns it
-            into the same `FingerprintError` `asyncio.wait_for` produces.
+        ScanDeadlineExceeded: The deadline passed before every record was examined. A
+            `TimeoutError`, so the caller turns it into the same `FingerprintError`
+            `asyncio.wait_for` produces; it carries `reached`, which is the scan's own unit and the
+            one place the deadline's property can be asserted from.
     """
     max_matches = settings.fingerprint_max_top_k
     index = index_for(records, deadline)
     if index is None:
-        found, unreadable, reached = _match_record_by_record(
-            records, pattern, max_matches + 1, deadline
-        )
+        found, unreadable = _match_record_by_record(records, pattern, max_matches + 1, deadline)
     else:
-        found, reached = index.labels_matching(pattern, max_matches + 1, deadline)
+        found = index.labels_matching(pattern, max_matches + 1, deadline)
         unreadable = index.unreadable
     hits_truncated = len(found) > max_matches
     if hits_truncated:
@@ -356,13 +358,12 @@ def _scan_for_matches(
         [MoleculeHit.for_molecule(label) for label in found[:max_matches]],
         hits_truncated,
         unreadable,
-        reached,
     )
 
 
 def _match_record_by_record(
     records: list[FingerprintRecord], pattern: Chem.Mol, limit: int, deadline: float
-) -> tuple[list[str], int, int]:
+) -> tuple[list[str], int]:
     """Match `pattern` by parsing each stored SMILES in turn — the scan with no index behind it.
 
     **This is the floor the index has to beat, and therefore also the floor it falls back to.** An
@@ -394,13 +395,16 @@ def _match_record_by_record(
         could not be parsed at all.
 
     Raises:
-        ScanDeadlineExceeded: The deadline passed before every record was examined. Shared with the
-            indexed path so a caller — and a test — reads `reached` the same way whichever path ran;
-            the two used to raise the same *type* with two different messages and no attribute.
+        ScanDeadlineExceeded: The deadline passed before every candidate was examined. The same
+            class the indexed path raises, so an `except` upstream needs no second name — but the
+            *numbers* on it are this path's: `total` is every record, where the index counts only
+            the rows it
+            could parse. `because` keeps the two messages distinguishable, which they are on
+            purpose, since a corpus too large to index and one too slow to match have different
+            remedies.
     """
     found: list[str] = []
     unreadable = 0
-    examined = 0
     for examined, record in enumerate(records):
         if time.monotonic() >= deadline:
             raise ScanDeadlineExceeded(
@@ -414,6 +418,4 @@ def _match_record_by_record(
             continue
         if len(found) < limit and molecule.HasSubstructMatch(pattern):
             found.append(record.label)
-    # `enumerate` leaves `examined` at the *last index*, so the count of records reached is one more
-    # — and is 0 for an empty corpus, which the initialiser above is for.
-    return found, unreadable, (examined + 1 if records else 0)
+    return found, unreadable
