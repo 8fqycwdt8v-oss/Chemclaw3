@@ -45,16 +45,26 @@ from chemclaw.templates.manifest import AgentStep, JobStep, Template, ToolStep
 from chemclaw.templates.schedule import batches, schedule
 
 
-def available_tools() -> set[str]:
+def available_tools(*, declared: bool = False) -> set[str]:
     """Every tool a template step could legitimately call: in-process plus every connector's.
 
     Importing the agent package is what populates the in-process registry, exactly as
     `chemclaw.cli.validate_skills` does it — the check has to see the real set, not a hardcoded
     list.
-    """
-    from chemclaw.agent.chemclaw_agent import available_tool_names
 
-    return available_tool_names()
+    **`declared` is the fork `ConnectorManifest.default_enabled` opened**, and the two callers want
+    opposite answers. `make template-validate` asks "does this tool exist in this tree", so a
+    template naming `mtsr` must resolve on a checkout that has not turned `thermalsafety` on —
+    which is every checkout by default. `registry.unrunnable_reason` asks "can this deployment run
+    it", and there the bound set is exactly right: a template whose bundle is off must be refused
+    at launch, with the missing capability named.
+
+    Defaulting to the bound set keeps the runtime answer the one it has always been, so the
+    validator is the caller that has to say what it means.
+    """
+    from chemclaw.agent.chemclaw_agent import available_tool_names, declared_tool_names
+
+    return declared_tool_names() if declared else available_tool_names()
 
 
 def available_jobs() -> set[str]:
@@ -219,7 +229,7 @@ class TemplateSurface(NamedTuple):
     signatures: dict[str, inspect.Signature]
 
     @classmethod
-    def resolve(cls, *, with_signatures: bool = True) -> "TemplateSurface":
+    def resolve(cls, *, with_signatures: bool = True, declared: bool = False) -> "TemplateSurface":
         """Derive the whole surface once. The call order matters — see `resolvable_signatures`.
 
         Registering the file profiles is part of resolving, not something each caller does first.
@@ -230,6 +240,9 @@ class TemplateSurface(NamedTuple):
         tool surface. The load is idempotent, so resolving twice registers once.
 
         Args:
+            declared: Check against every tool this tree *declares* rather than the ones this
+                deployment binds. True for `make template-validate`, False for the runtime
+                launch gate — see `available_tools`.
             with_signatures: Whether to resolve each tool's parameters as well as its name. The
                 runtime precondition (`templates.registry`) passes False: the signatures are the
                 14.45 s half of this derivation, and an empty mapping is not a *weaker* answer to
@@ -248,7 +261,7 @@ class TemplateSurface(NamedTuple):
 
         load_profiles()
         return cls(
-            tools=available_tools(),
+            tools=available_tools(declared=declared),
             jobs=available_jobs(),
             profiles=set(registered_profile_names()),
             signatures=resolvable_signatures() if with_signatures else {},

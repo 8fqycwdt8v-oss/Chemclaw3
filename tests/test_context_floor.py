@@ -99,7 +99,7 @@ from chemclaw.agent.langgraph_agent import (
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import get_profile, registered_profile_names
 from chemclaw.agent.skill_manifest import MAX_SKILL_DESCRIPTION_CHARS
-from chemclaw.connectors.registry import enabled, server_tools_module
+from chemclaw.connectors.registry import discovered, enabled, server_tools_module
 from chemclaw.connectors.transport import _allowed
 from chemclaw.core.config import Settings, settings
 from tests.siblings import (
@@ -513,7 +513,84 @@ load_profiles()
 #: they are a deployment's bytes rather than this repository's, and folding a worst case nobody has
 #: into `PREFIX_BOUND` costs every deployment on earth the same thread allowance. See
 #: `LOCAL_SKILLS_ALLOWANCE` and `ORG_SKILLS_ALLOWANCE`.
-CEILINGS: dict[str, int] = {"__default__": 70_600}
+#: **Raised to 71,400 when `rescale_experiment_protocol` landed. The figure this entry first gave
+#: was wrong, and correcting it is the point of the correction.**
+#:
+#: It said the tool "wanted 948" and that every deployment pays "948 more tokens" for it. 948 was
+#: that commit's whole-prefix delta (69,872 -> 70,820), not the tool's schema. Re-derived on
+#: 2026-09-21 with this file's own counter: `rescale_experiment_protocol` is **300** and its skill's
+#: listing entry (`protocol-scale-translation`) is **127** — 427 of the 948, and the remainder is
+#: **not attributed here**, because the honest thing to write in this file is the number that was
+#: measured rather than a plausible split for the rest.
+#:
+#: That is the mistake this file exists to prevent, made inside it:
+#: `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` is about exactly this, and
+#: `test_the_recorded_cost_of_a_known_oversized_tool_is_still_true` was written because the figures
+#: beside `KNOWN_OVERSIZED` drifted unasserted. A per-tool figure in *this* comment has no such
+#: assertion behind it — the ceiling is asserted, the attribution is prose — so a reader should
+#: treat any per-tool number in these entries as a claim about the afternoon it was taken and
+#: re-derive it before relying on it. The ceiling itself was measured correctly against the real
+#: prefix total on each raise, which is why the constant is right and the sentence was not.
+#:
+#: What the turn buys is unchanged and is the reason the raise stands: taking a procedure from the
+#: scale it was run at to the scale it will be run at is the defining kilo-lab task, and before this
+#: the model could only do it by multiplying numbers in prose, where the failure is silent and
+#: specific — everything gets multiplied, including the addition time and the filtration, and the
+#: scaled document then prescribes a time-temperature history no experiment ever produced.
+#:
+#: **Why the prose was not trimmed further instead**, since that is the cheaper answer when it
+#: works: it was, twice, and the second pass bought **22 tokens** (70,842 -> 70,820). The schema
+#: wrapper, the name and two string arguments are the floor for any tool at all, and
+#: `test_no_single_tool_schema_dominates_the_floor` passes, so this is an ordinary tool's price
+#: rather than a badly-shaped one.
+#: **And to 72,000 for six process-development skills, which is a different kind of raise.**
+#: A skill costs the prompt its *name and description* — the `skills-listing` contributor — and
+#: nothing else until a turn loads it, which is what makes layer 3 cheap. Six of them
+#: (`crystallisation-design`, `solvent-swap-and-distillation`, `impurity-fate-and-purge`,
+#: `analytical-readiness`, `scale-up-readiness-review`, `robustness-and-edge-of-failure`) measured
+#: **594** together. Measured on this commit: **71,414**, so the raise is that plus a tripwire's
+#: worth of headroom rather than the round number it looks like.
+#:
+#: The descriptions were trimmed twice first, because that is the answer that costs nothing when it
+#: works: 830 tokens down to 594. It stopped there on purpose. A skill's description is the only
+#: thing deciding whether the model loads it at all, so trimming past the trigger phrases buys
+#: prefix by making the judgment unfindable — which is a worse outcome than the prefix, and an
+#: invisible one.
+#:
+#: **Why these are global rather than bundled**, since a bundled skill would have cost nothing on a
+#: deployment that binds no process-development bundle: four of the six span two or more bundles
+#: (`crystallisation-design` reads `unitops` and `props`; `scale-up-readiness-review` reads
+#: everything), and a bundled skill belongs to one capability. The other two name only
+#: default-enabled tools. Splitting judgment across bundles to save prefix would put the same
+#: skill in two places, which is the duplication `connectors/README.md`'s ownership rule exists to
+#: prevent.
+#:
+#: The cost, stated: every deployment pays 594 more tokens on every model call and the thread
+#: allowance drops by the same amount again — `tests/test_compaction.py`'s two allowances carry it,
+#: for the reason the entry there gives about the window being the input.
+#: **And to 73,100 for the plate-results loop — the third raise on this branch, and the one with
+#: the best case.** `attach_plate_results` costs **606** (a nested `list[ArmResult]` argument) and
+#: `read_plate_results` **257**. Measured on this commit: **72,641**.
+#:
+#: The case is better than the two above it for one reason worth stating rather than assuming: both
+#: tools work in **every** deployment. They touch only core's design store, so unlike the six
+#: process-development skills — whose judgment is about tools most deployments do not bind — and
+#: unlike the template that was parked for exactly this, the prefix here buys something every turn
+#: can actually use.
+#:
+#: What it buys is the loop that was open since `D-2026-08-28` built the prescriptive tier: a
+#: design reached `executed` and nothing attached the outcome, so the round trip
+#: `skills/hte-campaign-design` promises in its own closing section was a person retyping a table,
+#: and the `DEFERRED.md` row on mining the agent-to-human protocol diff had no corpus because
+#: nothing could tell which designs had ever been run.
+#:
+#: **The running total is the thing to look at, not this entry.** This branch has taken
+#: 70,600 -> 73,100, which is **2,500 tokens of thread allowance from every deployment on earth**,
+#: and `tests/test_compaction.py`'s two allowances carry all of it because the budget is pinned by
+#: the window rather than the prefix. A fourth raise on one branch should be refused; what buys it
+#: back is `D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`'s deferred schemas, or
+#: profile routing, neither of which is a raise.
+CEILINGS: dict[str, int] = {"__default__": 73_100}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.
@@ -634,7 +711,21 @@ KNOWN_OVERSIZED: dict[str, int] = {
     # profile that runs the harness, so a narrowed surface pays this back on each of them.
     "write_todos": 1_372,
     "suggest_next_experiment": 2_951,
-    "generate_screening_design": 2_309,
+    # **2,309 -> 2,673 on 2026-09-21, and the +364 bought a design family rather than drifting.**
+    # `D-2026-09-21-a-design-is-a-criterion-not-a-second-tool` folded BoFire's `DoEStrategy` into
+    # this tool as a `criterion` argument instead of shipping a second one. The alternative was
+    # measured: a standalone `generate_optimal_design` cost **1,435**, of which **1,367 was a second
+    # copy of the `OptimizationProblem` schema this entry is already paying for** — so the fold is
+    # 364 against 1,435, and it needed no ceiling raise where the standalone needed 1,147.
+    #
+    # It stays on this list rather than joining it, which is the distinction the dict's own warning
+    # draws: growing debt already taken on, re-recorded in the commit that moved it, is the
+    # mechanism working. Narrowing is still unavailable for the reason the two entries above share —
+    # the cost is a nested union of parameter and constraint types, not prose, so **no tool taking
+    # an `OptimizationProblem` can clear the 900-token cap**. Two docstring trims on the standalone
+    # took
+    # it 1,733 -> 1,435 and could touch no more.
+    "generate_screening_design": 2_673,
     "predict_outcome": 2_201,
     "campaign_progress": 2_087,
     # **2,307 on `main`, 1,532 here, and the difference is this branch rather than drift.** That
@@ -746,6 +837,24 @@ def _tool_schema(tool: Any) -> str:
 #: Named rather than left implicit, and asserted below, for the reason
 #: `cli/validate_connectors.py::unverified_tool_surfaces` gives about the identical blind spot one
 #: layer over: a check that quietly shrinks is worse than one that says what it did not look at.
+#: **A fifth reason this set did not grow, and the first one that is not "we declare no bundle".**
+#: `D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions` declares five of the
+#: fleet's bundles here — `thermalsafety`, `kinetics`, `unitops`, `props`, `suitability` — so the
+#: four entries below that say "this tree declares no such bundle" have stopped being true, and
+#: the set they were protecting still must not move.
+#:
+#: What keeps it right is that the allowance was never really about *declaring*. It prices what a
+#: turn is **sent**, and a turn is sent what `enabled()` binds. All five declare
+#: `default_enabled: false`, so an empty `connectors_enabled` — a fresh checkout, `make test`, CI,
+#: and every chart release that has not asked — binds none of them and pays for none of them.
+#: Their 21,913 tokens are charged to whoever names them in `CHEMCLAW_CONNECTORS_ENABLED`, which
+#: is a line in a values file rather than a property of this repository.
+#:
+#: So the membership rule is now two predicates rather than one: declared in **both** trees *and*
+#: bound by silence. `test_the_bundles_both_repositories_declare_are_the_ones_charged_to_the_
+#: allowance` asserts exactly that pair, and it is what would red if somebody flipped one of those
+#: five to `default_enabled: true` without raising the allowance in the same commit — which is the
+#: whole point of the flag being in the manifest rather than in a deployment's head.
 SERVED_ELSEWHERE = frozenset({"chem", "rxnpredict", "safety"})
 
 #: What to allow for `SERVED_ELSEWHERE`'s schemas when a *bound* on the whole prefix is needed.
@@ -1511,9 +1620,10 @@ def test_the_bundles_both_repositories_declare_are_the_ones_charged_to_the_allow
 
     **What it does not do is widen the allowance to cover the fleet's own bundles**, and that is a
     decision rather than an omission (`D-2026-09-07-a-claim-about-another-repository-is-checked-by-
-    reading-it`). `props` and `pyexec` are declared only in `Chemclaw3-mcp`; no chart entry mounts
-    them and no `enabled()` here returns them, so charging them to `PREFIX_BOUND` would raise both
-    compaction defaults for every deployment on account of two bundles those deployments do not
+    reading-it`). `pyexec` is declared only in `Chemclaw3-mcp`, and the five process-development
+    bundles are declared here but `default_enabled: false`; no chart entry mounts the first and no
+    default `enabled()` returns any of them, so charging them to `PREFIX_BOUND` would raise both
+    compaction defaults for every deployment on account of bundles those deployments do not
     bind. What they cost is bounded by `FLEET_PUBLISHED_ALLOWANCE` below instead, which is where
     the configuration that *does* mount them — `infra/live/e2e-full-stack/up.sh` — is priced.
 
@@ -1528,13 +1638,18 @@ def test_the_bundles_both_repositories_declare_are_the_ones_charged_to_the_allow
             "repositories declare is unchecked in this run."
         )
     published = set(fleet_published_bundles(root))
-    assert published & set(bundles_declared_here()) == SERVED_ELSEWHERE, (
-        f"the fleet publishes {sorted(published)} and this repository declares "
-        f"{sorted(set(bundles_declared_here()))}; the names in both are "
-        f"{sorted(published & set(bundles_declared_here()))} where SERVED_ELSEWHERE says "
-        f"{sorted(SERVED_ELSEWHERE)}. A name in both trees is a bundle this repository declares "
-        "and does not serve, so its schemas are charged to SERVED_ELSEWHERE_ALLOWANCE and through "
-        "it to PREFIX_BOUND and both compaction defaults."
+    bound_by_silence = {m.name for _, m in discovered().values() if m.default_enabled}
+    charged = published & set(bundles_declared_here()) & bound_by_silence
+    assert charged == SERVED_ELSEWHERE, (
+        f"the fleet publishes {sorted(published)}, this repository declares "
+        f"{sorted(set(bundles_declared_here()))} and binds {sorted(bound_by_silence)} by silence; "
+        f"the names in all three are {sorted(charged)} where SERVED_ELSEWHERE says "
+        f"{sorted(SERVED_ELSEWHERE)}. A name in both trees that an empty `connectors_enabled` "
+        "still binds is a bundle this repository declares, does not serve, and pays for on every "
+        "model call — so its schemas are charged to SERVED_ELSEWHERE_ALLOWANCE and through it to "
+        "PREFIX_BOUND and both compaction defaults. A bundle declaring `default_enabled: false` "
+        "is declared and not charged; flipping one to true means raising the allowance in the "
+        "same commit."
     )
 
 

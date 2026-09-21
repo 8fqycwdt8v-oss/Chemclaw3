@@ -252,15 +252,23 @@ def bearer_token_env_names() -> tuple[str, ...]:
 def enabled() -> list[ConnectorManifest]:
     """The manifests this deployment turns on, in the order the enable-list (or discovery) gives.
 
-    An empty `connectors_enabled` means every discovered connector — the same "discovery is
-    enablement until you say otherwise" default `skills_enabled` uses, so a fresh checkout runs
-    the full shipped surface. A name in the list that no bundle provides is a loud error: it
-    would otherwise advertise nothing and look like a capability that simply stopped working.
+    An empty `connectors_enabled` means every discovered connector **that declares
+    `default_enabled`** — the same "discovery is enablement until you say otherwise" default
+    `skills_enabled` uses, narrowed by the one thing a bundle may say about itself. A name in the
+    list that no bundle provides is a loud error: it would otherwise advertise nothing and look
+    like a capability that simply stopped working.
+
+    **An explicit list overrides `default_enabled` rather than being filtered by it**, and that
+    asymmetry is the whole point: the flag decides what *silence* means, not what a deployment is
+    allowed to ask for. A release that names `thermalsafety` gets it, which is how an opt-in
+    bundle is ever reachable; a release that names nothing gets the surface it had before the
+    bundle existed. Filtering the explicit list too would make an opt-in bundle unreachable by any
+    configuration, which is `reject_widening`'s shape — a control whose condition cannot occur.
     """
     found = discovered()
     names = settings.connectors_enabled_list
     if not names:
-        return [manifest for _, manifest in found.values()]
+        return [manifest for _, manifest in found.values() if manifest.default_enabled]
     unknown = sorted(set(names) - found.keys())
     if unknown:
         raise ConnectorError(
@@ -358,7 +366,7 @@ def skills_dirs() -> list[str]:
     the shipped wiring order for `Chemclaw3-mcp`'s `safety` port. `_bundle_content_dirs` carries the
     argument and the measurement.
     """
-    return _bundle_content_dirs("skills")
+    return _bundle_content_dirs("skills", enabled())
 
 
 def _endpoint_url(connector: str, endpoint: HttpEndpoint) -> str:
@@ -693,11 +701,11 @@ def profiles_dirs() -> list[str]:
     profile that names tools the winning surface does not serve narrows itself to what that surface
     binds rather than widening anything.
     """
-    return _bundle_content_dirs("profiles")
+    return _bundle_content_dirs("profiles", enabled())
 
 
-def _bundle_content_dirs(kind: str) -> list[str]:
-    """Every enabled bundle's `<kind>/` directory, across every directory carrying that name.
+def _bundle_content_dirs(kind: str, manifests: Iterable[ConnectorManifest]) -> list[str]:
+    """Every named bundle's `<kind>/` directory, across every directory carrying that name.
 
     `skills_dirs` and `profiles_dirs` were this function twice, three hundred lines apart, differing
     in two tokens and each carrying its own copy of the "only directories that exist" paragraph —
@@ -752,7 +760,7 @@ def _bundle_content_dirs(kind: str) -> list[str]:
     """
     dirs: list[str] = []
     by_name = _bundle_dirs_by_name(tuple(settings.connectors_dirs))
-    for manifest in enabled():
+    for manifest in manifests:
         for bundle in by_name.get(manifest.name, ()):
             candidate = bundle / kind
             if candidate.is_dir() and str(candidate) not in dirs:
@@ -982,3 +990,40 @@ def connector_tool_names() -> list[str]:
     against, so a skill or a prompt that teaches a connector tool cannot outlive it.
     """
     return sorted(set(endpoint_tool_names()) | set(job_names()))
+
+
+def declared_connector_tool_names() -> list[str]:
+    """Every tool name any *discovered* bundle declares, enabled or not, sorted.
+
+    The sibling of `connector_tool_names`, and the difference is the whole point of
+    `ConnectorManifest.default_enabled`: that one answers "what can this deployment call", which is
+    what the runtime verifier needs, and this one answers "what does this tree declare", which is
+    what a validator needs. A skill, a prompt clause or a template step naming a tool is a claim
+    about the repository, not about one checkout's enable-list — so checking it against `enabled()`
+    would reject a correct reference to an opt-in bundle's tool on every machine that has not
+    turned the bundle on, which is every machine by default.
+
+    Deletion is still caught, which is the property the enabled-based check was really providing:
+    a tool that no manifest declares any more is absent from this set too.
+    """
+    found = discovered()
+    names: set[str] = set()
+    for _, manifest in found.values():
+        names.update(job.name for job in manifest.jobs)
+        if manifest.endpoint is not None:
+            names.update(manifest.endpoint.tools)
+    return sorted(names)
+
+
+def declared_skills_dirs() -> list[str]:
+    """The `skills/` directory of every *discovered* bundle, enabled or not.
+
+    `skills_dirs` above is the runtime answer and stays enabled-based: a deployment that has not
+    turned `thermalsafety` on must not be offered judgment about tools it cannot call. This one is
+    the validator's answer, and it has to reach further for the reason
+    `D-2026-09-15-a-capability-in-the-fleet-cannot-refute-a-denial-this-tree-declares-no-bundle-for`
+    gives about controls generally: a bundled skill that no `make skill-validate` run ever reads is
+    a check whose condition never occurs. An opt-in bundle's skill would be exactly that — shipped,
+    unvalidated, and free to name a tool its own manifest dropped three releases ago.
+    """
+    return _bundle_content_dirs("skills", [m for _, m in discovered().values()])

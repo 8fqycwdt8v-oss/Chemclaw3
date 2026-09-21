@@ -1451,3 +1451,58 @@ free number at the end of its section.
     two separate calls, because then there is no pipeline for a status to get lost in. **The
     general shape: when I break a written rule twice, the remedy is a mechanical one that removes
     the opportunity, not a stronger intention.**
+
+95. **A capability that is built and unreachable looks exactly like a capability that is missing,
+    and the two have opposite fixes.** Asked to ideate process-development tooling, I was one
+    subagent away from proposing seven servers that already existed next door — `thermalsafety`,
+    `kinetics`, `unitops`, `props`, `suitability`, 33 tools, none reachable from any chart
+    deployment because this tree declared no manifest. **Before proposing a capability, check
+    whether the sibling already serves it and what stops this tree binding it**, because the answer
+    changes the work from "build a server" to "write a manifest and a skill". The reason it had
+    stayed unreachable was also not the one I would have guessed: not oversight, but *price* —
+    21,913 tokens of tool schema on every model call — and four separate entries in
+    `tests/test_context_floor.py` had already declined the trade in writing. **When something
+    obvious has not been done, the argument against it is usually already written down somewhere
+    that the grep for the feature name does not reach**; I found it by reading the ratchet's
+    comments, not by searching for the bundle names. And the fix followed from the cost rather than
+    from the feature: declaring and binding are separable, so `default_enabled` buys the reachable
+    manifest without the prefix. **A constraint that blocks the obvious implementation is usually
+    telling you the operation has two halves that should be priced separately.**
+
+96. **A warning that fires on correct input is a worse defect than a missing check, and it reads as
+    a working one.** `quantities_are_plausible` capped a charge at 1 kg as a unit-mistake
+    heuristic, so every real charge on a 20 kg campaign was reported as a suspected error — and
+    since it is a warning rather than a blocker, nothing failed and nobody noticed. I also
+    initially wrote that it *refused* the scale, which was wrong and more dramatic; checking the
+    severity is what corrected it. **Read a check's severity before describing its consequence**,
+    and when a bound is a proxy for something else (here: "nobody runs a kilo on the bench"), the
+    fix is to make it relative to the thing it was proxying rather than to widen it. Widening would
+    have deleted the catch at bench scale, which is where it works.
+
+97. **Run the suite serially before believing a parallel failure, and do not start a second one
+    while the first is running.** I had nine failures, triaged all nine, and five were scheduling
+    artifacts from a box at load 69 — I had started a second full run and a chart run on top of the
+    first. `D-2026-09-13-a-stable-failure-set-is-not-two-green-runs` says this in the Makefile I
+    had already read. **Two of the four real ones were only visible because the tooling was
+    installed**: 73 chart tests had been skipping for want of `helm`, on a branch whose whole
+    change was a chart change, and four cross-repository checks were skipping for want of a built
+    `.venv` in the sibling checkout — including the two that measure the very token figures this
+    branch's central argument rests on. **A skip is not a pass, and in both cases the cost of
+    turning it into evidence was one install.** I reported the second as a standing limitation
+    twice before acting on it, which is the part to change: when a run tells you what it is not
+    evidence about, treat that as a task rather than as a caveat to pass along. Skips went 7 to 3,
+    the chart evidence went from nothing to 211 tests, and the remaining three are a host without
+    IPv6 and two surfaces declared not to be deployment surfaces.
+
+98. **A delta is not an attribution, and I wrote one into the file whose subject is that mistake.**
+    Raising a prefix ceiling for a new tool, I recorded "the tool wanted 948" — 948 was the
+    *commit's whole-prefix delta*. Re-derived, the tool's schema is **300** and its skill's listing
+    entry 127; the rest I still cannot attribute, which is the tell. The ceiling constant was right,
+    because it was measured against the real total each time; the sentence beside it was a claim
+    nothing asserted, in `tests/test_context_floor.py`, whose sibling assertion
+    `test_the_recorded_cost_of_a_known_oversized_tool_is_still_true` exists *because* per-tool
+    figures drift unwatched. **When a total moves after a change, the change is a candidate cause
+    and not a measurement of itself** — decompose before attributing, and where the decomposition
+    does not close, say so rather than writing the plausible split. The general form: a number I can
+    assert and a number I merely computed a difference for should not appear in the same sentence
+    without saying which is which.

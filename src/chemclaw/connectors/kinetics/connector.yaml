@@ -1,0 +1,73 @@
+# **Declared here, served by `Chemclaw3-mcp`, and OFF unless a deployment names it.**
+#
+# This file is a copy of the fleet's own `manifests/kinetics/connector.yaml`, which stays
+# authoritative because it is what actually answers. What this copy buys is the thing a manifest
+# does even when no turn binds it: `chemclaw_agent.declared_tool_names` reads manifests out of
+# `connectors_dirs`, so `skill-validate`, `prose-validate` and `template-validate` can resolve
+# these tool names — and without it the judgment beside this file could not name the tools it is
+# judgment *about* (the D-117 defect, the same argument `connectors/safety/connector.yaml` makes).
+#
+# **`default_enabled: false` is the other half, and it is what makes declaring this affordable.**
+# Every bound tool's schema is serialised ahead of the system message on every model call. These
+# five process-development bundles are ~22,000 tokens together, against a `PREFIX_BOUND` that
+# `core/config/agent.py` derives both compaction thresholds from — so binding them everywhere would
+# take that much thread allowance from every deployment on earth, including the ones that never ask
+# a scale-up question. So silence means off: a release that wants this capability names it in
+# `CHEMCLAW_CONNECTORS_ENABLED` (the chart's `connectors.kinetics.enabled`) and pays for it, and one
+# that does not is byte-for-byte unchanged.
+#
+name: kinetics
+description: >-
+  Isothermal rate and ideal-reactor arithmetic, from kinetic parameters the chemist already has:
+  carry a rate constant to another temperature along Arrhenius, determine an activation energy
+  exactly from two measured points, get conversion or time for an ideal batch reactor at any
+  order, compare an ideal plug-flow reactor against an ideal stirred tank at the same residence
+  time, and integrate a constant-rate semi-batch addition for the accumulation profile a dose time
+  is chosen against. **Nothing here fits anything** — there is no regression, no time-course data
+  and no goodness of fit, so a question of the form "here is my concentration-against-time data,
+  what is the rate law" is one this server refuses. Every reactor is ideal and isothermal: perfect
+  mixing, no dispersion, no mass-transfer limitation, no energy balance. It returns no TMR, no
+  T_D24 and no criticality class — a cooling-failure question is `thermalsafety`'s, whose Arrhenius
+  extrapolation is of a decomposition's heat-release rate rather than of a reaction's rate
+  constant. Pure and synchronous — no store, no durable state, no corpus, and no network call at
+  any point.
+
+endpoint:
+  transport: http
+  # A loopback dev default; the deployment moves it.
+  url: http://127.0.0.1:8852/mcp
+  health_url: http://127.0.0.1:8852/healthz
+  # Five of the six tools are microseconds of closed-form algebra. The sixth integrates, at a fixed
+  # step count that bounds its cost. The timeout exists to stop a mute connector hanging a turn.
+  request_timeout: 15
+  # Bearer even though the shipped URL is loopback, for the reason `servers/props/connector.yaml`
+  # states: a manifest whose auth mode changes with its address is one whose serving side gets it
+  # wrong. The token env var is the same name on both sides.
+  auth:
+    mode: bearer
+    token_env: CHEMCLAW_KINETICS_TOKEN
+  tools:
+    - rate_constant_at_temperature
+    - activation_energy_from_two_rates
+    - batch_conversion_after
+    - batch_time_to_reach
+    - continuous_reactor_conversion
+    - semibatch_accumulation_profile
+
+  # Every tool is read-only: each takes numbers, computes, and returns. Nothing here writes, stores
+  # or reserves anything, so there is no state a plan gate would need to approve. Classifying by
+  # omission fails *open* (D-167), which is why all six are listed rather than left to a default.
+  read_only:
+    - rate_constant_at_temperature
+    - activation_energy_from_two_rates
+    - batch_conversion_after
+    - batch_time_to_reach
+    - continuous_reactor_conversion
+    - semibatch_accumulation_profile
+
+skills:
+  - kinetics-and-reactor-choice
+
+# Silence means off for this bundle; an explicit `connectors_enabled` naming it wins over
+# this flag, which is how it is ever reachable (`connectors/registry.py::enabled`).
+default_enabled: false

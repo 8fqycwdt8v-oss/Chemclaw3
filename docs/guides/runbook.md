@@ -559,7 +559,20 @@ which this release **declares but does not run**: all three are served by
 its bearer (`CHEMCLAW_CHEM_TOKEN`, `CHEMCLAW_SAFETY_TOKEN`, `CHEMCLAW_RXNPREDICT_TOKEN`) provided,
 or every call to them is refused. The
 physics behind `calc` is served there too — `CHEMCLAW_CALC_SERVER_URL` and `CHEMCLAW_CALC_TOKEN` —
-even though the `calc` bundle's own tools, cache and durable jobs stay in this release.
+even though the `calc` bundle's own tools, cache and durable jobs stay in this release. **And five more this release declares, does not run, and
+does not bind**: `props` (solvent and pure-component properties), `thermalsafety` (runaway and
+thermal-hazard arithmetic from measured calorimetry), `kinetics` (isothermal rate and ideal-reactor
+arithmetic), `unitops` (scale-up and unit-operation sizing) and `suitability` (USP <621>
+chromatographic system suitability). These declare `default_enabled: false`, so an empty
+`CHEMCLAW_CONNECTORS_ENABLED` binds none of them and the chart ships all five at `enabled: false`
+(`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`). Their manifests are
+here anyway because the declaration validators resolve tool names through them, which lets the
+judgment beside each one name the tools it is judgment about. Turning one on is the same three
+obligations as the three above — host, port, bearer (`CHEMCLAW_PROPS_TOKEN`,
+`CHEMCLAW_THERMALSAFETY_TOKEN`, `CHEMCLAW_KINETICS_TOKEN`, `CHEMCLAW_UNITOPS_TOKEN`,
+`CHEMCLAW_SUITABILITY_TOKEN`) — plus a fourth that the other three do not have: it costs prefix on
+**every** model call, not only on the calls that use it, so enable the ones a site's chemists
+actually ask for rather than the set.
 
 **`chem` is declared here and served elsewhere.** Its capability is `Chemclaw3-mcp`'s
 `servers/chem`, so this release renders no Deployment and no Service for it and dials the address

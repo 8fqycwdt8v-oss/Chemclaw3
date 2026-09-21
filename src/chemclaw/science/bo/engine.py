@@ -43,12 +43,22 @@ from bofire.data_models.features.api import (
 )
 from bofire.data_models.objectives.api import MaximizeObjective, MinimizeObjective
 from bofire.data_models.strategies.api import (
+    DoEStrategy as DoESpec,
+)
+from bofire.data_models.strategies.api import (
     FractionalFactorialStrategy,
     MoboStrategy,
     RandomStrategy,
     SoboStrategy,
 )
+from bofire.data_models.strategies.doe import (
+    AOptimalityCriterion,
+    DOptimalityCriterion,
+    IOptimalityCriterion,
+    SpaceFillingCriterion,
+)
 from bofire.strategies import api as strategies
+from bofire.strategies.doe.utils import get_formula_from_string
 from bofire.surrogates import api as surrogate_api
 from bofire.utils.doe import get_generator
 from botorch.exceptions.errors import BotorchError, InfeasibilityError, ModelFittingError
@@ -57,6 +67,8 @@ from linear_operator.utils.errors import NanError, NotPSDError
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.science.bo.problem import (
+    DESIGN_CRITERIA,
+    DESIGN_FORMULAE,
     MIN_SEED_OBSERVATIONS,
     Candidate,
     CategoricalParameter,
@@ -64,7 +76,9 @@ from chemclaw.science.bo.problem import (
     ContinuousParameter,
     ExcludeConstraint,
     FitQuality,
+    LinearConstraint,
     Observation,
+    OptimalDesign,
     OptimizationProblem,
     ParamValue,
     Prediction,
@@ -1109,3 +1123,213 @@ def factorial_design(
         else _full_design(problem, n_center, n_repetitions)
     )
     return _randomized(design, seed) if randomize else design
+
+
+#: BoFire's criterion class for each name `DESIGN_CRITERIA` exposes.
+#:
+#: A mapping rather than a string passed through, because the names on the left are this
+#: repository's surface and the classes on the right are somebody else's: a BoFire rename is a
+#: failure here rather than a model writing an unknown string into a tool argument.
+_CRITERIA = {
+    "d-optimal": DOptimalityCriterion,
+    "a-optimal": AOptimalityCriterion,
+    "i-optimal": IOptimalityCriterion,
+    "space-filling": SpaceFillingCriterion,
+}
+
+
+def _model_terms(problem: OptimizationProblem, formula: str) -> int:
+    """How many coefficients `formula` has over this problem's factors.
+
+    BoFire's own count, through the function its DoE strategy uses, rather than the arithmetic
+    re-derived here. The arithmetic is not hard — a fully quadratic model over k continuous factors
+    has 1 + 2k + k(k-1)/2 terms — and that is exactly why re-deriving it is the wrong call: a
+    categorical factor contributes one column per level *minus one*, so the two definitions agree
+    on the easy case and diverge on the case a chemist actually brings.
+    """
+    return len(get_formula_from_string(model_type=formula, inputs=_to_domain(problem).inputs))
+
+
+def _require_design_can_estimate_its_model(
+    problem: OptimizationProblem, n_experiments: int, formula: str
+) -> None:
+    """Refuse a design with fewer runs than the model it claims to be optimal for.
+
+    **BoFire does not refuse this, and the design it returns looks like any other.** Measured on
+    bofire 0.4.1: a `fully-quadratic` criterion over three continuous factors, asked for **3** runs
+    against a 10-term model, returns three rows and no error. The information matrix is singular,
+    so not one coefficient of that model is estimable — and nothing in the returned frame says so.
+
+    That is the shape this repository refuses everywhere else: a plausible answer that is wrong in
+    a way the reader cannot see. A chemist handed those three rows runs them, fits nothing, and
+    concludes the chemistry is noisy.
+
+    The bound is `n_experiments >= n_terms`, which is the condition for estimability and **not** a
+    recommendation — a design at exactly n_terms has zero residual degrees of freedom, so it fits
+    the model perfectly and can say nothing about how well. The message says so rather than
+    encoding a second, softer bound nobody asked for.
+
+    Raises:
+        ValueError: Naming the run count, the term count and the formula that set it.
+    """
+    terms = _model_terms(problem, formula)
+    if n_experiments < terms:
+        raise ValueError(
+            f"{n_experiments} run(s) cannot estimate a {formula!r} model over these factors, "
+            f"which has {terms} term(s): the design would be singular and none of its "
+            f"coefficients estimable. Ask for at least {terms} runs, or choose a simpler formula "
+            f"— 'linear' has {_model_terms(problem, 'linear')} term(s) here. Note that exactly "
+            f"{terms} runs leaves no residual degrees of freedom, so the model would fit perfectly "
+            "and tell you nothing about how well."
+        )
+
+
+#: How far outside a declared linear constraint a returned run may sit before it is a failure.
+#:
+#: **Measured, not chosen.** BoFire's DoE solves a continuous optimization — SLSQP through
+#: `scipy.minimize` where cyipopt is absent, which is this deployment — so the point it lands on
+#: satisfies an active constraint to the optimizer's own tolerance rather than exactly. Driven over
+#: 20 seeds x 4 criteria on a two-parameter constrained domain, the worst excursion was **7.5e-06**
+#: (`temp` 70.00000746 against an active limit at 70.0).
+#:
+#: A first version of `tests/test_bo_optimal_design.py` asserted 1e-6. It passed here and **failed
+#: on CI**, whose different scipy build landed on the other side of a bound tighter than the solver
+#: ever promised — a flaky assertion rather than a flaky solver, and the reason this constant is a
+#: measurement with its method written down rather than a number somebody liked.
+#:
+#: 1e-4 is an order of magnitude above that worst case and orders below anything a chemist can set:
+#: nobody dials 70.0001 °C or weighs 3.0001 equivalents. So a breach of *this* bound is a real
+#: infeasibility rather than arithmetic, which is what makes refusing on it worth doing.
+_CONSTRAINT_TOLERANCE = 1e-4
+
+
+def _constraint_breaches(
+    problem: OptimizationProblem, runs: list[dict[str, ParamValue]]
+) -> list[str]:
+    """Every run sitting outside a declared linear constraint by more than the tolerance.
+
+    **"Every run is feasible" is this function's claim, and before it the claim was only a
+    sentence.** Honouring a limit is `optimal_design`'s whole reason to exist over
+    `factorial_design`, and the ADR, the skill and `OptimalDesign.summary` all say so — so a solver
+    that quietly returned an infeasible corner would make three documents wrong at once and hand a
+    chemist conditions the chemistry forbids.
+
+    `point_is_feasible` does not cover this and is not the place to: it answers a different
+    question — does this run consume one of the space's cells — and reads `ExcludeConstraint` only.
+    """
+    breaches: list[str] = []
+    for index, run in enumerate(runs, start=1):
+        for constraint in problem.constraints:
+            if not isinstance(constraint, LinearConstraint):
+                continue
+            total = sum(
+                coefficient * float(run[name])
+                for name, coefficient in zip(
+                    constraint.parameters, constraint.coefficients, strict=True
+                )
+                if name in run
+            )
+            slack = {
+                "<=": constraint.rhs - total,
+                ">=": total - constraint.rhs,
+                "==": -abs(total - constraint.rhs),
+            }[constraint.relation]
+            if slack < -_CONSTRAINT_TOLERANCE:
+                breaches.append(f"run {index} gives {total:g} against {constraint.describe()}")
+    return breaches
+
+
+def optimal_design(
+    problem: OptimizationProblem,
+    n_experiments: int,
+    criterion: str = "d-optimal",
+    formula: str = "linear",
+    seed: int | None = None,
+) -> OptimalDesign:
+    """Lay out `n_experiments` runs over `problem`, honouring its constraints.
+
+    The answer to the question `factorial_design` refuses. A factorial enumerates the corners of
+    the space and cannot honour a limit at all, so a chemist with a real constraint — "base plus
+    acid under 3 equivalents" — and a fixed run budget had no design to run. This honours the
+    constraints the problem declares and fills exactly the budget asked for.
+
+    **Two different questions live behind `criterion`.** An optimality criterion builds the design
+    that best estimates a *stated model*, so `formula` is part of the question rather than a
+    tuning knob: the same factors and budget give a different design for a linear model than a
+    quadratic one, and a design built for `linear` is blind to curvature by construction.
+    `space-filling` assumes no model and spreads the runs to cover the region, which is what to
+    use when the question is "what does this space even look like".
+
+    Args:
+        problem: The decision space, with any constraints it declares.
+        n_experiments: The run budget. Filled exactly.
+        criterion: One of `DESIGN_CRITERIA`.
+        formula: One of `DESIGN_FORMULAE`. Ignored by `space-filling`, which assumes no model.
+        seed: Reproducibility for the optimizer's own starting points.
+
+    Returns:
+        The runs, with the formula, the term count, the duplicate count and a `summary` stating
+        what the design cannot do.
+
+    Raises:
+        ValueError: An unknown criterion or formula, a non-positive budget, a budget over
+            `bo_max_design_runs`, or a budget too small to estimate the stated model.
+    """
+    if criterion not in _CRITERIA:
+        raise ValueError(
+            f"unknown criterion {criterion!r}; this deployment offers {', '.join(DESIGN_CRITERIA)}"
+        )
+    space_filling = criterion == "space-filling"
+    if not space_filling and formula not in DESIGN_FORMULAE:
+        raise ValueError(
+            f"unknown formula {formula!r}; this deployment offers {', '.join(DESIGN_FORMULAE)}"
+        )
+    if n_experiments < 1:
+        raise ValueError(f"n_experiments must be 1 or more; got {n_experiments}")
+    if n_experiments > settings.bo_max_design_runs:
+        raise ValueError(
+            f"{n_experiments} runs is over this deployment's bo_max_design_runs "
+            f"({settings.bo_max_design_runs}). Raise the setting, or ask for fewer."
+        )
+    if not space_filling:
+        _require_design_can_estimate_its_model(problem, n_experiments, formula)
+    spec = DoESpec(
+        domain=_to_domain(problem),
+        criterion=SpaceFillingCriterion()
+        if space_filling
+        else _CRITERIA[criterion](formula=formula),
+        seed=_resolve_seed(seed),
+    )
+    try:
+        frame = strategies.map(spec).ask(candidate_count=n_experiments)
+    except Exception as error:
+        raise SurrogateFitError(
+            f"the {criterion} design could not be solved for {n_experiments} run(s) over this "
+            f"space: {error}. A tighter constraint set leaves less room, so try more runs, a "
+            "simpler formula, or space-filling."
+        ) from error
+    runs: list[dict[str, ParamValue]] = [
+        {p.name: _cast(p, row[p.name]) for p in problem.parameters} for _, row in frame.iterrows()
+    ]
+    breaches = _constraint_breaches(problem, runs)
+    if breaches:
+        raise SurrogateFitError(
+            "the solver returned run(s) outside a declared constraint, so this design is not "
+            f"feasible and must not be run: {'; '.join(breaches)}. Honouring a limit is the one "
+            "thing this offers over a factorial screen, so it refuses rather than returning them."
+        )
+    seen: set[tuple[tuple[str, ParamValue], ...]] = set()
+    duplicates = 0
+    for run in runs:
+        key = tuple(sorted(run.items()))
+        if key in seen:
+            duplicates += 1
+        seen.add(key)
+    return OptimalDesign(
+        runs=runs,
+        criterion=criterion,
+        formula=None if space_filling else formula,
+        n_terms=0 if space_filling else _model_terms(problem, formula),
+        duplicate_runs=duplicates,
+        honoured_constraints=len(problem.constraints),
+    )

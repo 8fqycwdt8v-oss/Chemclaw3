@@ -194,6 +194,105 @@ _ARGUED_DIVERGENCES: dict[tuple[str, str], str] = {
         "that repository's README and its integration doc publish (`manifests/` first) dropped it "
         "with no error, no warning and no log line."
     ),
+    ("props", "default_enabled"): (
+        "this tree declares `default_enabled: false` and the fleet's copy declares nothing, which "
+        "means True there — and the divergence is the decision rather than a drift "
+        "(`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`). The flag "
+        "answers a question only this repository has: what an *empty* `connectors_enabled` should "
+        "bind, given that every bound tool's schema is charged to `PREFIX_BOUND` and through it to "
+        "both compaction defaults. The fleet publishes a capability and has no prefix to protect.\n"
+        "\n"
+        "What makes it harmless is that the two answers are right in the two wirings. A chart "
+        "deployment reads this copy and binds nothing it did not ask for. The one configuration "
+        "that mounts the fleet's `manifests/` directory — `infra/live/e2e-full-stack/up.sh` — is "
+        "by construction the lane that *wants* these bundles, and there the fleet's copy wins the "
+        "name and they bind, which is the behaviour that lane had before this key existed."
+    ),
+    ("thermalsafety", "default_enabled"): (
+        "this tree declares `default_enabled: false` and the fleet's copy declares nothing, which "
+        "means True there — and the divergence is the decision rather than a drift "
+        "(`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`). The flag "
+        "answers a question only this repository has: what an *empty* `connectors_enabled` should "
+        "bind, given that every bound tool's schema is charged to `PREFIX_BOUND` and through it to "
+        "both compaction defaults. The fleet publishes a capability and has no prefix to protect.\n"
+        "\n"
+        "What makes it harmless is that the two answers are right in the two wirings. A chart "
+        "deployment reads this copy and binds nothing it did not ask for. The one configuration "
+        "that mounts the fleet's `manifests/` directory — `infra/live/e2e-full-stack/up.sh` — is "
+        "by construction the lane that *wants* these bundles, and there the fleet's copy wins the "
+        "name and they bind, which is the behaviour that lane had before this key existed."
+    ),
+    ("thermalsafety", "skills"): (
+        "the same split `safety` above records, for the same reason and with the same remedy: the "
+        "judgment about `thermalsafety`'s tools is architecture layer 3 and lives here, and that "
+        "fleet "
+        "has no equivalent seam to declare it in. `_bundle_content_dirs` reads every directory "
+        "carrying the bundle's name, so `thermal-safety-assessment` is reachable in either wiring "
+        "order."
+    ),
+    ("kinetics", "default_enabled"): (
+        "this tree declares `default_enabled: false` and the fleet's copy declares nothing, which "
+        "means True there — and the divergence is the decision rather than a drift "
+        "(`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`). The flag "
+        "answers a question only this repository has: what an *empty* `connectors_enabled` should "
+        "bind, given that every bound tool's schema is charged to `PREFIX_BOUND` and through it to "
+        "both compaction defaults. The fleet publishes a capability and has no prefix to protect.\n"
+        "\n"
+        "What makes it harmless is that the two answers are right in the two wirings. A chart "
+        "deployment reads this copy and binds nothing it did not ask for. The one configuration "
+        "that mounts the fleet's `manifests/` directory — `infra/live/e2e-full-stack/up.sh` — is "
+        "by construction the lane that *wants* these bundles, and there the fleet's copy wins the "
+        "name and they bind, which is the behaviour that lane had before this key existed."
+    ),
+    ("kinetics", "skills"): (
+        "the same split `safety` above records, for the same reason and with the same remedy: the "
+        "judgment about `kinetics`'s tools is architecture layer 3 and lives here, and that fleet "
+        "has no equivalent seam to declare it in. `_bundle_content_dirs` reads every directory "
+        "carrying the bundle's name, so `kinetics-and-reactor-choice` is reachable in either "
+        "wiring order."
+    ),
+    ("unitops", "default_enabled"): (
+        "this tree declares `default_enabled: false` and the fleet's copy declares nothing, which "
+        "means True there — and the divergence is the decision rather than a drift "
+        "(`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`). The flag "
+        "answers a question only this repository has: what an *empty* `connectors_enabled` should "
+        "bind, given that every bound tool's schema is charged to `PREFIX_BOUND` and through it to "
+        "both compaction defaults. The fleet publishes a capability and has no prefix to protect.\n"
+        "\n"
+        "What makes it harmless is that the two answers are right in the two wirings. A chart "
+        "deployment reads this copy and binds nothing it did not ask for. The one configuration "
+        "that mounts the fleet's `manifests/` directory — `infra/live/e2e-full-stack/up.sh` — is "
+        "by construction the lane that *wants* these bundles, and there the fleet's copy wins the "
+        "name and they bind, which is the behaviour that lane had before this key existed."
+    ),
+    ("unitops", "skills"): (
+        "the same split `safety` above records, for the same reason and with the same remedy: the "
+        "judgment about `unitops`'s tools is architecture layer 3 and lives here, and that fleet "
+        "has no equivalent seam to declare it in. `_bundle_content_dirs` reads every directory "
+        "carrying the bundle's name, so `unit-operation-sizing` is reachable in either wiring "
+        "order."
+    ),
+    ("suitability", "default_enabled"): (
+        "this tree declares `default_enabled: false` and the fleet's copy declares nothing, which "
+        "means True there — and the divergence is the decision rather than a drift "
+        "(`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`). The flag "
+        "answers a question only this repository has: what an *empty* `connectors_enabled` should "
+        "bind, given that every bound tool's schema is charged to `PREFIX_BOUND` and through it to "
+        "both compaction defaults. The fleet publishes a capability and has no prefix to protect.\n"
+        "\n"
+        "What makes it harmless is that the two answers are right in the two wirings. A chart "
+        "deployment reads this copy and binds nothing it did not ask for. The one configuration "
+        "that mounts the fleet's `manifests/` directory — `infra/live/e2e-full-stack/up.sh` — is "
+        "by construction the lane that *wants* these bundles, and there the fleet's copy wins the "
+        "name and they bind, which is the behaviour that lane had before this key existed."
+    ),
+    ("suitability", "skills"): (
+        "the same split `safety` above records, for the same reason and with the same remedy: the "
+        "judgment about `suitability`'s tools is architecture layer 3 and lives here, and that "
+        "fleet "
+        "has no equivalent seam to declare it in. `_bundle_content_dirs` reads every directory "
+        "carrying the bundle's name, so `system-suitability` is reachable in either wiring order."
+    ),
 }
 
 

@@ -1,0 +1,70 @@
+# **Declared here, served by `Chemclaw3-mcp`, and OFF unless a deployment names it.**
+#
+# This file is a copy of the fleet's own `manifests/thermalsafety/connector.yaml`, which stays
+# authoritative because it is what actually answers. What this copy buys is the thing a manifest
+# does even when no turn binds it: `chemclaw_agent.declared_tool_names` reads manifests out of
+# `connectors_dirs`, so `skill-validate`, `prose-validate` and `template-validate` can resolve
+# these tool names — and without it the judgment beside this file could not name the tools it is
+# judgment *about* (the D-117 defect, the same argument `connectors/safety/connector.yaml` makes).
+#
+# **`default_enabled: false` is the other half, and it is what makes declaring this affordable.**
+# Every bound tool's schema is serialised ahead of the system message on every model call. These
+# five process-development bundles are ~22,000 tokens together, against a `PREFIX_BOUND` that
+# `core/config/agent.py` derives both compaction thresholds from — so binding them everywhere would
+# take that much thread allowance from every deployment on earth, including the ones that never ask
+# a scale-up question. So silence means off: a release that wants this capability names it in
+# `CHEMCLAW_CONNECTORS_ENABLED` (the chart's `connectors.thermalsafety.enabled`) and pays for it, and one
+# that does not is byte-for-byte unchanged.
+#
+name: thermalsafety
+description: >-
+  Runaway and thermal-hazard arithmetic for scale-up, from calorimetry numbers the chemist supplies:
+  adiabatic temperature rise, MTSR, TMR_ad and the temperature at which it reaches a target (T_D24),
+  the Stoessel criticality class from the ordering of T_p / MTSR / MTT / T_D24, jacket heat-removal
+  capacity, a Semenov critical-ambient estimate for a stored package, and a stoichiometric
+  oxygen-balance screen from a molecular formula. Every input is a DSC, ARC or RC1 number a person
+  measured; nothing here measures, predicts or fits anything, and no default is supplied for a
+  number that carries the safety argument. Pure and synchronous — no store, no durable state, no
+  corpus, and no network call at any point.
+
+endpoint:
+  transport: http
+  # A loopback dev default; the deployment moves it.
+  url: http://127.0.0.1:8851/mcp
+  health_url: http://127.0.0.1:8851/healthz
+  # Every tool here is microseconds of closed-form arithmetic. The bound exists to stop a mute
+  # connector hanging a turn, not to police a fast one.
+  request_timeout: 15
+  # Bearer even though the shipped URL is loopback, for the reason `servers/props/connector.yaml`
+  # states: a manifest whose auth mode changes with its address is one whose serving side gets it
+  # wrong. The token env var is the same name on both sides.
+  auth:
+    mode: bearer
+    token_env: CHEMCLAW_THERMALSAFETY_TOKEN
+  tools:
+    - adiabatic_temperature_rise
+    - mtsr
+    - tmr_ad
+    - stoessel_criticality_class
+    - heat_removal_capacity
+    - semenov_critical_ambient
+    - oxygen_balance_screen
+
+  # Every tool is read-only: each takes numbers, computes, and returns. Nothing here writes, stores
+  # or reserves anything, so there is no state a plan gate would need to approve. Classifying by
+  # omission fails *open* (D-167), which is why all seven are listed rather than left to a default.
+  read_only:
+    - adiabatic_temperature_rise
+    - mtsr
+    - tmr_ad
+    - stoessel_criticality_class
+    - heat_removal_capacity
+    - semenov_critical_ambient
+    - oxygen_balance_screen
+
+skills:
+  - thermal-safety-assessment
+
+# Silence means off for this bundle; an explicit `connectors_enabled` naming it wins over
+# this flag, which is how it is ever reachable (`connectors/registry.py::enabled`).
+default_enabled: false

@@ -647,6 +647,115 @@ def _roman(number: int) -> str:
     return rendered
 
 
+#: The design criteria this repository exposes, mapped to the BoFire criterion each one builds.
+#:
+#: **A closed set, and short.** BoFire ships six optimality criteria and a space-filling one; every
+#: one of them is a defensible thing to ask for, and a model choosing between "G-optimal" and
+#: "I-optimal" from their names alone is choosing between two sentences it cannot distinguish.
+#: These four are the ones whose *question* is separable in a chemist's terms — estimate the model
+#: (D), predict across the region (I), cover the space with no model at all (space-filling) — plus
+#: A, which is the one people name when they mean D and is cheap to honour. E, G and K are
+#: deliberately absent rather than forgotten: nothing here can tell a chemist what they would buy
+#: over D, and a criterion offered without that is a coin flip wearing a Greek letter.
+DESIGN_CRITERIA: tuple[str, ...] = ("d-optimal", "a-optimal", "i-optimal", "space-filling")
+
+#: The model a design is optimal *for*, and the reason `criterion` alone is not an answer.
+#:
+#: **"Optimal" is meaningless without this.** A D-optimal design minimises the variance of the
+#: coefficients of a *stated* model, so the same four factors and the same run budget give a
+#: different design for a linear model than for a quadratic one — and a design optimal for a linear
+#: model cannot see curvature at all, which is usually the thing a process chemist is looking for.
+#: The names are BoFire's own strings, passed through rather than re-spelled.
+DESIGN_FORMULAE: tuple[str, ...] = (
+    "linear",
+    "linear-and-interactions",
+    "linear-and-quadratic",
+    "fully-quadratic",
+)
+
+
+class OptimalDesign(BaseModel):
+    """A model-based or space-filling design: the runs, and what the design cannot do.
+
+    The sibling of `ScreeningDesign` and the answer to the question it refuses. A factorial
+    enumerates corners and **honours no constraint**, so a chemist with a real limit ("base plus
+    acid under 3 equivalents") and a fixed run budget had nowhere to go: the screen would propose
+    combinations the chemistry forbids, and `propose_candidates` answers a different question
+    (where to go next given what you have observed) than "lay me out N runs I can start on Monday".
+
+    Three things this carries that the runs alone cannot say, each of which a reader will otherwise
+    get wrong:
+
+    - **`formula`** — the model the design is optimal for. Absent for space filling, which assumes
+      none. A design built for `linear` is blind to curvature by construction.
+    - **`n_terms` against `len(runs)`** — a design with fewer runs than model terms cannot estimate
+      that model at all, and BoFire returns one anyway (measured: 3 runs for a 10-term quadratic in
+      three factors, no error). `engine.optimal_design` refuses that case; the two numbers are
+      carried so a reader can see the margin rather than trust that somebody checked.
+    - **`duplicate_runs`** — an optimal design frequently *repeats* a point, because replication at
+      an informative corner is what minimises the criterion. Two identical rows are the design
+      working, not a bug, and a chemist who deletes the duplicate has changed the design.
+    """
+
+    runs: list[dict[str, ParamValue]] = Field(default_factory=list)
+    criterion: str = Field(default="d-optimal")
+    # `None` for space filling, which is optimal for no model because it assumes none.
+    formula: str | None = None
+    # Terms in that model, counted by BoFire's own `get_formula_from_string` rather than
+    # re-derived here — two definitions of "how many terms" is one that drifts.
+    n_terms: int = Field(default=0, ge=0)
+    # Rows that repeat an earlier row exactly. Intentional, and named so nobody prunes them.
+    duplicate_runs: int = Field(default=0, ge=0)
+    # Constraints the domain carried into the design, by name, so the answer can say which limit
+    # was honoured rather than claiming generally that limits were.
+    honoured_constraints: int = Field(default=0, ge=0)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def summary(self) -> str:
+        """What this design is and is not, in the context window when the answer is written.
+
+        A `computed_field` for `ScreeningDesign.summary`'s reason: a bare property is not
+        serialized, so the caveat would never reach the model composing the answer.
+        """
+        factors = len(self.runs[0]) if self.runs else 0
+        if self.criterion == "space-filling":
+            head = (
+                f"Space-filling design: {len(self.runs)} run(s) over {factors} factor(s), spread "
+                "to cover the region. It assumes no model, so it favours no effect — and it "
+                "estimates none either."
+            )
+        else:
+            head = (
+                f"A {self.criterion} design for a {self.formula} model: "
+                f"{len(self.runs)} run(s) over {factors} factor(s) against {self.n_terms} model "
+                f"term(s). Optimal *for that model* — it is blind to any effect the formula omits, "
+                f"so a linear design cannot see curvature."
+            )
+        return " ".join([head, *self._clauses()])
+
+    def _clauses(self) -> list[str]:
+        """One sentence per property a reader would otherwise have to infer from the rows."""
+        clauses = []
+        if self.duplicate_runs:
+            clauses.append(
+                f"{self.duplicate_runs} run(s) repeat an earlier row exactly. That is the design "
+                "working rather than a fault — replication at an informative point is what "
+                "minimises the criterion — so run them as written."
+            )
+        if self.honoured_constraints:
+            clauses.append(
+                f"{self.honoured_constraints} declared constraint(s) were honoured: every run "
+                "below satisfies them, which is what a factorial screen cannot offer."
+            )
+        clauses.append(
+            "It carries no resolution and no alias structure, so unlike a fractional factorial it "
+            "cannot tell you which effects are confounded; what it offers instead is that every "
+            "run is feasible."
+        )
+        return clauses
+
+
 class ScreeningDesign(BaseModel):
     """A screening design — the runs, and an unavoidable statement of *which* design it is (D-092).
 

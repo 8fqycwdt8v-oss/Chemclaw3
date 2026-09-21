@@ -30,6 +30,25 @@ like any other, and the deployment says the address is not ours to render
 network, it must carry a bearer credential — `HttpEndpoint` refuses `auth: mode: none` for a
 non-loopback URL.
 
+**And a bundle may declare itself off by default.** `default_enabled: false` is read in exactly one
+place — what an *empty* `connectors_enabled` means — because declaring a capability and binding it
+are different decisions with different prices
+(`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`). Declaring is nearly
+free and is what lets a validator resolve a tool name and a `SKILL.md` name the tools it is
+judgment about; binding puts every one of that bundle's schemas ahead of the system message on
+**every** model call, which `tests/test_context_floor.py` charges to `PREFIX_BOUND` and
+`core/config/agent.py` turns into both compaction thresholds. The five process-development bundles
+(`props`, `thermalsafety`, `kinetics`, `unitops`, `suitability`) take that shape. An explicit
+enable-list is deliberately **not** filtered by the flag: it says what silence means, not what a
+deployment may ask for, and a bundle no configuration could reach would be a control whose
+condition cannot occur.
+
+That split is also why the validators and the runtime read different sets. `connector_tool_names`
+and `skills_dirs` answer "what can this turn call"; `declared_connector_tool_names` and
+`declared_skills_dirs` answer "what does this tree declare", and the second pair is what
+`skill-validate`, `prose-validate` and `template-validate` use — so an opt-in bundle's own skill is
+still read by CI on a checkout that never binds it.
+
 ## The boundary against `science/`
 
 A bundle is a *surface*, not an implementation. The computation lives in `chemclaw.science`

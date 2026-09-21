@@ -308,6 +308,7 @@ def test_a_blank_session_id_is_no_session_rather_than_a_session_of_its_own(
 #: `unapproved_jobs` over a fingerprint recomputed from the stored document).
 _UNGATED_WITHOUT_A_SESSION = frozenset(
     {
+        "attach_plate_results",
         "compose_workflow",
         "draft_experiment_protocol",
         "forget_preference",

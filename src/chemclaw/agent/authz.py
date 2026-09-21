@@ -171,6 +171,11 @@ STATE_CHANGING_TOOLS: frozenset[str] = (
             # would put drafting a protocol behind the same door as pushing to the graph.
             "structure_experiment_request",  # writes the structured ask as revision 1
             "draft_experiment_protocol",  # writes a protocol revision
+            # Writes `experiment_arm_results`, on the same terms and with one of its own: the
+            # table is INSERT-only for the application, so what the plan gate is approving is
+            # an addition to a record that cannot later be tidied. An outcome attached to the
+            # wrong revision or the wrong arm stays attached.
+            "attach_plate_results",  # writes measured outcomes against a revision
             # Both halves of the composed-workflow seam. `compose_workflow` writes a row that
             # later *runs*, which is a stronger reason to gate it than the row itself: what is
             # being approved is a procedure, not a note. `run_composed_workflow` starts a durable
@@ -312,6 +317,17 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
         # than from the current head is the write this pair exists to prevent.
         "read_experiment_protocol",
         "find_experiment_protocols",
+        # Scaling a stored protocol's charges to a new basis. **Read-only because it stores
+        # nothing**: it returns a proposal and every path to keeping one goes back through
+        # `draft_experiment_protocol`, under the same `parent_revision` check any other revision
+        # takes. The substantive reason is the same one `read_experiment_protocol` above carries —
+        # "what would this look like at 2 kg" is a question a chemist asks *while* deciding
+        # whether to approve the work, so the plan gate must not hold it until after.
+        "rescale_experiment_protocol",
+        # Reading a plate's outcomes back, and the observations they make for a campaign.
+        # A read for the same reason its neighbours are: "what did the plate give" is a
+        # question asked while deciding whether to approve the next round, not after.
+        "read_plate_results",
         # Arithmetic over a campaign's recorded points: it reads a campaign thread and returns
         # factors and arms, writing nothing anywhere. Read-only is the substantive classification
         # rather than the technical one — the plan gate lets a read run while a plan is still being

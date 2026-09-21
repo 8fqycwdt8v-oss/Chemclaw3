@@ -50,6 +50,7 @@ SELECTABLE = {
     # honest behaviour there rather than a failure to configure something.
     "InMemoryComposedStore": "session_store",
     "InMemoryDesignStore": "session_store",
+    "InMemoryArmResultStore": "session_store",
     "InMemoryVectorStore": "vector_store_provider",
 }
 

@@ -23,6 +23,8 @@ tools:
   - workup_precedent
   - similar_reactions
   - condense_protocols
+  - attach_plate_results
+  - read_plate_results
   - gather_evidence
   - recall_observations
   - resolve_compound
@@ -163,12 +165,38 @@ whole point is that it introduces reagents the base protocol does not have. `ich
 where a solvent choice is one of the factors. And say the sentence: this system flags, it does not
 certify.
 
-## What comes after the plate
+## What comes after the plate, and the loop is now closed
 
 A screen is usually round one. Say so, and say what round two would be: the arms that survive
 become the observations `suggest_next_experiment` fits a surrogate to, and the factor space you
 declared here is the design space it searches. That is why the factor names and levels are worth
 getting right even for a fixed screen — they are the vocabulary the campaign inherits.
+
+**When the results come back, attach them rather than reading them into prose.**
+`attach_plate_results` takes one entry per measured well against the revision the plate was *run
+from* — which is the printed revision, not necessarily the head, and passing the wrong one points
+the numbers at arms that may no longer mean the same thing. Then `read_plate_results` with an
+outcome named gives each measured arm's factor levels beside its value, which is exactly the shape
+`suggest_next_experiment` takes. Before this existed the round trip this section promises was
+somebody retyping a table.
+
+Three things to do with what comes back, all of which are easy to skip:
+
+- **Lead with the arms that have no result.** They are named, not counted, for a reason: a summary
+  of only what landed makes a half-run plate look finished. Ask which of three things happened —
+  the well was run and failed, was not run, or is still in the queue — because they are different
+  facts and only one is evidence.
+- **Never let an unmeasured well become a zero.** The observations deliberately omit it. If you are
+  tempted to fill a gap so the table looks complete, that is the temptation this design exists to
+  refuse: a surrogate fitted to an invented zero is confidently wrong in the direction of that
+  arm's conditions, and nothing downstream can see why.
+- **Report a disagreement rather than resolving it.** A well measured twice with two answers is
+  kept as two observations on purpose. Say that the assay disagrees; do not average them and do not
+  quietly take the newer one without saying so.
+
+Use the design's own `analytics.measures` wording for `outcome`, so the number that comes back
+matches the objective the plate was run for. A yield recorded as `yield` on one plate and
+`yield_pct` on the next is two columns nothing will join.
 
 If results already exist and the chemist is asking where to go next rather than what to put on a
 first plate, stop: that is `experiment-design`, and forcing an answered question back into a grid

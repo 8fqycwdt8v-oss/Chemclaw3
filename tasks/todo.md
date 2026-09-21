@@ -1,139 +1,146 @@
-# A discriminating check that can name a template — plan
+# Process development, HTE campaigns and protocol prediction — early PD to kilo lab
 
-**Status:** plan. Closes the `BACKLOG.md` row
-`D-2026-09-20-a-swept-axis-is-a-choice-an-invented-argument-is-a-lie` opened: *"a check can name a
-note, and cannot name a tool's output."*
+**Status:** in progress. Ideation merged as
+`docs/archive/IDEATION-2026-09-20-process-development-hte-and-protocol-prediction.md`; this is the
+implementation of it.
 
-The previous occupant of this file was the dispatcher's own plan and review, merged as #425.
+The previous occupants are archived: the computable-discriminating-check plan (#425) at
+`docs/archive/plans/computable-discriminating-check.md`, and the plan for the check that names
+a template (#426, merged into `main` while this branch was in review) at
+`docs/archive/plans/discriminating-check-naming-a-template.md`.
 
-## The problem, restated
+## The ask
 
-A check may name a **tool** (one structure) or a **job** (structures by role, one swept axis). Both
-draw every argument from notes already in the corpus. So a question whose subject is a *derived*
-set — this molecule's tautomers, its protonation states, its breakable bonds — cannot be asked at
-all, because none of those structures is a note anybody wrote down. That is what leaves
-`survey_bond_strengths`, `profile_rotation` and `scan_coordinate` refused, and it is what stops the
-chemist's "which molecule will be generated" question being a check rather than a lab proposal.
+"Implement and fix everything" from the ideation. That document's own §7 orders it, and this plan
+follows that order rather than the document's.
 
-## What I found, and why it changes the shape
+## What the ideation found, that the plan is shaped by
 
-The ADR's rewritten trigger says the missing piece is chaining a tool's output into a job's params.
-**That chaining already exists, as a `Template`** — and five of the nine shipped templates *are*
-this exact pattern:
-
-| template | chain |
-| --- | --- |
-| `tautomer-resolution` | `enumerate_tautomers` → `rank_species` |
-| `microspecies-profile` | `enumerate_protonation_states` → `rank_species` |
-| `stereoisomer-ranking` | `enumerate_stereoisomers` → `rank_species` |
-| `bond-strength-survey` | `enumerate_bond_cleavages` → **`survey_bond_strengths`** |
-
-`bond-strength-survey` is one of the three jobs the ADR refused, already wired to the enumerator
-whose entries its spec is documented as copying. The sibling repo's `SpeciesSet.smiles` says so in
-as many words: *"the field Chemclaw3's templates pass straight into `rank_species`, by value."*
-
-**So the fix is not a new chaining mechanism. It is a third thing a check may name.** (The table above said five when this plan was written; measured, it is four — `degradant-triage` chains nothing, which its own step `purpose` states.) Building a
-second enumerate-then-rank path would duplicate a reviewed seam and lose what that seam already
-carries — `tautomer-resolution` pins `level: thorough` on a *measured* finding (acetylacetone ranks
-99.9% keto from one embedding per tautomer and is ~80% enol in reality, because the enol's
-intramolecular hydrogen bond exists in one planar conformer). A hand-rolled chain in the dispatcher
-would get that wrong and look entirely reasonable.
-
-## The shape
-
-**A check may name a template, and supplies only its structure input.** Everything the rule already
-says holds unchanged:
-
-- the model **selects** a template name from a set derived offline, and **selects** a subject note;
-- the structure is read off the resolved `compound` note, exactly as now;
-- every other declared input stays unset, so the template's own reviewed defaults apply;
-- a template declaring a required input that is *not* the structure is **refused** — fail closed,
-  by the same derivation the job half uses.
-
-The pre-flight is the template's own, not a second one: `unrunnable_reason` (this deployment's
-connector set) plus `_params_model(template).model_validate(...)`, which is what
-`templates/registry.py` runs before any launch. `TemplateRunInput` already carries `roles`, so the
-authorization gap the last round found on the job half cannot reappear here.
+1. Five fleet bundles (`thermalsafety`, `kinetics`, `unitops`, `props`, `suitability`, 33 tools)
+   are unreachable from every chart deployment — and declaring them the ordinary way costs 21,913
+   tokens of prefix on **every** model call, which four `test_context_floor.py` entries already
+   declined.
+2. The prescriptive tier is bench-scale by construction: `_MAX_MASS_MG = 1_000_000` (1 kg),
+   `_MAX_VOLUME_ML = 20_000` (20 L), and `ChargeLine` is three fixed-unit floats.
+3. Nothing attaches a plate's results back to the design that prescribed them.
 
 ## Steps
 
-- [x] 1. `hypotheses/dispatch.py` — the template half, pure: `ground_template_inputs(declared,
-      structure)` returning the inputs mapping or a `Refusal`. Fail closed on a required input that
-      is not the structure.
-- [x] 2. `CheckCall` gains `template: str`. A call naming more than one of tool/job/template is
-      refused rather than resolved by precedence — precedence is a silent choice.
-- [x] 3. `ground_check_template` activity: resolve the subject, run the template's own pre-flight,
-      return a `_GroundedTemplate` carrying the **resolved** template pinned into it (the same
-      rule `TemplateRunInput.template` states: an edit afterwards cannot change a live run).
-- [x] 4. `_settle_templates`: launch `TemplateWorkflow` as a child under the shared budget. A
-      template runs a job inside it, so it costs one calculation.
-- [x] 5. `report.py` / `_template_line`: the `ran:` line names the template, the subject note and
-      the inputs left at their defaults — same disclosure rule as the other two halves.
-- [x] 6. `derive_check` prompt: teach the third shape, and that a template is **preferred** where
-      one fits, because it carries defaults a check cannot supply.
-- [x] 7. Tests: a ratchet deriving the dispatchable template set from the shipped catalogue; a
-      refusal for a template needing a non-structure input; a refusal for a call naming two
-      targets; end-to-end through a stubbed child workflow; the budget covering templates.
-- [x] 8. ADR superseding nothing and closing the trigger, `BACKLOG.md` row deleted in the same
-      commit, `SKILL.md` updated.
-- [x] 9. `make lint type test` green with the daemon up, then PR and merge.
+- [x] **S1. Split declaring from binding.** `ConnectorManifest.default_enabled`, read in exactly
+      one place (`registry.enabled()` when `connectors_enabled` is empty). Explicit lists are not
+      filtered by it.
+- [x] **S2. The declared basis for validators.** `declared_connector_tool_names`,
+      `declared_tool_names`, `declared_skills_dirs` — so an opt-in bundle's skill is still
+      validated on a checkout that never binds it. Runtime keeps the enabled basis.
+- [x] **S3. Declare the five bundles**, `default_enabled: false`, manifest text carried from the
+      fleet (authoritative there), each with a `README.md`.
+- [x] **S4. The four skills that could not previously exist** — `thermal-safety-assessment`,
+      `kinetics-and-reactor-choice`, `unit-operation-sizing`, `system-suitability`. `props` gets
+      none: `skills/solvent-selection` already holds that judgment.
+- [x] **S5. ADR** `D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`.
+- [x] **S6. Tests** for the split: opt-in bundles stay out of `enabled()` and out of the measured
+      prefix; an explicit list reaches them; a declared-but-unbound tool resolves for a validator
+      and not for the runtime verifier. Five tests in `tests/test_connector_registry.py`.
+- [x] **S7. Chart**: five `connectors.<name>` entries at `enabled: false`, plus the
+      `networkPolicy.egressPorts` entry each one needs *before* anybody enables it. Rendered config
+      unchanged for an existing release. helm/kubeconform/promtool installed, so the 73 chart tests
+      that had been skipping actually ran.
+- [x] **S8. Context-floor prose**: the allowance's membership rule is now two predicates —
+      declared in both trees *and* bound by silence — and `_ARGUED_DIVERGENCES` carries nine rows.
+- [x] **S9. Plausibility bands relative to the declared scale.** Scoped down from the plan's
+      "`ChargeLine` on `Measurement`" — see the review below for why, and what it costs.
+- [x] **S10. `rescale_protocol`** + `rescale_experiment_protocol` + the
+      `protocol-scale-translation` skill.
+- [x] **S4b. Six cross-capability skills** (not in the original list): crystallisation, solvent
+      swap, impurity fate, analytical readiness, readiness review, robustness.
+- [x] **S11. The design → results loop** — `experiment_arm_results` keyed by
+      `(design, revision, arm)`, `attach_plate_results` and `read_plate_results`, with the
+      observations handoff into a campaign.
+      `D-2026-09-21-an-outcome-is-a-third-table-not-a-column-on-either-tier`.
+- [x] **S12. The gate** a fleet template's arguments needed — the fleet's own recorded
+      `tool-surface.json`, read offline. The first template is written and **parked**, because
+      its launcher would cost every deployment prefix for a capability that ships off; the
+      measurement and the ADR that would unblock it are the backlog row.
+- [x] **S13. Design generators** — BoFire's `DoEStrategy` behind a `criterion` argument, not a
+      second tool (`D-2026-09-21-a-design-is-a-criterion-not-a-second-tool`). Closes the
+      `DEFERRED.md` row and the `BACKLOG.md` row, both deleted. Blocking and `NChooseK` are
+      still open and still their own row.
 
-## What this will still not do
+## Verification
 
-`scan_coordinate` stays refused and should: it needs `values`, a coordinate grid, which no
-enumerator produces and which a model would invent. Saying so is the point — the other two unlock
-because something real produces their arguments, and this one does not.
-
-Ranking substitution products nobody has written down still needs a substitution-product
-enumerator, which is a `Chemclaw3-mcp` question rather than this repo's.
+`make lint type test` green, plus every validator (`connector-validate`, `skill-validate`,
+`prose-validate`, `template-validate`, `kg-validate`, `helm-validate`). Postgres-backed tests must
+actually run — `sudo -n dockerd`, `make up`, `make db-migrate` — because a local run that skips them
+prints green and proves nothing.
 
 ## Review
 
-**The plan survived contact, which is unusual here and is worth saying why.** The design work was
-done before any code: reading the sibling repo's enumerators to see what they actually return, and
-then finding that `data/templates/` already held five chains of exactly the needed shape. The
-implementation after that was mechanical, because the decision — *a third target, not a second
-mechanism* — had already been made against the evidence.
+### What shipped
 
-**What the reading changed.** My first sketch was `CheckCall.enumeration`: name an enumerator, call
-it in the grounding activity, parse its output into the job's field. That would have worked and
-would have been wrong. It rebuilds `TemplateWorkflow`'s substitution and per-step audit, and it
-leaves the check choosing `level` and `ranking` — the two arguments whose correct values *are* the
-reviewed finding. `tautomer-resolution`'s own comment is the evidence: acetylacetone ranks 99.9%
-keto from one embedding per tautomer and is ~80% enol in reality. A dispatcher-side chain gets the
-textbook case backwards and looks entirely reasonable.
+Four commits. The bundles and the declared/bound split; the scale-relative bands and the rescale
+path; the three declarations a new bundle lands in; six skills and the four a new tool lands in.
 
-**Two guards exist because of what is absent, not what is present.** No shipped template declares
-`write_tools`, and no shipped template requires a second input. Both are refused anyway, because a
-set that is safe today and dispatchable *by omission* is the shape the last review round found four
-times in one diff.
+**The finding that shaped everything**: the ideation expected to *add* capability and found the
+capability already built and unreachable — 33 tools across five fleet servers, with a manifest in
+this tree the only thing missing. The reason it had stayed missing was not oversight but price:
+declaring them the ordinary way costs 21,913 tokens of prefix on every model call, and four
+separate `test_context_floor.py` entries had already declined that trade on smaller numbers.
+`default_enabled` is the whole change — one field, read in one place — and it exists because
+*declaring* a capability and *binding* it are different decisions with different costs.
 
-**One thing the plan got wrong and the type checker caught**: `_GroundedTemplate.template` started
-as `Any` with `arbitrary_types_allowed`, which crossed the Temporal wire as a bare dict and failed
-at the child launch. Typing it `Template | None` round-trips it as the model `TemplateRunInput`
-expects, and `mypy --strict` then forced the `None` to be handled at the launch site rather than
-assumed away — which is a real refusal path, not a formality.
+### What I got wrong, and what corrected it
 
-**A third review round found eight defects, and the two worst were my own prose.** "Five of the
-nine templates chain an enumerator into a calculation" is **four** — `degradant-triage` chains
-nothing and says so in its own step `purpose`, and `conformer-refinement`'s upstream is a
-calculation. "Two of the nine end in an `agent` step" is **all nine**, which understated this
-ADR's own cost disclosure by more than four times. Both claims had propagated into four files
-each. The rule CLAUDE.md opens with is that prose is evidence about what its author believed; both
-of these were one script away from being checked, and I wrote them from reading rather than
-measuring.
+- **The ideation said the prescriptive tier "refuses" a kilo-lab scale.** It does not;
+  `quantities_are_plausible` is a warning. Corrected in the archived document rather than left to
+  land, because the real defect is worse in a more interesting way: a warning that fires on correct
+  input is how a chemist learns to stop reading the two checks beside it.
+- **I raised `agent_context_token_budget` to hold the thread allowance whole.** The window pins
+  that number, not the prefix, and `tests/test_compaction.py` records a previous branch trying
+  exactly this and reverting it. The thread absorbs 1,400 tokens instead, and says so.
+- **I ran the suite in parallel against an already-loaded box** and got nine failures, five of
+  which were scheduling artifacts. `D-2026-09-13` documents that this happens and says to re-run
+  serially before believing a parallel failure. It cost a triage pass that a serial run would not
+  have needed.
 
-The code findings were the same class as the last round — a rule applied to a narrower scope than
-it was written for. The dispatchable set read `discovered()` instead of `enabled()`, so a
-deployment's own template switch was the one gate this path did not pass. The write guard read
-`AgentStep.write_tools` alone, so a `tool` step naming `record_knowledge_note` was invisible to
-it. The child launched with no `execution_timeout`, having just been gated by
-`run_ceiling_problems` *against* that timeout. And the `model_validator` refusing an ambiguous call
-raised on the model's own structured output, which is non-retryable bad data — so the check it was
-protecting vanished entirely rather than being reported.
+### Three things a reviewer should push back on
 
-**Verification.** `make lint` and `make type` (944 files) green; `skill-validate` and
-`prose-validate` pass; 199 tests across the dispatch, tournament, hypotheses and templates suites,
-including an end-to-end launch of a stand-in `TemplateWorkflow` child — the previous job-half tests
-all refused at grounding, so nothing had ever driven a real child launch before. Full `make test`
-runs against Postgres and Temporal started locally so the Postgres-backed set is not skipped.
+1. **S9 is narrower than the plan.** `ChargeLine` still carries `mass_mg`/`volume_ml`/`amount_mmol`
+   as fixed-unit floats rather than `Measurement`. The band defect is fixed and the field shape is
+   not. Moving it touches stored JSONB revisions, `from_bo`, `render`, `export` and the
+   `charge_is_consistent` arithmetic, which is a migration rather than a change, and it was not
+   needed to close the defect. It stays the right long-term shape.
+2. **Two ceiling raises in one branch**, totalling 1,400 tokens of thread allowance taken from
+   every deployment — including every one that binds none of the five bundles. Both are argued in
+   the file; whether the second (six skills) is worth it is the judgement call most worth
+   challenging, and the cheaper alternative — bundling four of the six — was rejected because they
+   genuinely span bundles.
+3. **~~`SERVED_ELSEWHERE_ALLOWANCE` and `FLEET_PUBLISHED_ALLOWANCE` went unverified~~ — closed,
+   and the way it closed is the point.** For most of this work both skipped, because measuring the
+   fleet's schemas needs a built `.venv` in the sibling checkout and this one had none; the token
+   figures were that file's own recorded measurements, cited as such. So the sibling was built
+   (`make install` there, one command), and the four cross-repository checks now **run**: the
+   allowances are measured against the real servers, `tests/conftest.py`'s "Cross-repository checks
+   did not run" epilogue is absent from the final run, and the skip count went 7 → 3. The three
+   left are an IPv6-less host and two surfaces declared not to be deployment surfaces.
+
+   This is the same lesson as the 73 chart tests that had been skipping for want of `helm`:
+   **a skip is not a pass, and in both cases the cost of turning it into evidence was one
+   install.** What remains unverified is nothing — which is a different sentence from the one this
+   row started as, and worth the two commands it took.
+
+### Not built, and why
+
+`attach_plate_results` (S11) is the loop-shaped gap the ideation calls out: a design reaches
+`executed` and nothing attaches what the plate produced, so the plate → observations →
+`suggest_next_experiment` round trip is handwork and the deferred mining of human protocol edits
+has no corpus. It needs a table, a migration and a decision about whether results hang off the
+design or off `reaction_records` — an ADR, not an afternoon, and a half-built version is worse than
+none.
+
+The step templates (S12) were started and stopped on a principle: a template's steps carry literal
+argument keys, `make live-template-args` is the only gate that checks them against a running
+connector, and this lane cannot run one. Writing argument names for five fleet servers I cannot
+introspect is the fabricated-argument failure `D-2026-09-20-a-ranking-is-evidence-a-critic-is-not-
+a-gate` refuses one layer over.
+
+The design generators (S13) are self-contained and simply not done.
