@@ -1522,34 +1522,34 @@ free number at the end of its section.
     corrected row, and the real work is usually the gap the wrong row was standing in front of.**
 
 100. **A guard that excludes one thing by name excludes exactly that thing, and my change was the
-    second.** `test_every_compiled_graph_in_this_tree_names_its_checkpointer` walks every `.compile`
-    call and skipped `re` with a comment saying "`re.compile` is the other `.compile` in this tree".
-    Adding `regex` for a site-supplied pattern's deadline made that sentence false and reddened a
-    guard with nothing to do with graphs. The fix that matters is not the second name, it is naming
-    the **class** (`_PATTERN_ENGINES`) so a third entry has to be a third engine rather than an
-    exception somebody added to get to green. **Before adding an import that looks like something a
-    guard already has an opinion about, grep the guards for the thing it looks like** — and when I
-    do trip one, ask whether its exclusion is a list or a category, because the two age completely
-    differently.
+     second.** `test_every_compiled_graph_in_this_tree_names_its_checkpointer` walks every `.compile`
+     call and skipped `re` with a comment saying "`re.compile` is the other `.compile` in this tree".
+     Adding `regex` for a site-supplied pattern's deadline made that sentence false and reddened a
+     guard with nothing to do with graphs. The fix that matters is not the second name, it is naming
+     the **class** (`_PATTERN_ENGINES`) so a third entry has to be a third engine rather than an
+     exception somebody added to get to green. **Before adding an import that looks like something a
+     guard already has an opinion about, grep the guards for the thing it looks like** — and when I
+     do trip one, ask whether its exclusion is a list or a category, because the two age completely
+     differently.
 
 101. **The measurement I skipped was the one that would have told me the fix.** The timing test that
-    reds under load had already been corrected once *to an in-process control* and still failed at
-    1.289x against 1.3. I could have widened the margin. Measuring instead showed why the margin
-    could not help: the control blocked the loop for 32 ms, which is inside the noise a loaded box
-    adds to **both** arms, and the offloaded arm's worst gap tracks the *concurrency* rather than
-    the total work. Four heavier turns instead of twelve light ones moved the separation from 2.8x
-    to 14-26x with the defect still at 1.00x — a bound with room, from the same test. **When a
-    margin keeps needing to be widened, the thing to measure is the size of the control, not the
-    size of the margin.** And the second half: the sync-path stand-in was replaceable by the driven
-    mutation (`asyncio.to_thread` neutered), which reads identically and is the defect, so the
-    denominator stopped being an analogy for one.
+     reds under load had already been corrected once *to an in-process control* and still failed at
+     1.289x against 1.3. I could have widened the margin. Measuring instead showed why the margin
+     could not help: the control blocked the loop for 32 ms, which is inside the noise a loaded box
+     adds to **both** arms, and the offloaded arm's worst gap tracks the *concurrency* rather than
+     the total work. Four heavier turns instead of twelve light ones moved the separation from 2.8x
+     to 14-26x with the defect still at 1.00x — a bound with room, from the same test. **When a
+     margin keeps needing to be widened, the thing to measure is the size of the control, not the
+     size of the margin.** And the second half: the sync-path stand-in was replaceable by the driven
+     mutation (`asyncio.to_thread` neutered), which reads identically and is the defect, so the
+     denominator stopped being an analogy for one.
 
 102. **I ran `uv sync` in the middle of a full-suite baseline and then read the result as a
-    baseline.** Two failures came back; one was a shallow clone and one was my own in-flight edit.
-    Lesson 97 says do not start a second run while the first is running, and installing packages
-    under a running suite is the same mistake wearing different clothes — the interpreter the run
-    started with is not the one it finished with. **A baseline is only a baseline if the tree and
-    the environment hold still for it**; anything I want installed goes in before the run starts.
-    The shallow-clone half is worth its own note: `git log origin/main | wc -l` read **80**, and a
-    guard asserting reachability from `origin/main` fails on history nobody fetched. One
-    `git fetch --depth=2000` was the fix, and editing two merged ADRs would have been the damage.
+     baseline.** Two failures came back; one was a shallow clone and one was my own in-flight edit.
+     Lesson 97 says do not start a second run while the first is running, and installing packages
+     under a running suite is the same mistake wearing different clothes — the interpreter the run
+     started with is not the one it finished with. **A baseline is only a baseline if the tree and
+     the environment hold still for it**; anything I want installed goes in before the run starts.
+     The shallow-clone half is worth its own note: `git log origin/main | wc -l` read **80**, and a
+     guard asserting reachability from `origin/main` fails on history nobody fetched. One
+     `git fetch --depth=2000` was the fix, and editing two merged ADRs would have been the damage.

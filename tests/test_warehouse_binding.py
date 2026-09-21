@@ -581,7 +581,8 @@ def test_a_pattern_that_cannot_finish_stops_on_a_wall_clock_instead_of_on_the_ac
 def test_a_pattern_that_cannot_finish_is_not_a_bad_row() -> None:
     """Why `PatternBudgetError` is its own class, in the one assertion that makes it load-bearing.
 
-    `warehouse/adapter.py` catches `ElnMappingError` per entry and skips the row — right for a NULL
+    `src/chemclaw/ingest/eln/warehouse/adapter.py` catches `ElnMappingError` per entry and skips
+    the row — right for a NULL
     timestamp, and exactly wrong here: the cost belongs to the pattern, so skipping and continuing
     re-runs the same unfinishable match on every remaining row. One stall would become `rows x
     budget` of them, each one counted as a data refusal, and the ingest would still never finish.
