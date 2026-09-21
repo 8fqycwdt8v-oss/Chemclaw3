@@ -1168,7 +1168,12 @@ def test_the_overrun_indicator_can_fire_at_the_shipped_budget_with_no_window(
 #: Both drop a further 600 when the ceiling goes to 72,000 for the six process-development
 #: skills, on the same argument and with the same arithmetic: the prefix grew, the window did
 #: not, so the thread is the term that moves.
-CLEAR_TRIGGER_THREAD_ALLOWANCE = 28_600
+#:
+#: And a further 1,100 at 73,100 for the plate-results loop. The branch total is **2,500**, all
+#: of it taken from the thread — which is the number a reviewer should weigh rather than any
+#: single entry, and the reason the ceiling's own comment says a fourth raise here should be
+#: refused.
+CLEAR_TRIGGER_THREAD_ALLOWANCE = 27_500
 
 #: The thread allowance `agent_context_token_budget`'s default is derived to leave.
 #:
@@ -1220,7 +1225,7 @@ CLEAR_TRIGGER_THREAD_ALLOWANCE = 28_600
 #: commit before this one and reverted on the argument directly above — the window is the input, so
 #: a budget that rises with the prefix spends head-room a provider decides, and what buys the
 #: thread back is a narrower prefix rather than a raise here.
-BUDGET_THREAD_ALLOWANCE = 35_700
+BUDGET_THREAD_ALLOWANCE = 34_600
 
 #: The smallest context window this stack is designed against, in billed tokens.
 #:

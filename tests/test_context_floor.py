@@ -563,7 +563,29 @@ load_profiles()
 #: The cost, stated: every deployment pays 594 more tokens on every model call and the thread
 #: allowance drops by the same amount again — `tests/test_compaction.py`'s two allowances carry it,
 #: for the reason the entry there gives about the window being the input.
-CEILINGS: dict[str, int] = {"__default__": 72_000}
+#: **And to 73,100 for the plate-results loop — the third raise on this branch, and the one with
+#: the best case.** `attach_plate_results` costs **606** (a nested `list[ArmResult]` argument) and
+#: `read_plate_results` **257**. Measured on this commit: **72,641**.
+#:
+#: The case is better than the two above it for one reason worth stating rather than assuming: both
+#: tools work in **every** deployment. They touch only core's design store, so unlike the six
+#: process-development skills — whose judgment is about tools most deployments do not bind — and
+#: unlike the template that was parked for exactly this, the prefix here buys something every turn
+#: can actually use.
+#:
+#: What it buys is the loop that was open since `D-2026-08-28` built the prescriptive tier: a
+#: design reached `executed` and nothing attached the outcome, so the round trip
+#: `skills/hte-campaign-design` promises in its own closing section was a person retyping a table,
+#: and the `DEFERRED.md` row on mining the agent-to-human protocol diff had no corpus because
+#: nothing could tell which designs had ever been run.
+#:
+#: **The running total is the thing to look at, not this entry.** This branch has taken
+#: 70,600 -> 73,100, which is **2,500 tokens of thread allowance from every deployment on earth**,
+#: and `tests/test_compaction.py`'s two allowances carry all of it because the budget is pinned by
+#: the window rather than the prefix. A fourth raise on one branch should be refused; what buys it
+#: back is `D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`'s deferred schemas, or
+#: profile routing, neither of which is a raise.
+CEILINGS: dict[str, int] = {"__default__": 73_100}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.

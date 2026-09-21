@@ -65,20 +65,6 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
-- [ ] **A plate's results never reach the design that prescribed them, so the round trip
-  `hte-campaign-design` promises in its own closing section is handwork** — [L]. A design reaches
-  `DesignStatus.executed` and nothing attaches what came back. Results enter only through
-  `ingest/eln` as `reaction_records`, with no link to the `design_id` that asked for them, so the
-  plate -> observations -> `suggest_next_experiment` path a chemist is told to expect is somebody
-  retyping a table. It also starves two things that already exist: `campaign_progress` has to be
-  fed observations by hand, and the `DEFERRED.md` row on mining the agent-to-human protocol diff
-  ("the highest-quality supervision this system can collect about its own suggestions, and it is
-  currently written and never read") has no corpus because nothing joins a stored design to its
-  outcome. Wants its own ADR before any code: the open question is whether a result hangs off the
-  design, off `reaction_records` with a `design_id` column, or off a third table, and that decides
-  whether a plate run outside this system can ever be attached. Named in
-  `docs/archive/IDEATION-2026-09-20-process-development-hte-and-protocol-prediction.md` §3.3.
-
 - [ ] **A template launcher is bound whatever its tools are, so an opt-in capability's template
   costs every deployment prefix it cannot use** — [M]. The argument-checking half of this row is
   **done**: `tests/test_template_args_recorded.py` reads the fleet's own recorded

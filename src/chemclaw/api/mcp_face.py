@@ -109,6 +109,12 @@ WITHHELD: dict[str, str] = {
         "read that stores nothing is what makes it read-only to the plan gate; it is not an "
         "argument for exporting it to an unauthenticated face"
     ),
+    "read_plate_results": (
+        "one team's plate and what it gave: the conditions they ran and the numbers they got, "
+        "reached by the same guessable `design-<hash>` id `read_experiment_protocol` above is "
+        "withheld for. An unreported campaign's results are the most commercially sensitive "
+        "thing this tier holds"
+    ),
     "check_pending_requests": (
         "every open request in the deployment with the reasoning a chemist typed, who asked and "
         "which session it belongs to — also the discovery path for the session ids above"

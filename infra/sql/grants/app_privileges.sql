@@ -187,11 +187,18 @@ BEGIN
     -- holds an answer that was moved aside precisely so a reopen could not blank it, so a credential
     -- able to UPDATE or DELETE one would undo the move. The application writes it once, from
     -- `pending_store.open_request`, and never reads it back to revise it.
+    -- `experiment_arm_results` is the third of the same family and the argument is the clearest of
+    -- them: it holds what a designed arm actually produced, and a re-measured well is a *second*
+    -- observation rather than a correction of the first. A credential that could UPDATE one could
+    -- make two disagreeing assays look like one agreeing measurement, which is precisely the
+    -- evidence the append-only shape exists to keep; one that could DELETE could make a failed
+    -- plate disappear from the record that says which designs were ever run.
     EXECUTE format(
         'GRANT INSERT ON bo_suggestions, structures, experiment_protocol_revisions, '
-        'experiment_protocol_status_events, pending_request_answers TO %I',
+        'experiment_protocol_status_events, pending_request_answers, experiment_arm_results TO %I',
         app_role
     );
+    EXECUTE format('GRANT USAGE ON SEQUENCE experiment_arm_results_result_id_seq TO %I', app_role);
 
     -- Insert, delete, and now a narrow update. The row is still written once by its creator
     -- (`ON CONFLICT DO NOTHING`, first writer wins), and offboarding removes a departed person's

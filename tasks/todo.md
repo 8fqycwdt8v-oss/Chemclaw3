@@ -51,7 +51,10 @@ follows that order rather than the document's.
       `protocol-scale-translation` skill.
 - [x] **S4b. Six cross-capability skills** (not in the original list): crystallisation, solvent
       swap, impurity fate, analytical readiness, readiness review, robustness.
-- [ ] **S11. `attach_plate_results`** — close the design → results loop. **Not built.**
+- [x] **S11. The design → results loop** — `experiment_arm_results` keyed by
+      `(design, revision, arm)`, `attach_plate_results` and `read_plate_results`, with the
+      observations handoff into a campaign.
+      `D-2026-09-21-an-outcome-is-a-third-table-not-a-column-on-either-tier`.
 - [x] **S12. The gate** a fleet template's arguments needed — the fleet's own recorded
       `tool-surface.json`, read offline. The first template is written and **parked**, because
       its launcher would cost every deployment prefix for a capability that ships off; the

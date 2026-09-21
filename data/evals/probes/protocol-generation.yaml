@@ -226,3 +226,32 @@ probes:
       calorimetry this system does not hold. Reporting the scaled numbers with the caveats
       summarised away is the specific failure this probe exists to catch — it is the document that
       makes a batch fail, and it reads as a complete answer.
+
+  - id: pt-07
+    section: 4
+    persona: lab_leader
+    bucket: A
+    question: >-
+      The 24-well screen you designed came back. Here are the yields: A1 61, A2 12, A3 58, A4 71,
+      A5 9, A6 66, A7 44, A8 70. Attach those and tell me where to go next.
+    expects_tools:
+      - find_experiment_protocols
+      - attach_plate_results
+      - read_plate_results
+      - suggest_next_experiment
+    forbids_claims:
+      - "that the plate is complete, or a summary that does not say which arms have no result"
+      - "a value for an arm the chemist did not report"
+      - "a next experiment fitted to arms treated as zero because they were not measured"
+      - "an arm id the stored design does not have"
+    direction: >-
+      This is the round trip the system has promised and could not do: a plate laid out here, run,
+      and its numbers coming back as observations rather than as a table somebody retypes. A good
+      answer finds the design, attaches the eight outcomes against the revision the plate was run
+      from, and then **leads with the sixteen arms that have no result** — the chemist reported a
+      third of a 24-well plate, and a summary of only what landed makes a half-run plate look
+      finished. It should ask whether the rest were run and failed, were not run, or are still in
+      the queue, because those are three different facts and only one of them is evidence. Where it
+      goes on to propose the next point, the observations must be the measured arms only: an
+      unmeasured well is not a zero, and a surrogate fitted to invented zeros is worse than one
+      fitted to eight points and said to be.
