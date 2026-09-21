@@ -40,13 +40,31 @@ The capability gap has its own measurement. A personal skill declaring
 A narrowing that runs and cannot narrow is worse than an absent one, because the prose says it is
 applied.
 
-The name half is older than `SkillManifest.requires`. Upstream resolves a collision between two
-mounts by *listing*, so a shared skill that any narrowing removes is not there to displace anything:
-`skills/deep-research/SKILL.md` carries no `requires:`, and one `skill_role_gates` entry the caller's
-roles do not satisfy took the listing from `/skills/deep-research/SKILL.md` to
-`/mine/deep-research/SKILL.md`. Both write doors already refuse a stored skill under a name
-`shipped_skill_names()` occupies; what they cannot refuse is a body stored before that tree shipped the
-name, or a name a later commit moved *into* `skills/`.
+The name half needs its own correction, because the row's measurement had expired and a review is
+what established that. Upstream resolves a collision between two mounts by *listing*, so a shared
+skill that any narrowing removes is not there to displace anything — and the row named a
+`skill_role_gates` entry as the narrowing that does it. Driven over four arms, with the reserved rule
+on and off:
+
+| scenario | reserved rule on | off |
+|---|---|---|
+| stored mounts ungated (before `D-2026-09-20` gave them a backend predicate) | — | `/mine/deep-research/SKILL.md` |
+| one shared predicate (the state this change replaces), role gate | `None` | `None` |
+| `filed`-only `EnabledSkills` (this change), enable-list omitting the name | `None` | `/mine/deep-research/SKILL.md` |
+| no narrowing configured | `/skills/deep-research/SKILL.md` | `/skills/…` |
+
+So the row was true when written and had been **closed since, silently**, by the backend predicate
+`D-2026-09-20` added: `RoleScopedSkills` is in that predicate, so the gate removed the stored copy
+too. For a colliding name every narrowing did, because the declaration map is keyed once and the
+filed skill's own `tools:` decided the stored copy as well.
+
+**What re-opens it is the `EnabledSkills` decision above**, and that is the reason these two rows
+belong in one commit rather than two. Making that narrowing `filed`-only is what stops it emptying the
+stored tiers — and therefore also what stops it removing a stored skill that has taken a shipped name.
+`UnreservedNames` is what keeps the name closed on its own terms instead of as a side effect of a
+narrowing whose real effect was deleting the tier. Both write doors already refuse a stored skill under
+a name `shipped_skill_names()` occupies; what they cannot refuse is a body stored before that tree
+shipped the name, or a name a later commit moved *into* `skills/`.
 
 ## Decision
 
@@ -63,7 +81,8 @@ both stored mounts.
 - **`UnreservedNames` is in `stored` only** — the fifth narrowing, and the first that belongs to a kind
   of tier rather than to a kind of question. A stored skill under a name this deployment ships is never
   served, so the read side agrees with the write side's *discovered* basis, which is the invariant the
-  second row asked for.
+  second row asked for. It is not optional given the first bullet: an enable-list that hides a name in
+  `skills/` now leaves the stored tiers standing, so without this the stored copy inherits the name.
 - **`ProfileScopedSkills` and `RoleScopedSkills` stay in both**, each for a reason rather than by
   default; see *Consequences*.
 

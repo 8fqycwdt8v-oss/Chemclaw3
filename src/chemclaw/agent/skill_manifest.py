@@ -227,6 +227,12 @@ def declared_triple(metadata: Mapping[str, Any]) -> tuple[str, frozenset[str], f
     ever cost a skill its visibility — so the parse is one function and only the *fallback* differs
     (a directory name for a file, a store key's name for a body).
 
+    **It re-implements `SkillManifest`'s strip-and-require-non-empty rather than validating through
+    it, and must stay in step with it.** That is deliberate and pre-existing: validating the whole
+    manifest here made *any* frontmatter defect erase the `tools:` declaration, which
+    `ToolScopedSkills` reads as "declares nothing" and leaves visible — a read error that *widens*.
+    The two rules to keep aligned are `str_strip_whitespace` and `min_length=1` on `name`.
+
     It raises rather than returning a sentinel, because the caller is what knows the fallback name
     and what to log about the thing that could not be read. See `_declared_pair` for why every
     failure has to fail *closed*.

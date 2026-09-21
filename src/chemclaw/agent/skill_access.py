@@ -1,22 +1,30 @@
 """Skill visibility: admin enablement, capability scoping, then Phase-6 RBAC (plan step 6.2).
 
-Four independent narrowings, deliberately kept separate because they answer different questions.
+Independent narrowings, deliberately kept separate because they answer different questions.
 `EnabledSkills` answers *"is this skill turned on in this
 deployment?"* (an admin/config concern); `ProfileScopedSkills` answers *"is this agent about it?"*
 (a per-profile concern); `ToolScopedSkills` answers *"can this agent do any
 of what the skill teaches?"* (a capability concern); `RoleScopedSkills` answers *"may this
-caller see it?"* (an identity concern). All four only ever remove skills, so chaining them in any
-order is safe; `build_langgraph_agent` wraps them in the order the request reads — what exists at
-all, then what this agent is about, then what it can do, then who may see it.
+caller see it?"* (an identity concern). Every one of them only ever removes skills, so chaining them
+in any order is safe; `build_langgraph_agent` wraps them in the order the request reads — what
+exists at all, then what this agent is about, then what it can do, then who may see it.
 
-**The fourth arrived last and for a reason that is not symmetry.** The other three are a
+**`ProfileScopedSkills` arrived last of those four, and for a reason that is not symmetry.** The
+other three are a
 deployment's, a tool surface's and an identity's, and none of them belongs to a *profile* — so
 until `AgentProfile.skill_names` existed, the only way to move one agent's skill surface was to
 move its tool surface and let `ToolScopedSkills` follow. That coupling is what made a skill
 unmeasurable: an A/B arm is a profile file, and an arm that cannot hold tools still while moving
 skills produces a delta nobody can attribute. See `ProfileScopedSkills`.
 
-All four are the same short-circuit over a different predicate, which is what `_Narrowing`
+**A fifth arrived with the stored tiers, and it is the one that is not asked of every tier.**
+`UnreservedNames` answers *"is this a name the reviewed trees already occupy?"*, which is a question
+only a **stored** skill can fail — so `skill_permits` returns a `SkillNarrowing` with one predicate
+per kind of tier rather than one for all of them. That type carries the measurement: `EnabledSkills`
+was being applied to the stored tiers and **deleted them outright**, which both of their module
+docstrings already said it would, as their reason for believing it did not.
+
+All five are the same short-circuit over a different predicate, which is what `_Narrowing`
 holds: await the inner source, return it untouched when this narrowing is unconfigured, otherwise
 filter. Extracted at the third copy (Rule of Three), and the short-circuit is the part worth
 sharing — it is what keeps an unconfigured decorator from paying for itself on every turn.
@@ -47,8 +55,11 @@ request path (tests, the classic non-service caller) there are simply no roles, 
 skills show — and with no gates configured, that is still every skill.
 """
 
+from __future__ import annotations
+
 from abc import abstractmethod
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 
 from chemclaw.core.identity_context import get_current_roles
 
@@ -264,6 +275,114 @@ class RoleScopedSkills(_Narrowing):
         return required is None or bool(get_current_roles() & required)
 
 
+class UnreservedNames(_Narrowing):
+    """Hide a **stored** skill whose name this deployment's reviewed trees already occupy.
+
+    The fifth narrowing, and the only one that applies to one kind of tier rather than to one kind
+    of question — which is why it is not composed into `SkillNarrowing.filed`: asking it of a filed
+    tree would hide every shipped skill from itself.
+
+    **It exists because the read side and the write side had different bases for one rule.** Both
+    write doors into the stored tiers refuse a name `langgraph_agent.shipped_skill_names()`
+    occupies, and upstream's `SkillsMiddleware` resolves a collision between two mounts by *listing*
+    — so a shared skill that any narrowing removes is not in the listing to displace anything, and
+    the stored document is served under the reserved name. `tests/test_local_skills.py::
+    test_a_reviewed_skill_wins_a_name_a_personal_one_also_claims` puts `/mine` before `/skills`
+    precisely so the reviewed skill wins that collision, and a hidden shared skill inverted it.
+
+    **Which narrowing actually reaches this was measured, and the backlog row's answer was stale.**
+    The row named a `skill_role_gates` entry, and that was true of the tier as it stood when the row
+    was written: with the stored mounts ungated — narrowed in the prompt only, before
+    `D-2026-09-20` gave them a backend predicate — a gate on `deep-research` served
+    `/mine/deep-research/SKILL.md`. Driven again against the one *shared* predicate that replaced
+    it: the gate hides **both** copies, because `RoleScopedSkills` is in `stored` too, so the row
+    was already closed as a side effect. Every narrowing was, for a colliding name: the declaration
+    map is keyed once, so a filed skill's own `tools:` decided the stored copy as well.
+
+    **What re-opens it is the `EnabledSkills` fix in `SkillNarrowing` below**, which is why these
+    two land together rather than separately. That narrowing is now `filed`-only, so an enable-list
+    that hides `deep-research` in `skills/` no longer empties `/mine` along with it — driven, the
+    listing moves to `/mine/deep-research/SKILL.md`. This narrowing is what makes the name safe
+    *structurally*, rather than leaving it safe as a consequence of a narrowing whose real effect
+    was deleting the tier.
+
+    The write doors cannot close this on their own, and that is the whole reason a read-side rule is
+    needed: they refuse a *new* stored skill under a shipped name, and say nothing about one stored
+    before that tree shipped the name, or about a name a later commit moved *into* `skills/`.
+
+    Args:
+        reserved: Every name this deployment's reviewed trees occupy — `shipped_skill_names()`, the
+            *discovered* set, which is the same basis the write doors use. Empty narrows nothing, so
+            a deployment with no skills tree is unaffected.
+    """
+
+    def __init__(self, reserved: Iterable[str] | None = None) -> None:
+        """Pre-normalize the reserved set for cheap lookups."""
+        self._reserved: frozenset[str] = frozenset(reserved or ())
+
+    def _narrows(self) -> bool:
+        """No reviewed tree, no reserved name — the default on a deployment shipping no skills."""
+        return bool(self._reserved)
+
+    def _permits(self, name: str) -> bool:
+        """A stored skill survives if no reviewed tree occupies its name."""
+        return name not in self._reserved
+
+
+@dataclass(frozen=True)
+class SkillNarrowing:
+    """The narrowing for a **filed** tree and the narrowing for a **stored** tier, as one value.
+
+    **Two fields rather than one predicate, because the tiers are not asked the same question — and
+    three of the four narrowings were answering the wrong one.** Both stored tiers' module
+    docstrings stated that `EnabledSkills` does not apply to them, each giving the same reason: the
+    enable-list names *shipped* skills, so applying it would delete the tier outright rather than
+    narrow it. Driven against `scratchpad_backend` before this type existed, it did exactly that —
+    `CHEMCLAW_SKILLS_ENABLED=development-report` left `ls('/mine/')` and `ls('/org/')` both empty. A
+    narrowing whose basis is a deployment's list of filed names cannot narrow a stored tier, because
+    `make skill-validate` checks that list against the *discovered* trees and therefore no stored
+    name can legally appear in it.
+
+    **One tuple of narrowing objects builds both**, so this is a partition rather than a second
+    composition: `skill_permits`' own docstring says a second implementation of "may this caller see
+    this skill" is "not a gate, it is a coin flip with a config flag for a coin", and two
+    independent compositions would be that. `stored` is the same objects minus the one that cannot
+    answer, plus the one that only a stored tier is asked (`UnreservedNames`).
+
+    **What deliberately stays in `stored`.** `ProfileScopedSkills` does — `skill_names: frozenset()`
+    is a profile author writing down that this agent reaches no skill at all, which is what the
+    `skills-removed.yaml` eval control arm is, and a tier escaping it would contaminate every arm
+    that measured against it (`tests/test_org_skills.py`). `RoleScopedSkills` does too: its keys are
+    validated against the filed trees, so it is a no-op on a stored name unless that name is also a
+    shipped one — the case `UnreservedNames` removes from the listing anyway.
+
+    The residual is recorded rather than hidden: a profile naming a *non-empty* `skill_names`
+    removes both stored tiers as collateral, for the same structural reason the enable-list did. It
+    is kept because the measurement case wants it — an A/B arm naming its skill surface means that
+    surface, and a stored tier leaking in produces a delta nobody can attribute — and because no
+    shipped profile sets the field at all, so it is a latent consequence of a deliberate rule rather
+    than a live defect. `docs/decisions/` carries the argument.
+    """
+
+    filed: Callable[[str], bool]
+    stored: Callable[[str], bool]
+
+    @classmethod
+    def permissive(cls) -> SkillNarrowing:
+        """Narrow nothing, either tier — for a caller whose subject is not the narrowing.
+
+        A named constructor rather than a defaulted argument, because the personal tier shipped with
+        no backend predicate at all: it was narrowed in the prompt, so `skill_names: []` advertised
+        nothing and still served every body to anyone who guessed a path. A default is how that
+        reopens by omission; a caller writing `SkillNarrowing.permissive()` is saying so.
+
+        **Every caller is a test**, and it ships here rather than in a fixture for that reason: the
+        thing it has to stay in step with is this class, so a field added above without a value here
+        is a build error in one place instead of a permissive answer six test files derive by hand.
+        """
+        return cls(filed=lambda _name: True, stored=lambda _name: True)
+
+
 def skill_permits(
     *,
     enabled: Iterable[str] | None,
@@ -272,8 +391,9 @@ def skill_permits(
     gates: Mapping[str, list[str]] | None,
     required: Mapping[str, frozenset[str]] | None = None,
     names: Iterable[str] | None = None,
-) -> Callable[[str], bool]:
-    """The four narrowings as one predicate over a skill name — the engine-neutral form.
+    reserved: Iterable[str] | None = None,
+) -> SkillNarrowing:
+    """The narrowings as one predicate per tier — the engine-neutral form.
 
     The one form now. It was one of two while MAF composed the same three as `SkillsSource`
     decorators, because that framework reached skills by asking a source for them; the backend
@@ -300,16 +420,26 @@ def skill_permits(
         names: The profile's `skill_names`; `None` narrows nothing, and an empty set narrows
             everything away — see `ProfileScopedSkills._narrows` for why those differ here and not
             in the enable-list.
+        reserved: Every name this deployment's reviewed trees occupy, applied to the **stored**
+            narrowing alone. See `UnreservedNames`, and `SkillNarrowing` for why the two tiers do
+            not get one predicate.
 
     Returns:
-        A predicate answering "is this skill visible to the turn in flight". Evaluated per call,
-        never cached, because the role gate reads the turn's ambient identity and one agent serves
-        every concurrent turn.
+        The narrowing for each kind of tier. Both predicates are evaluated per call, never cached,
+        because the role gate reads the turn's ambient identity and one agent serves every
+        concurrent turn.
     """
-    narrowings = (
-        EnabledSkills(enabled),
+    # One tuple, two subsets of it. The objects are shared rather than rebuilt, so the two tiers
+    # cannot come to disagree about a narrowing they both apply — see `SkillNarrowing`.
+    enabled_only = EnabledSkills(enabled)
+    both = (
         ProfileScopedSkills(names),
         ToolScopedSkills(declared, available, required),
         RoleScopedSkills(gates),
     )
-    return lambda name: all(narrowing.permits(name) for narrowing in narrowings)
+    filed = (enabled_only, *both)
+    stored = (*both, UnreservedNames(reserved))
+    return SkillNarrowing(
+        filed=lambda name: all(narrowing.permits(name) for narrowing in filed),
+        stored=lambda name: all(narrowing.permits(name) for narrowing in stored),
+    )

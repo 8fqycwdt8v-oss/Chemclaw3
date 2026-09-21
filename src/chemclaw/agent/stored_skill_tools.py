@@ -50,6 +50,7 @@ from chemclaw.agent.local_skills import LOCAL_SKILL_FILENAME, local_skills_names
 from chemclaw.agent.org_skills import org_skills_namespace
 from chemclaw.agent.skill_manifest import UNREADABLE_DECLARATION, declared_triple
 from chemclaw.agent.skill_store import paged_items
+from chemclaw.core.identity_context import get_current_actor
 from chemclaw.core.metrics_bridge import degraded
 
 logger = logging.getLogger(__name__)
@@ -61,51 +62,74 @@ class StoredSkillTools:
 
     The same pair of maps `skill_manifest.declared_tools`/`required_tools` answer for the filed
     trees, so `skill_access.skill_permits` takes one merged map of each and does not learn that two
-    kinds of tier exist. Both are read-only to every caller, as the filed maps are.
+    kinds of tier exist. Both **must be treated as read-only** — `frozen=True` freezes the fields,
+    not the dicts behind them, which is the same caveat `skill_manifest._declared_tools` states
+    about the maps it shares; every caller today only reads them.
 
-    A type rather than a bare tuple because this is threaded through `build_langgraph_agent` beside
-    `store` and `checkpointer`, and `(dict, dict)` at a call site says nothing about which is which.
+    A type rather than a bare tuple because this is threaded through `build_langgraph_agent` and
+    `build_turn_graph` beside `store` and `checkpointer`, and `(dict, dict)` at a call site says
+    nothing about which is which.
     """
 
     declared: dict[str, frozenset[str]] = field(default_factory=dict)
     required: dict[str, frozenset[str]] = field(default_factory=dict)
 
-    def __bool__(self) -> bool:
-        """Whether anything was read, so a caller can skip the merge entirely."""
-        return bool(self.declared or self.required)
 
-
-async def stored_skill_declarations(store: Any | None, actor: str) -> StoredSkillTools:
-    """Read both stored tiers' declarations, for the turn this actor is taking.
+async def stored_skill_declarations(store: Any | None) -> StoredSkillTools:
+    """Read both stored tiers' declarations, for the turn in flight.
 
     **Two tiers, two conditions, mirroring the mount exactly.** `scratchpad_backend` mounts the
     organisation's tier on a store alone and the chemist's on a store *and* an actor; asking about a
     tier a turn has no mount for would narrow by a declaration the model can never reach, which is a
     gate disagreeing with a listing in the direction that hides a skill for no reason.
 
-    A name held by both tiers keeps the **personal** declaration, because `_skills_middleware`
-    mounts `/mine` before `/org` and upstream resolves a collision by listing order, so the personal
-    body is the one a turn reads. That the write door refuses the reverse direction (a personal
-    skill may not take an org name, an admin may take a personal one) is what makes the collision
-    possible at all — see `local_skills.save_local_skill`.
+    **The actor is read from the ambient rather than taken as an argument, and it used to be
+    taken.** `scratchpad_backend` resolves the personal namespace through `get_current_actor()`,
+    which normalizes — `core/identity_context.py` returns the value *stripped*, "because the reader
+    every gate and every namespace shares normalizes rather than leaving each of them to".
+    `api/runner.py` passed the raw request value, so for a padded oid the two spelled one actor two
+    ways: the reader resolved a namespace with nothing in it, the mount resolved the real one, and a
+    *missing* declaration reads as "declares nothing" — so the whole `/mine` tier reverted to being
+    unscoped, silently. Found by review and driven on `' alice-oid '`. Fixing the call site would
+    have left the parameter able to disagree again; asking the same reader the mount asks is what
+    makes the two spellings one.
+
+    **A name held by both tiers keeps the *organisation's* declaration, and getting this backwards
+    is the defect a review caught here.** Upstream resolves a collision **last-source-wins**, and
+    `_skills_middleware` orders its sources by ascending review depth — `/mine`, then `/org`, then
+    the reviewed trees — so the *last* of the two is what a turn reads. Measured on a name both
+    tiers hold: one entry, advertised as `/org/<name>/SKILL.md`, carrying the organisation's
+    description. `local_skills.save_local_skill` says the same thing in the course of refusing the
+    other direction: a personal skill under an org name "would never act, since `_skills_middleware`
+    puts `/org` after `/mine`".
+
+    So the tiers are read `/mine` first and `/org` last, matching that order. Keyed the other way,
+    one person's private document decided the visibility of a skill acting on **everybody's** turns
+    — in both directions: it could hide an org skill whose own tools are all bound, or serve one
+    whose are not. The collision is reachable in exactly one direction and by design:
+    `save_local_skill` refuses an existing org name, while `POST /skills/org` deliberately may
+    publish over a name somebody already keeps privately, because the alternative is a
+    deployment-wide publication blocked by one person's private vocabulary.
 
     Args:
         store: The process's store, or `None` for a deployment with no durable memory — in which
             case neither tier is mounted and there is nothing to read.
-        actor: The turn's actor, empty off the request path. Empty means no personal mount, so only
-            the organisation's tier is read.
 
     Returns:
-        The two declaration maps, empty when no tier is reachable.
+        The two declaration maps, empty when no tier is reachable. Off the request path there is no
+        actor, so only the organisation's tier is read — which is what is mounted there too.
     """
     if store is None:
         return StoredSkillTools()
+    actor = get_current_actor()
     declared: dict[str, frozenset[str]] = {}
     required: dict[str, frozenset[str]] = {}
-    namespaces = [org_skills_namespace()]
-    if actor:
-        # Read last so it wins the `update` below, which is the order the mount resolves in.
-        namespaces.append(local_skills_namespace(actor))
+    # `/mine` first and `/org` last, so the later write below wins for a name both hold — which is
+    # the order `_skills_middleware` lists them in and therefore the body a turn reads. See above:
+    # this was the other way round, and one chemist's private skill decided an org skill's
+    # visibility.
+    namespaces = [local_skills_namespace(actor)] if actor else []
+    namespaces.append(org_skills_namespace())
     for namespace in namespaces:
         for key, item in (await paged_items(store, namespace)).items():
             # **Keyed by the store key's name, never by the frontmatter's**, which is the same
@@ -126,8 +150,11 @@ def _name_of(key: str) -> str | None:
     """The skill a store key names, or `None` for a key that is not a skill body.
 
     The shape `StoreBackend` writes is `/<name>/SKILL.md` (`local_skills._key`), and a key of any
-    other shape is not this tier's — the same filter both listings apply, stated here because a
-    non-skill key must not become a declaration keyed by a nonsense name.
+    other shape is not this tier's. **Stricter than either listing, deliberately**: both of those
+    test `key.endswith("/SKILL.md")` alone, which is enough when the answer is a name to show a
+    person, and not enough here — a key with no leading segment would become a declaration under a
+    nonsense name, and the entry that matters is the one that goes *missing*, because a missing
+    entry reads as "declares nothing".
     """
     suffix = f"/{LOCAL_SKILL_FILENAME}"
     if not key.startswith("/") or not key.endswith(suffix) or len(key) <= len(suffix) + 1:
@@ -149,7 +176,14 @@ def _declaration(item: Any) -> tuple[frozenset[str], frozenset[str]]:
     try:
         _declared_name, tools, requires = declared_triple(frontmatter.loads(body).metadata)
     except Exception as exc:
-        return _unreadable(str(exc))
+        # **The exception's *type*, never its message**, which is the correction a review drove
+        # here. A parser quotes what it choked on: measured, a body whose frontmatter opens
+        # `name: !project_<a-real-name> x` put that tag verbatim into the WARNING, which is a
+        # person's own words in a shared log — the thing the module docstring promises does not
+        # happen, and that `_count_a_local_load` refuses for a metric label. The type separates a
+        # YAML fault from a schema one, which is all this line is for; the body is identified
+        # through the route its owner calls.
+        return _unreadable(type(exc).__name__)
     return tools, requires
 
 

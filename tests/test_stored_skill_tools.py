@@ -99,11 +99,7 @@ def _mounted(
     prof = profile or AgentProfile(name="default")
     tokens = set_current_identity(actor, frozenset())
     try:
-        read = (
-            asyncio.run(stored_skill_declarations(store, actor))
-            if stored is True
-            else stored or None
-        )
+        read = asyncio.run(stored_skill_declarations(store)) if stored is True else stored or None
         labelled = _labelled(_skill_dirs())
         permits = skill_narrowing(
             prof, [], labelled, available=available if available is not None else set(), stored=read
@@ -111,6 +107,21 @@ def _mounted(
         return scratchpad_backend(
             skills_backend(prof, [], labelled=labelled, permits=permits), store, permits=permits
         )
+    finally:
+        reset_current_identity(tokens)
+
+
+def _read(store: Any | None, actor: str) -> StoredSkillTools:
+    """The reader, under the identity a turn takes — it reads the ambient rather than an argument.
+
+    Stamped rather than passed, because that is the fix for the defect a review found here: the
+    reader resolving the personal namespace from a *different* spelling of one actor than the mount
+    does. A test that could still pass an actor would be a test of a parameter that no longer
+    exists.
+    """
+    tokens = set_current_identity(actor, frozenset())
+    try:
+        return asyncio.run(stored_skill_declarations(store))
     finally:
         reset_current_identity(tokens)
 
@@ -230,12 +241,20 @@ def test_the_control_arm_that_removes_every_skill_still_removes_both_stored_tier
 def test_a_stored_skill_under_a_shipped_name_is_never_served(store: InMemoryStore) -> None:
     """The read side agrees with the write side's *discovered* basis — the row's own invariant.
 
-    Upstream resolves a collision between two mounts by **listing**, so a shared skill that any
-    narrowing removes is not there to displace anything and the stored document is served under the
-    reserved name. Measured, and older than `SkillManifest.requires`:
-    `skills/deep-research/SKILL.md` carries no `requires:`, so one `skill_role_gates` entry the
-    caller's roles do not satisfy took the listing from `/skills/deep-research/SKILL.md` to
-    `/mine/deep-research/SKILL.md`.
+    **The scenario is an enable-list, and that matters: the role gate the row named does not reach
+    this.** Driven all four ways, with `UnreservedNames` on and off:
+
+    - a `skill_role_gates` entry hides the stored copy **either way**, because `RoleScopedSkills` is
+      in the stored narrowing too — so the row's own measurement was already closed, silently, when
+      the stored mounts gained a backend predicate;
+    - an enable-list that omits the name gives `/mine/deep-research/SKILL.md` with the rule off and
+      nothing with it on. `EnabledSkills` is the one narrowing this change makes `filed`-only, so
+      the stored tiers now survive an enable-list — which is exactly what re-opens the collision,
+      and why these two fixes belong in one commit.
+
+    An earlier version of this test used the role gate and therefore stayed green with
+    `UnreservedNames` removed from the composition *and* with `reserved=` emptied at the production
+    call site. A mutation review found both; this asserts the mechanism that actually binds.
 
     The body is written through the tier's own writer rather than `save_local_skill`, because that
     is the case: `validated_skill` refuses this name *now*, and what is left is a row stored before
@@ -252,23 +271,85 @@ def test_a_stored_skill_under_a_shipped_name_is_never_served(store: InMemoryStor
         *declared_tools([d for _label, d in _labelled(_skill_dirs())]).values()
     ) | {"compute_thermochemistry"}
 
-    original = settings.skill_role_gates
+    original = settings.skills_enabled
     try:
-        settings.skill_role_gates = {contested: ["Chemclaw.Admin"]}
-        served = _paths_offered(_mounted(store, available=every_tool))
-        assert contested not in served, (
-            f"the personal copy took the reserved name: the model is served {served.get(contested)}"
+        # An enable-list naming some other shipped skill, so the reviewed `deep-research` leaves the
+        # filed listing and the stored copy is the only claimant left.
+        settings.skills_enabled = "development-report"
+        offered = _paths_offered(_mounted(store, available=every_tool))
+        assert contested not in offered, (
+            "the personal copy took the reserved name: the model is served "
+            f"{offered.get(contested)}"
         )
         assert not _served(_mounted(store, available=every_tool), LOCAL_SKILLS_ROOT, contested), (
             "hidden from the listing is only half the gate — the body must be unreadable too"
         )
+        assert "development-report" in offered, (
+            "the enable-list removed everything, so this arm does not show the reviewed copy "
+            "leaving"
+        )
     finally:
-        settings.skill_role_gates = original
+        settings.skills_enabled = original
 
-    # Without the gate the reviewed copy wins, which is the precedence
+    # Without the enable-list the reviewed copy wins, which is the precedence
     # `tests/test_local_skills.py::test_a_reviewed_skill_wins_a_name_a_personal_one_also_claims`
     # decides and this must not have changed.
     assert _paths_offered(_mounted(store, available=every_tool))[contested].startswith("/skills/")
+
+
+def test_a_role_gate_alone_does_not_reach_the_reserved_name_case(store: InMemoryStore) -> None:
+    """The row's stated measurement, driven and recorded as *not* the mechanism.
+
+    Kept as its own test rather than deleted, because the next reader of `UnreservedNames` will
+    reach for the scenario the backlog row named, and a green test saying "this one does not
+    distinguish the arms" is what stops it being written as the guard a third time.
+    `RoleScopedSkills` is in the stored narrowing, so the gate removes the personal copy on its own.
+    """
+    contested = "deep-research"
+    body = f"---\nname: {contested}\ndescription: my own digging\n---\n\nMine.\n"
+    asyncio.run(_writer(store, _ACTOR).awrite(_key(contested), body))
+    every_tool = set().union(
+        *declared_tools([d for _label, d in _labelled(_skill_dirs())]).values()
+    ) | {"compute_thermochemistry"}
+
+    original = settings.skill_role_gates
+    try:
+        settings.skill_role_gates = {contested: ["Chemclaw.Admin"]}
+        offered = _paths_offered(_mounted(store, available=every_tool))
+    finally:
+        settings.skill_role_gates = original
+
+    assert contested not in offered, "the gate must hide both copies, which is the point here"
+
+
+def test_a_stored_requires_narrows_the_stored_tier(store: InMemoryStore) -> None:
+    """`requires:` on a stored body behaves as it does on a filed one — the other half of R6.
+
+    Separate from the `tools:` case because the two quantifiers differ and only one of them was
+    driven: `tools:` hides when *every* declared tool is absent, `requires:` hides when *any*
+    required one is. A mutation review found that dropping `stored.required` from the merge entirely
+    left the whole file green, because the existing assertions read the reader's map rather than the
+    visibility it buys.
+    """
+    body = (
+        "---\nname: my-scan\ndescription: how I scan\n"
+        "tools: [compute_thermochemistry, sample_conformers]\n"
+        "requires: [sample_conformers]\n---\n\nScan wide.\n"
+    )
+    asyncio.run(save_local_skill(store, _ACTOR, "my-scan", body))
+
+    read = _read(store, _ACTOR)
+    assert read.required["my-scan"] == frozenset({"sample_conformers"})
+
+    # `tools:` alone would keep this visible — `compute_thermochemistry` is bound, and the declared
+    # rule survives on *any* reachable tool. `requires:` is what takes it away.
+    partial = _mounted(store, available={"compute_thermochemistry"})
+    assert not _served(partial, LOCAL_SKILLS_ROOT, "my-scan"), (
+        "a required tool this turn cannot reach must hide the skill even though a declared one is "
+        "bound; the stored `requires:` map is not reaching the narrowing"
+    )
+    both = _mounted(store, available={"compute_thermochemistry", "sample_conformers"})
+    assert _served(both, LOCAL_SKILLS_ROOT, "my-scan")
 
 
 def test_a_stored_declaration_cannot_hide_the_reviewed_skill_of_that_name(
@@ -368,7 +449,7 @@ def test_an_unreadable_stored_body_is_scoped_to_nothing(store: InMemoryStore) ->
     asyncio.run(_writer(store, _ACTOR).awrite(_key("broken"), "---\ntools: {not: a list}\n---\nx"))
     asyncio.run(_writer(store, _ACTOR).awrite(_key("nameless"), "no frontmatter at all"))
 
-    read = asyncio.run(stored_skill_declarations(store, _ACTOR))
+    read = _read(store, _ACTOR)
 
     assert read.declared["broken"] == UNREADABLE_DECLARATION
     assert read.required["broken"] == UNREADABLE_DECLARATION
@@ -422,32 +503,78 @@ def test_a_tier_is_read_exactly_where_it_is_mounted(store: InMemoryStore) -> Non
     asyncio.run(save_local_skill(store, _ACTOR, "my-workup", _DECLARING))
     asyncio.run(save_org_skill(store, "house-workup", _ORG, activated_by="admin-oid"))
 
-    assert not asyncio.run(stored_skill_declarations(None, _ACTOR)).declared
-    actorless = asyncio.run(stored_skill_declarations(store, ""))
+    assert not _read(None, _ACTOR).declared
+    actorless = _read(store, "")
     assert sorted(actorless.declared) == ["house-workup"], (
         "an actorless turn mounts the organisation's tier and not the chemist's, so it must read "
         "exactly one of them"
     )
-    both = asyncio.run(stored_skill_declarations(store, _ACTOR))
+    both = _read(store, _ACTOR)
     assert sorted(both.declared) == ["house-workup", "my-workup"]
 
 
-def test_a_name_both_tiers_hold_keeps_the_declaration_the_turn_reads(store: InMemoryStore) -> None:
-    """The personal body wins, because `/mine` is mounted before `/org` and upstream lists in order.
+def test_the_reader_and_the_mount_resolve_one_actor_to_one_namespace(store: InMemoryStore) -> None:
+    """A padded actor spelling must not give the gate a different namespace from the mount.
 
-    The collision is reachable in one direction only and by design: a personal skill may not take an
-    org name, while an administrator may publish over one somebody already keeps privately
-    (`local_skills.save_local_skill` argues both). So a declaration read from the wrong side would
-    scope a body the turn never sees.
+    `core/identity_context.get_current_actor` returns the value **stripped**, "because the reader
+    every gate and every namespace shares normalizes rather than leaving each of them to", and
+    `scratchpad_backend` resolves the personal mount through it. The reader took an `actor` argument
+    and `api/runner.py` passed the request's raw value, so `' alice-oid '` resolved two namespaces:
+    the reader found nothing, the mount found the skill, and a *missing* declaration reads as
+    "declares nothing" — the whole `/mine` tier unscoped, silently, which is the pre-change state.
+
+    Driven through the mount rather than on the namespaces, because the namespaces agreeing is the
+    mechanism and the tier being scoped is the property. The reader takes no actor now, so the two
+    spellings cannot diverge; this is what turns re-introducing the parameter into a red test.
+    """
+    asyncio.run(save_local_skill(store, _ACTOR, "my-workup", _DECLARING))
+
+    padded = _mounted(store, actor=f"  {_ACTOR}  ", available=set())
+    plain = _mounted(store, actor=_ACTOR, available=set())
+
+    assert not _served(plain, LOCAL_SKILLS_ROOT, "my-workup"), "the control arm must be scoped"
+    assert not _served(padded, LOCAL_SKILLS_ROOT, "my-workup"), (
+        "a padded actor spelling left the personal tier unscoped, so the gate and the mount "
+        "disagreed about which namespace this turn's tier lives in"
+    )
+
+
+def test_a_name_both_tiers_hold_is_scoped_by_the_body_the_turn_reads(store: InMemoryStore) -> None:
+    """The **organisation's** body wins; this test asserted the opposite until a review drove it.
+
+    Upstream resolves a collision *last-source-wins* and `_skills_middleware` orders its sources by
+    ascending review depth — `/mine`, `/org`, then the reviewed trees — so the organisation's body
+    is what a turn reads. `local_skills.save_local_skill` says so in the course of refusing the
+    other direction: a personal skill under an org name "would never act, since `_skills_middleware`
+    puts `/org` after `/mine`".
+
+    Keyed the other way, one person's private document decided the visibility of a skill acting on
+    everybody's turns. The collision is reachable in one direction and by design: `save_local_skill`
+    refuses an existing org name, while `POST /skills/org` may publish over a name somebody already
+    keeps privately, because the alternative is a deployment-wide publication blocked by one
+    person's private vocabulary.
+
+    **The served path is asserted beside the declaration**, which is the part whose absence let this
+    pass: a test that reads only the map cannot notice that the map disagrees with the listing.
     """
     shared = "house-workup"
     asyncio.run(save_org_skill(store, shared, _ORG, activated_by="admin-oid"))
     mine = f"---\nname: {shared}\ndescription: my version\ntools: [sample_conformers]\n---\nMine.\n"
     asyncio.run(_writer(store, _ACTOR).awrite(_key(shared), mine))
 
-    read = asyncio.run(stored_skill_declarations(store, _ACTOR))
+    read = _read(store, _ACTOR)
+    offered = _paths_offered(_mounted(store, available={"compute_thermochemistry"}))
 
-    assert read.declared[shared] == frozenset({"sample_conformers"})
+    assert offered[shared] == f"{ORG_SKILLS_ROOT}{shared}/SKILL.md", (
+        "the mount order changed, so re-derive which body the declaration must come from"
+    )
+    assert read.declared[shared] == frozenset({"compute_thermochemistry"}), (
+        "the declaration was read from the personal body, which is not the one the line "
+        "above shows the turn is served"
+    )
+    # And the consequence, driven rather than argued: the org skill's own tools decide its
+    # visibility, so a private document declaring something unbindable cannot take it away.
+    assert _served(_mounted(store, available={"compute_thermochemistry"}), ORG_SKILLS_ROOT, shared)
 
 
 def test_the_reader_pages_like_the_listing_it_shares_a_walk_with(store: InMemoryStore) -> None:
@@ -464,7 +591,7 @@ def test_the_reader_pages_like_the_listing_it_shares_a_walk_with(store: InMemory
         body = f"---\nname: s{index}\ndescription: d\ntools: [absent_tool]\n---\nbody"
         asyncio.run(writer.awrite(_key(f"s{index}"), body))
 
-    read = asyncio.run(stored_skill_declarations(store, _ACTOR))
+    read = _read(store, _ACTOR)
 
     assert len(read.declared) == rows
     assert all(tools == frozenset({"absent_tool"}) for tools in read.declared.values())

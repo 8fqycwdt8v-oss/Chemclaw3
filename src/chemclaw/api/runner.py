@@ -353,9 +353,14 @@ async def run_turn(
                 # same reason the other two are, and it is here because the builder that needs it is
                 # synchronous. It is one paged search per mounted tier over a capped namespace, on
                 # the same store `turn_store()` just returned.
+                #
+                # It takes no actor: it reads the same `get_current_actor()` the mount resolves
+                # its namespace from, which is why this call sits inside `_turn_ambient`. Passing
+                # the request's raw value made the two spell one actor two ways for a padded oid —
+                # see `stored_skill_declarations`, which carries the measurement.
                 checkpointer = await _turn_checkpointer()
                 store = await turn_store()
-                stored_skills = await stored_skill_declarations(store, actor or "")
+                stored_skills = await stored_skill_declarations(store)
                 graph = await asyncio.to_thread(
                     graph_factory,
                     profile=profile,

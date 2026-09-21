@@ -1691,3 +1691,35 @@ free number at the end of its section.
      tools it declares. **A guarantee that holds on one output of a shared input is not a guarantee
      about the input**, and the tell was that I wrote "the merge order is not load-bearing" instead of
      driving the order I had chosen.
+
+117. **My headline measurement for a new narrowing measured a different narrowing.** I drove
+     `UnreservedNames` with a `skill_role_gates` entry, saw the personal copy absent, and wrote that
+     into the docstring, the test, the ADR and the commit message. A mutation review showed the test
+     stayed green with the narrowing deleted: `RoleScopedSkills` is in the same composition, so the
+     gate was doing all the work and my arm could not distinguish them. The mechanism that actually
+     binds is the enable-list — the one narrowing this change moved. **When measuring a new predicate,
+     run the arm with it removed**; "the outcome I wanted, with the feature on" is not a measurement,
+     and a single-arm probe is how a false figure reaches four documents at once.
+
+118. **A backlog row's own measurement can have expired, and the row is the last place that shows it.**
+     R7's premise was true when written — with the stored mounts ungated, a role gate did promote the
+     personal copy — and was silently closed months later by the backend predicate a different ADR
+     added. That makes five stale rows of fifteen worked in this series. What is new here: my *fix for
+     the other row in the same commit* re-opened it, which is the real reason the two belonged
+     together. **Re-derive a row's mechanism, not just its symptom, and check whether the rest of your
+     own diff changes it.**
+
+119. **I used a script to rewrap over-long prose and it silently broke string literals.** Twice: it
+     split an f-string across lines and mangled a Markdown bullet's continuation indent, in files that
+     had just passed tests. Both were caught by `ruff`, and one was two characters from being a
+     plausible-looking message. **A line-length fixer must not touch code lines**, and a tool I wrote
+     to save a minute of editing cost three rounds of repair — the second time in this session that
+     an automated edit over prose damaged something a human would not have.
+
+120. **A reviewer's `git checkout --` landed inside my commit window and the commit shipped without a
+     file.** I had identified the hazard, wrote it down, and then committed anyway while a subagent was
+     mutating the tree — my content checks ran a minute before `git add -A`, not against the staged
+     tree. The committed tree could not even import. **Verify the staged content, not the working tree,
+     and never commit while another agent holds write access** — the instruction to restore was mine,
+     and `git checkout --` discards an *unstaged* change rather than a mutation, which is the part I
+     should have specified.

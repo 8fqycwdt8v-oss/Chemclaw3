@@ -69,11 +69,16 @@ LISTING_PAGE = 100
 async def paged_items(store: Any, namespace: tuple[str, ...]) -> dict[str, Any]:
     """Every item in one namespace, keyed by store key — the whole tier rather than one page.
 
-    **One walk because there are now three callers** (Rule of Three): each tier's own listing, which
-    answers a route's "what is acting on my turns", and `agent/stored_skill_tools.py`, which reads
-    the bodies for the capability narrowing. It was two copies of this loop in two modules before
-    the third arrived, and a paging walk is exactly the kind of thing that stays in step until one
-    of them is edited.
+    **One walk because the loop had reached two copies and a third caller** (Rule of Three). The
+    callers are each tier's own listing, which answers a route's "what is acting on my turns", the
+    organisation tier's version listing and its version-cap walk, and `agent/stored_skill_tools.py`,
+    which reads the bodies for the capability narrowing — five call sites in three modules. A paging
+    walk is exactly the kind of thing that stays in step until one copy is edited.
+
+    A fourth copy survives in `agent/scratchpad.py`'s eviction walk (`_EVICTION_PAGE`) and is not
+    collapsed here: that one pages in order to *evict*, so it writes under a different cap as it
+    goes, and folding it in would give this function a second purpose its other callers do not have.
+    Named rather than left for a reader to find.
 
     The walk terminates on a page that adds nothing, which also ends it against a store that ignores
     `offset` — the same guard `scratchpad.BoundedStoreBackend` carries for the same reason.

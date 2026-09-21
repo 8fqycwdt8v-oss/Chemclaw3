@@ -331,7 +331,10 @@ def local_skills_backend(
     Args:
         store: The process's store.
         actor: Whose tier this is, in the turn's own actor spelling.
-        permits: `agent/skill_access.skill_permits`' composed narrowing, applied per reach.
+        permits: `agent/skill_access.SkillNarrowing.stored` — the **stored** half of this
+            turn's narrowing, applied per reach. A half rather than the whole composition,
+            because `EnabledSkills` names shipped skills and applying it here emptied this
+            tier rather than narrowing it; `SkillNarrowing` carries that measurement.
     """
     namespace = local_skills_namespace(actor)
     return PermittedStoreBackend(

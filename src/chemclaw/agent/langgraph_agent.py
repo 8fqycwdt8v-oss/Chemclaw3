@@ -1389,8 +1389,8 @@ def skill_narrowing(
         # `deep-research` invisible, in a turn binding all twelve tools it declares. A stored
         # declaration for a shipped name describes a body no turn can read, so it must not describe
         # the body a turn does read.
-        declared={**(stored.declared if stored else {}), **declared},
-        required={**(stored.required if stored else {}), **required},
+        declared={**(stored.declared if stored is not None else {}), **declared},
+        required={**(stored.required if stored is not None else {}), **required},
         available=available if available is not None else _advertised_names(profile, tools),
         gates=settings.skill_role_gates,
         names=profile.skill_names,

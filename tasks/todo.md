@@ -53,9 +53,13 @@ deployment's list of *filed* names cannot narrow a stored tier — it can only e
 - [x] Every claim in the table above as a test, both arms — `tests/test_stored_skill_tools.py`, 17
       tests, each with its defect arm (`stored=False`, `reserved=frozenset()`, the enable-list arm
       that still hides a filed skill).
-- [x] The full serial suite.
-- [ ] `make lint type` immediately before the commit (lesson 107).
-- [ ] Fresh-context subagent review before the PR.
+- [x] The full serial suite — **1 failed, 10505 passed**: a new `degraded` subsystem label
+      (`stored_skill_manifest`) undeclared in `tests/test_degraded.py`'s label space. Declared, with
+      the reason it is separate from the filed tier's.
+- [x] Two fresh-context adversarial reviews. Six findings, all fixed, listed below.
+- [x] The three mutations that previously left the file green now each turn it red.
+- [ ] `make lint type` immediately before the commit (lesson 107), and the full suite re-run over the
+      review fixes.
 
 ## Review
 
@@ -81,4 +85,44 @@ Driven, fixed, and pinned by
 owner takes — the thing `local_skills._count_a_local_load` refuses to do to a metric label. The
 narrowing reads both maps; the log keeps the filed one.
 
-Lessons 112–116 added.
+Lessons 112–120 added.
+
+### What the two reviews found
+
+**My headline measurement for `UnreservedNames` measured a different narrowing.** I drove it with a
+`skill_role_gates` entry, saw the personal copy absent, and put that in the docstring, the test, the
+ADR and the commit message. `RoleScopedSkills` is in the same composition, so the gate was doing all
+the work: a mutation review showed the test stayed green both with `UnreservedNames` deleted and with
+`reserved=` emptied at the production call site. Driven over four arms, the mechanism that binds is the
+**enable-list** — the one narrowing this change moves. Re-derived further: the row's own premise was
+true when written, closed silently since by `D-2026-09-20`'s backend predicate, and **re-opened by the
+`EnabledSkills` fix in this same commit**, which is the real reason the two rows belong together. Test,
+docstring, ADR and commit message all corrected; a second test now records the role-gate scenario as
+*not* the mechanism, so the next reader does not reach for it again.
+
+**The `/mine` ↔ `/org` merge was backwards.** I keyed a colliding name from the personal body, citing
+mount order. Measured: `_skills_middleware` lists `/mine`, `/org`, filed, and upstream resolves
+*last*-source-wins, so the **organisation's** body is served — `local_skills.save_local_skill` says so
+in its own comment. One person's private document was deciding the visibility of a skill acting on
+everybody's turns. The tiers are now read `/mine` first, and the test asserts the served path beside
+the declaration, which is the assertion whose absence let the wrong direction pass.
+
+**The reader resolved the actor from a different spelling than the mount.** `api/runner.py` passed the
+request's raw value; `scratchpad_backend` resolves through `get_current_actor()`, which strips. For a
+padded oid the two spelled one actor two ways, the declarations came back empty, and a missing entry
+reads as "declares nothing" — the whole `/mine` tier silently unscoped. Fixed at the root: the reader
+takes no actor and asks the same ambient the mount asks.
+
+**The stored `requires:` half bought nothing.** Dropping it from the merge left the file green, because
+the assertions read the reader's map rather than the visibility it buys. Now driven through the mount,
+with the arm where `tools:` alone would keep the skill visible.
+
+**A log line could carry a person's own words.** `_unreadable(str(exc))` passed parser text through, and
+a YAML parser quotes what it choked on — a body with `name: !project_<something> x` put that tag
+verbatim into a shared WARNING, against the module docstring's own absolute claim. It now logs the
+exception *type*.
+
+Plus four count/wording corrections: `paged_items` has five call sites in three modules (not "three
+callers"), with `scratchpad.py`'s eviction walk named as the fourth copy deliberately left alone;
+`_name_of` is *stricter* than both listings rather than the same filter; `StoredSkillTools`' maps are
+read-only by convention, not by `frozen=True`; `StoredSkillTools.__bool__` was dead and is gone.
