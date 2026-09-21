@@ -1840,6 +1840,20 @@ networkPolicy:
     # cover it, and without an entry here an operator who adds the host to `egressDestinations`
     # still has every packet dropped — the misreading this chart used to ship.
     rxnpredict: 8857
+    # The five process-development bundles (`connectors.props.url` and its four siblings above), on
+    # exactly the same terms. **These are here although all five ship `enabled: false`**, and that
+    # is deliberate: a port entry for a disabled bundle opens nothing — the NetworkPolicy still
+    # restricts the destination, and no pod dials a bundle that is not in
+    # `CHEMCLAW_CONNECTORS_ENABLED` — while its *absence* is the failure that looks like the server
+    # being down. An operator who enables `thermalsafety` and adds its host to
+    # `egressDestinations` would otherwise have every packet dropped, with the connector reported
+    # unhealthy and nothing naming the port as the reason. Five separate values for the reason the
+    # three above are separate: each sibling is free to land on a different port.
+    props: 8850
+    thermalsafety: 8851
+    kinetics: 8852
+    unitops: 8853
+    suitability: 8892
   # WHERE those ports may be dialled. Empty renders `to: []`, which in a NetworkPolicy means
   # **any destination** — so with this unset, TCP/443 from every pod to the whole internet is
   # permitted. The addresses are deployment-specific and a chart cannot invent your Postgres CIDR,

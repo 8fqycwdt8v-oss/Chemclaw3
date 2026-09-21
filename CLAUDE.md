@@ -114,7 +114,7 @@ at all, because the broker is cluster-shared and a constant there put every envi
 namespace, one task queue and one schedule-id space. **Two releases need separate databases**, which
 no chart guard can check.
 
-**Seams.** A connector is a directory with a `connector.yaml` (D-118); a data source is
+**Seams.** A connector is a directory with a `connector.yaml` (D-118), which may declare itself *off* by default — declaring a capability is what lets a validator and a skill name its tools, while binding it charges every model call for its schemas, so the two are separate decisions (`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`);  a data source is
 `ingest/sources/<name>/datasource.yaml` plus its name in `CHEMCLAW_DATA_SOURCES`, with zero core
 edits (D-120); a result sink is the third (`publish/`, schema in `schema/result-store/`, off until
 `CHEMCLAW_RESULT_SINKS` names one) — a connector *produces*, a source *supplies*, a sink *consumes
