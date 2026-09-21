@@ -312,6 +312,13 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
         # than from the current head is the write this pair exists to prevent.
         "read_experiment_protocol",
         "find_experiment_protocols",
+        # Scaling a stored protocol's charges to a new basis. **Read-only because it stores
+        # nothing**: it returns a proposal and every path to keeping one goes back through
+        # `draft_experiment_protocol`, under the same `parent_revision` check any other revision
+        # takes. The substantive reason is the same one `read_experiment_protocol` above carries —
+        # "what would this look like at 2 kg" is a question a chemist asks *while* deciding
+        # whether to approve the work, so the plan gate must not hold it until after.
+        "rescale_experiment_protocol",
         # Arithmetic over a campaign's recorded points: it reads a campaign thread and returns
         # factors and arms, writing nothing anywhere. Read-only is the substantive classification
         # rather than the technical one — the plan gate lets a read run while a plan is still being

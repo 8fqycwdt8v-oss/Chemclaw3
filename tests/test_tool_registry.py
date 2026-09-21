@@ -57,6 +57,10 @@ _EXPECTED_INPROCESS_TOOLS = {
     "draft_experiment_protocol",
     "read_experiment_protocol",
     "find_experiment_protocols",
+    # Scaling a stored design to a new basis. In-process for the same reason as the three above:
+    # it reads the design store, which is core's, and writes nothing — keeping a rescale goes back
+    # through `draft_experiment_protocol` under the ordinary `parent_revision` check.
+    "rescale_experiment_protocol",
     # The join between the two halves of "propose an experiment": a campaign's suggested points
     # are `{parameter: value}` and a design needs labelled factors and arms citing those labels.
     # In-process for the same reason as the pair above — the campaign store is core's and the

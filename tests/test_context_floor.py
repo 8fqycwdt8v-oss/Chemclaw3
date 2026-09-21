@@ -538,7 +538,32 @@ load_profiles()
 #: rather than a badly-shaped one. Trimming past here would have taken the sentence telling the
 #: model to report the caveats rather than summarise them, which is the one instruction that makes
 #: the tool worth binding.
-CEILINGS: dict[str, int] = {"__default__": 71_400}
+#: **And to 72,000 for six process-development skills, which is a different kind of raise.**
+#: A skill costs the prompt its *name and description* — the `skills-listing` contributor — and
+#: nothing else until a turn loads it, which is what makes layer 3 cheap. Six of them
+#: (`crystallisation-design`, `solvent-swap-and-distillation`, `impurity-fate-and-purge`,
+#: `analytical-readiness`, `scale-up-readiness-review`, `robustness-and-edge-of-failure`) measured
+#: **594** together. Measured on this commit: **71,414**, so the raise is that plus a tripwire's
+#: worth of headroom rather than the round number it looks like.
+#:
+#: The descriptions were trimmed twice first, because that is the answer that costs nothing when it
+#: works: 830 tokens down to 594. It stopped there on purpose. A skill's description is the only
+#: thing deciding whether the model loads it at all, so trimming past the trigger phrases buys
+#: prefix by making the judgment unfindable — which is a worse outcome than the prefix, and an
+#: invisible one.
+#:
+#: **Why these are global rather than bundled**, since a bundled skill would have cost nothing on a
+#: deployment that binds no process-development bundle: four of the six span two or more bundles
+#: (`crystallisation-design` reads `unitops` and `props`; `scale-up-readiness-review` reads
+#: everything), and a bundled skill belongs to one capability. The other two name only
+#: default-enabled tools. Splitting judgment across bundles to save prefix would put the same
+#: skill in two places, which is the duplication `connectors/README.md`'s ownership rule exists to
+#: prevent.
+#:
+#: The cost, stated: every deployment pays 594 more tokens on every model call and the thread
+#: allowance drops by the same amount again — `tests/test_compaction.py`'s two allowances carry it,
+#: for the reason the entry there gives about the window being the input.
+CEILINGS: dict[str, int] = {"__default__": 72_000}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.

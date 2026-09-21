@@ -1153,7 +1153,22 @@ def test_the_overrun_indicator_can_fire_at_the_shipped_budget_with_no_window(
 #: ceiling and not a measurement). It is written here rather than imported because the config
 #: comment is prose and this is the assertion: if the two ever disagree, one of them is a claim
 #: nobody checked.
-CLEAR_TRIGGER_THREAD_ALLOWANCE = 30_000
+#:
+#: **Both allowances drop 800 for `rescale_experiment_protocol`, and the thread is what pays.**
+#: `CEILINGS["__default__"]` rose from 70,600 to 71,400 for that tool
+#: (`tests/test_context_floor.py` carries the entry), so `PREFIX_BOUND` rose with it. Raising the
+#: two defaults to keep these numbers whole is exactly what the paragraph above records being tried
+#: and reverted: `agent_context_token_budget` is pinned by the smallest target window, not by the
+#: prefix, and `test_the_budget_leaves_room_for_an_answer_on_the_smallest_window_we_target` fails
+#: outright when it moves. The clear trigger could have moved alone, and did not, because splitting
+#: the two would make the thread allowance mean one thing for the lossless edit and another for the
+#: window — the pair is the claim. So the prefix grew and the thread absorbed it, which is the
+#: trade a tool that costs 948 tokens on every call actually makes.
+#:
+#: Both drop a further 600 when the ceiling goes to 72,000 for the six process-development
+#: skills, on the same argument and with the same arithmetic: the prefix grew, the window did
+#: not, so the thread is the term that moves.
+CLEAR_TRIGGER_THREAD_ALLOWANCE = 28_600
 
 #: The thread allowance `agent_context_token_budget`'s default is derived to leave.
 #:
@@ -1205,7 +1220,7 @@ CLEAR_TRIGGER_THREAD_ALLOWANCE = 30_000
 #: commit before this one and reverted on the argument directly above — the window is the input, so
 #: a budget that rises with the prefix spends head-room a provider decides, and what buys the
 #: thread back is a narrower prefix rather than a raise here.
-BUDGET_THREAD_ALLOWANCE = 37_100
+BUDGET_THREAD_ALLOWANCE = 35_700
 
 #: The smallest context window this stack is designed against, in billed tokens.
 #:
