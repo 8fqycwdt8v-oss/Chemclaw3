@@ -94,6 +94,7 @@ from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.profile_discovery import ProfileError, load_profiles
 from chemclaw.agent.profiles import AgentProfile, get_profile, registered_profile_names
 from chemclaw.agent.state import PEER_DEPTH_ATTR, ChemclawState
+from chemclaw.agent.stored_skill_tools import StoredSkillTools
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 
@@ -326,6 +327,7 @@ def build_turn_graph(
     checkpointer: Any | None = None,
     connectors: list[Any] | None = None,
     store: Any | None = None,
+    stored_skills: StoredSkillTools | None = None,
 ) -> Any | None:
     """Compile the turn graph for this turn, or `None` when no peer roster is configured.
 
@@ -356,6 +358,10 @@ def build_turn_graph(
             re-bound.
         store: This process's memory store, passed to peers. Unlike a helper, a peer keeps it: a
             peer is talking to the chemist, so a preference it records is one the chemist asked for.
+        stored_skills: What the two stored skills tiers declare about tools, as
+            `build_langgraph_agent` takes it. Passed to every peer for the reason `store` is: a peer
+            mounts the tiers, so a peer whose narrowing could not see their declarations would offer
+            judgment about tools its own surface excludes.
 
     Returns:
         The compiled turn graph, or `None` when `agent_peer_roster` is empty — which is the shipped
@@ -451,6 +457,7 @@ def build_turn_graph(
                 # opened.
                 connectors=_peer_connectors(connectors, surface),
                 store=store,
+                stored_skills=stored_skills,
                 # Measured identical to `None` and cheaper — see the module docstring. The turn
                 # graph's own checkpointer below is what holds the thread.
                 checkpointer=False,
@@ -514,6 +521,7 @@ def build_turn_agent(
     checkpointer: Any | None = None,
     connectors: list[Any] | None = None,
     store: Any | None = None,
+    stored_skills: StoredSkillTools | None = None,
 ) -> Any:
     """What a turn actually runs on: the mesh when one is configured, the single agent otherwise.
 
@@ -537,6 +545,7 @@ def build_turn_agent(
         checkpointer: Where the thread persists — the turn graph's own, or the single agent's.
         connectors: This turn's already-open connector tools.
         store: This process's memory store.
+        stored_skills: As `build_langgraph_agent` takes it, forwarded either way.
 
     Returns:
         A compiled graph. Construction only, exactly as `build_langgraph_agent` promises.
@@ -550,6 +559,7 @@ def build_turn_agent(
         checkpointer=checkpointer,
         connectors=connectors,
         store=store,
+        stored_skills=stored_skills,
     )
     if mesh is not None:
         return mesh
@@ -562,4 +572,5 @@ def build_turn_agent(
         checkpointer=checkpointer,
         connectors=connectors,
         store=store,
+        stored_skills=stored_skills,
     )

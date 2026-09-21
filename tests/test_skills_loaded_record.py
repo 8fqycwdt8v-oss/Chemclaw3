@@ -18,6 +18,7 @@ from langgraph.store.memory import InMemoryStore
 from chemclaw.agent.local_skills import LOCAL_SKILLS_ROOT, save_local_skill
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.agent.scratchpad import scratchpad_backend
+from chemclaw.agent.skill_access import SkillNarrowing
 from chemclaw.core import turn_signals
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.turn_signals import SkillLoadedSignal
@@ -47,7 +48,7 @@ def _read(store: Any, actor: str, path: str) -> Any:
         backend = scratchpad_backend(
             skills_backend(AgentProfile(name="default"), []),
             store,
-            permits=lambda _name: True,
+            permits=SkillNarrowing.permissive(),
         )
         return backend.read(path)
     finally:

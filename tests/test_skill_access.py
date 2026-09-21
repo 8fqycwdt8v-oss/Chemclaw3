@@ -109,7 +109,7 @@ def test_no_shipped_skill_declares_only_tools_no_manifest_advertises() -> None:
         gates=settings.skill_role_gates,
     )
     everything = _discovered() | _bundled_skill_names()
-    advertised = {name for name in everything if permits(name)}
+    advertised = {name for name in everything if permits.filed(name)}
 
     assert advertised == _skill_names({}) | _bundled_skill_names()
 
@@ -251,7 +251,7 @@ def test_the_narrowings_compose_and_only_ever_remove() -> None:
 
     token = set_current_identity("u-1", frozenset({"process-chemist"}))
     try:
-        names = {name for name in _discovered() if permits(name)}
+        names = {name for name in _discovered() if permits.filed(name)}
     finally:
         reset_current_identity(token)
 

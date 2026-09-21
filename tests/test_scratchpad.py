@@ -35,6 +35,7 @@ from chemclaw.agent.scratchpad import (
     scratchpad_backend,
     scratchpad_tools,
 )
+from chemclaw.agent.skill_access import SkillNarrowing
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.metrics import METRICS
@@ -43,15 +44,14 @@ from tests.pg import migrated_db_or_skip
 _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
 
 
-def _ALL(_name: str) -> bool:
-    """A narrowing that narrows nothing — what these tests assert *around*.
-
-    `scratchpad_backend` takes the predicate as a required keyword so a mount cannot silently get
-    none (`agent/skill_store.py` records the tier that shipped with exactly that gap). These tests
-    are about which *routes* exist, so they state the permissive answer explicitly rather than
-    inheriting it from a default that would not exist in production.
-    """
-    return True
+#: A narrowing that narrows nothing — what these tests assert *around*.
+#:
+#: `scratchpad_backend` takes the narrowing as a required keyword so a mount cannot silently get
+#: none (`agent/skill_store.py` records the tier that shipped with exactly that gap). These tests
+#: are about which *routes* exist, so they state the permissive answer explicitly rather than
+#: inheriting it from a default that would not exist in production — which is what
+#: `SkillNarrowing.permissive()` is for.
+_ALL = SkillNarrowing.permissive()
 
 
 @pytest.fixture

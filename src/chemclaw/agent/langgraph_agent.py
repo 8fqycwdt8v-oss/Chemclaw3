@@ -129,11 +129,12 @@ from chemclaw.agent.scratchpad import (
     scratchpad_backend,
     scratchpad_tools,
 )
-from chemclaw.agent.skill_access import skill_permits
+from chemclaw.agent.skill_access import SkillNarrowing, skill_permits
 from chemclaw.agent.skill_backend import NarrowedSkillsBackend
 from chemclaw.agent.skill_manifest import declared_tools, required_tools
 from chemclaw.agent.spend_cap import MeterTurnSpend, enforce_spend_cap
 from chemclaw.agent.state import ChemclawState
+from chemclaw.agent.stored_skill_tools import StoredSkillTools
 from chemclaw.agent.subagents import (
     HELPER_BRIEF,
     describe_helper,
@@ -172,6 +173,7 @@ def build_langgraph_agent(
     connectors: list[Any] | None = None,
     response_format: Any | None = None,
     store: Any | None = None,
+    stored_skills: StoredSkillTools | None = None,
     helper: bool = False,
     specialist: AgentProfile | None = None,
     handoffs: list[Any] | None = None,
@@ -206,6 +208,12 @@ def build_langgraph_agent(
             with no durable memory — which is every turn under the default configuration. A
             parameter rather than something built here for the reason `checkpointer` is one:
             creating it is `await`, and this builder is sync because all four of its callers are.
+        stored_skills: What the two stored tiers declare about tools
+            (`agent/stored_skill_tools.stored_skill_declarations`), so `ToolScopedSkills` can narrow
+            them as it narrows a filed tree. A parameter for the same reason `store` is one and read
+            off the same store: the walk is `await` and this builder is sync. Omitted — every caller
+            that mounts no stored tier — the stored tiers declare nothing to scope by, which is
+            exactly what "no stored tier is mounted" should mean.
         response_format: A pydantic model the agent must finish by producing, surfaced on the
             returned state's `structured_response`. `None` — the conversational default — leaves the
             agent answering in prose. This exists for callers whose *whole* output is a datum rather
@@ -382,9 +390,13 @@ def build_langgraph_agent(
     # disagree about what this turn can reach.
     #
     # **Computed once and handed to both**, because three tiers are mounted on one backend and a
-    # narrowing that answered differently depending on which mount asked would not be a narrowing.
+    # mount deriving its own answer is how a listing and a gate come to disagree. What each mount
+    # binds is not the same predicate — a filed tree and a stored tier are not asked the same
+    # question, and `skill_access.SkillNarrowing` is where that partition and its measurement live.
     # The stored tiers used to have no predicate at all — see `skill_narrowing`.
-    permits = skill_narrowing(prof, tools, labelled, available={t.name for t in bound})
+    permits = skill_narrowing(
+        prof, tools, labelled, available={t.name for t in bound}, stored=stored_skills
+    )
     skills = skills_backend(
         prof, tools, labelled=labelled, available={t.name for t in bound}, permits=permits
     )
@@ -1255,7 +1267,7 @@ def skills_backend(
     *,
     labelled: list[tuple[str, str]] | None = None,
     available: Collection[str] | None = None,
-    permits: Callable[[str], bool] | None = None,
+    permits: SkillNarrowing | None = None,
 ) -> CompositeBackend:
     """The skills backend for one profile — a backend that can only reach what it may.
 
@@ -1296,8 +1308,10 @@ def skills_backend(
             server is unreachable. The argument exists because that difference was measured
             offering two skills with no bound tool at all.
         permits: The narrowing this turn already computed (`skill_narrowing`), so one build asks
-            the question once and every mount binds the same answer. Omitted, it is computed here,
-            which is what a test building a backend alone wants.
+            the question once and every mount binds the same answer. **Its `filed` half is what
+            these mounts get**, because a reviewed tree is the tier every narrowing was written
+            about; `scratchpad_backend` takes the same value and uses `stored`. Omitted, it is
+            computed here, which is what a test building a backend alone wants.
     """
     labelled = labelled if labelled is not None else _labelled(_skill_dirs())
     if permits is None:
@@ -1305,7 +1319,8 @@ def skills_backend(
     return CompositeBackend(
         default=StateBackend(),
         routes={
-            f"/{label}/": NarrowedSkillsBackend(directory, permits) for label, directory in labelled
+            f"/{label}/": NarrowedSkillsBackend(directory, permits.filed)
+            for label, directory in labelled
         },
     )
 
@@ -1316,18 +1331,27 @@ def skill_narrowing(
     labelled: list[tuple[str, str]],
     *,
     available: Collection[str] | None = None,
-) -> Callable[[str], bool]:
-    """Whether this turn may reach a skill, by name — **one predicate for every tier**.
+    stored: StoredSkillTools | None = None,
+) -> SkillNarrowing:
+    """Whether this turn may reach a skill, by name — **one narrowing, computed once per build**.
 
     Extracted from `skills_backend` when the stored tiers gained a gate. The reviewed tree, the
-    chemist's own tier and the organisation's are three mounts of one turn, and a narrowing that
-    answered differently depending on which mount asked would not be a narrowing: the model reads
-    all three through one composed backend and can name a path in any of them.
+    chemist's own tier and the organisation's are three mounts of one turn, and a narrowing derived
+    independently per mount would not be a narrowing: the model reads all three through one composed
+    backend and can name a path in any of them.
 
     That is not a hypothetical. The personal tier shipped narrowed in the *prompt* and not at the
     backend, so `skill_names: []` — the eval control arm whose whole job is removing skills —
     advertised nothing and still served the bodies. Computing this once and handing it to every
     mount is what makes a second such gap a build error rather than a measurement nobody takes.
+
+    **"One predicate for every tier" is what this used to say, and it was the wrong invariant.** A
+    filed tree and a stored tier are not asked the same question, and three of the four narrowings
+    were answering the filed one about a stored tier: `EnabledSkills` deleted both stored tiers
+    outright, which is what `skill_access.SkillNarrowing` now partitions. The invariant that
+    actually held the gap shut is *computed once, handed to every mount* — which is unchanged, and
+    is why this returns one value carrying both predicates rather than letting a mount ask for its
+    own.
 
     It is computed here rather than per mount for the second reason too: `_log_narrowing` writes one
     line per build saying what this profile was offered, and three mounts deriving their own
@@ -1339,22 +1363,52 @@ def skill_narrowing(
         labelled: The already-walked `(label, directory)` list, for the declared-tools map.
         available: The tool names this turn actually binds, connectors included. See
             `skills_backend` for why the fallback is the manifest answer and why that differs.
+        stored: What the two stored tiers declare (`agent/stored_skill_tools.py`), read by the async
+            caller because this builder is synchronous. Omitted, the stored tiers declare nothing to
+            scope by, which is the pre-existing behaviour and the behaviour every caller off the
+            request path wants.
 
     Returns:
-        The composed predicate, evaluated per reach because the role gate reads ambient identity.
+        The narrowing per kind of tier, each evaluated per reach because the role gate reads ambient
+        identity.
     """
     directories = [directory for _label, directory in labelled]
     declared = declared_tools(directories)
-    permits = skill_permits(
+    required = required_tools(directories)
+    narrowing = skill_permits(
         enabled=settings.skills_enabled_list,
-        declared=declared,
-        required=required_tools(directories),
+        # **Merged rather than passed separately**, so `ToolScopedSkills` does not learn that two
+        # kinds of tier exist: a declaration is a declaration, and the only thing that differs is
+        # where the frontmatter was read from.
+        #
+        # **The filed entry wins a name held by both, and that direction is load-bearing.** The
+        # other way round was written first, with a comment saying the collision could not happen
+        # because `UnreservedNames` removes it — which is true of the *stored* predicate and says
+        # nothing about the filed one, since both read this one map. Driven: a grandfathered
+        # `/mine/deep-research` declaring one tool nothing binds made the **reviewed**
+        # `deep-research` invisible, in a turn binding all twelve tools it declares. A stored
+        # declaration for a shipped name describes a body no turn can read, so it must not describe
+        # the body a turn does read.
+        declared={**(stored.declared if stored else {}), **declared},
+        required={**(stored.required if stored else {}), **required},
         available=available if available is not None else _advertised_names(profile, tools),
         gates=settings.skill_role_gates,
         names=profile.skill_names,
+        # The keys of *this* walk rather than a `shipped_skill_names()` call, which would walk the
+        # trees a second time. The two agree on every production path — that function is
+        # `frozenset(declared_tools(_labelled(_skill_dirs())))` — and where they could differ, a
+        # caller that passed its own `labelled`, this one is the set the backend actually routes.
+        # A read side that reserved names from a different walk than the one it serves is the
+        # disagreement `UnreservedNames` exists to close, arriving by the other door.
+        reserved=frozenset(declared),
     )
-    _log_narrowing(profile, declared, permits)
-    return permits
+    # **The *filed* map, deliberately, now that the narrowing reads both.** A stored name in this
+    # line would put a chemist's own vocabulary into a log field on every turn they take, which
+    # `local_skills._count_a_local_load` refuses to do to a metric label for exactly that reason.
+    # The count it reports is therefore about the discovered corpus, which is what "discovered"
+    # means.
+    _log_narrowing(profile, declared, narrowing.filed)
+    return narrowing
 
 
 def _log_narrowing(

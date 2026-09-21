@@ -29,6 +29,7 @@ from chemclaw.agent.org_skills import (
 )
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.agent.scratchpad import scratchpad_backend
+from chemclaw.agent.skill_access import SkillNarrowing
 from chemclaw.agent.skill_backend import SkillsReadOnlyRefusal
 from chemclaw.agent.skill_store import PermittedStoreBackend
 from chemclaw.core.config import settings
@@ -54,14 +55,14 @@ def _backend(store: Any) -> PermittedStoreBackend:
     return org_skills_backend(store, lambda _name: True)
 
 
-def _mounted(store: Any, actor: str, permits: Any = None) -> Any:
+def _mounted(store: Any, actor: str, permits: SkillNarrowing | None = None) -> Any:
     """The backend a turn for `actor` would be given, mounted as a turn mounts it."""
     tokens = set_current_identity(actor, frozenset())
     try:
         return scratchpad_backend(
             skills_backend(AgentProfile(name="default"), []),
             store,
-            permits=permits or (lambda _name: True),
+            permits=permits or SkillNarrowing.permissive(),
         )
     finally:
         reset_current_identity(tokens)
@@ -110,7 +111,8 @@ def test_the_tier_needs_a_store_and_not_an_actor(store: InMemoryStore) -> None:
 
     skills = skills_backend(AgentProfile(name="default"), [])
     assert (
-        ORG_SKILLS_ROOT not in scratchpad_backend(skills, None, permits=lambda _name: True).routes
+        ORG_SKILLS_ROOT
+        not in scratchpad_backend(skills, None, permits=SkillNarrowing.permissive()).routes
     ), "with no store there is nowhere to keep one"
 
 
@@ -400,7 +402,7 @@ def test_the_tier_is_advertised_only_when_it_is_mounted(store: InMemoryStore) ->
 
     skills = skills_backend(AgentProfile(name="default"), [])
     without = _sources(
-        scratchpad_backend(skills, None, permits=lambda _name: True),
+        scratchpad_backend(skills, None, permits=SkillNarrowing.permissive()),
         AgentProfile(name="default"),
     )
     assert f"/{ORG_SKILLS_LABEL}" not in without
