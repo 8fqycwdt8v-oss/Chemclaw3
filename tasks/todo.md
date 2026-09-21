@@ -52,7 +52,10 @@ follows that order rather than the document's.
 - [x] **S4b. Six cross-capability skills** (not in the original list): crystallisation, solvent
       swap, impurity fate, analytical readiness, readiness review, robustness.
 - [ ] **S11. `attach_plate_results`** — close the design → results loop. **Not built.**
-- [ ] **S12. Step templates** for the compositions the skills describe. **Not built.**
+- [x] **S12. The gate** a fleet template's arguments needed — the fleet's own recorded
+      `tool-surface.json`, read offline. The first template is written and **parked**, because
+      its launcher would cost every deployment prefix for a capability that ships off; the
+      measurement and the ADR that would unblock it are the backlog row.
 - [x] **S13. Design generators** — BoFire's `DoEStrategy` behind a `criterion` argument, not a
       second tool (`D-2026-09-21-a-design-is-a-criterion-not-a-second-tool`). Closes the
       `DEFERRED.md` row and the `BACKLOG.md` row, both deleted. Blocking and `NChooseK` are

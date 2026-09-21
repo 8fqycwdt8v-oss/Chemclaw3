@@ -79,17 +79,22 @@ topic).
   whether a plate run outside this system can ever be attached. Named in
   `docs/archive/IDEATION-2026-09-20-process-development-hte-and-protocol-prediction.md` §3.3.
 
-- [ ] **A step template naming a fleet tool has no gate that checks its argument keys** — [M].
-  `make template-validate` name-checks a tool whose bundle is declared but not served and reports
-  `arguments unchecked`; `make live-template-args` is the only check that reads a running
-  connector, and no lane in CI runs one. So the process-development templates the ideation asks
-  for (§5: a thermal envelope, a solvent swap, a crystallisation first pass) would ship with
-  argument names verified against nothing, which is the fabricated-argument shape
-  `D-2026-09-20-a-ranking-is-evidence-a-critic-is-not-a-gate` refuses one layer over. Either read
-  the sibling's `tool-surface.json` at validation time the way
-  `tests/test_sibling_manifest_agreement.py` already reads its manifests, or decide these templates
-  wait for a lane that can run `live-template-args`. The first is the smaller change and the one
-  with a precedent.
+- [ ] **A template launcher is bound whatever its tools are, so an opt-in capability's template
+  costs every deployment prefix it cannot use** — [M]. The argument-checking half of this row is
+  **done**: `tests/test_template_args_recorded.py` reads the fleet's own recorded
+  `servers/<name>/tool-surface.json` — the file `tests/test_sibling_manifest_agreement.py` already
+  reads for the `calc` and `rxnlabel` seams — so a template naming `mtsr` now has its argument keys
+  checked offline, where `make template-validate` prints `arguments unchecked` and the only other
+  gate needs a running connector no CI lane has. What is left is the shipping half. Measured:
+  `run_scale_up_thermal_envelope` costs ~560 tokens of prefix on every model call, and it would be
+  the **only** template in `data/templates/` naming tools a default deployment does not bind —
+  every existing one is runnable out of the box. So a default deployment pays for a launcher
+  `unrunnable_reason` refuses at launch. Withholding the launcher is argued against in that
+  function's own docstring, on a measurement about templates a **profile names**; this one is named
+  by none, so the narrower rule — withhold only what no profile names — is probably right and is an
+  ADR rather than an edit. The finished template is parked at
+  `docs/archive/proposed-templates/scale-up-thermal-envelope.yaml` with its arguments verified;
+  move it back when this closes.
 
 - [ ] **A site-supplied regex from a datasource manifest runs against warehouse cell text with no
   timeout, so a catastrophic pattern hangs the ingest activity** — [M].

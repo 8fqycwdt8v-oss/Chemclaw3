@@ -1,0 +1,141 @@
+# **PARKED, not shipped. This file is not on `CHEMCLAW_TEMPLATES_DIR` and no launcher exists.**
+#
+# Its arguments are correct — verified against `Chemclaw3-mcp`'s own recorded
+# `servers/thermalsafety/tool-surface.json` by `tests/test_template_args_recorded.py`, which was
+# written alongside it and drove this file through a mutation before it was parked. What stops it
+# shipping is not correctness but cost, measured:
+#
+# `run_scale_up_thermal_envelope` costs **~560 tokens** of prefix on every model call, and every
+# template in `data/templates/` today names only tools a default deployment binds. This one names
+# `thermalsafety`'s, which ship `default_enabled: false`, so a default deployment would pay that
+# prefix for a launcher `templates.registry.unrunnable_reason` refuses at launch — a cost that
+# always occurs for a capability that usually does not.
+#
+# Withholding the launcher instead is the obvious fix and is argued against where it would live:
+# `unrunnable_reason`'s docstring measured that not registering an unrunnable launcher takes two
+# shipped profiles from "one procedure is unavailable" to "every turn on this profile fails at
+# build". That argument was made about templates a profile names; this one is named by none, so the
+# narrower rule — withhold only what no profile names — may well be right. It is a decision, with
+# an ADR, and not something to take at the end of a long branch.
+#
+# `docs/planning/BACKLOG.md` carries the row. Move this file back to `data/templates/` when that
+# row closes.
+#
+# The cooling-failure question, in the one order that makes its answer mean anything.
+#
+# Why this is a template and not a prompt: the three numbers depend on each other, and the
+# dependency is the whole argument. An adiabatic rise is a property of the charge; the MTSR is what
+# the *accumulated* fraction of it reaches from the process temperature; the criticality class is
+# where that sits against the boiling point and the decomposition onset. Asked as one question, a
+# model can produce a class without ever computing the rise, and the class is the sentence a
+# chemist acts on.
+#
+# **Every input is a number a person measured, and there is no default for any of them.** That is
+# the fleet server's own rule — a correlation handed a defaulted value returns a plausible number
+# nobody measured — and it is why this template asks for eight inputs rather than inferring any.
+# In particular `heat_of_reaction_kj_per_mol` is a *calorimetry* number (DSC, RC1). The one thing
+# this system can compute cheaply, a GFN2-xTB reaction energy, is **not** it: that is a ranking of
+# alternatives, it omits mixing, dilution, crystallisation and quench heats, and feeding it here
+# produces an MTSR with a decimal point and no measurement behind it.
+summary: Turn measured calorimetry into an adiabatic rise, an MTSR and a Stoessel criticality class.
+description: >-
+  A fixed four-step thermal envelope: adiabatic rise from the measured heat of reaction, MTSR at
+  the stated accumulation, Stoessel criticality class, then the write-up. Use it when a step with a
+  real exotherm scales up and the calorimetry exists; where it does not, the answer is that
+  experiment rather than this.
+
+inputs:
+  - name: heat_of_reaction_kj_per_mol
+    type: number
+    description: >-
+      Measured heat of reaction, kJ/mol, from RC1 or DSC. Never a computed reaction energy.
+  - name: moles
+    type: number
+    description: Moles of limiting reagent the heat of reaction is per.
+  - name: mass_kg
+    type: number
+    description: Total batch mass, kg, including solvent.
+  - name: specific_heat_kj_per_kg_k
+    type: number
+    description: Batch specific heat, kJ/(kg·K).
+  - name: process_temperature_c
+    type: number
+    description: Reaction temperature, °C.
+  - name: accumulation_fraction
+    type: number
+    description: >-
+      Unreacted fraction at the worst moment, 0 to 1. A batch charge is 1; a dose is its
+      accumulation peak.
+  - name: max_technical_temperature_c
+    type: number
+    description: >-
+      Highest temperature the vessel tolerates, °C — boiling point at pressure, or the relief set
+      point.
+  - name: decomposition_t_d24_c
+    type: number
+    description: Temperature where adiabatic time to maximum rate is 24 h, °C, from ARC or DSC.
+
+steps:
+  - id: rise
+    kind: tool
+    purpose: >-
+      Every joule of reaction heat staying in the batch. First, because both numbers below are
+      derived from it and neither is meaningful without it.
+    tool: adiabatic_temperature_rise
+    arguments:
+      heat_of_reaction_kj_per_mol: "${inputs.heat_of_reaction_kj_per_mol}"
+      moles: "${inputs.moles}"
+      mass_kg: "${inputs.mass_kg}"
+      specific_heat_kj_per_kg_k: "${inputs.specific_heat_kj_per_kg_k}"
+
+  - id: mtsr
+    kind: tool
+    purpose: >-
+      The temperature the synthesis actually reaches on cooling failure — the process temperature
+      plus the rise the *accumulated* fraction supports, which is the number people get wrong by
+      using the fully-charged rise.
+    tool: mtsr
+    arguments:
+      adiabatic_temperature_rise_k: "${steps.rise.result.adiabatic_temperature_rise_k}"
+      process_temperature_c: "${inputs.process_temperature_c}"
+      accumulation_fraction: "${inputs.accumulation_fraction}"
+
+  - id: criticality
+    kind: tool
+    purpose: >-
+      Where the MTSR sits against the technical limit and the decomposition onset. The ordering of
+      those four temperatures is the assessment; the class is its name.
+    tool: stoessel_criticality_class
+    arguments:
+      mtsr_c: "${steps.mtsr.result.mtsr_c}"
+      process_temperature_c: "${inputs.process_temperature_c}"
+      max_technical_temperature_c: "${inputs.max_technical_temperature_c}"
+      decomposition_t_d24_c: "${inputs.decomposition_t_d24_c}"
+
+  - id: report
+    kind: agent
+    purpose: Turn three numbers and a class into what a chemist does next.
+    prompt: >-
+      Write the thermal envelope for this scale-up.
+
+      Adiabatic temperature rise: ${steps.rise.result}
+      MTSR at the stated accumulation: ${steps.mtsr.result}
+      Stoessel criticality: ${steps.criticality.result}
+
+      Lead with the criticality class and the ordering that produced it — not in a closing caveat.
+      A class 3, 4 or 5 is a finding to hand to process safety rather than an answer, and say so in
+      those words. Say what would move it: a lower process temperature, a longer dose, a more
+      dilute charge, a solvent with a higher boiling point.
+
+      State the accumulation fraction that was used and where it came from. If it was 1, say that
+      this is the fully-charged worst case and that a measured accumulation profile would refine
+      it.
+
+      Then name what none of these numbers sees, because their absence is invisible: gas evolution
+      and pressure rise, a secondary decomposition whose onset a dynamic DSC scan rate flatters,
+      the quench and the work-up (frequently the larger exotherm and usually left out of the
+      question as asked), and the fall in surface-to-volume that makes a bench reaction's "it never
+      got warm" no evidence at all about the plant.
+
+      Never write that the step is safe. These tools compute from what they were given and know
+      nothing about what was not measured.
