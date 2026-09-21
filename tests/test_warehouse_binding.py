@@ -12,6 +12,7 @@ being enabled.
 
 import os
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +21,12 @@ import yaml
 
 from chemclaw.core.config import settings
 from chemclaw.ingest.eln.warehouse.binding import BindingError, load_binding
-from chemclaw.ingest.eln.warehouse.expr import TransformError, apply_transforms, resolve_path
+from chemclaw.ingest.eln.warehouse.expr import (
+    PatternBudgetError,
+    TransformError,
+    apply_transforms,
+    resolve_path,
+)
 
 _SOURCES = Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "ingest" / "sources"
 _MANIFEST = _SOURCES / "eln-databricks" / "datasource.yaml"
@@ -539,6 +545,186 @@ def test_a_regex_transform_is_compiled_when_the_binding_loads() -> None:
     ]
     with pytest.raises(BindingError, match="asks for group 5"):
         load_binding(binding)
+
+
+def test_a_pattern_that_cannot_finish_stops_on_a_wall_clock_instead_of_on_the_activity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one transform whose cost is a function of nothing this repository chose.
+
+    A site writes the pattern; the subject is a free-text warehouse column. `re` has no timeout at
+    any layer, so before this the only bound on `(a+)+$` against a long cell was the ingest
+    activity's `start_to_close` — after which the retry ran the identical pattern over the
+    identical page.
+
+    **The assertion separates two outcomes rather than two speeds** (`tasks/lessons.md` rule 59).
+    The passing case returns at the budget; the defect does not return at all — driven,
+    `re.search("(a+)+$", "a" * 3000 + "b")` was still running when a 120 s alarm killed it, so its
+    duration is not a number anybody has. The bound is therefore a generous multiple of the budget
+    and still at least three orders of magnitude from the defect, which is what keeps it from
+    reddening the gate on a loaded box.
+    """
+    monkeypatch.setattr(settings, "eln_regex_timeout_seconds", 0.05)
+    catastrophic = [{"regex": {"pattern": "(a+)+$"}}]
+
+    started = time.perf_counter()
+    with pytest.raises(PatternBudgetError, match="did not finish within"):
+        apply_transforms("a" * 3_000 + "b", catastrophic)
+    spent = time.perf_counter() - started
+
+    assert spent < 5.0, (
+        f"the match ran {spent:.2f}s against a 0.05s budget, so the deadline is not being checked "
+        "inside the matching loop and the only real bound is still the activity's"
+    )
+
+
+def test_no_handler_on_the_ingest_path_catches_a_pattern_that_cannot_finish() -> None:
+    """The assertion the first version of this fix needed and did not have.
+
+    `PatternBudgetError` descended from `ChemclawError` and its docstring claimed to escape the
+    per-entry handler because it was not an `ElnMappingError`. That claim was checked against the
+    `ElnMappingError` arm in `src/chemclaw/ingest/eln/warehouse/adapter.py` — the wrong handler.
+    A transform runs under
+    `ingest/eln/sync.py`'s `except (ChemclawError, ValidationError)`, one layer further out, which
+    caught it by construction. Driven on the real `sync_entries` with a `(a+)+$` transform over ten
+    entries at a 0.05 s budget: nothing escaped, all ten were booked as data refusals, and the page
+    cost `rows x budget` — the exact outcome the class exists to prevent, shipped under a green
+    test that asserted the wrong non-membership.
+
+    **So this walks the handlers instead of naming one.** Every `except` clause under
+    `ingest/eln/` is resolved to the classes it actually catches, and none of them may be a base of
+    `PatternBudgetError`. A handler added or widened later reds this, which naming a single module
+    never could.
+    """
+    import ast
+    import importlib
+
+    package = Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "ingest" / "eln"
+    catchers: list[str] = []
+    for path in sorted(package.rglob("*.py")):
+        module_name = (
+            "chemclaw.ingest.eln"
+            + "."
+            + str(path.relative_to(package).with_suffix("")).replace("/", ".")
+        ).removesuffix(".__init__")
+        namespace = vars(importlib.import_module(module_name))
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.ExceptHandler) or node.type is None:
+                continue
+            named = node.type.elts if isinstance(node.type, ast.Tuple) else [node.type]
+            for element in named:
+                if not isinstance(element, ast.Name):
+                    continue
+                caught = namespace.get(element.id)
+                if isinstance(caught, type) and issubclass(PatternBudgetError, caught):
+                    catchers.append(f"{module_name}:{node.lineno} catches {element.id}")
+
+    assert not catchers, (
+        "a pattern that cannot finish is swallowed on the ingest path and the row it was reading "
+        f"is booked as a data refusal, so the same unfinishable match is re-run on every remaining "
+        f"row: {catchers}. The cost belongs to the pattern, not to the row"
+    )
+
+
+def test_a_pattern_that_cannot_finish_is_still_refused_once_rather_than_retried() -> None:
+    """The retry half, which leaving the error hierarchy does not cover on its own.
+
+    `durable/publish._BAD_DATA_TYPES` is what Temporal reads as `non_retryable_error_types`, and it
+    matches the outermost failure's class **name** — so a type's ancestry buys it nothing either
+    way. Listed although it is no longer a `ChemclawError`, because the pattern is the same string
+    in the manifest on the next attempt and the page is the same page: a retry is the stall again.
+    """
+    from chemclaw.durable.publish import _BAD_DATA_TYPES
+
+    assert PatternBudgetError.__name__ in _BAD_DATA_TYPES, (
+        "the pattern and the page are both the same on the next attempt, so a retry is the stall "
+        "again"
+    )
+
+
+def test_a_repeat_count_too_large_to_expand_is_refused_before_it_is_compiled() -> None:
+    """The cost the engine swap brought with it, which the first version of this change did not see.
+
+    `re.compile` is O(1) on a bounded repeat; `regex` **expands** one. Measured: `re.compile` is
+    ~0.1 ms flat for every count, while `regex.compile` is 2.9 ms at `a{10000}`, 34 ms at
+    `a{100000}`, **431 ms and 290 MB** at `a{1000000}`, and did not finish in two minutes at
+    `a{100000000}`. That runs at binding load, on manifest text nobody here wrote, outside
+    `eln_regex_timeout_seconds` (which bounds a *match*) and outside every Temporal deadline — so a
+    `datasource.yaml` could take an ingest worker down before a single row was read. Under `re`
+    that pattern was free, which is why this guard arrived with the second engine and not before.
+
+    The scan is the guard rather than a compile, because compiling is the thing being guarded.
+    """
+    binding = _ingest()
+    binding["ingest"]["reaction"]["reaction_id"]["transform"] = [
+        {"regex": {"pattern": "a{200000}"}}
+    ]
+
+    started = time.perf_counter()
+    with pytest.raises(BindingError, match="over the 10000 this engine will expand"):
+        load_binding(binding)
+    spent = time.perf_counter() - started
+
+    assert spent < 1.0, (
+        f"the refusal itself took {spent:.2f}s, which is the pattern being compiled before it was "
+        "refused — the guard has to run first or it is not a guard"
+    )
+
+
+@pytest.mark.parametrize(
+    ("pattern", "because"),
+    [
+        (r"\d{3,6}", "a field width, which is what a real binding writes"),
+        (r"[A-Z]{2,4}-\d+", "a bounded class repeat"),
+        (r"a{2,}", "unbounded: the other remedy's subject, and free to compile"),
+        (r"\{100000\}", "an escaped brace is a literal, not a quantifier"),
+        (r"[{]{1}", "a brace inside a character class, repeated once"),
+        (r"x{not a number}", "a brace group that is not a quantifier at all"),
+    ],
+)
+def test_the_expansion_guard_does_not_refuse_a_pattern_a_binding_would_write(
+    pattern: str, because: str
+) -> None:
+    """A guard that fires on correct input reads as a working one (`tasks/lessons.md` rule 96).
+
+    The two cases worth paying for are the two ways a `{` is not a quantifier — a backslash escape
+    and a character class — because a bare scan over the whole pattern refuses `[{]{1}` and an
+    escaped brace pair, both of which every engine reads as literals. The scan tracks exactly
+    those two and nothing else.
+    """
+    binding = _ingest()
+    binding["ingest"]["reaction"]["reaction_id"]["transform"] = [{"regex": {"pattern": pattern}}]
+
+    load_binding(binding)
+
+    assert because, "every row states why it is a pattern a binding would legitimately write"
+
+
+def test_an_ordinary_pattern_still_reads_its_group_under_the_bounded_engine() -> None:
+    """The engine swap is not allowed to cost the feature, which is the other half of the trade.
+
+    `regex` is a superset of `re` in its default version, and this is the assertion that says so
+    for the shapes a binding actually writes — a group, an alternation, a bounded quantifier and a
+    character class — rather than leaving it to the library's own claim.
+    """
+    assert apply_transforms("L-40127 batch", [{"regex": {"pattern": r"L-(\d+)", "group": 1}}]) == (
+        "40127"
+    )
+    assert (
+        apply_transforms(
+            "sample XYZ-12345", [{"regex": {"pattern": r"([A-Z]{2,4}-\d{3,6})", "group": 1}}]
+        )
+        == "XYZ-12345"
+    )
+    assert (
+        apply_transforms(
+            "isolated 87.4 % after", [{"regex": {"pattern": r"(\d+(?:\.\d+)?)\s*%", "group": 1}}]
+        )
+        == "87.4"
+    )
+    assert apply_transforms("no digits here", [{"regex": {"pattern": r"L-(\d+)"}}]) is None, (
+        "no match is silence, not an error"
+    )
 
 
 def test_the_server_embed_function_is_checked_like_every_other_interpolated_name() -> None:

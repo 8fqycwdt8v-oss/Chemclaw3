@@ -1506,3 +1506,106 @@ free number at the end of its section.
     does not close, say so rather than writing the plausible split. The general form: a number I can
     assert and a number I merely computed a difference for should not appear in the same sentence
     without saying which is which.
+
+99. **A queued row is a claim about the code and I have to check it before working it — twice in
+    one wave the row was the thing that was wrong.** `BACKLOG.md` says this in its own header and I
+    nearly implemented both rows as written. *"`tool_result_blobs` ships its retention window at
+    zero, and nobody chose zero"* — the deliberation is recorded in **four** places, including a
+    post-mortem of a 30-day default that was tried and withdrawn on measurement, so implementing
+    the row would have re-litigated a settled decision. And the row's own two anchors had drifted:
+    `memory.py:125` is the last line of a preamble comment, not the field (`:145`), and
+    `retention.py:447` is an ordinary register entry rather than the meta-comment it was cited as.
+    The *useful* finding was one layer under the row and nobody had written it down: `_NOT_PRUNED`
+    states a reason per entry and `_PRUNABLE` has nowhere to put one, so a swept table's argument
+    lived only in a code comment and a seventh table could have joined the sweep in silence.
+    **When a row's premise does not survive contact with the tree, the contribution is the
+    corrected row, and the real work is usually the gap the wrong row was standing in front of.**
+
+100. **A guard that excludes one thing by name excludes exactly that thing, and my change was the
+     second.** `test_every_compiled_graph_in_this_tree_names_its_checkpointer` walks every `.compile`
+     call and skipped `re` with a comment saying "`re.compile` is the other `.compile` in this tree".
+     Adding `regex` for a site-supplied pattern's deadline made that sentence false and reddened a
+     guard with nothing to do with graphs. The fix that matters is not the second name, it is naming
+     the **class** (`_PATTERN_ENGINES`) so a third entry has to be a third engine rather than an
+     exception somebody added to get to green. **Before adding an import that looks like something a
+     guard already has an opinion about, grep the guards for the thing it looks like** — and when I
+     do trip one, ask whether its exclusion is a list or a category, because the two age completely
+     differently.
+
+101. **The measurement I skipped was the one that would have told me the fix.** The timing test that
+     reds under load had already been corrected once *to an in-process control* and still failed at
+     1.289x against 1.3. I could have widened the margin. Measuring instead showed why the margin
+     could not help: the control blocked the loop for 32 ms, which is inside the noise a loaded box
+     adds to **both** arms, and the offloaded arm's worst gap tracks the *concurrency* rather than
+     the total work. Four heavier turns instead of twelve light ones moved the separation from 2.8x
+     to 14-26x with the defect still at 1.00x — a bound with room, from the same test. **When a
+     margin keeps needing to be widened, the thing to measure is the size of the control, not the
+     size of the margin.** And the second half: the sync-path stand-in was replaceable by the driven
+     mutation (`asyncio.to_thread` neutered), which reads identically and is the defect, so the
+     denominator stopped being an analogy for one.
+
+102. **I ran `uv sync` in the middle of a full-suite baseline and then read the result as a
+     baseline.** Two failures came back; one was a shallow clone and one was my own in-flight edit.
+     Lesson 97 says do not start a second run while the first is running, and installing packages
+     under a running suite is the same mistake wearing different clothes — the interpreter the run
+     started with is not the one it finished with. **A baseline is only a baseline if the tree and
+     the environment hold still for it**; anything I want installed goes in before the run starts.
+     The shallow-clone half is worth its own note: `git log origin/main | wc -l` read **80**, and a
+     guard asserting reachability from `origin/main` fails on history nobody fetched. One
+     `git fetch --depth=2000` was the fix, and editing two merged ADRs would have been the damage.
+
+103. **I checked my "this escapes the handler" claim against a handler, and it was the wrong one.**
+     `PatternBudgetError` was built not to be an `ElnMappingError` so a reject-and-continue arm
+     would not swallow it. I found that arm in `warehouse/adapter.py`, confirmed the class was
+     outside it, wrote the docstring, the ADR and a passing test asserting the non-membership — and
+     the handler a transform actually runs under is one layer further out, `sync.py`'s
+     `except (ChemclawError, ValidationError)`, which caught it by construction. Driven, the
+     shipped behaviour was `rows x budget`: the exact outcome the class existed to prevent, under a
+     green test. **A negative claim about reachability has to be checked against every handler on
+     the path, not against the one I happened to open** — and the way to make that true is to stop
+     naming one: the replacement resolves every `except` clause under `ingest/eln/` by AST and
+     asserts none of them is a base of the class, which immediately found a *second* handler
+     (the replay path) that no prose anywhere had mentioned. When a test asserts a non-membership,
+     ask what the membership set is derived from; if I wrote the set by hand, the test is a
+     restatement of my own belief.
+
+104. **Adopting a library for one property means owning the rest of its surface, including the
+     parts the old one did not have.** I swapped `re` for `regex` in one function to get a match
+     deadline, and measured the per-call cost carefully. What I did not measure was *compile*:
+     `regex` expands a bounded repeat where `re` does not, so `a{1000000}` is 431 ms and 290 MB and
+     `a{100000000}` never returns — at binding load, on site-supplied text, outside the very budget
+     I had just added. I also wrote that `regex` is a superset of `re`, which is false: `{name}` is
+     its fuzzy-match syntax, and `[[:alpha:]]` and `\s` change meaning *silently*. **The questions
+     to ask of a swap are what the new library does that the old one did not, on every entry point
+     I use, not only on the one I adopted it for.** A differential fuzz over both engines took
+     minutes and would have found all three before review did.
+
+105. **A timing bound whose denominator is a busy-wait is an absolute bound wearing a ratio's
+     clothes.** I replaced a fixed margin with an in-process control and thought that made it
+     load-robust. It did not: the control busy-waits to a `perf_counter` deadline, so its duration
+     is pinned by the wall clock and does not move with the machine, while the numerator does —
+     under 3x oversubscription the margin fell from 4x to 1.16x. The fix was to stop measuring a
+     duration at all and count *how many times the event loop was scheduled during the work*:
+     18-28 against 0-1 quiet, 13-26 against 1 under load. **Before calling a ratio load-robust,
+     ask whether both sides actually move with load** — and prefer the countable form of the
+     property, which is what lesson 59's "separate the outcomes, not the speeds" has been saying.
+
+106. **Moving prose from a comment into a docstring is an edit, and I added a claim while doing
+     it.** Relocating the `session_events` argument I wrote "an unconsumed row is the only record
+     that something finished" — which the same docstring refutes forty lines down, where
+     `job_records` is refused from pruning precisely because it is that record. The original said
+     something narrower and true. **When relocating an argument, diff it word by word and treat any
+     sentence I did not move as new prose that needs its own check**, because a generalisation
+     added in transit reads exactly like the thing that was already there.
+
+107. **I ran the gate, then kept editing, then pushed — so the gate I read was not about the tree I
+     sent.** `make lint` and `make type` were green, and *after* that I lengthened two docstring
+     paths to satisfy `test_docstring_paths`, pushing both lines past 100 characters. `ruff format`
+     does not reflow prose in a docstring and `pytest` does not run `ruff`, so the full suite went
+     green over a tree CI reddened in 27 seconds. Lesson 94's remedy was "a gate and the action it
+     gates belong in two separate calls"; that is necessary and not sufficient, because it says
+     nothing about *when* the gate runs relative to the last edit. **The mechanical form: the gate
+     is the call immediately before `git commit`, every time, with no edit between them** — and
+     when a fix is prompted by one gate (a path checker), re-run the others, because the fix's
+     side effect is exactly what the other gate measures. Lengthening a path to satisfy a path
+     rule is a line-length change; the two rules pull against each other by construction.

@@ -359,6 +359,70 @@ def test_every_disposal_decision_states_a_reason() -> None:
     assert not blank, f"_NOT_PRUNED entries with no stated reason: {sorted(blank)}"
 
 
+def test_every_prunable_table_is_argued_where_the_others_are() -> None:
+    """The other half of the rule above, which only one of the two registers was holding.
+
+    `_NOT_PRUNED` carries its reason *in the register*, so a refusal cannot be added silently. A
+    `_PRUNABLE` entry is a `(column, predicate)` pair with nowhere to put one, so the argument for
+    why an age cutoff is the right instrument for that table lived only in a code comment — and a
+    comment is not something a check can see. A seventh table could have joined the sweep with no
+    stated reason at all and every test here would have stayed green.
+
+    Derived rather than restated: the module docstring already argues five of the six, in a list
+    whose whole purpose is that argument, so the rule is that a swept table appears there. Writing
+    the reasons a second time into the register would have made two copies of one answer, which is
+    the failure `docs/planning/BACKLOG.md` and `DEFERRED.md` are both scarred by. Two tables had
+    only the comment — `result_publications` and `session_events`, the second found by this test —
+    and moving both up is what it is derived against.
+    """
+    import chemclaw.durable.retention as retention_module
+
+    doc = retention_module.__doc__ or ""
+    # The argument for one table is the block from its bullet to the next blank-line-separated
+    # bullet, which is what "argued" has to mean if the check is to be more than a name lookup.
+    argued: dict[str, str] = {}
+    current: str | None = None
+    for line in doc.splitlines():
+        opened = re.match(r"^- `([a-z_]+)`", line)
+        if opened is not None:
+            current = opened.group(1)
+            argued[current] = line
+        elif current is not None and line.startswith("  "):
+            argued[current] += " " + line.strip()
+        elif not line.strip():
+            current = None
+
+    # **The list holds both registers' arguments, so presence alone is not the rule.** Every
+    # refusal is a bullet too, and `session_turns`' bullet says in as many words that it is *not*
+    # in `_PRUNABLE` — so moving a refused table into the sweep would have turned this green while
+    # the paragraph it points at argued against sweeping it. A swept table's argument may not be
+    # one of those.
+    refusals = sorted(
+        table
+        for table in _PRUNABLE
+        if "is **refused**" in argued.get(table, "")
+        or "**not** in `_PRUNABLE`" in argued.get(table, "")
+    )
+    assert not refusals, (
+        f"{refusals} are swept by this job and the paragraph arguing for them argues the "
+        "opposite — it is one of the refusals. A table cannot be moved into `_PRUNABLE` while "
+        "keeping the bullet that says it is not"
+    )
+
+    missing = sorted(table for table in _PRUNABLE if table not in argued)
+    assert not missing, (
+        f"{missing} are swept by this job and argued nowhere a check can read. Add each to the "
+        "list in `durable/retention.py`'s module docstring, saying why an age cutoff is the right "
+        "instrument for that table — beside every other swept table's argument, not only in a "
+        "comment by its entry."
+    )
+    thin = sorted(table for table in _PRUNABLE if len(argued[table]) < 120)
+    assert not thin, (
+        f"{thin} appear in the list with a one-line mention rather than an argument, which "
+        "satisfies the letter of the rule above and none of its purpose"
+    )
+
+
 def test_retention_is_off_until_a_policy_is_stated(monkeypatch: pytest.MonkeyPatch) -> None:
     """A deployment must choose its window; inheriting a deletion default from code is wrong."""
     assert settings.retention_session_events_days == 0

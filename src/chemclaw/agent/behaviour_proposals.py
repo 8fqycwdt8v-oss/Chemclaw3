@@ -98,18 +98,29 @@ def _book(kind: str, outcome: str) -> None:
     )
 
 
-def _arrival(inserted: bool, stored: Proposal) -> str:
+def _arrival(inserted: bool, stored: Proposal, *, revived: bool) -> str:
     """What a `propose` call actually was, which is not the same as what its caller intended.
 
-    Three outcomes, because a queue's usefulness is measured by the gap between them. A **fresh**
+    Four outcomes, because a queue's usefulness is measured by the gap between them. A **fresh**
     row is a proposal. A call that met its own content on an **open** row proposed nothing — the
     model is repeating itself, which is worth seeing and is not a second proposal. A call that met a
     **decided** row is the idempotent path this table exists for: the same text cannot reopen a
     rejection, and counting it as a proposal would report a queue busier than it is in the one
     series whose purpose is telling an operator whether anybody is reading it.
+
+    **`revived` is the fourth and it used to be counted as the second.** `superseded` is
+    deliberately not a decision, so a re-proposal of a superseded body fell through to the
+    `stored.decided` test and booked `already_open` — for a row that `GET /proposals?state=open`
+    does not list and `POST /proposals/{kind}/{name}` answers 409 for. The idempotence this table
+    exists for is over a *decision*; applying it to a state the system produced told an operator
+    the queue was being repeated at while it was in fact being refilled, and told the model its
+    proposal was waiting for a chemist who could never see it. A revive is a genuine state change
+    and is counted as its own thing rather than folded into either neighbour.
     """
     if inserted:
         return "proposed"
+    if revived:
+        return "revived"
     return "already_decided" if stored.decided else "already_open"
 
 
@@ -210,6 +221,22 @@ _SUPERSEDE = (
     "WHERE actor = %s AND kind = %s AND name = %s AND content_hash <> %s AND state = 'open'"
 )
 
+# **Putting a superseded body back in the queue, which is what re-proposing it means.** The unique
+# key is `(actor, kind, name, content_hash)`, so the row holding V1 is the only row that body can
+# ever have — `ON CONFLICT DO NOTHING` cannot append a second one, and nothing else moves a row out
+# of `superseded` (`_DECIDE` is `AND state = 'open'`). So without this the proposer is told V1 is
+# waiting to be decided while it is listed nowhere and `POST /proposals/{kind}/{name}` answers 409:
+# a decision with nowhere to land.
+#
+# `proposed_at` is refreshed because it is what the queue orders by and what a chemist reads as
+# "when was I asked": the ask is now. The original ask is not lost — `superseded` was reached
+# through a supersede that is itself booked, and the decision columns are untouched (the row was
+# never decided, which is exactly why reviving it is legal).
+_REVIVE = (
+    "UPDATE behaviour_proposals SET state = 'open', proposed_at = now() "
+    "WHERE actor = %s AND kind = %s AND name = %s AND content_hash = %s AND state = 'superseded'"
+)
+
 # **The serializer for one name's queue.** `_SUPERSEDE` reads under READ COMMITTED before a peer's
 # insert is visible, so N concurrent proposes of N different bodies each found nothing to supersede
 # and left N open rows — measured at 8 concurrent, 7 open, no error and no deadlock, which is
@@ -272,14 +299,18 @@ class PostgresProposalStore:
     async def propose(self, proposal: Proposal) -> Proposal:
         """Record a proposal, or return the standing one for this exact content.
 
-        **The supersede runs before the insert and both are in one transaction**, because the queue
-        must never show two open versions of one name — a reviewer who sees both has to guess which
-        one a decision applies to, which is the state migration 058 exists to describe. Ordering it
-        the other way would supersede the row just inserted in the `content_hash <> %s` sense only
-        by accident of the hash comparison; doing it first makes the intent structural.
+        **Arriving at one open row per name is the invariant, and all three writes are in one
+        transaction under the advisory lock** — the queue must never show two open versions of one
+        name, because a reviewer who sees both has to guess which one a decision applies to, which
+        is the state migration 058 exists to describe. The order is insert-or-revive, then
+        supersede: `_SUPERSEDE`'s `content_hash <> %s` is what keeps the version this call is about
+        out of its own sweep, and the `if arrived` guard is what keeps a call that arrived at
+        nothing from killing an open sibling it did not replace.
 
         `ON CONFLICT DO NOTHING` is the whole of "an unchanged re-proposal cannot reopen a
-        rejection": the row already there is returned untouched, whatever state it is in.
+        **decision**": the row already there is returned untouched when a person decided it.
+        `_REVIVE` is where that idempotence stops — `superseded` is a state this system produced
+        and no person answered, so a re-proposal of that body is a proposal rather than a repeat.
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
@@ -304,14 +335,24 @@ class PostgresProposalStore:
                     ),
                 )
                 inserted = cur.rowcount == 1
-                # **Only a genuinely new version supersedes anything**, which the first spelling
+                # A body already stored under this name is put back in the queue rather than left
+                # where a decision cannot reach it. Only ever one row, by the unique key.
+                revived = False
+                if not inserted:
+                    await cur.execute(
+                        _REVIVE,
+                        (proposal.actor, proposal.kind, proposal.name, proposal.content_hash),
+                    )
+                    revived = cur.rowcount == 1
+                # **Only a version that arrived supersedes anything**, which the first spelling
                 # got wrong by running the update unconditionally: re-proposing a body already
                 # stored killed the *open* sibling and revived nothing, so a queue holding one
                 # open proposal and one superseded one came back holding two superseded ones and
                 # nothing to decide. Measured — `OPEN rows: []` — while `propose_skill` went on
-                # telling the model its proposal was "already waiting".
+                # telling the model its proposal was "already waiting". A revive arrives in exactly
+                # the same sense an insert does, so it sweeps the siblings an insert would.
                 superseded = 0
-                if inserted:
+                if inserted or revived:
                     await cur.execute(
                         _SUPERSEDE,
                         (proposal.actor, proposal.kind, proposal.name, proposal.content_hash),
@@ -331,7 +372,7 @@ class PostgresProposalStore:
         stored = _row(row)
         for _ in range(superseded):
             _book(stored.kind, "superseded")
-        _book(stored.kind, _arrival(inserted, stored))
+        _book(stored.kind, _arrival(inserted, stored, revived=revived))
         return stored
 
     async def decide(
@@ -420,26 +461,48 @@ class InMemoryProposalStore:
         return (actor, kind, name, digest)
 
     async def propose(self, proposal: Proposal) -> Proposal:
-        """Record a proposal, or return the standing one for this exact content."""
+        """Record a proposal, or return the standing one for this exact content.
+
+        Mirrors `PostgresProposalStore.propose` statement for statement, including the revive: the
+        two backends disagreeing about what a re-proposal *means* is the defect this module's
+        header is about, and `superseded` is the state where the difference would have been
+        invisible until a chemist could not decide something the model said was waiting for them.
+        """
         key = self._key(proposal.actor, proposal.kind, proposal.name, proposal.content_hash)
         standing = self._held.get(key)
         if standing is not None:
-            _book(proposal.kind, _arrival(False, standing.proposal))
+            # `_REVIVE`'s `AND state = 'superseded'`, spelled in Python.
+            revived = standing.proposal.state == "superseded"
+            if revived:
+                standing.proposal = replace(
+                    standing.proposal, state="open", proposed_at=datetime.now(UTC)
+                )
+                self._supersede_open_siblings(proposal)
+            _book(proposal.kind, _arrival(False, standing.proposal, revived=revived))
             return standing.proposal
+        self._supersede_open_siblings(proposal)
+        fresh = replace(proposal, state="open", proposed_at=datetime.now(UTC))
+        self._held[key] = _Held(fresh)
+        _book(fresh.kind, _arrival(True, fresh, revived=False))
+        return fresh
+
+    def _supersede_open_siblings(self, proposal: Proposal) -> None:
+        """Close every *other* open version of this name, which is `_SUPERSEDE` in Python.
+
+        `content_hash != proposal.content_hash` is the `<> %s` — the version this call is about is
+        not swept by its own arrival, whether it arrived by insert or by revive.
+        """
         for held in self._held.values():
             other = held.proposal
             if (
                 other.actor == proposal.actor
                 and other.kind == proposal.kind
                 and other.name == proposal.name
+                and other.content_hash != proposal.content_hash
                 and other.state == "open"
             ):
                 held.proposal = replace(other, state="superseded")
                 _book(other.kind, "superseded")
-        fresh = replace(proposal, state="open", proposed_at=datetime.now(UTC))
-        self._held[key] = _Held(fresh)
-        _book(fresh.kind, _arrival(True, fresh))
-        return fresh
 
     async def decide(
         self,
