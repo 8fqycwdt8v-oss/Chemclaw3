@@ -76,6 +76,7 @@ unit names rather than the chemist's spelling — on the path every caller's `ex
 guards.
 """
 
+import re
 from dataclasses import dataclass, replace
 from typing import Literal, get_args
 
@@ -632,3 +633,34 @@ def reconcile(value: float, reported: str, expected: str) -> float:
             f"{expected!r} are the same unit measured against different things"
         )
     return measured.to(expected).value
+
+
+#: A leading number and a trailing unit, with optional space and an optional sign/exponent.
+#: Deliberately anchored at both ends: this reads a field a *person* wrote as the whole answer
+#: ("20 kg"), not a number mentioned inside a sentence. `quantities.labelled_values` is the tool for
+#: the other job, and conflating them would make "run it at 20 °C in 500 mL" parse as a scale.
+_QUANTITY = re.compile(r"^\s*([+-]?\d+(?:[.,]\d+)?(?:[eE][+-]?\d+)?)\s*([^\s\d].*?)\s*$")
+
+
+def parse_quantity(text: str) -> Measurement | None:
+    """A free-text quantity a person typed, or `None` when it is not one.
+
+    **Returns `None` rather than raising, because most of what reaches it is legitimately not a
+    quantity.** `ExperimentRequest.scale` is a `RequestField` whose value is whatever the chemist
+    said, and "a 96-well plate", "pilot scale" and "" are all ordinary answers. A parser that
+    raised on those would make every caller write the same `try`, and the second caller would write
+    it differently.
+
+    Two callers, which is why this is here rather than inlined: `protocols/checks.py` derives the
+    plausibility bands from the declared scale, and `protocols/rescale.py` reads the basis a
+    protocol is being scaled to. Both want the same three answers — a number, its dimension, or
+    "that was not a quantity" — and both must not explode on prose.
+    """
+    match = _QUANTITY.match(text)
+    if match is None:
+        return None
+    number, unit = match.groups()
+    try:
+        return Measurement.of(float(number.replace(",", ".")), unit)
+    except (UnitError, ValueError):
+        return None

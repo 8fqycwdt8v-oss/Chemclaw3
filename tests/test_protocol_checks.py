@@ -832,6 +832,68 @@ def test_quantities_are_plausible_flags_a_zero_equivalents_line() -> None:
     assert "0 equivalents" in verdict.detail
 
 
+def test_a_kilo_lab_charge_is_not_a_unit_mistake_when_the_scale_says_so() -> None:
+    """The bench bands described a discovery chemist and called a 20 kg campaign an error.
+
+    `data/evals/probes/process-chemistry.yaml`'s opening probe is 20 kg in a 250 L reactor. Every
+    charge on it cleared 1 kg and 20 L, so this warning fired on correct input — which is the one
+    kind of warning that teaches a chemist to stop reading the two checks beside it.
+    """
+    charge = [
+        ChargeLine(component="aryl bromide", limiting=True, mass_mg=20_000_000.0).model_dump(),
+        ChargeLine(component="2-MeTHF", volume_ml=200_000.0).model_dump(),
+    ]
+    at_scale = _design(
+        request=_request(scale={"value": "20 kg", "basis": "stated", "quote": "20 kg"}),
+        base={"charge": charge},
+    )
+    assert quantities_are_plausible(at_scale).passed
+
+    unstated = _design(base={"charge": charge})
+    verdict = quantities_are_plausible(unstated)
+    assert not verdict.passed
+    assert "is over 1 kg" in verdict.detail
+
+
+def test_the_scale_relative_band_still_catches_a_thousandfold_slip() -> None:
+    """Widening the band must not delete it: at 20 kg, 20 tonnes is still a slip."""
+    design = _design(
+        request=_request(scale={"value": "20 kg", "basis": "stated", "quote": "20 kg"}),
+        base={"charge": [ChargeLine(component="solid", mass_mg=2e13).model_dump()]},
+    )
+    verdict = quantities_are_plausible(design)
+    assert not verdict.passed
+    assert "for the declared scale of 20 kg" in verdict.detail
+
+
+def test_a_declared_scale_never_tightens_the_band() -> None:
+    """A 5 g scale must not start failing a 900 g charge that passes with no scale at all.
+
+    The band exists to catch an order-of-magnitude slip, and one that grew teeth because somebody
+    filled in an optional field would be a check that punishes stating your scale.
+    """
+    charge = [ChargeLine(component="solid", mass_mg=900_000.0).model_dump()]
+    assert quantities_are_plausible(_design(base={"charge": charge})).passed
+    small = _design(
+        request=_request(scale={"value": "5 g", "basis": "stated", "quote": "5 g"}),
+        base={"charge": charge},
+    )
+    assert quantities_are_plausible(small).passed
+
+
+def test_a_scale_that_is_not_a_quantity_leaves_the_bench_bands_alone() -> None:
+    """A 96-well plate and 'pilot' are ordinary answers, and neither fixes a bound."""
+    design = _design(
+        request=_request(
+            scale={"value": "a 96-well plate", "basis": "stated", "quote": "a 96-well plate"}
+        ),
+        base={"charge": [ChargeLine(component="solid", mass_mg=2_000_000.0).model_dump()]},
+    )
+    verdict = quantities_are_plausible(design)
+    assert not verdict.passed
+    assert "is over 1 kg" in verdict.detail
+
+
 # --- coverage_is_stated -------------------------------------------------------------------------
 
 

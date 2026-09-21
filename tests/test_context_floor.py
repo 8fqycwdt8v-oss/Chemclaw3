@@ -513,7 +513,32 @@ load_profiles()
 #: they are a deployment's bytes rather than this repository's, and folding a worst case nobody has
 #: into `PREFIX_BOUND` costs every deployment on earth the same thread allowance. See
 #: `LOCAL_SKILLS_ALLOWANCE` and `ORG_SKILLS_ALLOWANCE`.
-CEILINGS: dict[str, int] = {"__default__": 70_600}
+#: **Raised to 71,400 for `rescale_experiment_protocol`, and the 728 of headroom above is where
+#: the first 728 of it came from.** That paragraph called 728 "what the next first-party tool has";
+#: this is the next first-party tool and it wanted 948, so the ceiling moves by the difference plus
+#: a tripwire's worth. Measured on this commit: **70,820**.
+#:
+#: The cost is stated rather than absorbed, because a ratchet raised quietly stops being one: every
+#: deployment on earth pays 948 more tokens on every model call and gives up the same amount of
+#: thread allowance, since `core/config/agent.py` derives both compaction defaults from
+#: `PREFIX_BOUND`. Nothing about a turn that never scales a protocol gets better for it.
+#:
+#: **What the turn buys is the one operation this system had no path to at all.** Taking a
+#: procedure from the scale it was run at to the scale it will be run at is the defining kilo-lab
+#: task, and before this the model could only do it by multiplying numbers in prose — where the
+#: failure is silent and specific: everything gets multiplied, including the addition time and the
+#: filtration, and the scaled document then prescribes a time-temperature history no experiment
+#: ever produced. The tool's whole return value exists to make that impossible, and a tool that is
+#: not bound cannot refuse anything.
+#:
+#: **Why the prose was not trimmed further instead**, since that is the cheaper answer when it
+#: works: it was, twice, and the second pass bought **22 tokens** (70,842 -> 70,820). The schema
+#: wrapper, the name and two string arguments are the floor for any tool at all, and
+#: `test_no_single_tool_schema_dominates_the_floor` passes, so this is an ordinary tool's price
+#: rather than a badly-shaped one. Trimming past here would have taken the sentence telling the
+#: model to report the caveats rather than summarise them, which is the one instruction that makes
+#: the tool worth binding.
+CEILINGS: dict[str, int] = {"__default__": 71_400}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.

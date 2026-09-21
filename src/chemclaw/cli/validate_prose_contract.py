@@ -123,7 +123,7 @@ from chemclaw.agent.chemclaw_agent import (
     _INSTRUCTION_BLOCKS,
     _SAFETY_BLOCKS,
     PromptBlock,
-    available_tool_names,
+    declared_tool_names,
     harness_tool_names,
     skill_tool_names,
     subagent_tool_names,
@@ -200,7 +200,7 @@ def taught_tool_names(text: str, known: Collection[str]) -> set[str]:
     loose pattern; checking that an unknown name is absent needs a strict one** — is
     D-2026-08-05's, which measured the widening and rejected it for rule 2 alone.
 
-    `known` is a parameter rather than a call to `available_tool_names()` here so the filter is
+    `known` is a parameter rather than a call to `declared_tool_names()` here so the filter is
     part of the contract instead of a caller's afterthought: there is no way to use this
     extractor without one.
     """
@@ -428,7 +428,11 @@ def check_instruction_blocks() -> list[str]:
     (`tests/test_prose_contract.py` asserts the shipped two both ways instead).
     """
     always_bound = skill_tool_names() | set(subagent_tool_names())
-    bindable = available_tool_names() - always_bound - harness_tool_names()
+    # Declared, for the reason `check_prose_contract` gives: with an opt-in bundle in the tree a
+    # deployment *can* bind these, so a block keyed on one is a control whose condition occurs —
+    # which is exactly what `D-2026-09-15-a-capability-in-the-fleet-cannot-refute-a-denial-this-
+    # tree-declares-no-bundle-for` refused when no manifest existed here to make it possible.
+    bindable = declared_tool_names() - always_bound - harness_tool_names()
     problems: list[str] = []
     for symbol, blocks in _block_groups():
         for index, block in enumerate(blocks):
@@ -748,7 +752,13 @@ def check_prose_contract() -> list[str]:
     """Return one problem string per violation; empty means the prose matches the tool surface."""
     # One definition of the union, shared with the two other validators and the agent itself, so a
     # tool cannot be "available" to one checker and unknown to another (D-117).
-    tools = available_tool_names()
+    #
+    # **Declared rather than bound**, since `ConnectorManifest.default_enabled` exists: prose naming
+    # `mtsr` is a claim about this repository, and an opt-in bundle's tools are absent from
+    # `enabled()` on every checkout that has not turned it on. Checking against the bound set would
+    # report a correct reference as unknown everywhere, which is the D-117 defect with a new cause.
+    # Deletion is still caught: a tool no manifest declares is in neither set.
+    tools = declared_tool_names()
     problems: list[str] = []
     for origin, text in _prose_sources().items():
         for name in sorted(referenced_tool_names(text) - tools):

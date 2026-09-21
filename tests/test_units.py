@@ -19,6 +19,7 @@ from chemclaw.core.units import (
     JOULE_PER_CALORIE,
     Measurement,
     UnitError,
+    parse_quantity,
     parse_unit,
     reconcile,
 )
@@ -455,3 +456,50 @@ def test_the_three_physical_constants_are_pinned_against_the_codata_release_scip
     assert JOULE_PER_CALORIE == 4.184
     assert HARTREE_TO_KCAL == 627.5094740628974
     assert ELECTRONVOLT_TO_KJ == 96.48533212331002
+
+
+# --- parse_quantity -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "value", "symbol"),
+    [
+        ("20 kg", 20.0, "kg"),
+        ("20kg", 20.0, "kg"),
+        ("  500 mg  ", 500.0, "mg"),
+        ("1.5 L", 1.5, "L"),
+        ("2,5 kg", 2.5, "kg"),
+        ("1e3 g", 1000.0, "g"),
+        ("0.5 mol", 0.5, "mol"),
+    ],
+)
+def test_parse_quantity_reads_what_a_person_types_in_a_scale_field(
+    text: str, value: float, symbol: str
+) -> None:
+    """Including the comma decimal and the missing space, because both are what people write."""
+    quantity = parse_quantity(text)
+    assert quantity is not None
+    assert quantity.value == pytest.approx(value)
+    assert quantity.unit.symbol == symbol
+
+
+@pytest.mark.parametrize(
+    "text", ["", "   ", "a 96-well plate", "pilot scale", "20 furlongs", "kg", "lots", "20"]
+)
+def test_parse_quantity_returns_none_for_what_is_not_a_quantity(text: str) -> None:
+    """`None` rather than an exception, because most of what reaches it is legitimately prose.
+
+    `ExperimentRequest.scale` holds whatever the chemist said. A parser that raised on "a 96-well
+    plate" would put the same `try` in every caller, and the second caller would write it
+    differently — which is the whole reason this returns an answer instead of a failure.
+    """
+    assert parse_quantity(text) is None
+
+
+def test_parse_quantity_refuses_a_number_inside_a_sentence() -> None:
+    """Anchored at both ends: this reads a field, not prose that mentions a number.
+
+    "run it at 20 °C in 500 mL" parsing as a 20 °C *scale* is the failure the anchors prevent, and
+    `quantities.labelled_values` is the tool for the other job.
+    """
+    assert parse_quantity("run it at 20 C in 500 mL") is None

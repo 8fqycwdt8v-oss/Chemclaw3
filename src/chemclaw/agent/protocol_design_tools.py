@@ -67,6 +67,7 @@ from chemclaw.protocols.render import (
     receipt,
     render_markdown,
 )
+from chemclaw.protocols.rescale import RescaleError, rescale
 from chemclaw.protocols.store import DesignStore, RevisionConflict, default_design_store
 from chemclaw.science.bo.campaign_record import read_campaign_thread
 from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions
@@ -770,6 +771,81 @@ async def read_experiment_protocol(design_id: str, revision: int = 0) -> str:
         run_sheet=run_sheet_path(design_id, stored.revision),
     )
     return _readable(body)
+
+
+class RescaleReadout(BaseModel):
+    """A rescaled protocol, the factor, and what the rescale refused to touch.
+
+    `caveats` is not a footnote and is deliberately a first-class field beside `design`: a reader
+    that reports the scaled charges without them has produced exactly the document that makes a
+    scaled batch fail. `protocols/rescale.py` says why each entry is on the list.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    design_id: str = ""
+    from_revision: int = 0
+    factor: float = 0.0
+    basis: str = ""
+    design: ExperimentDesign
+    caveats: list[dict[str, str]] = Field(default_factory=list)
+    stored: bool = False
+
+
+# **Why this tool's docstring is short, when the thing it is about is a long argument.**
+# A tool description is serialised ahead of the system message on every model call, and the first
+# draft of the one below cost 1,169 tokens against the 728 of headroom
+# `tests/test_context_floor.py` had — it was the widest single contributor in the prefix. The
+# reasoning it carried (which durations are not linear in the charge, and why a scaled batch gains
+# an impurity the bench never saw) is judgment, so it belongs where judgment belongs: in
+# `protocols/rescale.py`'s module docstring for a reader, and in `skills/protocol-scale-translation`
+# for the model, loaded on the turns that need it rather than on all of them. What stays here is
+# what the model needs to *call* it correctly and the one instruction it must not get wrong, which
+# is that the caveats are reported rather than summarised.
+@tool
+async def rescale_experiment_protocol(design_id: str, target_scale: str) -> str:
+    """Scale a stored protocol's charges to a new basis, and list what does not scale.
+
+    Charges move by one factor off the limiting line; equivalents do not. Stores nothing — to keep
+    it, call `draft_experiment_protocol` with the head's `parent_revision`.
+
+    Args:
+        design_id: The `design-…` id to scale.
+        target_scale: The new basis as a quantity — "2 kg", "500 mL". Must be in the dimension the
+            limiting charge line already states.
+
+    Returns:
+        JSON with `factor`, `basis`, the scaled `design`, and `caveats` — the quantities that did
+        not scale. **Report every caveat beside the charges**; scaled charges without them are the
+        document that makes a batch fail.
+
+    Raises:
+        ChemclawError: unknown design, not exactly one limiting line, a limiting line with no
+            amount, or a target needing a molar mass or density.
+    """
+    store = _store()
+    stored = await store.read(design_id, None)
+    if stored is None:
+        raise ChemclawError(
+            f"no design {design_id!r}. Use find_experiment_protocols to list what exists."
+        )
+    try:
+        result = rescale(stored.design, target=target_scale)
+    except RescaleError as exc:
+        raise ChemclawError(str(exc)) from exc
+    return _readable(
+        RescaleReadout(
+            design_id=design_id,
+            from_revision=stored.revision,
+            factor=result.factor,
+            basis=result.basis,
+            design=result.design,
+            caveats=[
+                {"where": c.where, "quantity": c.quantity, "reason": c.reason}
+                for c in result.caveats
+            ],
+        )
+    )
 
 
 class ProtocolListing(BaseModel):
