@@ -2,7 +2,8 @@
 
 **The gap this closes.** `make template-validate` resolves a tool *name* through every discovered
 manifest, so a step naming `mtsr` passes; it resolves that tool's *arguments* through the bundle's
-own `server/tools.py`, and a declared-not-served bundle ships none. Its own output says so —
+own server module, which a declared-not-served bundle has none of
+(`connectors/registry.py::server_tools_module` returns `None` for it). Its own output says so —
 `arguments unchecked` — and the only gate that did check them,
 `chemclaw.cli.validate_template_args_live`, needs a **running** connector, which no CI lane has.
 

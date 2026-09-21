@@ -414,6 +414,11 @@ _NOT_PRUNED: dict[str, str] = {
     "experiment_protocol_revisions": "refused: the append-only history of a design, whose human "
     "revisions are an expert's corrections of a generated protocol — INSERT-only by grant, so "
     "neither a clock nor an UPDATE can reach one",
+    "experiment_arm_results": "refused: what a designed arm actually produced — the only record "
+    "that a design was ever run, and the corpus the deferred protocol-diff miner needs. A "
+    "re-measured well is a second observation rather than a correction, so a sweep that pruned the "
+    "older row would delete the evidence that two assays disagree. INSERT-only by grant, like the "
+    "revisions it points at, and it cascades from a header nothing deletes",
     "experiment_protocol_status_events": "refused: who approved, ran or abandoned which revision "
     "of a design, and why — the only record of a sign-off, because a later revision moves the "
     "header's status off it. INSERT-only by grant, like the revisions it points at",

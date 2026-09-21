@@ -207,6 +207,10 @@ _BAD_DATA_TYPES = [
     "StatusConflict",
     "UnstorableDocument",
     "UnknownDesign",
+    # An outcome naming an arm the stored revision does not have. Bad data in this list's exact
+    # sense: the arm id is wrong, so every attempt fails identically and a retry only delays the
+    # message that names the arms which do exist.
+    "UnknownArm",
     "TemplateError",
     # A composed workflow that names a write, a job, or a step that does not resolve. Bad data in
     # exactly this list's sense: the document is what is wrong, so every attempt fails identically.

@@ -409,6 +409,13 @@ _RETAINED: tuple[tuple[str, tuple[str, ...], str], ...] = (
         "expert's correction of a generated protocol attributable at all",
     ),
     (
+        "experiment_arm_results",
+        ("author",),
+        "who attached a measured outcome to a designed arm — the provenance of a number a "
+        "laboratory acts on, and with `author_kind` the thing that says whether a person or this "
+        "system put it there",
+    ),
+    (
         "experiment_protocol_status_events",
         ("actor",),
         "who approved, ran or abandoned a design and at which revision — the strongest case of "
