@@ -102,6 +102,13 @@ WITHHELD: dict[str, str] = {
         "what they ruled out. A `design-<hash>` id is derived from the ask, which is the same "
         "guessability argument that withholds `get_durable_job_status`"
     ),
+    "rescale_experiment_protocol": (
+        "the same document `read_experiment_protocol` above is withheld for, reached by the same "
+        "guessable `design-<hash>` id — it returns the whole design, not only its charge table, so "
+        "the chemist's goal, `prior_work` and `notes` ride out with the scaled numbers. Being a "
+        "read that stores nothing is what makes it read-only to the plan gate; it is not an "
+        "argument for exporting it to an unauthenticated face"
+    ),
     "check_pending_requests": (
         "every open request in the deployment with the reasoning a chemist typed, who asked and "
         "which session it belongs to — also the discovery path for the session ids above"
