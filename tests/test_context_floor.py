@@ -513,31 +513,36 @@ load_profiles()
 #: they are a deployment's bytes rather than this repository's, and folding a worst case nobody has
 #: into `PREFIX_BOUND` costs every deployment on earth the same thread allowance. See
 #: `LOCAL_SKILLS_ALLOWANCE` and `ORG_SKILLS_ALLOWANCE`.
-#: **Raised to 71,400 for `rescale_experiment_protocol`, and the 728 of headroom above is where
-#: the first 728 of it came from.** That paragraph called 728 "what the next first-party tool has";
-#: this is the next first-party tool and it wanted 948, so the ceiling moves by the difference plus
-#: a tripwire's worth. Measured on this commit: **70,820**.
+#: **Raised to 71,400 when `rescale_experiment_protocol` landed. The figure this entry first gave
+#: was wrong, and correcting it is the point of the correction.**
 #:
-#: The cost is stated rather than absorbed, because a ratchet raised quietly stops being one: every
-#: deployment on earth pays 948 more tokens on every model call and gives up the same amount of
-#: thread allowance, since `core/config/agent.py` derives both compaction defaults from
-#: `PREFIX_BOUND`. Nothing about a turn that never scales a protocol gets better for it.
+#: It said the tool "wanted 948" and that every deployment pays "948 more tokens" for it. 948 was
+#: that commit's whole-prefix delta (69,872 -> 70,820), not the tool's schema. Re-derived on
+#: 2026-09-21 with this file's own counter: `rescale_experiment_protocol` is **300** and its skill's
+#: listing entry (`protocol-scale-translation`) is **127** — 427 of the 948, and the remainder is
+#: **not attributed here**, because the honest thing to write in this file is the number that was
+#: measured rather than a plausible split for the rest.
 #:
-#: **What the turn buys is the one operation this system had no path to at all.** Taking a
-#: procedure from the scale it was run at to the scale it will be run at is the defining kilo-lab
-#: task, and before this the model could only do it by multiplying numbers in prose — where the
-#: failure is silent and specific: everything gets multiplied, including the addition time and the
-#: filtration, and the scaled document then prescribes a time-temperature history no experiment
-#: ever produced. The tool's whole return value exists to make that impossible, and a tool that is
-#: not bound cannot refuse anything.
+#: That is the mistake this file exists to prevent, made inside it:
+#: `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` is about exactly this, and
+#: `test_the_recorded_cost_of_a_known_oversized_tool_is_still_true` was written because the figures
+#: beside `KNOWN_OVERSIZED` drifted unasserted. A per-tool figure in *this* comment has no such
+#: assertion behind it — the ceiling is asserted, the attribution is prose — so a reader should
+#: treat any per-tool number in these entries as a claim about the afternoon it was taken and
+#: re-derive it before relying on it. The ceiling itself was measured correctly against the real
+#: prefix total on each raise, which is why the constant is right and the sentence was not.
+#:
+#: What the turn buys is unchanged and is the reason the raise stands: taking a procedure from the
+#: scale it was run at to the scale it will be run at is the defining kilo-lab task, and before this
+#: the model could only do it by multiplying numbers in prose, where the failure is silent and
+#: specific — everything gets multiplied, including the addition time and the filtration, and the
+#: scaled document then prescribes a time-temperature history no experiment ever produced.
 #:
 #: **Why the prose was not trimmed further instead**, since that is the cheaper answer when it
 #: works: it was, twice, and the second pass bought **22 tokens** (70,842 -> 70,820). The schema
 #: wrapper, the name and two string arguments are the floor for any tool at all, and
 #: `test_no_single_tool_schema_dominates_the_floor` passes, so this is an ordinary tool's price
-#: rather than a badly-shaped one. Trimming past here would have taken the sentence telling the
-#: model to report the caveats rather than summarise them, which is the one instruction that makes
-#: the tool worth binding.
+#: rather than a badly-shaped one.
 #: **And to 72,000 for six process-development skills, which is a different kind of raise.**
 #: A skill costs the prompt its *name and description* — the `skills-listing` contributor — and
 #: nothing else until a turn loads it, which is what makes layer 3 cheap. Six of them

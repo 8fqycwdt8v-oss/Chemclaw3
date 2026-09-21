@@ -1493,3 +1493,16 @@ free number at the end of its section.
     evidence about, treat that as a task rather than as a caveat to pass along. Skips went 7 to 3,
     the chart evidence went from nothing to 211 tests, and the remaining three are a host without
     IPv6 and two surfaces declared not to be deployment surfaces.
+
+98. **A delta is not an attribution, and I wrote one into the file whose subject is that mistake.**
+    Raising a prefix ceiling for a new tool, I recorded "the tool wanted 948" — 948 was the
+    *commit's whole-prefix delta*. Re-derived, the tool's schema is **300** and its skill's listing
+    entry 127; the rest I still cannot attribute, which is the tell. The ceiling constant was right,
+    because it was measured against the real total each time; the sentence beside it was a claim
+    nothing asserted, in `tests/test_context_floor.py`, whose sibling assertion
+    `test_the_recorded_cost_of_a_known_oversized_tool_is_still_true` exists *because* per-tool
+    figures drift unwatched. **When a total moves after a change, the change is a candidate cause
+    and not a measurement of itself** — decompose before attributing, and where the decomposition
+    does not close, say so rather than writing the plausible split. The general form: a number I can
+    assert and a number I merely computed a difference for should not appear in the same sentence
+    without saying which is which.
