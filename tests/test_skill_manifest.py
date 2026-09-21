@@ -319,7 +319,7 @@ def test_a_skill_with_no_readable_name_is_scoped_to_nothing(tmp_path: Path) -> N
     _declared_tools.cache_clear()
 
 
-def test_a_skill_manifest_pair_is_always_a_pair(tmp_path: Path) -> None:
+def test_a_skill_manifest_read_is_always_a_whole_triple(tmp_path: Path) -> None:
     """`_declared_pair` is total, over every way a manifest can fail to be read.
 
     **The dead code this replaces was invisible to `mypy --strict`.** The function was annotated
@@ -330,10 +330,17 @@ def test_a_skill_manifest_pair_is_always_a_pair(tmp_path: Path) -> None:
     a licence: a future `return None` would type-check, pass the guard, drop the entry, and leave
     the skill **visible**, which is the fail-open answer that arm exists to refuse.
 
-    So the annotation is narrowed and this is what holds it. Driven over five shapes, which is the
-    set that reaches the `except` for five different reasons — a file that is not there at all, a
-    name that is empty, a name that is only whitespace, bytes no decoder accepts, and a `tools:` key
-    of the wrong type.
+    So the annotation is narrowed and this is what holds it. Driven over six shapes, which is the
+    set that reaches the `except` for six different reasons — a file that is not there at all, a
+    name that is empty, a name that is only whitespace, bytes no decoder accepts, a `tools:` key of
+    the wrong type, and a `requires:` key of the wrong type.
+
+    **Both halves of the answer are asserted, which is why the last case is here.** The read returns
+    `(name, tools, requires)`, and `ToolScopedSkills` consults the two sets with opposite
+    quantifiers: a skill survives on *any* declared tool and is hidden unless *every* required one
+    is present. A failure arm that sentinelled `tools` and left `requires` empty would therefore be
+    fail-closed on one rule and fail-*open* on the other, from the same unreadable file — so the
+    triple is compared whole rather than by its first two elements.
     """
     from chemclaw.agent.skill_manifest import UNREADABLE_DECLARATION, _declared_pair
 
@@ -342,6 +349,7 @@ def test_a_skill_manifest_pair_is_always_a_pair(tmp_path: Path) -> None:
         "empty-name": "---\nname: ''\n---\nbody\n",
         "ws-name": "---\nname: '   '\n---\nbody\n",
         "scalar-tools": "---\nname: scalar-tools\ntools: nope\n---\nbody\n",
+        "scalar-requires": "---\nname: scalar-requires\nrequires: nope\n---\nbody\n",
     }
     for directory, body in cases.items():
         (tmp_path / directory).mkdir()
@@ -351,9 +359,11 @@ def test_a_skill_manifest_pair_is_always_a_pair(tmp_path: Path) -> None:
     (tmp_path / "bad-bytes" / "SKILL.md").write_bytes(b"---\nname: \xff\xfe\n---\nbody\n")
 
     for directory in (*cases, "bad-bytes"):
-        pair = _declared_pair(tmp_path / directory / "SKILL.md")
-        assert pair == (directory, UNREADABLE_DECLARATION), (
-            f"{directory} answered {pair!r}; an unreadable manifest must be a pair keyed by its "
-            "directory and scoped to nothing — `None` drops the entry, and a missing entry reads "
-            "as 'declares nothing', which leaves the skill visible to every profile"
+        read = _declared_pair(tmp_path / directory / "SKILL.md")
+        assert read == (directory, UNREADABLE_DECLARATION, UNREADABLE_DECLARATION), (
+            f"{directory} answered {read!r}; an unreadable manifest must be a whole triple keyed "
+            "by its directory and scoped to nothing — `None` drops the entry, a missing entry "
+            "reads "
+            "as 'declares nothing', which leaves the skill visible to every profile, and an empty "
+            "`requires` is the same fail-open answer for the all-of rule"
         )

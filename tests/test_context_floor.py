@@ -590,7 +590,24 @@ load_profiles()
 #: the window rather than the prefix. A fourth raise on one branch should be refused; what buys it
 #: back is `D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`'s deferred schemas, or
 #: profile routing, neither of which is a raise.
-CEILINGS: dict[str, int] = {"__default__": 73_100}
+#: **Lowered to 72,850, which is the first entry here that gives something back.**
+#:
+#: Three of the six skills above turned out to be largely inert in a default deployment: their
+#: *central* tools ship with the opt-in process-development bundles, so what a default turn paid
+#: for was judgment about a path it cannot take. `solvent-swap-and-distillation` is the clearest —
+#: six of its twelve tools are the `props` chain plus `shortcut_distillation`, so a default
+#: deployment can execute one step of its five-step answer.
+#:
+#: `SkillManifest.requires` names the subset without which a skill is *misleading* rather than
+#: merely narrower, and `ToolScopedSkills` hides the skill when one of them is absent. Measured:
+#: `skills-listing` 3,785 -> 3,542, so **243 tokens come back on every model call** in every
+#: deployment that does not enable those bundles, and nothing changes for one that does. Total on
+#: this commit: **72,398**.
+#:
+#: The ceiling drops by 250 rather than by the whole branch's 2,500, and the difference is worth
+#: being plain about: the other raises bought capability every deployment can use, this one bought
+#: capability most of them cannot, and only that part is refundable.
+CEILINGS: dict[str, int] = {"__default__": 72_850}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.

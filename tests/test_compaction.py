@@ -1173,7 +1173,11 @@ def test_the_overrun_indicator_can_fire_at_the_shipped_budget_with_no_window(
 #: of it taken from the thread — which is the number a reviewer should weigh rather than any
 #: single entry, and the reason the ceiling's own comment says a fourth raise here should be
 #: refused.
-CLEAR_TRIGGER_THREAD_ALLOWANCE = 27_500
+#:
+#: **Both gain 250 back** when `SkillManifest.requires` takes three largely-inert skills out of
+#: the default listing — the same arithmetic run the other way, and the only part of this
+#: branch's 2,500 that was ever refundable.
+CLEAR_TRIGGER_THREAD_ALLOWANCE = 27_750
 
 #: The thread allowance `agent_context_token_budget`'s default is derived to leave.
 #:
@@ -1225,7 +1229,7 @@ CLEAR_TRIGGER_THREAD_ALLOWANCE = 27_500
 #: commit before this one and reverted on the argument directly above — the window is the input, so
 #: a budget that rises with the prefix spends head-room a provider decides, and what buys the
 #: thread back is a narrower prefix rather than a raise here.
-BUDGET_THREAD_ALLOWANCE = 34_600
+BUDGET_THREAD_ALLOWANCE = 34_850
 
 #: The smallest context window this stack is designed against, in billed tokens.
 #:

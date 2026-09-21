@@ -131,7 +131,7 @@ from chemclaw.agent.scratchpad import (
 )
 from chemclaw.agent.skill_access import skill_permits
 from chemclaw.agent.skill_backend import NarrowedSkillsBackend
-from chemclaw.agent.skill_manifest import declared_tools
+from chemclaw.agent.skill_manifest import declared_tools, required_tools
 from chemclaw.agent.spend_cap import MeterTurnSpend, enforce_spend_cap
 from chemclaw.agent.state import ChemclawState
 from chemclaw.agent.subagents import (
@@ -1343,10 +1343,12 @@ def skill_narrowing(
     Returns:
         The composed predicate, evaluated per reach because the role gate reads ambient identity.
     """
-    declared = declared_tools([directory for _label, directory in labelled])
+    directories = [directory for _label, directory in labelled]
+    declared = declared_tools(directories)
     permits = skill_permits(
         enabled=settings.skills_enabled_list,
         declared=declared,
+        required=required_tools(directories),
         available=available if available is not None else _advertised_names(profile, tools),
         gates=settings.skill_role_gates,
         names=profile.skill_names,

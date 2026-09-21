@@ -13,6 +13,8 @@ tools:
   - ich_impurity_limit
   - gather_evidence
   - ask_clarifying_question
+requires:
+  - system_suitability_report
 ---
 
 # Is the analytics ready, and does the number mean what it says

@@ -34,6 +34,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from chemclaw.agent.audit import AuditEvent, NullAuditSink
 from chemclaw.agent.authz import side_effecting_tools
 from chemclaw.agent.chemclaw_agent import (
+    _advertised_names,
     _capability_tools,
     available_tool_names,
     harness_tool_names,
@@ -50,7 +51,7 @@ from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.scratchpad import MEMORY_ROOT, SCRATCH_ROOT, scratchpad_tools
 from chemclaw.agent.skill_access import skill_permits
 from chemclaw.agent.skill_backend import REFUSED
-from chemclaw.agent.skill_manifest import declared_tools
+from chemclaw.agent.skill_manifest import declared_tools, required_tools
 from chemclaw.agent.state import turn_config, turn_input
 from chemclaw.agent.tool_authz import denial_result, dry_run_refusal
 from chemclaw.api.events import ToolFailedEvent
@@ -452,6 +453,31 @@ def test_a_failing_tool_is_announced_and_recorded(monkeypatch: pytest.MonkeyPatc
 # --- skills (M4) ---------------------------------------------------------------------------------
 
 
+def _a_skill_this_deployment_lists() -> str:
+    """The alphabetically first shipped skill the default surface actually offers.
+
+    These fixtures used `sorted(declared_tools(...))[0]`, and that stopped naming a *listed* skill
+    when `SkillManifest.requires` arrived: a skill whose central tools ship with an opt-in bundle is
+    hidden wherever the bundle is off, which is everywhere by default — and the alphabetically first
+    shipped skill is one of those. A role-gate fixture has to start from a skill the listing
+    contains, or its "visible to the role-holder" half asserts nothing about the gate.
+
+    Answered by `skill_permits` itself, minus the role gate the caller is about to install, rather
+    than by re-deriving which skills survive. Re-deriving it would make this helper a second opinion
+    about visibility in the file whose job is to hold the first one. Still chosen from the shipped
+    tree rather than named, so these tests keep testing the real corpus as it grows.
+    """
+    directories = [*settings.skills_dirs]
+    permits = skill_permits(
+        enabled=settings.skills_enabled_list,
+        declared=declared_tools(directories),
+        required=required_tools(directories),
+        available=_advertised_names(get_profile(None), _capability_tools()),
+        gates={},
+    )
+    return sorted(name for name in declared_tools(directories) if permits(name))[0]
+
+
 def test_the_skills_middleware_is_attached_and_narrows_by_role(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -465,7 +491,7 @@ def test_the_skills_middleware_is_attached_and_narrows_by_role(
     The gated skill is chosen from the shipped tree rather than named, so this keeps testing the
     real corpus as it grows.
     """
-    gated = sorted(declared_tools([*settings.skills_dirs]))[0]
+    gated = _a_skill_this_deployment_lists()
     monkeypatch.setattr(settings, "skill_role_gates", {gated: ["process-chemist"]})
     backend = skills_backend(get_profile(None), _capability_tools())
 
@@ -498,14 +524,17 @@ def test_the_backend_narrows_skills_by_the_shared_predicate(
     predicate every other caller asks, against the shipped corpus and the shipped gates rather
     than a written list.
 
-    **The basis is passed to both sides rather than defaulted on one, and that is not tidiness.**
+    **Every basis is passed to both sides rather than defaulted on one, and that is not tidiness.**
     `skills_backend` grew an `available=` argument so a turn's gate reads the tools it *binds*
     instead of the tools its manifests advertise, and it keeps the manifest answer as the fallback
     for callers with no graph. Omitting it here would have left this test asserting parity on the
     path production no longer takes — a green line about the default branch, in the file whose job
-    is the production one.
+    is the production one. `required=` is the same hazard one rule later, and it is the sharper
+    one: `skill_permits` defaults it to *no requirements*, so leaving it off does not pick a
+    different branch, it picks a **weaker predicate** — this side would offer skills the backend
+    hides and the parity assertion would report the omission as a disagreement about the corpus.
     """
-    gated = sorted(declared_tools([*settings.skills_dirs]))[0]
+    gated = _a_skill_this_deployment_lists()
     monkeypatch.setattr(settings, "skill_role_gates", {gated: ["process-chemist"]})
     profile, tools = get_profile(None), _capability_tools()
     bound = {fn.__name__ for fn in tools}
@@ -521,6 +550,7 @@ def test_the_backend_narrows_skills_by_the_shared_predicate(
             if skill_permits(
                 enabled=settings.skills_enabled_list,
                 declared=declared_tools(every_dir),
+                required=required_tools(every_dir),
                 available=bound,
                 gates=settings.skill_role_gates,
             )(name)
@@ -580,7 +610,7 @@ def test_a_role_change_mid_session_renarrows_the_listing(monkeypatch: pytest.Mon
     contains no gated skill. A staleness fix that silently deletes the whole skills layer after the
     first turn is worse than the staleness. So turn two must show exactly the ungated remainder.
     """
-    gated = sorted(declared_tools([*settings.skills_dirs]))[0]
+    gated = _a_skill_this_deployment_lists()
     monkeypatch.setattr(settings, "skill_role_gates", {gated: ["process-chemist"]})
     monkeypatch.setattr(settings, "entra_required", False)
     model = _Recording(messages=iter([AIMessage(content="done")] * 2))

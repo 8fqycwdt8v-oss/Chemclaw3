@@ -65,11 +65,16 @@ follows that order rather than the document's.
       second tool (`D-2026-09-21-a-design-is-a-criterion-not-a-second-tool`). Closes the
       `DEFERRED.md` row and the `BACKLOG.md` row, both deleted. Blocking and `NChooseK` are
       still open and still their own row.
+- [x] **S14. The answer to review point 2 below** — `SkillManifest.requires`, the subset of
+      `tools` without which a skill is misleading rather than narrower, hidden unless *every* one
+      is available. Three of the six skills carry it; `skills-listing` 3,785 → 3,542, so the
+      ceiling comes **down** 73,100 → 72,850 and the two thread allowances go up by 250.
+      `D-2026-09-21-a-skill-that-lost-its-central-tools-is-misleading-not-narrower`.
 
 ## Verification
 
-`make lint type test` green, plus every validator (`connector-validate`, `skill-validate`,
-`prose-validate`, `template-validate`, `kg-validate`, `helm-validate`). Postgres-backed tests must
+`make lint type test` green, plus **every** validator target, not a chosen six — `requires:` is a
+new frontmatter key and `skill-validate` is the only thing that holds it against `tools`. Postgres-backed tests must
 actually run — `sudo -n dockerd`, `make up`, `make db-migrate` — because a local run that skips them
 prints green and proves nothing.
 
@@ -109,11 +114,22 @@ separate `test_context_floor.py` entries had already declined that trade on smal
    not. Moving it touches stored JSONB revisions, `from_bo`, `render`, `export` and the
    `charge_is_consistent` arithmetic, which is a migration rather than a change, and it was not
    needed to close the defect. It stays the right long-term shape.
-2. **Two ceiling raises in one branch**, totalling 1,400 tokens of thread allowance taken from
-   every deployment — including every one that binds none of the five bundles. Both are argued in
-   the file; whether the second (six skills) is worth it is the judgement call most worth
-   challenging, and the cheaper alternative — bundling four of the six — was rejected because they
-   genuinely span bundles.
+2. **~~Two ceiling raises in one branch~~ — three, and then the first refund the file has
+   recorded.** The raises totalled 2,500 tokens of thread allowance taken from every deployment,
+   including every one that binds none of the five bundles. The second (six skills) was the one
+   flagged here as most worth challenging, and challenging it found something worse than the price:
+   three of the six kept only *peripheral* tools on a default surface and so survived
+   `ToolScopedSkills`' all-absent rule, which meant a default turn was being offered — and charged
+   for — judgment about a path it cannot take. `solvent-swap-and-distillation` measured six of
+   twelve tools unbound, a five-step answer with one executable step.
+
+   `SkillManifest.requires` (S14) is the fix, and it is narrow on purpose: the all-absent rule is
+   *right* for a narrow profile and is pinned by a test that measured the alternative (all-of over
+   `tools` hides 20 of 28 skills on the shipped `property-lookup` profile, one of which that
+   profile's own instructions name). 243 tokens come back; 2,250 do not, and that residue is the
+   honest number — the other raises bought capability every deployment can use, and only the part
+   that did not is refundable. The bundling alternative is still rejected for the same reason: four
+   of the six genuinely span bundles.
 3. **~~`SERVED_ELSEWHERE_ALLOWANCE` and `FLEET_PUBLISHED_ALLOWANCE` went unverified~~ — closed,
    and the way it closed is the point.** For most of this work both skipped, because measuring the
    fleet's schemas needs a built `.venv` in the sibling checkout and this one had none; the token
