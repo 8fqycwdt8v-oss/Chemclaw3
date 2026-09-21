@@ -102,6 +102,17 @@ separate `test_context_floor.py` entries had already declined that trade on smal
 - **I raised `agent_context_token_budget` to hold the thread allowance whole.** The window pins
   that number, not the prefix, and `tests/test_compaction.py` records a previous branch trying
   exactly this and reverting it. The thread absorbs 1,400 tokens instead, and says so.
+- **Three test fixtures picked `sorted(<every discovered skill>)[0]`** and that name stopped being
+  a *listed* skill the moment `requires:` landed. Two of them are role-gate fixtures and one is the
+  personal-tier collision test, and all three failed for a reason unrelated to what they assert.
+  The fixtures now ask the live predicate (or the live listing) instead of the discovered set — the
+  distinction the whole change is about, applied to the tests that measure it.
+- **The collision test's failure was worth chasing rather than repointing.** Measured: a shared
+  skill any narrowing hides leaves its name to `/mine`, and `deep-research` (no `requires:` at all)
+  does it under one `skill_role_gates` entry — so the hole predates this branch and `requires` only
+  changed which skill falls in under default settings. `BACKLOG.md` carries it, because whether the
+  personal copy should be hidden too is a decision about whose document a chemist loses, not a
+  patch to smuggle into this PR.
 - **I ran the suite in parallel against an already-loaded box** and got nine failures, five of
   which were scheduling artifacts. `D-2026-09-13` documents that this happens and says to re-run
   serially before believing a parallel failure. It cost a triage pass that a serial run would not

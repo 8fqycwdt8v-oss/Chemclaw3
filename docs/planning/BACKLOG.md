@@ -119,6 +119,24 @@ topic).
   and keep the declared tools beside the body; it fixes both tiers at once, which is why this is one
   row rather than two.
 
+- [ ] **A shared skill that a narrowing hides leaves its name to the personal tier, which the
+  collision order was chosen to prevent** — [S]. `tests/test_local_skills.py::
+  test_a_reviewed_skill_wins_a_name_a_personal_one_also_claims` puts `/mine` first precisely so a
+  reviewed skill displaces a personal one of the same name — the case `POST /skills/mine` cannot
+  refuse, a name that entered `skills/` after somebody saved theirs. Upstream resolves
+  last-source-wins by *listing*, so a shared skill any of the four narrowings removes is not there
+  to displace anything and the personal document is served under the reserved name. **Measured, and
+  older than `SkillManifest.requires`**: `deep-research` carries no `requires:` at all, and one
+  `skill_role_gates` entry the caller's roles do not satisfy takes the listing from
+  `/skills/deep-research/SKILL.md` to `/mine/deep-research/SKILL.md`. `requires` only changed which
+  skill lands here under default settings, which is how it was found.
+
+  It is a decision rather than a patch, which is why it is a row: hiding the personal copy too
+  costs a chemist their own document over a name they cannot see, and serving it keeps a collision
+  the deployment intended to resolve the other way. The write side already uses the *discovered*
+  basis (`shipped_skill_names()`), so whichever way it goes, the read side agreeing with it is the
+  invariant to state.
+
 - [ ] **`max_concurrent_workflow_tasks` is set nowhere, so nothing this repository chose bounds
   workflow-task concurrency** — [M]. `durable/background_worker.py` sets `max_concurrent_activities`
   and stops there, so the workflow-task ceiling is whatever the SDK defaults to. A **child workflow
