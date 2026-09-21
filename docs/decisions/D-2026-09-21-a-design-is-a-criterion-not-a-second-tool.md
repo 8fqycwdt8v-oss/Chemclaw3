@@ -60,6 +60,14 @@ shipped behaviour is byte-identical for every existing caller.
 - **A budget passed to `factorial` is refused rather than ignored**, which is the rule this tool's
   docstring already applies to `n_center` and `n_repetitions`. A factorial's size is the product of
   its level counts; being handed 128 rows after asking for 24 is the failure.
+- **A returned run outside a declared constraint is refused**, which turns this design's whole
+  selling point from a sentence into a checked property. Added after CI failed where local passed:
+  the first test asserted feasibility to 1e-6, and BoFire's DoE is a continuous optimization
+  (SLSQP through `scipy.minimize`, cyipopt being absent here) that satisfies an active constraint
+  to its own tolerance rather than exactly. Measured over 20 seeds x 4 criteria, the worst
+  excursion is **7.5e-06** — arithmetic, not infeasibility. `_CONSTRAINT_TOLERANCE` is 1e-4: an
+  order of magnitude above that and orders below anything a chemist can set, so a breach of it is
+  real. BoFire warns "please check if the results lie within your tolerance"; now something does.
 - **The term count is BoFire's own**, through `get_formula_from_string`, rather than the arithmetic
   re-derived here. The arithmetic is easy for continuous factors and that is exactly why: a
   categorical contributes one column per level *minus one*, so two definitions agree on the easy

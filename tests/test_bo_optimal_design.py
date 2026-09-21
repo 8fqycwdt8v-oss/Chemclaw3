@@ -8,7 +8,12 @@ themselves: which model the design is optimal *for*, and whether it has enough r
 
 import pytest
 
-from chemclaw.science.bo.engine import SurrogateFitError, optimal_design
+from chemclaw.science.bo.engine import (
+    _CONSTRAINT_TOLERANCE,
+    SurrogateFitError,
+    _constraint_breaches,
+    optimal_design,
+)
 from chemclaw.science.bo.problem import (
     CategoricalParameter,
     ContinuousParameter,
@@ -53,7 +58,8 @@ def test_every_run_satisfies_a_constraint_a_factorial_refuses_outright() -> None
     design = optimal_design(_problem(constrained=True), n_experiments=12, seed=5)
     assert len(design.runs) == 12
     assert all(
-        float(run["temp"]) + 10.0 * float(run["base_equiv"]) <= 100.0 + 1e-6 for run in design.runs
+        float(run["temp"]) + 10.0 * float(run["base_equiv"]) <= 100.0 + _CONSTRAINT_TOLERANCE
+        for run in design.runs
     )
     assert design.honoured_constraints == 1
 
@@ -98,7 +104,8 @@ def test_space_filling_assumes_no_model_and_says_so() -> None:
     assert design.n_terms == 0
     assert "assumes no model" in design.summary
     assert all(
-        float(run["temp"]) + 10.0 * float(run["base_equiv"]) <= 100.0 + 1e-6 for run in design.runs
+        float(run["temp"]) + 10.0 * float(run["base_equiv"]) <= 100.0 + _CONSTRAINT_TOLERANCE
+        for run in design.runs
     )
 
 
@@ -197,3 +204,41 @@ def test_an_unsolvable_space_is_translated_rather_than_raised_as_bofires_own_err
     )
     with pytest.raises((SurrogateFitError, ValueError)):
         optimal_design(problem, n_experiments=6)
+
+
+def test_the_tolerance_is_the_one_the_engine_enforces_not_a_tighter_one() -> None:
+    """The bug this pair of tests had, and the reason the constant is shared rather than repeated.
+
+    The first version asserted 1e-6 against a solver that only ever promised its own tolerance. It
+    passed locally and failed on CI, whose different scipy build landed on the other side — a flaky
+    assertion, not a flaky solver. Measured over 20 seeds x 4 criteria, the worst excursion was
+    7.5e-06, so the engine refuses at 1e-4 and these tests assert the same number by importing it.
+    """
+    assert _CONSTRAINT_TOLERANCE == pytest.approx(1e-4)
+    design = optimal_design(_problem(constrained=True), n_experiments=8, seed=5)
+    assert _constraint_breaches(_problem(constrained=True), design.runs) == []
+
+
+def test_a_run_outside_a_constraint_is_reported_rather_than_returned() -> None:
+    """The check is not vacuous: a genuinely infeasible run is named, with the constraint.
+
+    Driven with a hand-built run rather than by hoping the solver misbehaves, because the whole
+    point of the tolerance above is that it does not — and a check that only ever sees feasible
+    input is one nothing proves.
+    """
+    breaches = _constraint_breaches(
+        _problem(constrained=True), [{"temp": 80.0, "base_equiv": 3.0, "ligand": "XPhos"}]
+    )
+    assert len(breaches) == 1
+    assert "110" in breaches[0]
+
+
+def test_a_breach_inside_the_tolerance_is_not_reported() -> None:
+    """Otherwise the engine would refuse every design the solver actually returns."""
+    assert (
+        _constraint_breaches(
+            _problem(constrained=True),
+            [{"temp": 70.00000746, "base_equiv": 3.0, "ligand": "XPhos"}],
+        )
+        == []
+    )
