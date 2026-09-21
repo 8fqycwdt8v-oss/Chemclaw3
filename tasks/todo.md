@@ -1,124 +1,139 @@
-# Dispatching a computable discriminating check — plan
+# A discriminating check that can name a template — plan
 
-**Status:** plan. Closes the `BACKLOG.md` row opened by
-`D-2026-09-20-a-ranking-is-evidence-a-critic-is-not-a-gate`, whose `Revisit when:` names the exact
-condition: *"a structured check type exists whose arguments are validated against the target tool's
-own signature offline, the way a `connection:` block already is."*
+**Status:** plan. Closes the `BACKLOG.md` row
+`D-2026-09-20-a-swept-axis-is-a-choice-an-invented-argument-is-a-lie` opened: *"a check can name a
+note, and cannot name a tool's output."*
 
-The previous occupant of this file was the hypothesis tournament's own plan and review, merged as
-#424 and archived to `docs/archive/plans/hypothesis-tournament.md`.
+The previous occupant of this file was the dispatcher's own plan and review, merged as #425.
 
-## The problem, restated from the deferral
+## The problem, restated
 
-A tournament derives a discriminating check per hypothesis. Where the check is answerable by this
-system's tools, it is currently reported and **not run**, because running it means producing tool
-arguments — which molecule, which solvent, which charge — and every one of those is a field a model
-invents when asked to fill a schema. A fabricated argument yields a real number a chemist reads as
-computed, which is worse than a missing verdict: the gap is visible, the wrong number is not.
+A check may name a **tool** (one structure) or a **job** (structures by role, one swept axis). Both
+draw every argument from notes already in the corpus. So a question whose subject is a *derived*
+set — this molecule's tautomers, its protonation states, its breakable bonds — cannot be asked at
+all, because none of those structures is a note anybody wrote down. That is what leaves
+`survey_bond_strengths`, `profile_rotation` and `scan_coordinate` refused, and it is what stops the
+chemist's "which molecule will be generated" question being a check rather than a lab proposal.
 
-So the whole task is: **make fabrication structurally impossible, not merely discouraged.**
+## What I found, and why it changes the shape
 
-## The shape that achieves that
+The ADR's rewritten trigger says the missing piece is chaining a tool's output into a job's params.
+**That chaining already exists, as a `Template`** — and five of the nine shipped templates *are*
+this exact pattern:
 
-**Nothing the model writes becomes a tool argument.** The model may only *select*:
+| template | chain |
+| --- | --- |
+| `tautomer-resolution` | `enumerate_tautomers` → `rank_species` |
+| `microspecies-profile` | `enumerate_protonation_states` → `rank_species` |
+| `stereoisomer-ranking` | `enumerate_stereoisomers` → `rank_species` |
+| `bond-strength-survey` | `enumerate_bond_cleavages` → **`survey_bond_strengths`** |
 
-- a **tool name**, which must be in a set derived from signatures rather than written down; and
-- a **subject note id**, which must resolve, in this deployment's own corpus, to a `compound` note
-  whose `compound_smiles` frontmatter parses as a molecule.
+`bond-strength-survey` is one of the three jobs the ADR refused, already wired to the enumerator
+whose entries its spec is documented as copying. The sibling repo's `SpeciesSet.smiles` says so in
+as many words: *"the field Chemclaw3's templates pass straight into `rank_species`, by value."*
 
-The structure handed to the calculator is read from the resolved note. The model never writes it.
-That is the same move `protocol_design_tools.structure_experiment_request` makes when it refuses a
-`stated` slot without a verbatim quote from the chemist: the model points at something real, and
-the pointer is checked.
+**So the fix is not a new chaining mechanism. It is a third thing a check may name.** (The table above said five when this plan was written; measured, it is four — `degradant-triage` chains nothing, which its own step `purpose` states.) Building a
+second enumerate-then-rank path would duplicate a reviewed seam and lose what that seam already
+carries — `tautomer-resolution` pins `level: thorough` on a *measured* finding (acetylacetone ranks
+99.9% keto from one embedding per tautomer and is ~80% enol in reality, because the enol's
+intramolecular hydrogen bond exists in one planar conformer). A hand-rolled chain in the dispatcher
+would get that wrong and look entirely reasonable.
 
-**The dispatchable set is computed, not curated.** A tool qualifies iff its schema requires exactly
-one argument and that argument is the structure. Measured over the bundles whose servers ship in
-this repo, twelve qualify (`predict_pka`, `predict_solubility`, `compute_xtb_energy`,
-`predict_site_reactivity`, `predict_logd`, `compute_thermochemistry`, … — every one takes `smiles`
-required and everything else defaulted). A tool that later gains a second required argument drops
-out of the set on its own and its checks refuse, rather than the dispatcher guessing the new field.
+## The shape
 
-**Every other argument takes the tool's own default, and the outcome says so.** `predict_logd` has
-a `ph`, `compute_thermochemistry` a `solvent` and a `temperature_k`. Left at their defaults the
-computation is well-defined; supplied by a model they are invented. So they are never supplied, and
-`CheckOutcome.detail` records the exact call including the defaults it ran under — an assumption
-disclosed rather than hidden.
+**A check may name a template, and supplies only its structure input.** Everything the rule already
+says holds unchanged:
+
+- the model **selects** a template name from a set derived offline, and **selects** a subject note;
+- the structure is read off the resolved `compound` note, exactly as now;
+- every other declared input stays unset, so the template's own reviewed defaults apply;
+- a template declaring a required input that is *not* the structure is **refused** — fail closed,
+  by the same derivation the job half uses.
+
+The pre-flight is the template's own, not a second one: `unrunnable_reason` (this deployment's
+connector set) plus `_params_model(template).model_validate(...)`, which is what
+`templates/registry.py` runs before any launch. `TemplateRunInput` already carries `roles`, so the
+authorization gap the last round found on the job half cannot reappear here.
 
 ## Steps
 
-- [x] 1. `hypotheses/dispatch.py` — pure. `CheckCall` (tool + subject note id), the schema
-      validator (`requires exactly the structure`), and the refusal reasons as a closed set. No
-      Temporal, no MCP, no graph access: it takes a schema and a resolved structure and answers.
-- [x] 2. `DiscriminatingCheck` gains `call: CheckCall | None`. A `computable` check without a
-      resolvable call is reported as computable-but-refused, with the reason, rather than silently
-      dropping to prose.
-- [x] 3. Ground the subject: resolve the note id against the corpus, require `type: compound`,
-      require `compound_smiles` to pass `core.chem.require_canonical_smiles`. Refuse on each miss
-      with a distinct reason.
-- [x] 4. `derive_check` asks for the structured call, and is shown the note ids the evidence sweep
-      actually returned so the model selects from what the system saw rather than from memory.
-- [x] 5. `run_computable_check` loses its early return: open connector sessions the way
-      `durable/template_activities.py` does, find the tool by name, re-check the **live** schema
-      before invoking, call it, and return the result verbatim.
-- [x] 6. Verdict: a model reads the computed value against the check's stated expectation and
-      returns `supported` / `refuted` / `inconclusive`. It judges a real number rather than
-      inventing one, `inconclusive` is explicitly available for a difference inside the method's
-      error bar (`CLAUDE.md` requires saying so), and the raw value rides in `detail` so a chemist
-      can check the reading. **The outcome does not change the rating** — the ranking stays a
-      product of pairwise comparison, and one tool call must not silently reorder the field.
-- [x] 7. `report.py` renders a check that ran with its value, and a refused one with its reason.
-- [x] 8. Tests: the validator refuses a tool requiring a second argument, refuses an unresolvable
-      id, refuses a non-compound note, refuses an unparseable SMILES; the workflow dispatches end
-      to end against a stubbed connector; a **ratchet** asserting the in-repo `calc` tools still
-      satisfy the one-required-argument rule, so a tool gaining a required field fails here.
-- [x] 9. Delete the `BACKLOG.md` row in the same commit (the register's own rule), and write the
-      ADR recording what the dispatcher does and does not cover.
-- [x] 10. `make lint type test` green; run the suite with the daemon up so the Postgres-backed
-      tests are not silently skipped.
+- [x] 1. `hypotheses/dispatch.py` — the template half, pure: `ground_template_inputs(declared,
+      structure)` returning the inputs mapping or a `Refusal`. Fail closed on a required input that
+      is not the structure.
+- [x] 2. `CheckCall` gains `template: str`. A call naming more than one of tool/job/template is
+      refused rather than resolved by precedence — precedence is a silent choice.
+- [x] 3. `ground_check_template` activity: resolve the subject, run the template's own pre-flight,
+      return a `_GroundedTemplate` carrying the **resolved** template pinned into it (the same
+      rule `TemplateRunInput.template` states: an edit afterwards cannot change a live run).
+- [x] 4. `_settle_templates`: launch `TemplateWorkflow` as a child under the shared budget. A
+      template runs a job inside it, so it costs one calculation.
+- [x] 5. `report.py` / `_template_line`: the `ran:` line names the template, the subject note and
+      the inputs left at their defaults — same disclosure rule as the other two halves.
+- [x] 6. `derive_check` prompt: teach the third shape, and that a template is **preferred** where
+      one fits, because it carries defaults a check cannot supply.
+- [x] 7. Tests: a ratchet deriving the dispatchable template set from the shipped catalogue; a
+      refusal for a template needing a non-structure input; a refusal for a call naming two
+      targets; end-to-end through a stubbed child workflow; the budget covering templates.
+- [x] 8. ADR superseding nothing and closing the trigger, `BACKLOG.md` row deleted in the same
+      commit, `SKILL.md` updated.
+- [x] 9. `make lint type test` green with the daemon up, then PR and merge.
 
 ## What this will still not do
 
-A check whose subject is not a compound in the corpus, or that needs a second argument, or that
-belongs to a bundle served from `Chemclaw3-mcp` (no server here to introspect). Those stay
-`physical` or refused-with-a-reason. The point is that the boundary is now *checked* rather than
-assumed.
+`scan_coordinate` stays refused and should: it needs `values`, a coordinate grid, which no
+enumerator produces and which a model would invent. Saying so is the point — the other two unlock
+because something real produces their arguments, and this one does not.
+
+Ranking substitution products nobody has written down still needs a substitution-product
+enumerator, which is a `Chemclaw3-mcp` question rather than this repo's.
 
 ## Review
 
-**Shipped, and it grew a second half while being built.** The plan above is the tool path — one
-structure, one note, every other argument at its default. What the chemist asked for next ("its own
-list of solvents") is a *job* path with one varied axis, and the reason that is safe where an
-invented argument is not turned out to be sharp enough to build on: **the harm in invention is a
-hidden assumption, and a swept axis is the most visible part of the answer.** The solvents compared
-are the result, they are printed beside it, and each value is checked by the job's own
-`require_supported_solvents` before anything runs.
+**The plan survived contact, which is unusual here and is worth saying why.** The design work was
+done before any code: reading the sibling repo's enumerators to see what they actually return, and
+then finding that `data/templates/` already held five chains of exactly the needed shape. The
+implementation after that was mechanical, because the decision — *a third target, not a second
+mechanism* — had already been made against the evidence.
 
-**What the plan got wrong, corrected in the code rather than argued:**
+**What the reading changed.** My first sketch was `CheckCall.enumeration`: name an enumerator, call
+it in the grounding activity, parse its output into the job's field. That would have worked and
+would have been wrong. It rebuilds `TemplateWorkflow`'s substitution and per-step audit, and it
+leaves the check choosing `level` and `ranking` — the two arguments whose correct values *are* the
+reviewed finding. `tautomer-resolution`'s own comment is the evidence: acetylacetone ranks 99.9%
+keto from one embedding per tautomer and is ~80% enol in reality. A dispatcher-side chain gets the
+textbook case backwards and looks entirely reasonable.
 
-- "Thirteen qualify" was twelve, and the pin is on the tools this tree can *introspect* — 21 more
-  are declared and served from `Chemclaw3-mcp`, on the live surface a check is dispatched against.
-  That blind spot is now asserted rather than implied.
-- Step 6's verdict model reads a real number, as planned. But the composed `detail` reaches a
-  committed note body and was not celled, so a model-written `[[...]]` would have minted a graph
-  edge. `proposal_body` twenty lines away had done this correctly since it was written.
+**Two guards exist because of what is absent, not what is present.** No shipped template declares
+`write_tools`, and no shipped template requires a second input. Both are refused anyway, because a
+set that is safe today and dispatchable *by omission* is the shape the last review round found four
+times in one diff.
 
-**Two fresh-context reviews found seven defects and every one was the feature's own rule applied
-somewhere it had not been.** Worth recording as a pattern rather than a list: *the rule was right
-and its scope was assumed.* Arguments are validated — except a key the target does not declare,
-which pydantic silently drops while the report keeps claiming it. Subjects are grounded — except
-for a job that requires no subject at all, which made `republish_calculations` reachable. The
-budget is bounded — except over the half that looked cheap, and spent in generation order so it
-could refuse the leader's own check. The launch is governed — except it bound no roles, so every
-`expensive: true` job was refused wherever Entra runs, as an ordinary-looking grounding refusal.
+**One thing the plan got wrong and the type checker caught**: `_GroundedTemplate.template` started
+as `Any` with `arbitrary_types_allowed`, which crossed the Temporal wire as a bare dict and failed
+at the child launch. Typing it `Template | None` round-trips it as the model `TemplateRunInput`
+expects, and `mypy --strict` then forced the `None` to be handled at the launch site rather than
+assumed away — which is a real refusal path, not a formality.
 
-**The most useful finding was in the ADR's `Revisit when:`**, which named a condition that was
-*already met* on the day it was written — `chem` ships six enumerators and `BondCleavageSpec` is
-documented as taking exactly what one of them emits. That is `D-092`'s failure reproduced inside
-the very file whose rule is that a refusal must carry an expiry. It is rewritten around what is
-actually missing: a check can name a note and cannot name a tool's output.
+**A third review round found eight defects, and the two worst were my own prose.** "Five of the
+nine templates chain an enumerator into a calculation" is **four** — `degradant-triage` chains
+nothing and says so in its own step `purpose`, and `conformer-refinement`'s upstream is a
+calculation. "Two of the nine end in an `agent` step" is **all nine**, which understated this
+ADR's own cost disclosure by more than four times. Both claims had propagated into four files
+each. The rule CLAUDE.md opens with is that prose is evidence about what its author believed; both
+of these were one script away from being checked, and I wrote them from reading rather than
+measuring.
 
-**Verification.** `make lint`, `make type` (944 files) and every validator but `helm-validate`
-(helm is not installed here) are green; the feature suites are 47 + 19 tests. The full `make test`
-run is against Postgres and Temporal started locally, so the Postgres-backed set is not skipped —
-and the one failure it produced was a 180-second pytest timeout in the workflow-replay control
-under a saturated machine, which passes in isolation and in its own file.
+The code findings were the same class as the last round — a rule applied to a narrower scope than
+it was written for. The dispatchable set read `discovered()` instead of `enabled()`, so a
+deployment's own template switch was the one gate this path did not pass. The write guard read
+`AgentStep.write_tools` alone, so a `tool` step naming `record_knowledge_note` was invisible to
+it. The child launched with no `execution_timeout`, having just been gated by
+`run_ceiling_problems` *against* that timeout. And the `model_validator` refusing an ambiguous call
+raised on the model's own structured output, which is non-retryable bad data — so the check it was
+protecting vanished entirely rather than being reported.
+
+**Verification.** `make lint` and `make type` (944 files) green; `skill-validate` and
+`prose-validate` pass; 199 tests across the dispatch, tournament, hypotheses and templates suites,
+including an end-to-end launch of a stand-in `TemplateWorkflow` child — the previous job-half tests
+all refused at grounding, so nothing had ever driven a real child launch before. Full `make test`
+runs against Postgres and Temporal started locally so the Postgres-backed set is not skipped.
