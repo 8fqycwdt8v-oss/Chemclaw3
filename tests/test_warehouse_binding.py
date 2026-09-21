@@ -583,7 +583,8 @@ def test_no_handler_on_the_ingest_path_catches_a_pattern_that_cannot_finish() ->
 
     `PatternBudgetError` descended from `ChemclawError` and its docstring claimed to escape the
     per-entry handler because it was not an `ElnMappingError`. That claim was checked against the
-    `ElnMappingError` arm in `src/chemclaw/ingest/eln/warehouse/adapter.py` — the wrong handler. A transform runs under
+    `ElnMappingError` arm in `src/chemclaw/ingest/eln/warehouse/adapter.py` — the wrong handler.
+    A transform runs under
     `ingest/eln/sync.py`'s `except (ChemclawError, ValidationError)`, one layer further out, which
     caught it by construction. Driven on the real `sync_entries` with a `(a+)+$` transform over ten
     entries at a 0.05 s budget: nothing escaped, all ten were booked as data refusals, and the page

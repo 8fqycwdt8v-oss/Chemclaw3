@@ -68,7 +68,8 @@ class PatternBudgetError(Exception):
     `ChemclawError` and its docstring claimed to escape the per-entry handler because it was not an
     `ElnMappingError` — but the handler a transform actually runs under is
     `ingest/eln/sync.py`'s `except (ChemclawError, ValidationError)`, one layer further out than
-    the `ElnMappingError` arm in `src/chemclaw/ingest/eln/warehouse/adapter.py` that the claim was checked against. Driven
+    the `ElnMappingError` arm in `src/chemclaw/ingest/eln/warehouse/adapter.py` that the claim was
+    checked against. Driven
     on the real `sync_entries` with a `(a+)+$` transform over ten entries at a 0.05 s budget:
     nothing escaped, all ten were booked as data refusals, and the page cost 0.503 s — `rows x
     budget`, which is the exact outcome this class exists to prevent.

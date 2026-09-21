@@ -1597,3 +1597,15 @@ free number at the end of its section.
      something narrower and true. **When relocating an argument, diff it word by word and treat any
      sentence I did not move as new prose that needs its own check**, because a generalisation
      added in transit reads exactly like the thing that was already there.
+
+107. **I ran the gate, then kept editing, then pushed — so the gate I read was not about the tree I
+     sent.** `make lint` and `make type` were green, and *after* that I lengthened two docstring
+     paths to satisfy `test_docstring_paths`, pushing both lines past 100 characters. `ruff format`
+     does not reflow prose in a docstring and `pytest` does not run `ruff`, so the full suite went
+     green over a tree CI reddened in 27 seconds. Lesson 94's remedy was "a gate and the action it
+     gates belong in two separate calls"; that is necessary and not sufficient, because it says
+     nothing about *when* the gate runs relative to the last edit. **The mechanical form: the gate
+     is the call immediately before `git commit`, every time, with no edit between them** — and
+     when a fix is prompted by one gate (a path checker), re-run the others, because the fix's
+     side effect is exactly what the other gate measures. Lengthening a path to satisfy a path
+     rule is a line-length change; the two rules pull against each other by construction.
