@@ -597,23 +597,46 @@ topic).
 
 ## 4 — Operating it
 
-- [ ] **A per-cell regex budget does not add up to a page bound** — [S], opened 2026-09-21 by
-  `D-2026-09-21-a-pattern-that-cannot-be-timed-out-is-run-by-an-engine-that-can`, which bounds the
-  catastrophic case and states this one as what it did not do. `eln_regex_timeout_seconds` bounds
-  one `search`, and `warehouse/adapter.py::_read` runs one per reaction field, per attribute, and
-  per component and impurity **row** — so a page is `eln_sync_batch_size x cells_per_entry`
-  matches. At the shipped 100-entry batch, a pattern spending most of its 0.25 s on each of twenty
-  cells per entry is 500 s: past `eln_sync_timeout_seconds` and past the heartbeat, because
-  `map_to_ord` is synchronous CPU work no asyncio timer can interrupt, after which the retry runs
-  the identical page.
-  **Pre-existing rather than introduced**, and that is why it is a row and not a defect: the same
-  pattern under `re` cost the same page about 3x faster, so the engine swap made it worse in degree
-  and not in kind. What closes it is a cumulative budget — per entry, or per activity — and that is
-  a decision rather than an edit, because it trades refusing an honest slow pattern against
-  bounding total work, and the per-entry form gives a binding with twenty regex cells 12 ms each.
-  Anchors: `ingest/eln/warehouse/expr.py::_regex`, `ingest/eln/warehouse/adapter.py::_read`,
-  `core/config/eln.py::eln_regex_timeout_seconds`.
+- [ ] **A loop-schedulability assertion counts beats over windows of different length and compares
+      them to an absolute bar, so the better the offload works the fewer beats it may collect** —
+      [S], found 2026-09-22 when it reddened PR #435 twice and passed on the third sample, on a tree
+      whose only change between the second and third was two markdown files.
+      `tests/test_context_budget.py::test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable`
+      asserts `beats > 4`, where `beats` is how many times a 1 ms heartbeat was serviced while four
+      offloaded prefix measurements ran.
 
+      **The bar is absolute and the window is not.** The offloaded arm's burst and the un-offloaded
+      control's run for different durations — measured on CI, 660 ms against 1285 ms — so the arm
+      that offloads successfully is measured over a *shorter* window and allowed fewer beats for
+      being faster. The docstring's calibration (18-28 beats offloaded against 0-1 for the block,
+      13-26 under six spinners on four cores) was taken where the offloaded window was ~430-565 ms.
+
+      | measured | offloaded beats | control | window |
+      |---|---|---|---|
+      | CI `check`, run 1 | **2** | 1 | 660 ms / 1285 ms |
+      | CI `check`, run 2 | **3** | 1 | 660 ms / 1285 ms |
+      | CI `check`, run 3 | passed | — | — |
+      | here, isolated | 24-34 | 1 | 480-565 ms |
+      | here, `--cov` | 22-27 | 1 | 430 ms |
+      | here, 2 cores (`taskset`) + `--cov` | 22-38 | 1 | 436-446 ms |
+      | here, full `make cov` (CI's own command) | passed | — | — |
+
+      So it is not reproducible outside CI's runner — six configurations, including the exact
+      `make cov` command — and `main` is green on it across twelve consecutive runs. The assertion's
+      own history is the argument for fixing the shape rather than the number: its docstring records
+      three earlier duration-shaped forms, each replaced after failing under load, and says "every
+      duration-shaped form of this assertion has had the defect and the passing case within 30% of
+      each other on a busy machine". An absolute count has the same defect one step along.
+
+      **The fix is a rate against the control measured in the same process**, which is the
+      discriminator the docstring already names: beats-per-second offloaded over beats-per-second
+      blocked gives **3.86x** and **5.84x** on CI's two samples and ~77x here, against 1.0x by
+      construction if the offload is deleted. Not applied when found, because it was a change to a
+      test the PR did not otherwise touch and the third sample went green; the control's beat count
+      quantises at 1, so the guard needs `max(blocked_beats, 1)` and a bar measured against all
+      three CI samples rather than chosen. Anchors:
+      `tests/test_context_budget.py::test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable`,
+      `agent/context_budget.py:873`.
 
 - [ ] **A worker whose broker is down never opens its probe port, so "Temporal is down" and "the
   image is broken" are the same picture to everything but the container log** — [M].

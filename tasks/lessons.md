@@ -1866,3 +1866,22 @@ free number at the end of its section.
      that minute. **A flaky test can have more than one flake**, and fixing the one that fired tells
      you nothing about the others. Characterising the distribution — five samples, median, against
      the figure the docstring records for CI — is what found the second.
+
+137. **I ticked "ADR + delete the row" in a plan file for work I had not done.** Wave 4 shipped the
+     ELN page budget — `eln_regex_page_budget_seconds`, `expr.pattern_budget`, five call sites, tests
+     — and neither wrote the ADR nor deleted the `BACKLOG.md` row. `tasks/todo.md` recorded both as
+     complete. Two waves later my own triage then counted that row among the actionable ones, so the
+     miss cost a second reader — me — real time, and anyone reading the backlog was told a bound did
+     not exist that had shipped. **A checkbox is a claim, so check it against the artifact**: the ADR
+     is a file in `docs/decisions/` and the deletion is a `grep` returning nothing, and both are one
+     command. The code landing is not evidence that the record did.
+
+138. **I nearly filed a deliberate design as a defect.** CI's log carries a "Cross-repository checks
+     did not run" block on every run, and `ci.yml`'s comment says that block "should be absent — its
+     presence means this variable stopped reaching them". I had the workflow fix half-drafted when I
+     read `tests/siblings.py::sibling_python`, whose docstring splits the two costs on purpose and
+     argues only one is plausible in CI: reading manifests needs a shallow clone, running the servers
+     to measure schemas needs RDKit, torch and a T5 checkpoint's dependencies. The skip is designed
+     and the epilogue's job is to announce it. **The false thing was one sentence of diagnosis, not
+     the behaviour it described** — so read the code the comment is about before believing the
+     comment, including when the comment is the one reporting a problem.
