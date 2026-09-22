@@ -791,10 +791,51 @@ def test_clamp_refuses_the_one_number_it_cannot_hold_in_a_range() -> None:
 
 # A pattern whose cost is *polynomial* rather than exponential, so it lands inside the per-cell
 # budget instead of blowing through it. This is the case the per-cell bound cannot see, and the
-# reason the page bound exists: measured on this box at 165 ms over a 6,000-character cell, 66% of
-# the shipped 0.25 s, and it returns a match rather than raising.
+# reason the page bound exists: it returns a match rather than raising.
 _SLOW_BUT_COMPLETING = {"regex": {"pattern": r"a*a*a*$"}}
-_SLOW_CELL = "a" * 6000 + "b"
+
+
+def _a_cell_this_machine_finishes() -> tuple[str, float]:
+    """The longest of a fixed ladder of cells whose warm cost is well inside the per-cell budget.
+
+    **Sized against the machine rather than written down, because the written-down size was a
+    coin-flip on a shared runner.** The constant was `"a" * 6000`, measured at 165 ms against the
+    shipped 0.25 s per-cell timeout — a margin of 1.5x. Every test below needs this cell to be
+    *slow and completing*: slow enough that a few of them spend a page budget, and completing so
+    the per-cell arm does not fire first. At 1.5x, a runner 1.6x slower than the box that measured
+    it fires the per-cell arm instead, which is what CI did on 2026-09-22: the page test read
+    `PatternBudgetError("did not finish within 0.25s on one 6001-character cell")` where it wanted
+    the page refusal, on a commit whose diff touches nothing in `ingest/eln`.
+
+    The cost of `a*a*a*$` is superlinear in the cell length, so one step down the ladder buys a
+    large factor. `_MARGIN` is the fraction of the per-cell budget the chosen cell may cost; at
+    0.3 a machine has to be more than three times slower than the one that sized the cell before
+    the wrong arm can fire, and the ladder's floor keeps the page tests meaningful by refusing to
+    pick a cell that is merely fast.
+    """
+    budget = settings.eln_regex_timeout_seconds
+    for length in (6000, 4000, 2500, 1500, 1000):
+        cell = "a" * length + "b"
+        try:
+            apply_transforms(cell, [_SLOW_BUT_COMPLETING])  # warm the compile cache
+            start = time.perf_counter()
+            apply_transforms(cell, [_SLOW_BUT_COMPLETING])
+        except PatternBudgetError:
+            continue  # this rung is past the per-cell budget on this machine; try a shorter one
+        cost = time.perf_counter() - start
+        if cost <= _MARGIN * budget:
+            return cell, cost
+    raise AssertionError(
+        f"no cell in the ladder costs under {_MARGIN:.0%} of the {budget}s per-cell budget on this "
+        "machine, so the page tests below cannot separate the page arm from the per-cell one. "
+        "Either the machine is extraordinarily slow or `a*a*a*$` has stopped being polynomial"
+    )
+
+
+#: How much of the per-cell budget the sized cell above may cost. The inverse is the slowdown a
+#: machine needs before the per-cell arm fires where a page refusal is expected.
+_MARGIN = 0.3
+_SLOW_CELL, _SLOW_CELL_COST = _a_cell_this_machine_finishes()
 
 #: What a real binding's pattern costs, for the ratio the budget's generosity rests on: 0.0024 ms
 #: warm. An earlier comment said 0.472 ms, which was the first call including the `lru_cache`
@@ -857,11 +898,36 @@ def test_an_honest_page_is_nowhere_near_the_budget() -> None:
     the *pathological* cell, which is the comparison the argument actually rests on — an honest page
     must stay cheaper than one bad cell — and which moves with the machine rather than with a
     setting.
+
+    **The bad cell here is the *longest* this machine can run, not the one `_SLOW_CELL` sizes down
+    for the arm-ordering tests.** Those shrink their cell so the page arm fires before the per-cell
+    one; this test is about the ratio between a real binding's pattern and a pathological one, and
+    shrinking the pathological side is what quietly inverts it — driven, a 1,000-character bad cell
+    costs 4.8 ms against 5.2 ms for 2,000 honest ones, and the assertion then reads as a regression
+    in the honest path when nothing about it moved. So it takes the longest rung that completes
+    inside the per-cell budget, and skips below 2,500 characters rather than measuring something
+    else: at 2,500 the bad cell is 27.5 ms against the honest page's 5.2 ms here, which is still a
+    ratio worth asserting.
     """
     cells = 2000
     apply_transforms("batch 4471 of 12", [_HONEST])  # warm the compile cache; see `_HONEST`
+    pathological = ""
+    for length in (6000, 4000, 2500):
+        candidate = "a" * length + "b"
+        try:
+            apply_transforms(candidate, [_SLOW_BUT_COMPLETING])  # warm, and prove it completes
+        except PatternBudgetError:
+            continue
+        pathological = candidate
+        break
+    if not pathological:
+        pytest.skip(
+            "no pathological cell of 2,500 characters or more completes inside the "
+            f"{settings.eln_regex_timeout_seconds}s per-cell budget on this machine, so the ratio "
+            "this test is about would be measured against a cell too small to mean it"
+        )
     started = time.perf_counter()
-    apply_transforms(_SLOW_CELL, [_SLOW_BUT_COMPLETING])
+    apply_transforms(pathological, [_SLOW_BUT_COMPLETING])
     one_bad_cell = time.perf_counter() - started
 
     started = time.perf_counter()
@@ -872,8 +938,8 @@ def test_an_honest_page_is_nowhere_near_the_budget() -> None:
 
     assert spent < one_bad_cell, (
         f"{cells} honest cells cost {spent:.4f}s, which is no longer cheaper than the single "
-        f"pathological cell this bound exists for ({one_bad_cell:.4f}s); the ratio the budget's "
-        "generosity rests on is gone"
+        f"{len(pathological)}-character pathological cell this bound exists for "
+        f"({one_bad_cell:.4f}s); the ratio the budget's generosity rests on is gone"
     )
 
 
@@ -915,8 +981,13 @@ def test_a_pattern_cut_short_by_the_page_is_not_reported_as_innocent() -> None:
     catastrophic = {"regex": {"pattern": r"(a+)+$"}}
     apply_transforms(_SLOW_CELL, [_SLOW_BUT_COMPLETING])
 
+    # The page must be *nearly* spent when the catastrophic pattern runs, or it is handed a clamp
+    # big enough to blow its own ceiling and the unclamped arm fires instead — which is the other
+    # test. Sized from the measured cell cost rather than from a fixed budget and a fixed count,
+    # because those two encode a machine speed: three cells at 0.45s only drains the page on a box
+    # where a cell costs ~150ms.
     with pytest.raises(PatternBudgetError) as refused:
-        with pattern_budget(0.45):
+        with pattern_budget(3.5 * _SLOW_CELL_COST):
             for _ in range(3):
                 apply_transforms(_SLOW_CELL, [_SLOW_BUT_COMPLETING])
             apply_transforms("a" * 4000 + "b", [catastrophic])
