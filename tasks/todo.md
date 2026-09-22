@@ -15,7 +15,14 @@
       regressed TBTU — it is a pharmaceutical salt list and knows no tetrafluoroborate — which is
       why charge leads.
 - [x] `STANDARDIZATION_VERSION` -> `std11`, one bump for both halves.
-- [ ] Full serial `make cov`, fresh-context subagent review, PR, merge on green CI.
+- [x] **Fresh-context subagent review.** One defect (`all(...)` coupled the spectators), two
+      half-driven measurements of my own, three stale present-tense claims in `chem.py`, and a
+      trade I had not named. All fixed in `50e1a677`. Its species sweep also found three defects
+      the commits never claimed: BH3·THF was THF, BH3·SMe2 was dimethyl sulfide, DABCO·2H2O2 was
+      DABCO — all fixed by the same change.
+- [x] **Full serial `make cov`**: **10,611 passed, 8 skipped**, coverage **89.94%** against a floor
+      of 84.0, 34m52s, with Postgres and Temporal up.
+- [ ] PR, and merge when CI is green.
 
 ## Measurements this wave rests on
 
