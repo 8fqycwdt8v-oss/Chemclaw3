@@ -210,22 +210,12 @@ topic).
       solvent list, which is the table `core/chem.py` opens by refusing, or RDKit's own
       `rdMolStandardize.FragmentRemover`, whose list is curated upstream and would make the answer
       somebody else's to maintain. Either moves every solvate at once and needs a
-      `STANDARDIZATION_VERSION` bump. Pinned meanwhile by
+      `STANDARDIZATION_VERSION` bump. **The sibling question is settled**:
+      `D-2026-09-22-the-parent-is-the-fragment-this-module-calls-organic` fixed *which* fragment is
+      kept once the discarding is agreed, so what is left here is only which neutral fragments may
+      be discarded at all. Pinned meanwhile by
       `tests/test_compound_identity.py::test_a_neutral_co_former_is_stripped_like_a_counterion`
       and by a row of `_STANDARDIZATION_AT_THIS_VERSION`, so it cannot move in silence.
-
-- [ ] **Ammonium formate standardizes to ammonia** — [M], `src/chemclaw/core/chem.py::standardize`.
-      Driven: `standard_smiles("[NH4+].[O-]C=O")` returns `'N'`. `FragmentParent` picks `[NH4+]`
-      over the formate as the parent — neither fragment is organic by any version of
-      `_is_organic`, so `organic == 0` is not the branch; the pick happens inside RDKit — and
-      `Uncharger` then neutralises it. `_neutralization_is_protonation` does not refuse it because
-      the neutralisation *adds* a hydrogen, which is the shape that guard exists to allow.
-      Ammonium formate is a transfer-hydrogenation reagent; ammonia is a different substance in
-      every way that matters, and the note, the cache key and the hazard screen all follow the id.
-      Identical at `std9` and `std10`, so it is neither caused nor fixed by
-      `D-2026-09-22-a-version-bump-costs-the-same-whenever-it-is-taken`; found while driving it.
-      Weigh the fix against the same question the row above asks, because both are about which
-      fragment `FragmentParent` is allowed to keep.
 
 - [ ] **A `STANDARDIZATION_VERSION` bump retires the fingerprint rows and re-keys nothing, so the
       graph keeps a note per superseded spelling forever** — [L],

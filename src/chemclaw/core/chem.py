@@ -183,7 +183,16 @@ from chemclaw.core.ids import stable_hash
 # taken. What latency bounds is the damage of *not* taking it. The two together are still an
 # argument for now rather than later: the bill does not grow, and the population of rows keyed
 # under the wrong identity does.
-STANDARDIZATION_VERSION = "std10"
+#
+# `std10` -> `std11` because the branch that keeps the organic fragment asked **RDKit** which
+# fragment that was (`D-2026-09-22-the-parent-is-the-fragment-this-module-calls-organic`).
+# `rdMolStandardize.FragmentParent`'s chooser counts atoms *including hydrogens* and defaults to
+# `preferOrganic=False`, so on `[NH4+].[O-]C=O` it kept the five-atom `[NH4+]` over the four-atom
+# formate and `Uncharger` made ammonium formate **ammonia**. This module has its own answer to
+# that question — `_is_organic`, argued at the top of this file — and now uses it. Measured over
+# every parseable carbon-bearing SMILES in the tree, 6,472 of them, **exactly one** standard form
+# moves: that one, to formic acid.
+STANDARDIZATION_VERSION = "std11"
 
 # The d- and f-block by atomic number — Sc→Zn, Y→Cd, La→Hg (lanthanides included) and Ac onward.
 # A block rather than a hand-picked element list, because the property being asserted is a block
@@ -492,11 +501,20 @@ def standardize(mol: Chem.Mol) -> Chem.Mol:
         atom.SetAtomMapNum(0)
     if _metal_is_the_compound(mol, cleaned):
         return _TAUTOMERS.Canonicalize(cleaned)
-    organic = sum(1 for f in Chem.GetMolFrags(cleaned, asMols=True) if _is_organic(f))
-    if organic == 0:
+    organic_fragments = [f for f in Chem.GetMolFrags(cleaned, asMols=True) if _is_organic(f)]
+    if not organic_fragments:
         return _TAUTOMERS.Canonicalize(cleaned)  # no organic parent to keep, nothing to neutralize
-    if organic == 1:
-        cleaned = rdMolStandardize.FragmentParent(cleaned)  # the rest are counterions
+    if len(organic_fragments) == 1:
+        # **The one organic fragment *is* the parent — asked here rather than of RDKit.** This used
+        # to call `rdMolStandardize.FragmentParent`, whose `LargestFragmentChooser` defaults to
+        # counting atoms *including hydrogens* and to `preferOrganic=False`. Measured, the two
+        # disagree: on `[NH4+].[O-]C=O` the chooser keeps `[NH4+]` — five atoms against formate's
+        # four — and `Uncharger` then makes ammonium formate **ammonia**. This module already has
+        # a notion of which fragment is the compound, stated at the top of this file and tested in
+        # `_THE_ORGANIC_LINE`, so delegating the same question to a heuristic with a different
+        # answer was the defect. See
+        # `D-2026-09-22-the-parent-is-the-fragment-this-module-calls-organic`.
+        cleaned = organic_fragments[0]
     uncharged = rdMolStandardize.Uncharger().uncharge(cleaned)
     if not _neutralization_is_protonation(cleaned, uncharged):
         return _TAUTOMERS.Canonicalize(cleaned)  # not a conjugate acid; keep the anion as written
