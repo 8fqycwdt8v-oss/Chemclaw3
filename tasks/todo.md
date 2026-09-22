@@ -110,7 +110,11 @@ refusal naming the key instead of eleven crash-looping pods and a stuck upgrade.
       The new tests carry their own render arms.
 - [x] Fresh-context subagent review — read-only this time. Five confirmed defects and eight falsified
       figures, all listed below and all fixed.
-- [ ] Full serial suite; `make lint type` immediately before the commit; staged-content check.
+- [x] Full serial suite over the review fixes: **10527 passed, 7 skipped, 0 failed** (23:27). The
+      7 skips are environmental and declared — 4 tiktoken cache, 1 no IPv6, 2 surfaces that are
+      deliberately not a pod; none Postgres- or Temporal-gated.
+- [x] `make lint type` immediately before the commit, staged content verified, and the committed
+      tree checked to import — the three steps a broken Wave 3 commit taught.
 
 ## Review
 
