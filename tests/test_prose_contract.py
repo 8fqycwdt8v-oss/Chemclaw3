@@ -8,6 +8,7 @@ fail at call time. `mypy` cannot see prose, `pytest` did not read it, and `make 
 checks frontmatter.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -42,36 +43,39 @@ def test_shipped_prose_names_only_real_tools() -> None:
 
 
 def _model_facing_descriptions() -> dict[str, str]:
-    """Every docstring this system ships to a model, by name.
+    """Every text this system ships to a model, by name.
 
-    Two sources, because one of them was the whole gap. `registered_tools()` holds the in-process
-    agent tools — 31 of them — while the agent's surface is 114, and every first-party connector
-    bundle's served tool module sat outside it. That is the entire `calc` surface: the bundle that
-    *lost* DFT was the one the guard below could not see. Driven: a sentence naming DFT, HPC,
-    Nextflow and `compute_dft_energy` — four of the five alternatives at once — inserted into
-    `connectors/calc/server/tools.py::report_measurement` left this file at 50 passed, while the
-    same sentence in a registered tool reds it immediately.
+    **Five sources, and each one was added because the guards below were green over it.** The
+    universe started as `registered_tools()` — the in-process agent tools — which left every
+    first-party connector bundle's served tool module outside, and that is the entire `calc`
+    surface: the bundle that *lost* DFT was the one the guards could not see. Driven then: a
+    sentence naming DFT, HPC, Nextflow and `compute_dft_energy` at once, inserted into
+    `connectors/calc/server/tools.py::report_measurement`, left this file green, while the same
+    sentence in a registered tool red it immediately.
 
-    The bundles are read off their own source with `ast`: their `@server.tool()` docstrings
-    ship to the model through a served manifest, and importing them here would drag each
-    bundle's dependency closure into a lane that does not need it.
+    Three more classes were outside until 2026-09-22, and `D-2026-09-15`'s "What keeps it true"
+    had already claimed the guards ran "over the whole model-facing surface, bundles included" —
+    the same error one level out. They are the durable jobs' assembled docstrings (which are
+    *all* of the `results` bundle, since it serves no tool module), every `SKILL.md` a turn can
+    load, and the system prompt's own `_INSTRUCTION_BLOCKS`. Driven then: every forbidden string
+    at once in `connectors/results/connector.yaml`'s job description left this file green.
+    `test_a_forbidden_sentence_in_any_of_them_is_caught` is that drive kept, one class and one
+    sentence at a time.
 
-    **This is not the whole model-facing surface, and saying that it was is the same error one
-    level out.** `D-2026-09-15`'s "What keeps it true" claimed these guards run "over the whole
-    model-facing surface, bundles included". Measured, three classes are still outside: the
-    `description:` on each of the 14 `workflow:` job entries in the connector manifests — which
-    `connectors/jobs.py` assembles into a tool docstring and calls "the job's model-facing
-    documentation", and which is 100% of the `results` bundle since it ships no served tool
-    module at all — the bundle `SKILL.md` files, and `agent/chemclaw_agent.py`'s
-    `_INSTRUCTION_BLOCKS`.
-    Driven: every forbidden string at once in `connectors/results/connector.yaml`'s job description
-    left this file green.
+    No count is written here. The one that was said 31 registered tools against a surface of 114,
+    and both had moved; `test_the_universe_reaches_every_class_the_model_reads` asserts that each
+    class *contributes*, which is the part that can go wrong silently.
 
-    Widening the universe is coupled to narrowing the patterns and is a `docs/planning/BACKLOG.md`
-    row for that reason: shipped prose in those three places legitimately *names* the removed tier
-    and the removed gate in order to say they are gone ("there is no DFT tier", "the PR gate … was
-    deleted"), so a wider scan with these patterns would red on correct text. What is asserted here
-    is what is scanned, and the docstring now says which that is.
+    The served bundle tools are read off their own source with `ast`: their `@server.tool()`
+    docstrings ship to the model through a served manifest, and importing them here would drag
+    each bundle's dependency closure into a lane that does not need it.
+
+    **Widening the universe was coupled to the patterns, and that coupling is resolved rather
+    than deferred.** Shipped prose in the added classes legitimately *names* the removed tier and
+    the removed gate in order to say they are gone. Measured before building: over the widened
+    universe the three patterns as they stood produced three hits and all three were correct
+    text. `_TRUE_ABOUT_WHAT_IS_GONE` is what resolves it, and the measurement that chose that
+    shape over the one `BACKLOG.md` proposed is recorded there.
     """
     import ast
     import inspect
@@ -99,7 +103,243 @@ def _model_facing_descriptions() -> dict[str, str]:
             if served:
                 where = f"{module.parent.parent.name}:{node.name}"
                 described[where] = ast.get_docstring(node) or ""
+    described.update(_job_tool_docstrings())
+    described.update(_shipped_skill_bodies())
+    described.update(_instruction_block_texts())
     return described
+
+
+def _job_tool_docstrings() -> dict[str, str]:
+    """The durable-job tools' descriptions — assembled, not read off the manifest.
+
+    `connectors/jobs.py::_docstring` is what the model is actually sent: the job's summary, then
+    its `description:`, then one line per declared parameter. Reading the manifest's
+    `description:` alone would miss the summary and every parameter description, which are the
+    same prose by another route. The `results` bundle ships no served tool module at all, so
+    before this its entire model-facing surface was these entries and nothing else.
+    """
+    from chemclaw.connectors.jobs import _docstring
+    from chemclaw.connectors.registry import discovered
+
+    found: dict[str, str] = {}
+    for connector, (_, manifest) in discovered().items():
+        for job in manifest.jobs:
+            found[f"job:{connector}:{job.name}"] = _docstring(job)
+    assert found, "no connector jobs discovered; this test is reading the wrong tree"
+    return found
+
+
+def _shipped_skill_bodies() -> dict[str, str]:
+    """Every `SKILL.md` a turn can load — the bundle-local ones and the repository's own.
+
+    Both, because the axis that matters is whether the model reads it, and it reads both. The
+    bundle skills reach a turn through `registry.skills_dirs`; `skills/` is architecture layer 3
+    and is loaded on demand by name. A skill is longer than a docstring and is loaded whole, so
+    a sentence about a removed tier costs more here than in the text this guard started on.
+    """
+    import chemclaw
+
+    package = Path(chemclaw.__file__).parent
+    repository = Path(__file__).resolve().parents[1]
+    found = {
+        f"bundleskill:{path.parent.parent.parent.name}:{path.parent.name}": path.read_text(
+            encoding="utf-8"
+        )
+        for path in sorted(package.glob("connectors/*/skills/*/SKILL.md"))
+    }
+    found.update(
+        {
+            f"skill:{path.parent.name}": path.read_text(encoding="utf-8")
+            for path in sorted((repository / "skills").glob("*/SKILL.md"))
+        }
+    )
+    assert found, "no SKILL.md files found; this test is reading the wrong tree"
+    return found
+
+
+def _instruction_block_texts() -> dict[str, str]:
+    """The system prompt's own blocks, which are sent on every turn rather than on demand.
+
+    Indexed by position: a `PromptBlock` has no name, and its text is the identity anyway — the
+    assertion messages below quote the match, so the index is only there to keep the keys apart.
+    """
+    return {f"block:{index}": block.text for index, block in enumerate(_INSTRUCTION_BLOCKS)}
+
+
+#: The tier `D-2026-08-26-semiempirical-is-the-whole-tier` deleted, by the names it went under.
+#:
+#: `conceptual[- ]DFT` is carved out rather than exempted sentence by sentence: it is the name of a
+#: shipped panel (`publish/properties.py`'s `conceptual_dft` group, `project.py`'s Fukui
+#: projection), derived from GFN2-xTB frontier orbitals and reaching no DFT tier at all. A term of
+#: art that happens to contain the word is not the class this guard is about, and three skills
+#: would otherwise need an exemption apiece for saying something true about a capability that ships.
+_A_REMOVED_TIER = re.compile(
+    r"(?<!conceptual-)(?<!conceptual )\bDFT\b|\bHPC\b|Nextflow|Seqera|compute_dft_energy"
+    r"|agents/job_status"
+)
+
+#: The deleted PR-gate, named by its machinery. Widened 2026-09-22 with the phrasings the
+#: `BACKLOG.md` row measured as missing — `PRs`, the review queue, the knowledge gate — which cost
+#: **zero** new hits over the widened universe, so recall here is free.
+_REVIEW_MACHINERY = re.compile(
+    r"\bPR[- ]gate\b|pull requests?|\bPRs?\b|NoteProposal|review queue|knowledge gate",
+    re.IGNORECASE,
+)
+
+#: A promise that something the model does waits for a person.
+#:
+#: **`propose[sd]? (?:what|it|them|the)` was dropped**, and that is a narrowing made on evidence
+#: rather than to make a widening pass. Measured over the four classes: it caught **zero** of the
+#: three shipped `synthesize_memory` defects this guard exists for — all three are caught by
+#: `for review` and `pull request` — and **four** correct sentences, every one of them proposing an
+#: *experiment* rather than a review ("propose the next point(s)", "name the limit and propose the
+#: experiment that would settle it"). Proposing an experiment is the behaviour
+#: `D-2026-08-26-semiempirical-is-the-whole-tier` asks for in as many words. What is left requires
+#: the review *object*, which is the thing that was deleted.
+_A_REVIEW_PROMISE = re.compile(
+    r"for (?:review|approval|acceptance)|awaits? review|pending review", re.IGNORECASE
+)
+
+#: Shipped sentences that match a pattern above and are *correct*, each with why.
+#:
+#: **The shape the row proposed is disqualified by the one true positive this file has.** It
+#: suggested "sentence-level with a negation/past-tense exclusion". Driven against the original
+#: defect — `get_durable_job_status`'s "**used to** degrade to a bare status, because the DFT job
+#: returned its own typed result and had its own status tool" — such an exclusion matches it and
+#: turns the guard green over the exact text it was written to catch. History about a removed tier
+#: is *always* past tense; that is what makes it history. So the discriminator cannot be the tense.
+#:
+#: An exemption is therefore a literal quote that **contains** the match, not a file name. A new
+#: DFT sentence added to an exempted skill still reds, because the exemption covers that span and
+#: nothing else, and `test_every_exemption_still_quotes_shipped_prose` fails the day one of these
+#: sentences is reworded — so it cannot outlive the text it was written for.
+_TRUE_ABOUT_WHAT_IS_GONE: dict[str, str] = {
+    "never present one as if it were DFT": (
+        "The system prompt telling the model not to overclaim the method. Actionable, and the "
+        "opposite of describing a tier as reachable."
+    ),
+    "There is no DFT tier and no cluster to send a calculation to": (
+        "`skills/computational-evidence` saying the tier is absent, which is what "
+        "`D-2026-08-26-semiempirical-is-the-whole-tier` asks prose to say."
+    ),
+    "the PR gate over agent-written knowledge was deleted": (
+        "`connectors/safety/skills/safety-screening` explaining why the screen is a tool and not "
+        "a gate — the reader needs the removed control named to follow it."
+    ),
+}
+
+
+def _first_offence(text: str, pattern: re.Pattern[str]) -> str | None:
+    """The first match not covered by an exemption, or `None`.
+
+    Whitespace is flattened first, so a quote in `_TRUE_ABOUT_WHAT_IS_GONE` does not have to
+    reproduce a `SKILL.md`'s line wrapping — rewrapping a paragraph is not a change in what the
+    model is told, and an exemption that broke on it would teach people to delete exemptions.
+    """
+    flat = " ".join(text.split())
+    exempt = [
+        (found.start(), found.end())
+        for phrase in _TRUE_ABOUT_WHAT_IS_GONE
+        for found in re.finditer(re.escape(phrase), flat)
+    ]
+    for match in pattern.finditer(flat):
+        if any(start <= match.start() and match.end() <= end for start, end in exempt):
+            continue
+        return match.group(0)
+    return None
+
+
+#: The three classes the guards could not see before 2026-09-22, each with the loader that reaches
+#: it. Parametrised rather than written out, so a fourth class is a row here and not a fourth copy
+#: of the same driving.
+_THE_CLASSES_THAT_WERE_OUTSIDE = (
+    "_job_tool_docstrings",
+    "_shipped_skill_bodies",
+    "_instruction_block_texts",
+)
+
+
+def test_the_universe_reaches_every_class_the_model_reads() -> None:
+    """Each loader contributes, and the bundle that ships no served tools is in it.
+
+    `results` is the case worth naming: it serves no tool module, so its durable job's
+    assembled docstring is its *entire* model-facing surface and the old universe held none of it.
+    """
+    names = set(_model_facing_descriptions())
+    for prefix in ("job:", "bundleskill:", "skill:", "block:"):
+        assert any(name.startswith(prefix) for name in names), f"no {prefix} text in the universe"
+    assert any(name.startswith("job:results:") for name in names), (
+        "the `results` bundle serves no tool module, so its job descriptions are the only "
+        "model-facing text it has; the universe must reach them"
+    )
+
+
+@pytest.mark.parametrize("loader", _THE_CLASSES_THAT_WERE_OUTSIDE)
+@pytest.mark.parametrize(
+    "poison",
+    [
+        "Escalate to the DFT tier when GFN2 is not enough.",
+        "The HPC launcher runs this through Nextflow on Seqera.",
+        "It opens a pull request and the result waits for review.",
+        "The finding is staged behind the knowledge gate until a reviewer accepts it.",
+    ],
+)
+def test_a_forbidden_sentence_in_any_of_them_is_caught(
+    monkeypatch: pytest.MonkeyPatch, loader: str, poison: str
+) -> None:
+    """The measurement in `BACKLOG.md` run again, and now it reds.
+
+    The row drove exactly this and got green: "every forbidden string at once in
+    `connectors/results/connector.yaml`'s job `description:` left both guards green". Poisoning
+    each loader in turn is the same drive, one class and one sentence at a time, so a class that
+    silently stops being scanned fails here rather than going quiet.
+    """
+    real = globals()[loader]
+    guard = (
+        test_no_tool_description_tells_the_model_about_a_tier_that_is_gone
+        if _A_REMOVED_TIER.search(poison)
+        else test_no_tool_description_tells_the_model_to_expect_a_review_gate
+    )
+    guard()  # the control: green before the poison, so the failure below is the poison's.
+    monkeypatch.setitem(globals(), loader, lambda: dict(real(), poisoned=poison))
+    with pytest.raises(AssertionError) as caught:
+        guard()
+    assert str(caught.value).startswith("{'poisoned':"), (
+        f"the guard failed, but not solely on the poison: {caught.value}"
+    )
+
+
+def test_every_exemption_still_quotes_shipped_prose() -> None:
+    """A stale exemption is a hole nobody can see — it covers a span that is no longer there.
+
+    Worse than dead code: rewording an exempted sentence silently leaves the exemption behind to
+    match some *other* sentence later, which is exactly the "a control that is satisfied while the
+    thing it protects is false" shape this file exists to find.
+    """
+    texts = [" ".join(text.split()) for text in _model_facing_descriptions().values()]
+    orphaned = sorted(
+        phrase for phrase in _TRUE_ABOUT_WHAT_IS_GONE if not any(phrase in one for one in texts)
+    )
+    assert not orphaned, (
+        f"{orphaned} are exempted but no longer appear in any model-facing text. Delete the "
+        "entry: the prose it was written for has been reworded or removed."
+    )
+
+
+def test_every_exemption_is_needed() -> None:
+    """The control for the test above: an exemption that guards nothing is noise with authority."""
+    texts = _model_facing_descriptions()
+    for phrase, reason in _TRUE_ABOUT_WHAT_IS_GONE.items():
+        assert reason.strip(), f"{phrase!r} is exempted without a reason"
+        matched = any(
+            pattern.search(phrase)
+            for pattern in (_A_REMOVED_TIER, _REVIEW_MACHINERY, _A_REVIEW_PROMISE)
+        )
+        assert matched, (
+            f"{phrase!r} is exempted but matches none of the patterns, so it exempts nothing. "
+            "Either a pattern was narrowed past it, or the entry was never needed."
+        )
+    assert texts, "no model-facing text found; this test is reading the wrong tree"
 
 
 def test_no_tool_description_tells_the_model_about_a_tier_that_is_gone() -> None:
@@ -116,13 +356,10 @@ def test_no_tool_description_tells_the_model_about_a_tier_that_is_gone() -> None
     `#` comment and guidance in the docstring — is judgment and stays a review rule; naming a
     removed tier is not judgment.
     """
-    import re
-
-    gone = re.compile(r"\bDFT\b|\bHPC\b|Nextflow|Seqera|compute_dft_energy|agents/job_status")
     offenders = {
-        name: match.group(0)
+        name: found
         for name, text in _model_facing_descriptions().items()
-        if (match := gone.search(text))
+        if (found := _first_offence(text, _A_REMOVED_TIER))
     }
     assert not offenders, (
         f"{offenders} name a removed tier in text the model is sent on every turn. Move the "
@@ -196,16 +433,12 @@ def test_no_tool_description_tells_the_model_to_expect_a_review_gate() -> None:
     description naming a *pull request* or a `NoteProposal` is describing the deleted control
     whatever tool it belongs to.
     """
-    import re
-
-    machinery = re.compile(r"\bPR[- ]gate\b|pull request|NoteProposal", re.IGNORECASE)
-    promises = re.compile(r"propose[sd]? (?:what|it|them|the)|for review", re.IGNORECASE)
     offenders: dict[str, str] = {}
     for name, text in _model_facing_descriptions().items():
-        if match := machinery.search(text):
-            offenders[name] = match.group(0)
-        elif name not in _A_LIVE_GATE and (match := promises.search(text)):
-            offenders[name] = match.group(0)
+        if found := _first_offence(text, _REVIEW_MACHINERY):
+            offenders[name] = found
+        elif name not in _A_LIVE_GATE and (found := _first_offence(text, _A_REVIEW_PROMISE)):
+            offenders[name] = found
     assert not offenders, (
         f"{offenders} promise the model a review step that "
         "`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted. A note is recorded, not "

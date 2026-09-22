@@ -458,41 +458,6 @@ topic).
   `_bounded_file`, `agent/tool_result_shape.py::rewritten_command_files`,
   `deepagents.backends.state.StateBackend`.
 
-- [ ] **The model-facing prose guards scan the in-process registry and four bundles, not the
-      surface** — [M], found 2026-09-15 in the round-two review.
-      `tests/test_prose_contract.py::test_no_tool_description_tells_the_model_about_a_tier_that_is_gone`
-      and `::test_no_tool_description_tells_the_model_to_expect_a_review_gate` read
-      `registered_tools()` plus `glob("connectors/*/server/tools.py")`. Three classes of text the
-      model is sent are outside that: the `description:` on the 14 `workflow:` job entries in the
-      connector manifests, which `src/chemclaw/connectors/jobs.py:226` assembles into a tool
-      docstring and its own comment calls "the job's model-facing documentation" — and which is
-      **all** of the `results` bundle, since it ships no `server/tools.py`; the bundle skills
-      (`connectors/*/skills/*/SKILL.md` — seven bundles ship one as of 2026-09-22: bo, calc,
-      kinetics, safety, suitability, thermalsafety, unitops, where this row named three); and
-      `agent/chemclaw_agent.py::_INSTRUCTION_BLOCKS`. Driven: every forbidden string at once in
-      `connectors/results/connector.yaml`'s job `description:` left both guards green.
-
-      **The universe and the patterns are one problem, not two, which is why this is a row rather
-      than a widening.** Shipped prose in those places names the removed tier and the removed gate
-      *in order to say they are gone* — `connectors/calc/connector.yaml:23` "there is no DFT tier",
-      `agent/chemclaw_agent.py:240` "never present one as if it were DFT",
-      `connectors/safety/skills/safety-screening/SKILL.md:77` "the PR gate … was deleted",
-      `skills/deep-research/SKILL.md:95` "propose the next point(s)" — so widening with today's
-      patterns reds on correct text. Both directions are already measurable: the review-gate
-      pattern also misses `a PR`/`PRs`, "awaits review", "staged behind the knowledge gate" and
-      "submits the finding to the review queue". The shape that works is probably sentence-level
-      with a negation/past-tense exclusion; measure the false-positive rate over the three classes
-      before building it, the way
-      `D-2026-09-11-the-debt-was-in-the-claims-not-in-the-code` measured 82.9% and declined.
-
-      **This row is now the only live instance of its shape, which is worth saying because it is
-      not the whole shape.** "A guard satisfied while the thing it protects is false" was worked on
-      `tests/test_repo_map.py` and `tests/test_readiness_record.py` by
-      `D-2026-09-18-a-mutation-watched-failing-is-half-a-guard` — six mutations, all green over a
-      live false statement, all closed. None of that touches this row: what is open here is the
-      *universe* those two prose-contract guards read and the patterns they read it with, and no
-      derivation used there reaches it. A reader who takes the class as closed would skip this.
-
 - [ ] **An agent-recorded note the model could not date reaches no subscriber who has a
       watermark** — [M], found 2026-09-15 in the review of the wave 2/4/7 merge.
       `durable/digest._is_new` reads an absent `valid_from` as *open-ended* — true for as long as
