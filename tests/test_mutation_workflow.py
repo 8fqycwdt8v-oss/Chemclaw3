@@ -22,6 +22,11 @@ one module's results missing.
 
 The third is not about the workflow but about whether the run can start at all: `also_copy` builds
 the tree the run executes in, and the selected tests read files from it. See `_NOT_COPIED` below.
+
+The fourth is the gate's own numbers. A kill rate is a claim about a population, and the recorded
+floor outlived two widenings of it — so `_THE_POPULATION_THE_FLOOR_WAS_MEASURED_OVER` pins the
+`source_paths` the floor was measured against, and the `no_tests` ceiling is gated beside it
+because a mutant nothing reaches depresses the rate without being a weak test.
 """
 
 import json
@@ -294,3 +299,75 @@ def test_an_exemption_cannot_claim_a_directory_the_copy_already_makes() -> None:
         f"declared absent from the mutation tree and copied into it anyway: {contradicted}"
     )
     assert all(reason.strip() for reason in _NOT_COPIED.values()), "an exemption needs its reason"
+
+
+def test_a_selection_that_stopped_covering_a_module_fails_the_gate(tmp_path: Path) -> None:
+    """A mutant nothing reaches is a hole in the selection, and the kill rate cannot see it.
+
+    Such a mutant is neither killed nor survived-under-test: it inflates `total` and depresses the
+    rate without saying why. Measured at the config this workflow ran on before 2026-09-22, 27.7%
+    of 3,640 mutants were in that state and the rate read 44.3% — a number that looks like badly
+    tested code and was a selection that named six test files too few.
+    """
+    stats = dict(_HEALTHY, no_tests=200)  # 24.2% of 825, well over the recorded ceiling
+    result = _run_gate(_gate_workspace(tmp_path, stats=stats, missing=None))
+    assert result.returncode != 0, result.stdout
+    assert "no selected test" in result.stdout + result.stderr
+
+
+#: The `source_paths` the recorded floor was measured over, pinned beside it.
+#:
+#: **A rate gate is only stable while its population is, and this one was not.** 72.0 was measured
+#: over 825 mutants and survived two widenings of `source_paths` to a population of 3,640, where
+#: the same code scores 62.1% — so the floor was not a standard the config had fallen short of, it
+#: was a number about a different set of modules, and the first run that completed would have
+#: failed on it. The workflow's own comment argues for a *rate* because "a count breaks the first
+#: time one of these modules legitimately grows"; that is true and incomplete, because a rate
+#: breaks the first time the *set* of modules grows.
+#:
+#: So adding a module here reds this test until somebody re-runs `make mutants` and writes the new
+#: floor beside the new list. Two edits in one file that a reviewer sees as one diff, which is the
+#: shape `tests/test_compound_identity.py` uses to pin `STANDARDIZATION_VERSION`.
+_THE_POPULATION_THE_FLOOR_WAS_MEASURED_OVER = (
+    "src/chemclaw/agent/audit_store.py",
+    "src/chemclaw/agent/authz.py",
+    "src/chemclaw/agent/spend_cap.py",
+    "src/chemclaw/api/budget.py",
+    "src/chemclaw/api/runner_trace.py",
+    "src/chemclaw/core/chem.py",
+    "src/chemclaw/core/fulltext.py",
+    "src/chemclaw/core/logging.py",
+    "src/chemclaw/core/quantities.py",
+    "src/chemclaw/kg/git_writer.py",
+    "src/chemclaw/kg/note.py",
+    "src/chemclaw/kg/record.py",
+    "src/chemclaw/publish/outbox.py",
+    "src/chemclaw/science/calc/store.py",
+    "src/chemclaw/templates/resolve.py",
+)
+
+
+def test_the_floor_is_pinned_to_the_population_it_was_measured_over() -> None:
+    """Changing which modules are mutated changes what the rate means; the floor must move with it.
+
+    Both directions, so neither edit can be made alone: the literal below is what was in
+    `pyproject.toml` when 62.1% was measured, and the floor in the workflow is what that
+    measurement produced.
+    """
+    declared = tomllib.loads((_ROOT / "pyproject.toml").read_text())["tool"]["mutmut"][
+        "source_paths"
+    ]
+    assert sorted(declared) == sorted(_THE_POPULATION_THE_FLOOR_WAS_MEASURED_OVER), (
+        "[tool.mutmut].source_paths changed, so the kill rate is over a different population and "
+        "the recorded floor in .github/workflows/mutants.yml is a number about the old one. "
+        "Re-run `make mutants`, write the new floor and the new list together, and say in the "
+        "commit message what the rate moved from and to"
+    )
+    gate = _steps()["Gate on the kill rate, on the coverage, and on the harness having worked"]
+    assert gate["env"]["MUTATION_SCORE_FLOOR"] == "59.0", (
+        "the recorded floor moved. Update the list above with it, or say beside the number which "
+        "measurement it came from"
+    )
+    assert gate["env"]["MUTATION_NO_TESTS_CEILING"] == "16.0", (
+        "the no-test ceiling moved; the same rule applies to it"
+    )

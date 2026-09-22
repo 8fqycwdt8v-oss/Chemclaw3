@@ -198,8 +198,7 @@ topic).
       that a bump is "a permanent doubling" of `molecule_fingerprints`/`reaction_fingerprints`
       because the runtime role holds no `DELETE`.
 
-- [ ] **Three first-party refusal gates are still outside the weekly mutation backstop, and the
-      run's cost is still unmeasured** — [S], `pyproject.toml` `[tool.mutmut].source_paths`.
+- [ ] **Three first-party refusal gates are still outside the weekly mutation backstop** — [S], `pyproject.toml` `[tool.mutmut].source_paths`.
       `agent/spend_cap.py` joined it on 2026-09-22 (the smallest of the four by source length), which
       leaves `agent/plan_gate.py`, `agent/skill_backend.py` and `agent/loop_cap.py`. The original row
       asked for each addition's runtime to be measured first, on the ground that "the comment above it
@@ -238,22 +237,33 @@ topic).
       count of distinct `x_<function>__mutmut_<n>` symbols in the mutated copy of the file, which is a
       proxy for what mutmut scheduled rather than a reading of its own ledger.
 
-      **But the gate does not pass, and that is the finding to work next.** It scores
-      `killed / total` = 1612/3640 = **44.3%** against `MUTATION_SCORE_FLOOR: "72.0"`, so the weekly job
-      now fails on its kill rate where it used to fail on starting. The floor is not the problem and
-      neither is a sudden regression: `total` counts the 1009 mutants **no selected test reaches**, and
-      `pytest_add_cli_args_test_selection` is a hand-kept list — read it, do not count it here — never widened as
-      `source_paths` grew from the seven the floor was recorded against (74.7% and 76.8%, per
-      `mutants.yml`'s own comments) to fifteen. `agent/spend_cap.py` shipping with `tests/test_spend_cap.py`
-      outside the selection — fixed in the same commit as this row — was one instance of the pattern,
-      not the whole of it.
+      **The gate did not pass, and that half is now done.** It scored `killed / total` = 1612/3640
+      = **44.3%** against `MUTATION_SCORE_FLOOR: "72.0"` — not a regression: `total` counted the
+      1009 mutants **no selected test reaches**, because `pytest_add_cli_args_test_selection` is a
+      hand-kept list that was never widened as `source_paths` grew. Six test files were paired with
+      the modules they cover and the run repeated on 2026-09-22: **2260 killed of 3640 — 62.1%** —
+      with 866 survived, **446 reached by no selected test (12.3%)**, 68 timed out, 0 suspicious or
+      segfault, in **87 minutes at 0.70 mutations/second**. The floor is now 59.0 and there is a
+      second gate on the `no_tests` share at 16.0, both measured rather than chosen, and
+      `tests/test_mutation_workflow.py` pins the floor to the `source_paths` list it was measured
+      over — because a rate is only comparable while its population is, which is how 72.0 (825
+      mutants) outlived two widenings.
 
-      So the work is: pair every `source_paths` entry with the tests that exercise it, re-measure, and
-      then decide whether 72.0 is still the right floor for a fifteen-module list — with the remaining
-      three gates added once the denominator means something. A derived guard that fails when a declared
-      source path has no test file in the selection is the shape that stops this recurring. Anchors:
+      **The derived pairing guard the last version of this row asked for is disqualified by
+      measurement, and that is recorded here so nobody builds it.** The obvious rule — a declared
+      source path must have its module name or dotted path mentioned in some selected test file —
+      finds a hit for **all fifteen**, including `templates/resolve.py`, which had eight such
+      "hits" at 19% coverage. Mentioning a module is not covering it. What replaced it is the
+      `no_tests` ceiling above: the run's own answer to the same question, measured instead of
+      inferred.
+
+      **What is left is the three gates**, and adding them now costs two things rather than one:
+      the mutants themselves (`plan_gate.py`, `skill_backend.py` and `loop_cap.py` are 333, 367 and
+      671 lines against `spend_cap.py`'s 309, so the same order as its ~18 s) *and* a re-measurement
+      of the floor, because the population pin reds until the new list and the new number are
+      written together. Budget an 90-minute run for it, not a config edit. Anchors:
       `pyproject.toml` `[tool.mutmut]`, `.github/workflows/mutants.yml`,
-      `mutants/mutmut-cicd-stats.json`.
+      `tests/test_mutation_workflow.py`, `mutants/mutmut-cicd-stats.json`.
 
 - [ ] **`Chemclaw3_ui` has no surface for the four `/skills/mine` routes, the six `/skills/org`
       ones, or the proposal queue** — [M], opened by

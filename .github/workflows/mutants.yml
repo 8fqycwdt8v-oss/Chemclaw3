@@ -138,9 +138,20 @@ jobs:
       # harmless. A gate on any of those at zero would be red the day it merged, which is how a
       # weekly job stops being read.
       #
-      # So the gate is the **kill rate against a recorded floor**. A rate, not a count, because a
-      # count breaks the first time one of these modules legitimately grows: well-tested new code
-      # raises `killed` and `total` together and leaves the rate alone.
+      # So the gates are the **kill rate against a recorded floor** and the **`no_tests` share
+      # against a recorded ceiling**. A rate rather than a count, because a count breaks the first
+      # time one of these modules legitimately grows: well-tested new code raises `killed` and
+      # `total` together and leaves the rate alone. A rate is not enough on its own, though — a
+      # mutant reached by no selected test is neither killed nor survived-under-test, so it
+      # depresses the rate without saying why, and 27.7% of the population was in that state until
+      # 2026-09-22. That is a hole in the *selection*, a different defect from a weak test, and it
+      # gets its own number.
+      #
+      # **The floor is pinned to the population it was measured over**, in
+      # `tests/test_mutation_workflow.py`. The paragraph above argues for a rate because a count
+      # breaks when a module grows; a rate breaks when the *set* of modules grows, which is what
+      # left a floor of 72.0 — measured over 825 mutants — standing over a population of 3,640
+      # that scores 62.1%.
       #
       # `suspicious` and `segfault` fail at zero, and they are a different kind of thing — not a
       # result at all, but the harness going wrong, which leaves every number above them unexplained.
@@ -159,14 +170,37 @@ jobs:
       - name: Gate on the kill rate, on the coverage, and on the harness having worked
         if: ${{ !cancelled() }}
         env:
-          # Measured 2026-08-27 on this checkout, twice: 618 and 634 killed of 825 — 74.9% and
-          # 76.8%, a 1.9-point spread on identical code. The floor is roughly one and a half spreads
-          # below the *lower* observation, not just under it: a floor set against the best run is a
-          # job that fails for no reason and gets switched off. Two runs is a small sample, so this
-          # number is provisional on the distribution the weekly artifacts will build; raise it —
-          # with a fresh measurement beside it — once there is one, or once somebody works through
-          # the survivor list.
-          MUTATION_SCORE_FLOOR: "72.0"
+          # **A rate is only comparable while the population is, and this floor outlived two
+          # changes to it.** 72.0 was measured 2026-08-27 over **825** mutants — 618 and 634
+          # killed, 74.9% and 76.8%, a 1.9-point spread on identical code — and `source_paths` has
+          # grown twice since. The population is now 3,640. Re-measured 2026-09-22 on the first
+          # `make mutants` run that has ever completed here (every scheduled run before
+          # `D-2026-09-22-a-mutation-backstop-that-cannot-start` died in the stats phase):
+          # **2,260 killed of 3,640 — 62.1%** — with 866 survived, 446 reached by no selected
+          # test, 68 timed out, and 0 suspicious or segfault. So 72.0 was not a standard this
+          # config had fallen short of; it was a number about a different set of modules, and the
+          # first completed run would have failed on it.
+          #
+          # 59.0 is one and a half of the recorded spread below that observation, read
+          # proportionally (1.5 × 1.9 ≈ 2.9), which is the same margin rule the 72.0 comment
+          # applied and the reason it is not set at the observation. It rests on **one**
+          # observation of this population, not two: the variance here has never been measured,
+          # because until this week no run finished. The weekly artifacts are what will build that
+          # distribution, and this number is to be raised against it rather than left alone.
+          #
+          # What moved the rate is worth recording beside the number. At the config this workflow
+          # ran on before 2026-09-22 the same 3,640 mutants scored **1,612 killed — 44.3%** —
+          # with 1,009 `no_tests`. Pairing the test selection with the modules it claims to cover
+          # moved it to 62.1% and cut `no_tests` from 27.7% to 12.3%. Nothing about the code
+          # changed; the backstop had simply not been asked to run the tests that cover it.
+          MUTATION_SCORE_FLOOR: "59.0"
+          # Measured on the same run: 446 of 3,640, **12.3%**. A mutant nothing reaches is not a
+          # survivor — it is a hole in the *selection*, and it is the number the widening above
+          # was aimed at, so it is the one to hold. The ceiling is set with headroom rather than
+          # at the observation for the reason the floor is: a gate that reds on ordinary movement
+          # gets switched off. A new module joining `source_paths` without its tests joining the
+          # selection is precisely what this catches, and it is the mistake that produced 27.7%.
+          MUTATION_NO_TESTS_CEILING: "16.0"
         run: |
           python - <<'PY'
           import json, os, pathlib, sys, tomllib
@@ -177,7 +211,8 @@ jobs:
           # mutmut writes `mutants/<source path>.meta` for every file it actually mutated, and
           # `export-cicd-stats` skips any path without one — which is exactly how a path that
           # stopped resolving leaves the aggregate silently smaller. Reading the declaration back
-          # from `pyproject.toml` keeps the seven modules named in one place.
+          # from `pyproject.toml` keeps the declared modules named in one place. No count is
+          # written here: the one that was said seven, over a list that has grown twice since.
           config = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
           declared = config["tool"]["mutmut"]["source_paths"]
           unmutated = [p for p in declared if not pathlib.Path("mutants", p + ".meta").exists()]
@@ -203,6 +238,21 @@ jobs:
           )
           if score < floor:
               sys.exit(f"kill rate {score:.1f}% is below the recorded floor of {floor:.1f}%")
+
+          # The second gate, and it is on the selection rather than on the tests. `no_tests` means
+          # mutmut reached the mutant with nothing that exercises it; the kill rate cannot see it,
+          # because such a mutant is neither killed nor survived-under-test — it inflates `total`
+          # and depresses the rate without saying why.
+          uncovered = 100.0 * stats["no_tests"] / total
+          ceiling = float(os.environ["MUTATION_NO_TESTS_CEILING"])
+          print(f"no-test share {uncovered:.1f}% ({stats['no_tests']}/{total}); ceiling {ceiling:.1f}%.")
+          if uncovered > ceiling:
+              sys.exit(
+                  f"{uncovered:.1f}% of mutants were reached by no selected test, above the "
+                  f"recorded ceiling of {ceiling:.1f}%. That is a gap in "
+                  "[tool.mutmut].pytest_add_cli_args_test_selection, not in the tests: a module "
+                  "joined source_paths without the tests that cover it joining the selection."
+              )
           PY
 
       # The half that makes the schedule worth having. Deduplicated on the label, so a failure that
