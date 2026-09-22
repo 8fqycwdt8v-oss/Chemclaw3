@@ -56,8 +56,11 @@ export LANGCHAIN_TRACING_V2="${LANGCHAIN_TRACING_V2:-false}"
 # a mistake** (the Helm-only LangSmith pin; the Helm-only LLM provider). In the image, every
 # component gets it — including a plain `docker run` — and the chart cannot hold a value that
 # silently disagrees. It also keeps the knowledge-sync containers out of it on purpose: they set
-# their own `command` and so never pass through here, and what they dial is `git`'s remote, which is
-# not on the settings object the allowlist is derived from.
+# their own `command` and so never pass through here. The reason used to have a second half — that
+# what they dial is `git`'s remote, "which is not on the settings object the allowlist is derived
+# from" — and that half is no longer true: `netguard._push_hosts_for` resolves the note checkout's
+# push URLs, so a component that *does* pass through here has the git host on its allowlist. Those
+# containers stay out because they bypass this script, not because the destination is underivable.
 #
 # `chemclaw.cli.egress_preload` prints `enabled|disabled` and the allowlist
 # `netguard.derive_allowed` returns — the *same* derivation the in-process guard arms with, so there

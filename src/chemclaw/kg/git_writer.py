@@ -46,6 +46,7 @@ from collections.abc import AsyncIterator, Iterable, Iterator, Sequence
 from pathlib import Path
 
 from chemclaw.core.aio import LoopLocalLock
+from chemclaw.core.checkout import is_the_processes_own_checkout
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.logging import log_event, secret_env_names
@@ -234,19 +235,6 @@ class GitRemoteError(GitWriteError):
     """
 
 
-def _process_repo_root() -> Path | None:
-    """The root of the git checkout this process runs from, or None outside any checkout.
-
-    The nearest ancestor of the CWD containing `.git` — the tree a note write must never commit
-    into, because it is the one the running application is checked out in.
-    """
-    cwd = Path.cwd().resolve()
-    for candidate in (cwd, *cwd.parents):
-        if (candidate / ".git").exists():
-            return candidate
-    return None
-
-
 def _require_dedicated_checkout(repo_dir: str) -> None:
     """Refuse a checkout that is verifiably the process's own working tree (G4).
 
@@ -271,7 +259,10 @@ def _require_dedicated_checkout(repo_dir: str) -> None:
             checkout the process is running from, or to a linked worktree.
     """
     resolved = Path(repo_dir).resolve()
-    if resolved == Path.cwd().resolve() or resolved == _process_repo_root():
+    # Shared with `core/netguard.py`, which skips deriving this tree's git remote into the egress
+    # allowlist *because* this function refuses the write. Two spellings of that question disagreed
+    # once and the disagreement was a widening, so both now ask it the same way.
+    if is_the_processes_own_checkout(repo_dir):
         raise GitWriteError(
             f"note_repo_dir {repo_dir!r} resolves to {resolved} — the checkout this "
             "process is running from. A note write commits into that tree and pushes it to its "

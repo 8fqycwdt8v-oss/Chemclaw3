@@ -38,19 +38,47 @@ default.** Three choices, each with a rejected alternative:
   dedicated clone configured, `python -m chemclaw.cli.egress_preload` prints
   `enabled 127.0.0.1,localhost,notes.example.com`, and the entrypoint needed no edit at all.
 
-- **Only off the default `"."`.** At the default the writer refuses the write before it can push —
-  `git_writer._require_dedicated_checkout` will not commit into the running application's own tree
-  and push to the source repository — so there is no destination to allow. Deriving one anyway
-  would put the *source* repository's host on the allowlist of every dev checkout, a widening for a
-  push that cannot happen. A single string comparison rather than importing that predicate, because
-  `core/` may not import `kg/`; the alternative was moving the predicate into `core/`, which is a
-  refactor across a layer boundary for one caller.
+- **`--push --all`, and each word of that was a defect.** Plain `git remote get-url` returns the
+  *fetch* URL, and `git push` uses `remote.<name>.pushurl` when it is set. The first version was
+  therefore wrong in both directions at once whenever they differ: the host that would actually be
+  dialled was **missing** from the allowlist — the deployment's own guard refusing its own push,
+  which is the outage this change exists to remove — and a host nothing dials was **added** to it.
+  Driven against real `git config`: a `pushurl`, a `pushInsteadOf` rewrite and two push URLs all
+  resolved to the fetch host before, and to the push hosts now. `insteadOf` was always correct,
+  because `get-url` expands it.
 
-- **Absent beats wrong.** No git, no checkout, no such remote, a local-path remote, a wedged
-  filesystem past the five-second bound — every one contributes nothing and none raises.
-  `derive_allowed` runs at arm time in every process, so a raise there is a crashloop. An absent
-  entry refuses a push a deployment can still permit through `egress_allow`; a wrong entry opens a
-  host nobody declared.
+- **Only when the checkout is not this process's own**, and asked through a predicate both sides
+  share. At `note_repo_dir="."` the writer refuses the write before it can push —
+  `git_writer._require_dedicated_checkout` will not commit into the running application's own tree
+  and push to the source repository — so there is no destination to allow, and deriving one would
+  put the *source* repository's host on every dev checkout's allowlist. **The first spelling was a
+  bare `repo_dir == "."` and it did not hold**: driven, `./`, `././`, `src/..`, `$PWD`, an absolute
+  path and a symlink all derived this repository's own remote while the writer went on refusing
+  them — the exact widening the comment claimed to prevent, on spellings a compose file or a Helm
+  values file writes without thinking. The predicate moves to `core/checkout.py`, which
+  `git_writer` now calls too, so the two cannot disagree again;
+  `test_the_derivation_and_the_writers_refusal_ask_the_same_question` holds them together. `core/`
+  rather than beside the writer because `core/` may not import `kg/`, which
+  `tests/test_layering.py::test_the_kernel_imports_no_sibling` enforces.
+
+- **A derived host may not carry the compiled layer's separator.**
+  `core/netguard_preload.c::parse_allowlist` splits its environment variable on commas while
+  `_check` here compares whole strings, so one derived entry containing a comma is *two* allowed
+  hosts on the compiled layer and one that matches nothing on the Python layer — a host permitted
+  by one layer and refused by the other, which is the divergence the first bullet places this
+  function in `derive_allowed` to prevent, reintroduced through the data. Driven: a remote URL of
+  `https://harmless,target.example.com/n.git` put `harmless` and `target.example.com` on the
+  compiled allowlist. A derived host must now match `[A-Za-z0-9._:-]+`, which also discards the
+  junk a multi-line or backtick-bearing URL produces.
+
+- **Absent beats wrong, and nothing here may raise.** No git, no checkout, no such remote, a
+  local-path remote, a wedged filesystem past the five-second bound: each contributes nothing. An
+  absent entry refuses a push a deployment can still permit through `egress_allow`; a wrong entry
+  opens a host nobody declared. `derive_allowed` runs at `chemclaw.core.config` import in every
+  process, so an exception is an import-time crashloop — **and the first version could produce
+  one**: `_host_from_url` sat outside the `try`, and `urlsplit` raises `ValueError` on an
+  unbalanced `[` that `git remote add` accepts (`https://[oops/path`). Every component would have
+  failed to start on a `.git/config` a deployment could write by accident.
 
 ## Consequences
 
@@ -65,13 +93,30 @@ assumption that a deployment's own clone is not attacker-writable, which is the 
 
 **A local-path remote is refused before the URL parser sees it.** `_host_from_url` reads `../notes`
 as the host `..`, which would have put a nonsense entry on the allowlist; `file://` and an absolute
-path have no host at all. Driven over nine spellings including the scp-like `git@host:path`, which
-is the form that surprises — it has no scheme, so anything reading it as a URL sees no host unless
-asked the right way.
+path have no host at all. Driven over eleven spellings including the scp-like `git@host:path`,
+which is the form that surprises — it has no scheme, so anything reading it as a URL sees no host
+unless asked the right way — an IPv6 literal, which both layers unbracket alike, and a URL carrying
+credentials, from which only the host is taken.
+
+**The cache is keyed on the resolved directory, not on the string.** A relative `note_repo_dir`
+names different directories under different working directories; measured before the fix, two
+clones both reached as `notes` returned the first one's host for the second.
+
+**One case is named and not handled, deliberately.** An SSH host *alias* — `git@notes-alias:o/n.git`
+with `Host notes-alias` / `HostName real-git.internal.example` in `~/.ssh/config` — derives
+`notes-alias`, while ssh dials `real-git.internal.example`, which is not on the allowlist. A first
+draft of this ADR listed that under `Revisit when:` as hypothetical; it is reachable today with one
+`git remote add` plus an ssh config, so a refusal that has already expired is not a trigger. It is
+not handled because resolving it means a *second* mechanism — `ssh -G <alias>`, a second subprocess,
+against a config file this tree does not otherwise read — for a configuration nothing in this
+repository ships or tests. A deployment that uses one names the real host in `egress_allow`, the
+same way it did for the git remote before this change, and the symptom is the same refusal it had
+then. `docs/planning/BACKLOG.md` carries the row.
 
 **Revisit when:** a second destination arrives that is a *name* rather than an address — a registry
-alias, a service name resolved from a file, an SSH host alias in `~/.ssh/config` (which would make
-even a resolved git URL's host the wrong answer). At two, the pattern is worth extracting into
-something the derived field guard can see; at one it is a special case with its own test. The file
-that would show it is `tests/test_netguard.py::test_every_destination_field_is_derived_or_declared`,
-which by construction cannot: it is the test that could not find this one either.
+alias, a service name resolved from a file, the ssh alias above. At two the pattern is worth
+extracting into something a derived guard can see; at one it is a special case with its own tests.
+The file that would show it is
+`tests/test_netguard.py::test_every_destination_shaped_setting_is_on_the_allowlist_it_derives`,
+which by construction cannot find such a destination — it is the guard that could not find this
+one either — so what would show it is that test's exemption list growing a second entry.
