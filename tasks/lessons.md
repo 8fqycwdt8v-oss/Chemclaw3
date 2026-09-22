@@ -1818,7 +1818,7 @@ free number at the end of its section.
 
 132. **I wrote "no CI job runs it" four times about a job that runs weekly and had been failing for a
      month.** `.github/workflows/mutants.yml` runs `make mutants` on a Monday cron, gates on the kill
-     rate, and files a GitHub issue on failure. All four scheduled runs had failed and issue #295 had
+     rate, and files a GitHub issue on failure. All four scheduled runs had failed and that issue had
      been open for three weeks with three comments. I inferred the absence from `make mutants` not
      being in the `ci` target and never listed `.github/workflows/`. **"Nothing checks this" is a
      claim about a search, so do the search** — and the finding it cost me was the better one: the
@@ -1828,7 +1828,7 @@ free number at the end of its section.
 
 133. **A lock that only binds when it is contended is a lock that passes every test taking it alone.**
      `asyncio.Lock.acquire` resolves its event loop on the *contended* path only — the fast path sets
-     `_locked` and returns before `_get_loop()` — so a module-level one binds to the first loop that
+     the lock held and returns before `_get_loop()` — so a module-level one binds to the first loop that
      races on it, which is the first time it does its work. Two of these sat in `src/` behind comments
      that had *considered* the multi-loop case and priced it as one extra connect, because the
      uncontended path is what they were picturing. The real cost is a hang with no exception: the

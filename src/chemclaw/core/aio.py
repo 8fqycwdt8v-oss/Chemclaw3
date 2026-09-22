@@ -2,7 +2,7 @@
 
 **A module-level `asyncio.Lock()` is not process-scoped state, although it looks exactly like it.**
 `Lock.acquire` resolves its event loop lazily *and only on the contended path* — the uncontended
-fast path sets `_locked` and returns without ever calling `_get_loop()` — so the lock binds itself
+fast path marks the lock held and returns without ever calling `_get_loop()` — so it binds itself
 to the first loop that races on it, which is to say the first time it does its job. Every use
 before that is silent about the binding.
 
@@ -46,10 +46,11 @@ class LoopLocalLock:
 
     **A plain dict that discards closed loops, and not a `WeakKeyDictionary`, which cannot work
     here.** A weak mapping keyed by the loop is the obvious shape and it leaks by construction: the
-    *value* is an `asyncio.Lock`, and a contended `asyncio.Lock` stores `_loop` — its own key — so
-    the entry keeps itself alive forever. Measured over three `asyncio.run` calls, collecting in
-    between: **0** entries survive when the lock is never contended and **3** when it is, with
-    `lock._loop is its key`. The contended case is the only one this class exists for, so the weak
+    *value* is an `asyncio.Lock`, and a contended one stores a reference to its own loop — its own
+    key — so the entry keeps itself alive forever. Measured over three `asyncio.run` calls, with a
+    collection in between: **0** entries survive when the lock is never contended and **3** when it
+    is, each one's value holding its own key. The contended case is the only one this exists for,
+    so the weak
     mapping would have released exactly the entries that do not matter.
 
     Discarding closed loops on resolve holds the same property by a route that is checkable: a

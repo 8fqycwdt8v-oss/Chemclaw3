@@ -284,10 +284,26 @@ async def test_a_parse_past_its_deadline_frees_its_slot_for_the_next_upload(
 
     with pytest.raises(AttachmentError):
         await parse_attachment_off_loop("slow.csv", _SLOW_CSV)
-    # The release rides `Future.add_done_callback`, which asyncio dispatches with `call_soon`,
-    # so it lands on the next turn of the loop rather than before this coroutine resumes.
-    await asyncio.sleep(0)
-    assert attachments._PARSE_SLOTS.in_flight == 0
+    # **Waited for rather than asserted on the next loop turn, because the slot is not the caller's
+    # to release.** `parse_attachment_off_loop` shields the future precisely so that cancelling the
+    # *caller* cannot fire the release while the thread is still running — its own comment says "the
+    # slot comes back exactly when the thread does" — and when the backstop fires, that thread is
+    # still inside `isolate`, killing the child. Measured from this test's own log: "killed the
+    # reader process for slow.csv after 0.058s". So `await asyncio.sleep(0)` yielded one turn and
+    # then asserted a 58 ms event had already happened; it passed 10 of 10 runs in isolation and
+    # failed inside a full serial suite, which is the signature of a race rather than of a wedge.
+    #
+    # The bound is what keeps this a regression test. The defect it exists for held the slot for the
+    # life of the process — the docstring's own measurement is `in_flight` still at 2 five seconds
+    # after both callers were freed — so five seconds separates "comes back" from "never comes back"
+    # by two orders of magnitude while asserting nothing about scheduling.
+    released = time.monotonic() + 5.0
+    while attachments._PARSE_SLOTS.in_flight and time.monotonic() < released:
+        await asyncio.sleep(0.01)
+    assert attachments._PARSE_SLOTS.in_flight == 0, (
+        "the slot was still held 5 s after the caller was freed, which is the wedge this test "
+        "exists for: a replica with capacity on paper and none in fact"
+    )
 
     # **The second upload gets its own deadline, and that is the whole reason this test is stable.**
     # One setting was doing two jobs: the slow parse has to *overrun* it and the small file has to
