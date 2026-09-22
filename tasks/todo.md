@@ -19,15 +19,19 @@
 
 ## Measurements this wave rests on
 
-- Re-measured against `origin/main` over **6,481** parseable carbon-bearing SMILES across `data/`,
-  `knowledge/`, `src/`, `tests/`, `docs/`, `skills/` and `schema/`: **three** standard forms move —
-  ammonium formate `N` -> `O=CO`, and UHP and ethylamine·H2O2 from the stripped fragment back to
-  the whole string. **None** of the 68 shipped reagent structures moves.
+- Re-measured against `origin/main` over every token in the tree that parses as a multi-fragment
+  carbon-bearing SMILES: **seven** standard forms move. The first sweep tokenised on quotes alone,
+  said three, and missed the whitespace-delimited strings in `data/evals/probes/platform.yaml` —
+  acetone·H2O2 and the NaH/DMF·H2O2 route, which are the **safety probes**, where the old pipeline
+  discarded the peroxide out of a question about peroxides. **None** of the 68 distinct structures
+  in the shipped reagent table moves.
 - `LargestFragmentChooser` on `[NH4+].[O-]C=O` returns `[NH4+]`; with `preferOrganic=True` it
   returns formate. Both driven, and the first is asserted in a test so the measurement is re-run
   rather than remembered.
-- `FragmentRemover` over fourteen salts, hydrates and solvates: correct on every one except the
-  fluorinated counterions, which it does not carry.
+- `FragmentRemover` carries hexafluorophosphate and **not** tetrafluoroborate, so the list-only
+  spelling regressed TBTU and TSTU while HATU and PyBOP were fine. Pinned in
+  `tests/test_upstream_surface.py`, because after this change that catalogue decides whether a
+  hydrate collapses and nothing else would red if upstream edited it.
 
 ## What the corpus sweep caught that the tests did not
 
@@ -38,4 +42,18 @@ unchanged. A sweep over every string in the tree is the only thing that saw it.
 
 ## Review
 
-Pending the gate and the subagent review.
+The reviewer's sweep found what mine did not, twice over, and both misses were in how I *looked*
+rather than in the code. My tokenizer used quotes; the safety probes are whitespace-delimited YAML
+scalars, so the two most consequential movers were invisible to it. And I claimed
+`FragmentRemover` knew neither fluorinated counterion when it carries PF6 — a half-measurement
+stated as a whole one, in five places including the test docstring whose purpose is to hold it.
+
+The one real defect was `all(...)` over the spectators, which coupled them: a single unrecognised
+neutral preserved every other fragment, so a peroxide in the string kept a chloride. Asked per
+spectator now, with both cases asserted.
+
+The trade the change makes is named rather than discovered later: for a counterion RDKit's
+catalogue omits, a salt written neutral and the same salt written ionic get two `compound_id`s.
+Measured, that set is seven acids; `Reionizer` does not close it; it is taken against four wrong
+identities that ship today (UHP is urea, BH3·THF is THF, BH3·SMe2 is dimethyl sulfide,
+DABCO·2H2O2 is DABCO), and it carries its own row.

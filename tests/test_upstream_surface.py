@@ -2273,3 +2273,49 @@ def test_only_the_subagent_middleware_returns_a_command_carrying_the_files_chann
         "here with that noted; if it builds one of its own, the divisor's argument no longer "
         "holds and `batch_siblings` has to count the union of the producing tools."
     )
+
+
+def test_rdkits_fragment_catalogue_still_carries_what_this_module_assumes() -> None:
+    """`core/chem.standardize` discards a neutral spectator only if RDKit's catalogue knows it.
+
+    **This is the one upstream shape here that is a *list* rather than a name.** After
+    `D-2026-09-22-the-parent-is-the-fragment-this-module-calls-organic`, whether a hydrate or a
+    solvate collapses is decided by `rdMolStandardize.FragmentRemover`'s catalogue — so upstream
+    dropping water from it would silently stop every hydrate collapsing, and adding
+    tetrafluoroborate would silently change how TBTU is keyed. Neither would red anything, because
+    the identity tests assert what this system answers and that answer would move with the list.
+
+    Two directions, and the absent half is as load-bearing as the present one: the charge clause in
+    `standardize` leads *because* the catalogue omits tetrafluoroborate, which was measured after a
+    list-only spelling regressed TBTU. The day it is added, that argument is worth re-reading.
+    """
+    from rdkit import Chem
+    from rdkit.Chem.MolStandardize import rdMolStandardize
+
+    remover = rdMolStandardize.FragmentRemover()
+
+    def stripped_from(organic: str, spectator: str) -> bool:
+        """Whether the catalogue removes `spectator` when it sits beside an organic fragment."""
+        pair = Chem.MolFromSmiles(f"{organic}.{spectator}")
+        assert pair is not None, spectator
+        remaining = {
+            Chem.MolToSmiles(f) for f in Chem.GetMolFrags(remover.remove(pair), asMols=True)
+        }
+        return Chem.MolToSmiles(Chem.MolFromSmiles(spectator)) not in remaining
+
+    carried = {"O": "water", "Cl": "hydrogen chloride", "[Na+]": "sodium"}
+    for spectator, name in carried.items():
+        assert stripped_from("CCN", spectator), (
+            f"RDKit's fragment catalogue no longer carries {name}. `core/chem.standardize` "
+            "discards a neutral spectator only if this catalogue knows it, so every hydrate and "
+            "solvate "
+            "silently stops collapsing — re-read that branch before touching anything else"
+        )
+    omitted = {"F[B-](F)(F)F": "tetrafluoroborate"}
+    for spectator, name in omitted.items():
+        assert not stripped_from("CC[NH3+]", spectator), (
+            f"RDKit's fragment catalogue now carries {name}. That is the omission the charge "
+            "clause in `core/chem.standardize` was measured against — it leads because the list "
+            "alone "
+            "regressed TBTU — so the argument for its order is worth re-reading, not the code"
+        )

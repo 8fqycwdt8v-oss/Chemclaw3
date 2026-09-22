@@ -924,10 +924,16 @@ def test_a_neutral_co_former_is_not_a_counterion() -> None:
     bromide. Two ways a spectator earns discarding now, and between them they need no list of
     this repository's own: it carries a charge, or it is a solvent RDKit's curated list knows.
 
-    **The charge half is what keeps the coupling reagents working**, and driving the list alone
-    is how that was found: `FragmentRemover` is a *pharmaceutical salt* list, it knows neither
-    tetrafluoroborate nor hexafluorophosphate, and a first version that asked only the list left
-    TBTU carrying its BF4. Charge reads it without naming it.
+    **The charge half is what keeps the coupling reagents working**, and driving the list alone is
+    how that was found: `FragmentRemover` is a *pharmaceutical salt* list, and measured it carries
+    hexafluorophosphate but **not** tetrafluoroborate — so a version that asked only the list left
+    TBTU and TSTU carrying their anions while HATU and PyBOP were fine. Charge reads all of them
+    without naming any. (A first version of this docstring said the list knew neither, which was
+    the half that had not been driven.)
+
+    **And the question is asked of each spectator, not of the set.** `all(...)` over them coupled
+    them: one unrecognised neutral preserved every other fragment too, so `CC[NH3+].[Cl-].OO` kept
+    its chloride. Whether a bromide is a counterion cannot depend on what else is in the string.
     """
     assert compound_id("NC(N)=O.OO") != compound_id("NC(N)=O"), "UHP is not urea"
     assert compound_id("CCN.OO") != compound_id("CCN"), "and the same for any organic-H2O2"
@@ -940,6 +946,13 @@ def test_a_neutral_co_former_is_not_a_counterion() -> None:
     assert standard_smiles("CN(C)C(=[N+](C)C)On1nnc2ccccc21.F[B-](F)(F)F") == standard_smiles(
         "CN(C)C(=[N+](C)C)On1nnc2ccccc21"
     ), "TBTU kept its tetrafluoroborate; a salt list curated for pharma does not know it"
+    # The coupling, driven: an unrecognised neutral beside a counterion keeps only itself.
+    assert standard_smiles("CC[NH3+].[Cl-].OO") == "CCN.OO", (
+        "the chloride survived because a peroxide was in the same string"
+    )
+    assert standard_smiles("NC(N)=O.OO.O") == "NC(N)=O.OO", (
+        "and the water went while the H2O2 stayed"
+    )
 
 
 def test_the_standardization_version_is_pinned_to_the_behaviour_it_names() -> None:

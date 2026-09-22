@@ -195,6 +195,30 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
+- [ ] **A salt written neutral and the same salt written ionic get two `compound_id`s, for the
+      counterions RDKit's catalogue omits** — [M], opened 2026-09-22 by the review of
+      `D-2026-09-22-the-parent-is-the-fragment-this-module-calls-organic`. That decision discards a
+      *neutral* spectator only when RDKit's fragment catalogue knows it, so the two spellings of one
+      salt diverge whenever the catalogue does not carry the counterion: driven,
+      `CCN.OCl(=O)(=O)=O` keeps its perchloric acid while `CC[NH3+].[O-]Cl(=O)(=O)=O` strips the
+      perchlorate. One substance, two ids — which is `D-2026-07-31-two-spellings-of-one-molecule`,
+      the defect `core/chem.py` exists to prevent.
+
+      **Measured, the set is small and enumerable**: the neutral spectators the catalogue omits that
+      can also ionise — perchloric, tetrafluoroboric, sulfamic, thiocyanic, carbonic,
+      hypophosphorous and boric acid. Everything it carries (HCl, HBr, HF, HI, H2SO4, H3PO4, HNO3,
+      the group-1/2 metals) agrees from both spellings, and an adduct that cannot ionise (H2O2, BH3,
+      I2, CO2) is correctly kept from both.
+
+      **`Reionizer` does not close it** — driven, `Cleanup` normalises perchloric acid to a
+      charge-separated but net-neutral form and reionizing does not move the proton to the amine, so
+      the charge clause cannot see it. The candidates are a pKa-shaped predicate (the same one
+      `D-2026-09-09-a-map-number-is-not-a-molecule` declines for the alkali/alkoxide case) or an
+      explicit list of ionisable neutrals, which is the table this module opens by refusing. Weigh
+      both against how rare the neutral spelling of a perchlorate salt is; the trade was taken
+      knowingly, against four wrong identities that shipped. Anchors:
+      `core/chem.py::standardize`, `tests/test_compound_identity.py::_STANDARDIZATION_AT_THIS_VERSION`.
+
 - [ ] **A `STANDARDIZATION_VERSION` bump retires the fingerprint rows and re-keys nothing, so the
       graph keeps a note per superseded spelling forever** — [L],
       `src/chemclaw/core/chem.py::compound_id`, `src/chemclaw/ingest/eln/compound.py:85-92`.

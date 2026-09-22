@@ -60,15 +60,24 @@ between them they need no list of this repository's own:
   fragment, and a solvent list is exactly the table `D-2026-08-01` refuses to keep in step by hand.
 
 **Asking that list alone was the first spelling and it regressed TBTU**, which is why the charge
-clause leads. `FragmentRemover` is a *pharmaceutical salt* list: driven, it knows neither
-tetrafluoroborate nor hexafluorophosphate, so TBTU kept its BF4 and HATU would have kept its PF6.
-Reading the charge covers both without naming either, and without a table to maintain.
+clause leads. `FragmentRemover` is a *pharmaceutical salt* list: driven, it carries
+hexafluorophosphate and **not** tetrafluoroborate, so the list-only spelling left TBTU and TSTU
+holding their anions while HATU and PyBOP were fine. A first version of this paragraph said it knew
+neither, which was wrong about PF6 and was the half that was not driven — the finding stands, the
+measurement did not.
 
-- **`STANDARDIZATION_VERSION` moves to `std11`.** Measured over every parseable carbon-bearing
-  SMILES the tree holds — 6,481 of them across `data/`, `knowledge/`, `src/`, `tests/`, `docs/`,
-  `skills/` and `schema/` — **three** standard forms change: ammonium formate from `N` to `O=CO`,
-  and UHP and ethylamine·H2O2 from the stripped organic fragment back to the whole string. None of
-  the 68 shipped reagent structures moves. The bump is taken for the reason
+**And the question is asked of each spectator, not of the set.** The first spelling was `all(...)`
+over them, which coupled them: one unrecognised neutral preserved every *other* fragment too, so
+`CC[NH3+].[Cl-].OO` kept its chloride and TBTU beside a peroxide kept its BF4. Whether a bromide is
+a counterion cannot depend on what else is in the string.
+
+- **`STANDARDIZATION_VERSION` moves to `std11`.** Measured over every token in the tree that
+  parses as a multi-fragment carbon-bearing SMILES — `data/`, `knowledge/`, `src/`, `tests/`,
+  `docs/`, `skills/`, `schema/`, `examples/` — **seven** standard forms change. A first sweep
+  tokenised on quotes alone, said three, and missed the whitespace-delimited strings in
+  `data/evals/probes/platform.yaml`: acetone·H2O2 and the NaH/DMF·H2O2 route, which are the
+  **safety probes**, where the old pipeline discarded the peroxide out of a question about
+  peroxides. None of the 68 distinct structures in the shipped reagent table moves. The bump is taken for the reason
   `D-2026-09-22-a-version-bump-costs-the-same-whenever-it-is-taken` gives: a bump retires every row
   under the old definition whenever it is taken, so its cost does not grow with delay while the
   population keyed wrong does.
@@ -81,16 +90,31 @@ not part of the identity, and a base screen over three of them reads as three co
 change does not reopen it; it stops the pipeline from keeping the *inorganic* half, which no rule
 in this module ever asked for.
 
-**Three rows join the behaviour table and one test drives the disagreement.**
+**Six rows join the behaviour table, one existing row's expected value changes, and one test
+drives the disagreement.**
 `test_the_parent_is_the_fragment_this_module_calls_organic` asserts what
 `LargestFragmentChooser` returns for ammonium formate, so the measurement is re-run rather than
 remembered, and asserts that the two answers still coincide on every salt the table pins — which is
 what makes "exactly one thing moved" checkable rather than claimed.
 
-**The `FragmentParent` call is gone from this branch, and with it a class of surprises.** Anything
-that changed in upstream's chooser — its metric, its tie-breaking, its salt list — used to be able
-to change this system's notion of compound identity without a line of this repository moving. The
-one remaining delegation on this path is `Uncharger`, which answers a different question.
+**The chooser is gone; the list is not, and that distinction is the honest version.** Upstream's
+*metric* and its tie-breaking can no longer change this system's notion of identity. Its fragment
+*catalogue* still can: it decides whether a hydrate collapses. So there are two delegations left on
+this path, not one — that catalogue and `Uncharger` — and
+`tests/test_upstream_surface.py::test_rdkits_fragment_catalogue_still_carries_what_this_module_assumes`
+is what turns the first into a shape somebody re-measures rather than remembers.
+
+**The trade this makes, which the first draft did not name.** For a counterion RDKit's list does
+not carry, identity now depends on how the salt was spelled: `CCN.OCl(=O)(=O)=O` keeps its
+perchloric acid while `CC[NH3+].[O-]Cl(=O)(=O)=O` strips the perchlorate, so one substance gets two
+`compound_id`s — the `D-2026-07-31` defect this module exists to prevent, on a narrow set.
+Measured, the set is the neutral spectators the list omits that can also ionise: perchloric,
+tetrafluoroboric, sulfamic, thiocyanic, carbonic, hypophosphorous and boric acid. `Reionizer` does
+not close it (driven: the proton does not move to the amine). It is taken because the alternative
+is four wrong *identities* that ship today — UHP is urea, BH3·THF is THF, BH3·SMe2 is dimethyl
+sulfide, DABCO·2H2O2 is DABCO — against an agreement failure on an unusual spelling of a rare salt
+class, and because the first is a hazard screen reading the wrong id. `docs/planning/BACKLOG.md`
+carries the row.
 
 **Revisit when:** a *charged* spectator turns out to be part of an identity rather than its
 counterion, or a solvate a chemist means to keep is stripped because the list calls its partner a
