@@ -21,8 +21,9 @@ belong to different runs.
 
 The failing assertion is the harmless end of it. What a mutation run could destroy this way is
 narrower than it looks and is worth stating rather than gesturing at: a mutant run executes
-`pytest_add_cli_args_test_selection`, 16 files, of which **2** contain a `TRUNCATE` or a
-`DELETE FROM` and only one runs anything — a delete scoped to its own fixture row. Repo-wide the
+`pytest_add_cli_args_test_selection`, not the suite, and of the files it names **2** contain a
+`TRUNCATE` or a `DELETE FROM` — only one of which runs anything, a delete scoped to its own
+fixture row. Repo-wide the
 figure is 52 of 417 test files, and the `note_index` truncations live in two files a mutation run
 never selects. So what leaked here was audit rows. The reason to fix it is not this harness's blast
 radius but that the suite's isolation silently stops holding for *any* caller that reuses the

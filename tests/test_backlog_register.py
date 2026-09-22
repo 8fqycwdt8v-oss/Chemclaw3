@@ -85,6 +85,127 @@ _HISTORICAL: tuple[str, ...] = ("this file reached 4,717 lines and 237 open rows
 _RETROSPECTIVE = re.compile(r"\b(?:reached|grew to|used to|once held|was|were|had)\b")
 
 
+#: An anchor: a backticked citation carrying **both** a directory and a `::symbol`. That shape is
+#: the file's way of saying "go read this", and it is the one worth holding to the tree.
+#:
+#: **Narrower than every backticked path on purpose.** Measured over the file, 140 backticked tokens
+#: look path-like and 124 resolve; most of the rest are ordinary prose shorthand — `fanout.py`,
+#: `serve.py`, `spend_cap.py`, `server/tools.py` — which a reader resolves from context and which no
+#: guard should turn into a style rule. Requiring a directory *and* a symbol excludes those by
+#: construction rather than by an allowlist, and leaves 41 citations of which 3 were dead: one
+#: naming a module that never existed, one naming `note_reindex_effective` in
+#: `retrieval/vector_index.py` when it is a `Settings` property, and one naming a
+#: `tests/test_sibling_manifest_agreement.py::_DISPATCHERS` that had become a `_Seam` field.
+#:
+#: Paths resolve from the repository root or from `src/chemclaw/`, because the file writes both.
+#:
+#: **`path:LINE` citations are outside this and that is a known residual.** The file carries eleven,
+#: and when this guard was written **five had drifted** — `retention.py:498` was about a different
+#: table than the sentence claimed, `runbook.md:1996` had become an unrelated `ALTER TABLE`,
+#: `background_worker.py:98` had become the line above `connect()`. A line number rots on any edit
+#: above it and nothing can check the *intent*, only the number, so the fix is to cite the symbol
+#: instead — which is what those became, except where the target is prose in Markdown or YAML with
+#: no symbol to name. Banning them outright would need those converted to quoted phrases first.
+_ANCHOR = re.compile(r"`([\w./-]+/[\w.-]+\.(?:py|c|sh|ya?ml|sql|toml|tpl)::[\w.]+)`")
+
+#: Anchors the file cites in order to say they do **not** exist. One today: a retracted ADR claim
+#: that the human gate ran through `agent/interaction_tools.py::start_approval`, which the row
+#: quotes precisely to record that neither the module nor the function was ever in `src/`.
+#:
+#: Same discipline as `_HISTORICAL` above: an entry must still be cited, and the sentence citing it
+#: must still say it does not exist — otherwise the allowlist would let a genuinely rotted anchor be
+#: parked here.
+_NEVER_EXISTED: tuple[str, ...] = ("agent/interaction_tools.py::start_approval",)
+
+#: What makes a sentence a statement that its own citation is not real.
+#:
+#: **`retracted` was in here and made the guard vacuous.** The one line this exempts also says "its
+#: second reason was false and is retracted", so with that word in the set the check passed against
+#: a sentence rewritten to claim the module *does* carry the approval flow — driven, and it passed.
+#: A retraction says a claim was withdrawn; it does not say the symbol never existed, and only the
+#: second thing licenses the exemption.
+_NONEXISTENT = re.compile(r"never existed|has ever existed|does not exist|no such")
+
+
+def _anchors() -> list[str]:
+    """Every `path::symbol` citation in the register, in file order."""
+    return _ANCHOR.findall(_BACKLOG.read_text(encoding="utf-8"))
+
+
+def _resolve(anchor: str) -> str:
+    """`""` when `anchor` resolves, else why it does not.
+
+    A dotted symbol (`Class.method`) resolves when **every** component appears, because that is how
+    the file writes a method and it is not how the source spells it: `class MeasureRequestPrefix`
+    and `async def awrap_model_call` are separate lines, so a whole-string match rejects a citation
+    that is perfectly good. Found by this guard rejecting the first such anchor added after it.
+    """
+    path, _, symbol = anchor.partition("::")
+    for base in ("", "src/chemclaw/"):
+        candidate = _ROOT / (base + path)
+        if candidate.exists():
+            body = candidate.read_text(encoding="utf-8", errors="replace")
+            absent = [
+                part for part in symbol.split(".") if not re.search(rf"\b{re.escape(part)}\b", body)
+            ]
+            if not absent:
+                return ""
+            return f"{base + path} has no {', '.join(absent)}"
+    return f"no such file: {path}"
+
+
+def test_the_anchor_parse_finds_anchors() -> None:
+    """Guard the guard: a regex matching nothing would pass every row below."""
+    assert len(_anchors()) > 20, (
+        "no `path::symbol` anchors parsed from BACKLOG.md; the citation shape moved and the "
+        "resolution guard below is now checking nothing"
+    )
+
+
+def test_every_anchor_resolves_to_something_in_the_tree() -> None:
+    """A row's anchors are what the next reader greps, so a dead one costs them the row.
+
+    This is the guard the file did not have, and it was worth having: an audit of all 42 open rows
+    found three anchors pointing at nothing, in rows that were otherwise accurate. A dead anchor is
+    worse than a missing one — it reads as a location, so the reader concludes the subsystem moved
+    rather than that the citation did.
+
+    Nothing here checks whether a row's *claim* is still true; that needs reading the code and is
+    not derivable. What is derivable is whether the place it sends you exists, and that is the half
+    that rots silently.
+    """
+    dead = {
+        anchor: reason
+        for anchor in sorted(set(_anchors()))
+        if anchor not in _NEVER_EXISTED and (reason := _resolve(anchor))
+    }
+    assert not dead, (
+        f"BACKLOG.md anchors that resolve to nothing: {dead}. Point them at what the symbol is "
+        "called now, or — if the row's point is that the citation never existed — add it to "
+        "`_NEVER_EXISTED` with the sentence that says so."
+    )
+
+
+def test_every_never_existed_exemption_is_still_cited_as_nonexistent() -> None:
+    """Guard the allowlist, for the reason `_HISTORICAL` has the same test.
+
+    An exemption is a claim about the file. If the sentence citing the anchor is rewritten, the
+    entry exempts nothing and hides that it does not; if the sentence stops saying the thing does
+    not exist, the entry is laundering a live dead anchor.
+    """
+    text = _BACKLOG.read_text(encoding="utf-8")
+    for anchor in _NEVER_EXISTED:
+        assert f"`{anchor}`" in text, (
+            f"`{anchor}` is exempted in `_NEVER_EXISTED` and is no longer cited in BACKLOG.md, so "
+            "the entry exempts nothing; delete it."
+        )
+        sentence = next(line for line in text.splitlines() if f"`{anchor}`" in line)
+        assert _NONEXISTENT.search(sentence), (
+            f"the line citing `{anchor}` no longer says it does not exist, so this exemption is "
+            f"hiding a dead anchor rather than recording a retraction: {sentence.strip()[:200]}"
+        )
+
+
 def _titles() -> list[str]:
     """Every open row's bolded title, in file order."""
     return _ROW_TITLE.findall(_BACKLOG.read_text(encoding="utf-8"))

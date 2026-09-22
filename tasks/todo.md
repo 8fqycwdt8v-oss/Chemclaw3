@@ -63,14 +63,70 @@ bound did not exist that had shipped. Lesson 137.
 - [x] `make lint`, `make prose-validate` green; `test_decision_log`, `test_backlog_register`,
       `test_deferred_register`, `test_claude_md_figures`, `test_lessons_stay_a_digest`,
       `test_docstring_paths` — all green. `ci.yml` parses.
-- [ ] A read-only audit of all 41 remaining rows against the tree, for others in R1's state.
-- [ ] Substantive rows once the audit says which are real.
+- [x] A read-only audit of all 42 rows against the tree. See R4.
+- [ ] Substantive rows now that the audit says which are real.
 - [ ] Full suite, fresh-context review, PR, merge on green CI.
+
+## R4 — the audit, and the guard it argued for
+
+All 42 open rows checked against `HEAD`, read-only: **1 stale-closed, 5 stale-wrong, 6 declined,
+30 live**. So R1 was the *only* row closed and undeleted — the register is in better shape than R1
+suggested, which is worth saying as plainly as the finding was.
+
+What it did find is rot in the *citations*, and that turned out to be the derivable half.
+
+- [x] **A guard over anchors**, `test_every_anchor_resolves_to_something_in_the_tree`. Scope chosen
+      from measurement rather than taste: 140 backticked tokens in the file look path-like and 124
+      resolve, but most of the remainder are ordinary prose shorthand (`fanout.py`, `serve.py`,
+      `spend_cap.py`) that no guard should turn into a style rule. Requiring a directory **and** a
+      `::symbol` excludes those by construction and leaves 43 real anchors.
+- [x] Three were dead: `agent/interaction_tools.py::start_approval` (a module that never existed —
+      the row *quotes* it to say so, so it is an allowlisted exemption in the `_HISTORICAL` shape,
+      with its own test that the sentence still says it does not exist);
+      `retrieval/vector_index.py::note_reindex_effective`, which is a `Settings` property in
+      `core/config/__init__.py`; and `tests/test_sibling_manifest_agreement.py::_DISPATCHERS`, now
+      `_CALC_SEAM.dispatchers`. The last one I had already spotted in wave 5's triage and left.
+- [x] **Both arms falsified.** Breaking one anchor reds it; neutering the exemption's sentence reds
+      the allowlist guard — but only after fixing that guard, because `retracted` was in the marker
+      set and the exempted line says "is retracted" elsewhere, so the check passed against a
+      sentence rewritten to claim the module *does* carry the approval flow. Driven, and it passed.
+      A retraction says a claim was withdrawn; only "never existed" licenses the exemption.
+- [x] **The guard then rejected the first anchor added after it — mine.** A dotted `Class.method`
+      citation fails a whole-string word match, because the source spells the two on separate lines.
+      `_resolve` now requires every dotted component.
+- [x] Six figures corrected, each re-measured here rather than taken from the audit: the
+      side-effecting surface is **54**, not 49 (`authz.side_effecting_tools()`); the knowledge corpus
+      is **34 of 41 notes undated across twelve types**, not 33 of 40 across ten, whose own per-type
+      numbers summed to 32; `deep-research`'s corpus is **41**, where the row said 39 and then 40
+      three sentences apart; the bundle-skill universe is a glob over **seven** bundles, not the
+      three the row named; `STANDARDIZATION_VERSION` is std9.
+- [x] **One figure was mine, made stale by my own merged commit.** The mutation row said the test
+      selection is "a hand-kept list of 16 files" — my commit added the seventeenth. Rather than
+      renumber it I removed the transcription; the load-bearing "2 of those contain a `TRUNCATE`"
+      re-measured and still holds. The same 16 is in a merged ADR, which `CLAUDE.md` forbids
+      editing, so it stands there as the cost of having written a count into prose.
+- [x] Five drifted `path:LINE` citations fixed, including one I added this morning — converted to a
+      symbol so it cannot rot again. That whole class is outside the new guard and its docstring
+      says so, with the five as the evidence.
 
 ## Review
 
-Wave 7's first two findings are both about the *record* rather than the code, and in opposite
-directions: one row said a bound was missing that had shipped, and one comment said a control was
-broken when it was working as designed. Between them they are the argument for auditing the backlog
-against the tree before picking work from it — which is now running, and which my wave 5 triage
-should have done rather than reading the rows and believing them.
+Wave 7's findings are about the *record* rather than the code, and they point in opposite
+directions. One row said a bound was missing that had shipped, in wave 4, with the plan file ticking
+an ADR that does not exist. One comment in `ci.yml` said a control was broken when it was working
+exactly as designed, and I had the workflow fix half-drafted before reading the code it was about.
+Both are the argument for auditing the register against the tree before picking work from it, which
+my wave 5 triage should have done rather than reading rows and believing them.
+
+**The audit's headline is reassuring and worth stating that way.** One row of 42 was closed and
+undeleted — the one I had already found. Thirty are accurate as written. So the register is not
+rotten; what rots is the *citations*, and that is the half a rule can hold, which is why this wave
+ends with a guard rather than with a list of corrections.
+
+Three things in here were mine. A count my own merged commit made stale, in three places, in the
+commit that made it stale. A `path:LINE` citation I added this morning, in a class of citation the
+audit had just shown drifts. And a guard whose exemption arm passed against a sentence rewritten to
+say the opposite, because I had put `retracted` in the marker set — caught only because I drove both
+arms instead of the one I expected to fail.
+
+Lessons 137-139.

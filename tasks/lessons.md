@@ -1885,3 +1885,12 @@ free number at the end of its section.
      and the epilogue's job is to announce it. **The false thing was one sentence of diagnosis, not
      the behaviour it described** — so read the code the comment is about before believing the
      comment, including when the comment is the one reporting a problem.
+
+139. **I drove the arm I expected to fail and the other one was the broken one.** A new allowlist
+     guard had two arms: a dead anchor must red, and an exemption whose sentence stops saying the
+     citation never existed must red. The first worked. The second passed against a sentence I had
+     rewritten to claim the opposite — because `retracted` was in my marker set and the exempted line
+     says "is retracted" about something else on the same line. A retraction says a claim was
+     withdrawn; only "never existed" licenses the exemption. **An allowlist needs its own falsifying
+     test, and both arms driven** — the arm that protects the guard from abuse is the one nobody
+     thinks to break, and a keyword match over a whole line will find the keyword somewhere.
